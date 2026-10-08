@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "crates/tetherly-core",
+    "crates/tetherly-crypto",
+    "crates/tetherly-net",
+    "bins/tetherly-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+rust-version = "1.82"
+authors = ["Tetherly contributors"]
+description = "Personal-device mesh: LAN first, OTP on-device, desktop input later"
+
+[workspace.dependencies]
+tetherly-core = { path = "crates/tetherly-core", version = "0.1.0" }
+tetherly-crypto = { path = "crates/tetherly-crypto", version = "0.1.0" }
+tetherly-net = { path = "crates/tetherly-net", version = "0.1.0" }
+
+argon2 = "0.5"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+data-encoding = "2"
+ed25519-dalek = { version = "2", features = ["std", "zeroize"] }
+getrandom = "0.2"
+hkdf = "0.12"
+mdns-sd = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+snow = "0.9"
+spake2 = "0.4"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = { version = "1", features = ["derive", "zeroize_derive"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+[package]
+name = "tetherly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description.workspace = true
+publish = false
+
+[dependencies]
+tetherly-core.workspace = true
+tetherly-crypto.workspace = true
+tetherly-net.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+serde_json.workspace = true
+tracing-subscriber.workspace = true
+
+[[test]]
+name = "loopback"
+path = "tests/loopback.rs"

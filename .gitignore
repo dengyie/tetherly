@@ -1,0 +1,14 @@
+/target
+/Cargo.lock.bak
+**/*.rs.bk
+.idea/
+.vscode/
+*.pdb
+*.exe
+!bins/**/src/**
+.DS_Store
+Thumbs.db
+identity.bin
+trusted.json
+/tmp-test/
+tmp-write-loopback.py

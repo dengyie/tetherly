@@ -1,0 +1,23 @@
+[package]
+name = "tetherly-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "TCP Hello/SPAKE2/Noise sessions and optional LAN mDNS"
+publish = false
+
+[features]
+default = ["lan"]
+lan = ["mdns-sd"]
+
+[dependencies]
+tetherly-core.workspace = true
+tetherly-crypto.workspace = true
+mdns-sd = { workspace = true, optional = true }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+serde.workspace = true

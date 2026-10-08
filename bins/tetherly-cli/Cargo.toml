@@ -1,0 +1,24 @@
+[package]
+name = "tetherly-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Phase 0 pairing and ping CLI"
+publish = false
+
+[[bin]]
+name = "tetherly-cli"
+path = "src/main.rs"
+
+[dependencies]
+tetherly-core.workspace = true
+tetherly-crypto.workspace = true
+tetherly-net.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+getrandom.workspace = true
