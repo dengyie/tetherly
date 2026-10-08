@@ -7,7 +7,7 @@
 - Phase 0 protocol skeleton landed. Spec `docs/DEVELOPMENT.md` **v1.2**.
 
 ## Current Branch
-- `main` (initial public repo)
+- `main` @ `e6954c0` (`https://github.com/dengyie/tetherly`)
 
 ## Last Verified
 - `cargo fmt --all`
