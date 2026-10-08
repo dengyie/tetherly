@@ -1,0 +1,9 @@
+# rustfmt newline_style = "Unix". Windows runners default to
+# core.autocrlf=true, which would rewrite LF to CRLF on checkout and
+# fail `cargo fmt -- --check`.
+* text=auto eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.lock text eol=lf

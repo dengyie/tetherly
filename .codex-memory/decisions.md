@@ -1,5 +1,13 @@
 # Decisions
 
+## 2026-10-09 - Force LF in git for rustfmt
+- Decision: `.gitattributes` sets `eol=lf` for text; Windows CI also sets `core.autocrlf=false` before fmt.
+- Rationale: `rustfmt.toml` uses `newline_style = "Unix"`. GitHub `windows-latest` defaults `core.autocrlf=true`, so checkout rewrites LF to CRLF and `cargo fmt -- --check` fails while Linux/macOS pass.
+- Alternatives considered: `newline_style = "Auto"` (lets CRLF leak into the repo); skip fmt on Windows (hides the mismatch).
+- Impact: Working tree on Windows stays LF for tracked text files.
+- Rollback trigger: None; mixed newlines would fail fmt again.
+- Related files: `.gitattributes`, `.github/workflows/ci.yml`
+
 ## 2026-10-09 - PairBind direction-specific AEAD nonces
 - Decision: Initiator uses nonce `tetherlybndI`, responder `tetherlybndR`. Decrypt with the peer role.
 - Rationale: RFC 8439 forbids reusing `(key, nonce)` for two plaintexts. Both peers share one SPAKE2 `pair_key`.

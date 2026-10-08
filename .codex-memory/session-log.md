@@ -6,3 +6,10 @@
 - Results: clippy `-D warnings` and `cargo test --workspace --locked` green. Spec bumped to v1.2. Public repo created.
 - Next: Phase 1 only on explicit request.
 - Blockers: None.
+
+## 2026-10-09
+- Task: Fix Windows CI `cargo fmt --check` newline failure.
+- Actions: Add `.gitattributes` (`eol=lf`) so Windows runners do not rewrite rustfmt Unix newlines; disable `core.autocrlf` on the Windows job before toolchain setup.
+- Results: Pending CI after push.
+- Next: Confirm Windows check is green.
+- Blockers: None.
