@@ -1,5 +1,21 @@
 # Decisions
 
+## 2026-10-09 - Input uses a separate resume-only Noise port (45719)
+- Decision: keyboard/mouse traffic runs on its own TCP port 45719 with `SessionConfig.resume_only`. Hello after that only accepts `ResumeNoise`; an unknown peer gets `NetError::InputRequiresTrust`. Pairing stays on 45717. Frames are binary `TIN1` and never enter control-plane JSON.
+- Rationale: ADR-005 wants input off the control plane and off any DeskFlow/Lan Mouse/KDE code path. Reusing the existing trust store keeps pairing single-sourced while the input channel stays trust-gated.
+- Alternatives considered: multiplex input onto 45717 (mixes latency-sensitive frames with control JSON); a JSON mouse payload (rejected by the spec).
+- Impact: Node binds 45719 on LAN + overlay (never `0.0.0.0`), advertises `inputport=` in `caps.update`, and keeps one persistent `InputServer` so `seq` stays session-monotonic.
+- Rollback trigger: Only with a spec revision; the port split is what keeps pairing and injection separable.
+- Related files: `crates/tetherly-core/src/input.rs`, `crates/tetherly-net/src/session.rs`, `crates/tetherly-node/src/runtime.rs`, `tests/phase3.rs`
+
+## 2026-10-09 - Input CI injects MemorySink, not Win32 SendInput
+- Decision: CI and loopback tests apply input events to a `MemorySink`. Real OS injection (Win SendInput / macOS / Wayland portal+libei) stays Manual-required and out of the engine.
+- Rationale: `tetherly-core` must stay OS-free (`#![forbid(unsafe_code)]`, no `cfg(target_os)`); CI runners have no real dual desktop. Keeps the engine deterministic and reviewable.
+- Alternatives considered: calling SendInput behind `cfg(windows)` in CI (nondeterministic, unsafe, no second desktop).
+- Impact: M3.1's 100 round-trips are proven in-process; the physical 100-trip and injection gates are documented as Manual-required.
+- Rollback trigger: When the platform injector lands as a separate node-layer module.
+- Related files: `crates/tetherly-core/src/input.rs`, `crates/tetherly-node/src/runtime.rs`
+
 ## 2026-10-09 - Overlay bind is separate from LAN/mDNS
 - Decision: LAN listeners skip EasyTier `10.144.144.0/24` so mDNS never advertises on TUN. Overlay IPs bind on a second path. Missing sidecar returns empty lists (success).
 - Rationale: EasyTier TUN often drops multicast; ADR-006 forbids mDNS as the cross-net discovery. Binding `0.0.0.0` is still forbidden.

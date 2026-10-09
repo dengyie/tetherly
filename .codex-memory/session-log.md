@@ -1,6 +1,13 @@
 # Session log
 
 ## 2026-10-09
+- Task: Land Phase 3 native keyboard/mouse CI slice; spec v1.5; push so GitHub CI compiles and tests.
+- Actions: `tetherly-core::input` (binary `TIN1`, seq window, `InputServer`/`InputClient`/`MemorySink`, edge state machine); node listens on separate TCP 45719 with `SessionConfig.resume_only` (pairing still 45717); `caps.update inputport=`; input frames only on the 45719 channel; `tests/phase3.rs`.
+- Results: local fmt/clippy `-D warnings`/`cargo test --workspace --locked`/deny green. First CI run `37989970083` failed: Windows `m3_2` (shared `identity.bin.tmp` collision) and Android unit tests (`org.json` stub). Fixed with per-write temp names and a real `org.json` test dependency. CI run `37997269866` all five jobs **success**.
+- Next: Stop. Do not open Phase 4. Physical SendInput / dual-desktop remain Manual-required.
+- Blockers: No real dual-desktop or OS injection in CI.
+
+## 2026-10-09
 - Task: Land Phase 2 EasyTier sidecar CI slice; spec v1.4; do not open Phase 3.
 - Actions: overlay CIDR/PathKind + sidecar RPC/CLI/iface discovery; overlay bind separate from LAN/mDNS; LAN-wins attach; UI「仅局域网」; `tests/phase2.rs` M2.2–M2.5; clippy nits; isolate host TUN with `10.199.199.0/24`.
 - Results: fmt/clippy `-D warnings`/workspace tests (loopback 10, phase1 7, phase2 4, core 63)/cargo deny green. No `easytier*` in Cargo.toml.

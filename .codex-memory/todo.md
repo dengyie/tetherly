@@ -3,8 +3,9 @@
 - (none)
 
 ## Next
-- [ ] Phase 3 only after Phase 2 device exit or waiver: native input 45719, no DeskFlow/Lan Mouse/KDE source
+- [ ] Phase 4 iPhone ANCS only with a new waiver (computer-side ANCS ingress → NotifyHub)
 - [ ] Physical Android cellular M2.1 p95 and Wi-Fi→overlay failover
+- [ ] Real OS cursor/key injection (Win SendInput / macOS / Wayland portal+libei) + 100 dual-desktop round-trips (M3.1 device)
 - [ ] `libtetherly_android.so` (cargo-ndk) + real Ed25519 JNI identity
 - [ ] Physical Android M1.1 p95 and Win+Android 8h soak
 - [ ] True Notepad UIA insert (M1.3 device)
@@ -30,3 +31,8 @@
 - [x] Overlay bind separate from LAN/mDNS; LAN wins over overlay
 - [x] tests/phase2.rs M2.2–M2.5 loopback; UI「仅局域网」
 - [x] DEVELOPMENT.md v1.4
+- [x] Phase 3 `tetherly-core::input` binary TIN1 engine + edge state machine
+- [x] Native Noise input port 45719 (resume-only, MemorySink); caps `inputport=`
+- [x] tests/phase3.rs 未配对拒绝 / 过边按键 / 断线回光标 / 聚焦时剪贴板
+- [x] Windows parallel-test identity temp collision fix; Android unit org.json stub
+- [x] DEVELOPMENT.md v1.5; GitHub CI all five jobs green
