@@ -1,5 +1,29 @@
 # Decisions
 
+## 2026-10-09 - Overlay bind is separate from LAN/mDNS
+- Decision: LAN listeners skip EasyTier `10.144.144.0/24` so mDNS never advertises on TUN. Overlay IPs bind on a second path. Missing sidecar returns empty lists (success).
+- Rationale: EasyTier TUN often drops multicast; ADR-006 forbids mDNS as the cross-net discovery. Binding `0.0.0.0` is still forbidden.
+- Alternatives considered: Advertise mDNS on overlay (fails on many TUNs); skip overlay bind entirely (peers cannot accept inbound overlay TCP).
+- Impact: Discovery is unicast 45717 from RPC/CLI/`extra_peers`. UI shows「仅局域网」when sidecar is absent.
+- Rollback trigger: None while EasyTier stays sidecar.
+- Related files: `crates/tetherly-node/src/{lan,sidecar,runtime}.rs`, ADR-006
+
+## 2026-10-09 - extra_peers dial even outside overlay CIDR
+- Decision: Config/test `extra_peers` are dial targets regardless of CIDR. Overlay bind and JSON/CLI IP harvest still require the address to sit in overlay CIDR.
+- Rationale: Loopback tests and manual IPs (127.0.0.1:ephemeral) must unicast without a real TUN. Host EasyTier `10.144.144.0/24` must not leak into “absent sidecar” tests; those use `10.199.199.0/24`.
+- Alternatives considered: Filter extra_peers by CIDR (broke M2.5); treat any `et*`/`tun*` IP as overlay bind (broke isolation on this host).
+- Impact: M2.4/M2.5 stay deterministic on a machine that already runs EasyTier.
+- Rollback trigger: If production needs name-only TUN bind, gate it behind explicit config, not the default.
+- Related files: `crates/tetherly-node/src/sidecar.rs`, `tests/phase2.rs`
+
+## 2026-10-09 - Live LAN session wins over overlay attach
+- Decision: If a peer is already live on LAN, drop inbound overlay TCP without recording. Overlay session teardown removes live/session only when `p.addr == sess_addr`.
+- Rationale: Same Wi-Fi should stay on LAN (M2.2). Overlay scan loops must not replace or delete a healthy LAN map entry.
+- Alternatives considered: Last-writer-wins (flaps to overlay); tear down any session for that device_id (kills LAN when overlay probe ends).
+- Impact: Dual-path hosts keep one LAN peer; overlay is for when LAN is gone.
+- Rollback trigger: None for v1 path preference.
+- Related files: `crates/tetherly-node/src/runtime.rs`, `crates/tetherly-core/src/overlay.rs`
+
 ## 2026-10-09 - Phase 1 desktop is loopback HTTP, not Tauri
 - Decision: Serve `ui/index.html` on `127.0.0.1:45716` only. `src-tauri` is the next desktop-shell iteration.
 - Rationale: CI must not require WebView2. Host allowlist is 127.0.0.1/localhost; never bind `0.0.0.0`.

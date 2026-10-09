@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tetherly_core::{hex_sha256, ManualClock, NotifyPush, CANDIDATE_TTL_MS};
-use tetherly_node::{MemoryInsertor, Node, NodeConfig, UiEvent};
+use tetherly_node::{MemoryInsertor, Node, NodeConfig, OverlayConfig, UiEvent};
 
 const OTP_BODY: &str = "【测试】验证码：524681，您正在登录";
 const OTP: &str = "524681";
@@ -44,6 +44,10 @@ fn cfg(dir: PathBuf, name: &str, platform: &str) -> NodeConfig {
         loopback_only: true,
         reconnect: false,
         ui_port: 0,
+        overlay: OverlayConfig {
+            enabled: false,
+            ..OverlayConfig::default()
+        },
     }
 }
 

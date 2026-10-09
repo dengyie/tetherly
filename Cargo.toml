@@ -75,3 +75,7 @@ path = "tests/loopback.rs"
 [[test]]
 name = "phase1"
 path = "tests/phase1.rs"
+
+[[test]]
+name = "phase2"
+path = "tests/phase2.rs"

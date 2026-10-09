@@ -1,6 +1,13 @@
 # Session log
 
 ## 2026-10-09
+- Task: Land Phase 2 EasyTier sidecar CI slice; spec v1.4; do not open Phase 3.
+- Actions: overlay CIDR/PathKind + sidecar RPC/CLI/iface discovery; overlay bind separate from LAN/mDNS; LAN-wins attach; UI「仅局域网」; `tests/phase2.rs` M2.2–M2.5; clippy nits; isolate host TUN with `10.199.199.0/24`.
+- Results: fmt/clippy `-D warnings`/workspace tests (loopback 10, phase1 7, phase2 4, core 63)/cargo deny green. No `easytier*` in Cargo.toml.
+- Next: Stop. Do not open Phase 3. M2.1 physical cellular p95 remains Manual-required.
+- Blockers: No physical phone + cellular EasyTier soak in this session.
+
+## 2026-10-09
 - Task: Land Phase 1 CI slice (LAN desktop + Android skeleton); update spec to v1.3; push.
 - Actions: `tetherly-node` persist/LAN/notify/clip/file; loopback HTTP UI; Android NLService; `tests/phase1.rs`; `copy_otp` CandidateExpired; deny BSL-1.0; DEVELOPMENT.md v1.3; Obsidian 速读.
 - Results: workspace tests green (loopback 10, phase1 7, core 58); clippy `-D warnings`; cargo deny licenses/bans/sources ok.

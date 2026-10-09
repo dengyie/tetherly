@@ -3,12 +3,21 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.3** |
+| 文档版本 | **1.4** |
 | 日期 | 2026-10-09 |
-| 状态 | Phase 1 CI 切片已落地（loopback notify/clip/file + 本机 HTTP UI + Android NLService 骨架）；物理 Android p95 / 8h soak 与 JNI `.so` 为 Manual-required；**未开 Phase 2** |
+| 状态 | Phase 2 CI 切片已落地（EasyTier **侧车**发现 + 虚网单播 45717 + LAN 优先 + 缺侧车仅局域网）；物理 Android 蜂窝 p95 为 Manual-required；**未开 Phase 3** |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli` |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.4 相对 1.3（Phase 2 EasyTier 侧车 CI 切片）**
+
+- 仍 **不** 把 `easytier*` 放进 `Cargo.toml`。发现走本机 RPC `127.0.0.1:15888`（2s）或 `easytier-cli -o json peer list`（失败则 `peer`），任意 JSON walker + 文本 IPv4 扫描；缺侧车是成功（LAN only，M2.4）。
+- 虚网 bind 与 LAN bind **分开**：LAN/mDNS 永不在 EasyTier TUN 上 advertise。overlay 监听仍禁止 `0.0.0.0`/`::`；无 TUN IP 时 bind 空列表成功。
+- 路径：`PathKind::Lan` 赢过 overlay attach；overlay 会话结束只拆自己的 `sess_addr`，不拆仍活着的 LAN 条目（M2.2）。
+- UI：缺侧车显示「仅局域网（未检测到 EasyTier 侧车，不影响 LAN）」；在线显示「虚网在线」。CLI：`--overlay-cidr`、`--no-overlay`。
+- `tests/phase2.rs`：M2.3 停侧车不崩、M2.4 未装侧车 Phase 1 不变、M2.5 无 mDNS 靠 extra_peers 单播、M2.2 重复 overlay 扫描仍保 LAN。夹具 CIDR 用 `10.199.199.0/24` 隔离本机真实 EasyTier TUN。
+- M2.1 Android 蜂窝 ↔ 电脑通知 p95 < 3s：**Manual-required**（真机蜂窝 + 侧车 soak）。
 
 **1.3 相对 1.2（Phase 1 LAN 桌面 + Android）**
 
@@ -262,12 +271,14 @@ caps=notify,clip,file
 
 端口在 SRV。完整 `id_pk` 只在 Hello。
 
-**虚网（Phase 2）**
+**虚网（Phase 2，已接线）**
 
-- 探测接口：路由表里出现 `10.144.144.0/24` **或** 用户配置的 CIDR **或** 接口名含 `et`/`easytier`（启发式，失败则手动填对端 IP）。
-- `GET` EasyTier RPC（若本机 `15888` 可达）或解析 `easytier-cli peer` JSON。
-- 对每个 peer 虚网 IP **TCP 连接 45717**，超时 2s。
-- **禁止**在虚网接口上发 mDNS 作为唯一发现手段。
+- 默认 CIDR `10.144.144.0/24`，可用 `--overlay-cidr` 覆盖。接口名 `et*` / `easytier` / `tun*`（不含 `eth*`）只作启发式分类；**bind / 广告仍要求地址落在 overlay CIDR**，避免把无关 TUN 当虚网。
+- `GET` EasyTier RPC（本机 `15888`，超时 `OVERLAY_PROBE_MS=2000`）或解析 `easytier-cli -o json peer list`（失败则 `peer`）。JSON 任意形状 walker + 文本 dotted-quad 扫描。Windows CLI 用 `CREATE_NO_WINDOW`。
+- 对每个 overlay peer IPv4 **TCP 连接 45717**，超时 2s。`extra_peers` 是拨号目标，**不必**落在 CIDR（测试 / 手动 IP）。
+- 虚网 bind 与 LAN bind 分开；**禁止**在虚网接口上发 mDNS 作为发现手段。
+- 同设备已有 LAN 会话时丢弃 overlay attach；overlay 会话结束不拆 LAN。
+- 未装或停 EasyTier：`lan_only`，UI「仅局域网」，不崩。
 
 IPv6：v1 不做。
 
@@ -405,10 +416,11 @@ tetherly/
 │   ├── tetherly-core/      # OTP、帧、状态机、白名单、去重、bind/clip/file/notify/persist
 │   ├── tetherly-crypto/    # Ed25519、X25519、Argon2id、SPAKE2、Noise、file AEAD
 │   ├── tetherly-net/       # TCP、hello、mDNS、内层 dispatch、filechan 45718
-│   └── tetherly-node/      # LAN 节点、落盘、hubs、本机 HTTP UI、tetherly 二进制
+│   └── tetherly-node/      # LAN 节点、落盘、hubs、本机 HTTP UI、EasyTier sidecar 发现、tetherly 二进制
 ├── bins/tetherly-cli/      # Phase 0 配对夹具仍保留
 ├── tests/loopback.rs       # Phase 0
 ├── tests/phase1.rs         # Phase 1 loopback 双节点
+├── tests/phase2.rs         # Phase 2 sidecar unicast / LAN 优先 / 缺侧车
 ├── ui/index.html           # 本机 UI（loopback HTTP）
 ├── android/                # NLService + gradle CI
 └── docs/
@@ -552,17 +564,19 @@ Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要�
 
 退出：M1.1–M1.3、M1.5–M1.7。Win+Android 8h 无崩溃。macOS 能跑通 M1.1 或文档标明「mac 下一迭代」。
 
-**v1.3 退出裁定**：CI 切片（协议、落盘、日志脱敏、文件确认、本机 UI、Android 工程骨架）已绿。物理 Android p95 / 8h / JNI `.so` / 真 UIA / Win↔mac 仍是 Manual-required，**不得开 Phase 2 功能代码**，除非另下豁免。
+**v1.3 退出裁定（历史）**：CI 切片（协议、落盘、日志脱敏、文件确认、本机 UI、Android 工程骨架）已绿。物理 Android p95 / 8h / JNI `.so` / 真 UIA / Win↔mac 仍是 Manual-required。后续以用户「继续按文档开发」为豁免，进入 Phase 2 CI 切片。
 
 ### Phase 2 — EasyTier 侧车（约 3 周）
 
-| ID | 验收 |
-|---|---|
-| M2.1 | Android 蜂窝网 ↔ 电脑，通知 p95 < 3s |
-| M2.2 | 同 Wi-Fi 走 LAN 接口；断 Wi-Fi 后 **新通知** 走虚网。进行中文件允许失败并提示 |
-| M2.3 | 停 EasyTier：UI「仅局域网」，不崩 |
-| M2.4 | 未装 EasyTier 时 Phase 1 不变 |
-| M2.5 | 虚网接口上关闭 mDNS 仍能靠 peer 列表连上 |
+| ID | 验收 | 状态（v1.4） |
+|---|---|---|
+| M2.1 | Android 蜂窝网 ↔ 电脑，通知 p95 < 3s | **Manual-required**（真机蜂窝 + 用户 EasyTier soak） |
+| M2.2 | 同 Wi-Fi 走 LAN 接口；断 Wi-Fi 后 **新通知** 走虚网。进行中文件允许失败并提示 | CI：已有 LAN 时丢弃 overlay attach，重复扫描仍保一条 LAN。真机断 Wi-Fi 切虚网：**Manual-required** |
+| M2.3 | 停 EasyTier：UI「仅局域网」，不崩 | CI 绿（无 RPC/CLI/TUN → `lan_only`，shutdown 不崩） |
+| M2.4 | 未装 EasyTier 时 Phase 1 不变 | CI 绿（隔离 CIDR 下仍可配对 + `notify.push`） |
+| M2.5 | 虚网接口上关闭 mDNS 仍能靠 peer 列表连上 | CI 绿（`advertise=false` + `extra_peers` 单播 45717） |
+
+**v1.4 退出裁定**：Phase 2 CI 切片（侧车探测、单播、LAN 优先、缺侧车仅局域网、UI 文案）已绿。M2.1 物理蜂窝 p95 与真机断 Wi-Fi 切路径仍是 Manual-required，**不得开 Phase 3 功能代码**，除非另下豁免。
 
 ### Phase 3 — 桌面键鼠（约 4 周）
 
@@ -599,7 +613,7 @@ Android 被控、notify.reply、WinFsp 挂载、文件持久续传、Linux ANCS 
 | 向量 | Argon2+SPAKE2+Noise prologue |
 | proptest | 控制 JSON 往返 |
 | fuzz | 内层帧、ANCS tuple（Phase 4） |
-| 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello。`tests/phase1.rs`：notify、clip TTL、insert 拒绝、persist 重拨、日志脱敏、文件拒绝/接受 |
+| 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello。`tests/phase1.rs`：notify、clip TTL、insert 拒绝、persist 重拨、日志脱敏、文件拒绝/接受。`tests/phase2.rs`：缺侧车、停侧车、无 mDNS 单播、LAN 优先 |
 | 真机 | 发版清单：Win × Android；Phase 4 再加 iPhone |
 
 PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
@@ -611,7 +625,7 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - CI：Windows、macOS、Ubuntu（fmt / clippy `-D warnings` / test `--locked`）。Phase 1 另加 Ubuntu `android` job（Java 17 + Gradle 8.9：`:app:testDebugUnitTest`、`assembleDebug`）与 `deny`（licenses/bans/sources + audit）。
 - 版本号 workspace 统一 bump。
 - 控制 **45717/tcp**，文件 **45718/tcp**，键鼠 **45719/tcp**。本机 UI **45716/tcp** 仅 127.0.0.1。DeskFlow 网关默认关。
-- 安装程序提示放行 45717–45719；默认监听地址：`127.0.0.1` + RFC1918 / 链路本地，不含公网、不含 EasyTier `10.144.144.0/24`。
+- 安装程序提示放行 45717–45719；默认 **LAN** 监听：`127.0.0.1` + RFC1918 / 链路本地，不含公网、**跳过** EasyTier `10.144.144.0/24`（避免 mDNS 打到 TUN）。Phase 2 另绑 overlay CIDR 内的本机 IP，仍永不 `0.0.0.0`/`::`。
 - Phase 1 桌面不要求 WebView2（loopback HTTP）。Tauri 壳下一迭代才需要 WebView2、MSVC 运行库；ANCS 需要蓝牙。
 
 ---
@@ -689,4 +703,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 4. 本机 UI：`ui/index.html` + `uihttp`，Host 必须是 127.0.0.1/localhost。
 5. Android：NLService、前台服务、Wire JSON 无 url action、gradle CI。JNI `.so` 下一刀。
 6. `tests/phase1.rs` 覆盖 M1.2–M1.7 与模拟 M1.1/M1.6。
-7. **不要**加 EasyTier crate、不要加 DeskFlow 源码、不要改 OTP 规则、不要开 Phase 2。
+7. **不要**加 EasyTier crate、不要加 DeskFlow 源码、不要改 OTP 规则。Phase 1 清单至此为止；Phase 2 见 §20。
+
+---
+
+## 20. Phase 2 开工与落地清单
+
+1. `tetherly-core::overlay`：CIDR、`PathKind`、JSON/文本 peer IPv4 扫描；默认虚网 `10.144.144.0/24`。
+2. `tetherly-node::sidecar`：本机 RPC 15888 → `easytier-cli` → 接口 CIDR；`extra_peers` 作拨号目标。缺侧车返回空列表，不算错误。
+3. overlay bind 与 LAN bind 分开；mDNS 只挂 LAN。已有 LAN 则丢 overlay attach。
+4. UI `/api/state` 暴露 `lan_only` / `overlay_present` / `overlay_source` / peer `path`。
+5. `tests/phase2.rs` 覆盖 M2.2–M2.5 的 loopback 切片；夹具 CIDR 不得撞本机真实 EasyTier TUN。
+6. **不要**把 `easytier*` 写进依赖图、不要在 TUN 上发 mDNS、不要改 OTP 规则、不要开 Phase 3。

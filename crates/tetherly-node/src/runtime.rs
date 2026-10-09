@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Phase 1 node: LAN listen, persist, notify/clip/file, reconnect without re-pair.
+//! LAN + optional EasyTier sidecar overlay. Overlay is unicast only; no mDNS on TUN.
 
 use crate::events::{file_offered, peer_up, CandidateViewDto, UiEvent};
-use crate::lan::{bind_many, control_bind_addrs, lan_ips};
+use crate::lan::{bind_many, bind_overlay, control_bind_addrs, lan_ips};
 use crate::platform::{insert_foreground, MemoryClip, SystemClip};
+use crate::sidecar::{self, OverlayConfig, OverlayStatus};
 use crate::store::{load_or_create_identity, load_trust, remember_route, save_trust, RouteTable};
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,8 +20,9 @@ use tetherly_core::ports::{Clip, Clock, Rng, SystemClock};
 use tetherly_core::session::LockoutTable;
 use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
-    hex_lower, is_desktop_platform, ClipApply, ClipHub, CoreError, DeviceId, FileHub,
-    IngestOutcome, MemoryTrustStore, NotifyHub, TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS,
+    hex_lower, is_desktop_platform, path_kind, ClipApply, ClipHub, CoreError, DeviceId, FileHub,
+    IngestOutcome, MemoryTrustStore, NotifyHub, PathKind, TcpLimiter, TrustStore,
+    CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -57,6 +59,8 @@ pub struct NodeConfig {
     pub reconnect: bool,
     /// Loopback HTTP UI. 0 disables.
     pub ui_port: u16,
+    /// EasyTier sidecar. Missing binary/RPC is success (LAN only).
+    pub overlay: OverlayConfig,
 }
 
 impl Default for NodeConfig {
@@ -72,6 +76,7 @@ impl Default for NodeConfig {
             loopback_only: false,
             reconnect: true,
             ui_port: 45716,
+            overlay: OverlayConfig::default(),
         }
     }
 }
@@ -91,6 +96,7 @@ pub struct LivePeer {
     pub handshake_hash: [u8; 32],
     /// Advertised via caps.update `fileport=`. None until the peer tells us.
     pub file_port: Option<u16>,
+    pub path: PathKind,
 }
 
 struct Hubs {
@@ -121,6 +127,7 @@ struct Shared {
     bound_control: AtomicU16,
     bound_file: AtomicU16,
     shutdown: watch::Sender<bool>,
+    overlay: Mutex<OverlayStatus>,
 }
 
 pub struct Node {
@@ -182,6 +189,7 @@ impl Node {
             bound_control,
             bound_file,
             shutdown,
+            overlay: Mutex::new(OverlayStatus::lan_only()),
         });
         Ok(Self { shared })
     }
@@ -366,6 +374,14 @@ impl Node {
         }
     }
 
+    pub fn overlay_status(&self) -> OverlayStatus {
+        self.shared.overlay.lock().expect("overlay").clone()
+    }
+
+    pub fn lan_only(&self) -> bool {
+        !self.overlay_status().present
+    }
+
     pub async fn run(&self) -> anyhow::Result<()> {
         self.spawn_listeners().await?;
         if self.shared.cfg.ui_port != 0 {
@@ -407,6 +423,9 @@ impl Node {
 
         if self.shared.cfg.advertise {
             self.advertise_mdns();
+        }
+        if self.shared.cfg.overlay.enabled {
+            self.spawn_overlay();
         }
         if self.shared.cfg.reconnect {
             self.spawn_reconnect();
@@ -491,6 +510,138 @@ impl Node {
         self.persist_trust();
     }
 
+    fn already_live_on_ip(&self, addr: SocketAddr) -> bool {
+        self.shared
+            .live
+            .lock()
+            .expect("live")
+            .values()
+            .any(|p| p.addr.ip() == addr.ip() && p.addr.port() == addr.port())
+    }
+
+    fn spawn_overlay(&self) {
+        if !self.shared.cfg.loopback_only {
+            let overlay_addrs =
+                sidecar::overlay_bind_addrs(&self.shared.cfg.overlay, self.shared.cfg.control_port);
+            let overlay_file =
+                sidecar::overlay_bind_addrs(&self.shared.cfg.overlay, self.shared.cfg.file_port);
+            let node = self.clone_handle();
+            tokio::spawn(async move {
+                for l in bind_overlay(&overlay_addrs).await {
+                    let node = node.clone_handle();
+                    let mut stop = node.shared.shutdown.subscribe();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                _ = stop.changed() => {
+                                    if *stop.borrow() {
+                                        break;
+                                    }
+                                }
+                                accepted = l.accept() => {
+                                    match accepted {
+                                        Ok((stream, addr)) => {
+                                            let node = node.clone_handle();
+                                            tokio::spawn(async move {
+                                                if let Err(e) = node.accept_one(stream, addr).await {
+                                                    warn!(%e, %addr, "overlay accept failed");
+                                                }
+                                            });
+                                        }
+                                        Err(e) => {
+                                            debug!(%e, "overlay accept");
+                                            tokio::time::sleep(Duration::from_millis(200)).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                for l in bind_overlay(&overlay_file).await {
+                    let node = node.clone_handle();
+                    let mut stop = node.shared.shutdown.subscribe();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                _ = stop.changed() => {
+                                    if *stop.borrow() {
+                                        break;
+                                    }
+                                }
+                                accepted = l.accept() => {
+                                    if let Ok((stream, addr)) = accepted {
+                                        let node = node.clone_handle();
+                                        tokio::spawn(async move {
+                                            let _ = node.accept_file(stream, addr).await;
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        }
+        let node = self.clone_handle();
+        tokio::spawn(async move {
+            node.overlay_scan_loop().await;
+        });
+    }
+
+    async fn overlay_scan_loop(&self) {
+        let mut stop = self.shared.shutdown.subscribe();
+        let mut last_present = false;
+        loop {
+            if *stop.borrow() {
+                break;
+            }
+            let st = sidecar::discover(&self.shared.cfg.overlay).await;
+            let present = st.present;
+            {
+                *self.shared.overlay.lock().expect("overlay") = st.clone();
+            }
+            if present != last_present {
+                last_present = present;
+                self.emit(UiEvent::Overlay {
+                    present,
+                    lan_only: !present,
+                });
+                if !present {
+                    info!("overlay down; LAN only");
+                } else {
+                    info!(peers = st.peers.len(), "overlay peers");
+                }
+            }
+            let live = self.live_peers();
+            let live_ips: Vec<IpAddr> = live.iter().map(|p| p.addr.ip()).collect();
+            let port = self.control_port();
+            let mut targets: Vec<SocketAddr> = self.shared.cfg.overlay.extra_peers.clone();
+            for ip in &st.peers {
+                if live_ips.contains(&IpAddr::V4(*ip)) {
+                    continue;
+                }
+                targets.push(SocketAddr::from((*ip, port)));
+            }
+            for addr in targets {
+                if self.already_live_on_ip(addr) {
+                    continue;
+                }
+                if let Err(e) = self.dial(addr).await {
+                    debug!(%e, %addr, "overlay dial");
+                }
+            }
+            tokio::select! {
+                _ = stop.changed() => {
+                    if *stop.borrow() {
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(OVERLAY_PROBE_MS.max(5_000))) => {}
+            }
+        }
+    }
+
     fn advertise_mdns(&self) {
         let id = self.shared.identity.device_id().clone();
         let fp = DeviceId::fingerprint12(self.shared.identity.id_pk());
@@ -559,6 +710,9 @@ impl Node {
     }
 
     pub async fn dial(&self, addr: SocketAddr) -> Result<(), tetherly_net::NetError> {
+        if self.already_live_on_ip(addr) {
+            return Ok(());
+        }
         let stream = TcpStream::connect(addr).await?;
         let cfg = self.session_config();
         let sess = dial_session(stream, addr, &cfg).await?;
@@ -594,8 +748,19 @@ impl Node {
         let name = sess.peer_hello.name.clone();
         let platform = sess.peer_hello.platform.clone();
         let addr = sess.peer_addr;
+        let incoming = path_kind(addr, &self.shared.cfg.overlay.cidrs);
         {
-            self.shared.live.lock().expect("live").insert(
+            let live = self.shared.live.lock().expect("live");
+            if let Some(cur) = live.get(&peer_id) {
+                if cur.path == PathKind::Lan && incoming == PathKind::Overlay {
+                    debug!(peer = %peer_id, %addr, "keep LAN; drop overlay attach");
+                    return;
+                }
+            }
+        }
+        {
+            let mut live = self.shared.live.lock().expect("live");
+            live.insert(
                 peer_id.clone(),
                 LivePeer {
                     device_id: peer_id.clone(),
@@ -604,10 +769,15 @@ impl Node {
                     addr,
                     handshake_hash: *sess.handshake_hash(),
                     file_port: None,
+                    path: incoming,
                 },
             );
         }
         self.emit(peer_up(&peer_id, &name, &platform));
+        match incoming {
+            PathKind::Lan => info!(peer = %peer_id, %addr, "path lan"),
+            PathKind::Overlay => info!(peer = %peer_id, %addr, "path overlay"),
+        }
         let (tx, mut rx) = mpsc::unbounded_channel::<InnerFrame>();
         {
             self.shared
@@ -630,6 +800,7 @@ impl Node {
         }
         let node = self.clone_handle();
         let mut stop = self.shared.shutdown.subscribe();
+        let sess_addr = addr;
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -665,11 +836,21 @@ impl Node {
                     }
                 }
             }
-            node.shared.sessions.lock().await.remove(&peer_id);
-            node.shared.live.lock().expect("live").remove(&peer_id);
-            node.emit(UiEvent::PeerDown {
-                device_id: peer_id.to_string(),
-            });
+            let still_mine = node
+                .shared
+                .live
+                .lock()
+                .expect("live")
+                .get(&peer_id)
+                .map(|p| p.addr)
+                == Some(sess_addr);
+            if still_mine {
+                node.shared.sessions.lock().await.remove(&peer_id);
+                node.shared.live.lock().expect("live").remove(&peer_id);
+                node.emit(UiEvent::PeerDown {
+                    device_id: peer_id.to_string(),
+                });
+            }
         });
     }
 

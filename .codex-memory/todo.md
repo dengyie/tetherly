@@ -3,7 +3,8 @@
 - (none)
 
 ## Next
-- [ ] Phase 2 only after Phase 1 device exit or waiver: EasyTier sidecar unicast, no crate link
+- [ ] Phase 3 only after Phase 2 device exit or waiver: native input 45719, no DeskFlow/Lan Mouse/KDE source
+- [ ] Physical Android cellular M2.1 p95 and Wi-Fi→overlay failover
 - [ ] `libtetherly_android.so` (cargo-ndk) + real Ed25519 JNI identity
 - [ ] Physical Android M1.1 p95 and Win+Android 8h soak
 - [ ] True Notepad UIA insert (M1.3 device)
@@ -25,3 +26,7 @@
 - [x] copy_otp returns CandidateExpired for present-but-expired ids
 - [x] deny.toml allow BSL-1.0 (clipboard-win)
 - [x] DEVELOPMENT.md v1.3
+- [x] Phase 2 sidecar discovery (RPC/CLI/iface) + unicast 45717
+- [x] Overlay bind separate from LAN/mDNS; LAN wins over overlay
+- [x] tests/phase2.rs M2.2–M2.5 loopback; UI「仅局域网」
+- [x] DEVELOPMENT.md v1.4

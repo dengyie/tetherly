@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! LAN bind policy. Phase 1 listens on loopback + RFC1918 + link-local.
-//! Never bind `0.0.0.0` / `::`. Skip the default EasyTier overlay so Phase 1
-//! cannot accidentally advertise on a TUN.
+//! LAN bind policy. Listens on loopback + RFC1918 + link-local.
+//! Never bind `0.0.0.0` / `::`. Skip the default EasyTier overlay so mDNS
+//! cannot advertise on a TUN. Overlay bind is a separate Phase 2 path.
 
 use std::net::{IpAddr, Ipv4Addr};
 

@@ -94,6 +94,10 @@
       </div>
     </section>
     <section style="margin-top:16px">
+      <h2>网络</h2>
+      <div id="net" class="hint">探测 EasyTier 侧车…</div>
+    </section>
+    <section style="margin-top:16px">
       <h2>在线对端</h2>
       <div id="peers"><div class="empty">无会话</div></div>
     </section>
@@ -109,6 +113,12 @@ async function api(path, body) {
 function el(html) { const d = document.createElement("div"); d.innerHTML = html.trim(); return d.firstChild; }
 function render(s) {
   $("who").textContent = s.name + " · " + s.platform + " · " + s.device_id;
+  const net = $("net");
+  if (net) {
+    net.textContent = s.lan_only
+      ? "仅局域网（未检测到 EasyTier 侧车，不影响 LAN）"
+      : ("虚网在线 · " + (s.overlay_source || "") + " · peers " + (s.overlay_peers || 0));
+  }
   const c = $("cands");
   c.innerHTML = "";
   if (!s.candidates.length) c.appendChild(el('<div class="empty">等待通知。码不会出现在日志里。</div>'));
@@ -150,7 +160,7 @@ function render(s) {
   for (const x of s.peers) {
     p.appendChild(el('<div class="card"><div><div class="title"></div><div class="meta"></div></div></div>'));
     p.lastChild.querySelector(".title").textContent = x.name;
-    p.lastChild.querySelector(".meta").textContent = x.platform + " · " + x.device_id;
+    p.lastChild.querySelector(".meta").textContent = x.platform + " · " + (x.path || "lan") + " · " + x.device_id;
   }
 }
 $("mkpin").onclick = async () => {

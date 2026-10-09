@@ -36,6 +36,10 @@ pub enum UiEvent {
     Status {
         message: String,
     },
+    Overlay {
+        present: bool,
+        lan_only: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

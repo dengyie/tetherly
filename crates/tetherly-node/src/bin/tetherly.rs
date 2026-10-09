@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Phase 1 desktop CLI.
+//! Desktop CLI: LAN + optional EasyTier sidecar overlay.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -10,7 +10,10 @@ use tetherly_node::{Node, NodeConfig};
 use tracing::info;
 
 #[derive(Parser)]
-#[command(name = "tetherly", about = "Tetherly Phase 1 LAN node")]
+#[command(
+    name = "tetherly",
+    about = "Tetherly LAN node with optional EasyTier sidecar"
+)]
 struct Cli {
     #[arg(long)]
     data_dir: Option<PathBuf>,
@@ -26,6 +29,12 @@ enum Cmd {
     Run {
         #[arg(long, default_value_t = 45717)]
         port: u16,
+        /// Extra EasyTier overlay CIDRs, comma-separated. Default 10.144.144.0/24.
+        #[arg(long)]
+        overlay_cidr: Option<String>,
+        /// Disable overlay bind/scan (LAN only).
+        #[arg(long, default_value_t = false)]
+        no_overlay: bool,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -80,8 +89,18 @@ async fn main() -> Result<()> {
             println!("{}", node.generate_pin()?);
             println!("不要把数字发给任何人，只在你自己的另一台设备上输入。");
         }
-        Cmd::Run { port } => {
+        Cmd::Run {
+            port,
+            overlay_cidr,
+            no_overlay,
+        } => {
             cfg.control_port = port;
+            if no_overlay {
+                cfg.overlay.enabled = false;
+            }
+            if let Some(c) = overlay_cidr {
+                cfg.overlay.cidrs = tetherly_node::parse_overlay_cidrs(&c);
+            }
             let node = Node::start(cfg)?;
             info!(device_id = %node.identity().device_id(), "run");
             info!("ui http://127.0.0.1:45716");

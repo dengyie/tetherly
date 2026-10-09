@@ -133,6 +133,10 @@ struct Snapshot {
     name: String,
     platform: String,
     pin_active: bool,
+    lan_only: bool,
+    overlay_present: bool,
+    overlay_source: String,
+    overlay_peers: usize,
     candidates: Vec<crate::events::CandidateViewDto>,
     peers: Vec<PeerView>,
     files: Vec<FileSnap>,
@@ -143,6 +147,7 @@ struct PeerView {
     device_id: String,
     name: String,
     platform: String,
+    path: String,
 }
 
 #[derive(Serialize)]
@@ -230,11 +235,16 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
 }
 
 fn snapshot(node: &Node) -> Snapshot {
+    let ov = node.overlay_status();
     Snapshot {
         device_id: node.identity().device_id().to_string(),
         name: node.name().to_string(),
         platform: node.platform().to_string(),
         pin_active: node.pin_if_fresh().is_some(),
+        lan_only: !ov.present,
+        overlay_present: ov.present,
+        overlay_source: format!("{:?}", ov.source),
+        overlay_peers: ov.peers.len(),
         candidates: node.candidates(),
         peers: node
             .live_peers()
@@ -243,6 +253,10 @@ fn snapshot(node: &Node) -> Snapshot {
                 device_id: p.device_id.to_string(),
                 name: p.name,
                 platform: p.platform,
+                path: match p.path {
+                    tetherly_core::PathKind::Lan => "lan".into(),
+                    tetherly_core::PathKind::Overlay => "overlay".into(),
+                },
             })
             .collect(),
         files: node

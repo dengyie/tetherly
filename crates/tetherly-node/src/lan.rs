@@ -62,6 +62,26 @@ pub async fn bind_many(addrs: &[SocketAddr]) -> std::io::Result<Vec<TcpListener>
     Ok(listeners)
 }
 
+/// Overlay listen set. Explicit EasyTier TUN IPs only; still never `0.0.0.0`.
+/// Empty is success: EasyTier is optional (M2.4).
+pub async fn bind_overlay(addrs: &[SocketAddr]) -> Vec<TcpListener> {
+    let mut listeners = Vec::new();
+    for addr in addrs {
+        if is_unspecified_bind(addr.ip()) {
+            warn!(%addr, "refusing unspecified overlay bind");
+            continue;
+        }
+        match TcpListener::bind(*addr).await {
+            Ok(l) => {
+                info!(%addr, "overlay listen");
+                listeners.push(l);
+            }
+            Err(e) => warn!(%addr, %e, "overlay bind failed"),
+        }
+    }
+    listeners
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
