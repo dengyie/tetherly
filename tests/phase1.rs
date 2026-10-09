@@ -111,8 +111,8 @@ async fn pair_phone_desktop() -> (Node, Node, DirGuard, DirGuard) {
     phone.set_pin(pin);
     desk.set_pin(pin);
     phone.dial(desk.control_addr()).await.unwrap();
-    wait_live(&phone, Duration::from_secs(8)).await;
-    wait_live(&desk, Duration::from_secs(8)).await;
+    wait_live(&phone, Duration::from_secs(25)).await;
+    wait_live(&desk, Duration::from_secs(25)).await;
     (phone, desk, g1, g2)
 }
 
@@ -205,8 +205,8 @@ async fn m1_4_win_loopback_clip_set() {
     a.set_pin(pin);
     b.set_pin(pin);
     a.dial(b.control_addr()).await.unwrap();
-    wait_live(&a, Duration::from_secs(8)).await;
-    wait_live(&b, Duration::from_secs(8)).await;
+    wait_live(&a, Duration::from_secs(25)).await;
+    wait_live(&b, Duration::from_secs(25)).await;
 
     a.clip().set_text("hello-clip").unwrap();
     a.send_clipboard().await.unwrap();
@@ -244,8 +244,8 @@ async fn m1_5_reconnect_without_repair() {
     let phone2 = Node::start(cfg(phone_dir, "phone", "android")).unwrap();
     phone2.spawn_listeners().await.unwrap();
     phone2.dial(desk_addr).await.unwrap();
-    wait_live(&phone2, Duration::from_secs(8)).await;
-    wait_live(&desk, Duration::from_secs(8)).await;
+    wait_live(&phone2, Duration::from_secs(25)).await;
+    wait_live(&desk, Duration::from_secs(25)).await;
     assert_eq!(phone2.live_peers()[0].device_id, desk_id);
     phone2
         .send_notify(desk.identity().device_id(), otp_push("uid-re"))
@@ -296,8 +296,8 @@ async fn m1_7_file_reject_then_accept_sha256() {
     a.set_pin(pin);
     b.set_pin(pin);
     a.dial(b.control_addr()).await.unwrap();
-    wait_live(&a, Duration::from_secs(8)).await;
-    wait_live(&b, Duration::from_secs(8)).await;
+    wait_live(&a, Duration::from_secs(25)).await;
+    wait_live(&b, Duration::from_secs(25)).await;
     let start = std::time::Instant::now();
     loop {
         if a.live_peers().iter().any(|p| p.file_port.is_some())

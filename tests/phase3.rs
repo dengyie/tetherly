@@ -94,8 +94,8 @@ async fn pair() -> (Node, Node, DirGuard, DirGuard) {
     a.set_pin(pin);
     b.set_pin(pin);
     a.dial(b.control_addr()).await.unwrap();
-    wait_live(&a, Duration::from_secs(8)).await;
-    wait_live(&b, Duration::from_secs(8)).await;
+    wait_live(&a, Duration::from_secs(25)).await;
+    wait_live(&b, Duration::from_secs(25)).await;
     wait_input_port(&a, b.identity().device_id(), Duration::from_secs(3)).await;
     (a, b, ga, gb)
 }

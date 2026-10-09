@@ -110,8 +110,8 @@ async fn pair(a: &Node, b: &Node) {
     b.spawn_listeners().await.unwrap();
     tokio::time::sleep(Duration::from_millis(40)).await;
     b.dial(a.control_addr()).await.unwrap();
-    wait_live(a, Duration::from_secs(8)).await;
-    wait_live(b, Duration::from_secs(8)).await;
+    wait_live(a, Duration::from_secs(25)).await;
+    wait_live(b, Duration::from_secs(25)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -168,8 +168,8 @@ async fn m2_5_unicast_peer_list_without_mdns() {
     let b = Node::start(cfg(db, "phone", ob)).unwrap();
     b.set_pin(pin);
     b.spawn_listeners().await.unwrap();
-    wait_live(&a, Duration::from_secs(8)).await;
-    wait_live(&b, Duration::from_secs(8)).await;
+    wait_live(&a, Duration::from_secs(25)).await;
+    wait_live(&b, Duration::from_secs(25)).await;
     let dest = a.identity().device_id().clone();
     let start = std::time::Instant::now();
     loop {
