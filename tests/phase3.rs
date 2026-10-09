@@ -21,13 +21,16 @@ impl Drop for DirGuard {
 }
 
 fn temp_dir(tag: &str) -> (PathBuf, DirGuard) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "tetherly-p3-{tag}-{}-{}",
+        "tetherly-p3-{tag}-{}-{}-{n}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+            .unwrap_or_default()
+            .as_millis()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     (dir.clone(), DirGuard(dir))

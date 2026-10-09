@@ -62,7 +62,11 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
     }
-    let tmp = path.with_extension("tmp");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_extension(format!("tmp-{}-{nonce}", std::process::id()));
     {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
