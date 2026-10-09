@@ -68,7 +68,10 @@ impl InnerFrame {
         if payload.len() > INNER_PAYLOAD_MAX {
             return Err(CoreError::PayloadTooLarge);
         }
-        if flags & FLAG_MUST_UNDERSTAND != 0 && !is_known_type(ty) {
+        if flags & FLAG_MUST_UNDERSTAND != 0
+            && !is_known_type(ty)
+            && !crate::input::is_input_type(ty)
+        {
             return Err(CoreError::MustUnderstand(ty));
         }
         Ok(Self {

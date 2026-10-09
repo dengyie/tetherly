@@ -39,6 +39,7 @@ fn cfg(dir: PathBuf, name: &str, platform: &str) -> NodeConfig {
         platform: platform.into(),
         control_port: 0,
         file_port: 0,
+        input_port: 0,
         advertise: false,
         memory_clip: true,
         loopback_only: true,

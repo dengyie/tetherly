@@ -111,6 +111,8 @@ pub struct SessionConfig {
     pub handshake_timeout: Duration,
     /// Test-only MITM fixture. Production callers leave this `None`.
     pub hello_override: Option<Hello>,
+    /// Input port 45719: Noise IK resume only. Pairing stays on 45717.
+    pub resume_only: bool,
 }
 
 impl Clone for SessionConfig {
@@ -127,6 +129,7 @@ impl Clone for SessionConfig {
             clock: self.clock.clone(),
             handshake_timeout: self.handshake_timeout,
             hello_override: self.hello_override.clone(),
+            resume_only: self.resume_only,
         }
     }
 }
@@ -134,8 +137,15 @@ impl Clone for SessionConfig {
 impl SessionConfig {
     fn hello(&self) -> Hello {
         self.hello_override.clone().unwrap_or_else(|| {
-            self.identity
-                .hello(&self.name, &self.platform, &["notify", "clip", "file"])
+            self.identity.hello(
+                &self.name,
+                &self.platform,
+                if self.resume_only {
+                    &["input"]
+                } else {
+                    &["notify", "clip", "file", "input"]
+                },
+            )
         })
     }
 
@@ -244,6 +254,9 @@ async fn handshake(
 
     match disposition {
         HelloDisposition::Pair => {
+            if cfg.resume_only {
+                return Err(NetError::InputRequiresTrust);
+            }
             pair_then_noise(
                 reader,
                 writer,

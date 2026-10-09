@@ -32,6 +32,7 @@ fn cfg(identity: Identity, name: &str, pin: Option<[u8; 8]>) -> SessionConfig {
         clock: Arc::new(ManualClock::new(1_000)),
         handshake_timeout: HANDSHAKE_TIMEOUT,
         hello_override: None,
+        resume_only: false,
     }
 }
 
@@ -133,6 +134,7 @@ async fn m0_3_paired_ping_and_reconnect_without_re_pair() {
         clock: host.clock.clone(),
         handshake_timeout: host.handshake_timeout,
         hello_override: None,
+        resume_only: false,
     };
     let server = tokio::spawn(async move {
         let (stream, addr) = listener.accept().await.unwrap();
@@ -163,6 +165,7 @@ async fn m0_3_paired_ping_and_reconnect_without_re_pair() {
         clock: Arc::new(ManualClock::new(2_000)),
         handshake_timeout: HANDSHAKE_TIMEOUT,
         hello_override: None,
+        resume_only: false,
     };
     let peer2 = SessionConfig {
         identity: Identity::from_secrets([0x61; 32], [0x62; 32]),
@@ -176,6 +179,7 @@ async fn m0_3_paired_ping_and_reconnect_without_re_pair() {
         clock: Arc::new(ManualClock::new(2_000)),
         handshake_timeout: HANDSHAKE_TIMEOUT,
         hello_override: None,
+        resume_only: false,
     };
     let server = tokio::spawn(async move {
         let (stream, addr) = listener.accept().await.unwrap();

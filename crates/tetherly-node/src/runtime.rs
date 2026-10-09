@@ -20,16 +20,16 @@ use tetherly_core::ports::{Clip, Clock, Rng, SystemClock};
 use tetherly_core::session::LockoutTable;
 use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
-    hex_lower, is_desktop_platform, path_kind, ClipApply, ClipHub, CoreError, DeviceId, FileHub,
-    IngestOutcome, MemoryTrustStore, NotifyHub, PathKind, TcpLimiter, TrustStore,
-    CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
+    hex_lower, is_desktop_platform, path_kind, ClipApply, ClipHub, CoreError, CursorSeat, DeviceId,
+    FileHub, IngestOutcome, InputClient, InputEvent, InputServer, MemorySink, MemoryTrustStore,
+    NotifyHub, PathKind, TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
 use tetherly_net::filechan::send_bytes as send_file_bytes;
 use tetherly_net::session::{
     accept_session, dial_session, ActiveSession, SessionConfig, CONTROL_PORT, FILE_PORT,
-    HANDSHAKE_TIMEOUT,
+    HANDSHAKE_TIMEOUT, INPUT_PORT,
 };
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
@@ -50,6 +50,7 @@ pub struct NodeConfig {
     pub platform: String,
     pub control_port: u16,
     pub file_port: u16,
+    pub input_port: u16,
     pub advertise: bool,
     /// Tests inject a clip. Production uses SystemClip.
     pub memory_clip: bool,
@@ -71,6 +72,7 @@ impl Default for NodeConfig {
             platform: std::env::consts::OS.to_string(),
             control_port: CONTROL_PORT,
             file_port: FILE_PORT,
+            input_port: INPUT_PORT,
             advertise: true,
             memory_clip: false,
             loopback_only: false,
@@ -96,6 +98,8 @@ pub struct LivePeer {
     pub handshake_hash: [u8; 32],
     /// Advertised via caps.update `fileport=`. None until the peer tells us.
     pub file_port: Option<u16>,
+    /// Advertised via caps.update `inputport=`. None until the peer tells us.
+    pub input_port: Option<u16>,
     pub path: PathKind,
 }
 
@@ -122,10 +126,17 @@ struct Shared {
     pin: Mutex<Option<([u8; 8], u64)>>,
     events: broadcast::Sender<UiEvent>,
     sessions: AsyncMutex<HashMap<DeviceId, mpsc::UnboundedSender<InnerFrame>>>,
+    input_out: AsyncMutex<Option<mpsc::UnboundedSender<InnerFrame>>>,
     live: Mutex<HashMap<DeviceId, LivePeer>>,
     pending_out: Mutex<HashMap<String, OutboundFile>>,
     bound_control: AtomicU16,
     bound_file: AtomicU16,
+    bound_input: AtomicU16,
+    /// Input cursor owner. None until a trusted desktop dials 45719.
+    input_seat: Mutex<Option<CursorSeat>>,
+    input_sink: Mutex<MemorySink>,
+    /// Seq lives here so repeated edge crossings do not replay seq 1.
+    input_engine: Mutex<InputServer>,
     shutdown: watch::Sender<bool>,
     overlay: Mutex<OverlayStatus>,
 }
@@ -168,6 +179,7 @@ impl Node {
         };
         let bound_control = AtomicU16::new(cfg.control_port);
         let bound_file = AtomicU16::new(cfg.file_port);
+        let bound_input = AtomicU16::new(cfg.input_port);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -184,10 +196,15 @@ impl Node {
             pin: Mutex::new(None),
             events,
             sessions: AsyncMutex::new(HashMap::new()),
+            input_out: AsyncMutex::new(None),
             live: Mutex::new(HashMap::new()),
             pending_out: Mutex::new(HashMap::new()),
             bound_control,
             bound_file,
+            bound_input,
+            input_seat: Mutex::new(None),
+            input_sink: Mutex::new(MemorySink::default()),
+            input_engine: Mutex::new(InputServer::new(1, 1)),
             shutdown,
             overlay: Mutex::new(OverlayStatus::lan_only()),
         });
@@ -203,6 +220,10 @@ impl Node {
     }
 
     pub fn session_config(&self) -> SessionConfig {
+        self.session_config_inner(false)
+    }
+
+    fn session_config_inner(&self, resume_only: bool) -> SessionConfig {
         let pin = *self.shared.pin.lock().expect("pin");
         SessionConfig {
             identity: self.shared.identity.clone(),
@@ -216,6 +237,7 @@ impl Node {
             clock: self.shared.clock.clone(),
             handshake_timeout: HANDSHAKE_TIMEOUT,
             hello_override: None,
+            resume_only,
         }
     }
 
@@ -420,6 +442,18 @@ impl Node {
                 self.shared.bound_file.store(addr.port(), Ordering::SeqCst);
             }
         }
+        let input_port = self.shared.cfg.input_port;
+        let input_addrs = if self.shared.cfg.loopback_only {
+            vec![SocketAddr::from(([127, 0, 0, 1], input_port))]
+        } else {
+            control_bind_addrs(input_port)
+        };
+        let input_listeners = bind_many(&input_addrs).await.unwrap_or_default();
+        if let Some(first) = input_listeners.first() {
+            if let Ok(addr) = first.local_addr() {
+                self.shared.bound_input.store(addr.port(), Ordering::SeqCst);
+            }
+        }
 
         if self.shared.cfg.advertise {
             self.advertise_mdns();
@@ -492,6 +526,36 @@ impl Node {
                 }
             });
         }
+        for l in input_listeners {
+            let node = self.clone_handle();
+            let mut stop = self.shared.shutdown.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = stop.changed() => {
+                            if *stop.borrow() {
+                                break;
+                            }
+                        }
+                        accepted = l.accept() => {
+                            match accepted {
+                                Ok((stream, addr)) => {
+                                    let node = node.clone_handle();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = node.accept_input(stream, addr).await {
+                                            debug!(%e, "input channel");
+                                        }
+                                    });
+                                }
+                                Err(_) => {
+                                    tokio::time::sleep(Duration::from_millis(200)).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
         Ok(())
     }
 
@@ -525,6 +589,8 @@ impl Node {
                 sidecar::overlay_bind_addrs(&self.shared.cfg.overlay, self.shared.cfg.control_port);
             let overlay_file =
                 sidecar::overlay_bind_addrs(&self.shared.cfg.overlay, self.shared.cfg.file_port);
+            let overlay_input =
+                sidecar::overlay_bind_addrs(&self.shared.cfg.overlay, self.shared.cfg.input_port);
             let node = self.clone_handle();
             tokio::spawn(async move {
                 for l in bind_overlay(&overlay_addrs).await {
@@ -574,6 +640,29 @@ impl Node {
                                         let node = node.clone_handle();
                                         tokio::spawn(async move {
                                             let _ = node.accept_file(stream, addr).await;
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                for l in bind_overlay(&overlay_input).await {
+                    let node = node.clone_handle();
+                    let mut stop = node.shared.shutdown.subscribe();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                _ = stop.changed() => {
+                                    if *stop.borrow() {
+                                        break;
+                                    }
+                                }
+                                accepted = l.accept() => {
+                                    if let Ok((stream, addr)) = accepted {
+                                        let node = node.clone_handle();
+                                        tokio::spawn(async move {
+                                            let _ = node.accept_input(stream, addr).await;
                                         });
                                     }
                                 }
@@ -769,6 +858,7 @@ impl Node {
                     addr,
                     handshake_hash: *sess.handshake_hash(),
                     file_port: None,
+                    input_port: None,
                     path: incoming,
                 },
             );
@@ -787,12 +877,15 @@ impl Node {
                 .insert(peer_id.clone(), tx.clone());
         }
         let file_port = self.file_port();
+        let input_port = self.input_port();
         let caps = CapsUpdate {
             caps: vec![
                 "notify".into(),
                 "clip".into(),
                 "file".into(),
+                "input".into(),
                 format!("fileport={file_port}"),
+                format!("inputport={input_port}"),
             ],
         };
         if let Ok(frame) = caps.to_frame() {
@@ -847,6 +940,7 @@ impl Node {
             if still_mine {
                 node.shared.sessions.lock().await.remove(&peer_id);
                 node.shared.live.lock().expect("live").remove(&peer_id);
+                *node.shared.input_seat.lock().expect("seat") = None;
                 node.emit(UiEvent::PeerDown {
                     device_id: peer_id.to_string(),
                 });
@@ -900,9 +994,16 @@ impl Node {
                 }
             }
             SessionEvent::Caps(update) => {
-                if let Some(port) = parse_file_port(&update.caps) {
+                let file_port = parse_file_port(&update.caps);
+                let input_port = parse_input_port(&update.caps);
+                if file_port.is_some() || input_port.is_some() {
                     if let Some(live) = self.shared.live.lock().expect("live").get_mut(peer) {
-                        live.file_port = Some(port);
+                        if let Some(port) = file_port {
+                            live.file_port = Some(port);
+                        }
+                        if let Some(port) = input_port {
+                            live.input_port = Some(port);
+                        }
                     }
                 }
             }
@@ -1169,12 +1270,203 @@ impl Node {
         self.shared.bound_file.load(Ordering::SeqCst)
     }
 
+    pub fn input_port(&self) -> u16 {
+        self.shared.bound_input.load(Ordering::SeqCst)
+    }
+
     pub fn control_addr(&self) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], self.control_port()))
     }
 
     pub fn file_addr(&self) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], self.file_port()))
+    }
+
+    pub fn input_addr(&self) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], self.input_port()))
+    }
+
+    pub fn input_seat(&self) -> Option<CursorSeat> {
+        *self.shared.input_seat.lock().expect("seat")
+    }
+
+    pub fn input_sink_snapshot(&self) -> MemorySink {
+        self.shared.input_sink.lock().expect("sink").clone()
+    }
+
+    /// Open the resume-only input channel. Pairing on 45719 is refused.
+    pub async fn open_input(&self, peer: &DeviceId) -> Result<(), tetherly_net::NetError> {
+        let addr = {
+            let live = self.shared.live.lock().expect("live");
+            let p = live
+                .get(peer)
+                .ok_or(tetherly_net::NetError::InputRequiresTrust)?;
+            let port = p.input_port.ok_or(tetherly_net::NetError::Handshake)?;
+            SocketAddr::new(p.addr.ip(), port)
+        };
+        let stream = TcpStream::connect(addr).await?;
+        let mut cfg = self.session_config_inner(true);
+        cfg.pin = None;
+        let sess = dial_session(stream, addr, &cfg).await?;
+        self.attach_input_server(sess).await;
+        Ok(())
+    }
+
+    /// Push local pixels onto the open 45719 session. Crossing the right edge
+    /// emits Enter + Move. Seq is monotonic for the life of the node. No JSON,
+    /// and never onto 45717. OS hooks stay Manual-required.
+    pub async fn drive_input(
+        &self,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<Option<tetherly_core::ScreenEdge>, CoreError> {
+        let (edge, events) = {
+            let mut server = self.shared.input_engine.lock().expect("engine");
+            server.resize(width, height);
+            let edge = server.local_move(x, y);
+            (edge, server.drain())
+        };
+        self.send_input_events(events).await?;
+        if edge.is_some() {
+            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Remote);
+        }
+        Ok(edge)
+    }
+
+    pub async fn drive_input_key(&self, code: u16, down: bool) -> Result<(), CoreError> {
+        let events = {
+            let mut server = self.shared.input_engine.lock().expect("engine");
+            if server.seat() != CursorSeat::Remote {
+                return Ok(());
+            }
+            let seq = server.next_seq();
+            server.note_seq(seq);
+            vec![InputEvent::key(seq, code, down, 0)]
+        };
+        self.send_input_events(events).await
+    }
+
+    pub fn input_engine_seat(&self) -> CursorSeat {
+        self.shared.input_engine.lock().expect("engine").seat()
+    }
+
+    async fn send_input_events(&self, events: Vec<InputEvent>) -> Result<(), CoreError> {
+        let tx = self
+            .shared
+            .input_out
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| CoreError::Json("input channel closed".into()))?;
+        for ev in events {
+            tx.send(ev.to_frame()?)
+                .map_err(|_| CoreError::Json("input peer gone".into()))?;
+        }
+        Ok(())
+    }
+
+    async fn accept_input(
+        &self,
+        stream: TcpStream,
+        addr: SocketAddr,
+    ) -> Result<(), tetherly_net::NetError> {
+        let mut cfg = self.session_config_inner(true);
+        cfg.pin = None;
+        let sess = accept_session(stream, addr, &cfg).await?;
+        self.attach_input_client(sess).await;
+        Ok(())
+    }
+
+    async fn attach_input_server(&self, mut sess: ActiveSession) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<InnerFrame>();
+        *self.shared.input_out.lock().await = Some(tx);
+        let mut stop = self.shared.shutdown.subscribe();
+        let node = self.clone_handle();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.changed() => {
+                        if *stop.borrow() {
+                            break;
+                        }
+                    }
+                    outbound = rx.recv() => {
+                        match outbound {
+                            Some(frame) => {
+                                if sess.send_inner(frame).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    inbound = sess.recv_inner() => {
+                        match inbound {
+                            Ok(frame) => {
+                                if let Ok(ev) = InputEvent::from_frame(&frame) {
+                                    if matches!(ev.kind, tetherly_core::InputKind::Leave) {
+                                        node.shared.input_engine.lock().expect("engine").on_remote_leave();
+                                        *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+            *node.shared.input_out.lock().await = None;
+            node.shared
+                .input_engine
+                .lock()
+                .expect("engine")
+                .on_peer_gone();
+            *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        });
+    }
+
+    async fn attach_input_client(&self, mut sess: ActiveSession) {
+        let mut client = InputClient::new(MemorySink::default());
+        let mut stop = self.shared.shutdown.subscribe();
+        let node = self.clone_handle();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.changed() => {
+                        if *stop.borrow() {
+                            break;
+                        }
+                    }
+                    inbound = sess.recv_inner() => {
+                        match inbound {
+                            Ok(frame) => {
+                                if let Ok(ev) = InputEvent::from_frame(&frame) {
+                                    if let Ok(Some(leave)) = client.apply(ev) {
+                                        let _ = sess.send_inner(match leave.to_frame() {
+                                            Ok(f) => f,
+                                            Err(_) => continue,
+                                        }).await;
+                                    }
+                                    *node.shared.input_sink.lock().expect("sink") = client.sink().clone();
+                                    let seat = if client.focused() {
+                                        CursorSeat::Remote
+                                    } else {
+                                        CursorSeat::Local
+                                    };
+                                    *node.shared.input_seat.lock().expect("seat") = Some(seat);
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+            client.on_peer_gone();
+            *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+            *node.shared.input_sink.lock().expect("sink") = client.sink().clone();
+        });
     }
 
     pub fn data_dir(&self) -> &std::path::Path {
@@ -1195,8 +1487,16 @@ fn route_addr(table: &RouteTable, device_id: &str) -> Option<SocketAddr> {
 }
 
 fn parse_file_port(caps: &[String]) -> Option<u16> {
+    parse_port_cap(caps, "fileport=")
+}
+
+fn parse_input_port(caps: &[String]) -> Option<u16> {
+    parse_port_cap(caps, "inputport=")
+}
+
+fn parse_port_cap(caps: &[String], prefix: &str) -> Option<u16> {
     caps.iter().find_map(|c| {
-        c.strip_prefix("fileport=")
+        c.strip_prefix(prefix)
             .and_then(|s| s.parse::<u16>().ok())
             .filter(|p| *p != 0)
     })

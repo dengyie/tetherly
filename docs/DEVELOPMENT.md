@@ -3,12 +3,20 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.4** |
+| 文档版本 | **1.5** |
 | 日期 | 2026-10-09 |
-| 状态 | Phase 2 CI 切片已落地（EasyTier **侧车**发现 + 虚网单播 45717 + LAN 优先 + 缺侧车仅局域网）；物理 Android 蜂窝 p95 为 Manual-required；**未开 Phase 3** |
+| 状态 | Phase 3 CI 切片已落地（45719 Noise IK 只恢复、二进制 TIN1、MemorySink）；真机 SendInput / 双桌面 soak 为 Manual-required；DeskFlow 网关保持关闭；**未开 Phase 4** |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli` |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.5 相对 1.4（Phase 3 原生键鼠 CI 切片）**
+
+- 键鼠走独立 TCP **45719**。Hello 之后只允许 `ResumeNoise`；未知对端返回 `InputRequiresTrust`，配对仍只在 45717。
+- 载荷魔数 `TIN1`、proto 1、`seq` u64be、屏幕单位 0..=1000。内层 type `0x0401`–`0x0407`，带 `MUST_UNDERSTAND`。控制面 JSON 表仍不含这些 type，也没有 `input.*` JSON。
+- 引擎在 `tetherly-core`（无 OS API）。节点用 `MemorySink` 注入；`caps.update` 广告 `inputport=`。过边第一帧 `x=0` 是进入，不是离开；只有先进屏幕内部再回到 `x=0` 才回 server。
+- `tests/phase3.rs`：未配对 45719 拒绝、过边+按键跟随、对端断开光标回本机、键鼠聚焦时 `clip.set` 仍走 45717。
+- 真机光标注入（Win SendInput / macOS / Wayland portal+libei）与双桌面 100 次物理往返：**Manual-required**。M3.4 DeskFlow 网关保持 experimental、默认关，**不链接** DeskFlow / Lan Mouse / KDE 源码。
 
 **1.4 相对 1.3（Phase 2 EasyTier 侧车 CI 切片）**
 
@@ -504,6 +512,8 @@ Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要�
 
 拓扑在 `config.toml`。断线光标回 server。Wayland 走 portal+libei，不行就标不支持。DeskFlow 网关另开端口、默认关、TLS 未实现就不要宣称兼容。
 
+**v1.5 已落地**：`tetherly-core::input` 编解码与边缘状态机；`tetherly-node` 在 LAN 与 overlay 上另听 45719，会话 `resume_only`。CI 注入是 `MemorySink`，不调用 Win32 `SendInput`。进入帧落在 `x=0` 时保持焦点；离开只在已经进入内部后再回到左缘时发生。剪贴板仍走 45717，不进键鼠帧。
+
 ### 9.6 Android（Phase 1）
 
 `NotificationListenerService` + 前台服务。Android 13+ `POST_NOTIFICATIONS`。帮助页教各 ROM 自启动，不搞黑保活。不读短信库。Play 上架需通知使用权声明，内部测试可先 sideload。
@@ -580,14 +590,16 @@ Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要�
 
 ### Phase 3 — 桌面键鼠（约 4 周）
 
-| ID | 验收 |
-|---|---|
-| M3.1 | 光标过 Win 右缘到第二台桌面，键盘跟随；脚本往返 100 次丢失 0 |
-| M3.2 | 对端断开，光标回本机 |
-| M3.3 | 键鼠模式下剪贴板仍可用 |
-| M3.4 | 加分：DeskFlow 官方 client + TLS 能移动光标。失败则网关标 experimental |
+| ID | 验收 | 状态（v1.5） |
+|---|---|---|
+| M3.1 | 光标过 Win 右缘到第二台桌面，键盘跟随；脚本往返 100 次丢失 0 | CI：45719 过边 + 按键进 `MemorySink`；core 100 次往返 0 丢失。真机 SendInput / 双桌面：**Manual-required** |
+| M3.2 | 对端断开，光标回本机 | CI 绿（输入会话结束 `on_peer_gone`，座位回 Local） |
+| M3.3 | 键鼠模式下剪贴板仍可用 | CI 绿（焦点在对端时 `clip.set` 仍走 45717） |
+| M3.4 | 加分：DeskFlow 官方 client + TLS 能移动光标。失败则网关标 experimental | **未做**。网关保持关闭，不链 GPL 源码，不挡退出 |
 
-Wayland 不挡退出。
+Wayland 不挡退出。真机注入未落地前不得宣称可替代键鼠。
+
+**v1.5 退出裁定**：Phase 3 CI 切片（resume-only Noise、二进制帧、过边、断线、剪贴板并存）已绿。物理双桌面与 OS 注入仍是 Manual-required，**不得开 Phase 4**，除非另下豁免。
 
 ### Phase 4 — iPhone ANCS（约 4 周）
 
@@ -613,7 +625,7 @@ Android 被控、notify.reply、WinFsp 挂载、文件持久续传、Linux ANCS 
 | 向量 | Argon2+SPAKE2+Noise prologue |
 | proptest | 控制 JSON 往返 |
 | fuzz | 内层帧、ANCS tuple（Phase 4） |
-| 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello。`tests/phase1.rs`：notify、clip TTL、insert 拒绝、persist 重拨、日志脱敏、文件拒绝/接受。`tests/phase2.rs`：缺侧车、停侧车、无 mDNS 单播、LAN 优先 |
+| 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello。`tests/phase1.rs`：notify、clip TTL、insert 拒绝、persist 重拨、日志脱敏、文件拒绝/接受。`tests/phase2.rs`：缺侧车、停侧车、无 mDNS 单播、LAN 优先。`tests/phase3.rs`：45719 拒绝配对、过边按键、断线回光标、聚焦时剪贴板 |
 | 真机 | 发版清单：Win × Android；Phase 4 再加 iPhone |
 
 PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
@@ -714,4 +726,14 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 3. overlay bind 与 LAN bind 分开；mDNS 只挂 LAN。已有 LAN 则丢 overlay attach。
 4. UI `/api/state` 暴露 `lan_only` / `overlay_present` / `overlay_source` / peer `path`。
 5. `tests/phase2.rs` 覆盖 M2.2–M2.5 的 loopback 切片；夹具 CIDR 不得撞本机真实 EasyTier TUN。
-6. **不要**把 `easytier*` 写进依赖图、不要在 TUN 上发 mDNS、不要改 OTP 规则、不要开 Phase 3。
+6. **不要**把 `easytier*` 写进依赖图、不要在 TUN 上发 mDNS、不要改 OTP 规则。Phase 3 见 §21。
+
+---
+
+## 21. Phase 3 开工与落地清单
+
+1. `tetherly-core::input`：`TIN1` 二进制事件、seq 窗口、`InputServer` / `InputClient` / `MemorySink`。无 `cfg(target_os)`。
+2. 45719 与 45717/45718 分开 bind（LAN + overlay，仍禁止 `0.0.0.0`）。`SessionConfig.resume_only` 拒绝在此端口配对。
+3. `caps.update` 增加 `inputport=`。键鼠帧只走 45719 的独立发送通道，不进控制面 JSON。
+4. `tests/phase3.rs` 覆盖未配对拒绝、M3.1 过边按键、M3.2 断线、M3.3 剪贴板。
+5. **不要**链接 DeskFlow / Lan Mouse / Barrier / KDE 源码，不要调用 Win32 注入当作 CI，不要改 OTP 规则，不要开 Phase 4。

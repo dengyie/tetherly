@@ -77,6 +77,7 @@ fn cfg(identity: Identity, name: &str, pin: [u8; 8]) -> SessionConfig {
         clock: Arc::new(SystemClock),
         handshake_timeout: HANDSHAKE_TIMEOUT,
         hello_override: None,
+        resume_only: false,
     }
 }
 

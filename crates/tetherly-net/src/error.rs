@@ -38,4 +38,6 @@ pub enum NetError {
     RekeyRequired,
     #[error("file channel: {0}")]
     File(String),
+    #[error("input channel requires trust; pairing belongs on 45717")]
+    InputRequiresTrust,
 }

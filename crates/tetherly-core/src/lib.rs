@@ -13,6 +13,7 @@ pub mod error;
 pub mod filexfer;
 pub mod frame;
 pub mod hello;
+pub mod input;
 pub mod insertion;
 pub mod notify;
 pub mod otp;
@@ -36,6 +37,11 @@ pub use frame::{
     FILE_TOKEN_TTL_MS, TYPE_PING, TYPE_PONG,
 };
 pub use hello::Hello;
+pub use input::{
+    is_input_type, CursorSeat, InputClient, InputEvent, InputKind, InputServer, InputSink,
+    MemorySink, ScreenEdge, INPUT_MAGIC, TYPE_INPUT_BUTTON, TYPE_INPUT_CLIP_HINT, TYPE_INPUT_ENTER,
+    TYPE_INPUT_KEY, TYPE_INPUT_LEAVE, TYPE_INPUT_MOVE, TYPE_INPUT_WHEEL,
+};
 pub use insertion::{plan as insertion_plan, InsertionDecision, InsertionPlan};
 pub use notify::{is_desktop_platform, CandidateView, IngestOutcome, NotifyHub};
 pub use otp::{extract_otp, DefaultOtpExtractor, OtpExtractor, DEFAULT_MIN_SCORE};
