@@ -19,6 +19,9 @@ pub const INPUT_MAGIC: [u8; 4] = *b"TIN1";
 pub const INPUT_PROTO: u8 = 1;
 pub const INPUT_BATCH_MAX: usize = 64;
 pub const INPUT_SEQ_WINDOW: u64 = 65_536;
+/// Most recent applied events `MemorySink` retains, so a long-lived client
+/// cannot grow the trace (or its per-frame clone) without bound.
+pub const INPUT_SINK_TRACE_MAX: usize = 256;
 
 pub const BTN_LEFT: u8 = 1;
 pub const BTN_RIGHT: u8 = 2;
@@ -276,13 +279,22 @@ pub struct MemorySink {
     pub cursor: (i32, i32),
     pub buttons: u8,
     pub keys_down: Vec<u16>,
-    pub applied: Vec<InputKind>,
+    pub applied: VecDeque<InputKind>,
+}
+
+impl MemorySink {
+    fn record(&mut self, kind: InputKind) {
+        if self.applied.len() >= INPUT_SINK_TRACE_MAX {
+            self.applied.pop_front();
+        }
+        self.applied.push_back(kind);
+    }
 }
 
 impl InputSink for MemorySink {
     fn move_abs(&mut self, x: i32, y: i32) {
         self.cursor = (x, y);
-        self.applied.push(InputKind::Move { x, y });
+        self.record(InputKind::Move { x, y });
     }
 
     fn button(&mut self, mask: u8, down: bool) {
@@ -291,11 +303,11 @@ impl InputSink for MemorySink {
         } else {
             self.buttons &= !mask;
         }
-        self.applied.push(InputKind::Button { mask, down });
+        self.record(InputKind::Button { mask, down });
     }
 
     fn wheel(&mut self, dx: i16, dy: i16) {
-        self.applied.push(InputKind::Wheel { dx, dy });
+        self.record(InputKind::Wheel { dx, dy });
     }
 
     fn key(&mut self, code: u16, down: bool, mods: u8) {
@@ -306,7 +318,7 @@ impl InputSink for MemorySink {
         } else {
             self.keys_down.retain(|c| *c != code);
         }
-        self.applied.push(InputKind::Key { code, down, mods });
+        self.record(InputKind::Key { code, down, mods });
     }
 }
 
@@ -376,6 +388,10 @@ impl InputServer {
         if self.seat == CursorSeat::Remote {
             self.x = x.clamp(0, self.width.saturating_sub(1));
             self.y = y;
+            self.push(InputKind::Move {
+                x: self.norm_x(),
+                y: self.norm_y(),
+            });
             return None;
         }
         if x >= self.width {
@@ -433,6 +449,13 @@ impl InputServer {
 
     pub fn drain(&mut self) -> Vec<InputEvent> {
         self.pending.drain(..).collect()
+    }
+
+    fn norm_x(&self) -> i32 {
+        if self.width <= 1 {
+            return 0;
+        }
+        ((self.x as i64) * SCREEN_UNITS as i64 / (self.width as i64 - 1)) as i32
     }
 
     fn norm_y(&self) -> i32 {
@@ -689,5 +712,35 @@ mod tests {
         assert_eq!(cli.applied(), before);
         assert_eq!(cli.sink().cursor, (10, 10));
         assert!(cli.dropped() > 0);
+    }
+
+    #[test]
+    fn remote_motion_is_forwarded_after_edge() {
+        let mut srv = InputServer::new(100, 50);
+        assert_eq!(srv.local_move(100, 25), Some(ScreenEdge::Right));
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+        let cross = srv.drain();
+        assert!(matches!(cross[0].kind, InputKind::Enter));
+
+        srv.local_move(80, 25);
+        let out = srv.drain();
+        assert_eq!(out.len(), 1, "remote motion must be forwarded");
+        match out[0].kind {
+            InputKind::Move { x, y } => {
+                assert!(x > 0 && x <= SCREEN_UNITS);
+                assert!(y > 0 && y <= SCREEN_UNITS);
+            }
+            other => panic!("expected Move, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sink_trace_is_bounded() {
+        let mut sink = MemorySink::default();
+        for i in 0..(INPUT_SINK_TRACE_MAX as i32 + 50) {
+            sink.move_abs(i, 0);
+        }
+        assert_eq!(sink.applied.len(), INPUT_SINK_TRACE_MAX);
+        assert_eq!(sink.cursor, (INPUT_SINK_TRACE_MAX as i32 + 49, 0));
     }
 }
