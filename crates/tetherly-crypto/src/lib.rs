@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aead;
 pub mod error;
 pub mod identity;
 pub mod kdf;
@@ -11,6 +12,7 @@ pub mod pairbind;
 pub mod spake;
 pub mod vectors;
 
+pub use aead::{aead_open, aead_seal, counter_nonce};
 pub use error::CryptoError;
 pub use identity::Identity;
 pub use kdf::{argon2id_pin, derive_pair_password, file_token};

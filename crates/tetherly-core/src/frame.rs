@@ -144,6 +144,159 @@ impl NotifyPush {
         self.actions.retain(|a| a != "url" && !a.contains("://"));
         self
     }
+
+    pub fn to_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_NOTIFY_PUSH, serde_json::to_vec(self)?)
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
+        let parsed: Self = serde_json::from_slice(payload)?;
+        Ok(parsed.truncate())
+    }
+}
+
+pub const CLIP_TEXT_MAX: usize = 1024 * 1024;
+pub const CANDIDATE_TTL_MS: u64 = 120_000;
+pub const CLIPBOARD_OTP_CLEAR_MS: u64 = 60_000;
+pub const FILE_TOKEN_TTL_MS: u64 = 60_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotifyDismiss {
+    pub uid: String,
+    pub app_id: String,
+}
+
+impl NotifyDismiss {
+    pub fn to_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_NOTIFY_DISMISS, serde_json::to_vec(self)?)
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
+        Ok(serde_json::from_slice(payload)?)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClipSet {
+    pub mime: String,
+    pub text: Option<String>,
+    pub blob_ref: Option<String>,
+    pub clip_seq: u64,
+    pub hash: String,
+}
+
+impl ClipSet {
+    pub fn text(clip_seq: u64, text: impl Into<String>) -> Result<Self, CoreError> {
+        let text = text.into();
+        if text.len() > CLIP_TEXT_MAX || text.len() > INNER_PAYLOAD_MAX.saturating_sub(256) {
+            return Err(CoreError::ClipboardTooLarge);
+        }
+        let hash = hex_sha256(text.as_bytes());
+        Ok(Self {
+            mime: "text/plain".into(),
+            text: Some(text),
+            blob_ref: None,
+            clip_seq,
+            hash,
+        })
+    }
+
+    pub fn to_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_CLIP_SET, serde_json::to_vec(self)?)
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
+        Ok(serde_json::from_slice(payload)?)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileMeta {
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileOffer {
+    pub transfer_id: String,
+    pub files: Vec<FileMeta>,
+}
+
+impl FileOffer {
+    pub fn to_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_FILE_OFFER, serde_json::to_vec(self)?)
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
+        Ok(serde_json::from_slice(payload)?)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileDecision {
+    pub transfer_id: String,
+}
+
+impl FileDecision {
+    pub fn accept_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_FILE_ACCEPT, serde_json::to_vec(self)?)
+    }
+
+    pub fn reject_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_FILE_REJECT, serde_json::to_vec(self)?)
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
+        Ok(serde_json::from_slice(payload)?)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileDone {
+    pub transfer_id: String,
+    pub sha256: String,
+}
+
+impl FileDone {
+    pub fn to_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_FILE_DONE, serde_json::to_vec(self)?)
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
+        Ok(serde_json::from_slice(payload)?)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapsUpdate {
+    pub caps: Vec<String>,
+}
+
+impl CapsUpdate {
+    pub fn to_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_CAPS_UPDATE, serde_json::to_vec(self)?)
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
+        Ok(serde_json::from_slice(payload)?)
+    }
+}
+
+pub fn hex_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    hex_lower(&digest)
+}
+
+pub fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
 }
 
 fn truncate_utf8(s: &mut String, max_bytes: usize) {

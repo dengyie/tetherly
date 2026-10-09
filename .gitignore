@@ -12,3 +12,8 @@ identity.bin
 trusted.json
 /tmp-test/
 tmp-write-loopback.py
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/

@@ -1,5 +1,29 @@
 # Decisions
 
+## 2026-10-09 - Phase 1 desktop is loopback HTTP, not Tauri
+- Decision: Serve `ui/index.html` on `127.0.0.1:45716` only. `src-tauri` is the next desktop-shell iteration.
+- Rationale: CI must not require WebView2. Host allowlist is 127.0.0.1/localhost; never bind `0.0.0.0`.
+- Alternatives considered: Full Tauri now (CI/WebView2 cost); CLI-only (no click-to-copy/file confirm UX).
+- Impact: Users open a local URL; PIN is returned only from POST `/api/pin`.
+- Rollback trigger: When Tauri packaging is the milestone, keep the same `/api/*` contract.
+- Related files: `crates/tetherly-node/src/uihttp.rs`, `ui/index.html`
+
+## 2026-10-09 - Allow BSL-1.0 in cargo deny
+- Decision: Add Boost Software License 1.0 to `deny.toml` allow list.
+- Rationale: `arboard` → `clipboard-win` / `error-code` are BSL-1.0 (OSI/FSF). Not copyleft. Still deny GPL/AGPL/LGPL and ban `easytier*`.
+- Alternatives considered: Drop `arboard` and use only Win32 clipboard (hurts Linux/mac later).
+- Impact: Phase 1 clip path can use arboard.
+- Rollback trigger: If a BSL crate with extra patent/field restrictions appears.
+- Related files: `deny.toml`, ADR-009
+
+## 2026-10-09 - File data uses advertised peer file port
+- Decision: Sender writes TFL1 chunks to `peer.file_port` from `caps.update fileport=`, never the control port.
+- Rationale: Two nodes on one host bind ephemeral ports; control 45717 ≠ file 45718.
+- Alternatives considered: Always 45718 (collides in loopback tests with port 0).
+- Impact: Caps must include `fileport=` after attach.
+- Rollback trigger: None for Phase 1.
+- Related files: `crates/tetherly-node/src/runtime.rs`, `crates/tetherly-net/src/filechan.rs`
+
 ## 2026-10-09 - Force LF in git for rustfmt
 - Decision: `.gitattributes` sets `eol=lf` for text; Windows CI also sets `core.autocrlf=false` before fmt.
 - Rationale: `rustfmt.toml` uses `newline_style = "Unix"`. GitHub `windows-latest` defaults `core.autocrlf=true`, so checkout rewrites LF to CRLF and `cargo fmt -- --check` fails while Linux/macOS pass.

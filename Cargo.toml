@@ -5,6 +5,7 @@ members = [
     "crates/tetherly-core",
     "crates/tetherly-crypto",
     "crates/tetherly-net",
+    "crates/tetherly-node",
     "bins/tetherly-cli",
 ]
 
@@ -20,6 +21,7 @@ description = "Personal-device mesh: LAN first, OTP on-device, desktop input lat
 tetherly-core = { path = "crates/tetherly-core", version = "0.1.0" }
 tetherly-crypto = { path = "crates/tetherly-crypto", version = "0.1.0" }
 tetherly-net = { path = "crates/tetherly-net", version = "0.1.0" }
+tetherly-node = { path = "crates/tetherly-node", version = "0.1.0" }
 
 argon2 = "0.5"
 base64 = "0.22"
@@ -42,6 +44,8 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive", "zeroize_derive"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+if-addrs = "0.13"
+arboard = "3"
 
 [package]
 name = "tetherly"
@@ -58,10 +62,16 @@ tetherly-crypto.workspace = true
 tetherly-net.workspace = true
 
 [dev-dependencies]
+tetherly-node.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 serde_json.workspace = true
 tracing-subscriber.workspace = true
+tracing.workspace = true
 
 [[test]]
 name = "loopback"
 path = "tests/loopback.rs"
+
+[[test]]
+name = "phase1"
+path = "tests/phase1.rs"

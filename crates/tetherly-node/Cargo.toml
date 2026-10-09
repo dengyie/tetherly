@@ -1,0 +1,39 @@
+[package]
+name = "tetherly-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Phase 1 LAN node: persist, notify/clip/file hubs, local UI API"
+publish = false
+
+[lib]
+name = "tetherly_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tetherly"
+path = "src/bin/tetherly.rs"
+
+[dependencies]
+tetherly-core.workspace = true
+tetherly-crypto.workspace = true
+tetherly-net.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+if-addrs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+getrandom.workspace = true
+arboard.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }

@@ -3,12 +3,20 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.2** |
+| 文档版本 | **1.3** |
 | 日期 | 2026-10-09 |
-| 状态 | Phase 0 协议骨架已落地；PairBind nonce / 信任提交顺序已按评审修订 |
-| crate / 二进制 | `tetherly`、`tetherly-core`、`tetherly-cli`、桌面壳 `tetherly` |
+| 状态 | Phase 1 CI 切片已落地（loopback notify/clip/file + 本机 HTTP UI + Android NLService 骨架）；物理 Android p95 / 8h soak 与 JNI `.so` 为 Manual-required；**未开 Phase 2** |
+| crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli` |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.3 相对 1.2（Phase 1 LAN 桌面 + Android）**
+
+- 新增 `tetherly-node`：身份/信任落盘、LAN bind（禁止 `0.0.0.0`、跳过 EasyTier `10.144.144.0/24`）、mDNS、`notify.push` / clip / file 控制面、文件数据走 **45718**、本机 HTTP UI **45716**（仅 127.0.0.1）。
+- 桌面壳本阶段是 loopback HTTP + `ui/index.html`，**不是** Tauri/WebView2。`src-tauri` 标为下一桌面壳迭代，避免 CI 依赖 WebView2。
+- Android：`NotificationListenerService` + 前台服务 + gradle CI。`libtetherly_android.so` / 真 Ed25519 JNI **尚未构建**；无 `.so` 时不擅自 raw-TCP。协议路径由 `tests/phase1.rs` 双节点 loopback 覆盖。
+- `cargo deny` 允许 **BSL-1.0**（Boost，OSI/FSF）：`arboard` → `clipboard-win`。仍拒绝 GPL/AGPL/LGPL；`easytier*` 仍 ban。
+- M1.2 / M1.3（MemoryInsertor）/ M1.4 Win 回环 / M1.5 persist 重拨 / M1.6 日志脱敏 / M1.7 文件确认+10MiB sha256：CI 全绿。M1.1 物理 Android p95、Win+Android 8h、真记事本 UIA、macOS M1.1：**Manual-required** / 「mac 下一迭代」。
 
 **1.2 相对 1.1（Phase 0 评审修订）**
 
@@ -159,10 +167,10 @@ iPhone v1 **不做** Tetherly SPAKE2，除非可选 iOS App（M4.4）。系统�
 
 | 依赖 | 允许 |
 |---|---|
-| MIT / Apache-2.0 / BSD | 链接 |
+| MIT / Apache-2.0 / BSD / BSL-1.0 | 链接（BSL = Boost，OSI；`arboard`/`clipboard-win` 需要） |
 | EasyTier LGPL-3.0 | 仅侧车 |
 | DeskFlow / Lan Mouse / KDE Connect 源码 | 禁止复制实现 |
-| `cargo deny` | 拒绝 GPL/AGPL/**LGPL** 进入 Tetherly 依赖图 |
+| `cargo deny` | 拒绝 GPL/AGPL/**LGPL** 进入 Tetherly 依赖图；ban `easytier*` |
 
 Tetherly 自身：**Apache-2.0 OR MIT**。
 
@@ -200,7 +208,8 @@ LAN 上桌面默认 `listen=true`。Android 默认只拨号（蜂窝网入站困
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ UI：Tauri/React │ Android Compose │ iOS SwiftUI（可选）     │
+│ UI：Phase 1 = 本机 HTTP 127.0.0.1:45716 + ui/index.html   │
+│     下一迭代：Tauri/React（src-tauri）；Android；可选 iOS   │
 ├──────────────────────────────────────────────────────────┤
 │ NotifyHub  Clip  File     │ InputEngine（45719，Phase 3）  │
 ├──────────────────────────────────────────────────────────┤
@@ -208,7 +217,7 @@ LAN 上桌面默认 `listen=true`。Android 默认只拨号（蜂窝网入站困
 ├──────────────────────────────────────────────────────────┤
 │ LanTcp（mDNS 仅真实 LAN） │ Phase2：虚网单播（无 mDNS）     │
 ├──────────────────────────────────────────────────────────┤
-│ Ingress：Android NLService │ 电脑 ANCS/BLE                 │
+│ Ingress：Android NLService │ 电脑 ANCS/BLE（Phase 4）      │
 ├──────────────────────────────────────────────────────────┤
 │ tetherly-core：OTP、帧、状态机、去重、白名单（无 OS API）    │
 └──────────────────────────────────────────────────────────┘
@@ -274,7 +283,7 @@ IPv6：v1 不做。
 | 信任库 | `trusted.json`：`device_id, id_pk, n_pk, alias, paired_at, revoked` |
 | 配置 | `config.toml` |
 
-写入：临时文件 + `rename`。忘记设备：标 `revoked` 或删除行。
+写入：临时文件 + `rename`。忘记设备：标 `revoked` 或删除行。Phase 1 `tetherly-node` 已接线文件回退（Windows `%LOCALAPPDATA%\tetherly`，Unix `~/.local/share/tetherly`，0600/0700）。系统凭据库（Credential Manager / Keychain / libsecret）仍是下一迭代。
 
 ### 6.2 状态机
 
@@ -377,7 +386,7 @@ TCP
 
 ### 7.4 文件
 
-默认必须点确认。自动接收默认关。文件名只取 basename，拒绝 `..`。v1 无跨进程续传；同连接可重发块。断线 offer 作废。
+默认必须点确认。自动接收默认关。文件名只取 basename，拒绝 `..`。v1 无跨进程续传；同连接可重发块。断线 offer 作废。控制面 offer/accept 走 45717；数据走对端 `caps.update` 广告的 **45718**（`fileport=`）。`file_token = HKDF-SHA256(handshake_hash, "tetherly-file-v1" || transfer_id)`；块 ChaCha20-Poly1305，魔数 `TFL1`，块 64KiB。
 
 ### 7.5 剪贴板
 
@@ -387,21 +396,25 @@ TCP
 
 ## 8. Workspace
 
-Phase 0 **只建这些**：
+Phase 0 四件套仍在。Phase 1 **已加**：
 
 ```
 tetherly/
 ├── Cargo.toml
 ├── crates/
-│   ├── tetherly-core/      # OTP、帧编解码、状态机纯逻辑、白名单、去重
-│   ├── tetherly-crypto/    # Ed25519、X25519、Argon2id、SPAKE2、Noise、测试向量
-│   └── tetherly-net/       # TCP、hello 读写、mdns-sd（feature lan）
-├── bins/tetherly-cli/
-├── tests/loopback.rs
+│   ├── tetherly-core/      # OTP、帧、状态机、白名单、去重、bind/clip/file/notify/persist
+│   ├── tetherly-crypto/    # Ed25519、X25519、Argon2id、SPAKE2、Noise、file AEAD
+│   ├── tetherly-net/       # TCP、hello、mDNS、内层 dispatch、filechan 45718
+│   └── tetherly-node/      # LAN 节点、落盘、hubs、本机 HTTP UI、tetherly 二进制
+├── bins/tetherly-cli/      # Phase 0 配对夹具仍保留
+├── tests/loopback.rs       # Phase 0
+├── tests/phase1.rs         # Phase 1 loopback 双节点
+├── ui/index.html           # 本机 UI（loopback HTTP）
+├── android/                # NLService + gradle CI
 └── docs/
 ```
 
-其后按阶段加：`tetherly-ancs`、`tetherly-input`、`tetherly-ffi`、`src-tauri`、`android/`、`ios/`。
+其后按阶段加：`tetherly-ancs`、`tetherly-input`、`tetherly-ffi`、`src-tauri`、`ios/`。`android/` 已存在但 JNI `.so` 未构建。
 
 红线：`tetherly-core` 无 `cfg(target_os)`、无 `windows`/`objc`/`jni`。`tetherly-net` 无 `easytier` crate。
 
@@ -483,6 +496,8 @@ Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要�
 
 `NotificationListenerService` + 前台服务。Android 13+ `POST_NOTIFICATIONS`。帮助页教各 ROM 自启动，不搞黑保活。不读短信库。Play 上架需通知使用权声明，内部测试可先 sideload。
 
+**诚实缺口（v1.3）**：Kotlin 侧可截获通知并入队；`NativeBridge` 加载 `libtetherly_android`。无 `.so` 时**禁止**自己拼 SPAKE2/Noise TCP。占位身份 `idPk = sha256(idSk)` **不是**生产 Ed25519。CI 跑 `gradle :app:testDebugUnitTest` + `assembleDebug`。物理机 M1.1 p95 / 8h soak 标 Manual-required。协议与 OTP 路径由桌面双节点 loopback 覆盖。
+
 ---
 
 ## 10. 模式与反模式
@@ -525,17 +540,19 @@ Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要�
 
 ### Phase 1 — LAN 桌面 + Android（约 4 周）
 
-| ID | 验收 |
-|---|---|
-| M1.1 | Android 测试通知含 `524681` 到桌面弹窗，**p95 < 1.0s**（listener 回调 → 窗口可见） |
-| M1.2 | 复制后剪贴板为该码；120s 候选消失 |
-| M1.3 | 记事本可填；只读拒绝 |
-| M1.4 | Win↔mac 文本剪贴板（有双桌面时）；至少 Win 本机回环 |
-| M1.5 | 杀 Android 进程后自动重连，不重新配对 |
-| M1.6 | 运行日志 `grep 524681` 无命中 |
-| M1.7 | 未确认不收文件；确认后 10MB sha256 一致 |
+| ID | 验收 | 状态（v1.3） |
+|---|---|---|
+| M1.1 | Android 测试通知含 `524681` 到桌面弹窗，**p95 < 1.0s**（listener 回调 → 窗口可见） | loopback `notify.push` CI 绿、耗时 < 1s。物理 Android p95：**Manual-required**（JNI `.so` 未构建）。macOS M1.1：**mac 下一迭代** |
+| M1.2 | 复制后剪贴板为该码；120s 候选消失 | CI 绿（`tests/phase1.rs` + ManualClock） |
+| M1.3 | 记事本可填；只读拒绝 | CI 绿（`MemoryInsertor` 空写/只读拒绝）。真记事本 UIA：**Manual-required** |
+| M1.4 | Win↔mac 文本剪贴板（有双桌面时）；至少 Win 本机回环 | Win 双节点 loopback CI 绿。Win↔mac：**Manual-required** |
+| M1.5 | 杀 Android 进程后自动重连，不重新配对 | persist trust + 无 PIN 重拨 CI 绿。真杀 Android 进程：**Manual-required** |
+| M1.6 | 运行日志 `grep 524681` 无命中 | CI 绿（tracing MakeWriter 捕获） |
+| M1.7 | 未确认不收文件；确认后 10MB sha256 一致 | CI 绿（reject 无 inbox 文件；accept 10MiB sha256） |
 
 退出：M1.1–M1.3、M1.5–M1.7。Win+Android 8h 无崩溃。macOS 能跑通 M1.1 或文档标明「mac 下一迭代」。
+
+**v1.3 退出裁定**：CI 切片（协议、落盘、日志脱敏、文件确认、本机 UI、Android 工程骨架）已绿。物理 Android p95 / 8h / JNI `.so` / 真 UIA / Win↔mac 仍是 Manual-required，**不得开 Phase 2 功能代码**，除非另下豁免。
 
 ### Phase 2 — EasyTier 侧车（约 3 周）
 
@@ -582,7 +599,7 @@ Android 被控、notify.reply、WinFsp 挂载、文件持久续传、Linux ANCS 
 | 向量 | Argon2+SPAKE2+Noise prologue |
 | proptest | 控制 JSON 往返 |
 | fuzz | 内层帧、ANCS tuple（Phase 4） |
-| 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello、notify、文件拒绝/接受 |
+| 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello。`tests/phase1.rs`：notify、clip TTL、insert 拒绝、persist 重拨、日志脱敏、文件拒绝/接受 |
 | 真机 | 发版清单：Win × Android；Phase 4 再加 iPhone |
 
 PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
@@ -591,11 +608,11 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 
 ## 14. CI、发版、默认端口
 
-- CI：Windows、macOS、Ubuntu。Android gradle 从 Phase 1 加。
+- CI：Windows、macOS、Ubuntu（fmt / clippy `-D warnings` / test `--locked`）。Phase 1 另加 Ubuntu `android` job（Java 17 + Gradle 8.9：`:app:testDebugUnitTest`、`assembleDebug`）与 `deny`（licenses/bans/sources + audit）。
 - 版本号 workspace 统一 bump。
-- 控制 **45717/tcp**，文件 **45718/tcp**，键鼠 **45719/tcp**。DeskFlow 网关默认关。
-- 安装程序提示放行上述端口；默认监听地址：`127.0.0.1` + 私网网卡，不含公网。
-- 桌面需要：WebView2、MSVC 运行库；ANCS 需要蓝牙。
+- 控制 **45717/tcp**，文件 **45718/tcp**，键鼠 **45719/tcp**。本机 UI **45716/tcp** 仅 127.0.0.1。DeskFlow 网关默认关。
+- 安装程序提示放行 45717–45719；默认监听地址：`127.0.0.1` + RFC1918 / 链路本地，不含公网、不含 EasyTier `10.144.144.0/24`。
+- Phase 1 桌面不要求 WebView2（loopback HTTP）。Tauri 壳下一迭代才需要 WebView2、MSVC 运行库；ANCS 需要蓝牙。
 
 ---
 
@@ -661,3 +678,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 5. `tetherly-cli` + `tests/loopback.rs` 覆盖 M0.2–M0.5。
 6. GitHub Actions：M0.7。
 7. 不要加 EasyTier、不要加 GUI、不要加 BLE。
+
+---
+
+## 19. Phase 1 开工与落地清单
+
+1. `tetherly-node`：persist identity/trust（temp+rename）、LAN bind 策略、mDNS `_tetherly._tcp`、session 循环、caps.update 广告 `fileport=`。
+2. NotifyHub 本地 extract；`insert()` 只挂 UI 点击；候选 120s；剪贴板 OTP 60s 清。
+3. 文件：控制面 offer/accept；数据面 45718 `TFL1` + HKDF token；默认确认才收。
+4. 本机 UI：`ui/index.html` + `uihttp`，Host 必须是 127.0.0.1/localhost。
+5. Android：NLService、前台服务、Wire JSON 无 url action、gradle CI。JNI `.so` 下一刀。
+6. `tests/phase1.rs` 覆盖 M1.2–M1.7 与模拟 M1.1/M1.6。
+7. **不要**加 EasyTier crate、不要加 DeskFlow 源码、不要改 OTP 规则、不要开 Phase 2。

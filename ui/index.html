@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Tetherly</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a222c;
+    --line: #2a3542;
+    --text: #e8eef4;
+    --muted: #8b9aab;
+    --accent: #3d9cf0;
+    --ok: #3ecf8e;
+    --warn: #f0b429;
+    --bad: #e85d5d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.45 "Segoe UI", "PingFang SC", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+  }
+  h1 { font-size: 16px; margin: 0; letter-spacing: .04em; }
+  h1 span { color: var(--accent); }
+  .id { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  main { display: grid; grid-template-columns: 1.2fr .8fr; gap: 16px; padding: 16px; }
+  section {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px;
+  }
+  h2 { margin: 0 0 10px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .card {
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;
+    display: flex; justify-content: space-between; gap: 8px; align-items: center;
+  }
+  .title { font-weight: 600; }
+  .meta { color: var(--muted); font-size: 12px; }
+  button {
+    background: var(--accent); color: #041018; border: 0; border-radius: 6px;
+    padding: 6px 10px; font-weight: 600; cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  button.bad { background: var(--bad); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  input {
+    background: #0d1218; color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 8px; width: 100%;
+  }
+  .row { display: flex; gap: 8px; margin-bottom: 8px; }
+  .pin {
+    font: 28px/1.2 ui-monospace, Consolas, monospace; letter-spacing: .12em; color: var(--ok);
+  }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .empty { color: var(--muted); padding: 12px 0; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Tether<span>ly</span></h1>
+  <div class="id" id="who">connecting…</div>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>验证码候选</h2>
+      <div id="cands"><div class="empty">等待通知。码不会出现在日志里。</div></div>
+    </section>
+    <section style="margin-top:16px">
+      <h2>待确认文件</h2>
+      <div id="files"><div class="empty">没有待接收文件。</div></div>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2>配对</h2>
+      <div class="row">
+        <button id="mkpin" type="button">显示 8 位 PIN</button>
+      </div>
+      <div class="pin" id="pin">•••• ••••</div>
+      <div class="hint">不要把数字发给任何人，只在你自己的另一台设备上输入。3 分钟有效。</div>
+      <div class="row" style="margin-top:12px">
+        <input id="addr" placeholder="127.0.0.1:45717"/>
+      </div>
+      <div class="row">
+        <input id="peerpin" placeholder="对端 PIN（首次）"/>
+        <button id="dial" type="button">连接</button>
+      </div>
+    </section>
+    <section style="margin-top:16px">
+      <h2>在线对端</h2>
+      <div id="peers"><div class="empty">无会话</div></div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, body) {
+  const opt = body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {};
+  const r = await fetch(path, opt);
+  return r.json();
+}
+function el(html) { const d = document.createElement("div"); d.innerHTML = html.trim(); return d.firstChild; }
+function render(s) {
+  $("who").textContent = s.name + " · " + s.platform + " · " + s.device_id;
+  const c = $("cands");
+  c.innerHTML = "";
+  if (!s.candidates.length) c.appendChild(el('<div class="empty">等待通知。码不会出现在日志里。</div>'));
+  for (const x of s.candidates) {
+    const card = el('<div class="card"><div><div class="title"></div><div class="meta"></div></div><div class="row"></div></div>');
+    card.querySelector(".title").textContent = x.title || x.app_name;
+    card.querySelector(".meta").textContent = (x.has_otp ? "含验证码 · " : "") + x.app_id;
+    const actions = card.querySelector(".row");
+    if (x.has_otp) {
+      const copy = el('<button type="button">复制</button>');
+      copy.onclick = () => api("/api/copy", { id: x.id });
+      const ins = el('<button type="button">填入</button>');
+      ins.onclick = () => api("/api/insert", { id: x.id });
+      actions.appendChild(copy); actions.appendChild(ins);
+    }
+    const dis = el('<button class="ghost" type="button">忽略</button>');
+    dis.onclick = () => api("/api/dismiss", { id: x.id });
+    actions.appendChild(dis);
+    c.appendChild(card);
+  }
+  const f = $("files");
+  f.innerHTML = "";
+  if (!s.files.length) f.appendChild(el('<div class="empty">没有待接收文件。</div>'));
+  for (const x of s.files) {
+    const card = el('<div class="card"><div><div class="title"></div><div class="meta"></div></div><div class="row"></div></div>');
+    card.querySelector(".title").textContent = x.name;
+    card.querySelector(".meta").textContent = x.size + " bytes · " + x.source;
+    const ok = el('<button type="button">接收</button>');
+    ok.onclick = () => api("/api/file/accept", { id: x.transfer_id });
+    const no = el('<button class="bad" type="button">拒绝</button>');
+    no.onclick = () => api("/api/file/reject", { id: x.transfer_id });
+    card.querySelector(".row").appendChild(ok);
+    card.querySelector(".row").appendChild(no);
+    f.appendChild(card);
+  }
+  const p = $("peers");
+  p.innerHTML = "";
+  if (!s.peers.length) p.appendChild(el('<div class="empty">无会话</div>'));
+  for (const x of s.peers) {
+    p.appendChild(el('<div class="card"><div><div class="title"></div><div class="meta"></div></div></div>'));
+    p.lastChild.querySelector(".title").textContent = x.name;
+    p.lastChild.querySelector(".meta").textContent = x.platform + " · " + x.device_id;
+  }
+}
+$("mkpin").onclick = async () => {
+  const r = await api("/api/pin", {});
+  if (r.pin) $("pin").textContent = r.pin;
+};
+$("dial").onclick = () => api("/api/dial", { addr: $("addr").value, pin: $("peerpin").value || null });
+async function tick() {
+  try { render(await api("/api/state")); } catch (e) { /* node down */ }
+}
+tick();
+setInterval(tick, 700);
+</script>
+</body>
+</html>

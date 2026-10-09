@@ -73,6 +73,18 @@ pub struct MemoryTrustStore {
     pub peers: std::collections::HashMap<DeviceId, TrustedPeer>,
 }
 
+impl MemoryTrustStore {
+    pub fn all(&self) -> Vec<TrustedPeer> {
+        self.peers.values().cloned().collect()
+    }
+
+    pub fn load(&mut self, peers: Vec<TrustedPeer>) {
+        for p in peers {
+            self.peers.insert(p.device_id.clone(), p);
+        }
+    }
+}
+
 impl TrustStore for MemoryTrustStore {
     fn get(&self, id: &DeviceId) -> Option<TrustedPeer> {
         self.peers.get(id).cloned()

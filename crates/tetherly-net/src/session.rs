@@ -34,6 +34,7 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct ActiveSession {
     pub peer_id: DeviceId,
     pub peer_hello: Hello,
+    pub peer_addr: SocketAddr,
     reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
     transport: NoiseTransport,
@@ -65,6 +66,22 @@ impl ActiveSession {
         Ok(frame)
     }
 
+    pub fn handshake_hash(&self) -> &[u8; 32] {
+        self.transport.handshake_hash()
+    }
+
+    pub fn file_token(&self, transfer_id: &str) -> [u8; 32] {
+        tetherly_crypto::file_token(self.transport.handshake_hash(), transfer_id.as_bytes())
+    }
+
+    pub fn peer_is_desktop(&self) -> bool {
+        tetherly_core::is_desktop_platform(&self.peer_hello.platform)
+    }
+
+    pub async fn recv_event(&mut self) -> Result<crate::dispatch::SessionEvent, NetError> {
+        crate::dispatch::SessionEvent::from_frame(self.recv_inner().await?)
+    }
+
     pub async fn ping_pong(&mut self, unix_ms: u64) -> Result<u64, NetError> {
         self.send_inner(ping(unix_ms)).await?;
         let reply = self.recv_inner().await?;
@@ -94,6 +111,24 @@ pub struct SessionConfig {
     pub handshake_timeout: Duration,
     /// Test-only MITM fixture. Production callers leave this `None`.
     pub hello_override: Option<Hello>,
+}
+
+impl Clone for SessionConfig {
+    fn clone(&self) -> Self {
+        Self {
+            identity: self.identity.clone(),
+            name: self.name.clone(),
+            platform: self.platform.clone(),
+            trust: self.trust.clone(),
+            lockout: self.lockout.clone(),
+            tcp_limiter: self.tcp_limiter.clone(),
+            pin: self.pin,
+            pin_created_ms: self.pin_created_ms,
+            clock: self.clock.clone(),
+            handshake_timeout: self.handshake_timeout,
+            hello_override: self.hello_override.clone(),
+        }
+    }
 }
 
 impl SessionConfig {
@@ -224,6 +259,7 @@ async fn handshake(
             finish_noise(
                 reader,
                 writer,
+                peer_addr,
                 cfg,
                 local_hello,
                 remote_hello,
@@ -324,6 +360,7 @@ async fn pair_then_noise(
     let session = finish_noise(
         reader,
         writer,
+        peer_addr,
         cfg,
         local_hello,
         remote_hello.clone(),
@@ -360,6 +397,7 @@ fn fail_lock(cfg: &SessionConfig, peer: &DeviceId, addr: SocketAddr) {
 async fn finish_noise(
     mut reader: OwnedReadHalf,
     mut writer: OwnedWriteHalf,
+    peer_addr: SocketAddr,
     cfg: &SessionConfig,
     local_hello: Hello,
     remote_hello: Hello,
@@ -399,6 +437,7 @@ async fn finish_noise(
     Ok(ActiveSession {
         peer_id: remote_hello.device_id.clone(),
         peer_hello: remote_hello,
+        peer_addr,
         reader,
         writer,
         transport,

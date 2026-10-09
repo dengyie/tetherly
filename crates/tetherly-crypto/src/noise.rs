@@ -75,10 +75,15 @@ impl NoiseHandshake {
     }
 
     pub fn into_transport(self) -> Result<NoiseTransport, CryptoError> {
+        let mut hash = [0u8; 32];
+        let raw = self.state.get_handshake_hash();
+        let n = raw.len().min(32);
+        hash[..n].copy_from_slice(&raw[..n]);
         Ok(NoiseTransport {
             state: self.state.into_transport_mode()?,
             msgs: 0,
             started_unix: 0,
+            handshake_hash: hash,
         })
     }
 }
@@ -87,6 +92,7 @@ pub struct NoiseTransport {
     state: TransportState,
     msgs: u64,
     started_unix: u64,
+    handshake_hash: [u8; 32],
 }
 
 impl NoiseTransport {
@@ -114,6 +120,11 @@ impl NoiseTransport {
         self.msgs >= REKEY_AFTER_MSGS
             || (self.started_unix > 0
                 && now_unix.saturating_sub(self.started_unix) >= REKEY_AFTER_SECS)
+    }
+
+    /// Noise chaining key / handshake hash. Used to HKDF the file-channel token.
+    pub fn handshake_hash(&self) -> &[u8; 32] {
+        &self.handshake_hash
     }
 }
 

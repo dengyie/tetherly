@@ -36,4 +36,6 @@ pub enum NetError {
     Replay,
     #[error("noise rekey required")]
     RekeyRequired,
+    #[error("file channel: {0}")]
+    File(String),
 }

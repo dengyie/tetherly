@@ -113,6 +113,22 @@ impl TcpLimiter {
     }
 }
 
+/// Spec §7.3: clip.set 4/s.
+#[derive(Debug, Default)]
+pub struct ClipLimiter {
+    per_source: HashMap<DeviceId, TokenBucket>,
+}
+
+impl ClipLimiter {
+    pub fn allow(&mut self, source: &DeviceId, now_ms: u64) -> bool {
+        let bucket = self
+            .per_source
+            .entry(source.clone())
+            .or_insert_with(|| TokenBucket::new(4.0, 4.0, now_ms));
+        bucket.try_take(now_ms)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

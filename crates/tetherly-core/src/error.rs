@@ -32,6 +32,28 @@ pub enum CoreError {
     Revoked,
     #[error("json: {0}")]
     Json(String),
+    #[error("unknown candidate")]
+    UnknownCandidate,
+    #[error("candidate expired")]
+    CandidateExpired,
+    #[error("no otp in candidate")]
+    NoOtp,
+    #[error("clipboard payload too large")]
+    ClipboardTooLarge,
+    #[error("file not accepted")]
+    FileNotAccepted,
+    #[error("unknown transfer")]
+    UnknownTransfer,
+    #[error("file already decided")]
+    FileAlreadyDecided,
+    #[error("bind address refused")]
+    BindRefused,
+    #[error("identity file corrupt")]
+    IdentityCorrupt,
+    #[error("sha256 mismatch")]
+    Sha256Mismatch,
+    #[error("insert refused: {0}")]
+    InsertRefused(String),
 }
 
 impl From<serde_json::Error> for CoreError {

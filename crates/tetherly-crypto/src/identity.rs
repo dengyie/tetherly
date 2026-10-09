@@ -84,6 +84,31 @@ impl Identity {
             platform: platform.to_string(),
         }
     }
+
+    /// 64-byte layout: id_sk || n_sk. Caller stores this with user-only ACL.
+    pub fn to_bytes(&self) -> [u8; 64] {
+        let mut out = [0u8; 64];
+        out[..32].copy_from_slice(&self.id_sk);
+        out[32..].copy_from_slice(&self.n_sk);
+        out
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.len() != 64 {
+            return Err(CryptoError::KeyLength);
+        }
+        let mut id_sk = [0u8; 32];
+        let mut n_sk = [0u8; 32];
+        id_sk.copy_from_slice(&bytes[..32]);
+        n_sk.copy_from_slice(&bytes[32..]);
+        Ok(Self::from_secrets(id_sk, n_sk))
+    }
+}
+
+impl Clone for Identity {
+    fn clone(&self) -> Self {
+        Self::from_secrets(self.id_sk, self.n_sk)
+    }
 }
 
 pub fn pairing_salt(id_pk_a: &[u8; 32], id_pk_b: &[u8; 32]) -> [u8; 32] {
@@ -110,5 +135,9 @@ mod tests {
         assert_ne!(id.device_id(), &DeviceId::from_id_pk(id.n_pk()));
         let hello = id.hello("t", "linux", &["notify"]);
         hello.validate().unwrap();
+        let bytes = id.to_bytes();
+        let restored = Identity::from_bytes(&bytes).unwrap();
+        assert_eq!(id.device_id(), restored.device_id());
+        assert_eq!(id.n_pk(), restored.n_pk());
     }
 }
