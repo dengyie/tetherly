@@ -3,12 +3,23 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.5** |
-| 日期 | 2026-10-09 |
-| 状态 | Phase 3 CI 切片已落地（45719 Noise IK 只恢复、二进制 TIN1、MemorySink）；真机 SendInput / 双桌面 soak 为 Manual-required；DeskFlow 网关保持关闭；**未开 Phase 4** |
+| 文档版本 | **1.6** |
+| 日期 | 2026-10-10 |
+| 状态 | Phase 4 ANCS CI 切片已落地（`tetherly-core::ancs` 编解码 + 状态机、`MemoryAncsTransport`、白名单门控「打开」、重连不连弹）；真机 BLE GATT / iPhone / p95<2s 为 Manual-required；DeskFlow 网关保持关闭 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli` |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.6 相对 1.5（Phase 4 iPhone ANCS CI 切片）**
+
+- 新增 `tetherly-core::ancs`（**无 OS API**）：Notification Source 8 字节事件解析、Control Point 编码（`GetNotificationAttributes` / `GetAppAttributes` / `PerformNotificationAction`）、Data Source **按字节**分片重组、`AncsIngress` 状态机、`AncsTransport` 端口与 `MemoryAncsTransport`。
+- §9.4 硬约束逐条落地：先订 Data Source 再订 Notification Source；`on_notification_source` **只入队不写** Control Point（写在 `tick`）；Control Point 串行（同一时刻最多一个未应答请求）；分片按字节拼满；静默首响应重试一次后放弃；断线指数退避（500ms→30s 封顶）；uid 去重。
+- M4.3：`PreExisting` 标志的通知一律丢弃，重连不连弹；uid 与 app 名缓存在重连后保留。
+- M4.2：动作只由 `ancs_actions(app_id, allowlist)` 决定——恒有 `copy`/`dismiss`，**只有**白名单命中本地 scheme 时才加 `open`。ANCS 载荷里的 url 从不被读取或执行；`NotifyPush::truncate` 仍会剔除含 `://` 的动作。
+- `tetherly-node`：`NodeConfig.ancs`（`Option<Arc<dyn AncsTransport>>`）、`Node::ancs_connect/ancs_notification_source/ancs_data_source/ancs_tick/ancs_disconnected/ancs_state`、`set_open_allowlist`/`add_open_rule`、`open_candidate(id, &dyn Opener)`。`Opener` 是端口：生产用 `SystemOpener`（`rundll32 url.dll,FileProtocolHandler` / `open` / `xdg-open`，无 shell），CI 用 `MemoryOpener`。
+- UI：配对向导拆成两步——①「系统蓝牙里连 iPhone（ANCS）→ 启动 ANCS」②「与本机/其他设备 SPAKE2 配对」。新增 `/api/ancs/connect`、`/api/ancs/allow`、`/api/open`。
+- `tests/phase4.rs`：M4.1 模拟时延预算、M4.2 白名单门控 + 载荷 url 不打开、M4.3 重连不连弹、Control Point 串行与回调线程不写、跨 UTF-8 分片重组、`Removed` 清候选、无传输时惰性、退避拒绝热重连。
+- **Manual-required**：真实 BLE GATT（Windows `windows` crate / macOS CoreBluetooth / Linux BlueZ）、物理 iPhone 的 p95 < 2s、蓝牙关 30s 再开的真机复现。M4.4 / M4.5（可选 iOS App、无 VPN）本切片不涉及。
 
 **1.5 相对 1.4（Phase 3 原生键鼠 CI 切片）**
 
@@ -429,12 +440,14 @@ tetherly/
 ├── tests/loopback.rs       # Phase 0
 ├── tests/phase1.rs         # Phase 1 loopback 双节点
 ├── tests/phase2.rs         # Phase 2 sidecar unicast / LAN 优先 / 缺侧车
+├── tests/phase3.rs         # Phase 3 键鼠 45719
+├── tests/phase4.rs         # Phase 4 ANCS 编解码与状态机
 ├── ui/index.html           # 本机 UI（loopback HTTP）
 ├── android/                # NLService + gradle CI
 └── docs/
 ```
 
-其后按阶段加：`tetherly-ancs`、`tetherly-input`、`tetherly-ffi`、`src-tauri`、`ios/`。`android/` 已存在但 JNI `.so` 未构建。
+其后按阶段加：`tetherly-ffi`、`src-tauri`、`ios/`。`android/` 已存在但 JNI `.so` 未构建。ANCS 与键鼠引擎都放在 `tetherly-core`（`ancs` / `input`），不开新 crate。
 
 红线：`tetherly-core` 无 `cfg(target_os)`、无 `windows`/`objc`/`jni`。`tetherly-net` 无 `easytier` crate。
 
@@ -507,6 +520,8 @@ url = "weixin://"
 Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要把电脑广告成音箱。
 
 用户路径：系统蓝牙设置里让 iPhone 连电脑（ANCS），**再**在 Tetherly 里把这台电脑与 Android/其他电脑 SPAKE2 配对。两步都要在 UI 向导里拆开写。
+
+**v1.6 已落地（CI 切片）**：`tetherly-core::ancs` 协议编解码 + `AncsIngress` 状态机 + `AncsTransport` 端口 + `MemoryAncsTransport`。硬约束按构造强制：订阅顺序由 `connect()` 固定；`on_notification_source` 只入队，Control Point 只在 `tick` 写；`in_flight` 保证串行；`DataAssembler` 只在整条属性元组到齐后才产出；静默一次后重试、再静默则放弃；`on_disconnected` 走 500ms→30s 退避。真实 GATT 栈与物理 iPhone 仍 Manual-required。
 
 ### 9.5 键鼠（Phase 3）
 
@@ -599,17 +614,21 @@ Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要�
 
 Wayland 不挡退出。真机注入未落地前不得宣称可替代键鼠。
 
-**v1.5 退出裁定**：Phase 3 CI 切片（resume-only Noise、二进制帧、过边、断线、剪贴板并存）已绿。物理双桌面与 OS 注入仍是 Manual-required，**不得开 Phase 4**，除非另下豁免。
+**v1.5 退出裁定**：Phase 3 CI 切片（resume-only Noise、二进制帧、过边、断线、剪贴板并存）已绿。物理双桌面与 OS 注入仍是 Manual-required。
+
+**豁免记录（2026-10-10）**：上述「不得开 Phase 4」的闸门已由项目方豁免，Phase 4 ANCS CI 切片据此落地（见 v1.6）。物理双桌面与 OS 注入的 Manual-required 状态**不变**。
 
 ### Phase 4 — iPhone ANCS（约 4 周）
 
-| ID | 验收 |
-|---|---|
-| M4.1 | 系统蓝牙连接后短信通知 p95 < 2s 到 Win 或 mac |
-| M4.2 | 仅白名单显示「打开」；payload 带 url 也不打开 |
-| M4.3 | 关蓝牙 30s 再开：重连且不连弹旧通知 |
-| M4.4 | 可选 iOS App：同 LAN 50MB sha256；无此 App 不挡退出 |
-| M4.5 | iOS App 无 VPN / Network Extension |
+| ID | 验收 | 状态 |
+|---|---|---|
+| M4.1 | 系统蓝牙连接后短信通知 p95 < 2s 到 Win 或 mac | **CI 代理**：`tests/phase4.rs` 用注入时钟断言端到端预算 < 2s，且 app 名等待封顶 400ms。真机 p95 = Manual-required |
+| M4.2 | 仅白名单显示「打开」；payload 带 url 也不打开 | **CI 绿**：`ancs_actions` 门控；`open_candidate` 只走白名单 url；载荷 url 从不读取 |
+| M4.3 | 关蓝牙 30s 再开：重连且不连弹旧通知 | **CI 绿**：`PreExisting` 丢弃 + uid 去重；退避拒绝热重连 |
+| M4.4 | 可选 iOS App：同 LAN 50MB sha256；无此 App 不挡退出 | 未做（不挡退出） |
+| M4.5 | iOS App 无 VPN / Network Extension | 未做（随 M4.4） |
+
+**v1.6 落地范围**：`tetherly-core::ancs`（Notification Source 解析、Control Point 编码、Data Source 按字节重组、`AncsIngress`）、`tetherly-node` 的 `ancs_*` 入口与 `Opener` 端口、UI 两步向导、`tests/phase4.rs`。**Manual-required**：真实 BLE GATT（Windows `windows` / CoreBluetooth / BlueZ）、物理 iPhone p95、蓝牙关 30s 真机复现。
 
 ### Phase 5 — 单独立项
 
@@ -625,7 +644,7 @@ Android 被控、notify.reply、WinFsp 挂载、文件持久续传、Linux ANCS 
 | 向量 | Argon2+SPAKE2+Noise prologue |
 | proptest | 控制 JSON 往返 |
 | fuzz | 内层帧、ANCS tuple（Phase 4） |
-| 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello。`tests/phase1.rs`：notify、clip TTL、insert 拒绝、persist 重拨、日志脱敏、文件拒绝/接受。`tests/phase2.rs`：缺侧车、停侧车、无 mDNS 单播、LAN 优先。`tests/phase3.rs`：45719 拒绝配对、过边按键、断线回光标、聚焦时剪贴板 |
+| 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello。`tests/phase1.rs`：notify、clip TTL、insert 拒绝、persist 重拨、日志脱敏、文件拒绝/接受。`tests/phase2.rs`：缺侧车、停侧车、无 mDNS 单播、LAN 优先。`tests/phase3.rs`：45719 拒绝配对、过边按键、断线回光标、聚焦时剪贴板。`tests/phase4.rs`：M4.1 模拟时延、M4.2 白名单门控打开、M4.3 重连不连弹、Control Point 串行、分片重组、`Removed` 清候选、退避 |
 | 真机 | 发版清单：Win × Android；Phase 4 再加 iPhone |
 
 PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
@@ -737,3 +756,14 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 3. `caps.update` 增加 `inputport=`。键鼠帧只走 45719 的独立发送通道，不进控制面 JSON。
 4. `tests/phase3.rs` 覆盖未配对拒绝、M3.1 过边按键、M3.2 断线、M3.3 剪贴板。
 5. **不要**链接 DeskFlow / Lan Mouse / Barrier / KDE 源码，不要调用 Win32 注入当作 CI，不要改 OTP 规则，不要开 Phase 4。
+
+---
+
+## 22. Phase 4 开工与落地清单
+
+1. `tetherly-core::ancs`：UUID 解码、`NotificationEvent`（8 字节）、Control Point 编码器、`DataAssembler`（按字节重组）、`AncsIngress` 状态机、`AncsTransport` 端口、`MemoryAncsTransport`。**无 `cfg(target_os)`**。
+2. 顺序与线程约束写进代码结构，不靠注释：`connect()` 先 `subscribe_data_source` 再 `subscribe_notification_source`；`on_notification_source` 只入队，`tick()` 才写 Control Point；`in_flight` 保证同一时刻一个未应答请求。
+3. `AncsIngress` 只用注入的 `Clock`：静默一次后重试、再静默放弃；`APP_NAME_WAIT_MS` 封顶 app 名等待；`NOTIF_ASSEMBLE_DEADLINE_MS` 兜底半截属性；`on_disconnected` 退避 500ms→30s。
+4. M4.2 动作只经 `ancs_actions(app_id, &OpenAllowlist)`；「打开」的 url 只来自 `allowlist.url_for`，`open_candidate` 在 `Opener` 端口上执行，**从不**读取通知里的 url。
+5. `tests/phase4.rs` 覆盖 M4.1 模拟时延、M4.2、M4.3、串行/回调不写、分片重组、`Removed`、无传输惰性、退避。
+6. **不要**在 `tetherly-core` 里放 BLE 栈；不要宣称真机 p95 已达标；不要执行对端 URL；不要改 OTP 规则；不要把 `otp.candidate` 放上线。

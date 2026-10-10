@@ -3,7 +3,9 @@
 - (none)
 
 ## Next
-- [ ] Phase 4 iPhone ANCS only with a new waiver (computer-side ANCS ingress → NotifyHub)
+- [ ] Real ANCS BLE transport on Windows (`windows` GATT), macOS (CoreBluetooth), Linux (BlueZ) — Manual-required
+- [ ] Physical iPhone ANCS p95 < 2s + Bluetooth off-30s-on re-pop check (M4.1/M4.3 device)
+- [ ] M4.4 / M4.5 optional iOS App (LAN 50MB sha256, no VPN / Network Extension)
 - [ ] Physical Android cellular M2.1 p95 and Wi-Fi→overlay failover
 - [ ] Real OS cursor/key injection (Win SendInput / macOS / Wayland portal+libei) + 100 dual-desktop round-trips (M3.1 device)
 - [ ] `libtetherly_android.so` (cargo-ndk) + real Ed25519 JNI identity
@@ -12,6 +14,7 @@
 - [ ] Tauri/React `src-tauri` desktop shell (next UI iteration)
 - [ ] Credential Manager / Keychain instead of identity.bin fallback
 - [ ] macOS M1.1（mac 下一迭代）
+- [ ] Phase 5 backlog: Android controlled device, notify.reply, WinFsp mount, persistent file resume, embedded EasyTier FFI
 
 ## Done
 - [x] Phase 0 crates + CLI + loopback
@@ -36,3 +39,9 @@
 - [x] tests/phase3.rs 未配对拒绝 / 过边按键 / 断线回光标 / 聚焦时剪贴板
 - [x] Windows parallel-test identity temp collision fix; Android unit org.json stub
 - [x] DEVELOPMENT.md v1.5; GitHub CI all five jobs green
+- [x] Phase 4 `tetherly-core::ancs` codec + `AncsIngress` + `AncsTransport`/`MemoryAncsTransport`
+- [x] §9.4 constraints in structure: subscribe order, no CP write on callback, serial CP, byte reassembly, retry, backoff, uid dedup, PreExisting drop
+- [x] Node `ancs_*` surface + `Opener` port (`SystemOpener`/`MemoryOpener`) + `open_candidate`
+- [x] UI two-step wizard (ANCS then SPAKE2) + `/api/ancs/connect`, `/api/ancs/allow`, `/api/open`
+- [x] tests/phase4.rs M4.1/M4.2/M4.3 + serial/reassembly/Removed/inert/backoff (10 tests)
+- [x] DEVELOPMENT.md v1.6

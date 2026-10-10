@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! OS clipboard and conservative insert. insert() only runs on a user click.
+//! OS clipboard, conservative insert, and allowlist-driven app open.
+//! insert() and open() only run on a user click.
 
 use std::sync::{Arc, Mutex};
-use tetherly_core::{insertion_plan, Clip, CoreError, InsertionPlan, Insertor};
+use tetherly_core::{insertion_plan, Clip, CoreError, InsertionPlan, Insertor, Opener};
 
 pub struct SystemClip;
 
@@ -73,6 +74,55 @@ impl Insertor for MemoryInsertor {
         if let Some(v) = plan.value {
             *self.current.lock().expect("ins") = v;
         }
+        Ok(())
+    }
+}
+
+/// Launch a local-scheme url through the OS handler. No shell is involved: the
+/// url is passed as a single argv element, and callers only ever pass a url
+/// that came from the validated allowlist.
+pub struct SystemOpener;
+
+impl Opener for SystemOpener {
+    fn open(&self, url: &str) -> Result<(), CoreError> {
+        let mut cmd = if cfg!(target_os = "windows") {
+            let mut c = std::process::Command::new("rundll32.exe");
+            c.arg("url.dll,FileProtocolHandler");
+            c
+        } else if cfg!(target_os = "macos") {
+            std::process::Command::new("open")
+        } else {
+            std::process::Command::new("xdg-open")
+        };
+        cmd.arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        cmd.spawn()
+            .map(|_| ())
+            .map_err(|e| CoreError::OpenRefused(e.to_string()))
+    }
+}
+
+/// Records opened urls instead of launching anything.
+#[derive(Clone, Default)]
+pub struct MemoryOpener {
+    urls: Arc<Mutex<Vec<String>>>,
+}
+
+impl MemoryOpener {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn opened(&self) -> Vec<String> {
+        self.urls.lock().expect("opener").clone()
+    }
+}
+
+impl Opener for MemoryOpener {
+    fn open(&self, url: &str) -> Result<(), CoreError> {
+        self.urls.lock().expect("opener").push(url.to_string());
         Ok(())
     }
 }

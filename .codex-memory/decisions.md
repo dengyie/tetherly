@@ -1,5 +1,29 @@
 # Decisions
 
+## 2026-10-10 - Phase 4 waiver recorded; ANCS lands as a core slice, not a new crate
+- Decision: Phase 4 iPhone ANCS is opened on an explicit owner waiver (v1.5's "do not open" gate). The implementation lives in `tetherly-core::ancs` with a `AncsTransport` port; no separate `tetherly-ancs` crate and no BLE stack in core.
+- Rationale: mirrors Phase 3's `tetherly-core::input` + `MemorySink` shape, so CI can drive the protocol, state machine, backoff and retries deterministically under an injected `Clock` while the OS GATT stays Manual-required. `tetherly-core` must stay free of `cfg(target_os)`.
+- Alternatives considered: a dedicated `tetherly-ancs` crate (no additional separation gained); putting a real GATT driver in core (breaks the OS-free rule); dropping Phase 4 until hardware exists (leaves M4.2/M4.3 unverified, which are software-checkable).
+- Impact: `tests/phase4.rs` covers M4.1 (simulated budget), M4.2, M4.3 in CI; M4.4/M4.5 and real p95 remain device-gated.
+- Rollback trigger: None; the port boundary is what keeps GATT replaceable.
+- Related files: `crates/tetherly-core/src/ancs.rs`, `docs/DEVELOPMENT.md` §9.4/§12/§22
+
+## 2026-10-10 - ANCS control point writes only happen in `tick()`, never in the value-changed callback
+- Decision: `AncsIngress::on_notification_source` and `on_data_source` only parse and enqueue. The serial Control Point write happens exclusively in `AncsIngress::tick()`, called from the BLE task. At most one request (`in_flight`) may be unanswered.
+- Rationale: §9.4 explicitly forbids writing the Control Point on the value-changed thread, and ANCS drops responses when requests overlap. Encoding the rule in the API makes a violation impossible to write and testable: `assert_eq!(transport.write_count(), 0)` right after feeding an event.
+- Alternatives considered: writing inline in the callback (forbidden, causes dropped responses); a lock inside the transport (moves the problem, keeps it hidden).
+- Impact: every ANCS caller must pump `tick()`; a neglected caller is slow but never wrong.
+- Rollback trigger: None.
+- Related files: `crates/tetherly-core/src/ancs.rs`
+
+## 2026-10-10 - "open" is gated on the allowlist app id only; notification payloads never supply urls
+- Decision: the `open` action is added by `ancs_actions(app_id, &OpenAllowlist)`, and `Node::open_candidate` looks the url up through `allowlist.url_for(app_id)` before handing it to the `Opener` port. A url carried in a notification title/body is never read or executed.
+- Rationale: M4.2 requires "open only for allowlisted apps; a payload url is never opened", and §10 forbids executing peer URLs. `NotifyPush::truncate` independently strips actions containing `://`.
+- Alternatives considered: parsing a launch url from the payload (the attack surface the milestone exists to close).
+- Impact: a non-allowlisted app gets `copy`/`dismiss` only, and `open_candidate` returns `OpenRefused`.
+- Rollback trigger: None; a url would have to come from config, not the wire.
+- Related files: `crates/tetherly-core/src/ancs.rs`, `crates/tetherly-node/src/runtime.rs`
+
 ## 2026-10-09 - Input uses a separate resume-only Noise port (45719)
 - Decision: keyboard/mouse traffic runs on its own TCP port 45719 with `SessionConfig.resume_only`. Hello after that only accepts `ResumeNoise`; an unknown peer gets `NetError::InputRequiresTrust`. Pairing stays on 45717. Frames are binary `TIN1` and never enter control-plane JSON.
 - Rationale: ADR-005 wants input off the control plane and off any DeskFlow/Lan Mouse/KDE code path. Reusing the existing trust store keeps pairing single-sourced while the input channel stays trust-gated.

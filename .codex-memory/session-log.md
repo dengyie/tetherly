@@ -1,5 +1,12 @@
 # Session log
 
+## 2026-10-10
+- Task: Open Phase 4 (waiver granted) and land the computer-side iPhone ANCS CI slice; spec v1.6.
+- Actions: new `tetherly-core::ancs` (UUID/event/CP codec, `DataAssembler` byte-wise reassembly, `AncsIngress`, `AncsTransport`, `MemoryAncsTransport`, `ancs_actions`, `ancs_source_id`); §9.4 constraints made structural (subscribe order, enqueue-only callback + `tick` write, serial `in_flight`, one retry of silence, 500ms→30s backoff, uid dedup, `PreExisting` drop); `Opener` port (`SystemOpener` no-shell / `MemoryOpener`); node `ancs_*` surface + `open_candidate`; `Candidate.actions` carried to DTO; UI two-step wizard and `/api/ancs/*`, `/api/open`; `tests/phase4.rs` (10 tests, M4.1/M4.2/M4.3 + serial/reassembly/Removed/inert/backoff).
+- Results: local fmt/clippy `-D warnings`/`cargo test --workspace --locked`/`cargo deny check` all green (loopback 10, phase1 7, phase2 4, phase3 4, phase4 10, core 93, crypto 10, net 1, node 4). Real BLE GATT + physical iPhone stay Manual-required.
+- Next: push to `main`, confirm GitHub Actions green.
+- Blockers: No real BLE stack or iPhone on this host.
+
 ## 2026-10-09
 - Task: Harden the landed Phase 3 input slice and remove a CI flake.
 - Actions: `InputServer::local_move` now forwards normalized `Move` when the seat is already `Remote` (motion was silently dropped after the edge); `MemorySink.applied` bounded by `INPUT_SINK_TRACE_MAX` (was unbounded + cloned per frame); integration `wait_live` budget raised 8s → 25s to exceed `HANDSHAKE_TIMEOUT` (20s), which was flaking `m2_5` on loaded Windows runners.

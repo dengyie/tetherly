@@ -53,6 +53,7 @@ pub struct CandidateViewDto {
     pub has_otp: bool,
     pub created_ms: u64,
     pub expires_ms: u64,
+    pub actions: Vec<String>,
 }
 
 impl From<CandidateView> for CandidateViewDto {
@@ -67,6 +68,7 @@ impl From<CandidateView> for CandidateViewDto {
             has_otp: v.has_otp,
             created_ms: v.created_ms,
             expires_ms: v.expires_ms,
+            actions: v.actions,
         }
     }
 }

@@ -54,12 +54,20 @@ pub enum CoreError {
     Sha256Mismatch,
     #[error("insert refused: {0}")]
     InsertRefused(String),
+    #[error("open refused: {0}")]
+    OpenRefused(String),
     #[error("malformed input frame")]
     InputFrame,
     #[error("input sequence jumped")]
     InputSeqJump,
     #[error("input channel requires an already-trusted peer")]
     InputRequiresTrust,
+    #[error("malformed ANCS frame")]
+    AncsFrame,
+    #[error("ANCS subscribe failed")]
+    AncsSubscribe,
+    #[error("ANCS control point write failed")]
+    AncsWrite,
 }
 
 impl From<serde_json::Error> for CoreError {

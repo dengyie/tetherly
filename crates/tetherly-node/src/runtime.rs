@@ -20,9 +20,11 @@ use tetherly_core::ports::{Clip, Clock, Rng, SystemClock};
 use tetherly_core::session::LockoutTable;
 use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
-    hex_lower, is_desktop_platform, path_kind, ClipApply, ClipHub, CoreError, CursorSeat, DeviceId,
-    FileHub, IngestOutcome, InputClient, InputEvent, InputServer, MemorySink, MemoryTrustStore,
-    NotifyHub, PathKind, TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
+    ancs_actions, ancs_source_id, hex_lower, is_desktop_platform, path_kind, AncsEvent,
+    AncsIngress, AncsState, AncsTransport, ClipApply, ClipHub, ConnectOutcome, CoreError,
+    CursorSeat, DeviceId, FileHub, IngestOutcome, InputClient, InputEvent, InputServer, MemorySink,
+    MemoryTrustStore, NotifyHub, OpenAllowlist, PathKind, TcpLimiter, TrustStore,
+    CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -62,6 +64,11 @@ pub struct NodeConfig {
     pub ui_port: u16,
     /// EasyTier sidecar. Missing binary/RPC is success (LAN only).
     pub overlay: OverlayConfig,
+    /// ANCS link to a phone. `None` until the platform BLE layer is attached;
+    /// tests attach a `MemoryAncsTransport`.
+    pub ancs: Option<Arc<dyn AncsTransport>>,
+    /// BLE peripheral identity of the phone, used to derive its synthetic id.
+    pub ancs_peripheral: String,
 }
 
 impl Default for NodeConfig {
@@ -79,6 +86,8 @@ impl Default for NodeConfig {
             reconnect: true,
             ui_port: 45716,
             overlay: OverlayConfig::default(),
+            ancs: None,
+            ancs_peripheral: "local-iphone".into(),
         }
     }
 }
@@ -139,6 +148,12 @@ struct Shared {
     input_engine: Mutex<InputServer>,
     shutdown: watch::Sender<bool>,
     overlay: Mutex<OverlayStatus>,
+    /// ANCS ingress. Present only when a transport was attached.
+    ancs: Mutex<Option<AncsIngress>>,
+    /// Synthetic peer id for the ANCS phone (ANCS is not a Noise session).
+    ancs_source: DeviceId,
+    /// Apps allowed to show "open". Empty until config/UI supplies rules.
+    allowlist: Mutex<OpenAllowlist>,
 }
 
 pub struct Node {
@@ -180,6 +195,8 @@ impl Node {
         let bound_control = AtomicU16::new(cfg.control_port);
         let bound_file = AtomicU16::new(cfg.file_port);
         let bound_input = AtomicU16::new(cfg.input_port);
+        let ancs_source = ancs_source_id(&cfg.ancs_peripheral);
+        let ancs = cfg.ancs.clone().map(|t| AncsIngress::new(t, clock.clone()));
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -207,6 +224,9 @@ impl Node {
             input_engine: Mutex::new(InputServer::new(1, 1)),
             shutdown,
             overlay: Mutex::new(OverlayStatus::lan_only()),
+            ancs: Mutex::new(ancs),
+            ancs_source,
+            allowlist: Mutex::new(OpenAllowlist::default()),
         });
         Ok(Self { shared })
     }
@@ -360,6 +380,33 @@ impl Node {
         self.shared.hubs.lock().expect("hubs").notify.dismiss(id)
     }
 
+    /// Open the app that produced a candidate, on explicit user click. The url
+    /// always comes from the allowlist; a url carried by the notification is
+    /// never consulted (M4.2).
+    pub fn open_candidate(
+        &self,
+        id: &str,
+        opener: &dyn tetherly_core::Opener,
+    ) -> Result<String, CoreError> {
+        let app_id = {
+            let hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.notify
+                .get(id)
+                .map(|c| c.app_id.clone())
+                .ok_or(CoreError::UnknownCandidate)?
+        };
+        let url = self
+            .shared
+            .allowlist
+            .lock()
+            .expect("allowlist")
+            .url_for(&app_id)
+            .map(str::to_string)
+            .ok_or_else(|| CoreError::OpenRefused(format!("{app_id} is not allowlisted")))?;
+        opener.open(&url)?;
+        Ok(url)
+    }
+
     pub async fn send_notify(&self, peer: &DeviceId, push: NotifyPush) -> Result<(), CoreError> {
         self.send_to(peer, push.to_frame()?).await
     }
@@ -375,6 +422,112 @@ impl Node {
             });
         }
         outcome
+    }
+
+    /// Install the app allowlist that gates the ANCS "open" action (M4.2).
+    pub fn set_open_allowlist(&self, list: OpenAllowlist) {
+        *self.shared.allowlist.lock().expect("allowlist") = list;
+    }
+
+    /// Add one allowlist rule (validated). Used by the pairing wizard.
+    pub fn add_open_rule(&self, rule: tetherly_core::OpenRule) -> Result<(), CoreError> {
+        self.shared.allowlist.lock().expect("allowlist").push(rule)
+    }
+
+    pub fn open_allowlist(&self) -> OpenAllowlist {
+        self.shared.allowlist.lock().expect("allowlist").clone()
+    }
+
+    pub fn ancs_state(&self) -> Option<AncsState> {
+        self.shared
+            .ancs
+            .lock()
+            .expect("ancs")
+            .as_ref()
+            .map(|i| i.state())
+    }
+
+    /// Bring the ANCS link up: Data Source first, then Notification Source.
+    pub fn ancs_connect(&self) -> Result<Option<ConnectOutcome>, CoreError> {
+        let mut guard = self.shared.ancs.lock().expect("ancs");
+        match guard.as_mut() {
+            Some(ing) => ing.connect().map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Phone disconnected: schedule the backoff reconnect.
+    pub fn ancs_disconnected(&self) -> Option<u64> {
+        self.shared
+            .ancs
+            .lock()
+            .expect("ancs")
+            .as_mut()
+            .map(|i| i.on_disconnected())
+    }
+
+    /// Notification Source value-changed. Never writes the Control Point.
+    pub async fn ancs_notification_source(&self, value: &[u8]) -> Result<(), CoreError> {
+        self.ancs_feed(|i| i.on_notification_source(value)).await
+    }
+
+    /// Data Source value-changed (fragments included).
+    pub async fn ancs_data_source(&self, value: &[u8]) -> Result<(), CoreError> {
+        self.ancs_feed(|i| i.on_data_source(value)).await
+    }
+
+    /// Drive the serial Control Point queue. Call from the BLE task.
+    pub async fn ancs_tick(&self) -> Result<(), CoreError> {
+        self.ancs_feed(|i| i.tick()).await
+    }
+
+    async fn ancs_feed<F>(&self, f: F) -> Result<(), CoreError>
+    where
+        F: FnOnce(&mut AncsIngress) -> Result<(), CoreError>,
+    {
+        let events = {
+            let mut guard = self.shared.ancs.lock().expect("ancs");
+            let Some(ing) = guard.as_mut() else {
+                return Ok(());
+            };
+            f(ing)?;
+            ing.drain_events()
+        };
+        for ev in events {
+            self.apply_ancs_event(ev).await;
+        }
+        Ok(())
+    }
+
+    async fn apply_ancs_event(&self, ev: AncsEvent) {
+        let source = self.shared.ancs_source.clone();
+        match ev {
+            AncsEvent::Added(n) | AncsEvent::Modified(n) => {
+                let actions = {
+                    let list = self.shared.allowlist.lock().expect("allowlist");
+                    ancs_actions(&n.app_id, &list)
+                };
+                let push = NotifyPush {
+                    uid: n.uid.to_string(),
+                    app_id: n.app_id,
+                    app_name: n.app_name,
+                    title: n.title,
+                    body: n.body,
+                    ts: self.shared.clock.unix_ms(),
+                    actions,
+                };
+                let _ = self.ingest_local_push(source, push).await;
+            }
+            AncsEvent::Removed { uid } => {
+                let ids = {
+                    let mut hubs = self.shared.hubs.lock().expect("hubs");
+                    hubs.notify.dismiss_uid(&source, &uid.to_string())
+                };
+                for id in ids {
+                    let _ = self.shared.events.send(UiEvent::CandidateExpired { id });
+                }
+            }
+        }
     }
 
     pub async fn send_to(&self, peer: &DeviceId, frame: InnerFrame) -> Result<(), CoreError> {

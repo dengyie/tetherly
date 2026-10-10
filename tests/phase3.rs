@@ -53,6 +53,8 @@ fn cfg(dir: PathBuf, name: &str) -> NodeConfig {
             enabled: false,
             ..OverlayConfig::default()
         },
+        ancs: None,
+        ancs_peripheral: "test-iphone".into(),
     }
 }
 

@@ -21,6 +21,9 @@ pub struct Candidate {
     pub title: String,
     pub created_ms: u64,
     pub expires_ms: u64,
+    /// Actions offered for this candidate, already filtered by the sender's
+    /// allowlist (`copy`, `dismiss`, optionally `open`).
+    pub actions: Vec<String>,
     otp: Option<String>,
 }
 
@@ -62,6 +65,7 @@ pub struct CandidateView {
     pub has_otp: bool,
     pub created_ms: u64,
     pub expires_ms: u64,
+    pub actions: Vec<String>,
 }
 
 impl From<&Candidate> for CandidateView {
@@ -76,6 +80,7 @@ impl From<&Candidate> for CandidateView {
             has_otp: c.has_otp(),
             created_ms: c.created_ms,
             expires_ms: c.expires_ms,
+            actions: c.actions.clone(),
         }
     }
 }
@@ -130,6 +135,7 @@ impl NotifyHub {
             title: push.title.clone(),
             created_ms: now,
             expires_ms: now.saturating_add(CANDIDATE_TTL_MS),
+            actions: push.actions.clone(),
             otp,
         };
         let view = CandidateView::from(&candidate);
@@ -195,6 +201,21 @@ impl NotifyHub {
 
     pub fn dismiss(&mut self, id: &str) -> bool {
         self.candidates.remove(id).is_some()
+    }
+
+    /// Drop every candidate for one phone notification. Used when the phone
+    /// reports the notification was removed (ANCS `Removed`).
+    pub fn dismiss_uid(&mut self, source: &DeviceId, uid: &str) -> Vec<String> {
+        let ids: Vec<String> = self
+            .candidates
+            .iter()
+            .filter(|(_, c)| c.source == *source && c.uid == uid)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            self.candidates.remove(id);
+        }
+        ids
     }
 
     pub fn dismiss_wire(&mut self, source: &DeviceId, d: &NotifyDismiss) -> bool {

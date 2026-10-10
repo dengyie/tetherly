@@ -140,6 +140,10 @@ struct Snapshot {
     candidates: Vec<crate::events::CandidateViewDto>,
     peers: Vec<PeerView>,
     files: Vec<FileSnap>,
+    /// "off" when no BLE transport is attached, else the ingress state.
+    ancs_state: String,
+    /// Allowlisted app ids, so the wizard can show what may be opened.
+    open_apps: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -167,6 +171,12 @@ struct DialBody {
 #[derive(serde::Deserialize)]
 struct IdBody {
     id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct OpenRuleBody {
+    app_id: String,
+    url: String,
 }
 
 async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'static str, Vec<u8>) {
@@ -216,6 +226,13 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             }
             Err(_) => err(400, "bad json"),
         },
+        ("POST", "/api/open") => match serde_json::from_slice::<IdBody>(body) {
+            Ok(d) => match node.open_candidate(&d.id, &crate::platform::SystemOpener) {
+                Ok(url) => json_ok(&serde_json::json!({ "ok": true, "url": url })),
+                Err(e) => err(400, &e.to_string()),
+            },
+            Err(_) => err(400, "bad json"),
+        },
         ("POST", "/api/file/accept") => match serde_json::from_slice::<IdBody>(body) {
             Ok(d) => match node.user_accept_file(&d.id).await {
                 Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
@@ -230,12 +247,42 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             },
             Err(_) => err(400, "bad json"),
         },
+        // Step 1 of the phone wizard: the user connected the iPhone in the OS
+        // Bluetooth settings, so we only have to subscribe to ANCS here.
+        ("POST", "/api/ancs/connect") => match node.ancs_connect() {
+            Ok(Some(tetherly_core::ConnectOutcome::Subscribed)) => {
+                json_ok(&serde_json::json!({ "state": "ready" }))
+            }
+            Ok(Some(tetherly_core::ConnectOutcome::BackingOff { retry_at_ms })) => {
+                json_ok(&serde_json::json!({ "state": "backoff", "retry_at_ms": retry_at_ms }))
+            }
+            Ok(None) => err(400, "no ANCS transport attached"),
+            Err(e) => err(400, &e.to_string()),
+        },
+        ("POST", "/api/ancs/allow") => match serde_json::from_slice::<OpenRuleBody>(body) {
+            Ok(d) => match node.add_open_rule(tetherly_core::OpenRule {
+                app_id: d.app_id,
+                url: d.url,
+            }) {
+                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+                Err(e) => err(400, &e.to_string()),
+            },
+            Err(_) => err(400, "bad json"),
+        },
         _ => (404, "text/plain", b"not found".to_vec()),
     }
 }
 
 fn snapshot(node: &Node) -> Snapshot {
     let ov = node.overlay_status();
+    let ancs_state = match node.ancs_state() {
+        None => "off".to_string(),
+        Some(tetherly_core::AncsState::Idle) => "idle".to_string(),
+        Some(tetherly_core::AncsState::Ready) => "ready".to_string(),
+        Some(tetherly_core::AncsState::Backoff { retry_at_ms }) => {
+            format!("backoff until {retry_at_ms}")
+        }
+    };
     Snapshot {
         device_id: node.identity().device_id().to_string(),
         name: node.name().to_string(),
@@ -246,6 +293,13 @@ fn snapshot(node: &Node) -> Snapshot {
         overlay_source: format!("{:?}", ov.source),
         overlay_peers: ov.peers.len(),
         candidates: node.candidates(),
+        ancs_state,
+        open_apps: node
+            .open_allowlist()
+            .rules()
+            .iter()
+            .map(|r| r.app_id.clone())
+            .collect(),
         peers: node
             .live_peers()
             .into_iter()

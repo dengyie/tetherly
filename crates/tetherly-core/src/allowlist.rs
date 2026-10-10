@@ -34,6 +34,19 @@ impl OpenAllowlist {
             .find(|r| glob_match(&r.app_id, app_id))
             .map(|r| r.url.as_str())
     }
+
+    pub fn rules(&self) -> &[OpenRule] {
+        &self.rules
+    }
+
+    /// Append one rule after validating it the same way `from_rules` does, so a
+    /// rule added from the UI cannot be weaker than one loaded from config.
+    pub fn push(&mut self, rule: OpenRule) -> Result<(), CoreError> {
+        let mut next = self.rules.clone();
+        next.push(rule);
+        *self = Self::from_rules(next)?;
+        Ok(())
+    }
 }
 
 fn is_local_scheme(url: &str) -> bool {

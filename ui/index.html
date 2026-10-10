@@ -80,6 +80,7 @@
   <div>
     <section>
       <h2>配对</h2>
+      <div class="hint">② 与其他设备配对：先在本机显示 PIN，再到对端输入。</div>
       <div class="row">
         <button id="mkpin" type="button">显示 8 位 PIN</button>
       </div>
@@ -91,6 +92,21 @@
       <div class="row">
         <input id="peerpin" placeholder="对端 PIN（首次）"/>
         <button id="dial" type="button">连接</button>
+      </div>
+    </section>
+    <section style="margin-top:16px">
+      <h2>iPhone 通知（ANCS）</h2>
+      <div class="hint">① 先在系统蓝牙设置里把 iPhone 连到本机（ANCS），再点下面。这一步与配对是两件事。</div>
+      <div id="ancs" class="hint">状态：读取中…</div>
+      <div class="row" style="margin-top:12px">
+        <button id="ancsgo" type="button">系统蓝牙已连上 → 启动 ANCS</button>
+      </div>
+      <div class="hint" style="margin-top:12px">允许「打开」的应用（只接受本地 scheme，例如 weixin://）：</div>
+      <div id="openapps" class="hint">（空）</div>
+      <div class="row">
+        <input id="openapp" placeholder="com.tencent.xin"/>
+        <input id="openurl" placeholder="weixin://"/>
+        <button id="openadd" type="button">加入白名单</button>
       </div>
     </section>
     <section style="margin-top:16px">
@@ -137,6 +153,11 @@ function render(s) {
     const dis = el('<button class="ghost" type="button">忽略</button>');
     dis.onclick = () => api("/api/dismiss", { id: x.id });
     actions.appendChild(dis);
+    if ((x.actions || []).includes("open")) {
+      const op = el('<button type="button">打开</button>');
+      op.onclick = () => api("/api/open", { id: x.id });
+      actions.appendChild(op);
+    }
     c.appendChild(card);
   }
   const f = $("files");
@@ -162,12 +183,24 @@ function render(s) {
     p.lastChild.querySelector(".title").textContent = x.name;
     p.lastChild.querySelector(".meta").textContent = x.platform + " · " + (x.path || "lan") + " · " + x.device_id;
   }
+  const a = $("ancs");
+  if (a) {
+    a.textContent = s.ancs_state === "off"
+      ? "状态：本机未接入蓝牙（ANCS 传输未挂载）"
+      : ("状态：" + s.ancs_state);
+  }
+  const oa = $("openapps");
+  if (oa) {
+    oa.textContent = (s.open_apps && s.open_apps.length) ? s.open_apps.join("、") : "（空）";
+  }
 }
 $("mkpin").onclick = async () => {
   const r = await api("/api/pin", {});
   if (r.pin) $("pin").textContent = r.pin;
 };
 $("dial").onclick = () => api("/api/dial", { addr: $("addr").value, pin: $("peerpin").value || null });
+$("ancsgo").onclick = () => api("/api/ancs/connect", {});
+$("openadd").onclick = () => api("/api/ancs/allow", { app_id: $("openapp").value, url: $("openurl").value });
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
 }

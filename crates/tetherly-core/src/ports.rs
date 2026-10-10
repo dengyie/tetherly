@@ -114,6 +114,12 @@ pub trait Insertor: Send + Sync {
     fn insert(&self, value: &str) -> Result<(), CoreError>;
 }
 
+/// Launch a local-scheme url on this machine. Callers must pass a url that came
+/// from the allowlist — never one carried by a notification (spec §10).
+pub trait Opener: Send + Sync {
+    fn open(&self, url: &str) -> Result<(), CoreError>;
+}
+
 pub trait Clip: Send + Sync {
     fn set_text(&self, text: &str) -> Result<(), CoreError>;
     fn get_text(&self) -> Result<Option<String>, CoreError>;

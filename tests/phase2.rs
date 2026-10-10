@@ -64,6 +64,8 @@ fn cfg(dir: PathBuf, name: &str, overlay: OverlayConfig) -> NodeConfig {
         reconnect: false,
         ui_port: 0,
         overlay,
+        ancs: None,
+        ancs_peripheral: "test-iphone".into(),
     }
 }
 
