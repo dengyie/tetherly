@@ -16,5 +16,5 @@ pub use filechan::{recv_bytes as recv_file_bytes, send_bytes as send_file_bytes,
 pub use mdns::{LanPeer, SERVICE_TYPE};
 pub use session::{
     accept_session, dial_session, serve_pong_once, ActiveSession, SessionConfig, CONTROL_PORT,
-    FILE_PORT, HANDSHAKE_TIMEOUT, INPUT_PORT,
+    FILE_PORT, HANDSHAKE_TIMEOUT, INPUT_PORT, SCREEN_PORT,
 };

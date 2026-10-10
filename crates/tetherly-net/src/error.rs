@@ -40,4 +40,6 @@ pub enum NetError {
     File(String),
     #[error("input channel requires trust; pairing belongs on 45717")]
     InputRequiresTrust,
+    #[error("screen channel requires trust; pairing belongs on 45717")]
+    ScreenRequiresTrust,
 }

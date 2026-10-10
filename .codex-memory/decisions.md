@@ -1,5 +1,29 @@
 # Decisions
 
+## 2026-10-10 - Phase 5 waiver recorded; remote screen lands as a core slice, RustDesk AGPL not linked
+- Decision: Phase 5 remote screen is opened on an explicit owner waiver (v1.5/v1.6's "do not open" gates deferred to single-item立项). The implementation lives in `tetherly-core::screen` with `ScreenSource`/`ScreenSink` ports; no separate crate and no OS capture code in core. RustDesk architecture is borrowed (separated capture + swappable encoder + P2P) but zero RustDesk code is linked — `deny.toml` bans `hbb_common`/`rustdesk`/`rustdesk-server`/`scrap`.
+- Rationale: mirrors Phase 3's `tetherly-core::input` + `MemorySink` shape, so CI can drive the frame protocol, consent gate, seq window and peer-gone reset deterministically under an injected `MemoryScreenSource` while OS capture/encode/presentation stay Manual-required. `tetherly-core` must stay free of `cfg(target_os)` and `unsafe`. RustDesk's AGPL-3.0 license is incompatible with Apache-2.0 OR MIT.
+- Alternatives considered: a dedicated `tetherly-screen` crate (no additional separation gained); using Windows `DXGI` in core (breaks OS-free rule); linking RustDesk AGPL code (license violation, `deny.toml` prevents it); adopting RustDesk rendezvous hbbs/hbbr model (conflicts with §2.3 no-cloud-account).
+- Impact: `tests/phase5.rs` covers M5.1–M5.4 in CI; M5.5, real capture, encoder, presentation and p95 remain device-gated.
+- Rollback trigger: None; the port boundary keeps capture replaceable.
+- Related files: `crates/tetherly-core/src/screen.rs`, `crates/tetherly-node/src/runtime.rs`, `deny.toml`, `docs/DEVELOPMENT.md` §9.7/§12/§23
+
+## 2026-10-10 - Screen uses a separate resume-only Noise port (45720) with mandatory local consent
+- Decision: screen traffic runs on its own TCP port 45720 with `SessionConfig.resume_only` + `screen_only: true`. Hello only accepts `ResumeNoise`; `HelloDisposition::Pair` returns `NetError::ScreenRequiresTrust`. Pairing stays on 45717. A peer dial reaching 45720 only sets `ScreenState::Requested`; the host must explicitly call `Node::screen_allow()` before the state enters `Allowed`. The peer's `ControlMsg::Start` before `Allowed` is refused and counted. `screen_revoke()` returns to `Idle`; `on_peer_gone` forces `Idle` and clears seq.
+- Rationale: mirrors Phase 3's 45719 pattern (ADR 2026-10-09). Adds an extra consent gate (M5.2) that the input port does not have, because screen capture is more sensitive than cursor sharing. `on_peer_gone` → `Idle` prevents stale frame replay after reconnect.
+- Alternatives considered: auto-stream on connect (rejected by M5.2); multiplex screen onto 45717 or 45719 (mixes latency-sensitive frames with control/input); consent via a wire message from the peer (not trustable).
+- Impact: Node binds 45720 on LAN + overlay (never `0.0.0.0`), advertises `screenport=` in caps.update, and keeps one active `ScreenSender` per session.
+- Rollback trigger: Only with a spec revision; the port + consent separation is what keeps pairing and streaming separable.
+- Related files: `crates/tetherly-net/src/session.rs`, `crates/tetherly-node/src/runtime.rs`, `tests/phase5.rs`
+
+## 2026-10-10 - Encoder route: lossless frames first, swappable encoder port later
+- Decision: the current implementation uses `SCREEN_COMPRESS_NONE` (raw pixel payloads in `ScreenFrame`). A real encoder will be added later as a `ScreenSource` port implementation, not as a wire-format change: the `ScreenFrame` header already carries a `compress` byte to signal the codec.
+- Rationale: the user explicitly chose "先无损帧 + 后接编码器" (lossless frames first, encoder later) via AskUserQuestion. This keeps the CI slice deliverable now while the encoder remains Manual-required. Permissive-license encoder candidates are OpenH264 (BSD-3-Clause), rav1e (BSD-2-Clause/ISC), and zstd (MIT/Apache-2.0); GPL/AGPL encoders x264/x265 are explicitly out.
+- Alternatives considered: shipping `rav1e` or `OpenH264` now (increases CI compile time and surface area before the frame protocol itself is validated); encoding in a separate crate (port pattern is simpler and testable).
+- Impact: current `compress=0` (none); when an encoder is injected, frames will carry `compress=N` and a codec-dependent payload. The wire format is forward-compatible.
+- Rollback trigger: None; this is purely additive.
+- Related files: `crates/tetherly-core/src/screen.rs`, `crates/tetherly-node/src/screen.rs`
+
 ## 2026-10-10 - Phase 4 waiver recorded; ANCS lands as a core slice, not a new crate
 - Decision: Phase 4 iPhone ANCS is opened on an explicit owner waiver (v1.5's "do not open" gate). The implementation lives in `tetherly-core::ancs` with a `AncsTransport` port; no separate `tetherly-ancs` crate and no BLE stack in core.
 - Rationale: mirrors Phase 3's `tetherly-core::input` + `MemorySink` shape, so CI can drive the protocol, state machine, backoff and retries deterministically under an injected `Clock` while the OS GATT stays Manual-required. `tetherly-core` must stay free of `cfg(target_os)`.

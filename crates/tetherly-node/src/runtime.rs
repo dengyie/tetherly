@@ -21,17 +21,18 @@ use tetherly_core::session::LockoutTable;
 use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
     ancs_actions, ancs_source_id, hex_lower, is_desktop_platform, path_kind, AncsEvent,
-    AncsIngress, AncsState, AncsTransport, ClipApply, ClipHub, ConnectOutcome, CoreError,
-    CursorSeat, DeviceId, FileHub, IngestOutcome, InputClient, InputEvent, InputServer, MemorySink,
-    MemoryTrustStore, NotifyHub, OpenAllowlist, PathKind, TcpLimiter, TrustStore,
-    CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
+    AncsIngress, AncsState, AncsTransport, ClipApply, ClipHub, ConnectOutcome, ControlMsg,
+    CoreError, CursorSeat, DeviceId, FileHub, IngestOutcome, InputClient, InputEvent, InputServer,
+    MemoryScreenSink, MemorySink, MemoryTrustStore, NotifyHub, OpenAllowlist, PathKind,
+    ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats,
+    TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
 use tetherly_net::filechan::send_bytes as send_file_bytes;
 use tetherly_net::session::{
     accept_session, dial_session, ActiveSession, SessionConfig, CONTROL_PORT, FILE_PORT,
-    HANDSHAKE_TIMEOUT, INPUT_PORT,
+    HANDSHAKE_TIMEOUT, INPUT_PORT, SCREEN_PORT,
 };
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
@@ -53,6 +54,7 @@ pub struct NodeConfig {
     pub control_port: u16,
     pub file_port: u16,
     pub input_port: u16,
+    pub screen_port: u16,
     pub advertise: bool,
     /// Tests inject a clip. Production uses SystemClip.
     pub memory_clip: bool,
@@ -69,6 +71,10 @@ pub struct NodeConfig {
     pub ancs: Option<Arc<dyn AncsTransport>>,
     /// BLE peripheral identity of the phone, used to derive its synthetic id.
     pub ancs_peripheral: String,
+    /// Screen capture source. `None` defaults to a System stub that returns
+    /// ScreenRefused (real capture is Manual-required). Tests inject
+    /// MemoryScreenSource for deterministic CI.
+    pub screen_source: Option<Arc<dyn ScreenSource>>,
 }
 
 impl Default for NodeConfig {
@@ -80,6 +86,7 @@ impl Default for NodeConfig {
             control_port: CONTROL_PORT,
             file_port: FILE_PORT,
             input_port: INPUT_PORT,
+            screen_port: SCREEN_PORT,
             advertise: true,
             memory_clip: false,
             loopback_only: false,
@@ -88,6 +95,7 @@ impl Default for NodeConfig {
             overlay: OverlayConfig::default(),
             ancs: None,
             ancs_peripheral: "local-iphone".into(),
+            screen_source: None,
         }
     }
 }
@@ -109,6 +117,8 @@ pub struct LivePeer {
     pub file_port: Option<u16>,
     /// Advertised via caps.update `inputport=`. None until the peer tells us.
     pub input_port: Option<u16>,
+    /// Advertised via caps.update `screenport=`. None until the peer tells us.
+    pub screen_port: Option<u16>,
     pub path: PathKind,
 }
 
@@ -141,11 +151,23 @@ struct Shared {
     bound_control: AtomicU16,
     bound_file: AtomicU16,
     bound_input: AtomicU16,
+    bound_screen: AtomicU16,
     /// Input cursor owner. None until a trusted desktop dials 45719.
     input_seat: Mutex<Option<CursorSeat>>,
     input_sink: Mutex<MemorySink>,
     /// Seq lives here so repeated edge crossings do not replay seq 1.
     input_engine: Mutex<InputServer>,
+    /// Frames outbound to the screen controller on 45720. None until attached.
+    screen_out: AsyncMutex<Option<mpsc::UnboundedSender<InnerFrame>>>,
+    /// Sender-side screen state machine: consent, seq, refusal counts.
+    screen_engine: Mutex<ScreenSender>,
+    /// Where sender-side frames come from. MemorySource in CI; real capture
+    /// lives in tetherly-node platform code and stays Manual-required.
+    screen_source: Arc<dyn ScreenSource>,
+    /// Controller-side trace of presented frames. Clone() shares inner state.
+    screen_sink: Mutex<MemoryScreenSink>,
+    /// Visitor-side control channel. None until a visitor attaches.
+    screen_ctl: AsyncMutex<Option<mpsc::UnboundedSender<ControlMsg>>>,
     shutdown: watch::Sender<bool>,
     overlay: Mutex<OverlayStatus>,
     /// ANCS ingress. Present only when a transport was attached.
@@ -195,8 +217,13 @@ impl Node {
         let bound_control = AtomicU16::new(cfg.control_port);
         let bound_file = AtomicU16::new(cfg.file_port);
         let bound_input = AtomicU16::new(cfg.input_port);
+        let bound_screen = AtomicU16::new(cfg.screen_port);
         let ancs_source = ancs_source_id(&cfg.ancs_peripheral);
         let ancs = cfg.ancs.clone().map(|t| AncsIngress::new(t, clock.clone()));
+        let screen_source = cfg
+            .screen_source
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::screen::SystemSource));
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -219,9 +246,15 @@ impl Node {
             bound_control,
             bound_file,
             bound_input,
+            bound_screen,
             input_seat: Mutex::new(None),
             input_sink: Mutex::new(MemorySink::default()),
             input_engine: Mutex::new(InputServer::new(1, 1)),
+            screen_out: AsyncMutex::new(None),
+            screen_engine: Mutex::new(ScreenSender::new()),
+            screen_source,
+            screen_sink: Mutex::new(MemoryScreenSink::new()),
+            screen_ctl: AsyncMutex::new(None),
             shutdown,
             overlay: Mutex::new(OverlayStatus::lan_only()),
             ancs: Mutex::new(ancs),
@@ -258,6 +291,7 @@ impl Node {
             handshake_timeout: HANDSHAKE_TIMEOUT,
             hello_override: None,
             resume_only,
+            screen_only: false,
         }
     }
 
@@ -607,6 +641,20 @@ impl Node {
                 self.shared.bound_input.store(addr.port(), Ordering::SeqCst);
             }
         }
+        let screen_port = self.shared.cfg.screen_port;
+        let screen_addrs = if self.shared.cfg.loopback_only {
+            vec![SocketAddr::from(([127, 0, 0, 1], screen_port))]
+        } else {
+            control_bind_addrs(screen_port)
+        };
+        let screen_listeners = bind_many(&screen_addrs).await.unwrap_or_default();
+        if let Some(first) = screen_listeners.first() {
+            if let Ok(addr) = first.local_addr() {
+                self.shared
+                    .bound_screen
+                    .store(addr.port(), Ordering::SeqCst);
+            }
+        }
 
         if self.shared.cfg.advertise {
             self.advertise_mdns();
@@ -709,6 +757,36 @@ impl Node {
                 }
             });
         }
+        for l in screen_listeners {
+            let node = self.clone_handle();
+            let mut stop = self.shared.shutdown.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = stop.changed() => {
+                            if *stop.borrow() {
+                                break;
+                            }
+                        }
+                        accepted = l.accept() => {
+                            match accepted {
+                                Ok((stream, addr)) => {
+                                    let node = node.clone_handle();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = node.accept_screen(stream, addr).await {
+                                            debug!(%e, "screen channel");
+                                        }
+                                    });
+                                }
+                                Err(_) => {
+                                    tokio::time::sleep(Duration::from_millis(200)).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
         Ok(())
     }
 
@@ -744,6 +822,8 @@ impl Node {
                 sidecar::overlay_bind_addrs(&self.shared.cfg.overlay, self.shared.cfg.file_port);
             let overlay_input =
                 sidecar::overlay_bind_addrs(&self.shared.cfg.overlay, self.shared.cfg.input_port);
+            let overlay_screen =
+                sidecar::overlay_bind_addrs(&self.shared.cfg.overlay, self.shared.cfg.screen_port);
             let node = self.clone_handle();
             tokio::spawn(async move {
                 for l in bind_overlay(&overlay_addrs).await {
@@ -816,6 +896,29 @@ impl Node {
                                         let node = node.clone_handle();
                                         tokio::spawn(async move {
                                             let _ = node.accept_input(stream, addr).await;
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                for l in bind_overlay(&overlay_screen).await {
+                    let node = node.clone_handle();
+                    let mut stop = node.shared.shutdown.subscribe();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                _ = stop.changed() => {
+                                    if *stop.borrow() {
+                                        break;
+                                    }
+                                }
+                                accepted = l.accept() => {
+                                    if let Ok((stream, addr)) = accepted {
+                                        let node = node.clone_handle();
+                                        tokio::spawn(async move {
+                                            let _ = node.accept_screen(stream, addr).await;
                                         });
                                     }
                                 }
@@ -1012,6 +1115,7 @@ impl Node {
                     handshake_hash: *sess.handshake_hash(),
                     file_port: None,
                     input_port: None,
+                    screen_port: None,
                     path: incoming,
                 },
             );
@@ -1031,14 +1135,17 @@ impl Node {
         }
         let file_port = self.file_port();
         let input_port = self.input_port();
+        let screen_port = self.screen_port();
         let caps = CapsUpdate {
             caps: vec![
                 "notify".into(),
                 "clip".into(),
                 "file".into(),
                 "input".into(),
+                "screen".into(),
                 format!("fileport={file_port}"),
                 format!("inputport={input_port}"),
+                format!("screenport={screen_port}"),
             ],
         };
         if let Ok(frame) = caps.to_frame() {
@@ -1149,13 +1256,17 @@ impl Node {
             SessionEvent::Caps(update) => {
                 let file_port = parse_file_port(&update.caps);
                 let input_port = parse_input_port(&update.caps);
-                if file_port.is_some() || input_port.is_some() {
+                let screen_port = parse_screen_port(&update.caps);
+                if file_port.is_some() || input_port.is_some() || screen_port.is_some() {
                     if let Some(live) = self.shared.live.lock().expect("live").get_mut(peer) {
                         if let Some(port) = file_port {
                             live.file_port = Some(port);
                         }
                         if let Some(port) = input_port {
                             live.input_port = Some(port);
+                        }
+                        if let Some(port) = screen_port {
+                            live.screen_port = Some(port);
                         }
                     }
                 }
@@ -1439,6 +1550,14 @@ impl Node {
         SocketAddr::from(([127, 0, 0, 1], self.input_port()))
     }
 
+    pub fn screen_port(&self) -> u16 {
+        self.shared.bound_screen.load(Ordering::SeqCst)
+    }
+
+    pub fn screen_addr(&self) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], self.screen_port()))
+    }
+
     pub fn input_seat(&self) -> Option<CursorSeat> {
         *self.shared.input_seat.lock().expect("seat")
     }
@@ -1462,6 +1581,28 @@ impl Node {
         cfg.pin = None;
         let sess = dial_session(stream, addr, &cfg).await?;
         self.attach_input_server(sess).await;
+        Ok(())
+    }
+
+    /// Open the resume-only screen channel 45720 as the **visitor**: this node
+    /// dials a trusted peer to view its screen. Pairing on 45720 is refused.
+    /// Frames only start flowing after the host calls `allow()` locally and the
+    /// host responds to our `Start`. Real capture is Manual-required.
+    pub async fn open_screen(&self, peer: &DeviceId) -> Result<(), tetherly_net::NetError> {
+        let addr = {
+            let live = self.shared.live.lock().expect("live");
+            let p = live
+                .get(peer)
+                .ok_or(tetherly_net::NetError::ScreenRequiresTrust)?;
+            let port = p.screen_port.ok_or(tetherly_net::NetError::Handshake)?;
+            SocketAddr::new(p.addr.ip(), port)
+        };
+        let stream = TcpStream::connect(addr).await?;
+        let mut cfg = self.session_config_inner(true);
+        cfg.pin = None;
+        cfg.screen_only = true;
+        let sess = dial_session(stream, addr, &cfg).await?;
+        self.attach_screen_client(sess).await;
         Ok(())
     }
 
@@ -1529,6 +1670,21 @@ impl Node {
         cfg.pin = None;
         let sess = accept_session(stream, addr, &cfg).await?;
         self.attach_input_client(sess).await;
+        Ok(())
+    }
+
+    /// Accept a 45720 screen connection. The peer wants to view this machine's
+    /// screen. We refuse to stream until the local user clicks `allow()`.
+    async fn accept_screen(
+        &self,
+        stream: TcpStream,
+        addr: SocketAddr,
+    ) -> Result<(), tetherly_net::NetError> {
+        let mut cfg = self.session_config_inner(true);
+        cfg.pin = None;
+        cfg.screen_only = true;
+        let sess = accept_session(stream, addr, &cfg).await?;
+        self.attach_screen_server(sess).await;
         Ok(())
     }
 
@@ -1622,6 +1778,208 @@ impl Node {
         });
     }
 
+    /// Host side of a 45720 session: this machine is being viewed. Consent is
+    /// enforced here — the peer's `Start` is refused until `screen_allow()` has
+    /// run locally. Frames are pumped by `screen_send_frame()`.
+    async fn attach_screen_server(&self, mut sess: ActiveSession) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<InnerFrame>();
+        *self.shared.screen_out.lock().await = Some(tx);
+        {
+            self.shared
+                .screen_engine
+                .lock()
+                .expect("screen")
+                .on_peer_connected();
+        }
+        let mut stop = self.shared.shutdown.subscribe();
+        let node = self.clone_handle();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.changed() => {
+                        if *stop.borrow() {
+                            break;
+                        }
+                    }
+                    outbound = rx.recv() => {
+                        match outbound {
+                            Some(frame) => {
+                                if sess.send_inner(frame).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    inbound = sess.recv_inner() => {
+                        match inbound {
+                            Ok(frame) => {
+                                if let Ok(msg) = ControlMsg::from_frame(&frame) {
+                                    let reply = node
+                                        .shared
+                                        .screen_engine
+                                        .lock()
+                                        .expect("screen")
+                                        .on_control(msg);
+                                    if let Ok(Some(reply)) = reply {
+                                        if let Ok(f) = reply.to_frame() {
+                                            let _ = sess.send_inner(f).await;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+            node.shared
+                .screen_engine
+                .lock()
+                .expect("screen")
+                .on_peer_gone();
+            *node.shared.screen_out.lock().await = None;
+        });
+    }
+
+    /// Visitor side of a 45720 session: this machine views a peer's screen.
+    /// Receives frames, presents them to the in-memory sink (real present is
+    /// Manual-required), and acks the sequence it accepted.
+    async fn attach_screen_client(&self, mut sess: ActiveSession) {
+        let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel::<ControlMsg>();
+        *self.shared.screen_ctl.lock().await = Some(ctl_tx);
+        let mut receiver = ScreenReceiver::new();
+        let mut stop = self.shared.shutdown.subscribe();
+        let node = self.clone_handle();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.changed() => {
+                        if *stop.borrow() {
+                            break;
+                        }
+                    }
+                    ctl = ctl_rx.recv() => {
+                        match ctl {
+                            Some(msg) => {
+                                match msg.to_frame() {
+                                    Ok(f) => {
+                                        if sess.send_inner(f).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(_) => continue,
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    inbound = sess.recv_inner() => {
+                        match inbound {
+                            Ok(frame) => {
+                                if let Ok(sf) = ScreenFrame::from_frame(&frame) {
+                                    match receiver.apply(&sf) {
+                                        Ok(Some(seq)) => {
+                                            if let Ok(sink) = node.shared.screen_sink.lock() {
+                                                let _ = sink.present(&sf);
+                                            }
+                                            let ack = ControlMsg::Ack { seq };
+                                            if let Ok(f) = ack.to_frame() {
+                                                let _ = sess.send_inner(f).await;
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(_) => break,
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+            receiver.on_peer_gone();
+            *node.shared.screen_ctl.lock().await = None;
+        });
+    }
+
+    /// Grab one frame from the source and push it toward the visitor. Returns
+    /// `true` only when a frame was queued (i.e. while streaming). Deterministic
+    /// in CI via `MemoryScreenSource`; real capture is Manual-required.
+    pub async fn screen_send_frame(&self) -> Result<bool, CoreError> {
+        let frame = self.shared.screen_source.grab()?;
+        let outbound = {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            if engine.push(frame).is_none() {
+                return Ok(false);
+            }
+            engine.drain()
+        };
+        self.send_screen_frames(outbound).await?;
+        Ok(true)
+    }
+
+    async fn send_screen_frames(&self, frames: Vec<ScreenFrame>) -> Result<(), CoreError> {
+        let tx = self
+            .shared
+            .screen_out
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| CoreError::Json("screen channel closed".into()))?;
+        for f in frames {
+            tx.send(f.to_frame()?)
+                .map_err(|_| CoreError::Json("screen peer gone".into()))?;
+        }
+        Ok(())
+    }
+
+    async fn send_screen_control(&self, msg: ControlMsg) -> Result<(), CoreError> {
+        let tx = self
+            .shared
+            .screen_ctl
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| CoreError::Json("screen control channel closed".into()))?;
+        tx.send(msg)
+            .map_err(|_| CoreError::Json("screen peer gone".into()))
+    }
+
+    /// Local consent for the currently connected visitor. This is the ONLY path
+    /// into `Allowed`; nothing a peer sends can reach it.
+    pub fn screen_allow(&self) {
+        self.shared.screen_engine.lock().expect("screen").allow();
+    }
+
+    /// Revoke local consent; any queued frames are dropped.
+    pub fn screen_revoke(&self) {
+        self.shared.screen_engine.lock().expect("screen").revoke();
+    }
+
+    /// Visitor: ask the host to begin sending. Refused by the host until it has
+    /// allowed locally.
+    pub async fn screen_start(&self) -> Result<(), CoreError> {
+        self.send_screen_control(ControlMsg::Start).await
+    }
+
+    /// Visitor: ask the host to stop sending.
+    pub async fn screen_stop(&self) -> Result<(), CoreError> {
+        self.send_screen_control(ControlMsg::Stop).await
+    }
+
+    pub fn screen_state(&self) -> ScreenState {
+        self.shared.screen_engine.lock().expect("screen").state()
+    }
+
+    pub fn screen_stats(&self) -> ScreenStats {
+        self.shared.screen_engine.lock().expect("screen").stats()
+    }
+
+    pub fn screen_sink_snapshot(&self) -> MemoryScreenSink {
+        self.shared.screen_sink.lock().expect("sink").clone()
+    }
+
     pub fn data_dir(&self) -> &std::path::Path {
         &self.shared.cfg.data_dir
     }
@@ -1645,6 +2003,10 @@ fn parse_file_port(caps: &[String]) -> Option<u16> {
 
 fn parse_input_port(caps: &[String]) -> Option<u16> {
     parse_port_cap(caps, "inputport=")
+}
+
+fn parse_screen_port(caps: &[String]) -> Option<u16> {
+    parse_port_cap(caps, "screenport=")
 }
 
 fn parse_port_cap(caps: &[String], prefix: &str) -> Option<u16> {

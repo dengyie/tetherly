@@ -68,6 +68,14 @@ pub enum CoreError {
     AncsSubscribe,
     #[error("ANCS control point write failed")]
     AncsWrite,
+    #[error("malformed screen frame")]
+    ScreenFrame,
+    #[error("screen sequence jumped")]
+    ScreenSeqJump,
+    #[error("screen frame exceeds the wire budget")]
+    ScreenTooLarge,
+    #[error("screen refused: {0}")]
+    ScreenRefused(String),
 }
 
 impl From<serde_json::Error> for CoreError {

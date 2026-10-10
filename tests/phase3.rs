@@ -44,6 +44,7 @@ fn cfg(dir: PathBuf, name: &str) -> NodeConfig {
         control_port: 0,
         file_port: 0,
         input_port: 0,
+        screen_port: 0,
         advertise: false,
         memory_clip: true,
         loopback_only: true,
@@ -55,6 +56,7 @@ fn cfg(dir: PathBuf, name: &str) -> NodeConfig {
         },
         ancs: None,
         ancs_peripheral: "test-iphone".into(),
+        screen_source: None,
     }
 }
 
@@ -123,6 +125,7 @@ async fn unpaired_45719_refuses_pairing() {
         handshake_timeout: HANDSHAKE_TIMEOUT,
         hello_override: None,
         resume_only: true,
+        screen_only: false,
     };
     let err = match dial_session(stream, addr, &cfg).await {
         Err(e) => e,

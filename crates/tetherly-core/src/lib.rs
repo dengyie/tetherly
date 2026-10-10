@@ -23,6 +23,7 @@ pub mod persist;
 pub mod pin;
 pub mod ports;
 pub mod replay;
+pub mod screen;
 pub mod session;
 
 pub use allowlist::{sanitize_file_name, OpenAllowlist, OpenRule};
@@ -60,9 +61,14 @@ pub use overlay::{
 pub use persist::{TrustFile, TrustedPeerDto};
 pub use ports::{
     Clip, Clock, Insertor, ManualClock, MemoryTrustStore, Opener, PhoneNotification, Rng,
-    SystemClock, TrustStore, TrustedPeer,
+    ScreenSink, ScreenSource, SystemClock, TrustStore, TrustedPeer,
 };
 pub use replay::ReplayGuard;
+pub use screen::{
+    is_screen_type, ControlMsg, MemoryScreenSink, MemoryScreenSource, PixelFormat, ScreenFrame,
+    ScreenReceiver, ScreenRect, ScreenSender, ScreenState, ScreenStats, SCREEN_MAGIC, SCREEN_PROTO,
+    SCREEN_SEQ_WINDOW,
+};
 pub use session::{
     backoff_delay, commit_trust, dispose_hello, ConnState, HelloDisposition, LockoutTable, PIN_TTL,
 };

@@ -110,6 +110,16 @@
       </div>
     </section>
     <section style="margin-top:16px">
+      <h2>远程屏幕（实验）</h2>
+      <div id="screen" class="hint">状态：读取中…</div>
+      <div class="row" style="margin-top:8px">
+        <button id="screenallow" type="button">① 允许本机被观看</button>
+        <button id="screenstart" type="button">② 开始推流</button>
+        <button id="screenstop" type="button">停止</button>
+      </div>
+      <div class="hint">需本机点击「允许」才会推流；Wayland 暂不支持；真机采集为 Manual-required。</div>
+    </section>
+    <section style="margin-top:16px">
       <h2>网络</h2>
       <div id="net" class="hint">探测 EasyTier 侧车…</div>
     </section>
@@ -193,6 +203,13 @@ function render(s) {
   if (oa) {
     oa.textContent = (s.open_apps && s.open_apps.length) ? s.open_apps.join("、") : "（空）";
   }
+  const sc = $("screen");
+  if (sc) {
+    const st = s.screen || {};
+    sc.textContent = "状态：" + (st.state || "idle")
+      + " · 已发送 " + (st.sent || 0)
+      + " · 拒绝 " + (st.refused || 0);
+  }
 }
 $("mkpin").onclick = async () => {
   const r = await api("/api/pin", {});
@@ -201,6 +218,9 @@ $("mkpin").onclick = async () => {
 $("dial").onclick = () => api("/api/dial", { addr: $("addr").value, pin: $("peerpin").value || null });
 $("ancsgo").onclick = () => api("/api/ancs/connect", {});
 $("openadd").onclick = () => api("/api/ancs/allow", { app_id: $("openapp").value, url: $("openurl").value });
+$("screenallow").onclick = () => api("/api/screen/allow", {});
+$("screenstart").onclick = () => api("/api/screen/start", {});
+$("screenstop").onclick = () => api("/api/screen/stop", {});
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
 }

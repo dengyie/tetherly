@@ -129,6 +129,17 @@ pub trait Notifier: Send + Sync {
     fn show(&self, title: &str, body_len: usize, score: i32) -> Result<(), CoreError>;
 }
 
+/// Pull one screen frame from the OS. Implemented in tetherly-node only; the
+/// core never captures. `grab` is called on the sender's own cadence.
+pub trait ScreenSource: Send + Sync {
+    fn grab(&self) -> Result<crate::screen::ScreenFrame, CoreError>;
+}
+
+/// Present one screen frame. In-memory fake for CI; the OS path is Manual.
+pub trait ScreenSink: Send + Sync {
+    fn present(&self, frame: &crate::screen::ScreenFrame) -> Result<(), CoreError>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionId {
     Copy,

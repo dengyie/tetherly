@@ -144,6 +144,20 @@ struct Snapshot {
     ancs_state: String,
     /// Allowlisted app ids, so the wizard can show what may be opened.
     open_apps: Vec<String>,
+    /// Remote-screen channel state (idle/requested/allowed/streaming).
+    screen_state: String,
+    /// Screen counters for the local UI. Never carries pixels.
+    screen: ScreenSnap,
+}
+
+#[derive(Serialize)]
+struct ScreenSnap {
+    state: String,
+    sent: u64,
+    received: u64,
+    dropped: u64,
+    bytes: u64,
+    refused: u64,
 }
 
 #[derive(Serialize)]
@@ -269,6 +283,20 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             },
             Err(_) => err(400, "bad json"),
         },
+        // Remote screen: consent is local and explicit. `allow` is the only
+        // gate into streaming; nothing a peer sends can flip it.
+        ("POST", "/api/screen/allow") => {
+            node.screen_allow();
+            json_ok(&serde_json::json!({ "state": node.screen_state().as_str() }))
+        }
+        ("POST", "/api/screen/start") => match node.screen_start().await {
+            Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+            Err(e) => err(400, &e.to_string()),
+        },
+        ("POST", "/api/screen/stop") => match node.screen_stop().await {
+            Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+            Err(e) => err(400, &e.to_string()),
+        },
         _ => (404, "text/plain", b"not found".to_vec()),
     }
 }
@@ -323,6 +351,18 @@ fn snapshot(node: &Node) -> Snapshot {
                 size: t.files.first().map(|f| f.size).unwrap_or(0),
             })
             .collect(),
+        screen_state: node.screen_state().as_str().to_string(),
+        screen: {
+            let s = node.screen_stats();
+            ScreenSnap {
+                state: node.screen_state().as_str().to_string(),
+                sent: s.sent,
+                received: s.received,
+                dropped: s.dropped,
+                bytes: s.bytes,
+                refused: s.refused,
+            }
+        },
     }
 }
 

@@ -40,6 +40,7 @@ fn cfg(dir: PathBuf, name: &str, platform: &str) -> NodeConfig {
         control_port: 0,
         file_port: 0,
         input_port: 0,
+        screen_port: 0,
         advertise: false,
         memory_clip: true,
         loopback_only: true,
@@ -51,6 +52,7 @@ fn cfg(dir: PathBuf, name: &str, platform: &str) -> NodeConfig {
         },
         ancs: None,
         ancs_peripheral: "test-iphone".into(),
+        screen_source: None,
     }
 }
 

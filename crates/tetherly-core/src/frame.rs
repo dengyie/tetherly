@@ -71,6 +71,7 @@ impl InnerFrame {
         if flags & FLAG_MUST_UNDERSTAND != 0
             && !is_known_type(ty)
             && !crate::input::is_input_type(ty)
+            && !crate::screen::is_screen_type(ty)
         {
             return Err(CoreError::MustUnderstand(ty));
         }

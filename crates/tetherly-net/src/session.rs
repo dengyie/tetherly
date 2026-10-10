@@ -26,6 +26,7 @@ use zeroize::Zeroize;
 pub const CONTROL_PORT: u16 = 45717;
 pub const FILE_PORT: u16 = 45718;
 pub const INPUT_PORT: u16 = 45719;
+pub const SCREEN_PORT: u16 = 45720;
 
 /// Handshake I/O budget. Argon2id itself is ~hundreds of ms; 20s covers a
 /// slow LAN plus KDF without hanging forever on a half-open TCP.
@@ -113,6 +114,8 @@ pub struct SessionConfig {
     pub hello_override: Option<Hello>,
     /// Input port 45719: Noise IK resume only. Pairing stays on 45717.
     pub resume_only: bool,
+    /// Screen port 45720: Noise IK resume only. Pairing stays on 45717.
+    pub screen_only: bool,
 }
 
 impl Clone for SessionConfig {
@@ -130,6 +133,7 @@ impl Clone for SessionConfig {
             handshake_timeout: self.handshake_timeout,
             hello_override: self.hello_override.clone(),
             resume_only: self.resume_only,
+            screen_only: self.screen_only,
         }
     }
 }
@@ -142,8 +146,10 @@ impl SessionConfig {
                 &self.platform,
                 if self.resume_only {
                     &["input"]
+                } else if self.screen_only {
+                    &["screen"]
                 } else {
-                    &["notify", "clip", "file", "input"]
+                    &["notify", "clip", "file", "input", "screen"]
                 },
             )
         })
@@ -256,6 +262,9 @@ async fn handshake(
         HelloDisposition::Pair => {
             if cfg.resume_only {
                 return Err(NetError::InputRequiresTrust);
+            }
+            if cfg.screen_only {
+                return Err(NetError::ScreenRequiresTrust);
             }
             pair_then_noise(
                 reader,

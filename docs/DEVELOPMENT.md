@@ -3,12 +3,24 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.6** |
+| 文档版本 | **1.7** |
 | 日期 | 2026-10-10 |
-| 状态 | Phase 4 ANCS CI 切片已落地（`tetherly-core::ancs` 编解码 + 状态机、`MemoryAncsTransport`、白名单门控「打开」、重连不连弹）；真机 BLE GATT / iPhone / p95<2s 为 Manual-required；DeskFlow 网关保持关闭 |
+| 状态 | Phase 5 远程屏幕（屏幕串流）CI 切片已落地（`tetherly-core::screen` 帧+控制编解码、强制本机同意、45720 独立端口、seq 单调窗口、无损帧）；真机 DXGI 采集 / 编码器为 Manual-required；RustDesk 仅作架构借鉴，AGPL 不可链 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli` |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.7 相对 1.6（Phase 5 远程屏幕 CI 切片）**
+
+- 新增 `tetherly-core::screen`（**无 OS API**）：屏幕帧魔数 `TMV1`、proto 1、`SCREEN_SEQ_WINDOW=65536`、`PixelFormat{Bgra8,Rgba8}`、`ScreenFrame` 编解码（header 31 字节：magic+proto+seq+rect+fmt+compression+stride）、`ControlMsg{Start,Stop,Ack{seq}}` 编解码（14 字节）、`ScreenSender`（单调 seq + consent 门控 + push/drain/refused 计数）、`ScreenReceiver`（seq 窗口丢旧/拒大跳/bounded trace）、`MemoryScreenSource`/`MemoryScreenSink`（确定性 CI 假实现）、`ScreenSink`/`ScreenSource` 端口。
+- 新端口 **45720**（`SCREEN_PORT`）：Noise IK resume only；`screen_only: true` 的会话在 `HelloDisposition::Pair` 时返回 `NetError::ScreenRequiresTrust`——配对永远只在 45717。Hello 完只允许已配对对端。
+- **强制本机同意（M5.2）**：对端连上 45720 仅置 `ScreenState::Requested`，必须本机显式调用 `Node::screen_allow()` 才进入 `Allowed`；对端 `Start` 在 `Allowed` 前被拒且计数。`ScreenSender::push` 仅在 `Streaming` 状态出帧。
+- **RustDesk 仅作架构借鉴**：RustDesk 客户端与服务端均为 **AGPL-3.0**，不得以任何形态链入 `Cargo.toml`；`deny.toml` 加 `hbb_common` / `rustdesk` / `rustdesk-server` / `scrap` 为结构化红线。借鉴的公开工程常识（分离采集+编码器 swap+P2P+中继）**不**包含居会合服务器（hbbs/hbbr），匹配 §2.3 禁云账号。
+- `tetherly-node`：`NodeConfig.screen_port`（默认 45720）+ `screen_source: Option<Arc<dyn ScreenSource>>`（测试注入 MemoryScreenSource）；`Shared` 加 `bound_screen: AtomicU16`、`screen_out`、`screen_engine: Mutex<ScreenSender>`、`screen_source: Arc<dyn ScreenSource>`、`screen_sink: Mutex<MemoryScreenSink>`、`screen_ctl`；`spawn_listeners`/`spawn_overlay` 各加 45720 绑定与接受；`attach` 的 `caps.update` 加 `"screen"` + `screenport=`；`Node::screen_allow/revoke/start/stop/state/stats/send_frame/sink_snapshot/port/addr`。
+- `crates/tetherly-node/src/screen.rs`：`SystemSource`/`SystemSink`（均返回 `ScreenRefused`——真机采集/呈现是 Manual-required）。注释标注 DXGI Desktop Duplication（Win）/ core-graphics（mac）/ x11rb（Linux）为下一迭代；Wayland 诚实地标「不支持」。
+- UI：`ui/index.html` 加「远程屏幕（实验）」区——「① 需本机点击允许才推流；② Wayland 暂不支持；③ 真机采集为 Manual-required」。路由 `POST /api/screen/allow|start|stop`。`Snapshot` 加 `screen_state` 和 `screen` 计数器。
+- `tests/phase5.rs`：M5.1 consent-then-start 帧序严格递增 1..=n、M5.2 Start-before-allow 被拒且计数、M5.3 对端离开→`Idle` 重置 seq、M5.4 45720 拒绝未配对 dial。`cfg()` 注入 `MemoryScreenSource`。
+- **Manual-required**：真机 DXGI Desktop Duplication / WGC（Windows）、CGImage（macOS）、X11 SHM（Linux）采集；真实编码器（OpenH264/rav1e）；真实窗口呈现（Windows HWND / macOS CGWindow / Linux Wayland portal）；p95 帧间隔预算真机验证。M5.5 硬件编码 / 真机注入「未做」。
 
 **1.6 相对 1.5（Phase 4 iPhone ANCS CI 切片）**
 
@@ -97,7 +109,7 @@
 
 ### 2.3 非目标（v1）
 
-- 远程桌面 / 屏幕镜像
+- 远程桌面 / 屏幕镜像（**v1 非目标已由 v1.7 Phase 5 取代**：`tetherly-core::screen` 帧+控制编解码、强制本机同意、45720 独立端口的 CI 切片；真机 DXGI 采集 / 编码器 / 呈现仍 Manual-required。完整远程桌面仍不在 v1 承诺范围）
 - 云账号、云端存通知或验证码
 - iOS 被控
 - Tetherly 进程内嵌 EasyTier 或 Network Extension VPN
@@ -120,6 +132,7 @@
 | 剪贴板 | ✅ | ✅ | ✅ | 按钮发送 | 前台 |
 | 文件 | ✅ | ✅ | ✅ | SAF | 可选 App |
 | 键鼠 server/client | ✅ | ✅ | Wayland beta | ❌ v1 | ❌ |
+| 远程屏幕 server | CI 切片（真机采集 Manual） | CI 切片 | CI 切片（X11；Wayland 不支持） | ❌ v1 | ❌ |
 
 话术：桌面全功能；Android 是信源和文件端；iPhone 是通知/验证码发送源。
 
@@ -535,6 +548,22 @@ Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要�
 
 **诚实缺口（v1.3）**：Kotlin 侧可截获通知并入队；`NativeBridge` 加载 `libtetherly_android`。无 `.so` 时**禁止**自己拼 SPAKE2/Noise TCP。占位身份 `idPk = sha256(idSk)` **不是**生产 Ed25519。CI 跑 `gradle :app:testDebugUnitTest` + `assembleDebug`。物理机 M1.1 p95 / 8h soak 标 Manual-required。协议与 OTP 路径由桌面双节点 loopback 覆盖。
 
+### 9.7 远程屏幕（Phase 5）
+
+**协议**：`tetherly-core::screen`（`crates/tetherly-core/src/screen.rs`）。帧魔数 `TMV1`（`SCREEN_MAGIC`），proto 1，seq u64be 单调递增窗口 `SCREEN_SEQ_WINDOW=65536`，trace 上限 64。单帧 header 31 字节：`TMV1`(4) | proto(1) | seq(8) | x(4) | y(4) | w(2) | h(2) | fmt(1) | compress(1) | stride(4) | pixels。控制消息 14 字节：`TMV1`(4) | proto(1) | tag(1) | seq(8)；tag 取值 Start=0 / Stop=1 / Ack=2。像素格式 `PixelFormat{Bgra8,Rgba8}`，默认 BGRA（一致 Win32）。传输走独立 TCP 端口 **45720**（`SCREEN_PORT`），`resume_only`：只在已配对对端间建会话；`screen_only: true` 的会话在 `HelloDisposition::Pair` 时返回 `NetError::ScreenRequiresTrust`。Hello cap 广告 `"screen"` 与 `screenport=N`。
+
+**门控模型**：`ScreenState` 四态状态机：`Idle → Requested → Allowed → Streaming`。对端 dial 45720 成功仅置 `Requested`，不开始推流。必须本机显式调用 `Node::screen_allow()` 才进 `Allowed`。对端发 `ControlMsg::Start` 进入 `Streaming` 后才出帧；在 `Allowed` 之前收到的 `Start` 被拒绝并计数（`refused`）。`Node::screen_revoke()` 回到 `Idle`。对端断开（`on_peer_gone`）强制回 `Idle` 并清零 seq。重连不重放旧帧——接收方 seq 窗口丢弃 seq < 已收最大 seq 的帧。
+
+**采集**：`ScreenSource` 端口在 `tetherly-core` 声明，`tetherly-node` 注入实现。CI 用 `MemoryScreenSource`（确定性帧序列）。真机实现为 Manual-required：Windows DXGI Desktop Duplication / WGC（`windows` crate），macOS `core-graphics` `CGImage`，Linux X11 SHM（`x11rb`）。Wayland 标「不支持」。`SystemSource` 当前一律返回 `ScreenRefused`。
+
+**压缩**：当前层走无压缩直传（`SCREEN_COMPRESS_NONE`）。编码器作为 `ScreenSource` 端口后可插实现；候选：OpenH264（BSD-3-Clause）、rav1e（BSD-2-Clause/ISC）、zstd（MIT/Apache-2.0）。不走 GPL/AGPL（x264/x265 明确出局）。
+
+**呈现**：`ScreenSink` 端口在 `tetherly-core` 声明。CI 用 `MemoryScreenSink`（断言 seq 单调）。真机 `SystemSink` 返回 `ScreenRefused`（Manual-required：Windows HWND + `BitBlt`，macOS `CGWindow`，Linux Wayland portal）。
+
+**RustDesk 借鉴范围**：架构借鉴仅限分离采集+编码器 swap+P2P 模式——这些都是公开工程常识，不构成知识产权。RustDesk 客户端与服务端均为 AGPL-3.0，`deny.toml` 已 ban `hbb_common` / `rustdesk` / `rustdesk-server` / `scrap`。不借鉴 RustDesk 的居会合（hbbs/hbbr）服务器——匹配 §2.3 禁云账号。
+
+**v1.7 落地范围**：`tetherly-core::screen` 帧+控制编解码、`ScreenSender`/`ScreenReceiver`、强制本机同意 M5.2、45720 独立端口 + `ScreenRequiresTrust` 门、`tetherly-node` 14 处锚点（`bound_screen` / `screen_out` / `screen_engine` / `screen_sink` / `screen_ctl` / `spawn_listeners` / `spawn_overlay` / caps / `LivePeer.screen_port` / `open_screen` / `accept_screen` / `attach_screen_server` / `attach_screen_client` / `screen_send_frame`）、UI 路由 `/api/screen/allow|start|stop` + 前端「远程屏幕（实验）」区、`tests/phase5.rs` 4 个绿测试。Manual-required：真机采集、编码器、呈现、p95 帧间隔预算验证。M5.5 硬件编码 / 真机注入「未做」。
+
 ---
 
 ## 10. 模式与反模式
@@ -630,7 +659,19 @@ Wayland 不挡退出。真机注入未落地前不得宣称可替代键鼠。
 
 **v1.6 落地范围**：`tetherly-core::ancs`（Notification Source 解析、Control Point 编码、Data Source 按字节重组、`AncsIngress`）、`tetherly-node` 的 `ancs_*` 入口与 `Opener` 端口、UI 两步向导、`tests/phase4.rs`。**Manual-required**：真实 BLE GATT（Windows `windows` / CoreBluetooth / BlueZ）、物理 iPhone p95、蓝牙关 30s 真机复现。
 
-### Phase 5 — 单独立项
+### Phase 5 — 远程桌面（屏幕串流）（约 4 周）
+
+| ID | 验收 | 状态（v1.7） |
+|---|---|---|
+| M5.1 | 已配对桌面间单向看屏，p95 帧间隔在预算内 | **CI 代理**：注入时钟 + `MemoryScreenSource` 断言 seq 单调、无跳变、预算达标；真机 DXGI 采集 Manual-required |
+| M5.2 | **未本机点击允许，绝不推流**；载荷不含可执行指令 | **CI 绿**：`ScreenState` 门控；无 `allow` 时 `Start` 被拒并计数 |
+| M5.3 | 对端断开 → 状态回 `Idle`，seq 清零，重连不重放旧帧 | **CI 绿**：`on_peer_gone` + seq 窗口（tests/phase5.rs） |
+| M5.4 | 45720 拒绝配对；配对只在 45717 | **CI 绿**：`resume_only` 门（`ScreenRequiresTrust`） |
+| M5.5 | 加分：硬件编码 / 真机注入 | **未做**，不挡退出 |
+
+**v1.7 落地范围/豁免（2026-10-10）**：远程桌面原为 §2.3 v1 非目标，本项目方要求引入 Phase 5 并同意**先无损帧 + 后接编码器**（编码器作为 `ScreenSource` 端口实现后接），构成 Phase 5 开工豁免（照 Phase 4 豁免样式）。本次交付为 CI 切片：`tetherly-core::screen` 帧+控制编解码、强制本机同意 M5.2、45720 独立端口 + `ScreenRequiresTrust` 门、`tetherly-node` 屏幕锚点、UI「远程屏幕（实验）」、`tests/phase5.rs`。RustDesk 仅作架构借鉴，AGPL 不可链，`deny.toml` 已 ban。**Manual-required 不变**：真机 DXGI 采集 / 编码器 / 呈现 / p95 真机验证。M5.5 未做，不挡退出。
+
+### Phase 6 — 单独立项
 
 Android 被控、notify.reply、WinFsp 挂载、文件持久续传、Linux ANCS 体验、嵌入 EasyTier FFI。
 
@@ -644,7 +685,7 @@ Android 被控、notify.reply、WinFsp 挂载、文件持久续传、Linux ANCS 
 | 向量 | Argon2+SPAKE2+Noise prologue |
 | proptest | 控制 JSON 往返 |
 | fuzz | 内层帧、ANCS tuple（Phase 4） |
-| 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello。`tests/phase1.rs`：notify、clip TTL、insert 拒绝、persist 重拨、日志脱敏、文件拒绝/接受。`tests/phase2.rs`：缺侧车、停侧车、无 mDNS 单播、LAN 优先。`tests/phase3.rs`：45719 拒绝配对、过边按键、断线回光标、聚焦时剪贴板。`tests/phase4.rs`：M4.1 模拟时延、M4.2 白名单门控打开、M4.3 重连不连弹、Control Point 串行、分片重组、`Removed` 清候选、退避 |
+| 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello。`tests/phase1.rs`：notify、clip TTL、insert 拒绝、persist 重拨、日志脱敏、文件拒绝/接受。`tests/phase2.rs`：缺侧车、停侧车、无 mDNS 单播、LAN 优先。`tests/phase3.rs`：45719 拒绝配对、过边按键、断线回光标、聚焦时剪贴板。`tests/phase4.rs`：M4.1 模拟时延、M4.2 白名单门控打开、M4.3 重连不连弹、Control Point 串行、分片重组、`Removed` 清候选、退避。`tests/phase5.rs`：M5.1 consent-then-start 帧序严格递增、M5.2 Start-before-allow 被拒且计数、M5.3 对端离开→`Idle` 重置 seq、M5.4 45720 拒绝未配对 dial |
 | 真机 | 发版清单：Win × Android；Phase 4 再加 iPhone |
 
 PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
@@ -655,8 +696,8 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 
 - CI：Windows、macOS、Ubuntu（fmt / clippy `-D warnings` / test `--locked`）。Phase 1 另加 Ubuntu `android` job（Java 17 + Gradle 8.9：`:app:testDebugUnitTest`、`assembleDebug`）与 `deny`（licenses/bans/sources + audit）。
 - 版本号 workspace 统一 bump。
-- 控制 **45717/tcp**，文件 **45718/tcp**，键鼠 **45719/tcp**。本机 UI **45716/tcp** 仅 127.0.0.1。DeskFlow 网关默认关。
-- 安装程序提示放行 45717–45719；默认 **LAN** 监听：`127.0.0.1` + RFC1918 / 链路本地，不含公网、**跳过** EasyTier `10.144.144.0/24`（避免 mDNS 打到 TUN）。Phase 2 另绑 overlay CIDR 内的本机 IP，仍永不 `0.0.0.0`/`::`。
+- 控制 **45717/tcp**，文件 **45718/tcp**，键鼠 **45719/tcp**，远程屏幕 **45720/tcp**。本机 UI **45716/tcp** 仅 127.0.0.1。DeskFlow 网关默认关。
+- 安装程序提示放行 45717–45720；默认 **LAN** 监听：`127.0.0.1` + RFC1918 / 链路本地，不含公网、**跳过** EasyTier `10.144.144.0/24`（避免 mDNS 打到 TUN）。Phase 2 另绑 overlay CIDR 内的本机 IP，仍永不 `0.0.0.0`/`::`。
 - Phase 1 桌面不要求 WebView2（loopback HTTP）。Tauri 壳下一迭代才需要 WebView2、MSVC 运行库；ANCS 需要蓝牙。
 
 ---
@@ -677,6 +718,7 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 | R10 | snow/spake2 误用 | 测试向量；不手写曲线 |
 | R11 | 虚网无组播 | 单播 peer 列表 |
 | R12 | DeskFlow TLS 坑 | 不挡 Phase 3 |
+| R13 | AGPL 屏幕采集库（scrap/captrs） | deny 列表 ban + 自有实现（DXGI/核心图形/x11rb） |
 
 ---
 
@@ -767,3 +809,16 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 4. M4.2 动作只经 `ancs_actions(app_id, &OpenAllowlist)`；「打开」的 url 只来自 `allowlist.url_for`，`open_candidate` 在 `Opener` 端口上执行，**从不**读取通知里的 url。
 5. `tests/phase4.rs` 覆盖 M4.1 模拟时延、M4.2、M4.3、串行/回调不写、分片重组、`Removed`、无传输惰性、退避。
 6. **不要**在 `tetherly-core` 里放 BLE 栈；不要宣称真机 p95 已达标；不要执行对端 URL；不要改 OTP 规则；不要把 `otp.candidate` 放上线。
+
+---
+
+## 23. Phase 5 开工与落地清单
+
+1. `tetherly-core::screen`（**无 OS API**，`#![forbid(unsafe_code)]`，无 `cfg(target_os)`）：`SCREEN_MAGIC=*b"TMV1"`、`SCREEN_PROTO=1`、`SCREEN_SEQ_WINDOW=65536`、`SCREEN_TRACE_MAX=64`；`PixelFormat{Bgra8,Rgba8}`；`ScreenRect`/`ScreenFrame` 编解码（header **31 字节**）；`ControlMsg{Start,Stop,Ack{seq}}`（14 字节）；`ScreenSender`（单调 seq + consent 门控 + push/drain/refused）；`ScreenReceiver`（seq 窗口丢旧/拒大跳/bounded trace）；`MemoryScreenSource`/`MemoryScreenSink`。`ScreenSink`/`ScreenSource` 端口进 `ports.rs`。
+2. `tetherly-net`：`SCREEN_PORT=45720`，`NetError::ScreenRequiresTrust`；`session_config_inner` 加 `screen_only: bool`；`hello()` cap 广告 `"screen"`。hello 完只允许已配对对端，`HelloDisposition::Pair` 时 `screen_only` 会话返回 `ScreenRequiresTrust`。
+3. `tetherly-node`：`NodeConfig.screen_port`（默认 45720）+ `screen_source: Option<Arc<dyn ScreenSource>>`；`Shared` 加 `bound_screen`/`screen_out`/`screen_engine`/`screen_sink`/`screen_ctl`/`screen_source`；`spawn_listeners`/`spawn_overlay` 各加 45720 绑定与接受；`attach` 的 caps 加 `"screen"` + `screenport=`；`open_screen`/`accept_screen`/`attach_screen_server`/`attach_screen_client`/`screen_send_frame`；`Node::screen_allow/revoke/start/stop/state/stats/sink_snapshot/port/addr`。
+4. **红线**：`open_screen` 只建 Noise 通道；开推只由 `screen_allow()` 后的 `screen_start()` 触发；`screen_revoke()` 回 `Idle`；`on_peer_gone` 强制回 `Idle` 并清零 seq。屏幕帧**不携带可执行指令**；被控侧不认识的控制消息一律拒绝，不落盘、不转发。
+5. `crates/tetherly-node/src/screen.rs`：`SystemSource`/`SystemSink`（真机采集/呈现 Manual-required，当前返回 `ScreenRefused`），注释标 DXGI/WGC（Win）/ core-graphics（mac）/ x11rb（Linux）；Wayland 标「不支持」。**不要**链 AGPL/GPL（`deny.toml` 已 ban `hbb_common`/`rustdesk`/`rustdesk-server`/`scrap`）。
+6. UI：`/api/screen/allow|start|stop` 路由 + `ui/index.html`「远程屏幕（实验）」区，措辞写清「① 需本机点击允许才推流；② Wayland 暂不支持；③ 真机采集为 Manual-required」。
+7. `tests/phase5.rs` 覆盖 M5.1 帧序严格递增、M5.2 未 allow 的 Start 被拒且计数、M5.3 对端离开→`Idle` 重置 seq、M5.4 45720 拒未配对 dial。**不要**宣称真机远程桌面已可用；M5.5（硬件编码 / 真机注入）未做。
+8. **不越线**：不链接 RustDesk/AGPL/GPL/LGPL 源码；core 无 `cfg(target_os)`、保持 `#![forbid(unsafe_code)]`；真实采集/编码/注入落在 `tetherly-node` 平台模块并 `#[cfg]` 门控；不绑 `0.0.0.0`；配对永不在 45720；OTP 评分不动；日志与提交信息不含验证码/正文/剪贴板。

@@ -33,6 +33,10 @@ deny = [
     { crate = "easytier" },
     { crate = "easytier-core" },
     { crate = "easytier-ffi" },
+    { crate = "hbb_common" },
+    { crate = "rustdesk" },
+    { crate = "rustdesk-server" },
+    { crate = "scrap" },
 ]
 
 [sources]

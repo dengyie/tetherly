@@ -3,6 +3,11 @@
 - (none)
 
 ## Next
+- [ ] Real screen capture: DXGI Desktop Duplication / WGC (Win), core-graphics CGImage (mac), X11 SHM (Linux) — Manual-required
+- [ ] Real screen encoder (OpenH264 / rav1e) as ScreenSource port impl — Manual-required
+- [ ] Real screen presentation (Win HWND BitBlt / macOS CGWindow / Linux portal) — Manual-required
+- [ ] Physical screen p95 frame-interval budget verification — Manual-required
+- [ ] Hardware encoder / real injection (M5.5) — not started
 - [ ] Real ANCS BLE transport on Windows (`windows` GATT), macOS (CoreBluetooth), Linux (BlueZ) — Manual-required
 - [ ] Physical iPhone ANCS p95 < 2s + Bluetooth off-30s-on re-pop check (M4.1/M4.3 device)
 - [ ] M4.4 / M4.5 optional iOS App (LAN 50MB sha256, no VPN / Network Extension)
@@ -14,7 +19,7 @@
 - [ ] Tauri/React `src-tauri` desktop shell (next UI iteration)
 - [ ] Credential Manager / Keychain instead of identity.bin fallback
 - [ ] macOS M1.1（mac 下一迭代）
-- [ ] Phase 5 backlog: Android controlled device, notify.reply, WinFsp mount, persistent file resume, embedded EasyTier FFI
+- [ ] Phase 6 backlog: Android controlled device, notify.reply, WinFsp mount, persistent file resume, embedded EasyTier FFI
 
 ## Done
 - [x] Phase 0 crates + CLI + loopback
@@ -45,3 +50,12 @@
 - [x] UI two-step wizard (ANCS then SPAKE2) + `/api/ancs/connect`, `/api/ancs/allow`, `/api/open`
 - [x] tests/phase4.rs M4.1/M4.2/M4.3 + serial/reassembly/Removed/inert/backoff (10 tests)
 - [x] DEVELOPMENT.md v1.6
+- [x] Phase 5 `tetherly-core::screen` OS-free TMV1 frame + ControlMsg codec + ScreenSender/ScreenReceiver/ScreenState
+- [x] Screen port 45720 + NetError::ScreenRequiresTrust + session_config screen_only + hello caps
+- [x] Mandatory local consent M5.2: ScreenState gate, Start refused before allow, revoke/on_peer_gone
+- [x] `tetherly-node` 14-anchor screen wiring + SystemSource/SystemSink stubs
+- [x] deny.toml ban hbb_common/rustdesk/rustdesk-server/scrap (AGPL red line)
+- [x] UI `/api/screen/allow|start|stop` + `ui/index.html`「远程屏幕（实验）」
+- [x] tests/phase5.rs M5.1–M5.4 (4 tests green)
+- [x] DEVELOPMENT.md v1.7
+- [x] `.codex-memory/` project-state, session-log, decisions (3 ADR-lite), phases/phase-5.md

@@ -83,3 +83,7 @@ path = "tests/phase2.rs"
 [[test]]
 name = "phase3"
 path = "tests/phase3.rs"
+
+[[test]]
+name = "phase5"
+path = "tests/phase5.rs"
