@@ -11,7 +11,7 @@
 
 ## Current Branch
 - `main` @ `https://github.com/dengyie/tetherly`
-- HEAD `5cac066` (CI green on all five jobs).
+- HEAD `901ce7b` (CI green on all five jobs).
 
 ## Last Verified
 - GitHub Actions `ci` run `37997269866`: android, deny, check(ubuntu/windows/macos) all **success**.
