@@ -118,6 +118,12 @@ async fn pair_view() -> (Node, Node, DirGuard, DirGuard) {
         Duration::from_secs(3),
     )
     .await;
+    wait_screen_port(
+        &visitor,
+        host.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
     (host, visitor, ga, gb)
 }
 
