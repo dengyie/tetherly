@@ -1,151 +1,52 @@
 package app.tetherly
 
 import android.content.Context
-import android.util.Log
 import java.io.File
-import java.net.InetSocketAddress
-import java.net.Socket
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Android Phase 1 session: persist identity, dial a desktop, send notify.push.
- * SPAKE2 / Noise run in `libtetherly_android.so` (cargo-ndk). Without the
- * library the listener still captures notifications but does not open a raw
- * TCP (that would fail the desktop handshake). Loopback tests on desktop
- * simulate this path.
+ * Android Phase 1 session: hand the persisted identity + target address to the
+ * native layer, which owns the TCP/Noise loop and reconnects internally. This
+ * class only bridges lifecycle and exposes device_id + connection state.
+ *
+ * The identity is a real Ed25519 keypair generated and persisted by Rust in
+ * app-private storage (`filesDir/tetherly/identity.bin`); Kotlin never handles
+ * secret bytes, and never opens a raw TCP itself.
  */
 class NodeSession(ctx: Context) {
     private val app = ctx.applicationContext
     private val prefs = Prefs(app)
-    private val exec = Executors.newSingleThreadExecutor()
-    private val running = AtomicBoolean(false)
-    val identity: PhoneIdentity = PhoneIdentity.loadOrCreate(File(app.filesDir, "identity.bin"))
+    private val dataDir = File(app.filesDir, "tetherly").also { it.mkdirs() }
+
+    @Volatile
+    private var deviceId: String = ""
+
+    /** Local device_id, or "unavailable" before the first successful attach. */
+    val identity: String
+        get() = if (deviceId.isEmpty()) "unavailable" else deviceId
 
     fun start() {
-        if (!running.compareAndSet(false, true)) return
-        exec.execute {
-            while (running.get()) {
-                try {
-                    connectOnce()
-                } catch (_: Exception) {
-                    Log.i(TAG, "session retry")
-                }
-                try {
-                    Thread.sleep(2_000)
-                } catch (_: InterruptedException) {
-                    return@execute
-                }
-            }
+        if (!NativeBridge.ensureLoaded()) return
+        val addr = NativeBridge.splitAddr(prefs.desktopAddr) ?: return
+        // attach() replaces any previous session internally (the old handle is
+        // stopped). device_id is stable across restarts.
+        val err = NativeBridge.attach(dataDir.absolutePath, addr.first, addr.second, prefs.pin)
+        if (err.isEmpty()) {
+            deviceId = NativeBridge.deviceId()
         }
     }
 
     fun stop() {
-        running.set(false)
+        NativeBridge.stop()
     }
 
-    private fun connectOnce() {
-        NativeBridge.ensureLoaded()
-        if (!NativeBridge.isLoaded) {
-            return
-        }
-        val addr = prefs.desktopAddr
-        val parts = addr.split(":")
-        if (parts.size != 2) return
-        val host = parts[0]
-        val port = parts[1].toIntOrNull() ?: return
-        Socket().use { s ->
-            s.connect(InetSocketAddress(host, port), 5_000)
-            NativeBridge.attach(s, identity, prefs.pin)
-            while (running.get() && s.isConnected) {
-                Thread.sleep(1_000)
-            }
-        }
-    }
+    fun state(): Int = NativeBridge.state()
+
+    fun lastError(): String = NativeBridge.lastError()
 
     fun enqueueNotify(n: PhoneNotify) {
-        exec.execute {
-            try {
-                NativeBridge.sendNotify(n)
-            } catch (_: Exception) {
-                Log.i(TAG, "notify dropped uid=${n.uid} app=${n.appId}")
-            }
-        }
+        NativeBridge.sendNotify(n)
     }
 
-    companion object {
-        private const val TAG = "tetherly"
-    }
-}
-
-data class PhoneNotify(
-    val uid: String,
-    val appId: String,
-    val appName: String,
-    val title: String,
-    val body: String,
-    val ts: Long,
-)
-
-class PhoneIdentity(
-    val idSk: ByteArray,
-    val nSk: ByteArray,
-) {
-    val idPk: ByteArray get() = Wire.sha256(idSk)
-    val deviceId: String get() = Wire.deviceIdFromIdPk(idPk)
-
-    fun persist(file: File) {
-        file.writeBytes(idSk + nSk)
-    }
-
-    companion object {
-        fun loadOrCreate(file: File): PhoneIdentity {
-            if (file.exists() && file.length() == 64L) {
-                val b = file.readBytes()
-                return PhoneIdentity(b.copyOfRange(0, 32), b.copyOfRange(32, 64))
-            }
-            val id = PhoneIdentity(Wire.randomKey(), Wire.randomKey())
-            file.parentFile?.mkdirs()
-            id.persist(file)
-            return id
-        }
-    }
-}
-
-object NativeBridge {
-    @Volatile
-    var isLoaded: Boolean = false
-        private set
-
-    fun ensureLoaded() {
-        if (isLoaded) return
-        try {
-            System.loadLibrary("tetherly_android")
-            isLoaded = true
-        } catch (_: UnsatisfiedLinkError) {
-            isLoaded = false
-        }
-    }
-
-    fun attach(socket: Socket, identity: PhoneIdentity, pin: String) {
-        if (isLoaded) {
-            nativeAttach(socket, identity.idSk, identity.nSk, pin)
-        }
-    }
-
-    fun sendNotify(n: PhoneNotify) {
-        if (isLoaded) {
-            nativeSendNotify(n.uid, n.appId, n.appName, n.title, n.body, n.ts)
-        }
-    }
-
-    private external fun nativeAttach(socket: Socket, idSk: ByteArray, nSk: ByteArray, pin: String)
-    private external fun nativeSendNotify(
-        uid: String,
-        appId: String,
-        appName: String,
-        title: String,
-        body: String,
-        ts: Long,
-    )
+    /** Quick replies typed on the desktop, drained exactly once. */
+    fun takeReplies(): List<PhoneReply> = NativeBridge.takeReplies()
 }

@@ -10,6 +10,9 @@ pub mod kdf;
 pub mod noise;
 pub mod pairbind;
 pub mod spake;
+// Frozen Phase 0 test vectors carry fixed secret seeds; keep them out of the
+// shipped library and available only to tests.
+#[cfg(test)]
 pub mod vectors;
 
 pub use aead::{aead_open, aead_seal, counter_nonce};

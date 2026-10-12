@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 use tetherly_core::{CursorSeat, InputKind};
-use tetherly_net::session::{dial_session, SessionConfig, HANDSHAKE_TIMEOUT, INPUT_PORT};
+use tetherly_net::session::{dial_session, SessionConfig, HANDSHAKE_TIMEOUT};
 use tetherly_net::NetError;
 use tetherly_node::{Node, NodeConfig, OverlayConfig};
 use tokio::net::TcpStream;
@@ -57,6 +57,9 @@ fn cfg(dir: PathBuf, name: &str) -> NodeConfig {
         ancs: None,
         ancs_peripheral: "test-iphone".into(),
         screen_source: None,
+        screen_codec: None,
+        screen_sink: None,
+        input_sink: None,
     }
 }
 
@@ -126,6 +129,7 @@ async fn unpaired_45719_refuses_pairing() {
         hello_override: None,
         resume_only: true,
         screen_only: false,
+        caps: None,
     };
     let err = match dial_session(stream, addr, &cfg).await {
         Err(e) => e,
@@ -135,7 +139,9 @@ async fn unpaired_45719_refuses_pairing() {
         matches!(err, NetError::InputRequiresTrust),
         "unpaired 45719 must refuse pairing, got {err}"
     );
-    assert_ne!(host.input_port(), INPUT_PORT);
+    // The listener bound an ephemeral port (config asked for 0); a zero here
+    // would mean it never came up. `input_addr` dials this same port.
+    assert_ne!(host.input_port(), 0, "input listener did not bind");
     let _ = SocketAddr::from(([127, 0, 0, 1], host.input_port()));
 }
 

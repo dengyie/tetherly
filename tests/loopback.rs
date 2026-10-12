@@ -6,7 +6,7 @@ use std::time::Duration;
 use tetherly_core::hello::{encode_b64_32, Hello};
 use tetherly_core::ports::MemoryTrustStore;
 use tetherly_core::session::LockoutTable;
-use tetherly_core::{CoreError, DeviceId, ManualClock, TcpLimiter};
+use tetherly_core::{CoreError, DeviceId, ManualClock, TcpLimiter, TrustStore};
 use tetherly_crypto::Identity;
 use tetherly_net::codec::{read_len_prefixed, write_len_prefixed};
 use tetherly_net::session::{
@@ -34,6 +34,7 @@ fn cfg(identity: Identity, name: &str, pin: Option<[u8; 8]>) -> SessionConfig {
         hello_override: None,
         resume_only: false,
         screen_only: false,
+        caps: None,
     }
 }
 
@@ -137,6 +138,7 @@ async fn m0_3_paired_ping_and_reconnect_without_re_pair() {
         hello_override: None,
         resume_only: false,
         screen_only: false,
+        caps: None,
     };
     let server = tokio::spawn(async move {
         let (stream, addr) = listener.accept().await.unwrap();
@@ -169,6 +171,7 @@ async fn m0_3_paired_ping_and_reconnect_without_re_pair() {
         hello_override: None,
         resume_only: false,
         screen_only: false,
+        caps: None,
     };
     let peer2 = SessionConfig {
         identity: Identity::from_secrets([0x61; 32], [0x62; 32]),
@@ -184,6 +187,7 @@ async fn m0_3_paired_ping_and_reconnect_without_re_pair() {
         hello_override: None,
         resume_only: false,
         screen_only: false,
+        caps: None,
     };
     let server = tokio::spawn(async move {
         let (stream, addr) = listener.accept().await.unwrap();
@@ -195,6 +199,74 @@ async fn m0_3_paired_ping_and_reconnect_without_re_pair() {
     let mut sess = dial_session(stream, addr, &peer2).await.unwrap();
     assert_eq!(sess.ping_pong(9).await.unwrap(), 9);
     server.await.unwrap();
+}
+
+/// A peer that is already trusted (so `dispose_hello` says `ResumeNoise`, no
+/// PairBind) must still prove it holds the trusted Noise static key. Otherwise
+/// anyone can replay the trusted peer's public `Hello` and run IK with their
+/// own static to be accepted as that peer (remote input/screen/notify).
+#[tokio::test]
+async fn trusted_hello_with_a_different_noise_static_is_rejected() {
+    let (listener, port) = bind().await;
+    // `b` is the trusted peer; `evil` is the attacker with a different static.
+    let a = Identity::from_secrets([0x51; 32], [0x52; 32]);
+    let b = Identity::from_secrets([0x61; 32], [0x62; 32]);
+    let evil = Identity::from_secrets([0xE1; 32], [0xE2; 32]);
+
+    let host_trust = Arc::new(Mutex::new(MemoryTrustStore::default()));
+    // Pre-trust b's real Hello, as if a prior pairing had completed.
+    {
+        let mut store = host_trust.lock().unwrap();
+        store
+            .put(tetherly_core::TrustedPeer {
+                device_id: b.device_id().clone(),
+                id_pk: *b.id_pk(),
+                n_pk: *b.n_pk(),
+                alias: "peer".into(),
+                paired_at: 1,
+                revoked: false,
+            })
+            .unwrap();
+    }
+
+    let host_for_server = SessionConfig {
+        identity: a,
+        name: "host".into(),
+        platform: "linux".into(),
+        trust: host_trust.clone(),
+        lockout: Arc::new(Mutex::new(LockoutTable::default())),
+        tcp_limiter: Arc::new(Mutex::new(TcpLimiter::default())),
+        pin: None,
+        pin_created_ms: 1,
+        clock: Arc::new(ManualClock::new(2_000)),
+        handshake_timeout: HANDSHAKE_TIMEOUT,
+        hello_override: None,
+        resume_only: false,
+        screen_only: false,
+        caps: None,
+    };
+
+    // The attacker presents b's real (trusted) Hello but runs Noise with its
+    // own static key.
+    let mut evil_cfg = cfg(evil, "peer", None);
+    evil_cfg.hello_override = Some(b.hello("peer", "linux", &["notify"]));
+
+    let server = tokio::spawn(async move {
+        let (stream, addr) = listener.accept().await.unwrap();
+        accept_session(stream, addr, &host_for_server).await
+    });
+    let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let addr = stream.peer_addr().unwrap();
+    let client = dial_session(stream, addr, &evil_cfg).await;
+    assert!(
+        client.is_err(),
+        "an impersonator with a different Noise static must be rejected"
+    );
+    let server_res = server.await.unwrap();
+    assert!(
+        server_res.is_err(),
+        "responder must reject the mismatched initiator static"
+    );
 }
 
 #[tokio::test]

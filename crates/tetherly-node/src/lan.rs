@@ -33,6 +33,19 @@ pub fn control_bind_addrs(port: u16) -> Vec<SocketAddr> {
 }
 
 pub async fn bind_many(addrs: &[SocketAddr]) -> std::io::Result<Vec<TcpListener>> {
+    let listeners = bind_many_optional(addrs).await;
+    if listeners.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "no LAN address bound",
+        ));
+    }
+    Ok(listeners)
+}
+
+/// Same guards as [`bind_many`] but tolerates an empty result. Data ports
+/// (file/input/screen) are optional: a missing interface is not fatal.
+pub async fn bind_many_optional(addrs: &[SocketAddr]) -> Vec<TcpListener> {
     let mut listeners = Vec::new();
     for addr in addrs {
         if is_unspecified_bind(addr.ip()) {
@@ -53,13 +66,7 @@ pub async fn bind_many(addrs: &[SocketAddr]) -> std::io::Result<Vec<TcpListener>
             }
         }
     }
-    if listeners.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AddrNotAvailable,
-            "no LAN address bound",
-        ));
-    }
-    Ok(listeners)
+    listeners
 }
 
 /// Overlay listen set. Explicit EasyTier TUN IPs only; still never `0.0.0.0`.

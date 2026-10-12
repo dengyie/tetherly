@@ -30,10 +30,34 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 getrandom.workspace = true
 arboard.workspace = true
+png = "0.18"
+zstd = "0.13"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Security_Credentials",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
 ] }
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Com",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Keychain generic-password storage for the identity secret (src/cred/macos.rs).
+security-framework = "3"
+security-framework-sys = "2"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Secret Service (libsecret) storage over the session bus (src/cred/linux.rs).
+# `rt-tokio-crypto-rust` uses the pure-Rust crypto backend (no openssl).
+secret-service = { version = "4", default-features = false, features = ["rt-tokio-crypto-rust"] }

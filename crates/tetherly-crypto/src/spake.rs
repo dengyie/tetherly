@@ -30,6 +30,19 @@ impl SpakeRole {
         id_b: &[u8],
     ) -> Result<Self, CryptoError> {
         let password = derive_pair_password(pin_ascii, id_pk_left, id_pk_right)?;
+        Ok(Self::start_with_password(is_alice, password, id_a, id_b))
+    }
+
+    /// Like [`SpakeRole::start`] but with the pair password already derived.
+    /// Argon2id is deliberately expensive (64 MiB, t=3); callers on an async
+    /// runtime compute it with [`derive_pair_password`] inside `spawn_blocking`
+    /// and pass the result here, so the executor thread is never blocked.
+    pub fn start_with_password(
+        is_alice: bool,
+        password: [u8; 32],
+        id_a: &[u8],
+        id_b: &[u8],
+    ) -> Self {
         let (state, outbound) = if is_alice {
             Spake2::<Ed25519Group>::start_a(
                 &Password::new(password),
@@ -43,11 +56,11 @@ impl SpakeRole {
                 &SpakeIdentity::new(id_b),
             )
         };
-        Ok(Self {
+        Self {
             state: Some(state),
             outbound,
             password,
-        })
+        }
     }
 
     pub fn outbound_message(&self) -> &[u8] {
@@ -97,8 +110,15 @@ mod tests {
         let b = SpakeRole::start(false, b"00000000", &b_pk, &a_pk, b"A", b"B").unwrap();
         let a_msg = a.outbound_message().to_vec();
         let b_msg = b.outbound_message().to_vec();
-        if let (Ok(x), Ok(y)) = (a.finish(&b_msg), b.finish(&a_msg)) {
-            assert_ne!(x, y);
+        // A wrong PIN must never yield the same key. Either `finish` fails
+        // outright (SPAKE2 confirms the transcript) or the two keys differ;
+        // an `Ok(x) == Ok(y)` would be a total break.
+        let ra = a.finish(&b_msg);
+        let rb = b.finish(&a_msg);
+        match (ra, rb) {
+            (Ok(x), Ok(y)) => assert_ne!(x, y, "wrong PIN produced equal keys"),
+            // At least one side must reject; both agreeing to fail is fine.
+            (Err(_), _) | (_, Err(_)) => {}
         }
     }
 }

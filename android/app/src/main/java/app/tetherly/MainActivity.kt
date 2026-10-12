@@ -53,7 +53,24 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= 33) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
-        root.addView(tv("device_id: " + TetherlyApp.instance.session.identity.deviceId))
+        val status = tv("device_id: " + TetherlyApp.instance.session.identity)
+        root.addView(status)
+        // Refresh the status line as the native session connects/reconnects.
+        status.postDelayed(object : Runnable {
+            override fun run() {
+                val s = TetherlyApp.instance.session
+                val code = s.state()
+                val label = when (code) {
+                    0 -> "未连接"
+                    1 -> "连接中"
+                    2 -> "已连接"
+                    3 -> "错误:" + s.lastError()
+                    else -> "本机库未加载"
+                }
+                status.text = "device_id: " + s.identity + " · " + label
+                status.postDelayed(this, 1_000)
+            }
+        }, 1_000)
         setContentView(ScrollView(this).apply { addView(root) })
     }
 }

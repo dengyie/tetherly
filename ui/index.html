@@ -73,6 +73,10 @@
       <div id="cands"><div class="empty">等待通知。码不会出现在日志里。</div></div>
     </section>
     <section style="margin-top:16px">
+      <h2>收到的回复</h2>
+      <div id="replies"><div class="empty">没有待处理的回复。</div></div>
+    </section>
+    <section style="margin-top:16px">
       <h2>待确认文件</h2>
       <div id="files"><div class="empty">没有待接收文件。</div></div>
     </section>
@@ -117,7 +121,16 @@
         <button id="screenstart" type="button">② 开始推流</button>
         <button id="screenstop" type="button">停止</button>
       </div>
-      <div class="hint">需本机点击「允许」才会推流；Wayland 暂不支持；真机采集为 Manual-required。</div>
+      <div class="hint">需本机点击「允许」才会推流；Wayland 暂不支持；Windows 真机采集/编码/呈现已可用（macOS/Linux 下一迭代）。</div>
+    </section>
+    <section style="margin-top:16px">
+      <h2>键鼠共享(实验)</h2>
+      <div id="input" class="hint">状态:读取中...</div>
+      <div class="row" style="margin-top:8px">
+        <button id="inputstart" type="button">连接键鼠通道</button>
+        <button id="inputstop" type="button">断开键鼠通道</button>
+      </div>
+      <div class="hint">连接后把本机鼠标移到屏幕右缘即可控制对端;断开或对端离线时键盘鼠标立即回到本机。仅 Windows 真机注入可用。</div>
     </section>
     <section style="margin-top:16px">
       <h2>网络</h2>
@@ -168,7 +181,38 @@ function render(s) {
       op.onclick = () => api("/api/open", { id: x.id });
       actions.appendChild(op);
     }
+    // Quick reply, sent back to the phone that owns this notification.
+    const replyRow = el('<div class="row reply"></div>');
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "快速回复…";
+    input.maxLength = 4096;
+    const send = el('<button type="button">回复</button>');
+    send.onclick = async () => {
+      const text = input.value;
+      if (!text.trim()) return;
+      const r = await api("/api/reply", { id: x.id, text });
+      if (r && r.ok) input.value = "";
+    };
+    input.onkeydown = (e) => { if (e.key === "Enter") send.click(); };
+    replyRow.appendChild(input); replyRow.appendChild(send);
+    card.appendChild(replyRow);
     c.appendChild(card);
+  }
+  // Replies received from a peer, awaiting hand-off on this machine.
+  const rc = $("replies");
+  if (rc) {
+    rc.innerHTML = "";
+    if (!s.replies.length) rc.appendChild(el('<div class="empty">没有待处理的回复。</div>'));
+    for (const x of s.replies) {
+      const card = el('<div class="card"><div><div class="title"></div><div class="meta"></div></div><div class="row"></div></div>');
+      card.querySelector(".title").textContent = x.app_id;
+      card.querySelector(".meta").textContent = "uid " + x.uid + " · " + x.source;
+      const take = el('<button type="button">取出</button>');
+      take.onclick = () => api("/api/reply/take", { id: x.id });
+      card.querySelector(".row").appendChild(take);
+      rc.appendChild(card);
+    }
   }
   const f = $("files");
   f.innerHTML = "";
@@ -203,12 +247,17 @@ function render(s) {
   if (oa) {
     oa.textContent = (s.open_apps && s.open_apps.length) ? s.open_apps.join("、") : "（空）";
   }
-  const sc = $("screen");
+const sc = $("screen");
   if (sc) {
     const st = s.screen || {};
-    sc.textContent = "状态：" + (st.state || "idle")
+    sc.textContent = "状态:" + (st.state || "idle")
       + " · 已发送 " + (st.sent || 0)
       + " · 拒绝 " + (st.refused || 0);
+  }
+  const inp = $("input");
+  if (inp) {
+    inp.textContent = (s.input_channel ? "通道已连接" : "通道未连接")
+      + " · 光标:" + (s.input_seat === "remote" ? "对端" : "本机");
   }
 }
 $("mkpin").onclick = async () => {
@@ -221,6 +270,8 @@ $("openadd").onclick = () => api("/api/ancs/allow", { app_id: $("openapp").value
 $("screenallow").onclick = () => api("/api/screen/allow", {});
 $("screenstart").onclick = () => api("/api/screen/start", {});
 $("screenstop").onclick = () => api("/api/screen/stop", {});
+$("inputstart").onclick = () => api("/api/input/start", {});
+$("inputstop").onclick = () => api("/api/input/stop", {});
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
 }

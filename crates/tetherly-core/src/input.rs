@@ -415,18 +415,6 @@ impl InputServer {
         None
     }
 
-    pub fn local_button(&mut self, mask: u8, down: bool) {
-        if self.seat == CursorSeat::Remote {
-            self.push(InputKind::Button { mask, down });
-        }
-    }
-
-    pub fn local_wheel(&mut self, dx: i16, dy: i16) {
-        if self.seat == CursorSeat::Remote {
-            self.push(InputKind::Wheel { dx, dy });
-        }
-    }
-
     pub fn local_key(&mut self, code: u16, down: bool, mods: u8) {
         if self.seat == CursorSeat::Remote {
             self.push(InputKind::Key { code, down, mods });

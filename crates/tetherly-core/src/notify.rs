@@ -5,7 +5,7 @@
 use crate::dedup::{NotifyDeduper, NotifyKey, NotifyLimiter};
 use crate::device_id::DeviceId;
 use crate::error::CoreError;
-use crate::frame::{hex_sha256, NotifyDismiss, NotifyPush, CANDIDATE_TTL_MS};
+use crate::frame::{hex_sha256, NotifyDismiss, NotifyPush, NotifyReply, CANDIDATE_TTL_MS};
 use crate::otp::{DefaultOtpExtractor, OtpExtractor};
 use crate::ports::{ActionId, Clock, PhoneNotification};
 use std::collections::HashMap;
@@ -91,6 +91,39 @@ pub struct NotifyHub {
     deduper: NotifyDeduper,
     limiter: NotifyLimiter,
     candidates: HashMap<String, Candidate>,
+    /// Inbound quick replies awaiting hand-off to the OS (a phone turns each
+    /// into the notification's reply action). Keyed by `reply_id(...)`.
+    replies: HashMap<String, QueuedReply>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct QueuedReply {
+    source: DeviceId,
+    app_id: String,
+    uid: String,
+    text: String,
+}
+
+impl std::fmt::Debug for QueuedReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The text is user content; never print it (same rule as a body).
+        f.debug_struct("QueuedReply")
+            .field("source", &self.source)
+            .field("app_id", &self.app_id)
+            .field("uid", &self.uid)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A queued inbound reply. `ReplyView` carries no text so list views and their
+/// `Debug`/JSON never echo user content; the text is released only by
+/// `take_reply*`, which hands it straight to the caller that will act on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyView {
+    pub id: String,
+    pub source: DeviceId,
+    pub app_id: String,
+    pub uid: String,
 }
 
 #[derive(Debug)]
@@ -258,6 +291,74 @@ impl NotifyHub {
     pub fn get(&self, id: &str) -> Option<&Candidate> {
         self.candidates.get(id)
     }
+
+    /// Record a reply that arrived over the wire. Last write wins for the same
+    /// notification, so a re-delivered reply is idempotent rather than a
+    /// duplicate quick-reply. Returns false when the text is empty after
+    /// trimming (there is nothing to send).
+    pub fn ingest_reply(&mut self, source: &DeviceId, reply: NotifyReply) -> bool {
+        let text = reply.text.trim().to_string();
+        if text.is_empty() {
+            return false;
+        }
+        let id = reply_id(source, &reply.app_id, &reply.uid);
+        self.replies.insert(
+            id,
+            QueuedReply {
+                source: source.clone(),
+                app_id: reply.app_id,
+                uid: reply.uid,
+                text,
+            },
+        );
+        true
+    }
+
+    /// Take a reply by id exactly once, returning both the addressing view and
+    /// the text. Single-use so a phone never fires the same quick-reply twice.
+    pub fn take_reply_id(&mut self, id: &str) -> Option<(ReplyView, String)> {
+        self.replies.remove(id).map(|q| {
+            (
+                ReplyView {
+                    id: id.to_string(),
+                    source: q.source,
+                    app_id: q.app_id,
+                    uid: q.uid,
+                },
+                q.text,
+            )
+        })
+    }
+
+    /// Take a reply for one notification by its natural key, exactly once.
+    pub fn take_reply(&mut self, source: &DeviceId, app_id: &str, uid: &str) -> Option<String> {
+        let id = reply_id(source, app_id, uid);
+        self.replies.remove(&id).map(|q| q.text)
+    }
+
+    /// Snapshot of pending replies for the local UI. Text is intentionally
+    /// omitted — the UI shows that a reply is queued, not its contents.
+    pub fn reply_views(&self) -> Vec<ReplyView> {
+        self.replies
+            .iter()
+            .map(|(id, q)| ReplyView {
+                id: id.clone(),
+                source: q.source.clone(),
+                app_id: q.app_id.clone(),
+                uid: q.uid.clone(),
+            })
+            .collect()
+    }
+}
+
+pub fn reply_id(source: &DeviceId, app_id: &str, uid: &str) -> String {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(source.as_str().as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(app_id.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(uid.as_bytes());
+    hex_sha256(&buf)
 }
 
 pub fn candidate_id(source: &DeviceId, app_id: &str, uid: &str, ts: u64) -> String {
@@ -341,5 +442,64 @@ mod tests {
             hub.ingest_push(source, p, &clock),
             IngestOutcome::RateLimited
         ));
+    }
+
+    #[test]
+    fn reply_is_taken_once_and_scoped_to_its_notification() {
+        let mut hub = NotifyHub::default();
+        let phone = DeviceId::from_id_pk(&[7u8; 32]);
+        let other = DeviceId::from_id_pk(&[8u8; 32]);
+        let reply = NotifyReply {
+            uid: "42".into(),
+            app_id: "com.example.sms".into(),
+            text: "  收到,马上回电  ".into(),
+        };
+        assert!(hub.ingest_reply(&phone, reply.clone()));
+        assert_eq!(hub.reply_views().len(), 1);
+        let (view, text) = hub
+            .take_reply_id(&reply_id(&phone, "com.example.sms", "42"))
+            .expect("queued");
+        assert_eq!(view.app_id, "com.example.sms");
+        assert_eq!(view.uid, "42");
+        // Trimmed on ingest.
+        assert_eq!(text, "收到,马上回电");
+        // Taken exactly once.
+        assert!(hub
+            .take_reply_id(&reply_id(&phone, "com.example.sms", "42"))
+            .is_none());
+        assert!(hub.reply_views().is_empty());
+        // A different source must never see it.
+        assert!(hub.ingest_reply(&phone, reply.clone()));
+        assert!(hub.take_reply(&other, "com.example.sms", "42").is_none());
+    }
+
+    #[test]
+    fn blank_reply_is_rejected_and_last_write_wins() {
+        let mut hub = NotifyHub::default();
+        let phone = DeviceId::from_id_pk(&[7u8; 32]);
+        assert!(!hub.ingest_reply(
+            &phone,
+            NotifyReply {
+                uid: "42".into(),
+                app_id: "sms".into(),
+                text: "   ".into(),
+            }
+        ));
+        assert!(hub.reply_views().is_empty());
+        for text in ["first", "second"] {
+            assert!(hub.ingest_reply(
+                &phone,
+                NotifyReply {
+                    uid: "42".into(),
+                    app_id: "sms".into(),
+                    text: text.into(),
+                }
+            ));
+        }
+        assert_eq!(hub.reply_views().len(), 1, "no duplicate queue entries");
+        assert_eq!(
+            hub.take_reply(&phone, "sms", "42").as_deref(),
+            Some("second")
+        );
     }
 }

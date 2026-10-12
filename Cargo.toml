@@ -6,6 +6,7 @@ members = [
     "crates/tetherly-crypto",
     "crates/tetherly-net",
     "crates/tetherly-node",
+    "crates/tetherly-android",
     "bins/tetherly-cli",
 ]
 
@@ -22,6 +23,7 @@ tetherly-core = { path = "crates/tetherly-core", version = "0.1.0" }
 tetherly-crypto = { path = "crates/tetherly-crypto", version = "0.1.0" }
 tetherly-net = { path = "crates/tetherly-net", version = "0.1.0" }
 tetherly-node = { path = "crates/tetherly-node", version = "0.1.0" }
+tetherly-android = { path = "crates/tetherly-android", version = "0.1.0" }
 
 argon2 = "0.5"
 base64 = "0.22"
@@ -87,3 +89,7 @@ path = "tests/phase3.rs"
 [[test]]
 name = "phase5"
 path = "tests/phase5.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -53,6 +53,9 @@ fn cfg(dir: PathBuf, name: &str, platform: &str) -> NodeConfig {
         ancs: None,
         ancs_peripheral: "test-iphone".into(),
         screen_source: None,
+        screen_codec: None,
+        screen_sink: None,
+        input_sink: None,
     }
 }
 
@@ -271,7 +274,10 @@ async fn m1_5_reconnect_without_repair() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn m1_6_logs_do_not_contain_otp_digits() {
-    let buf = tracing_capture::Capture::install();
+    // The default EnvFilter hides debug/trace, which is exactly where a leak
+    // would land, so widen it to the most verbose level: every event the
+    // ingest path can emit is captured.
+    let buf = tracing_capture::Capture::install_with("trace");
     let (phone, desk, _g1, _g2) = pair_phone_desktop().await;
     phone
         .send_notify(desk.identity().device_id(), otp_push("uid-log"))
@@ -282,6 +288,13 @@ async fn m1_6_logs_do_not_contain_otp_digits() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let dumped = buf.dump();
+    // Assert the ingest actually logged, so a missing subscriber can never make
+    // the redaction checks below pass vacuously.
+    assert!(
+        dumped.contains("notify ingested"),
+        "ingest must log (capture was empty), dumping {} bytes",
+        dumped.len()
+    );
     assert!(!dumped.contains(OTP), "logs leaked OTP digits");
     assert!(!dumped.contains(OTP_BODY), "logs leaked notify body");
     phone.shutdown();
@@ -347,7 +360,81 @@ async fn m1_7_file_reject_then_accept_sha256() {
     b.shutdown();
 }
 
-/// Minimal tracing subscriber that records formatted events for M1.6.
+/// M1.7b — an interrupted incoming transfer resumes from a persisted,
+/// chunk-aligned offset after a restart, sending only the missing tail.
+#[tokio::test(flavor = "multi_thread")]
+async fn m1_8_file_resumes_from_persisted_offset() {
+    let (a_dir, _g1) = temp_dir("resume-a");
+    let (b_dir, _g2) = temp_dir("resume-b");
+    // A's device id is needed to forge the receiver's resume sidecar before B
+    // starts (the sidecar is what the restart-scan reads).
+    let a = Node::start(cfg(a_dir, "a", "windows")).unwrap();
+    let a_id = a.identity().device_id().clone();
+
+    let chunk = tetherly_core::FILE_CHUNK;
+    let payload: Vec<u8> = (0..(3 * chunk + 5000)).map(|i| (i % 251) as u8).collect();
+    let total = payload.len() as u64;
+    // Content-addressed id must match `offer_and_send_bytes`.
+    let transfer_id = format!("tr_{}", &hex_sha256(&payload)[..16]);
+    let kept = 2 * chunk; // chunk-aligned partial the receiver already holds
+
+    // Seed B's inbox with the durable partial + sidecar, then start B so the
+    // restart scan rebuilds the resume table.
+    let inbox = b_dir.join("inbox");
+    std::fs::create_dir_all(&inbox).unwrap();
+    std::fs::write(inbox.join(format!(".{transfer_id}.part")), &payload[..kept]).unwrap();
+    std::fs::write(
+        inbox.join(format!(".{transfer_id}.resume.json")),
+        format!(
+            r#"{{"device_id":"{}","total":{},"offset":{}}}"#,
+            a_id.as_str(),
+            total,
+            kept
+        ),
+    )
+    .unwrap();
+
+    let b = Node::start(cfg(b_dir.clone(), "b", "windows")).unwrap();
+    a.spawn_listeners().await.unwrap();
+    b.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    a.set_pin(pin);
+    b.set_pin(pin);
+    a.dial(b.control_addr()).await.unwrap();
+    wait_live(&a, Duration::from_secs(25)).await;
+    wait_live(&b, Duration::from_secs(25)).await;
+    let start = std::time::Instant::now();
+    while !a.live_peers().iter().any(|p| p.file_port.is_some())
+        || !b.live_peers().iter().any(|p| p.file_port.is_some())
+    {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("fileport caps.update never arrived");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let peer_b = b.identity().device_id().clone();
+    let id = a
+        .offer_and_send_bytes(&peer_b, "resume.bin", &payload, false)
+        .await
+        .unwrap();
+    assert_eq!(id, transfer_id, "transfer id must be content-addressed");
+    wait_offered(&b, Duration::from_secs(3)).await;
+    // The receiver saw the offer and knows it can resume at the persisted offset.
+    let offered = b.offered_files();
+    assert_eq!(offered[0].resume_from, Some(kept as u64));
+    // Nothing final is written before the user confirms.
+    assert!(!inbox.join("resume.bin").exists());
+
+    b.user_accept_file(&id).await.unwrap();
+    let got = wait_inbox(&b_dir, "resume.bin", Duration::from_secs(20)).await;
+    assert_eq!(hex_sha256(&got), hex_sha256(&payload));
+    // The partial + sidecar are cleaned up once the transfer completes.
+    assert!(!inbox.join(format!(".{transfer_id}.part")).exists());
+    assert!(!inbox.join(format!(".{transfer_id}.resume.json")).exists());
+    a.shutdown();
+    b.shutdown();
+}
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
@@ -357,9 +444,12 @@ mod tracing_capture {
     pub struct Capture(Arc<Mutex<Vec<u8>>>);
 
     impl Capture {
-        pub fn install() -> Self {
+        /// Install with an explicit max level. Redaction tests use `trace` so
+        /// a leak at any level is captured rather than filtered away.
+        pub fn install_with(level: &str) -> Self {
             let cap = Capture(Arc::new(Mutex::new(Vec::new())));
             let _ = tracing_subscriber::fmt()
+                .with_max_level(level.parse().unwrap_or(tracing::Level::TRACE))
                 .with_writer(cap.clone())
                 .with_ansi(false)
                 .try_init();

@@ -3,25 +3,29 @@
 - (none)
 
 ## Next
-- [ ] Real screen capture: DXGI Desktop Duplication / WGC (Win), core-graphics CGImage (mac), X11 SHM (Linux) — Manual-required
-- [ ] Real screen encoder (OpenH264 / rav1e) as ScreenSource port impl — Manual-required
-- [ ] Real screen presentation (Win HWND BitBlt / macOS CGWindow / Linux portal) — Manual-required
-- [ ] Physical screen p95 frame-interval budget verification — Manual-required
+- [ ] DXGI-side real pixel capture + Windows cross-desktop p95 verification (AdbSource cross-device loop landed+verified v1.8) — Manual-required
+- [ ] Real open screen encoder (OpenH264 / rav1e) as `ScreenCodec` port impl — Manual-required
+- [ ] macOS screen capture/present (core-graphics CGImage / CGWindow), Linux X11 SHM (Wayland portal) — Manual-required
+- [ ] Android MediaProjection capture node (aarch64-linux-android cross + JNI) — candidate new 立项, superseded by AdbSource for now
 - [ ] Hardware encoder / real injection (M5.5) — not started
 - [ ] Real ANCS BLE transport on Windows (`windows` GATT), macOS (CoreBluetooth), Linux (BlueZ) — Manual-required
 - [ ] Physical iPhone ANCS p95 < 2s + Bluetooth off-30s-on re-pop check (M4.1/M4.3 device)
 - [ ] M4.4 / M4.5 optional iOS App (LAN 50MB sha256, no VPN / Network Extension)
 - [ ] Physical Android cellular M2.1 p95 and Wi-Fi→overlay failover
 - [ ] Real OS cursor/key injection (Win SendInput / macOS / Wayland portal+libei) + 100 dual-desktop round-trips (M3.1 device)
-- [ ] `libtetherly_android.so` (cargo-ndk) + real Ed25519 JNI identity
-- [ ] Physical Android M1.1 p95 and Win+Android 8h soak
+- [ ] Physical Android M1.1 p95 timing harness + Win+Android 8h soak (`.so` now built v1.10; on-device ping/pong p95 measured 15–16ms via android_probe bench on 2 phones)
+- [ ] Real APK end-to-end (Kotlin NLService → JNI → live session) on physical phone — Manual-required (APK built+installed+CONNECTED verified v1.10; NSList/RemoteInput interaction still device-manual)
+- [ ] notify.reply on-device RemoteInput fire (protocol+inbox CI-verified v1.11; firing the notification's own reply action needs system permission/foreground, device-manual)
 - [ ] True Notepad UIA insert (M1.3 device)
 - [ ] Tauri/React `src-tauri` desktop shell (next UI iteration)
-- [ ] Credential Manager / Keychain instead of identity.bin fallback
-- [ ] macOS M1.1（mac 下一迭代）
-- [ ] Phase 6 backlog: Android controlled device, notify.reply, WinFsp mount, persistent file resume, embedded EasyTier FFI
+- [ ] macOS M1.1(mac 下一迭代)
+- [ ] Phase 6 backlog: Android controlled device, WinFsp mount, embedded EasyTier FFI
 
 ## Done
+- [x] Peer-input hardening (v1.15): `ReplayGuard::check_and_record` `msg_id + 1024` overflow on a peer `u64` (debug panic / release accepts ancient id) → `saturating_add`; `ScreenAssembler::push` `total - off` underflow on a lying fragment `idx` (remote panic on 45720) → `checked_mul` + `off < total` guard; +3 regression tests, 205 green
+- [x] macOS Keychain + Linux libsecret credential backends (v1.14): `cred/{windows,macos,linux,other}.rs`; each compiles for its target (probe-verified: caught a Linux lifetime bug); real vault runtime Manual-required; CI macos/ubuntu build them
+- [x] Windows Credential Manager identity storage (v1.13): generic credential `tetherly.identity:<device_id>` + public `identity.ref`; old `identity.bin` auto-migrated; installed-dir-only gate keeps tests out of the real vault; real CredRead/CredWrite round-trip test green on Windows
+- [x] File cross-process resume (v1.12): content-addressed `transfer_id` + `TFL2` start offset + `.part`/`.resume.json` sidecar; `tests/phase1::m1_8` CI green
 - [x] Phase 0 crates + CLI + loopback
 - [x] PairBind direction nonces
 - [x] Trust-after-Noise + Clock + handshake timeout + TCP limiter
@@ -59,3 +63,29 @@
 - [x] tests/phase5.rs M5.1–M5.4 (4 tests green)
 - [x] DEVELOPMENT.md v1.7
 - [x] `.codex-memory/` project-state, session-log, decisions (3 ADR-lite), phases/phase-5.md
+- [x] Windows real screen capture `DxgiSource` (DXGI Desktop Duplication, WAIT_TIMEOUT→None)
+- [x] Real screen encoder path `ZstdCodec` (lossless level 3) + `EncodedSource<S>` decorator (raw fallback)
+- [x] Real screen presentation `SystemSink` (GDI CreateDIBSection 32bpp top-down + synchronous BitBlt)
+- [x] `TMF1` fragmentation (`ScreenFrame::to_frames`) + `ScreenAssembler::push` reassembly + client decompress chain
+- [x] p95 frame-interval `ScreenIntervalTracker` + `Node::screen_latency_p95_us()` + UI field
+- [x] `tetherly run` injects `SystemSink` + 16ms frame pump
+- [x] DEVELOPMENT.md v1.8 + `.codex-memory/` + Obsidian + MOC/router v1.8
+- [x] Real-machine verification: run bin on this Windows host, verify DXGI capture + BitBlt present + p95
+- [x] `AdbSource` (adb screencap → PNG → BGRA8, idle dedup) + bin `--screen-adb` + per-node port flags
+- [x] Cross-device E2E on cloud phones: Fold 720x1280 → zstd/TMF1/45720 → GDI window; 1060/1063 frames, 0 dropped, pixels ±8 97.6%, p95 0.9–1.45s
+- [x] Fix UI visitor flow: `/api/screen/start` auto-dials screen channel; `screen_rx_stats` in Snapshot
+- [x] Perf pass: persistent zstd contexts, offset assembler (-57%), single-copy present, release LTO profile, `bench_screen` example
+- [x] AdbSource persistent stream (PNG default per bandwidth measurements, TETHERLY_ADB_RAW=1 opt-in)
+- [x] Review fixes: ScreenSource::interrupt + grab timeout, pump backoff (no permanent break), GDI leak fix, pumped present window (resize live-verified), viewer error logging, adb parse unit tests (177 green)
+- [x] Phase 3 real-machine chain (v1.9): SystemInputSink SendInput + controller LL-hook capture (keyboard hook seat-gated) + probe-verified cursor injection; M5.1 pixel capture closed via injection
+- [x] New crate `tetherly-android` (cdylib+rlib): real Ed25519/X25519 identity + `identity.bin`/`trusted.json` + Noise session client (dial/SPAKE2/IK-resume/notify)
+- [x] `SessionConfig.caps: Option<Vec<String>>` explicit Hello cap override; phone advertises `notify/clip/file` only
+- [x] JNI thin shim (`NativeBridge_*`, `unsafe` exempted in `jni.rs` only) + Kotlin `NativeBridge`/`NodeSession`/`MainActivity` on real device_id
+- [x] `android_probe` bin (aarch64-linux-android) for on-device pair+notify proof
+- [x] `libtetherly_android.so` arm64-v8a via cargo-ndk (NDK r29); 7 JNI symbols exported; `jniLibs/` gitignored
+- [x] On-device E2E on TWO Galaxy Fold (Android 13): pair + notify (desktop `has_otp:true`) + wrong-PIN still resumes; both `trusted.json` written
+- [x] CI `android` job: rust target + cargo-ndk `.so` before Gradle; android/README native-build docs
+- [x] DEVELOPMENT.md v1.10 (header/§9.6/§8/§12 M1.1+M1.5/§14/§19/§23/waiver) + `.codex-memory/` sync
+- [x] Real APK built (JBR21 + Gradle 8.14.3), installed on cloud phone, connect tapped → `device_id: tdev_ewitkisf4gtr5o4i · 已连接`, `identity.bin`+`trusted.json` written, desktop trusts it (peers:1)
+- [x] M1.1 p95 harness: `rtt_bench` + `percentile` in tetherly-android, `android_probe bench` subcommand; measured on BOTH physical phones (p95 16167/14921 µs, p50 15360/13852) — far under 1.0s budget; CI test `rtt_bench_collects_samples_against_pong_server`
+- [x] notify.reply protocol (v1.11): `NotifyReply` frame + `NOTIFY_TEXT_MAX`; `SessionEvent::Reply` (ReplyStub removed); `NotifyHub` reply inbox (`ingest_reply`/`take_reply_id`/`take_reply`/`reply_views`, take-once, blank-rejected, redacted Debug); `Node::{send_reply,reply_to_candidate,take_reply,reply_views}` + `UiEvent::ReplyReceived`; UI reply box + `/api/reply` + `/api/reply/take` + `Snapshot.replies`; Android `SessionHandle::take_replies` + `nativeTakeReplies` + Kotlin `takeReplies`/`PhoneReply` + `NotifyListener.drainReplies` (own RemoteInput action); CI: 3 core units + `phase2::m2_6` + `client_e2e::android_client_receives_a_quick_reply_once`; 188 green; DEVELOPMENT.md v1.11

@@ -518,6 +518,13 @@ pub const NOTIF_ASSEMBLE_DEADLINE_MS: u64 = 3_000;
 pub const UID_SEEN_WINDOW_MS: u64 = 10 * 60 * 1000;
 /// Hard cap on remembered uids.
 pub const UID_SEEN_MAX: usize = 4_096;
+/// Hard cap on queued Control Point requests. A uid flood would otherwise grow
+/// the queue without bound (each entry is a small encoded request).
+pub const CP_QUEUE_MAX: usize = 256;
+/// Hard cap on notifications held waiting for an app display name.
+pub const HELD_MAX: usize = 64;
+/// Hard cap on the learned app-name cache.
+pub const APP_NAMES_MAX: usize = 256;
 
 pub const ANCS_BACKOFF_BASE_MS: u64 = 500;
 pub const ANCS_BACKOFF_MAX_MS: u64 = 30_000;
@@ -623,6 +630,7 @@ struct PendingNotif {
 }
 
 struct Held {
+    uid: u32,
     event_id: EventId,
     notif: AncsNotification,
     app_id: String,
@@ -730,6 +738,9 @@ impl AncsIngress {
         match ev.event_id {
             EventId::Removed => {
                 self.pending.remove(&ev.uid);
+                // Also drop any held popup for this uid: the notification is
+                // gone, so surfacing it later would be wrong.
+                self.held.retain(|h| h.uid != ev.uid);
                 self.events.push_back(AncsEvent::Removed { uid: ev.uid });
             }
             EventId::Added | EventId::Modified => {
@@ -755,7 +766,7 @@ impl AncsIngress {
                         deadline_ms: now.saturating_add(NOTIF_ASSEMBLE_DEADLINE_MS),
                     },
                 );
-                self.queue.push_back(CpRequest {
+                self.enqueue(CpRequest {
                     kind: CpKind::NotificationAttrs,
                     bytes: encode_get_notification_attributes(ev.uid, &NOTIF_ATTR_REQUEST),
                     uid: ev.uid,
@@ -824,6 +835,11 @@ impl AncsIngress {
                 self.in_flight = None;
                 self.assembler.end_response();
             } else {
+                // Reset before retrying: the partial bytes of the first,
+                // unanswered response would otherwise be glued onto the retry
+                // and mis-parsed. A Data Source response always starts at a
+                // command byte, so dropping the tail is safe.
+                self.assembler.reset();
                 self.transport.write_control_point(&bytes)?;
                 tracing::debug!(uid, "ancs: retrying first attribute response");
                 if let Some(f) = self.in_flight.as_mut() {
@@ -895,6 +911,9 @@ impl AncsIngress {
             return;
         }
         let name = String::from_utf8_lossy(&value).into_owned();
+        if self.app_names.len() >= APP_NAMES_MAX && !self.app_names.contains_key(app_id) {
+            self.app_names.clear();
+        }
         self.app_names.insert(app_id.to_string(), name);
         if self.app_req.as_deref() == Some(app_id) {
             self.app_req = None;
@@ -921,12 +940,18 @@ impl AncsIngress {
         let Some(p) = self.pending.remove(&uid) else {
             return;
         };
-        if let Some(f) = self.in_flight.as_ref() {
-            if f.kind == CpKind::NotificationAttrs && f.uid == uid {
-                self.in_flight = None;
-            }
+        // Only tear down the Data Source buffer when the request we were
+        // actually awaiting was this notification's. Otherwise (a deadline
+        // fire, or another request in flight) wiping it would destroy that
+        // other request's partial response.
+        let was_in_flight = matches!(
+            self.in_flight.as_ref(),
+            Some(f) if f.kind == CpKind::NotificationAttrs && f.uid == uid
+        );
+        if was_in_flight {
+            self.in_flight = None;
+            self.assembler.end_response();
         }
-        self.assembler.end_response();
         self.finish(uid, p);
     }
 
@@ -957,21 +982,36 @@ impl AncsIngress {
         }
 
         // Ask for the display name and hold this notification briefly so the
-        // first popup already carries the app name.
+        // first popup already carries the app name. Bound the held set: an app
+        // that never answers must not grow it without limit; oldest first out.
         let now = self.clock.unix_ms();
         self.app_req = Some(p.app_id.clone());
-        self.queue.push_back(CpRequest {
+        self.enqueue(CpRequest {
             kind: CpKind::AppAttrs,
             bytes: encode_get_app_attributes(&p.app_id, &[APP_ATTR_DISPLAY_NAME]),
             uid,
             app_id: p.app_id.clone(),
         });
+        if self.held.len() >= HELD_MAX {
+            let drop = self.held.remove(0);
+            self.emit(drop.event_id, drop.notif);
+        }
         self.held.push(Held {
+            uid,
             event_id: p.event_id,
             notif,
             app_id: p.app_id,
             deadline_ms: now.saturating_add(APP_NAME_WAIT_MS),
         });
+    }
+
+    /// Queue a Control Point request, dropping the oldest when full so a uid
+    /// flood cannot grow the queue without bound.
+    fn enqueue(&mut self, req: CpRequest) {
+        if self.queue.len() >= CP_QUEUE_MAX {
+            self.queue.pop_front();
+        }
+        self.queue.push_back(req);
     }
 
     fn release_expired_held(&mut self, now: u64) {
@@ -1463,5 +1503,66 @@ mod tests {
     fn source_id_is_stable_per_peripheral() {
         assert_eq!(ancs_source_id("abc"), ancs_source_id("abc"));
         assert_ne!(ancs_source_id("abc"), ancs_source_id("abd"));
+    }
+
+    #[test]
+    fn removed_purges_a_held_notification() {
+        let (mut ing, _t, clock) = ingress();
+        ing.connect().unwrap();
+        // A notification whose app name never arrives is held (not emitted).
+        ing.on_notification_source(&event(0, 0, 6, 42)).unwrap();
+        ing.tick().unwrap();
+        ing.on_data_source(&full_response(42, "com.a", "t", "b"))
+            .unwrap();
+        assert!(ing.drain_events().is_empty(), "held until the app name");
+        // iOS removes it before the name arrives: nothing may be emitted, even
+        // after the hold deadline passes.
+        ing.on_notification_source(&event(2, 0, 6, 42)).unwrap();
+        let removed = ing.drain_events();
+        assert!(matches!(
+            removed.as_slice(),
+            [AncsEvent::Removed { uid: 42 }]
+        ));
+        clock.set(clock.unix_ms() + APP_NAME_WAIT_MS * 2);
+        ing.tick().unwrap();
+        assert!(
+            ing.drain_events().is_empty(),
+            "a removed notification must never surface"
+        );
+    }
+
+    #[test]
+    fn retry_resets_the_data_source_buffer() {
+        let (mut ing, transport, clock) = ingress();
+        ing.connect().unwrap();
+        ing.on_notification_source(&event(0, 0, 6, 7)).unwrap();
+        ing.tick().unwrap(); // sends the first request
+                             // A truncated prefix of the answer arrives, then the phone goes quiet.
+        let full = full_response(7, "com.a", "t", "b");
+        ing.on_data_source(&full[..5]).unwrap();
+        let before = transport.write_count();
+        clock.set(clock.unix_ms() + CP_RESPONSE_TIMEOUT_MS + 1);
+        ing.tick().unwrap(); // retries -> must reset the buffer first
+        assert_eq!(transport.write_count(), before + 1, "one retry write");
+        // The clean full response now parses from byte 0, not glued to the stub.
+        ing.on_data_source(&full).unwrap();
+        ing.tick().unwrap();
+        ing.on_data_source(&app_response("com.a", "A")).unwrap();
+        let out = ing.drain_events();
+        assert_eq!(out.len(), 1, "exactly one clean notification, got {out:?}");
+    }
+
+    #[test]
+    fn queue_and_app_names_are_bounded() {
+        let (mut ing, _t, _clock) = ingress();
+        ing.connect().unwrap();
+        for uid in 0..(CP_QUEUE_MAX as u32 * 3) {
+            ing.on_notification_source(&event(0, 0, 6, uid)).unwrap();
+        }
+        assert!(
+            ing.queued() <= CP_QUEUE_MAX,
+            "queue must stay bounded, got {}",
+            ing.queued()
+        );
     }
 }

@@ -140,11 +140,14 @@ pub struct NotifyPush {
     pub actions: Vec<String>,
 }
 
+/// Notification text cap, shared by the title/body of a push and the text of a
+/// reply. Bounded well under the 64 KiB inner payload limit.
+pub const NOTIFY_TEXT_MAX: usize = 4 * 1024;
+
 impl NotifyPush {
     pub fn truncate(mut self) -> Self {
-        const LIMIT: usize = 4 * 1024;
-        truncate_utf8(&mut self.title, LIMIT);
-        truncate_utf8(&mut self.body, LIMIT);
+        truncate_utf8(&mut self.title, NOTIFY_TEXT_MAX);
+        truncate_utf8(&mut self.body, NOTIFY_TEXT_MAX);
         self.actions.retain(|a| a != "url" && !a.contains("://"));
         self
     }
@@ -163,6 +166,10 @@ pub const CLIP_TEXT_MAX: usize = 1024 * 1024;
 pub const CANDIDATE_TTL_MS: u64 = 120_000;
 pub const CLIPBOARD_OTP_CLEAR_MS: u64 = 60_000;
 pub const FILE_TOKEN_TTL_MS: u64 = 60_000;
+/// File data chunk size shared by the sender and the resume planner. A resumed
+/// transfer restarts at a multiple of this, so a persisted partial is always
+/// truncatable back to a chunk boundary.
+pub const FILE_CHUNK: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NotifyDismiss {
@@ -177,6 +184,33 @@ impl NotifyDismiss {
 
     pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
         Ok(serde_json::from_slice(payload)?)
+    }
+}
+
+/// A reply typed on the desktop and delivered back to the phone so it can be
+/// sent from the notification in place (quick reply). `text` is user content:
+/// it is surfaced to the local UI but never written to tracing, the same rule
+/// the notification body follows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotifyReply {
+    pub uid: String,
+    pub app_id: String,
+    pub text: String,
+}
+
+impl NotifyReply {
+    pub fn truncate(mut self) -> Self {
+        truncate_utf8(&mut self.text, NOTIFY_TEXT_MAX);
+        self
+    }
+
+    pub fn to_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_NOTIFY_REPLY, serde_json::to_vec(self)?)
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
+        let parsed: Self = serde_json::from_slice(payload)?;
+        Ok(parsed.truncate())
     }
 }
 
@@ -240,9 +274,27 @@ impl FileOffer {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileDecision {
     pub transfer_id: String,
+    /// Bytes the receiver already holds from a persisted partial transfer; the
+    /// data sender skips these. `None` on first accept (start at 0). Chunk-aligned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_from: Option<u64>,
 }
 
 impl FileDecision {
+    pub fn accept(&self, transfer_id: impl Into<String>) -> Self {
+        Self {
+            transfer_id: transfer_id.into(),
+            resume_from: None,
+        }
+    }
+
+    pub fn accept_resuming(transfer_id: impl Into<String>, resume_from: u64) -> Self {
+        Self {
+            transfer_id: transfer_id.into(),
+            resume_from: Some(resume_from),
+        }
+    }
+
     pub fn accept_frame(&self) -> Result<InnerFrame, CoreError> {
         InnerFrame::new(TYPE_FILE_ACCEPT, serde_json::to_vec(self)?)
     }
@@ -390,5 +442,30 @@ mod tests {
         assert!(n.body.len() <= 4096);
         assert!(!n.title.contains('验'));
         assert!(!n.body.contains('码'));
+    }
+
+    #[test]
+    fn notify_reply_roundtrip_and_cap() {
+        let r = NotifyReply {
+            uid: "42".into(),
+            app_id: "com.apple.MobileSMS".into(),
+            text: "收到,我马上回电话".into(),
+        };
+        let dec = NotifyReply::from_payload(&r.to_frame().unwrap().payload).unwrap();
+        assert_eq!(dec, r);
+
+        let long = NotifyReply {
+            uid: "42".into(),
+            app_id: "sms".into(),
+            text: "好".repeat(NOTIFY_TEXT_MAX),
+        }
+        .truncate();
+        assert!(long.text.len() <= NOTIFY_TEXT_MAX);
+        assert!(long.text.is_char_boundary(long.text.len()));
+
+        // A reply is a known type, so MUST_UNDERSTAND never fires on it.
+        let mut f = r.to_frame().unwrap();
+        f.flags = FLAG_MUST_UNDERSTAND;
+        assert!(InnerFrame::decode(&f.encode().unwrap()).is_ok());
     }
 }

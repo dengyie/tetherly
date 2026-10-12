@@ -2,10 +2,10 @@
 //! LAN + optional EasyTier sidecar overlay. Overlay is unicast only; no mDNS on TUN.
 
 use crate::events::{file_offered, peer_up, CandidateViewDto, UiEvent};
-use crate::lan::{bind_many, bind_overlay, control_bind_addrs, lan_ips};
+use crate::lan::{bind_many, bind_many_optional, bind_overlay, control_bind_addrs, lan_ips};
 use crate::platform::{insert_foreground, MemoryClip, SystemClip};
 use crate::sidecar::{self, OverlayConfig, OverlayStatus};
-use crate::store::{load_or_create_identity, load_trust, remember_route, save_trust, RouteTable};
+use crate::store::{load_trust, remember_route, save_trust, RouteTable};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -13,28 +13,29 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tetherly_core::frame::{
-    pong, CapsUpdate, ClipSet, FileDone, FileOffer, InnerFrame, NotifyPush,
+    pong, CapsUpdate, ClipSet, FileDone, FileOffer, InnerFrame, NotifyPush, NotifyReply,
 };
 use tetherly_core::pin::{format_pin, generate_pin};
 use tetherly_core::ports::{Clip, Clock, Rng, SystemClock};
 use tetherly_core::session::LockoutTable;
 use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
-    ancs_actions, ancs_source_id, hex_lower, is_desktop_platform, path_kind, AncsEvent,
-    AncsIngress, AncsState, AncsTransport, ClipApply, ClipHub, ConnectOutcome, ControlMsg,
-    CoreError, CursorSeat, DeviceId, FileHub, IngestOutcome, InputClient, InputEvent, InputServer,
-    MemoryScreenSink, MemorySink, MemoryTrustStore, NotifyHub, OpenAllowlist, PathKind,
-    ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats,
-    TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
+    ancs_actions, ancs_source_id, is_desktop_platform, path_kind, AncsEvent, AncsIngress,
+    AncsState, AncsTransport, ClipApply, ClipHub, ConnectOutcome, ControlMsg, CoreError,
+    CursorSeat, DeviceId, FileHub, IngestOutcome, InputClient, InputEvent, InputServer, InputSink,
+    MemoryScreenSink, MemorySink, MemoryTrustStore, NotifyHub, OpenAllowlist, PathKind, ReplyView,
+    ScreenAssembler, ScreenCodec, ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink,
+    ScreenSource, ScreenState, ScreenStats, TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS,
+    OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
-use tetherly_net::filechan::send_bytes as send_file_bytes;
+use tetherly_net::filechan::{read_header as read_file_header, recv_chunks_after_header};
 use tetherly_net::session::{
     accept_session, dial_session, ActiveSession, SessionConfig, CONTROL_PORT, FILE_PORT,
     HANDSHAKE_TIMEOUT, INPUT_PORT, SCREEN_PORT,
 };
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
 use tracing::{debug, info, warn};
 
@@ -46,7 +47,11 @@ impl Rng for OsRng {
     }
 }
 
+/// Hard budget for one `ScreenSource::grab` before the runtime interrupts it.
+const SCREEN_GRAB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Clone)]
+
 pub struct NodeConfig {
     pub data_dir: PathBuf,
     pub name: String,
@@ -75,6 +80,14 @@ pub struct NodeConfig {
     /// ScreenRefused (real capture is Manual-required). Tests inject
     /// MemoryScreenSource for deterministic CI.
     pub screen_source: Option<Arc<dyn ScreenSource>>,
+    /// Screen encoder/decoder. `None` defaults to lossless zstd level 3.
+    pub screen_codec: Option<Arc<dyn ScreenCodec>>,
+    /// Screen presentation sink. `None` defaults to the in-memory observer;
+    /// production passes `SystemSink` for real output.
+    pub screen_sink: Option<Arc<dyn ScreenSink>>,
+    /// Real key/mouse injection for the controlled side of 45719. `None`
+    /// keeps CI's MemorySink-only behavior (the observer always records).
+    pub input_sink: Option<Arc<Mutex<dyn InputSink>>>,
 }
 
 impl Default for NodeConfig {
@@ -96,6 +109,9 @@ impl Default for NodeConfig {
             ancs: None,
             ancs_peripheral: "local-iphone".into(),
             screen_source: None,
+            screen_codec: None,
+            screen_sink: None,
+            input_sink: None,
         }
     }
 }
@@ -104,6 +120,54 @@ fn hostname() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "tetherly".into())
+}
+
+/// Scan `inbox/` for `.<name>.resume.json` sidecars and rebuild the in-memory
+/// resume table. Only meaningful for content-addressed transfers whose
+/// `transfer_id` equals the name; a mismatched/unreadable sidecar is skipped.
+fn load_resume_table(data_dir: &std::path::Path) -> tetherly_core::ResumeTable {
+    let mut table = tetherly_core::ResumeTable::new();
+    let inbox = data_dir.join("inbox");
+    let Ok(rd) = std::fs::read_dir(&inbox) else {
+        return table;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(stem) = name
+            .strip_prefix('.')
+            .and_then(|s| s.strip_suffix(".resume.json"))
+        else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(entry.path()) else {
+            continue;
+        };
+        let Ok(dto) = serde_json::from_slice::<ResumeSidecar>(&bytes) else {
+            continue;
+        };
+        let Ok(source) = DeviceId::parse(&dto.device_id) else {
+            continue;
+        };
+        if dto.offset == 0 || dto.offset >= dto.total {
+            continue;
+        }
+        // A sidecar without a matching (or long enough) partial is torn state
+        // (crash between chunk write and sidecar write): drop it and restart
+        // the transfer from 0 rather than promising a resume we cannot honor.
+        let part = inbox.join(format!(".{stem}.part"));
+        let len = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+        if len < dto.offset {
+            let _ = std::fs::remove_file(entry.path());
+            continue;
+        }
+        table.put(tetherly_core::ResumeState {
+            transfer_id: stem.to_string(),
+            source,
+            total: dto.total,
+            offset: dto.offset,
+        });
+    }
+    table
 }
 
 #[derive(Clone)]
@@ -126,11 +190,68 @@ struct Hubs {
     notify: NotifyHub,
     clip: ClipHub,
     files: FileHub,
+    /// Chunk-aligned progress markers for interrupted incoming transfers.
+    /// Loaded from disk at startup; the node persists them as sidecars.
+    resume: tetherly_core::ResumeTable,
 }
 
 struct OutboundFile {
     peer: DeviceId,
     data: Vec<u8>,
+}
+
+/// Sidecar persisted next to a `.part` file: lets an interrupted incoming
+/// transfer resume after a process restart. No file content, only progress.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ResumeSidecar {
+    device_id: String,
+    total: u64,
+    offset: u64,
+}
+
+/// Wall-clock p95 of host-side frame send intervals. Real timing lives here in
+/// tetherly-node (core is deterministic and OS-free); production verifies the
+/// frame budget (M5.1) against this. Microsecond resolution.
+struct ScreenIntervalTracker {
+    last: Option<std::time::Instant>,
+    intervals: Vec<u64>, // micros, newest first
+    max: usize,
+}
+
+impl ScreenIntervalTracker {
+    fn new() -> Self {
+        Self {
+            last: None,
+            intervals: Vec::with_capacity(1024),
+            max: 1024,
+        }
+    }
+
+    /// Mark one frame send. The elapsed time since the previous send is the
+    /// interval; the first send only seeds the clock.
+    fn record(&mut self) {
+        let now = std::time::Instant::now();
+        if let Some(prev) = self.last.replace(now) {
+            self.intervals
+                .push(now.duration_since(prev).as_micros() as u64);
+        }
+        if self.intervals.len() > self.max {
+            let excess = self.intervals.len() - self.max;
+            self.intervals.drain(..excess);
+        }
+    }
+
+    /// 95th-percentile frame interval in microseconds, or `None` before two
+    /// frames have shipped.
+    fn p95_us(&self) -> Option<u64> {
+        if self.intervals.len() < 2 {
+            return None;
+        }
+        let mut sorted = self.intervals.clone();
+        sorted.sort_unstable();
+        let idx = ((sorted.len() as f64 * 0.95).ceil() as usize).saturating_sub(1);
+        Some(sorted[idx.min(sorted.len() - 1)])
+    }
 }
 
 struct Shared {
@@ -155,6 +276,9 @@ struct Shared {
     /// Input cursor owner. None until a trusted desktop dials 45719.
     input_seat: Mutex<Option<CursorSeat>>,
     input_sink: Mutex<MemorySink>,
+    /// Production injection sink (SendInput). Applied events are mirrored
+    /// here after the CI observer records them.
+    input_real_sink: Option<Arc<Mutex<dyn InputSink>>>,
     /// Seq lives here so repeated edge crossings do not replay seq 1.
     input_engine: Mutex<InputServer>,
     /// Frames outbound to the screen controller on 45720. None until attached.
@@ -165,9 +289,20 @@ struct Shared {
     /// lives in tetherly-node platform code and stays Manual-required.
     screen_source: Arc<dyn ScreenSource>,
     /// Controller-side trace of presented frames. Clone() shares inner state.
-    screen_sink: Mutex<MemoryScreenSink>,
+    screen_observer: Mutex<MemoryScreenSink>,
     /// Visitor-side control channel. None until a visitor attaches.
     screen_ctl: AsyncMutex<Option<mpsc::UnboundedSender<ControlMsg>>>,
+    /// Visitor-side decompressor. Defaults to zstd lossless.
+    screen_codec: Arc<dyn ScreenCodec>,
+    /// Visitor-side output. Defaults to the in-memory observer; production
+    /// injects `SystemSink` for real display.
+    screen_sink: Arc<dyn ScreenSink>,
+    /// Host-side frame-interval tracker (p95 budget). Recorded per successful
+    /// frame send.
+    screen_interval: Mutex<ScreenIntervalTracker>,
+    /// Visitor-side receiver counters (received/dropped/bytes). Written by the
+    /// screen-client task so the UI can show what actually arrived.
+    screen_rx_stats: Mutex<ScreenStats>,
     shutdown: watch::Sender<bool>,
     overlay: Mutex<OverlayStatus>,
     /// ANCS ingress. Present only when a transport was attached.
@@ -196,6 +331,46 @@ pub enum UserCommand {
     Forget { device_id: DeviceId },
 }
 
+/// One accept loop, shared by every listener (control/file/input/screen, LAN
+/// and overlay). Each accepted stream is handed to `handler` on its own task;
+/// accept errors back off briefly. Ends when the node shuts down.
+fn node_accept_loop<F, Fut>(node: Node, listener: TcpListener, label: &'static str, handler: F)
+where
+    F: Fn(Node, TcpStream, SocketAddr) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<(), tetherly_net::NetError>> + Send,
+{
+    let mut stop = node.shared.shutdown.subscribe();
+    let handler = Arc::new(handler);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = stop.changed() => {
+                    if *stop.borrow() {
+                        break;
+                    }
+                }
+                accepted = listener.accept() => {
+                    match accepted {
+                        Ok((stream, addr)) => {
+                            let node = node.clone_handle();
+                            let handler = handler.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handler(node, stream, addr).await {
+                                    debug!(%e, %addr, label, "channel");
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            debug!(%e, label, "accept");
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 impl Node {
     pub fn start(cfg: NodeConfig) -> Result<Self, crate::store::NodeStoreError> {
         Self::start_with_clock(cfg, Arc::new(SystemClock))
@@ -205,7 +380,7 @@ impl Node {
         cfg: NodeConfig,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, crate::store::NodeStoreError> {
-        let identity = load_or_create_identity(&cfg.data_dir)?;
+        let identity = crate::cred::load_or_create_identity(&cfg.data_dir)?;
         let trust = load_trust(&cfg.data_dir)?;
         let (events, _) = broadcast::channel(64);
         let (shutdown, _) = watch::channel(false);
@@ -220,10 +395,30 @@ impl Node {
         let bound_screen = AtomicU16::new(cfg.screen_port);
         let ancs_source = ancs_source_id(&cfg.ancs_peripheral);
         let ancs = cfg.ancs.clone().map(|t| AncsIngress::new(t, clock.clone()));
-        let screen_source = cfg
-            .screen_source
+        let screen_source: Arc<dyn ScreenSource> = cfg.screen_source.clone().unwrap_or_else(|| {
+            // Production: real DXGI capture → zstd lossless → wire.
+            // Tests inject MemoryScreenSource raw; this default is only
+            // active in the bin on Windows.
+            Arc::new(crate::screen::EncodedSource::new(
+                crate::screen::SystemSource::new(),
+                Arc::new(crate::screen::ZstdCodec::default()),
+            ))
+        });
+        let screen_codec: Arc<dyn ScreenCodec> = cfg
+            .screen_codec
             .clone()
-            .unwrap_or_else(|| Arc::new(crate::screen::SystemSource));
+            .unwrap_or_else(|| Arc::new(crate::screen::ZstdCodec::default()));
+        // The observer always records what was presented, so the local UI and
+        // CI can assert on the stream without a display.
+        let screen_observer = MemoryScreenSink::new();
+        // Production passes SystemSink; CI leaves it None and presents to the
+        // observer itself (the same shared state), so snapshots stay live.
+        let screen_sink: Arc<dyn ScreenSink> = cfg
+            .screen_sink
+            .clone()
+            .unwrap_or_else(|| Arc::new(screen_observer.clone()));
+        let input_real_sink = cfg.input_sink.clone();
+        let resume = load_resume_table(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -235,6 +430,7 @@ impl Node {
                 notify: NotifyHub::default(),
                 clip: ClipHub::default(),
                 files: FileHub::default(),
+                resume,
             }),
             clip,
             pin: Mutex::new(None),
@@ -249,12 +445,17 @@ impl Node {
             bound_screen,
             input_seat: Mutex::new(None),
             input_sink: Mutex::new(MemorySink::default()),
+            input_real_sink,
             input_engine: Mutex::new(InputServer::new(1, 1)),
             screen_out: AsyncMutex::new(None),
             screen_engine: Mutex::new(ScreenSender::new()),
             screen_source,
-            screen_sink: Mutex::new(MemoryScreenSink::new()),
+            screen_observer: Mutex::new(screen_observer),
             screen_ctl: AsyncMutex::new(None),
+            screen_codec,
+            screen_sink,
+            screen_interval: Mutex::new(ScreenIntervalTracker::new()),
+            screen_rx_stats: Mutex::new(ScreenStats::default()),
             shutdown,
             overlay: Mutex::new(OverlayStatus::lan_only()),
             ancs: Mutex::new(ancs),
@@ -292,6 +493,7 @@ impl Node {
             hello_override: None,
             resume_only,
             screen_only: false,
+            caps: None,
         }
     }
 
@@ -458,6 +660,45 @@ impl Node {
         outcome
     }
 
+    /// Reply to the notification behind a candidate, addressed to the phone it
+    /// came from. Empty text is refused; the text is trimmed and capped by
+    /// `NotifyReply::truncate` on the wire. Never executed, only delivered.
+    pub async fn reply_to_candidate(&self, id: &str, text: &str) -> Result<(), CoreError> {
+        let (source, app_id, uid) = {
+            let hubs = self.shared.hubs.lock().expect("hubs");
+            let c = hubs.notify.get(id).ok_or(CoreError::UnknownCandidate)?;
+            (c.source.clone(), c.app_id.clone(), c.uid.clone())
+        };
+        if text.trim().is_empty() {
+            return Err(CoreError::EmptyReply);
+        }
+        let reply = NotifyReply {
+            uid,
+            app_id,
+            text: text.to_string(),
+        }
+        .truncate();
+        self.send_to(&source, reply.to_frame()?).await
+    }
+
+    /// Take a queued inbound reply exactly once by its stable id. Returns the
+    /// addressing view and the reply text; the caller that owns the phone path
+    /// acts on it (fires the notification's reply action). Single-use so a
+    /// quick-reply is never fired twice.
+    pub fn take_reply(&self, id: &str) -> Option<(ReplyView, String)> {
+        self.shared
+            .hubs
+            .lock()
+            .expect("hubs")
+            .notify
+            .take_reply_id(id)
+    }
+
+    /// Queued `notify.reply` entries awaiting delivery to their phone.
+    pub fn reply_views(&self) -> Vec<ReplyView> {
+        self.shared.hubs.lock().expect("hubs").notify.reply_views()
+    }
+
     /// Install the app allowlist that gates the ANCS "open" action (M4.2).
     pub fn set_open_allowlist(&self, list: OpenAllowlist) {
         *self.shared.allowlist.lock().expect("allowlist") = list;
@@ -605,12 +846,13 @@ impl Node {
     }
 
     pub async fn spawn_listeners(&self) -> anyhow::Result<()> {
-        let control_port = self.shared.cfg.control_port;
-        let file_port = self.shared.cfg.file_port;
         let addrs = if self.shared.cfg.loopback_only {
-            vec![SocketAddr::from(([127, 0, 0, 1], control_port))]
+            vec![SocketAddr::from((
+                [127, 0, 0, 1],
+                self.shared.cfg.control_port,
+            ))]
         } else {
-            control_bind_addrs(control_port)
+            control_bind_addrs(self.shared.cfg.control_port)
         };
         let listeners = bind_many(&addrs).await?;
         if let Some(first) = listeners.first() {
@@ -618,43 +860,26 @@ impl Node {
                 .bound_control
                 .store(first.local_addr()?.port(), Ordering::SeqCst);
         }
-        let file_addrs = if self.shared.cfg.loopback_only {
-            vec![SocketAddr::from(([127, 0, 0, 1], file_port))]
-        } else {
-            control_bind_addrs(file_port)
-        };
-        let file_listeners = bind_many(&file_addrs).await.unwrap_or_default();
-        if let Some(first) = file_listeners.first() {
-            if let Ok(addr) = first.local_addr() {
-                self.shared.bound_file.store(addr.port(), Ordering::SeqCst);
-            }
+
+        macro_rules! data_listeners {
+            ($port:expr, $bound:expr) => {{
+                let port = $port;
+                let addrs = if self.shared.cfg.loopback_only {
+                    vec![SocketAddr::from(([127, 0, 0, 1], port))]
+                } else {
+                    control_bind_addrs(port)
+                };
+                let ls = bind_many_optional(&addrs).await;
+                if let Some(a) = ls.first().and_then(|l| l.local_addr().ok()) {
+                    $bound.store(a.port(), Ordering::SeqCst);
+                }
+                ls
+            }};
         }
-        let input_port = self.shared.cfg.input_port;
-        let input_addrs = if self.shared.cfg.loopback_only {
-            vec![SocketAddr::from(([127, 0, 0, 1], input_port))]
-        } else {
-            control_bind_addrs(input_port)
-        };
-        let input_listeners = bind_many(&input_addrs).await.unwrap_or_default();
-        if let Some(first) = input_listeners.first() {
-            if let Ok(addr) = first.local_addr() {
-                self.shared.bound_input.store(addr.port(), Ordering::SeqCst);
-            }
-        }
-        let screen_port = self.shared.cfg.screen_port;
-        let screen_addrs = if self.shared.cfg.loopback_only {
-            vec![SocketAddr::from(([127, 0, 0, 1], screen_port))]
-        } else {
-            control_bind_addrs(screen_port)
-        };
-        let screen_listeners = bind_many(&screen_addrs).await.unwrap_or_default();
-        if let Some(first) = screen_listeners.first() {
-            if let Ok(addr) = first.local_addr() {
-                self.shared
-                    .bound_screen
-                    .store(addr.port(), Ordering::SeqCst);
-            }
-        }
+        let file_listeners = data_listeners!(self.shared.cfg.file_port, self.shared.bound_file);
+        let input_listeners = data_listeners!(self.shared.cfg.input_port, self.shared.bound_input);
+        let screen_listeners =
+            data_listeners!(self.shared.cfg.screen_port, self.shared.bound_screen);
 
         if self.shared.cfg.advertise {
             self.advertise_mdns();
@@ -667,124 +892,23 @@ impl Node {
         }
 
         for l in listeners {
-            let node = self.clone_handle();
-            let mut stop = self.shared.shutdown.subscribe();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = stop.changed() => {
-                            if *stop.borrow() {
-                                break;
-                            }
-                        }
-                        accepted = l.accept() => {
-                            match accepted {
-                                Ok((stream, addr)) => {
-                                    let node = node.clone_handle();
-                                    tokio::spawn(async move {
-                                        if let Err(e) = node.accept_one(stream, addr).await {
-                                            warn!(%e, %addr, "accept session failed");
-                                        }
-                                    });
-                                }
-                                Err(e) => {
-                                    warn!(%e, "accept");
-                                    tokio::time::sleep(Duration::from_millis(200)).await;
-                                }
-                            }
-                        }
-                    }
-                }
+            node_accept_loop(self.clone_handle(), l, "control", |node, s, a| async move {
+                node.accept_one(s, a).await
             });
         }
         for l in file_listeners {
-            let node = self.clone_handle();
-            let mut stop = self.shared.shutdown.subscribe();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = stop.changed() => {
-                            if *stop.borrow() {
-                                break;
-                            }
-                        }
-                        accepted = l.accept() => {
-                            match accepted {
-                                Ok((stream, addr)) => {
-                                    let node = node.clone_handle();
-                                    tokio::spawn(async move {
-                                        if let Err(e) = node.accept_file(stream, addr).await {
-                                            warn!(%e, "file channel");
-                                        }
-                                    });
-                                }
-                                Err(_) => {
-                                    tokio::time::sleep(Duration::from_millis(200)).await;
-                                }
-                            }
-                        }
-                    }
-                }
+            node_accept_loop(self.clone_handle(), l, "file", |node, s, a| async move {
+                node.accept_file(s, a).await
             });
         }
         for l in input_listeners {
-            let node = self.clone_handle();
-            let mut stop = self.shared.shutdown.subscribe();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = stop.changed() => {
-                            if *stop.borrow() {
-                                break;
-                            }
-                        }
-                        accepted = l.accept() => {
-                            match accepted {
-                                Ok((stream, addr)) => {
-                                    let node = node.clone_handle();
-                                    tokio::spawn(async move {
-                                        if let Err(e) = node.accept_input(stream, addr).await {
-                                            debug!(%e, "input channel");
-                                        }
-                                    });
-                                }
-                                Err(_) => {
-                                    tokio::time::sleep(Duration::from_millis(200)).await;
-                                }
-                            }
-                        }
-                    }
-                }
+            node_accept_loop(self.clone_handle(), l, "input", |node, s, a| async move {
+                node.accept_input(s, a).await
             });
         }
         for l in screen_listeners {
-            let node = self.clone_handle();
-            let mut stop = self.shared.shutdown.subscribe();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = stop.changed() => {
-                            if *stop.borrow() {
-                                break;
-                            }
-                        }
-                        accepted = l.accept() => {
-                            match accepted {
-                                Ok((stream, addr)) => {
-                                    let node = node.clone_handle();
-                                    tokio::spawn(async move {
-                                        if let Err(e) = node.accept_screen(stream, addr).await {
-                                            debug!(%e, "screen channel");
-                                        }
-                                    });
-                                }
-                                Err(_) => {
-                                    tokio::time::sleep(Duration::from_millis(200)).await;
-                                }
-                            }
-                        }
-                    }
-                }
+            node_accept_loop(self.clone_handle(), l, "screen", |node, s, a| async move {
+                node.accept_screen(s, a).await
             });
         }
         Ok(())
@@ -803,6 +927,28 @@ impl Node {
         let _ = store.forget(device_id);
         drop(store);
         self.persist_trust();
+        // A forgotten device must not keep its live session, its capability
+        // state, or (if it held input) the remote seat. Dropping the outbound
+        // sender closes the channel, which ends the session task and its TCP.
+        let had_session = match self.shared.sessions.try_lock() {
+            Ok(mut sessions) => sessions.remove(device_id).is_some(),
+            Err(_) => false,
+        };
+        let had_live = self
+            .shared
+            .live
+            .lock()
+            .expect("live")
+            .remove(device_id)
+            .is_some();
+        if *self.shared.input_seat.lock().expect("seat") == Some(CursorSeat::Remote) {
+            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        }
+        if had_session || had_live {
+            self.emit(UiEvent::PeerDown {
+                device_id: device_id.to_string(),
+            });
+        }
     }
 
     fn already_live_on_ip(&self, addr: SocketAddr) -> bool {
@@ -827,104 +973,36 @@ impl Node {
             let node = self.clone_handle();
             tokio::spawn(async move {
                 for l in bind_overlay(&overlay_addrs).await {
-                    let node = node.clone_handle();
-                    let mut stop = node.shared.shutdown.subscribe();
-                    tokio::spawn(async move {
-                        loop {
-                            tokio::select! {
-                                _ = stop.changed() => {
-                                    if *stop.borrow() {
-                                        break;
-                                    }
-                                }
-                                accepted = l.accept() => {
-                                    match accepted {
-                                        Ok((stream, addr)) => {
-                                            let node = node.clone_handle();
-                                            tokio::spawn(async move {
-                                                if let Err(e) = node.accept_one(stream, addr).await {
-                                                    warn!(%e, %addr, "overlay accept failed");
-                                                }
-                                            });
-                                        }
-                                        Err(e) => {
-                                            debug!(%e, "overlay accept");
-                                            tokio::time::sleep(Duration::from_millis(200)).await;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    });
+                    node_accept_loop(
+                        node.clone_handle(),
+                        l,
+                        "overlay control",
+                        |n, s, a| async move { n.accept_one(s, a).await },
+                    );
                 }
                 for l in bind_overlay(&overlay_file).await {
-                    let node = node.clone_handle();
-                    let mut stop = node.shared.shutdown.subscribe();
-                    tokio::spawn(async move {
-                        loop {
-                            tokio::select! {
-                                _ = stop.changed() => {
-                                    if *stop.borrow() {
-                                        break;
-                                    }
-                                }
-                                accepted = l.accept() => {
-                                    if let Ok((stream, addr)) = accepted {
-                                        let node = node.clone_handle();
-                                        tokio::spawn(async move {
-                                            let _ = node.accept_file(stream, addr).await;
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    });
+                    node_accept_loop(
+                        node.clone_handle(),
+                        l,
+                        "overlay file",
+                        |n, s, a| async move { n.accept_file(s, a).await },
+                    );
                 }
                 for l in bind_overlay(&overlay_input).await {
-                    let node = node.clone_handle();
-                    let mut stop = node.shared.shutdown.subscribe();
-                    tokio::spawn(async move {
-                        loop {
-                            tokio::select! {
-                                _ = stop.changed() => {
-                                    if *stop.borrow() {
-                                        break;
-                                    }
-                                }
-                                accepted = l.accept() => {
-                                    if let Ok((stream, addr)) = accepted {
-                                        let node = node.clone_handle();
-                                        tokio::spawn(async move {
-                                            let _ = node.accept_input(stream, addr).await;
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    });
+                    node_accept_loop(
+                        node.clone_handle(),
+                        l,
+                        "overlay input",
+                        |n, s, a| async move { n.accept_input(s, a).await },
+                    );
                 }
                 for l in bind_overlay(&overlay_screen).await {
-                    let node = node.clone_handle();
-                    let mut stop = node.shared.shutdown.subscribe();
-                    tokio::spawn(async move {
-                        loop {
-                            tokio::select! {
-                                _ = stop.changed() => {
-                                    if *stop.borrow() {
-                                        break;
-                                    }
-                                }
-                                accepted = l.accept() => {
-                                    if let Ok((stream, addr)) = accepted {
-                                        let node = node.clone_handle();
-                                        tokio::spawn(async move {
-                                            let _ = node.accept_screen(stream, addr).await;
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    });
+                    node_accept_loop(
+                        node.clone_handle(),
+                        l,
+                        "overlay screen",
+                        |n, s, a| async move { n.accept_screen(s, a).await },
+                    );
                 }
             });
         }
@@ -993,23 +1071,40 @@ impl Node {
         let name = self.shared.cfg.name.clone();
         let port = self.shared.cfg.control_port;
         let addrs = lan_ips();
-        tokio::task::spawn_blocking(move || match tetherly_net::mdns::daemon() {
-            Ok(d) => {
-                if let Err(e) = tetherly_net::mdns::advertise(
-                    &d,
-                    &name,
-                    port,
-                    &id,
-                    &fp,
-                    "notify,clip,file",
-                    &addrs,
-                ) {
-                    warn!(%e, "mdns advertise");
-                } else {
-                    std::thread::park();
+        let mut stop = self.shared.shutdown.subscribe();
+        tokio::task::spawn_blocking(move || {
+            let d = match tetherly_net::mdns::daemon() {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!(%e, "mdns daemon");
+                    return;
                 }
+            };
+            if let Err(e) =
+                tetherly_net::mdns::advertise(&d, &name, port, &id, &fp, "notify,clip,file", &addrs)
+            {
+                warn!(%e, "mdns advertise");
+                return;
             }
-            Err(e) => warn!(%e, "mdns daemon"),
+            // Hold the registration for the node's lifetime, then drop the
+            // daemon so the service is withdrawn instead of lingering.
+            let handle = match tokio::runtime::Handle::try_current() {
+                Ok(h) => h,
+                Err(_) => {
+                    std::thread::park();
+                    return;
+                }
+            };
+            handle.block_on(async {
+                loop {
+                    if *stop.borrow() {
+                        break;
+                    }
+                    if stop.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
         });
     }
 
@@ -1226,23 +1321,68 @@ impl Node {
                 let mut hubs = self.shared.hubs.lock().expect("hubs");
                 hubs.notify.dismiss_wire(peer, &d);
             }
+            SessionEvent::Reply(reply) => {
+                let text_len = reply.text.len();
+                let accepted = {
+                    let mut hubs = self.shared.hubs.lock().expect("hubs");
+                    hubs.notify.ingest_reply(peer, reply.clone())
+                };
+                if accepted {
+                    // Never log the text; only its length and identity.
+                    info!(
+                        source = %peer,
+                        app_id = %reply.app_id,
+                        uid = %reply.uid,
+                        text_len,
+                        "notify reply queued"
+                    );
+                    self.emit(UiEvent::ReplyReceived {
+                        reply: crate::events::ReplyViewDto::from(ReplyView {
+                            id: tetherly_core::notify::reply_id(peer, &reply.app_id, &reply.uid),
+                            source: peer.clone(),
+                            app_id: reply.app_id.clone(),
+                            uid: reply.uid.clone(),
+                        }),
+                    });
+                }
+            }
             SessionEvent::Clip(clip) => {
                 self.apply_clip(peer, clip)?;
             }
             SessionEvent::FileOffer(offer) => {
+                let total: u64 = offer.files.iter().map(|f| f.size).sum();
+                let tid = offer.transfer_id.clone();
+                let hint = {
+                    let hubs = self.shared.hubs.lock().expect("hubs");
+                    hubs.resume.claim(peer, &tid, total)
+                };
+                if let Some(off) = hint {
+                    info!(transfer = %tid, offset = off, "resuming interrupted transfer");
+                }
                 let t = {
                     let mut hubs = self.shared.hubs.lock().expect("hubs");
-                    hubs.files
-                        .offer(peer.clone(), offer, self.shared.clock.unix_ms())?
+                    hubs.files.offer_resumable(
+                        peer.clone(),
+                        offer,
+                        self.shared.clock.unix_ms(),
+                        hint,
+                    )?
                 };
                 self.emit(file_offered(&t));
             }
             SessionEvent::FileAccept(d) => {
-                debug!(transfer = %d.transfer_id, "peer accepted");
-                self.on_peer_accepted_file(&d.transfer_id).await;
+                debug!(transfer = %d.transfer_id, resume = ?d.resume_from, "peer accepted");
+                self.on_peer_accepted_file(&d).await;
             }
             SessionEvent::FileReject(d) => {
                 info!(transfer = %d.transfer_id, "peer rejected file");
+                // Drop the buffered outbound bytes: without this the rejected
+                // file's whole body stays in `pending_out` for the node's life.
+                self.shared
+                    .pending_out
+                    .lock()
+                    .expect("pending")
+                    .remove(&d.transfer_id);
             }
             SessionEvent::FileDone(done) => {
                 let mut hubs = self.shared.hubs.lock().expect("hubs");
@@ -1271,7 +1411,7 @@ impl Node {
                     }
                 }
             }
-            SessionEvent::ReplyStub | SessionEvent::Unknown(_) => {}
+            SessionEvent::Unknown(_) => {}
         }
         Ok(())
     }
@@ -1296,85 +1436,111 @@ impl Node {
         mut stream: TcpStream,
         _addr: SocketAddr,
     ) -> Result<(), tetherly_net::NetError> {
-        // First 4 bytes of file channel after accept: we don't know transfer
-        // until magic+id. Peek via recv_file_bytes needs token+id. Handshake:
-        // peer writes magic|id|size|chunks. We read id first the same way.
-        use tokio::io::AsyncReadExt;
-        let mut magic = [0u8; 4];
-        stream.read_exact(&mut magic).await?;
-        if magic != tetherly_net::filechan::FILE_MAGIC {
-            return Err(tetherly_net::NetError::Handshake);
-        }
-        let id_bytes = tetherly_net::codec::read_len_prefixed(&mut stream).await?;
-        let transfer_id =
-            String::from_utf8(id_bytes).map_err(|_| tetherly_net::NetError::Handshake)?;
-        let accepted = {
-            let hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.files.is_accepted(&transfer_id)
-        };
-        if !accepted {
-            return Err(tetherly_net::NetError::File("not accepted".into()));
-        }
-        let (source, size) = {
+        // Header is unauthenticated (id/total/start). It only names the
+        // transfer; the token (HKDF over the Noise handshake + transfer_id)
+        // gates every chunk, so a forged id simply fails to decrypt.
+        let (transfer_id, total, start) = read_file_header(&mut stream).await?;
+        let (accepted, source, size, resume_hint, name, expected) = {
             let hubs = self.shared.hubs.lock().expect("hubs");
             let t = hubs
                 .files
                 .get(&transfer_id)
                 .ok_or(tetherly_net::NetError::File("unknown".into()))?;
             (
+                t.status == tetherly_core::TransferStatus::Accepted,
                 t.source.clone(),
                 t.files.iter().map(|f| f.size).sum::<u64>(),
+                t.resume_from.unwrap_or(0),
+                t.files
+                    .first()
+                    .map(|f| f.name.clone())
+                    .unwrap_or_else(|| "file.bin".into()),
+                t.files
+                    .first()
+                    .map(|f| f.sha256.clone())
+                    .unwrap_or_default(),
             )
         };
+        if !accepted {
+            return Err(tetherly_net::NetError::File("not accepted".into()));
+        }
+        if total != size || start != resume_hint {
+            return Err(tetherly_net::NetError::Handshake);
+        }
+        // The offer's size is authoritative; also refuse an absurd declared size.
+        if total > size.max(32 * 1024 * 1024) {
+            return Err(tetherly_net::NetError::TooLarge);
+        }
         let token = self
             .file_token_for(&source, &transfer_id)
             .ok_or(tetherly_net::NetError::File("no session token".into()))?;
-        let size_bytes = tetherly_net::codec::read_len_prefixed(&mut stream).await?;
-        if size_bytes.len() != 8 {
-            return Err(tetherly_net::NetError::Handshake);
-        }
-        let declared = u64::from_be_bytes(
-            size_bytes
-                .try_into()
-                .map_err(|_| tetherly_net::NetError::Handshake)?,
-        );
-        if declared > size.max(32 * 1024 * 1024) {
-            return Err(tetherly_net::NetError::TooLarge);
-        }
-        let mut data = Vec::new();
-        let mut counter = 1u64;
-        while (data.len() as u64) < declared {
-            let ct = tetherly_net::codec::read_len_prefixed(&mut stream).await?;
-            let nonce = tetherly_crypto::counter_nonce(counter);
-            let pt = tetherly_crypto::aead_open(&token, &nonce, transfer_id.as_bytes(), &ct)?;
-            data.extend_from_slice(&pt);
-            counter += 1;
-        }
-        let digest = tetherly_core::hex_sha256(&data);
-        let expected = {
-            let hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.files
-                .get(&transfer_id)
-                .and_then(|t| t.files.first().map(|f| f.sha256.clone()))
-                .unwrap_or_default()
-        };
-        if digest != expected {
-            return Err(tetherly_net::NetError::File("sha256".into()));
-        }
         let dest_dir = self.shared.cfg.data_dir.join("inbox");
         std::fs::create_dir_all(&dest_dir)?;
-        let name = {
-            let hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.files
-                .get(&transfer_id)
-                .and_then(|t| t.files.first().map(|f| f.name.clone()))
-                .unwrap_or_else(|| "file.bin".into())
+        let part = dest_dir.join(format!(".{}.part", transfer_id));
+        // Preload the resume prefix from the durable partial, refusing a resume
+        // the local file cannot actually honor.
+        let mut out = if start > 0 {
+            let bytes = std::fs::read(&part).unwrap_or_default();
+            let aligned =
+                bytes.len() as u64 - (bytes.len() as u64 % tetherly_core::FILE_CHUNK as u64);
+            if aligned < start {
+                return Err(tetherly_net::NetError::Handshake);
+            }
+            let mut v = bytes;
+            v.truncate(start as usize);
+            v
+        } else {
+            Vec::new()
         };
-        let path = dest_dir.join(name);
-        crate::store::atomic_write(&path, &data)?;
+        let mut written = out.len() as u64;
+        // Make the on-disk partial exactly `start` bytes so appends land at the
+        // right offset (a stale/un-aligned tail from a previous attempt is
+        // dropped; the sender re-sends that whole chunk).
+        {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&part)?;
+            f.set_len(written)?;
+            f.sync_all()?;
+        }
+        let res = recv_chunks_after_header(
+            &mut stream,
+            &token,
+            &transfer_id,
+            total,
+            start,
+            u64::MAX,
+            &mut out,
+            |buf, new_len| {
+                let mut f = std::fs::OpenOptions::new().append(true).open(&part)?;
+                use std::io::Write;
+                f.write_all(&buf[written as usize..new_len as usize])?;
+                f.sync_all()?;
+                written = new_len;
+                Ok(())
+            },
+        )
+        .await;
+        if let Err(e) = res {
+            // Persist a chunk-aligned resume marker (in memory + sidecar) so the
+            // next offer resumes instead of restarting.
+            self.note_resume(&source, &transfer_id, total, written);
+            return Err(e);
+        }
+        if tetherly_core::hex_sha256(&out) != expected {
+            let _ = std::fs::remove_file(&part);
+            self.clear_resume(&transfer_id);
+            return Err(tetherly_net::NetError::File("sha256".into()));
+        }
+        let path = dest_dir.join(&name);
+        crate::store::atomic_write(&path, &out)?;
+        let _ = std::fs::remove_file(&part);
+        self.clear_resume(&transfer_id);
         let done = FileDone {
             transfer_id: transfer_id.clone(),
-            sha256: digest,
+            sha256: tetherly_core::hex_sha256(&out),
         };
         {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
@@ -1383,6 +1549,58 @@ impl Node {
         let _ = self.send_to(&source, done.to_frame()?).await;
         self.emit(UiEvent::FileDone { transfer_id });
         Ok(())
+    }
+
+    /// Record a chunk-aligned resume marker in the hub and on disk (sidecar).
+    fn note_resume(&self, source: &DeviceId, transfer_id: &str, total: u64, offset: u64) {
+        let st = tetherly_core::ResumeState {
+            transfer_id: transfer_id.to_string(),
+            source: source.clone(),
+            total,
+            offset,
+        };
+        {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.resume.put(st.clone());
+        }
+        // Persist the chunk-aligned offset the table actually settled on.
+        let aligned = self
+            .shared
+            .hubs
+            .lock()
+            .expect("hubs")
+            .resume
+            .get(transfer_id)
+            .map(|s| s.offset)
+            .unwrap_or(0);
+        if aligned == 0 {
+            return;
+        }
+        let side = self.resume_sidecar(transfer_id);
+        let dto = ResumeSidecar {
+            device_id: source.as_str().to_string(),
+            total,
+            offset: aligned,
+        };
+        if let Ok(bytes) = serde_json::to_vec(&dto) {
+            let _ = crate::store::atomic_write(&side, &bytes);
+        }
+    }
+
+    fn clear_resume(&self, transfer_id: &str) {
+        {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.resume.remove(transfer_id);
+        }
+        let _ = std::fs::remove_file(self.resume_sidecar(transfer_id));
+    }
+
+    fn resume_sidecar(&self, transfer_id: &str) -> std::path::PathBuf {
+        self.shared
+            .cfg
+            .data_dir
+            .join("inbox")
+            .join(format!(".{}.resume.json", transfer_id))
     }
 
     pub async fn user_accept_file(&self, transfer_id: &str) -> Result<(), CoreError> {
@@ -1463,15 +1681,17 @@ impl Node {
         data: &[u8],
         _wait_accept: bool,
     ) -> Result<String, CoreError> {
-        let mut nonce = [0u8; 8];
-        getrandom::getrandom(&mut nonce).map_err(|_| CoreError::Rng)?;
-        let transfer_id = format!("tr_{}", hex_lower(&nonce));
+        // Content-addressed: the same bytes re-offered after an interruption
+        // carry the same id, so the receiver's persisted partial can be matched
+        // and resumed. Different content -> different id -> fresh transfer.
+        let digest = tetherly_core::hex_sha256(data);
+        let transfer_id = format!("tr_{}", &digest[..16]);
         let offer = FileOffer {
             transfer_id: transfer_id.clone(),
             files: vec![tetherly_core::FileMeta {
                 name: name.into(),
                 size: data.len() as u64,
-                sha256: tetherly_core::hex_sha256(data),
+                sha256: digest,
             }],
         };
         self.shared.pending_out.lock().expect("pending").insert(
@@ -1486,7 +1706,8 @@ impl Node {
         Ok(transfer_id)
     }
 
-    async fn on_peer_accepted_file(&self, transfer_id: &str) {
+    async fn on_peer_accepted_file(&self, decision: &tetherly_core::FileDecision) {
+        let transfer_id = decision.transfer_id.as_str();
         let outbound = self
             .shared
             .pending_out
@@ -1505,25 +1726,51 @@ impl Node {
             let token = tetherly_crypto::file_token(&peer.handshake_hash, transfer_id.as_bytes());
             (peer.addr, peer.file_port.unwrap_or(self.file_port()), token)
         };
+        let start = decision.resume_from.unwrap_or(0);
+        if start > outbound.data.len() as u64 {
+            warn!(transfer = %transfer_id, "resume offset beyond local data; aborting");
+            return;
+        }
         if let Err(e) = self
-            .send_file_data(addr, file_port, &token, transfer_id, &outbound.data)
+            .send_file_data(
+                addr,
+                file_port,
+                &token,
+                transfer_id,
+                outbound.data.len() as u64,
+                start,
+                &outbound.data,
+            )
             .await
         {
             warn!(%e, transfer = %transfer_id, "file data send failed");
         }
     }
 
+    /// Send file bytes from `start` (the resume offset) to the end of `data`,
+    /// where `data` holds the whole file and `total` is its length on the wire.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_file_data(
         &self,
         peer_addr: SocketAddr,
         file_port: u16,
         token: &[u8; 32],
         transfer_id: &str,
+        total: u64,
+        start: u64,
         data: &[u8],
-    ) -> Result<[u8; 32], tetherly_net::NetError> {
+    ) -> Result<(), tetherly_net::NetError> {
         let dest = SocketAddr::new(peer_addr.ip(), file_port);
         let mut stream = TcpStream::connect(dest).await?;
-        send_file_bytes(&mut stream, token, transfer_id, data).await
+        tetherly_net::filechan::send_chunks_from(
+            &mut stream,
+            token,
+            transfer_id,
+            total,
+            start,
+            &data[start as usize..],
+        )
+        .await
     }
 
     pub fn control_port(&self) -> u16 {
@@ -1562,6 +1809,15 @@ impl Node {
         *self.shared.input_seat.lock().expect("seat")
     }
 
+    /// "remote" while the logical cursor is on a peer, else "local". Encoding
+    /// lives here so the UI never has to mirror the enum.
+    pub fn input_seat_str(&self) -> &'static str {
+        match self.input_seat() {
+            Some(CursorSeat::Remote) => "remote",
+            _ => "local",
+        }
+    }
+
     pub fn input_sink_snapshot(&self) -> MemorySink {
         self.shared.input_sink.lock().expect("sink").clone()
     }
@@ -1581,6 +1837,25 @@ impl Node {
         cfg.pin = None;
         let sess = dial_session(stream, addr, &cfg).await?;
         self.attach_input_server(sess).await;
+        Ok(())
+    }
+
+    /// True while an input control channel to a peer is attached. The UI uses
+    /// this to dial the channel on demand instead of tracking sessions.
+    pub async fn input_channel_open(&self) -> bool {
+        self.shared.input_out.lock().await.is_some()
+    }
+
+    /// Controller: stop forwarding local input to the remote seat and release
+    /// the channel. The capture hooks stay armed (they are cheap while local).
+    pub async fn input_stop(&self) -> Result<(), CoreError> {
+        *self.shared.input_out.lock().await = None;
+        self.shared
+            .input_engine
+            .lock()
+            .expect("engine")
+            .on_peer_gone();
+        *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
         Ok(())
     }
 
@@ -1606,9 +1881,58 @@ impl Node {
         Ok(())
     }
 
-    /// Push local pixels onto the open 45719 session. Crossing the right edge
-    /// emits Enter + Move. Seq is monotonic for the life of the node. No JSON,
-    /// and never onto 45717. OS hooks stay Manual-required.
+    /// Start the controller-side capture: low-level mouse hook (edge
+    /// detection) and a keyboard hook armed only while the seat is remote.
+    /// Events feed the same edge state machine `drive_input` uses, so CI and
+    /// production share one path. Non-Windows: honest error, no hooks.
+    pub fn spawn_input_capture(&self) -> Result<(), CoreError> {
+        let (tx, rx) = std::sync::mpsc::channel::<crate::platform::RawInput>();
+        let control = crate::platform::start_input_hooks(tx)?;
+        let (w, h) = crate::platform::screen_size();
+        self.shared
+            .input_engine
+            .lock()
+            .expect("engine")
+            .resize(w.max(1), h.max(1));
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| CoreError::Json("input capture needs a tokio runtime".into()))?;
+        let node = self.clone_handle();
+        std::thread::spawn(move || {
+            let mut keyboard_armed = false;
+            for ev in rx {
+                // A failed send means the remote input channel is not open (yet)
+                // or just closed. That is transient, not fatal: keep the hook
+                // alive so a later `open_input` starts delivering again, rather
+                // than wedging input sharing until process restart. Events are
+                // paced by real user input, so retrying cannot busy-spin.
+                match ev {
+                    crate::platform::RawInput::Move { x, y } => {
+                        let _ = handle.block_on(node.drive_input(x, y, w, h));
+                    }
+                    crate::platform::RawInput::Button { mask, down } => {
+                        let _ = handle.block_on(node.drive_input_button(mask, down));
+                    }
+                    crate::platform::RawInput::Wheel { dx, dy } => {
+                        let _ = handle.block_on(node.drive_input_wheel(dx, dy));
+                    }
+                    crate::platform::RawInput::Key { code, down } => {
+                        let _ = handle.block_on(node.drive_input_key(code, down));
+                    }
+                }
+                // The keyboard hook records real keystrokes: arm it only for
+                // the remote seat, disarm the moment the cursor comes home.
+                let remote = node.input_engine_seat() == CursorSeat::Remote;
+                if remote != keyboard_armed && control.set_keyboard(remote).is_ok() {
+                    keyboard_armed = remote;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Push local cursor position toward the edge state machine. Crossing the
+    /// right edge emits Enter + Move. Seq is monotonic for the life of the
+    /// node. No JSON, and never onto 45717. OS hooks stay Manual-required.
     pub async fn drive_input(
         &self,
         x: i32,
@@ -1638,6 +1962,35 @@ impl Node {
             let seq = server.next_seq();
             server.note_seq(seq);
             vec![InputEvent::key(seq, code, down, 0)]
+        };
+        self.send_input_events(events).await
+    }
+
+    /// Push a physical mouse-button observation to the remote seat. No-op
+    /// while the seat is local (the engine gates the same way).
+    pub async fn drive_input_button(&self, mask: u8, down: bool) -> Result<(), CoreError> {
+        let events = {
+            let mut server = self.shared.input_engine.lock().expect("engine");
+            if server.seat() != CursorSeat::Remote {
+                return Ok(());
+            }
+            let seq = server.next_seq();
+            server.note_seq(seq);
+            vec![InputEvent::button(seq, mask, down)]
+        };
+        self.send_input_events(events).await
+    }
+
+    /// Push a physical wheel observation to the remote seat.
+    pub async fn drive_input_wheel(&self, dx: i16, dy: i16) -> Result<(), CoreError> {
+        let events = {
+            let mut server = self.shared.input_engine.lock().expect("engine");
+            if server.seat() != CursorSeat::Remote {
+                return Ok(());
+            }
+            let seq = server.next_seq();
+            server.note_seq(seq);
+            vec![InputEvent::wheel(seq, dx, dy)]
         };
         self.send_input_events(events).await
     }
@@ -1705,6 +2058,7 @@ impl Node {
                         match outbound {
                             Some(frame) => {
                                 if sess.send_inner(frame).await.is_err() {
+                                    tracing::warn!("input server: peer send failed; closing");
                                     break;
                                 }
                             }
@@ -1721,7 +2075,10 @@ impl Node {
                                     }
                                 }
                             }
-                            Err(_) => break,
+                            Err(e) => {
+                                tracing::warn!(%e, "input server: session recv ended; closing");
+                                break;
+                            }
                         }
                     }
                 }
@@ -1740,6 +2097,11 @@ impl Node {
         let mut client = InputClient::new(MemorySink::default());
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
+        // Real injection rides behind the CI observer: the sink trace records
+        // exactly the actions `apply` performed, so forwarding the tail keeps
+        // OS injection in lockstep with protocol-level filtering.
+        let real = node.shared.input_real_sink.clone();
+        let mut forwarded: usize = 0;
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -1759,15 +2121,47 @@ impl Node {
                                         }).await;
                                     }
                                     *node.shared.input_sink.lock().expect("sink") = client.sink().clone();
+                                    if let Some(sink) = &real {
+                                        let mut sink = sink.lock().expect("real input sink");
+                                        let trace = client.sink().applied.as_slices();
+                                        let total = trace.0.len() + trace.1.len();
+                                        // The bounded trace (256) can wrap; min()
+                                        // then skips nothing new rather than
+                                        // replaying stale actions.
+                                        let start = forwarded.min(total);
+                                        for kind in trace.0.iter().chain(trace.1.iter()).skip(start) {
+                                            match *kind {
+                                                tetherly_core::InputKind::Move { x, y } => {
+                                                    sink.move_abs(x, y)
+                                                }
+                                                tetherly_core::InputKind::Button { mask, down } => {
+                                                    sink.button(mask, down)
+                                                }
+                                                tetherly_core::InputKind::Wheel { dx, dy } => {
+                                                    sink.wheel(dx, dy)
+                                                }
+                                                tetherly_core::InputKind::Key { code, down, mods } => {
+                                                    sink.key(code, down, mods)
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        forwarded = total;
+                                    }
                                     let seat = if client.focused() {
                                         CursorSeat::Remote
                                     } else {
                                         CursorSeat::Local
                                     };
                                     *node.shared.input_seat.lock().expect("seat") = Some(seat);
+                                } else if let Err(e) = InputEvent::from_frame(&frame) {
+                                    tracing::warn!(%e, "input client: bad frame");
                                 }
                             }
-                            Err(_) => break,
+                            Err(e) => {
+                                tracing::warn!(%e, "input client: session recv ended; closing");
+                                break;
+                            }
                         }
                     }
                 }
@@ -1780,7 +2174,8 @@ impl Node {
 
     /// Host side of a 45720 session: this machine is being viewed. Consent is
     /// enforced here — the peer's `Start` is refused until `screen_allow()` has
-    /// run locally. Frames are pumped by `screen_send_frame()`.
+    /// run locally. Frames are pushed by the app calling `screen_send_frame()`
+    /// at its own cadence (CLI loop on real hardware).
     async fn attach_screen_server(&self, mut sess: ActiveSession) {
         let (tx, mut rx) = mpsc::unbounded_channel::<InnerFrame>();
         *self.shared.screen_out.lock().await = Some(tx);
@@ -1793,6 +2188,9 @@ impl Node {
         }
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
+        // Pipe outbound frames to the session and inbound controls into the
+        // engine. The session's send/recv is the wire; the pump task below
+        // produces frames on the timer.
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -1843,12 +2241,13 @@ impl Node {
     }
 
     /// Visitor side of a 45720 session: this machine views a peer's screen.
-    /// Receives frames, presents them to the in-memory sink (real present is
-    /// Manual-required), and acks the sequence it accepted.
+    /// Reassembles `TMF1` fragments, decodes the codec, presents through the
+    /// sink, and acks the sequence it accepted.
     async fn attach_screen_client(&self, mut sess: ActiveSession) {
         let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel::<ControlMsg>();
         *self.shared.screen_ctl.lock().await = Some(ctl_tx);
         let mut receiver = ScreenReceiver::new();
+        let mut assembler = ScreenAssembler::new();
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
         tokio::spawn(async move {
@@ -1877,23 +2276,68 @@ impl Node {
                     inbound = sess.recv_inner() => {
                         match inbound {
                             Ok(frame) => {
-                                if let Ok(sf) = ScreenFrame::from_frame(&frame) {
-                                    match receiver.apply(&sf) {
-                                        Ok(Some(seq)) => {
-                                            if let Ok(sink) = node.shared.screen_sink.lock() {
-                                                let _ = sink.present(&sf);
+                                match assembler.push(&frame) {
+                                    Ok(Some(sf)) => {
+                                        // Decompress if the sender zstd-compressed
+                                        // this frame.
+                                        let present_frame = if sf.compressed {
+                                            match node.shared.screen_codec.decompress(
+                                                &sf.bytes,
+                                                sf.raw_len(),
+                                            ) {
+                                                Ok(raw) => ScreenFrame {
+                                                    bytes: raw,
+                                                    compressed: false,
+                                                    ..sf
+                                                },
+                                                Err(e) => {
+                                                    tracing::warn!(%e, seq = sf.seq, "screen decompress failed; closing viewer");
+                                                    break;
+                                                }
                                             }
-                                            let ack = ControlMsg::Ack { seq };
-                                            if let Ok(f) = ack.to_frame() {
-                                                let _ = sess.send_inner(f).await;
+                                        } else {
+                                            sf
+                                        };
+                                        match receiver.apply(&present_frame) {
+                                            Ok(acked) => {
+                                                // The default sink is the
+                                                // observer itself (shared
+                                                // inner), so presenting once
+                                                // updates the CI snapshot too.
+                                                *node
+                                                    .shared
+                                                    .screen_rx_stats
+                                                    .lock()
+                                                    .expect("screen rx") =
+                                                    receiver.stats();
+                                                if let Some(seq) = acked {
+                                                    let _ = node
+                                                        .shared
+                                                        .screen_sink
+                                                        .present(&present_frame);
+                                                    let ack = ControlMsg::Ack { seq };
+                                                    if let Ok(f) = ack.to_frame() {
+                                                        let _ = sess.send_inner(f).await;
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(%e, "screen receiver rejected frame; closing viewer");
+                                                break;
                                             }
                                         }
-                                        Ok(None) => {}
-                                        Err(_) => break,
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        tracing::warn!(%e, "screen assembler error; closing viewer");
+                                        break;
                                     }
                                 }
                             }
-                            Err(_) => break,
+                            Err(e) => {
+                                tracing::warn!(%e, "screen session recv ended; closing viewer");
+                                break;
+                            }
                         }
                     }
                 }
@@ -1907,7 +2351,40 @@ impl Node {
     /// `true` only when a frame was queued (i.e. while streaming). Deterministic
     /// in CI via `MemoryScreenSource`; real capture is Manual-required.
     pub async fn screen_send_frame(&self) -> Result<bool, CoreError> {
-        let frame = self.shared.screen_source.grab()?;
+        // Grab is the expensive step (DXGI map, adb pipe read): skip it
+        // entirely unless a visitor is actually streaming.
+        if !self
+            .shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .state()
+            .is_streaming()
+        {
+            return Ok(false);
+        }
+        // Grab can block for a long time (adb pipe reads in particular), so
+        // run it on the blocking pool with a hard timeout. On timeout, call
+        // `interrupt` so a wedged device stream EOFs and unwinds instead of
+        // stalling the pump forever.
+        let source = Arc::clone(&self.shared.screen_source);
+        let grab_task = source.clone();
+        let grab = tokio::task::spawn_blocking(move || grab_task.grab());
+        let frame = match tokio::time::timeout(SCREEN_GRAB_TIMEOUT, grab).await {
+            Ok(Ok(inner)) => inner?,
+            Ok(Err(join)) => {
+                return Err(CoreError::ScreenRefused(format!(
+                    "screen grab task: {join}"
+                )));
+            }
+            Err(_) => {
+                source.interrupt();
+                return Err(CoreError::ScreenRefused("screen grab timed out".into()));
+            }
+        };
+        let Some(frame) = frame else {
+            return Ok(false);
+        };
         let outbound = {
             let mut engine = self.shared.screen_engine.lock().expect("screen");
             if engine.push(frame).is_none() {
@@ -1915,6 +2392,11 @@ impl Node {
             }
             engine.drain()
         };
+        self.shared
+            .screen_interval
+            .lock()
+            .expect("interval")
+            .record();
         self.send_screen_frames(outbound).await?;
         Ok(true)
     }
@@ -1928,8 +2410,10 @@ impl Node {
             .clone()
             .ok_or_else(|| CoreError::Json("screen channel closed".into()))?;
         for f in frames {
-            tx.send(f.to_frame()?)
-                .map_err(|_| CoreError::Json("screen peer gone".into()))?;
+            for frag in f.to_frames()? {
+                tx.send(frag)
+                    .map_err(|_| CoreError::Json("screen peer gone".into()))?;
+            }
         }
         Ok(())
     }
@@ -1963,6 +2447,12 @@ impl Node {
         self.send_screen_control(ControlMsg::Start).await
     }
 
+    /// True while a screen control channel to a host is attached. The UI uses
+    /// this to dial the screen channel on demand instead of tracking sessions.
+    pub async fn screen_channel_open(&self) -> bool {
+        self.shared.screen_ctl.lock().await.is_some()
+    }
+
     /// Visitor: ask the host to stop sending.
     pub async fn screen_stop(&self) -> Result<(), CoreError> {
         self.send_screen_control(ControlMsg::Stop).await
@@ -1976,12 +2466,24 @@ impl Node {
         self.shared.screen_engine.lock().expect("screen").stats()
     }
 
-    pub fn screen_sink_snapshot(&self) -> MemoryScreenSink {
-        self.shared.screen_sink.lock().expect("sink").clone()
+    /// Visitor-side receiver counters. All zeros until this node views a peer.
+    pub fn screen_rx_stats(&self) -> ScreenStats {
+        *self.shared.screen_rx_stats.lock().expect("screen rx")
     }
 
-    pub fn data_dir(&self) -> &std::path::Path {
-        &self.shared.cfg.data_dir
+    /// 95th-percentile host-side frame interval in microseconds, or `None`
+    /// before two frames have shipped. Wall-clock: this is the M5.1 budget
+    /// measurement on real hardware.
+    pub fn screen_latency_p95_us(&self) -> Option<u64> {
+        self.shared
+            .screen_interval
+            .lock()
+            .expect("interval")
+            .p95_us()
+    }
+
+    pub fn screen_sink_snapshot(&self) -> MemoryScreenSink {
+        self.shared.screen_observer.lock().expect("sink").clone()
     }
 
     pub fn offered_files(&self) -> Vec<tetherly_core::IncomingTransfer> {
@@ -2015,4 +2517,80 @@ fn parse_port_cap(caps: &[String], prefix: &str) -> Option<u16> {
             .and_then(|s| s.parse::<u16>().ok())
             .filter(|p| *p != 0)
     })
+}
+
+#[cfg(test)]
+mod resume_scan_tests {
+    use super::*;
+    use tetherly_core::{DeviceId, FILE_CHUNK};
+
+    fn temp_inbox(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-scan-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("inbox")).unwrap();
+        dir
+    }
+
+    fn write_sidecar(dir: &std::path::Path, stem: &str, src: &str, total: u64, offset: u64) {
+        let dto = serde_json::json!({ "device_id": src, "total": total, "offset": offset });
+        std::fs::write(
+            dir.join("inbox").join(format!(".{stem}.resume.json")),
+            serde_json::to_vec(&dto).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_healthy_sidecar_is_loaded_and_a_torn_one_is_dropped() {
+        let dir = temp_inbox("scan");
+        let src = DeviceId::from_id_pk(&[7u8; 32]).to_string();
+        let total = 3 * FILE_CHUNK as u64;
+        // Healthy: sidecar offset 2*CHUNK, matching partial of that length.
+        write_sidecar(&dir, "tr_good", &src, total, 2 * FILE_CHUNK as u64);
+        std::fs::write(
+            dir.join("inbox").join(".tr_good.part"),
+            vec![0u8; 2 * FILE_CHUNK],
+        )
+        .unwrap();
+        // Torn: sidecar claims 2*CHUNK but the partial is missing entirely.
+        write_sidecar(&dir, "tr_torn", &src, total, 2 * FILE_CHUNK as u64);
+        // Bogus: unparseable source id, and a zero/oversized offset.
+        write_sidecar(
+            &dir,
+            "tr_badid",
+            "not-a-device-id",
+            total,
+            FILE_CHUNK as u64,
+        );
+        write_sidecar(&dir, "tr_zero", &src, total, 0);
+        write_sidecar(&dir, "tr_over", &src, total, total + 1);
+        // Markdown dir entries that merely look like sidecars are ignored.
+        std::fs::write(dir.join("inbox").join("plain.txt"), b"x").unwrap();
+
+        let table = load_resume_table(&dir);
+        let good = table.get("tr_good").expect("healthy sidecar loads");
+        assert_eq!(good.offset, 2 * FILE_CHUNK as u64);
+        assert!(table.get("tr_torn").is_none(), "torn sidecar is dropped");
+        assert!(table.get("tr_badid").is_none());
+        assert!(table.get("tr_zero").is_none());
+        assert!(table.get("tr_over").is_none());
+        assert_eq!(table.all().len(), 1);
+        // The torn sidecar file was removed so a later transfer starts clean.
+        assert!(!dir.join("inbox").join(".tr_torn.resume.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_inbox_dir_yields_an_empty_table() {
+        let dir = std::env::temp_dir().join(format!("tetherly-scan-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let table = load_resume_table(&dir);
+        assert_eq!(table.all().len(), 0);
+    }
 }

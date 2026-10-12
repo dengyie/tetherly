@@ -24,9 +24,26 @@ pub const SCREEN_PROTO: u8 = 1;
 pub const SCREEN_SEQ_WINDOW: u64 = 65_536;
 
 /// Payload bytes accepted for one screen frame. The Noise inner frame caps at
-/// 64 KiB, so a full-resolution raw frame must be split by the caller; this is
-/// the hard ceiling the codec enforces on the concatenated pixel body.
-pub const SCREEN_PAYLOAD_MAX: usize = INNER_PAYLOAD_MAX;
+/// 64 KiB per fragment, so a full-resolution frame travels as several inner
+/// frames (see `SCREEN_FRAG_MAGIC` and `ScreenFrame::to_frames`); this is the
+/// hard ceiling the codec enforces on the concatenated pixel body. 8 MiB fits
+/// one 1920x1080 BGRA frame worst case even uncompressed; any realistic
+/// zstd-compressed frame sits far below it.
+pub const SCREEN_PAYLOAD_MAX: usize = 8 * 1024 * 1024;
+
+/// Fragment transport for screen frames too large for one inner frame.
+/// A fragment stream is a `TMF1`-enveloped run of inner frames; the receiver
+/// reassembles before `decode_payload`. A `TMV1`-prefixed payload is a whole
+/// frame and takes the fast path, so small frames stay byte-identical to the
+/// single-frame wire format.
+pub const SCREEN_FRAG_MAGIC: [u8; 4] = *b"TMF1";
+
+/// Fragment envelope: magic(4) | total_len(4) | frag_index(4) | frag_count(4)
+/// | seq(8) = 24 bytes, followed by the chunk.
+pub const SCREEN_FRAG_HEADER: usize = 24;
+
+/// Per-fragment chunk budget so every inner frame stays within 64 KiB.
+pub const SCREEN_FRAG_CHUNK_MAX: usize = INNER_PAYLOAD_MAX - SCREEN_FRAG_HEADER;
 
 /// Most recent presented frames the memory sink retains, so a long-lived
 /// receiver cannot grow its trace without bound.
@@ -101,7 +118,11 @@ impl ScreenRect {
     }
 
     pub fn pixel_bytes(&self, format: PixelFormat) -> usize {
-        self.w as usize * self.h as usize * format.bpp()
+        // Widened to u64 then saturated to usize so a peer-declared 65535x65535
+        // rect cannot overflow on a 32-bit target (Android armeabi-v7a) before
+        // the caller's cap check runs.
+        let n = (self.w as u64) * (self.h as u64) * (format.bpp() as u64);
+        usize::try_from(n).unwrap_or(usize::MAX)
     }
 }
 
@@ -198,6 +219,47 @@ impl ScreenFrame {
         })
     }
 
+    /// Envelope a whole (small) frame into one inner frame, or split a large
+    /// frame into `TMF1` fragment inner frames each under the 64 KiB inner
+    /// budget. Each fragment is independently `TYPE_SCREEN_FRAME`; a receiver
+    /// reassembles with `ScreenAssembler` before `decode_payload`. This is the
+    /// only way a full-screen BGRA frame crosses the 45720 wire.
+    pub fn to_frames(&self) -> Result<Vec<InnerFrame>, CoreError> {
+        let payload = self.encode_payload()?;
+        if payload.len() <= INNER_PAYLOAD_MAX {
+            return Ok(vec![InnerFrame {
+                ty: TYPE_SCREEN_FRAME,
+                flags: FLAG_MUST_UNDERSTAND,
+                msg_id: 0,
+                payload,
+            }]);
+        }
+        let total = payload.len();
+        let count = total.div_ceil(SCREEN_FRAG_CHUNK_MAX);
+        if count > u32::MAX as usize {
+            return Err(CoreError::ScreenTooLarge);
+        }
+        let mut frames = Vec::with_capacity(count);
+        for idx in 0..count {
+            let start = idx * SCREEN_FRAG_CHUNK_MAX;
+            let end = (start + SCREEN_FRAG_CHUNK_MAX).min(total);
+            let mut frag = vec![0u8; SCREEN_FRAG_HEADER + (end - start)];
+            frag[..4].copy_from_slice(&SCREEN_FRAG_MAGIC);
+            frag[4..8].copy_from_slice(&(total as u32).to_be_bytes());
+            frag[8..12].copy_from_slice(&(idx as u32).to_be_bytes());
+            frag[12..16].copy_from_slice(&(count as u32).to_be_bytes());
+            frag[16..24].copy_from_slice(&self.seq.to_be_bytes());
+            frag[SCREEN_FRAG_HEADER..].copy_from_slice(&payload[start..end]);
+            frames.push(InnerFrame {
+                ty: TYPE_SCREEN_FRAME,
+                flags: FLAG_MUST_UNDERSTAND,
+                msg_id: 0,
+                payload: frag,
+            });
+        }
+        Ok(frames)
+    }
+
     pub fn from_frame(frame: &InnerFrame) -> Result<Self, CoreError> {
         if frame.ty != TYPE_SCREEN_FRAME {
             return Err(CoreError::ScreenFrame);
@@ -234,6 +296,13 @@ impl ScreenFrame {
         };
         let stride = u32::from_be_bytes(payload[27..31].try_into().unwrap());
         let rect = ScreenRect::new(x, y, w, h)?;
+        // The decoded body is `w*h*bpp`; `w,h` are peer-controlled u16, so this
+        // can reach ~17 GB. Cap it here (the whole-frame payload cap does not
+        // cover the *decoded* size) so a small compressed frame cannot drive an
+        // unbounded allocation in the decoder that follows.
+        if rect.pixel_bytes(format) > SCREEN_PAYLOAD_MAX {
+            return Err(CoreError::ScreenTooLarge);
+        }
         let bytes = payload[HEADER..].to_vec();
         if bytes.is_empty() {
             return Err(CoreError::ScreenFrame);
@@ -555,6 +624,117 @@ impl ScreenReceiver {
     }
 }
 
+/// Reassembles `TMF1` fragment streams back into one `ScreenFrame`. A whole
+/// `TMV1` payload (small frame) passes through unchanged. Fragments that
+/// disagree with the current stream (a different seq, index, or shape) reset
+/// the buffer — the wire is a live stream and a stale fragment never pollutes
+/// a newer frame. Bounded: the assembled body is capped at
+/// `SCREEN_PAYLOAD_MAX`, so a hostile peer cannot grow memory without limit.
+#[derive(Debug, Default)]
+pub struct ScreenAssembler {
+    seq: u64,
+    total: usize,
+    count: usize,
+    /// Reassembly body, allocated once per stream and filled in place at each
+    /// fragment's offset — one buffer instead of per-chunk Vecs plus a final
+    /// concatenation copy.
+    body: Vec<u8>,
+    mask: Vec<bool>,
+    accepted: usize,
+}
+
+impl ScreenAssembler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one inner frame. Returns the complete frame when the last fragment
+    /// of a stream arrives (or immediately for a whole small frame).
+    pub fn push(&mut self, frame: &InnerFrame) -> Result<Option<ScreenFrame>, CoreError> {
+        if frame.ty != TYPE_SCREEN_FRAME {
+            return Err(CoreError::ScreenFrame);
+        }
+        if frame.payload.starts_with(&SCREEN_MAGIC) {
+            // A whole frame supersedes any half-assembled fragment stream; drop
+            // the stale fragments so a later fragment cannot resurrect them.
+            self.reset();
+            return ScreenFrame::from_frame(frame).map(Some);
+        }
+        if !frame.payload.starts_with(&SCREEN_FRAG_MAGIC) {
+            return Err(CoreError::ScreenFragment);
+        }
+        let p = &frame.payload;
+        if p.len() < SCREEN_FRAG_HEADER {
+            return Err(CoreError::ScreenFragment);
+        }
+        let total = u32::from_be_bytes(p[4..8].try_into().unwrap()) as usize;
+        let idx = u32::from_be_bytes(p[8..12].try_into().unwrap()) as usize;
+        let count = u32::from_be_bytes(p[12..16].try_into().unwrap()) as usize;
+        let seq = u64::from_be_bytes(p[16..24].try_into().unwrap());
+        let chunk = &p[SCREEN_FRAG_HEADER..];
+
+        // Every fragment must be under the inner budget and the whole stream
+        // under SCREEN_PAYLOAD_MAX; a lying count is refused, not allocated.
+        // `count` must also equal the chunk count implied by `total`, or a
+        // short `count` would let the stream "complete" with `body` unfilled.
+        let expected_count = total.div_ceil(SCREEN_FRAG_CHUNK_MAX);
+        if p.len() > INNER_PAYLOAD_MAX
+            || total > SCREEN_PAYLOAD_MAX
+            || total == 0
+            || count != expected_count
+            || idx >= count
+        {
+            return Err(CoreError::ScreenFragment);
+        }
+
+        // A new stream supersedes an incomplete older one.
+        if seq != self.seq && !self.mask.is_empty() {
+            self.reset();
+        }
+        if self.mask.is_empty() || self.total != total || self.count != count {
+            self.seq = seq;
+            self.total = total;
+            self.count = count;
+            self.body = vec![0u8; total];
+            self.mask = vec![false; count];
+            self.accepted = 0;
+        }
+        // `idx` indexes a chunk of a `count`-chunk stream, but a lying sender
+        // can still point an index past `total`; compute the offset with a
+        // checked multiply so neither step can overflow or underflow.
+        let Some(off) = idx.checked_mul(SCREEN_FRAG_CHUNK_MAX) else {
+            return Err(CoreError::ScreenFragment);
+        };
+        if off >= self.total {
+            return Err(CoreError::ScreenFragment);
+        }
+        let expected = (self.total - off).min(SCREEN_FRAG_CHUNK_MAX);
+        if chunk.len() != expected {
+            return Err(CoreError::ScreenFragment);
+        }
+        if !self.mask[idx] {
+            self.body[off..off + chunk.len()].copy_from_slice(chunk);
+            self.mask[idx] = true;
+            self.accepted += 1;
+        }
+        if self.accepted < self.count {
+            return Ok(None);
+        }
+        let frame = ScreenFrame::decode_payload(&self.body)?;
+        self.reset();
+        Ok(Some(frame))
+    }
+
+    fn reset(&mut self) {
+        self.seq = 0;
+        self.total = 0;
+        self.count = 0;
+        self.body = Vec::new();
+        self.mask = Vec::new();
+        self.accepted = 0;
+    }
+}
+
 /// In-memory capture source for tests and CI. Deterministic: the same `grab`
 /// calls always yield the same pixels, so latency and sequence assertions are
 /// reproducible without a display.
@@ -577,11 +757,6 @@ impl MemoryScreenSource {
         })
     }
 
-    pub fn with_format(mut self, format: PixelFormat) -> Self {
-        self.format = format;
-        self
-    }
-
     /// Make the `n`-th grab (1-based) return an error once.
     pub fn fail_on_grab(&self, n: u64) {
         self.fail_at.store(n, std::sync::atomic::Ordering::SeqCst);
@@ -593,7 +768,7 @@ impl MemoryScreenSource {
 }
 
 impl crate::ports::ScreenSource for MemoryScreenSource {
-    fn grab(&self) -> Result<ScreenFrame, CoreError> {
+    fn grab(&self) -> Result<Option<ScreenFrame>, CoreError> {
         let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.fail_at.load(std::sync::atomic::Ordering::SeqCst) == seq {
             return Err(CoreError::ScreenRefused("injected grab failure".into()));
@@ -604,7 +779,7 @@ impl crate::ports::ScreenSource for MemoryScreenSource {
         for (i, b) in bytes.iter_mut().enumerate() {
             *b = (i.wrapping_add(seq as usize) & 0xFF) as u8;
         }
-        ScreenFrame::raw(seq, self.rect, self.format, bytes)
+        Ok(Some(ScreenFrame::raw(seq, self.rect, self.format, bytes)?))
     }
 }
 
@@ -854,7 +1029,7 @@ mod tests {
         let a = MemoryScreenSource::new(4, 2).unwrap();
         let b = MemoryScreenSource::new(4, 2).unwrap();
         assert_eq!(a.grab().unwrap(), b.grab().unwrap());
-        assert_eq!(a.grab().unwrap().seq, 2);
+        assert_eq!(a.grab().unwrap().unwrap().seq, 2);
 
         let src = MemoryScreenSource::new(4, 2).unwrap();
         src.fail_on_grab(2);
@@ -898,5 +1073,162 @@ mod tests {
         assert!(is_screen_type(TYPE_SCREEN_FRAME));
         assert!(is_screen_type(TYPE_SCREEN_CONTROL));
         assert!(!is_screen_type(0x0999));
+    }
+
+    #[test]
+    fn small_frame_takes_the_whole_frame_fast_path() {
+        let f = raw_frame(7);
+        let frames = f.to_frames().unwrap();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].payload.starts_with(&SCREEN_MAGIC));
+        let mut a = ScreenAssembler::new();
+        let out = a.push(&frames[0]).unwrap();
+        assert_eq!(out, Some(f));
+    }
+
+    #[test]
+    fn large_frame_fragments_and_reassembles_round_trip() {
+        // 4 MiB raw BGRA body — far past the 64 KiB inner budget.
+        let rect = ScreenRect::new(0, 0, 1024, 1024).unwrap();
+        let bytes = vec![0xABu8; rect.pixel_bytes(PixelFormat::Bgra8)];
+        let f = ScreenFrame::raw(9, rect, PixelFormat::Bgra8, bytes).unwrap();
+        let frames = f.to_frames().unwrap();
+        assert!(frames.len() > 2, "must be fragmented, got {}", frames.len());
+        for fr in &frames {
+            assert!(fr.payload.starts_with(&SCREEN_FRAG_MAGIC));
+            assert!(fr.payload.len() <= INNER_PAYLOAD_MAX);
+        }
+        let mut a = ScreenAssembler::new();
+        let mut out = None;
+        for fr in &frames {
+            out = a.push(fr).unwrap();
+        }
+        let out = out.expect("last fragment yields the frame");
+        assert_eq!(out, f);
+        assert_eq!(out.bytes.len(), rect.pixel_bytes(PixelFormat::Bgra8));
+    }
+
+    #[test]
+    fn assembler_rejects_a_lying_fragment_stream() {
+        let rect = ScreenRect::new(0, 0, 1024, 1024).unwrap();
+        let f = ScreenFrame::raw(1, rect, PixelFormat::Bgra8, vec![0u8; 4 * 1024 * 1024]).unwrap();
+        let frames = f.to_frames().unwrap();
+        assert!(frames.len() > 1, "must be fragmented");
+        // Corrupt the first fragment: total_len far above the cap.
+        let mut bad = frames[0].payload.clone();
+        bad[4..8].copy_from_slice(&(SCREEN_PAYLOAD_MAX as u32 + 1000).to_be_bytes());
+        let mut a = ScreenAssembler::new();
+        assert_eq!(
+            a.push(&InnerFrame {
+                ty: TYPE_SCREEN_FRAME,
+                flags: FLAG_MUST_UNDERSTAND,
+                msg_id: 0,
+                payload: bad,
+            })
+            .unwrap_err(),
+            CoreError::ScreenFragment
+        );
+        // A non-TMV1 non-TMF1 payload is refused too.
+        let mut a = ScreenAssembler::new();
+        assert_eq!(
+            a.push(&InnerFrame {
+                ty: TYPE_SCREEN_FRAME,
+                flags: FLAG_MUST_UNDERSTAND,
+                msg_id: 0,
+                payload: b"not a frame".to_vec(),
+            })
+            .unwrap_err(),
+            CoreError::ScreenFragment
+        );
+    }
+
+    #[test]
+    fn assembler_rejects_an_index_past_the_stream_end() {
+        // A sender that keeps `total` small but claims a high `idx` must be
+        // refused before `total - off` can underflow (a remote panic).
+        let mut a = ScreenAssembler::new();
+        let mut frag = vec![0u8; SCREEN_FRAG_HEADER + 16];
+        frag[..4].copy_from_slice(&SCREEN_FRAG_MAGIC);
+        frag[4..8].copy_from_slice(&16u32.to_be_bytes()); // total = 16
+        frag[8..12].copy_from_slice(&1u32.to_be_bytes()); // idx = 1 -> off = 64K
+        frag[12..16].copy_from_slice(&2u32.to_be_bytes()); // count = 2
+        frag[16..24].copy_from_slice(&5u64.to_be_bytes());
+        assert_eq!(
+            a.push(&InnerFrame {
+                ty: TYPE_SCREEN_FRAME,
+                flags: FLAG_MUST_UNDERSTAND,
+                msg_id: 0,
+                payload: frag,
+            })
+            .unwrap_err(),
+            CoreError::ScreenFragment
+        );
+    }
+
+    #[test]
+    fn assembler_stale_stream_is_superseded_by_a_new_seq() {
+        let rect = ScreenRect::new(0, 0, 1024, 1024).unwrap();
+        let f1 =
+            ScreenFrame::raw(1, rect, PixelFormat::Bgra8, vec![0x11u8; 4 * 1024 * 1024]).unwrap();
+        let f2 =
+            ScreenFrame::raw(2, rect, PixelFormat::Bgra8, vec![0x22u8; 4 * 1024 * 1024]).unwrap();
+        let (mut f1f, mut f2f) = (f1.to_frames().unwrap(), f2.to_frames().unwrap());
+        let mut a = ScreenAssembler::new();
+        // Half of stream 1, then a chunk of stream 2 — the old buffer resets.
+        for fr in f1f.drain(..f1f.len() / 2) {
+            assert!(a.push(&fr).unwrap().is_none());
+        }
+        assert!(a.push(&f2f.remove(0)).unwrap().is_none());
+        let mut out = None;
+        for fr in f2f {
+            out = a.push(&fr).unwrap();
+        }
+        assert_eq!(out, Some(f2));
+    }
+
+    #[test]
+    fn assembler_rejects_a_short_count_that_would_leave_the_body_unfilled() {
+        // `count` smaller than the chunks implied by `total` would otherwise let
+        // the stream "complete" with holes in `body` — a silently corrupt frame.
+        let rect = ScreenRect::new(0, 0, 1024, 1024).unwrap();
+        let f = ScreenFrame::raw(1, rect, PixelFormat::Bgra8, vec![0u8; 4 * 1024 * 1024]).unwrap();
+        let frames = f.to_frames().unwrap();
+        assert!(frames.len() > 1);
+        let mut bad = frames[0].payload.clone();
+        bad[12..16].copy_from_slice(&1u32.to_be_bytes()); // count = 1, total is many
+        let mut a = ScreenAssembler::new();
+        assert_eq!(
+            a.push(&InnerFrame {
+                ty: TYPE_SCREEN_FRAME,
+                flags: FLAG_MUST_UNDERSTAND,
+                msg_id: 0,
+                payload: bad,
+            })
+            .unwrap_err(),
+            CoreError::ScreenFragment
+        );
+    }
+
+    #[test]
+    fn assembler_whole_frame_fast_path_drops_stale_fragments() {
+        // Half a fragmented stream, then a whole frame: the whole frame must
+        // win and the leftover fragments must not resurrect.
+        let rect = ScreenRect::new(0, 0, 1024, 1024).unwrap();
+        let big =
+            ScreenFrame::raw(1, rect, PixelFormat::Bgra8, vec![0x33u8; 4 * 1024 * 1024]).unwrap();
+        let frags = big.to_frames().unwrap();
+        let small = raw_frame(2);
+        let whole = small.to_frames().unwrap();
+        assert!(frags.len() > 1 && whole.len() == 1);
+
+        let mut a = ScreenAssembler::new();
+        assert!(a.push(&frags[0]).unwrap().is_none());
+        assert_eq!(a.push(&whole[0]).unwrap(), Some(small.clone()));
+        // Feeding the remaining old fragments must re-anchor against a fresh
+        // stream (they may start a new partial), never blend with the whole
+        // frame that already shipped.
+        for fr in &frags[1..] {
+            let _ = a.push(fr);
+        }
     }
 }

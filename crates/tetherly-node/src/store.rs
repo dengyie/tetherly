@@ -156,6 +156,8 @@ pub enum NodeStoreError {
     Json(#[from] serde_json::Error),
     #[error("identity file corrupt")]
     Corrupt,
+    #[error("credential vault unavailable but identity.ref present")]
+    VaultUnavailable,
     #[error("rng failure")]
     Rng,
     #[error(transparent)]

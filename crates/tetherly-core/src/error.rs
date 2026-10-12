@@ -38,6 +38,8 @@ pub enum CoreError {
     CandidateExpired,
     #[error("no otp in candidate")]
     NoOtp,
+    #[error("reply text is empty")]
+    EmptyReply,
     #[error("clipboard payload too large")]
     ClipboardTooLarge,
     #[error("file not accepted")]
@@ -46,6 +48,8 @@ pub enum CoreError {
     UnknownTransfer,
     #[error("file already decided")]
     FileAlreadyDecided,
+    #[error("resume offset is not chunk-aligned or out of range")]
+    ResumeOffset,
     #[error("bind address refused")]
     BindRefused,
     #[error("identity file corrupt")]
@@ -76,6 +80,10 @@ pub enum CoreError {
     ScreenTooLarge,
     #[error("screen refused: {0}")]
     ScreenRefused(String),
+    #[error("screen fragment stream is malformed")]
+    ScreenFragment,
+    #[error("screen compression codec failed: {0}")]
+    ScreenCodec(String),
 }
 
 impl From<serde_json::Error> for CoreError {

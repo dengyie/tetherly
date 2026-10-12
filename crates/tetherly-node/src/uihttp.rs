@@ -138,6 +138,8 @@ struct Snapshot {
     overlay_source: String,
     overlay_peers: usize,
     candidates: Vec<crate::events::CandidateViewDto>,
+    /// Inbound quick replies awaiting hand-off. No text is included.
+    replies: Vec<crate::events::ReplyViewDto>,
     peers: Vec<PeerView>,
     files: Vec<FileSnap>,
     /// "off" when no BLE transport is attached, else the ingress state.
@@ -148,6 +150,9 @@ struct Snapshot {
     screen_state: String,
     /// Screen counters for the local UI. Never carries pixels.
     screen: ScreenSnap,
+    /// Input channel state: whether 45719 is dialled and where the seat is.
+    input_channel: bool,
+    input_seat: String,
 }
 
 #[derive(Serialize)]
@@ -158,6 +163,8 @@ struct ScreenSnap {
     dropped: u64,
     bytes: u64,
     refused: u64,
+    /// p95 host-side frame interval in microseconds. Null until measurable.
+    p95_frame_interval_us: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -188,6 +195,12 @@ struct IdBody {
 }
 
 #[derive(serde::Deserialize)]
+struct ReplyBody {
+    id: String,
+    text: String,
+}
+
+#[derive(serde::Deserialize)]
 struct OpenRuleBody {
     app_id: String,
     url: String,
@@ -196,7 +209,7 @@ struct OpenRuleBody {
 async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'static str, Vec<u8>) {
     match (method, path) {
         ("GET", "/") | ("GET", "/index.html") => (200, "text/html", INDEX.as_bytes().to_vec()),
-        ("GET", "/api/state") => json_ok(&snapshot(node)),
+        ("GET", "/api/state") => json_ok(&snapshot(node).await),
         ("POST", "/api/pin") => match node.generate_pin() {
             Ok(pin) => json_ok(&serde_json::json!({ "pin": pin })),
             Err(e) => err(400, &e.to_string()),
@@ -247,6 +260,28 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             },
             Err(_) => err(400, "bad json"),
         },
+        // Quick reply typed on the desktop, sent back to the phone that owns
+        // the notification. The text is the user's own; it is delivered, never
+        // executed, and never logged.
+        ("POST", "/api/reply") => match serde_json::from_slice::<ReplyBody>(body) {
+            Ok(d) => match node.reply_to_candidate(&d.id, &d.text).await {
+                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+                Err(e) => err(400, &e.to_string()),
+            },
+            Err(_) => err(400, "bad json"),
+        },
+        // Hand a previously received reply to the local OS path exactly once.
+        ("POST", "/api/reply/take") => match serde_json::from_slice::<IdBody>(body) {
+            Ok(d) => match node.take_reply(&d.id) {
+                Some((view, _text)) => json_ok(&serde_json::json!({
+                    "ok": true,
+                    "uid": view.uid,
+                    "app_id": view.app_id,
+                })),
+                None => err(400, "unknown reply"),
+            },
+            Err(_) => err(400, "bad json"),
+        },
         ("POST", "/api/file/accept") => match serde_json::from_slice::<IdBody>(body) {
             Ok(d) => match node.user_accept_file(&d.id).await {
                 Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
@@ -289,19 +324,77 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             node.screen_allow();
             json_ok(&serde_json::json!({ "state": node.screen_state().as_str() }))
         }
-        ("POST", "/api/screen/start") => match node.screen_start().await {
+        ("POST", "/api/screen/start") => {
+            // The Start control only means something on an open screen
+            // channel, and the UI has no channel concept: dial the trusted
+            // peer on demand. More than one live peer needs an explicit
+            // target — refuse honestly instead of picking silently.
+            let open = if node.screen_channel_open().await {
+                Ok(())
+            } else {
+                let mut peers = node.live_peers();
+                peers.sort_by_key(|p| p.device_id.to_string());
+                match peers.len() {
+                    0 => Err("no connected peer".to_string()),
+                    1 => node
+                        .open_screen(&peers[0].device_id)
+                        .await
+                        .map_err(|e| e.to_string()),
+                    _ => Err(
+                        "multiple peers connected; screen target selection not implemented"
+                            .to_string(),
+                    ),
+                }
+            };
+            match open {
+                Err(msg) => err(400, &format!("screen open: {msg}")),
+                Ok(()) => match node.screen_start().await {
+                    Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+                    Err(e) => err(400, &e.to_string()),
+                },
+            }
+        }
+        ("POST", "/api/screen/stop") => match node.screen_stop().await {
             Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
             Err(e) => err(400, &e.to_string()),
         },
-        ("POST", "/api/screen/stop") => match node.screen_stop().await {
-            Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+        // Local input sharing (controller → controlled). Dialling the 45719
+        // channel is what lets `drive_input*` actually deliver; the established
+        // capture hooks are inert until then.
+        ("POST", "/api/input/start") => {
+            let open = if node.input_channel_open().await {
+                Ok(())
+            } else {
+                let mut peers = node.live_peers();
+                peers.sort_by_key(|p| p.device_id.to_string());
+                match peers.len() {
+                    0 => Err("no connected peer".to_string()),
+                    1 => node
+                        .open_input(&peers[0].device_id)
+                        .await
+                        .map_err(|e| e.to_string()),
+                    _ => Err(
+                        "multiple peers connected; input target selection not implemented"
+                            .to_string(),
+                    ),
+                }
+            };
+            match open {
+                Err(msg) => err(400, &format!("input open: {msg}")),
+                Ok(()) => {
+                    json_ok(&serde_json::json!({ "ok": true, "seat": node.input_seat_str() }))
+                }
+            }
+        }
+        ("POST", "/api/input/stop") => match node.input_stop().await {
+            Ok(()) => json_ok(&serde_json::json!({ "ok": true, "seat": node.input_seat_str() })),
             Err(e) => err(400, &e.to_string()),
         },
         _ => (404, "text/plain", b"not found".to_vec()),
     }
 }
 
-fn snapshot(node: &Node) -> Snapshot {
+async fn snapshot(node: &Node) -> Snapshot {
     let ov = node.overlay_status();
     let ancs_state = match node.ancs_state() {
         None => "off".to_string(),
@@ -321,6 +414,11 @@ fn snapshot(node: &Node) -> Snapshot {
         overlay_source: format!("{:?}", ov.source),
         overlay_peers: ov.peers.len(),
         candidates: node.candidates(),
+        replies: node
+            .reply_views()
+            .into_iter()
+            .map(crate::events::ReplyViewDto::from)
+            .collect(),
         ancs_state,
         open_apps: node
             .open_allowlist()
@@ -354,15 +452,20 @@ fn snapshot(node: &Node) -> Snapshot {
         screen_state: node.screen_state().as_str().to_string(),
         screen: {
             let s = node.screen_stats();
+            // Visitor-side receiver counters (the engine is host-side only).
+            let r = node.screen_rx_stats();
             ScreenSnap {
                 state: node.screen_state().as_str().to_string(),
                 sent: s.sent,
-                received: s.received,
-                dropped: s.dropped,
-                bytes: s.bytes,
+                received: r.received,
+                dropped: r.dropped,
+                bytes: s.bytes + r.bytes,
                 refused: s.refused,
+                p95_frame_interval_us: node.screen_latency_p95_us(),
             }
         },
+        input_channel: node.input_channel_open().await,
+        input_seat: node.input_seat_str().to_string(),
     }
 }
 

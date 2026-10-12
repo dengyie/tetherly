@@ -79,6 +79,7 @@ fn cfg(identity: Identity, name: &str, pin: [u8; 8]) -> SessionConfig {
         hello_override: None,
         resume_only: false,
         screen_only: false,
+        caps: None,
     }
 }
 

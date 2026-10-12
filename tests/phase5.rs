@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tetherly_core::{MemoryScreenSource, ScreenState};
-use tetherly_net::session::{dial_session, SessionConfig, HANDSHAKE_TIMEOUT, SCREEN_PORT};
+use tetherly_net::session::{dial_session, SessionConfig, HANDSHAKE_TIMEOUT};
 use tetherly_net::NetError;
 use tetherly_node::{Node, NodeConfig, OverlayConfig};
 use tokio::net::TcpStream;
@@ -63,6 +63,9 @@ fn cfg(
         ancs: None,
         ancs_peripheral: "test-iphone".into(),
         screen_source,
+        screen_codec: None,
+        screen_sink: None,
+        input_sink: None,
     }
 }
 
@@ -152,6 +155,7 @@ async fn unpaired_45720_refuses_pairing() {
         hello_override: None,
         resume_only: false,
         screen_only: true,
+        caps: None,
     };
     let err = match dial_session(stream, addr, &cfg).await {
         Err(e) => e,
@@ -161,7 +165,9 @@ async fn unpaired_45720_refuses_pairing() {
         matches!(err, NetError::ScreenRequiresTrust),
         "unpaired 45720 must refuse pairing, got {err}"
     );
-    assert_ne!(host.screen_port(), SCREEN_PORT);
+    // The listener bound an ephemeral port (config asked for 0); a zero here
+    // would mean it never came up. `screen_addr` dials this same port.
+    assert_ne!(host.screen_port(), 0, "screen listener did not bind");
     let _ = SocketAddr::from(([127, 0, 0, 1], host.screen_port()));
 }
 
@@ -299,4 +305,82 @@ async fn m5_3_peer_gone_resets_to_idle() {
     assert!(!host.screen_send_frame().await.unwrap());
 
     host.shutdown();
+}
+
+// --------------------------------------------------------------------------
+// Grab-failure recovery: one failed grab must never poison the next tick.
+// The pump keeps calling `screen_send_frame`, so source-level self-healing
+// (AdbSource respawn, DXGI retry) can actually engage.
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn grab_failure_does_not_poison_the_next_frame() {
+    let (da, _ga) = temp_dir("host-fail");
+    let (db, _gb) = temp_dir("visitor-fail");
+    let src = Arc::new(MemoryScreenSource::new(16, 16).unwrap());
+    let host = Node::start(cfg(da, "host", Some(src.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+    wait_screen_port(
+        &host,
+        visitor.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+    wait_screen_port(
+        &visitor,
+        host.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+    visitor
+        .open_screen(host.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    host.screen_allow();
+    visitor.screen_start().await.unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_state() == ScreenState::Streaming {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("host never started streaming");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // One grab fails (the device-blip analog).
+    src.fail_on_grab(1);
+    assert!(
+        host.screen_send_frame().await.is_err(),
+        "the failed grab surfaces as an error"
+    );
+
+    // The very next tick recovers and the frame reaches the visitor.
+    assert!(
+        host.screen_send_frame().await.unwrap(),
+        "recovered grab queues a frame"
+    );
+    let start = std::time::Instant::now();
+    loop {
+        let sink = visitor.screen_sink_snapshot();
+        if sink.count() >= 1 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("recovered frame did not arrive");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    host.shutdown();
+    visitor.shutdown();
 }

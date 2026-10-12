@@ -2,7 +2,7 @@
 //! UI-facing events. Bodies, OTP digits, and clipboard text never appear here.
 
 use serde::Serialize;
-use tetherly_core::{CandidateView, DeviceId, IncomingTransfer};
+use tetherly_core::{CandidateView, DeviceId, IncomingTransfer, ReplyView};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -12,6 +12,9 @@ pub enum UiEvent {
     },
     CandidateExpired {
         id: String,
+    },
+    ReplyReceived {
+        reply: ReplyViewDto,
     },
     FileOffered {
         transfer_id: String,
@@ -69,6 +72,27 @@ impl From<CandidateView> for CandidateViewDto {
             created_ms: v.created_ms,
             expires_ms: v.expires_ms,
             actions: v.actions,
+        }
+    }
+}
+
+/// A queued `notify.reply`, shown so the user knows a reply is waiting. The
+/// text is not carried here (see `ReplyView`), matching the no-content rule.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplyViewDto {
+    pub id: String,
+    pub source: String,
+    pub app_id: String,
+    pub uid: String,
+}
+
+impl From<ReplyView> for ReplyViewDto {
+    fn from(v: ReplyView) -> Self {
+        Self {
+            id: v.id,
+            source: v.source.to_string(),
+            app_id: v.app_id,
+            uid: v.uid,
         }
     }
 }

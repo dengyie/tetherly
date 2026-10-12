@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::codec::{read_len_prefixed, write_len_prefixed};
+use crate::codec::{
+    read_len_prefixed, read_tagged, write_len_prefixed, write_tagged, TAG_DATA, TAG_REKEY,
+};
 use crate::error::NetError;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,38 +44,222 @@ pub struct ActiveSession {
     transport: NoiseTransport,
     next_msg_id: u64,
     replay: ReplayGuard,
+    /// Everything needed to rebuild a fresh IK handshake in band. `snow` 0.9
+    /// `TransportState` has no `rekey()`, so the SSOT mandates a new IK
+    /// handshake (same static keys) after 2^16 messages or 3600s.
+    rekey: RekeyContext,
+    /// In-flight rekey. `send_inner`/`recv_inner` run inside `select!`, which
+    /// may cancel them at an await; a rekey therefore cannot be a single
+    /// `await`-heavy function but must resume from where it stopped.
+    rekey_state: Option<RekeyInFlight>,
+    /// Frames the peer sent under the old transport while our rekey handshake
+    /// was in flight. Drained by `recv_inner` before reading the wire again.
+    pending: VecDeque<InnerFrame>,
+}
+
+/// Static material for an in-band rekey. `Identity` and `Hello` are cheap to
+/// clone and the values are fixed for the whole session.
+struct RekeyContext {
+    identity: Identity,
+    local_hello: Hello,
+    remote_hello: Hello,
+    remote_n_pk: [u8; 32],
+    /// Only the Noise initiator drives a rekey, so the two sides can never
+    /// start one simultaneously. The responder reacts to the initiator's
+    /// handshake message.
+    we_initiate_noise: bool,
+}
+
+/// A rekey handshake resumable across cancellations. The `NoiseHandshake`
+/// keeps its own ratchet state; we only track which step comes next so a
+/// `select!`-cancelled send/recv can re-enter without re-ratcheting.
+struct RekeyInFlight {
+    hs: NoiseHandshake,
+    phase: RekeyPhase,
+}
+
+enum RekeyPhase {
+    /// Initiator: `m1` is ready to write, then we wait for the peer's `m2`.
+    SendInit { m1: Vec<u8> },
+    /// Initiator: `m1` is on the wire, awaiting `m2`.
+    AwaitReply,
+    /// Responder: `m1` was read; write this `m2`, then swap transports.
+    SendReply { m2: Vec<u8> },
 }
 
 impl ActiveSession {
+    /// A rekey is due when the live transport hit its counter/time limit, or
+    /// when a rekey was already started and cancelled before finishing (the
+    /// responder's old transport may itself not be "due", so the in-flight
+    /// state has to force the resume).
+    fn rekey_due(&self, now_unix: u64) -> bool {
+        self.rekey_state.is_some() || self.transport.needs_rekey(now_unix)
+    }
+
     pub async fn send_inner(&mut self, mut frame: InnerFrame) -> Result<(), NetError> {
-        if self.transport.needs_rekey(unix_now()) {
-            return Err(NetError::RekeyRequired);
+        if self.rekey_due(unix_now()) {
+            self.drive_rekey().await?;
         }
         frame.msg_id = self.next_msg_id();
         let plain = frame.encode()?;
+        // A fresh transport never needs a rekey, so this does not re-enter.
         let ct = self.transport.encrypt(&plain)?;
-        write_len_prefixed(&mut self.writer, &ct).await
+        write_tagged(&mut self.writer, TAG_DATA, &ct).await
     }
 
     pub async fn recv_inner(&mut self) -> Result<InnerFrame, NetError> {
-        if self.transport.needs_rekey(unix_now()) {
-            return Err(NetError::RekeyRequired);
+        if self.rekey_due(unix_now()) {
+            self.drive_rekey().await?;
         }
-        let ct = read_len_prefixed(&mut self.reader).await?;
-        let plain = self.transport.decrypt(&ct)?;
-        let frame = InnerFrame::decode(&plain)?;
+        let frame = loop {
+            // Frames the peer sent under the old transport while a rekey was
+            // in flight are already decrypted and ordered; deliver them first.
+            if let Some(frame) = self.pending.pop_front() {
+                break frame;
+            }
+            let (tag, body) = read_tagged(&mut self.reader).await?;
+            match tag {
+                TAG_DATA => {
+                    let plain = self.transport.decrypt(&body)?;
+                    break InnerFrame::decode(&plain)?;
+                }
+                TAG_REKEY => {
+                    // Only the initiator starts a rekey, so an inbound
+                    // handshake message reaches us exclusively as `m1`.
+                    self.accept_rekey_start(body).await?;
+                    // `m2` is on the wire; loop to read the first frame under
+                    // the new transport.
+                }
+                _ => return Err(NetError::Handshake),
+            }
+        };
         if !self.replay.check_and_record(frame.msg_id) {
             return Err(NetError::Replay);
         }
         Ok(frame)
     }
 
+    /// Advance an in-band rekey if the transport is due, and run it to
+    /// completion. Cancellation-safe: all progress lives in `self.rekey_state`.
+    async fn drive_rekey(&mut self) -> Result<(), NetError> {
+        if let Some(inflight) = self.rekey_state.take() {
+            return self.rekey_step(inflight).await;
+        }
+        if !self.rekey.we_initiate_noise {
+            // The responder never starts a rekey; it waits for the initiator's
+            // `m1`. Reusing a spent transport for one more frame is harmless —
+            // only the initiator's counter gates the boundary.
+            return Ok(());
+        }
+        let p = prologue(&self.rekey.local_hello, &self.rekey.remote_hello)?;
+        let mut hs = NoiseHandshake::initiator(&self.rekey.identity, &self.rekey.remote_n_pk, &p)?;
+        let m1 = hs.write_message(b"")?;
+        self.rekey_step(RekeyInFlight {
+            hs,
+            phase: RekeyPhase::SendInit { m1 },
+        })
+        .await
+    }
+
+    /// Run an in-flight rekey one step further. On cancellation the state is
+    /// put back first, so the caller re-enters at exactly this step.
+    async fn rekey_step(&mut self, mut inflight: RekeyInFlight) -> Result<(), NetError> {
+        loop {
+            match inflight.phase {
+                RekeyPhase::SendInit { m1 } => {
+                    // Take the message out before awaiting: a cancel while the
+                    // write is pending loses it, so re-enter at `AwaitReply`
+                    // only after the write completed.
+                    self.rekey_state = Some(RekeyInFlight {
+                        hs: inflight.hs,
+                        phase: RekeyPhase::AwaitReply,
+                    });
+                    write_tagged(&mut self.writer, TAG_REKEY, &m1).await?;
+                    inflight = self.rekey_state.take().expect("rekey in flight");
+                }
+                RekeyPhase::AwaitReply => {
+                    // Park the state before reading so a select! cancelled read
+                    // resumes the same handshake instead of dropping it.
+                    self.rekey_state = Some(inflight);
+                    let (tag, body) = read_tagged(&mut self.reader).await?;
+                    inflight = self.rekey_state.take().expect("rekey in flight");
+                    match tag {
+                        TAG_REKEY => {
+                            inflight.hs.read_message(&body)?;
+                            if !inflight.hs.is_handshake_finished() {
+                                return Err(NetError::Handshake);
+                            }
+                            let mut transport = inflight.hs.into_transport()?;
+                            transport.set_started(unix_now());
+                            self.transport = transport;
+                            debug!(peer = %self.peer_id, "noise rekey complete (initiator)");
+                            return Ok(());
+                        }
+                        TAG_DATA => {
+                            // Old-transport frame racing ahead of the peer's
+                            // `m2`: decrypt under the old transport, deliver
+                            // after the swap.
+                            let plain = self.transport.decrypt(&body)?;
+                            self.pending.push_back(InnerFrame::decode(&plain)?);
+                        }
+                        _ => return Err(NetError::Handshake),
+                    }
+                }
+                RekeyPhase::SendReply { m2 } => {
+                    // `m2` depends on `m1`; rebuilding it would consume the
+                    // handshake again, so it is computed once when `m1` is read
+                    // and only the write is retried.
+                    self.rekey_state = Some(RekeyInFlight {
+                        hs: inflight.hs,
+                        phase: RekeyPhase::SendReply { m2: m2.clone() },
+                    });
+                    write_tagged(&mut self.writer, TAG_REKEY, &m2).await?;
+                    let done = self.rekey_state.take().expect("rekey in flight");
+                    let mut transport = done.hs.into_transport()?;
+                    transport.set_started(unix_now());
+                    self.transport = transport;
+                    debug!(peer = %self.peer_id, "noise rekey complete (responder)");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// The peer started a rekey: read `m1`, verify its static, build `m2`, then
+    /// hand off to `rekey_step` to write it. The static check is the same as
+    /// the initial handshake — a replayed `Hello` must not let an attacker
+    /// substitute their own static key mid-session.
+    async fn accept_rekey_start(&mut self, m1: Vec<u8>) -> Result<(), NetError> {
+        let p = prologue(&self.rekey.local_hello, &self.rekey.remote_hello)?;
+        let mut hs = NoiseHandshake::responder(&self.rekey.identity, &p)?;
+        hs.read_message(&m1)?;
+        match hs.remote_static() {
+            Some(k) if k == self.rekey.remote_n_pk.as_slice() => {}
+            _ => return Err(NetError::StaticKeyChanged),
+        }
+        let m2 = hs.write_message(b"")?;
+        // In IK the responder's handshake only completes once `m2` is written.
+        if !hs.is_handshake_finished() {
+            return Err(NetError::Handshake);
+        }
+        self.rekey_state = None;
+        self.rekey_step(RekeyInFlight {
+            hs,
+            phase: RekeyPhase::SendReply { m2 },
+        })
+        .await
+    }
+
     pub fn handshake_hash(&self) -> &[u8; 32] {
         self.transport.handshake_hash()
     }
 
-    pub fn file_token(&self, transfer_id: &str) -> [u8; 32] {
-        tetherly_crypto::file_token(self.transport.handshake_hash(), transfer_id.as_bytes())
+    /// Test-only: force the transport to be "due for rekey" so the in-band
+    /// rekey can be exercised without sending 2^16 frames. Production must
+    /// never call this.
+    #[doc(hidden)]
+    pub fn debug_force_rekey_due(&mut self) {
+        self.transport.debug_force_rekey_due();
     }
 
     pub fn peer_is_desktop(&self) -> bool {
@@ -116,6 +303,11 @@ pub struct SessionConfig {
     pub resume_only: bool,
     /// Screen port 45720: Noise IK resume only. Pairing stays on 45717.
     pub screen_only: bool,
+    /// Explicit Hello capability list. `None` derives from the port flags, so
+    /// a plain caller advertises the full desktop set. The Android client sets
+    /// `Some(["notify","clip","file"])` — a phone is not a desktop and must not
+    /// claim input or screen.
+    pub caps: Option<Vec<String>>,
 }
 
 impl Clone for SessionConfig {
@@ -134,6 +326,7 @@ impl Clone for SessionConfig {
             hello_override: self.hello_override.clone(),
             resume_only: self.resume_only,
             screen_only: self.screen_only,
+            caps: self.caps.clone(),
         }
     }
 }
@@ -141,17 +334,18 @@ impl Clone for SessionConfig {
 impl SessionConfig {
     fn hello(&self) -> Hello {
         self.hello_override.clone().unwrap_or_else(|| {
-            self.identity.hello(
-                &self.name,
-                &self.platform,
-                if self.resume_only {
-                    &["input"]
-                } else if self.screen_only {
-                    &["screen"]
-                } else {
-                    &["notify", "clip", "file", "input", "screen"]
-                },
-            )
+            let caps: Vec<&str> = if let Some(explicit) = &self.caps {
+                explicit.iter().map(String::as_str).collect()
+            } else if self.screen_only {
+                // The screen channel is also resume_only; screen_only is the
+                // more specific one, so it wins the advertised cap.
+                vec!["screen"]
+            } else if self.resume_only {
+                vec!["input"]
+            } else {
+                vec!["notify", "clip", "file", "input", "screen"]
+            };
+            self.identity.hello(&self.name, &self.platform, &caps)
         })
     }
 
@@ -260,11 +454,12 @@ async fn handshake(
 
     match disposition {
         HelloDisposition::Pair => {
-            if cfg.resume_only {
-                return Err(NetError::InputRequiresTrust);
-            }
+            // screen_only is also resume_only; report the more specific one.
             if cfg.screen_only {
                 return Err(NetError::ScreenRequiresTrust);
+            }
+            if cfg.resume_only {
+                return Err(NetError::InputRequiresTrust);
             }
             pair_then_noise(
                 reader,
@@ -331,14 +526,21 @@ async fn pair_then_noise(
     };
     let we_are_alice = cfg.identity.device_id().as_str() <= remote_hello.device_id.as_str();
 
-    let spake = SpakeRole::start(
-        we_are_alice,
-        &pin_ascii,
-        &local_id_pk,
-        &remote_keys.id_pk,
-        &id_lo,
-        &id_hi,
-    )?;
+    // Argon2id (64 MiB, t=3) is intentionally expensive; run it off the async
+    // executor so pairing never stalls other tasks on this runtime thread.
+    let id_pk_left = local_id_pk;
+    let id_pk_right = remote_keys.id_pk;
+    let pin_owned = pin_ascii;
+    let password = tokio::task::spawn_blocking(move || {
+        let mut p = pin_owned;
+        let out = tetherly_crypto::derive_pair_password(&p, &id_pk_left, &id_pk_right);
+        p.zeroize();
+        out
+    })
+    .await
+    .map_err(|_| NetError::PairingFailed)??;
+
+    let spake = SpakeRole::start_with_password(we_are_alice, password, &id_lo, &id_hi);
     let inbound = write_then_read(
         &mut reader,
         &mut writer,
@@ -447,6 +649,15 @@ async fn finish_noise(
         let mut hs = NoiseHandshake::responder(&cfg.identity, &p)?;
         let m1 = read_len_prefixed(&mut reader).await?;
         hs.read_message(&m1)?;
+        // In IK the responder learns the initiator's static from message 1.
+        // `remote_n_pk` is the key we trust for this device id (from the store
+        // on the resume path, or the authenticated PairBind on the pair path);
+        // if the initiator's actual static does not match, the peer merely
+        // replayed a trusted Hello and must be refused.
+        match hs.remote_static() {
+            Some(k) if k == remote_n_pk.as_slice() => {}
+            _ => return Err(NetError::StaticKeyChanged),
+        }
         let m2 = hs.write_message(b"")?;
         write_len_prefixed(&mut writer, &m2).await?;
         if !hs.is_handshake_finished() {
@@ -458,13 +669,22 @@ async fn finish_noise(
 
     Ok(ActiveSession {
         peer_id: remote_hello.device_id.clone(),
-        peer_hello: remote_hello,
+        peer_hello: remote_hello.clone(),
         peer_addr,
         reader,
         writer,
         transport,
         next_msg_id: 1,
         replay: ReplayGuard::default(),
+        rekey: RekeyContext {
+            identity: cfg.identity.clone(),
+            local_hello,
+            remote_hello,
+            remote_n_pk,
+            we_initiate_noise,
+        },
+        rekey_state: None,
+        pending: VecDeque::new(),
     })
 }
 

@@ -1,0 +1,36 @@
+[package]
+name = "tetherly-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Android client: real Ed25519 identity and Noise session (libtetherly_android.so)"
+publish = false
+
+[lib]
+name = "tetherly_android"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "android_probe"
+path = "src/bin/android_probe.rs"
+
+[dependencies]
+tetherly-core.workspace = true
+tetherly-crypto.workspace = true
+# The phone never discovers peers; it dials. Disable mDNS so the .so stays
+# lean and does not pull a service daemon onto Android. Declared by path (not
+# workspace inheritance) because rustc < 1.99 cannot override a workspace
+# dependency's default features.
+tetherly-net = { path = "../tetherly-net", default-features = false }
+tokio.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

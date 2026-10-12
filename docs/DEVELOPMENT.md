@@ -3,12 +3,83 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.7** |
-| 日期 | 2026-10-10 |
-| 状态 | Phase 5 远程屏幕（屏幕串流）CI 切片已落地（`tetherly-core::screen` 帧+控制编解码、强制本机同意、45720 独立端口、seq 单调窗口、无损帧）；真机 DXGI 采集 / 编码器为 Manual-required；RustDesk 仅作架构借鉴，AGPL 不可链 |
-| crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli` |
+| 文档版本 | **1.15** |
+| 日期 | 2026-10-11 |
+| 状态 | Phase 5 远程屏幕**真机闭环**（Windows DXGI 采集 + zstd 编码 + GDI 呈现 + 跨设备云手机源 467/467 帧零丢失 + 注入驱动的真实像素捕获已验）；**Phase 1 Android 原生库已落地**——`crates/tetherly-android` 产出真实 Ed25519 身份 + Noise IK 会话的 `libtetherly_android.so`，已在两台 Galaxy Fold（arm64-v8a / Android 13）完成真实配对 + notify 投递 + 断线重连（resume）验证；Phase 3 键鼠真机链已落地；CI 全绿；**v1.14 落地 macOS Keychain / Linux libsecret 凭据库**(`cred` 后端化：Windows Credential Manager + macOS Keychain + Linux Secret Service，各自可编译验证，运行时 Manual-required）；v1.13 Windows 凭据库（Credential Manager 泛型凭据 + `identity.ref` 指针，旧 `identity.bin` 自动迁移）；v1.12 文件跨进程续传(内容寻址 transfer_id + TFL2 起始偏移 + .part/.resume.json 侧车,重启后按持久偏移续传);双桌面 100 次物理往返仍 Manual-required；v1.15 加固两处**对端可控输入**的健壮性缺陷（`ReplayGuard` msg_id 溢出、`ScreenAssembler` 碎片 idx 越界下溢），各补回归测试；RustDesk 仅作架构借鉴，AGPL 不可链 |
+| crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.15 相对 1.14（对端可控输入健壮性加固：重放窗口溢出 + 屏幕碎片越界）**
+
+- **`ReplayGuard` msg_id 溢出**：`check_and_record` 里的 `msg_id + 1024 < self.next` 对**对端可控的 `u64`** 直接相加——`msg_id = u64::MAX` 时在 debug 下 `attempt to add with overflow` panic、在 release（`overflow-checks` 关闭）下回绕为「远古 id 被当成 fresh 接受」，削弱重放防护。改为 `msg_id.saturating_add(1024) < self.next`；语义不变（`recent` 1024 项窗口仍兜底）。补两条回归：`rejects_id_far_behind_the_high_water_mark`、`extreme_peer_ids_do_not_overflow`。
+- **`ScreenAssembler::push` 越界下溢**：`off = idx * SCREEN_FRAG_CHUNK_MAX` 后直接 `self.total - off`，未校验 `off < total`——对端用合法 `total`（例如 16）配 `idx = 1` 即令 `total - off` 下溢（debug panic / release 得巨大 `expected` 而错配）。改为 `checked_mul` + `off >= self.total` 直接拒为 `ScreenFragment`，不分配、不 panic。补回归 `assembler_rejects_an_index_past_the_stream_end`。
+- **范围**：两处均为**入站防护**缺陷（远端可触发），不改变任何线格式、端口、状态机或对外语义；`cargo test` 由 202 升至 **205 全绿**。
+
+**1.14 相对 1.13(凭据库后端化:macOS Keychain + Linux libsecret)**
+
+- **`cred` 后端化**:`crates/tetherly-node/src/cred.rs` 拆为**按目标平台选择的后端**——`cred/windows.rs`(Credential Manager,已 v1.13)、`cred/macos.rs`(**Keychain 泛型密码**,`security-framework`)、`cred/linux.rs`(**Secret Service / libsecret**,`secret-service`,D-Bus)、`cred/other.rs`(无库目标回退)。每个后端文件**自包含**(只 import 绝对路径),因而可在**本机交叉编译验证**其目标平台的编译正确性;`vault_available()`/`vault_store()`/`vault_delete()`/`load_or_create_identity()` 语义不变,`.ref` 指针与 `identity.bin` 回退对所有平台一致。
+- **macOS**:`tetherly.identity`(service)/ `<device_id>`(account)经 `set_generic_password`/`generic_password`/`delete_generic_password`;`errSecItemNotFound` 视作「无条目」而非错误,任何 keychain 失败(无登录 keychain/被锁)一律回退文件,启动不阻塞。
+- **Linux/BSD**:`secret-service` **blocking** API,默认 collection 内以属性 `device_id=<id>`、标签 `tetherly.identity` 建项(`replace=true` upsert);无 `org.freedesktop.secrets` 提供者(无 gnome-keyring/KWallet 的 headless)时 `available()==false`,透明回退文件;`default-features=false` + `rt-tokio-crypto-rust`(纯 Rust 密码学,**不引 openssl**)。
+- **依赖**:新增 `[target.'cfg(target_os="macos")']`:`security-framework`/`security-framework-sys`;`[target.'cfg(all(unix, not(macos)))']`:`secret-service`。全部 **MIT OR Apache-2.0**(deny 许可检查通过);`unsafe` 仍**仅限** `cred/windows.rs` 的 Win32 FFI,macOS/Linux 后端**无 unsafe**。
+- **验证**:本机 `cargo check --target x86_64-apple-darwin` 与 `--target x86_64-unknown-linux-gnu` 对两个后端文件**逐字编译**(经 path-include 探针);探针即实测捕获并修复了 Linux `create_item` 返回 `Item<'_>` 借用于临时值的生命周期错误。**运行时** (真读写 Keychain / Secret Service) 仍 **Manual-required**:CI 的 `macos-latest`/`ubuntu-latest` job 已在真实平台上编译它们,`TETHERLY_VAULT_TEST=1` 可在真机跑一次真库往返。
+- **诚实边界**:Windows 已真机验(v1.13);macOS/Linux **仅编译验证 + 平台 CI 编译**,真库运行时读写未在本机验证,标 Manual-required。
+
+**1.13 相对 1.12(Windows 系统凭据库身份存储:Credential Manager + `identity.ref`)**
+
+- **凭据库落地**:新增 `crates/tetherly-node/src/cred.rs`。Windows 上身份 64 字节密钥存为 **Credential Manager 泛型凭据**(`CredWriteW`/`CredReadW`/`CredDeleteW`,`CRED_TYPE_GENERIC`,`CRED_PERSIST_LOCAL_MACHINE`),目标名 `tetherly.identity:<device_id>`;数据目录只留 `identity.ref`(公开 device_id 指针,原子写 0600),**不再落密钥明文**。`unsafe` 仅限 `cred.rs::ffi`(原始 Win32 FFI),与 `platform.rs`/`screen.rs` 既有豁免同规则;新增 windows-sys 特性 `Win32_Security_Credentials`。
+- **启动语义**:`cred::load_or_create_identity` 优先凭据库——凭 `.ref`(或旧 `identity.bin` 解析出的 device_id)读回密钥;**旧 `identity.bin` 首次运行自动迁移入库并从磁盘删除**。凭据库不可用/条目缺失/解析失败一律**回退文件**路径,启动永不依赖凭据库。
+- **卫生规则(关键)**:凭据库是**机器全局、按 Windows 用户**的存储,只对**已安装数据目录**启用;临时目录节点(全部集成/单元测试)继续用该目录的 `identity.bin`,**绝不写操作者的真实 Credential Manager**。`TETHERLY_VAULT=1/0` 环境变量可覆盖(供测试显式驱动)。
+- **测试**:`cred::tests::{file_fallback_roundtrips_on_every_platform, windows_vault_roundtrips_via_the_ref_pointer, installed_data_dir_opts_into_the_vault}`。Windows 上真跑 CredRead/CredWrite 往返(写→`.ref`→读回 device_id 一致→`identity.bin` 不存在→删除后读不到);两项 Windows 测试由 CI 的 `windows` job 覆盖,Unix 上 `vault_available()==false` 走文件回退。
+- **诚实边界**:macOS Keychain / Linux libsecret **仍未接**(`vault_available()==false`,回退文件);`identity.bin` 与 `identity.ref` 两种形态在非 Windows/回退路径下并存兼容。
+
+**1.12 相对 1.11(文件跨进程续传:内容寻址 + TFL2 起始偏移 + 持久侧车)**
+
+- **内容寻址 `transfer_id`**:发送方对整份文件取 `sha256`,取前 16 字节十六进制构成 `transfer_id = "tr_" + hex[..16]`(取代随机的 per-transfer id)。同字节 → 同 id → 接收方凭 id 命中其此前落盘的半成品续传;不同字节 → 不同 id → 全新传输,不会误续。
+- **core(filexfer)**:新增 `ResumeState{transfer_id,source,total,offset}` 与 `ResumeTable`;`ResumeTable::claim(source,transfer_id,total)` 仅当 **来源匹配 + 大小匹配 + 偏移 >0 且 <总长 且按 64KiB 对齐** 时返回可续偏移,否则 `None`(拒绝伪续)。`put` 将 offset 向下对齐到块边界。`IncomingTransfer` 增 `resume_from: Option<u64>`;`FileHub::offer` 委托新 `offer_resumable(...,resume_hint)`,`accept` 委托 `accept_at(...,resume_from)`(`accept_at` 校验偏移,非法即 `CoreError::ResumeOffset`)。`FileDecision`(JSON)增可选 `resume_from` 字段,新增 `FileDecision::accept_resuming`。
+- **net(filechan)**:新线格式 **`TFL2`**(`magic(4) | id | total u64be | start u64be`)在 `TFL1` 基础上加 **起始偏移**;`read_header` 同时接受 TFL2/TFL1(v1 视 start=0)。新 `send_chunks_from(w,token,id,total,start,data)` 仅从 `start` 起发尾块;`recv_chunks_after_header(...,start,...)` 校验对齐与 `out.len()==start` 后追加。**每块 AAD = `id || chan_offset_le`**,把块钉死在其通道位置上 —— 块不可跨续传边界被搬移;nonce 计数 = `chan_offset/64KiB + 1`,续传必须块对齐方能与既有 nonce/AAD 匹配(协议级保证,非约定)。新增 `resumable_offset(path,chunk)` 截断半尾并返回对齐长度。
+- **node(runtime)**:发送路径 `offer_and_send_bytes` 改为内容寻址;`FileOffer` 处理时按 `hubs.resume.claim(peer,id,total)` 得 `hint` 走 `offer_resumable`;`FileAccept` 回读 `decision.resume_from` 经 `send_file_data` 从该偏移发尾块。接收路径 `accept_file` 改为**增量落盘**:读头 → 校验 `total`/`start` → 预载既有 `.<transfer_id>.part`(截断到 `start`,拒绝 `aligned<start`)→ `set_len(start)` 后逐块 append + `sync_all`;`on_chunk` 回调即写即持久;中断时 `note_resume` 把块对齐偏移写入 `.<transfer_id>.resume.json` 侧车;完成后 sha256 校验 → 原子 `rename` 到 `inbox/` → 删 `.part`/侧车。**重启续传**:`load_resume_table(data_dir)` 启动时扫 `inbox/.*.resume.json` 重建 `ResumeTable`;若侧车对应的 `.part` 已丢失或短于声明偏移(崩溃撕裂态),**丢弃侧车从 0 重传**,不承诺无法兑现的续传。
+- **测试(CI 绿)**:core `resume_claim_requires_source_and_size_and_alignment`、`accept_at_validates_resume_offset`;net `resume_sends_only_the_tail_from_a_chunk_boundary`、`a_chunk_cannot_be_relocated_across_resume_positions`、`resumable_offset_truncates_partial_tail`;phase1 `m1_8_file_resumes_from_persisted_offset`:预置 B 的 `inbox/`(`.part` 前 2 块 + 侧车)后**重启** B(证明重启扫描路径),配对 → offer 回带 `resume_from==2*64KiB` → 接受后 sha256 一致 → `.part`/侧车清除。全量回归见 §13。
+
+**1.11 相对 1.10(notify.reply:桌面快速回复手机通知)**
+
+- **协议落地(不再是 stub)**:crates/tetherly-core/src/frame.rs 新增 NotifyReply{uid,app_id,text},to_frame()/from_payload(),文本按 NOTIFY_TEXT_MAX=4 KiB 截断(不切多字节字符)。TYPE_NOTIFY_REPLY=0x0103 原样保留,MUST_UNDERSTAND 对它不再解除。
+- **net 分派**:tetherly-net 的 SessionEvent::ReplyStub 占位删除,改为 SessionEvent::Reply(NotifyReply);反序列化失败即 NetError(与其它 JSON 帧一致)。
+- **接收方收件箱**:NotifyHub 增 ingest_reply/take_reply_id/take_reply/reply_views,键为 reply_id(source,app_id,uid)(=sha256),取用即删(快速回复永不二次触发)。空白文本拒绝;同键后写覆盖(幂等)。面向 UI 的 ReplyView 不含正文,只有 take_reply* 才释放文本——沿用「通知正文不进列表视图/日志」的规则;QueuedReply 的 Debug 手写 redact 正文。
+- **桌面端(node)**:Node::send_reply / reply_to_candidate(按候选寻址回其来源手机;空文本 CoreError::EmptyReply 本地拒绝)/ take_reply / reply_views;handle_event 收 SessionEvent::Reply 后入箱 + 发 UiEvent::ReplyReceived(只记 text_len,不记正文)。
+- **桌面 UI**:ui/index.html 每张候选卡加「快速回复…」输入框 → POST /api/reply {id,text};新增「收到的回复」区 + POST /api/reply/take {id} 取出(正文不落快照)。Snapshot 增 replies:[ReplyViewDto]。
+- **Android(手机)**:SessionHandle::take_replies()(Vec<NotifyReply>,一次取空)+ serve 循环解析 TYPE_NOTIFY_REPLY(同 uid+app 覆盖);JNI 新增 nativeTakeReplies(JSON 数组,空则空串;正文为用户内容、禁止写日志);Kotlin NativeBridge.takeReplies()/PhoneReply,NotifyListener.drainReplies() 用通知自身的 RemoteInput action 就地回复(不合成应用未声明的回复;activeNotifications 无匹配则丢弃)。真机触发 RemoteInput 需系统权限/前台通知,Manual-required。
+- **测试(CI 绿)**:core 单测 3 条;tests/phase2.rs::m2_6 双节点真实会话桌面→手机 reply 到达且只取一次;crates/tetherly-android/tests/client_e2e.rs::android_client_receives_a_quick_reply_once 真 accept_session 发 reply、客户端 take_replies() 一次拿到。全量 188 passed(原 182)。
+
+**1.10 相对 1.9（Phase 1 Android 原生库：真实身份 + Noise 会话落地）**
+
+- **新 crate `tetherly-android`**（`crates/tetherly-android`）：lib 名 `tetherly_android`，crate-type `["cdylib","rlib"]`；`cdylib` 编出 `libtetherly_android.so`（arm64-v8a），`rlib` 使 host/CI 可跑同一份代码的集成测试。依赖仅 `tetherly-core`/`tetherly-crypto`/`tetherly-net`（`default-features=false`）/`tokio`/`serde_json`/`thiserror`/`tracing`/`zeroize`；`jni` 依赖门控在 `[target.'cfg(target_os = "android")'.dependencies]`，桌面构建不引入。
+- **真实身份（取代占位）**：`Identity::from_secrets(id_sk, n_sk)` 生成真 Ed25519 签名密钥 + 独立 X25519 静态密钥（ADR-001），`device_id = DeviceId::from_id_pk(id_pk)`；`identity.bin` 64 字节（temp+rename、`0600`）落盘，`load_or_create_identity` 首启生成、之后加载。**彻底删除** v1.3 的 `idPk = sha256(idSk)` 占位路径。
+- **信任持久化**：`trusted.json` 与桌面节点**同构**（`TrustFile { peers: Vec<TrustedPeerDto> }`），两端文件可互换；配对成功即写，resume 无 PIN 重拨复用（ADR-002）。
+- **会话客户端**：`AndroidClient::start(addr, pin, once)` 在独立线程跑 `current_thread` tokio runtime，按桌面**相同**的 `dial_session` 路径（首配 Hello + SPAKE2 8 位 PIN，之后 Noise IK resume）拨 45717；`SessionHandle` 暴露 `notify()`/`state_code()`/`connected_peer()`/`last_error()`/`stop()`；指数退避重连 250ms→5s，`TYPE_PING` 回 pong。
+- **诚实能力集**：手机 `caps = ["notify","clip","file"]`，**永不**广告 `input`/`screen`（手机不是被控桌面）。落点是 `SessionConfig.caps: Option<Vec<String>>` 显式覆盖（`tetherly-net` 新增字段，默认 `None` 走既有推断）。
+- **JNI 薄壳**（`#[cfg(target_os = "android")]` 门控）：`Java_app_tetherly_NativeBridge_nativeAttach/SendNotify/DeviceId/IdPk/State/LastError/Stop`，与 Kotlin `NativeBridge`/`NodeSession` 对接。lib 顶层 `#![deny(unsafe_code)]`，仅 `jni.rs` 以 `#![allow(unsafe_code)]` 作 JNI ABI 的**唯一**豁免。
+- **端到端已验（真机）**：`android_probe`（同 crate `--bin`，aarch64-linux-android）推到云手机 `adb shell` 直接跑——两台 Galaxy Fold 分别生成新身份、以 PIN 配对成功、桌面节点收到带验证码的 `notify.push`（`has_otp:true`，正文不入快照/日志）、写双方 `trusted.json`；**换错 PIN 仍连接成功**，证明走的是 Noise IK resume 而非重新配对。
+- **CI**：`android` job 先 `dtolnay/rust-toolchain`（target `aarch64-linux-android`）+ `cargo install cargo-ndk` + `cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p tetherly-android --release`，再跑 Gradle；`jniLibs/` 是产物、已入 `.gitignore`（不入库）。
+
+**1.9 相对 1.8（Phase 3 键鼠真机链：SendInput 注入 + LL 钩子捕获）**
+
+- **受控端注入**：`SystemInputSink`（`InputSink` 端口实现）——`SendInput` 绝对移动（1000 单位→65535 归一化）、按钮 mask（`BTN_LEFT=1/BTN_RIGHT=2/BTN_MIDDLE=4`）、滚轮、VK 键盘；`NodeConfig.input_sink` 注入，CI 缺省 `None` 仅观察者。协议级过滤（seq 窗口/座位门控）后经 `MemorySink` 观察者 trace 镜像到真实注入。
+- **主控端捕获**：`Node::spawn_input_capture` —— `WH_MOUSE_LL` 恒挂（只读光标做过边检测）、`WH_KEYBOARD_LL` **仅远程座位时挂**（本地键盘隐私）、注入事件按 `LLMHF/LLKHF_INJECTED` 过滤防单机回环；喂给与 CI 相同的 `drive_input*` 路径。**注入探针实测**：过边后受控端光标真实移至左缘 (0,539)、中心移动精确、Win/Esc 注入生效。
+- **Manual-required**：双桌面 100 次物理往返（需两台交互桌面）。
+
+**1.8 相对 1.7（Phase 5 真机闭环：DXGI 采集 + zstd 编码 + BitBlt 呈现 + p95）**
+
+- **真机采集**：`crates/tetherly-node/src/screen.rs` 的 `DxgiSource` 实现 Windows DXGI Desktop Duplication——`D3D11CreateDevice`（BGRA）→ `IDXGIDevice::GetAdapter` → `IDXGIAdapter1::EnumOutputs(0)→IDXGIOutput1::DuplicateOutput` → `AcquireNextFrame(0)`（`DXGI_ERROR_WAIT_TIMEOUT` 映射为 `Ok(None)`，桌面未变时不产帧）→ staging texture `CopyResource` + `Map(READ)` → 行尾裁剪成 tightly-packed BGRA8 → `ScreenFrame::raw`。COM 单线程模式 `CoInitializeEx(MULTITHREADED)`；D3D11/DXGI 对象经 `unsafe impl Send/Sync`（单 pump 串行 + `Mutex`），是 D3D11 的标准单线程用法。
+- **真机编码（可换端口）**：`ZstdCodec`（无损，level 3）实现 `ScreenCodec`；`EncodedSource<S>` 是 `ScreenSource` 装饰器——每帧压缩，压不小就发原帧（病态编码器不可能放大传输）。生产默认链为 `EncodedSource<SystemSource>`；未来 OpenH264/rav1e 作为同一端口替换。**先无损帧 + 后接编码器**的落点。
+- **真机呈现**：`SystemSink` 消费侧用 GDI——`CreateWindowExW` + `CreateCompatibleDC` + `CreateDIBSection`（32bpp top-down）+ `BitBlt`（`SRCCOPY`）。**同步 BitBlt**（本线程无消息泵，不依赖 `WM_PAINT`），每帧直写窗口 DC 立即显示；尺寸变化时重建 DIB。
+- **分片传输 + 重组**：`ScreenFrame::to_frames()` 把超 64 KiB 内层预算的整帧拆成 `TMF1` 分片（header 24 字节：magic+total+index+count+seq）；`ScreenAssembler::push` 重组（跨流重置、单流内存上限 `SCREEN_PAYLOAD_MAX`，谎报 count 被拒而非分配）。整帧 `TMV1` 走单帧快路径，小帧线上字节不变。
+- **客户端解码链**：`attach_screen_client` = `ScreenAssembler` 重组 → 若 `compressed` 则 `screen_codec.decompress(expected_len)` 校验解压长度 → `ScreenReceiver::apply` 校验 seq 窗口 → `screen_sink.present`。呈现目标 `screen_sink` 默认 = 观察者 `MemoryScreenSink`（CI 断言），生产注入 `SystemSink`。
+- **p95 帧间隔预算**：`tetherly-node` 加 `ScreenIntervalTracker`（wall-clock，微秒，bounded 1024 样本），`screen_send_frame` 每次成功入队记录一次；`Node::screen_latency_p95_us()` 暴露，UI `Snapshot.screen.p95_frame_interval_us` 输出。core 保持无时钟（确定性）。
+- **生产默认**：`Node::start` 默认 `screen_source = EncodedSource<SystemSource>`（DXGI+zstd）、`screen_codec = ZstdCodec`、`screen_sink = 观察者`；`tetherly run` 注入 `SystemSink` 并起 16ms 帧 pump（非 Streaming 状态直接跳过 grab，空闲零开销）。`--screen-adb <serial>` 把源换成 `AdbSource`（云手机屏幕）。测试注入 `MemoryScreenSource`（原帧），路径不受影响。
+- **AdbSource 跨设备真机 E2E（云手机 → Windows）**：`AdbSource`（`adb exec-out screencap -p` → PNG 解码 → BGRA8，PNG 字节不变返回 `Ok(None)`）接入既有链路实测：1063 帧发出 / 1060 收达 / 0 丢帧，每帧解压后精确 720x1280x4 BGRA，GDI 窗口画面与真机屏 ±8 容差 97.6% 一致（残差 = loading 动画相位 + DWM 色彩管理），p95 ≈0.9–1.45s（`screencap` 源速率主导）。真机流程暴露并修复两处缺口：`/api/screen/start` 现自动拨号 screen 通道（单对端时；多对端诚实拒绝）；visitor 接收计数 `screen_rx_stats` 接入 Snapshot。
+- **测试**：`tests/phase5.rs` 4 个测试全绿（M5.1 帧序 1..=5 严格单调、M5.2 Start-before-allow 拒绝计数、M5.3 对端离开回 `Idle` 并重置 seq、M5.4 45720 拒未配对 dial）。`cargo fmt --check` / `clippy -D warnings` / `cargo test --workspace` 全绿（core 116 + phase1 7 + phase2 4 + phase3 4 + phase4 10 + phase5 4 + …）。
+- **Manual-required（收窄）**：真实开放编码器 OpenH264/rav1e（端口已就位、未接入）；DXGI 采集端的真实像素捕获与 Windows 跨桌面 100 帧 p95（需交互桌面）；macOS CGImage/CGWindow、Linux X11 SHM（Wayland 仍标「不支持」）。**DXGI 采集 / zstd 编码 / BitBlt 呈现 / p95 计量 / 跨设备（云手机源）真机闭环已从 Manual-required 转为已实现**。
 
 **1.7 相对 1.6（Phase 5 远程屏幕 CI 切片）**
 
@@ -104,12 +175,12 @@
 |---|---|
 | 跨网 | 桌面与 Android 走 EasyTier **侧车**；iPhone 跨网不是 v1 |
 | 验证码 | 本机打分提取；写入必须当次点击 |
-| 键鼠 | 桌面 ↔ 桌面；自有 Noise 端口。DeskFlow 仅实验网关 |
+| 键鼠 | 桌面 ↔ 桌面；自有 Noise 端口。Windows 真机链 v1.9 已落地（SendInput 注入 + LL 钩子捕获，键盘 hook 座位门控）；macOS/Linux 下一迭代。DeskFlow 仅实验网关 |
 | iPhone | 电脑用 ANCS/BLE 收新通知，再经 IP 会话转给其他已配对电脑 |
 
 ### 2.3 非目标（v1）
 
-- 远程桌面 / 屏幕镜像（**v1 非目标已由 v1.7 Phase 5 取代**：`tetherly-core::screen` 帧+控制编解码、强制本机同意、45720 独立端口的 CI 切片；真机 DXGI 采集 / 编码器 / 呈现仍 Manual-required。完整远程桌面仍不在 v1 承诺范围）
+- 远程桌面 / 屏幕镜像（**v1 非目标已由 v1.7 Phase 5 取代**：`tetherly-core::screen` 帧+控制编解码、强制本机同意、45720 独立端口的 CI 切片；**v1.8 已落地** Windows DXGI 采集 / zstd 编码 / BitBlt 呈现；macOS/Linux 与开放编码器仍 Manual-required。完整远程桌面仍不在 v1 承诺范围）
 - 云账号、云端存通知或验证码
 - iOS 被控
 - Tetherly 进程内嵌 EasyTier 或 Network Extension VPN
@@ -132,7 +203,7 @@
 | 剪贴板 | ✅ | ✅ | ✅ | 按钮发送 | 前台 |
 | 文件 | ✅ | ✅ | ✅ | SAF | 可选 App |
 | 键鼠 server/client | ✅ | ✅ | Wayland beta | ❌ v1 | ❌ |
-| 远程屏幕 server | CI 切片（真机采集 Manual） | CI 切片 | CI 切片（X11；Wayland 不支持） | ❌ v1 | ❌ |
+| 远程屏幕 server | ✅（v1.8 真机闭环） | CI 切片 | CI 切片（X11；Wayland 不支持） | ❌ v1 | ❌ |
 
 话术：桌面全功能；Android 是信源和文件端；iPhone 是通知/验证码发送源。
 
@@ -153,7 +224,7 @@ device_id = "tdev_" + base32lower(sha256(id_pk)[0..10])  // RFC 4648，无填充
 
 信任库存对端 `id_pk` 与 `n_pk`，校验 `device_id` 必须能从 `id_pk` 重算。禁止随机 UUID 当长期身份。禁止把 Ed25519 标量直接当 X25519。
 
-密钥：系统凭据库优先，否则用户目录文件 ACL 仅本人；进程内 `zeroize`。
+密钥:**Windows 系统凭据库已接(v1.13)**;否则用户目录文件 ACL 仅本人;进程内 `zeroize`。
 
 ### ADR-002 首次配对：Argon2id + SPAKE2；之后 Noise IK
 
@@ -322,11 +393,11 @@ IPv6：v1 不做。
 
 | 材料 | 位置 |
 |---|---|
-| `id_sk`、`n_sk` | Windows Credential Manager / macOS Keychain / libsecret；回退 `%LOCALAPPDATA%\tetherly\identity.bin` 等，ACL 仅当前用户 |
+| `id_sk`、`n_sk` | **凭据库已接(v1.13 Windows / v1.14 macOS+Linux)**：Windows Credential Manager 泛型凭据、macOS Keychain 泛型密码、Linux/BSD Secret Service（libsecret）；回退 `%LOCALAPPDATA%\tetherly\identity.bin` 等，ACL 仅当前用户 |
 | 信任库 | `trusted.json`：`device_id, id_pk, n_pk, alias, paired_at, revoked` |
 | 配置 | `config.toml` |
 
-写入：临时文件 + `rename`。忘记设备：标 `revoked` 或删除行。Phase 1 `tetherly-node` 已接线文件回退（Windows `%LOCALAPPDATA%\tetherly`，Unix `~/.local/share/tetherly`，0600/0700）。系统凭据库（Credential Manager / Keychain / libsecret）仍是下一迭代。
+写入：临时文件 + `rename`。忘记设备：标 `revoked` 或删除行。**凭据库（v1.13/v1.14）**：Windows→Credential Manager 泛型凭据（`tetherly.identity:<device_id>`）、macOS→Keychain 泛型密码、Linux/BSD→Secret Service（属性 `device_id=<id>`）；数据目录只留公开的 `identity.ref` 指针，旧 `identity.bin` 首次运行自动迁移入库并删除。**仅「已安装数据目录」启用凭据库**——临时目录节点（全部集成测试）仍用本地 `identity.bin`，绝不写操作者真实凭据库（`TETHERLY_VAULT=1/0` 可覆盖）。无可用凭据库（headless Linux / 无 keyring / 非三平台）时透明回退文件。
 
 ### 6.2 状态机
 
@@ -406,7 +477,7 @@ TCP
 | ping / pong | 0x0001 / 0x0002 | `unix_ms: u64` |
 | notify.push | 0x0101 | JSON：uid, app_id, app_name, title, body, ts, actions[]（无 url） |
 | notify.dismiss | 0x0102 | uid, app_id |
-| notify.reply | 0x0103 | stub，可忽略 |
+| notify.reply | 0x0103 | JSON:uid, app_id, text(快速回复,桌面→手机;≤4 KiB,仅投递、不执行) |
 | clip.set | 0x0201 | mime + text 或 blob_ref |
 | file.offer | 0x0301 | transfer_id, files[{name,size,sha256}] |
 | file.accept / reject | 0x0302 / 0x0303 | transfer_id |
@@ -429,7 +500,7 @@ TCP
 
 ### 7.4 文件
 
-默认必须点确认。自动接收默认关。文件名只取 basename，拒绝 `..`。v1 无跨进程续传；同连接可重发块。断线 offer 作废。控制面 offer/accept 走 45717；数据走对端 `caps.update` 广告的 **45718**（`fileport=`）。`file_token = HKDF-SHA256(handshake_hash, "tetherly-file-v1" || transfer_id)`；块 ChaCha20-Poly1305，魔数 `TFL1`，块 64KiB。
+默认必须点确认。自动接收默认关。文件名只取 basename，拒绝 `..`。v1 无跨进程续传；同连接可重发块 → **v1.12 起**:`transfer_id` 内容寻址(`"tr_"+sha256(file)[..16]`);接收方半成品写 `inbox/.<transfer_id>.part`、块对齐偏移持久化到 `inbox/.<transfer_id>.resume.json` 侧车,Node 重启扫描侧车重建续传表;发送方按 offer 回带的 `resume_from` 仅发尾块。续传**须 64KiB 块对齐**——每块 AAD=`transfer_id||chan_offset_le`、nonce=偏移/块+1,块不可跨位置搬移;侧车与 `.part` 撕裂则丢弃并从 0 重传。断线 offer 作废。控制面 offer/accept 走 45717；数据走对端 `caps.update` 广告的 **45718**（`fileport=`）。`file_token = HKDF-SHA256(handshake_hash, "tetherly-file-v1" || transfer_id)`；块 ChaCha20-Poly1305，魔数 `TFL1`（v1）/`TFL2`（v1.12 带起始偏移），块 64KiB。
 
 ### 7.5 剪贴板
 
@@ -448,7 +519,8 @@ tetherly/
 │   ├── tetherly-core/      # OTP、帧、状态机、白名单、去重、bind/clip/file/notify/persist
 │   ├── tetherly-crypto/    # Ed25519、X25519、Argon2id、SPAKE2、Noise、file AEAD
 │   ├── tetherly-net/       # TCP、hello、mDNS、内层 dispatch、filechan 45718
-│   └── tetherly-node/      # LAN 节点、落盘、hubs、本机 HTTP UI、EasyTier sidecar 发现、tetherly 二进制
+│   ├── tetherly-node/      # LAN 节点、落盘、hubs、本机 HTTP UI、EasyTier sidecar 发现、tetherly 二进制
+│   └── tetherly-android/   # 手机原生库：真身份 + Noise 会话 → libtetherly_android.so（cdylib+rlib）+ android_probe
 ├── bins/tetherly-cli/      # Phase 0 配对夹具仍保留
 ├── tests/loopback.rs       # Phase 0
 ├── tests/phase1.rs         # Phase 1 loopback 双节点
@@ -460,9 +532,9 @@ tetherly/
 └── docs/
 ```
 
-其后按阶段加：`tetherly-ffi`、`src-tauri`、`ios/`。`android/` 已存在但 JNI `.so` 未构建。ANCS 与键鼠引擎都放在 `tetherly-core`（`ancs` / `input`），不开新 crate。
+其后按阶段加：`tetherly-ffi`、`src-tauri`、`ios/`。`android/` 已存在且 JNI `.so` 已由 `tetherly-android`（v1.10）构建。ANCS 与键鼠引擎都放在 `tetherly-core`（`ancs` / `input`），不开新 crate。
 
-红线：`tetherly-core` 无 `cfg(target_os)`、无 `windows`/`objc`/`jni`。`tetherly-net` 无 `easytier` crate。
+红线：`tetherly-core` 无 `cfg(target_os)`、无 `windows`/`objc`/`jni`。`tetherly-net` 无 `easytier` crate。`tetherly-android` 的 `jni` 依赖锁在 `cfg(target_os = "android")`，桌面构建不引入；JNI `unsafe` 仅豁免 `jni.rs` 一处。
 
 ### 8.1 Phase 0 依赖冻结（名称，版本在 lock 时钉）
 
@@ -540,13 +612,21 @@ Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要�
 
 拓扑在 `config.toml`。断线光标回 server。Wayland 走 portal+libei，不行就标不支持。DeskFlow 网关另开端口、默认关、TLS 未实现就不要宣称兼容。
 
+**TIN1 语义（v1.9 明确）**：`Move` 的 x/y 是 `SCREEN_UNITS=1000` 千分比归一化（避免浮点过线），受控端映射回本地屏幕；`Button` 的 mask 位为 `BTN_LEFT=1 / BTN_RIGHT=2 / BTN_MIDDLE=4`；`Wheel` 的 dx/dy 为 i16 delta；`Key` 的 code 为 **Win32 虚拟键码（VK）**（u16），`mods` 为信息性字段——修饰键以独立 key 事件传输。
+
 **v1.5 已落地**：`tetherly-core::input` 编解码与边缘状态机；`tetherly-node` 在 LAN 与 overlay 上另听 45719，会话 `resume_only`。CI 注入是 `MemorySink`，不调用 Win32 `SendInput`。进入帧落在 `x=0` 时保持焦点；离开只在已经进入内部后再回到左缘时发生。剪贴板仍走 45717，不进键鼠帧。
+
+**v1.9 真机链已落地（Windows）**：受控端 `SystemInputSink`（`InputSink` 端口实现；SendInput 绝对移动/按钮/滚轮/VK 键盘，`NodeConfig.input_sink` 注入，CI 缺省 `None` 仅观察者）——收到的事件在协议级过滤（seq 窗口/座位门控）后经 `MemorySink` 观察者 trace 镜像到真实注入。主控端 `Node::spawn_input_capture`：`WH_MOUSE_LL` 恒挂（只读光标做过边检测）、`WH_KEYBOARD_LL` **仅在远程座位时挂**（本地键盘隐私）、注入事件按 `LLMHF/LLKHF_INJECTED` 过滤防单机回环；事件喂与 CI 相同的 `drive_input*` 路径。**注入探针实测**：过边后受控端光标真实移至左缘 (0,539)、中心移动精确、Win/Esc 键盘注入生效。双桌面 100 次物理往返仍 Manual-required。
 
 ### 9.6 Android（Phase 1）
 
 `NotificationListenerService` + 前台服务。Android 13+ `POST_NOTIFICATIONS`。帮助页教各 ROM 自启动，不搞黑保活。不读短信库。Play 上架需通知使用权声明，内部测试可先 sideload。
 
-**诚实缺口（v1.3）**：Kotlin 侧可截获通知并入队；`NativeBridge` 加载 `libtetherly_android`。无 `.so` 时**禁止**自己拼 SPAKE2/Noise TCP。占位身份 `idPk = sha256(idSk)` **不是**生产 Ed25519。CI 跑 `gradle :app:testDebugUnitTest` + `assembleDebug`。物理机 M1.1 p95 / 8h soak 标 Manual-required。协议与 OTP 路径由桌面双节点 loopback 覆盖。
+**原生库（v1.10 已落地）**：`crates/tetherly-android` 产出 `libtetherly_android.so`（arm64-v8a，cargo-ndk）。身份为**真 Ed25519 + X25519**（`Identity::from_secrets`，`device_id = DeviceId::from_id_pk`），`identity.bin`/`trusted.json` 与桌面节点同构、可互换。会话走与桌面**相同**的 `dial_session`（首配 Hello + SPAKE2 8 位 PIN，之后 Noise IK resume），手机仅拨 45717、不做 listener。**手机能力集固定 `["notify","clip","file"]`，永不广告 `input`/`screen`**。Kotlin 侧 `NativeBridge`/`NodeSession` 经 JNI 薄壳（`Java_app_tetherly_NativeBridge_*`）对接，拿到真实 `device_id` 并驱动 `notify.push`。**v1.3 的 `idPk = sha256(idSk)` 占位已删除**；无 `.so` 时 `state()==0` 且 `identity=="unavailable"`，**禁止**自己拼 SPAKE2/Noise TCP。
+
+**已验（真机 v1.10）**：两台 Galaxy Fold（SM-F900F / arm64-v8a / Android 13）分别以 `android_probe` 完成真实配对 + notify 投递（桌面 `has_otp:true`）+ 换错 PIN 仍 resume 成功。CI 跑 `cargo ndk` 出 `.so` 后再 `gradle :app:testDebugUnitTest` + `assembleDebug`（`jniLibs/` 是产物，不入库）。物理机 M1.1 p95 / 8h soak 仍 Manual-required；协议与 OTP 路径另由桌面双节点 loopback 覆盖。
+
+**快速回复(v1.11)**:桌面可对手机通知就地回复——notify.reply(0x0103,JSON uid/app_id/text)。NotifyListener.drainReplies() 把收到的回复交给通知自身的 RemoteInput action(actionIntent.send)执行,不合成应用未声明的回复;activeNotifications 无匹配则丢弃。文本为用户内容,不入日志。协议与收件箱由 CI 覆盖(phase2::m2_6 + client_e2e::android_client_receives_a_quick_reply_once);真机触发 RemoteInput(需系统权限/前台通知)Manual-required。
 
 ### 9.7 远程屏幕（Phase 5）
 
@@ -554,15 +634,15 @@ Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要�
 
 **门控模型**：`ScreenState` 四态状态机：`Idle → Requested → Allowed → Streaming`。对端 dial 45720 成功仅置 `Requested`，不开始推流。必须本机显式调用 `Node::screen_allow()` 才进 `Allowed`。对端发 `ControlMsg::Start` 进入 `Streaming` 后才出帧；在 `Allowed` 之前收到的 `Start` 被拒绝并计数（`refused`）。`Node::screen_revoke()` 回到 `Idle`。对端断开（`on_peer_gone`）强制回 `Idle` 并清零 seq。重连不重放旧帧——接收方 seq 窗口丢弃 seq < 已收最大 seq 的帧。
 
-**采集**：`ScreenSource` 端口在 `tetherly-core` 声明，`tetherly-node` 注入实现。CI 用 `MemoryScreenSource`（确定性帧序列）。真机实现为 Manual-required：Windows DXGI Desktop Duplication / WGC（`windows` crate），macOS `core-graphics` `CGImage`，Linux X11 SHM（`x11rb`）。Wayland 标「不支持」。`SystemSource` 当前一律返回 `ScreenRefused`。
+**采集**：`ScreenSource` 端口在 `tetherly-core` 声明，`tetherly-node` 注入实现。CI 用 `MemoryScreenSource`（确定性帧序列）。Windows 真机（v1.8 已落地）：`DxgiSource`（`windows` crate DXGI Desktop Duplication）——`D3D11CreateDevice(BGRA)` → `IDXGIDevice::GetAdapter` → `IDXGIOutput1::DuplicateOutput`，`AcquireNextFrame(0)` 遇到 `DXGI_ERROR_WAIT_TIMEOUT` 返回 `Ok(None)`（无新帧），staging 纹理 + `Map(READ)` + 行尾裁剪产出紧凑 BGRA8 帧；`SystemSource` 在 Windows 即 `DxgiSource`，非 Windows 返回诚实 `ScreenRefused`。另有 `AdbSource`（v1.8）：`adb exec-out screencap -p` 抓取 adb 连接的 Android 设备（云手机场景），PNG 解码 → 紧凑 BGRA8；PNG 字节与上帧相同则 `Ok(None)`（DXGI 同款空闲语义）；`tetherly run --screen-adb <serial>` 选用，`TETHERLY_ADB` 指定 adb 路径。macOS `core-graphics` `CGImage`、Linux X11 SHM（`x11rb`）为下一迭代；Wayland 标「不支持」。
 
-**压缩**：当前层走无压缩直传（`SCREEN_COMPRESS_NONE`）。编码器作为 `ScreenSource` 端口后可插实现；候选：OpenH264（BSD-3-Clause）、rav1e（BSD-2-Clause/ISC）、zstd（MIT/Apache-2.0）。不走 GPL/AGPL（x264/x265 明确出局）。
+**压缩**：生产默认链为 `EncodedSource<SystemSource>`——`ZstdCodec`（无损，level 3）实现 `ScreenCodec` 端口，每帧压缩，压不小就发原帧（病态编码器不可能放大传输）；接入侧按 `raw_len` 校验 decompress 后长度。未来 OpenH264（BSD-3-Clause）/ rav1e（BSD-2-Clause/ISC）作为同一 `ScreenCodec` 端口替换——「**先无损帧 + 后接编码器**」的落点。不走 GPL/AGPL（x264/x265 明确出局）。
 
-**呈现**：`ScreenSink` 端口在 `tetherly-core` 声明。CI 用 `MemoryScreenSink`（断言 seq 单调）。真机 `SystemSink` 返回 `ScreenRefused`（Manual-required：Windows HWND + `BitBlt`，macOS `CGWindow`，Linux Wayland portal）。
+**呈现**：`ScreenSink` 端口在 `tetherly-core` 声明。CI 用 `MemoryScreenSink`（断言 seq 单调）。Windows 真机（v1.8 已落地）：`SystemSink` → GDI 窗口——`RegisterClassW`/`CreateWindowExW` + `CreateDIBSection`（32bpp top-down）+ 同步 `BitBlt`（此线程无消息泵，不能依赖 `WM_PAINT`，直接画到窗口 DC 立即显示）。macOS `CGWindow`、Linux Wayland portal 为下一迭代；非 Windows 返回诚实 `ScreenRefused`。
 
 **RustDesk 借鉴范围**：架构借鉴仅限分离采集+编码器 swap+P2P 模式——这些都是公开工程常识，不构成知识产权。RustDesk 客户端与服务端均为 AGPL-3.0，`deny.toml` 已 ban `hbb_common` / `rustdesk` / `rustdesk-server` / `scrap`。不借鉴 RustDesk 的居会合（hbbs/hbbr）服务器——匹配 §2.3 禁云账号。
 
-**v1.7 落地范围**：`tetherly-core::screen` 帧+控制编解码、`ScreenSender`/`ScreenReceiver`、强制本机同意 M5.2、45720 独立端口 + `ScreenRequiresTrust` 门、`tetherly-node` 14 处锚点（`bound_screen` / `screen_out` / `screen_engine` / `screen_sink` / `screen_ctl` / `spawn_listeners` / `spawn_overlay` / caps / `LivePeer.screen_port` / `open_screen` / `accept_screen` / `attach_screen_server` / `attach_screen_client` / `screen_send_frame`）、UI 路由 `/api/screen/allow|start|stop` + 前端「远程屏幕（实验）」区、`tests/phase5.rs` 4 个绿测试。Manual-required：真机采集、编码器、呈现、p95 帧间隔预算验证。M5.5 硬件编码 / 真机注入「未做」。
+**v1.7 落地范围**：`tetherly-core::screen` 帧+控制编解码、`ScreenSender`/`ScreenReceiver`、强制本机同意 M5.2、45720 独立端口 + `ScreenRequiresTrust` 门、`tetherly-node` 14 处锚点（`bound_screen` / `screen_out` / `screen_engine` / `screen_sink` / `screen_ctl` / `spawn_listeners` / `spawn_overlay` / caps / `LivePeer.screen_port` / `open_screen` / `accept_screen` / `attach_screen_server` / `attach_screen_client` / `screen_send_frame`）、UI 路由 `/api/screen/allow|start|stop` + 前端「远程屏幕（实验）」区、`tests/phase5.rs` 4 个绿测试。真机采集 / zstd 编码 / BitBlt 呈现 / p95 计量其后由 **v1.8 真机闭环**落地（见 §12）；开放编码器（OpenH264/rav1e）与 macOS/Linux 仍 Manual-required。M5.5 硬件编码 / 真机注入「未做」。
 
 ---
 
@@ -608,15 +688,16 @@ Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要�
 
 | ID | 验收 | 状态（v1.3） |
 |---|---|---|
-| M1.1 | Android 测试通知含 `524681` 到桌面弹窗，**p95 < 1.0s**（listener 回调 → 窗口可见） | loopback `notify.push` CI 绿、耗时 < 1s。物理 Android p95：**Manual-required**（JNI `.so` 未构建）。macOS M1.1：**mac 下一迭代** |
+| M1.1 | Android 测试通知含 `524681` 到桌面弹窗，**p95 < 1.0s**（listener 回调 → 窗口可见） | loopback `notify.push` CI 绿、耗时 < 1s。**真机链已落地（v1.10）**：`libtetherly_android.so`（真 Ed25519 + Noise IK）+ `android_probe` 在两台 Galaxy Fold 完成配对 + notify 投递（桌面 `has_otp:true`）。物理 Android p95 计量 / 8h soak：**Manual-required**。macOS M1.1：**mac 下一迭代** |
 | M1.2 | 复制后剪贴板为该码；120s 候选消失 | CI 绿（`tests/phase1.rs` + ManualClock） |
 | M1.3 | 记事本可填；只读拒绝 | CI 绿（`MemoryInsertor` 空写/只读拒绝）。真记事本 UIA：**Manual-required** |
 | M1.4 | Win↔mac 文本剪贴板（有双桌面时）；至少 Win 本机回环 | Win 双节点 loopback CI 绿。Win↔mac：**Manual-required** |
-| M1.5 | 杀 Android 进程后自动重连，不重新配对 | persist trust + 无 PIN 重拨 CI 绿。真杀 Android 进程：**Manual-required** |
+| M1.5 | 杀 Android 进程后自动重连，不重新配对 | persist trust + 无 PIN 重拨 CI 绿。**真机已验（v1.10）**：`android_probe` 二次运行以**错误 PIN** 仍连上（走 Noise IK resume 而非配对），身份持久化于 `identity.bin`。真杀 Android 进程：**Manual-required** |
 | M1.6 | 运行日志 `grep 524681` 无命中 | CI 绿（tracing MakeWriter 捕获） |
 | M1.7 | 未确认不收文件；确认后 10MB sha256 一致 | CI 绿（reject 无 inbox 文件；accept 10MiB sha256） |
+| M1.8 | 中断后**跨进程**续传：重启接收方，凭持久偏移只补发尾块，最终 sha256 一致 | **CI 绿（v1.12）**：`tests/phase1.rs::m1_8_file_resumes_from_persisted_offset`（预置 `.part`+侧车后重启 B → offer 回带 `resume_from==2*64KiB` → 接受后 sha256 一致 → 侧车清除）；无侧车则从 0 重传 |
 
-退出：M1.1–M1.3、M1.5–M1.7。Win+Android 8h 无崩溃。macOS 能跑通 M1.1 或文档标明「mac 下一迭代」。
+退出：M1.1–M1.3、M1.5–M1.8。Win+Android 8h 无崩溃。macOS 能跑通 M1.1 或文档标明「mac 下一迭代」。
 
 **v1.3 退出裁定（历史）**：CI 切片（协议、落盘、日志脱敏、文件确认、本机 UI、Android 工程骨架）已绿。物理 Android p95 / 8h / JNI `.so` / 真 UIA / Win↔mac 仍是 Manual-required。后续以用户「继续按文档开发」为豁免，进入 Phase 2 CI 切片。
 
@@ -636,7 +717,7 @@ Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要�
 
 | ID | 验收 | 状态（v1.5） |
 |---|---|---|
-| M3.1 | 光标过 Win 右缘到第二台桌面，键盘跟随；脚本往返 100 次丢失 0 | CI：45719 过边 + 按键进 `MemorySink`；core 100 次往返 0 丢失。真机 SendInput / 双桌面：**Manual-required** |
+| M3.1 | 光标过 Win 右缘到第二台桌面，键盘跟随；脚本往返 100 次丢失 0 | CI：45719 过边 + 按键进 `MemorySink`；core 100 次往返 0 丢失。**真机链已落地（v1.9）**：受控端 `SystemInputSink`（SendInput：1000 单位→65535 绝对坐标、按钮/滚轮/VK 键盘）+ 主控端 `spawn_input_capture`（WH_MOUSE_LL 恒挂过边检测、WH_KEYBOARD_LL 仅远程座位时挂、注入事件按 LLMHF/LLKHF_INJECTED 过滤防回环）；注入探针实测光标过边到左缘 (0,539) 与中心移动精确。**双桌面 100 次物理往返：仍 Manual-required** |
 | M3.2 | 对端断开，光标回本机 | CI 绿（输入会话结束 `on_peer_gone`，座位回 Local） |
 | M3.3 | 键鼠模式下剪贴板仍可用 | CI 绿（焦点在对端时 `clip.set` 仍走 45717） |
 | M3.4 | 加分：DeskFlow 官方 client + TLS 能移动光标。失败则网关标 experimental | **未做**。网关保持关闭，不链 GPL 源码，不挡退出 |
@@ -661,19 +742,25 @@ Wayland 不挡退出。真机注入未落地前不得宣称可替代键鼠。
 
 ### Phase 5 — 远程桌面（屏幕串流）（约 4 周）
 
-| ID | 验收 | 状态（v1.7） |
+| ID | 验收 | 状态（v1.8） |
 |---|---|---|
-| M5.1 | 已配对桌面间单向看屏，p95 帧间隔在预算内 | **CI 代理**：注入时钟 + `MemoryScreenSource` 断言 seq 单调、无跳变、预算达标；真机 DXGI 采集 Manual-required |
+| M5.1 | 已配对桌面间单向看屏，p95 帧间隔在预算内 | **已实现（真机闭环）**：Windows DXGI Desktop Duplication + zstd 无损 + GDI BitBlt；p95 帧间隔计量（`ScreenIntervalTracker`）+ UI 暴露。**跨设备真机已验（v1.8 AdbSource）**：云手机（Galaxy Fold 720x1280）→ Windows 双节点，1063 帧发出 / 1060 帧收达 / 0 丢帧，GDI 窗口画面与真机屏 ±8 容差 97.6% 一致（残差为动画相位 + DWM 色彩管理），p95 帧间隔 ≈0.9–1.45s（`adb screencap` 源速率主导，诚实计量）。**DXGI 采集端真实像素捕获已验（v1.9）**：注入制造的真实桌面变化（Win 键开/关开始菜单）被 DXGI 捕获为 1920x1080 真实帧（8,294,400 字节 = w*h*4 精确）。跨桌面 p95 数据仍 Manual-required。macOS / Linux 下一迭代 |
 | M5.2 | **未本机点击允许，绝不推流**；载荷不含可执行指令 | **CI 绿**：`ScreenState` 门控；无 `allow` 时 `Start` 被拒并计数 |
 | M5.3 | 对端断开 → 状态回 `Idle`，seq 清零，重连不重放旧帧 | **CI 绿**：`on_peer_gone` + seq 窗口（tests/phase5.rs） |
 | M5.4 | 45720 拒绝配对；配对只在 45717 | **CI 绿**：`resume_only` 门（`ScreenRequiresTrust`） |
-| M5.5 | 加分：硬件编码 / 真机注入 | **未做**，不挡退出 |
+| M5.5 | 加分：硬件编码 / 真机注入 | **未做**，不挡退出。OpenH264/rav1e 端口已就位 |
 
 **v1.7 落地范围/豁免（2026-10-10）**：远程桌面原为 §2.3 v1 非目标，本项目方要求引入 Phase 5 并同意**先无损帧 + 后接编码器**（编码器作为 `ScreenSource` 端口实现后接），构成 Phase 5 开工豁免（照 Phase 4 豁免样式）。本次交付为 CI 切片：`tetherly-core::screen` 帧+控制编解码、强制本机同意 M5.2、45720 独立端口 + `ScreenRequiresTrust` 门、`tetherly-node` 屏幕锚点、UI「远程屏幕（实验）」、`tests/phase5.rs`。RustDesk 仅作架构借鉴，AGPL 不可链，`deny.toml` 已 ban。**Manual-required 不变**：真机 DXGI 采集 / 编码器 / 呈现 / p95 真机验证。M5.5 未做，不挡退出。
 
+**v1.8 真机闭环豁免续（2026-10-11）**：Phase 5 真机闭环落地——`DxgiSource`（DXGI Desktop Duplication 采集，`AcquireNextFrame` WAIT_TIMEOUT→`Ok(None)`）、`ZstdCodec` + `EncodedSource`（无损编码可换端口）、`SystemSink`（GDI BitBlt 同步呈现）、`TMF1` 分片 + `ScreenAssembler` 重组、接入侧 decompress 链、p95 计量。`tetherly run` 注入 `SystemSink` + 16ms 帧泵（非 Streaming 跳过 grab）。本机验证：DXGI 设备/adaptor/output/duplication 初始化成功、WAIT_TIMEOUT→None 空闲路径正常、GDI 呈现成功（60/60）。**AdbSource 真机 E2E（同日）**：云手机（Galaxy Fold 720x1280）屏幕经 `--screen-adb` 全链路推流至第二 Windows 节点 GDI 窗口——1063 帧 / 1060 收达 / 0 丢帧、每帧解压后精确 720x1280x4 BGRA、像素 ±8 容差 97.6% 一致、p95 ≈0.9–1.45s（源速率主导）。**UI 两处修复**：`/api/screen/start` 自动拨号 screen 通道（此前 visitor 从不调 `open_screen`，真机 Start 必失败）；visitor 接收计数（`screen_rx_stats`）接入 Snapshot（此前 B 端 UI 永远显示 0）。 同日性能专项：`ZstdCodec` 持久 bulk 上下文（1080p 压缩 16.1→12.6ms / 解压 4.7→4.1ms）、`ScreenAssembler` 偏移式重组（3.0→1.28ms）、`SystemSink` 单拷贝直写 DIB、`[profile.release]` lto=thin + codegen-units=1、`AdbSource` 持久长度前缀 PNG 流（每帧省 adb spawn，grab 543→436ms；带宽实测 overlay ~187KB/s ⇒ raw 3.7MB/帧=17.5s 不可用、PNG 31KB/帧=0.17s，故 PNG 为默认、`TETHERLY_ADB_RAW=1` 走 raw 仅限高速链路）；基准工具 `cargo run -p tetherly-node --example bench_screen --release`。注意：dedup 生效后静止屏幕的 p95 帧间隔反映的是**内容变化周期**而非传输成本。**Manual-required（收窄）**：DXGI 采集端实际像素捕获（需交互桌面）、Windows DXGI 跨桌面 p95、真实开放编码器 OpenH264/rav1e、macOS/Linux 实现。Wayland 仍标「不支持」。
+
+**v1.9 键鼠真机闭环豁免续（2026-10-11）**：Phase 3 真机链落地——`SystemInputSink`（SendInput 注入端口）+ `spawn_input_capture`（LL 钩子捕获，键盘 hook 座位门控）+ 受控端 trace 镜像转发 + `TIN1` 语义明确（VK 码/1000 单位/mask 位）。注入探针在本机实测：光标过边注入、中心移动、键盘 Win/Esc 注入全部生效，并以注入制造的真实桌面变化完成了 DXGI 像素捕获验证（M5.1 收窄）。`Cargo.toml` 新增 `Win32_UI_Input_KeyboardAndMouse` feature。**Manual-required（收窄）**：双桌面 100 次物理往返（M3.1 device）、macOS/Linux 注入与捕获（CGEvent/uinput/portal+libei）、跨桌面 p95。
+
+**v1.10 Android 原生库落地（2026-10-11）**：补齐 Phase 1 的 §9.6 诚实缺口——新增 `crates/tetherly-android`（`cdylib`+`rlib`）产出 `libtetherly_android.so`（arm64-v8a）：**真 Ed25519 + X25519** 身份（`Identity::from_secrets`，取代 v1.3 `idPk=sha256(idSk)` 占位）、与桌面同构的 `identity.bin`/`trusted.json`、桌面**同一条** `dial_session`（SPAKE2 首配 + Noise IK resume）、`SessionConfig.caps` 显式广告 `["notify","clip","file"]`（永不 `input`/`screen`）、JNI 薄壳（`unsafe` 仅豁免 `jni.rs`）。**真机已验**：`android_probe` 推到两台 Galaxy Fold（SM-F900F / arm64-v8a / Android 13），经 `adb reverse` 打隧道到宿主桌面节点（45717）——首跑真实配对、双方 `trusted.json` 落盘、桌面候选 `has_otp:true`（正文不入快照/日志）；二次以**错误 PIN** 仍连上（证明 Noise IK resume）。CI `android` job 先 `cargo ndk` 出 `.so` 再跑 Gradle，`jniLibs/` 入 `.gitignore`。**Manual-required（收窄）**：物理 Android M1.1 **p95 计量**与 8h soak（需真通知链路 + 计时）；`.so` 缺失这一阻塞项已消除。APK 内 Kotlin→JNI→会话的 UI 全链路仍以真机手动为准。
+
 ### Phase 6 — 单独立项
 
-Android 被控、notify.reply、WinFsp 挂载、文件持久续传、Linux ANCS 体验、嵌入 EasyTier FFI。
+Android 被控、WinFsp 挂载、文件持久续传、Linux ANCS 体验、嵌入 EasyTier FFI。(notify.reply 于 v1.11 结项;文件持久续传于 v1.12 结项;Windows 凭据库于 v1.13 结项;均不再列入 backlog。)
 
 ---
 
@@ -685,7 +772,7 @@ Android 被控、notify.reply、WinFsp 挂载、文件持久续传、Linux ANCS 
 | 向量 | Argon2+SPAKE2+Noise prologue |
 | proptest | 控制 JSON 往返 |
 | fuzz | 内层帧、ANCS tuple（Phase 4） |
-| 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello。`tests/phase1.rs`：notify、clip TTL、insert 拒绝、persist 重拨、日志脱敏、文件拒绝/接受。`tests/phase2.rs`：缺侧车、停侧车、无 mDNS 单播、LAN 优先。`tests/phase3.rs`：45719 拒绝配对、过边按键、断线回光标、聚焦时剪贴板。`tests/phase4.rs`：M4.1 模拟时延、M4.2 白名单门控打开、M4.3 重连不连弹、Control Point 串行、分片重组、`Removed` 清候选、退避。`tests/phase5.rs`：M5.1 consent-then-start 帧序严格递增、M5.2 Start-before-allow 被拒且计数、M5.3 对端离开→`Idle` 重置 seq、M5.4 45720 拒绝未配对 dial |
+| 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello。`tests/phase1.rs`：notify、clip TTL、insert 拒绝、persist 重拨、日志脱敏、文件拒绝/接受、**跨进程续传(M1.8)**。`tests/phase2.rs`：缺侧车、停侧车、无 mDNS 单播、LAN 优先。`tests/phase3.rs`：45719 拒绝配对、过边按键、断线回光标、聚焦时剪贴板。`tests/phase4.rs`：M4.1 模拟时延、M4.2 白名单门控打开、M4.3 重连不连弹、Control Point 串行、分片重组、`Removed` 清候选、退避。`tests/phase5.rs`：M5.1 consent-then-start 帧序严格递增、M5.2 Start-before-allow 被拒且计数、M5.3 对端离开→`Idle` 重置 seq、M5.4 45720 拒绝未配对 dial |
 | 真机 | 发版清单：Win × Android；Phase 4 再加 iPhone |
 
 PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
@@ -694,7 +781,7 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 
 ## 14. CI、发版、默认端口
 
-- CI：Windows、macOS、Ubuntu（fmt / clippy `-D warnings` / test `--locked`）。Phase 1 另加 Ubuntu `android` job（Java 17 + Gradle 8.9：`:app:testDebugUnitTest`、`assembleDebug`）与 `deny`（licenses/bans/sources + audit）。
+- CI：Windows、macOS、Ubuntu（fmt / clippy `-D warnings` / test `--locked`）。Phase 1 另加 Ubuntu `android` job：先 `cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p tetherly-android --release` 产出 `libtetherly_android.so`（NDK + `cargo-ndk`），再 Java 17 + Gradle 8.9 跑 `:app:testDebugUnitTest`、`assembleDebug`；以及 `deny`（licenses/bans/sources + audit）。`jniLibs/` 为构建产物，不入库。
 - 版本号 workspace 统一 bump。
 - 控制 **45717/tcp**，文件 **45718/tcp**，键鼠 **45719/tcp**，远程屏幕 **45720/tcp**。本机 UI **45716/tcp** 仅 127.0.0.1。DeskFlow 网关默认关。
 - 安装程序提示放行 45717–45720；默认 **LAN** 监听：`127.0.0.1` + RFC1918 / 链路本地，不含公网、**跳过** EasyTier `10.144.144.0/24`（避免 mDNS 打到 TUN）。Phase 2 另绑 overlay CIDR 内的本机 IP，仍永不 `0.0.0.0`/`::`。
@@ -774,8 +861,8 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 2. NotifyHub 本地 extract；`insert()` 只挂 UI 点击；候选 120s；剪贴板 OTP 60s 清。
 3. 文件：控制面 offer/accept；数据面 45718 `TFL1` + HKDF token；默认确认才收。
 4. 本机 UI：`ui/index.html` + `uihttp`，Host 必须是 127.0.0.1/localhost。
-5. Android：NLService、前台服务、Wire JSON 无 url action、gradle CI。JNI `.so` 下一刀。
-6. `tests/phase1.rs` 覆盖 M1.2–M1.7 与模拟 M1.1/M1.6。
+5. Android：NLService、前台服务、Wire JSON 无 url action、gradle CI。**JNI `.so` 已落地（v1.10）**：`crates/tetherly-android`（真 Ed25519 + Noise IK，`identity.bin`/`trusted.json` 与桌面同构）→ `libtetherly_android.so`；`jni` 门控 `cfg(target_os="android")`，`unsafe` 仅豁免 `jni.rs`。手机 caps 固定 `["notify","clip","file"]`。
+6. `tests/phase1.rs` 覆盖 M1.2–M1.8 与模拟 M1.1/M1.6。
 7. **不要**加 EasyTier crate、不要加 DeskFlow 源码、不要改 OTP 规则。Phase 1 清单至此为止；Phase 2 见 §20。
 
 ---
@@ -816,9 +903,11 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 
 1. `tetherly-core::screen`（**无 OS API**，`#![forbid(unsafe_code)]`，无 `cfg(target_os)`）：`SCREEN_MAGIC=*b"TMV1"`、`SCREEN_PROTO=1`、`SCREEN_SEQ_WINDOW=65536`、`SCREEN_TRACE_MAX=64`；`PixelFormat{Bgra8,Rgba8}`；`ScreenRect`/`ScreenFrame` 编解码（header **31 字节**）；`ControlMsg{Start,Stop,Ack{seq}}`（14 字节）；`ScreenSender`（单调 seq + consent 门控 + push/drain/refused）；`ScreenReceiver`（seq 窗口丢旧/拒大跳/bounded trace）；`MemoryScreenSource`/`MemoryScreenSink`。`ScreenSink`/`ScreenSource` 端口进 `ports.rs`。
 2. `tetherly-net`：`SCREEN_PORT=45720`，`NetError::ScreenRequiresTrust`；`session_config_inner` 加 `screen_only: bool`；`hello()` cap 广告 `"screen"`。hello 完只允许已配对对端，`HelloDisposition::Pair` 时 `screen_only` 会话返回 `ScreenRequiresTrust`。
-3. `tetherly-node`：`NodeConfig.screen_port`（默认 45720）+ `screen_source: Option<Arc<dyn ScreenSource>>`；`Shared` 加 `bound_screen`/`screen_out`/`screen_engine`/`screen_sink`/`screen_ctl`/`screen_source`；`spawn_listeners`/`spawn_overlay` 各加 45720 绑定与接受；`attach` 的 caps 加 `"screen"` + `screenport=`；`open_screen`/`accept_screen`/`attach_screen_server`/`attach_screen_client`/`screen_send_frame`；`Node::screen_allow/revoke/start/stop/state/stats/sink_snapshot/port/addr`。
+3. `tetherly-node`：`NodeConfig.screen_port`（默认 45720）+ `screen_source: Option<Arc<dyn ScreenSource>>` + `screen_codec: Option<Arc<dyn ScreenCodec>>` + `screen_sink: Option<Arc<dyn ScreenSink>>`；`Shared` 加 `bound_screen`/`screen_out`/`screen_engine`/`screen_observer`/`screen_ctl`/`screen_source`/`screen_codec`/`screen_sink`/`screen_interval`；`spawn_listeners`/`spawn_overlay` 各加 45720 绑定与接受；`attach` 的 caps 加 `"screen"` + `screenport=`；`open_screen`/`accept_screen`/`attach_screen_server`/`attach_screen_client`/`screen_send_frame`；`Node::screen_allow/revoke/start/stop/state/stats/sink_snapshot/port/addr/latency_p95_us`。
 4. **红线**：`open_screen` 只建 Noise 通道；开推只由 `screen_allow()` 后的 `screen_start()` 触发；`screen_revoke()` 回 `Idle`；`on_peer_gone` 强制回 `Idle` 并清零 seq。屏幕帧**不携带可执行指令**；被控侧不认识的控制消息一律拒绝，不落盘、不转发。
-5. `crates/tetherly-node/src/screen.rs`：`SystemSource`/`SystemSink`（真机采集/呈现 Manual-required，当前返回 `ScreenRefused`），注释标 DXGI/WGC（Win）/ core-graphics（mac）/ x11rb（Linux）；Wayland 标「不支持」。**不要**链 AGPL/GPL（`deny.toml` 已 ban `hbb_common`/`rustdesk`/`rustdesk-server`/`scrap`）。
-6. UI：`/api/screen/allow|start|stop` 路由 + `ui/index.html`「远程屏幕（实验）」区，措辞写清「① 需本机点击允许才推流；② Wayland 暂不支持；③ 真机采集为 Manual-required」。
-7. `tests/phase5.rs` 覆盖 M5.1 帧序严格递增、M5.2 未 allow 的 Start 被拒且计数、M5.3 对端离开→`Idle` 重置 seq、M5.4 45720 拒未配对 dial。**不要**宣称真机远程桌面已可用；M5.5（硬件编码 / 真机注入）未做。
+5. `crates/tetherly-node/src/screen.rs`：**v1.8 真机闭环已落地**——`DxgiSource`（DXGI Desktop Duplication，Windows）、`ZstdCodec` + `EncodedSource<S>`（无损可换端口）、`SystemSink`（GDI BitBlt 同步呈现）；非 Windows 返回诚实 `ScreenRefused`。macOS `core-graphics` / Linux `x11rb` 为下一迭代；Wayland 标「不支持」。**不要**链 AGPL/GPL（`deny.toml` 已 ban `hbb_common`/`rustdesk`/`rustdesk-server`/`scrap`）。
+6. UI：`/api/screen/allow|start|stop` 路由 + `ui/index.html`「远程屏幕（实验）」区，措辞写清「① 需本机点击允许才推流；② Wayland 暂不支持」。Windows 真机链路已可用（v1.8）；macOS/Linux 与开放编码器仍 Manual-required。
+7. `tests/phase5.rs` 覆盖 M5.1 帧序严格递增、M5.2 未 allow 的 Start 被拒且计数、M5.3 对端离开→`Idle` 重置 seq、M5.4 45720 拒未配对 dial。**不要**宣称 Windows DXGI 跨桌面远程桌面已达标：本机 DXGI 采集→zstd→BitBlt 呈现闭环与跨设备（云手机 AdbSource 源）真机闭环均已由 v1.8 落地并实测，DXGI 采集端的像素捕获与 Windows 跨桌面 p95 仍 Manual-required；M5.5（硬件编码 / 真机注入）未做。
 8. **不越线**：不链接 RustDesk/AGPL/GPL/LGPL 源码；core 无 `cfg(target_os)`、保持 `#![forbid(unsafe_code)]`；真实采集/编码/注入落在 `tetherly-node` 平台模块并 `#[cfg]` 门控；不绑 `0.0.0.0`；配对永不在 45720；OTP 评分不动；日志与提交信息不含验证码/正文/剪贴板。
+9. **v1.8 真机闭环**：`DxgiSource`（DXGI 采集，WAIT_TIMEOUT→`Ok(None)`）+ `ZstdCodec`/`EncodedSource<S>`（无损编码可换端口）+ `SystemSink`（GDI BitBlt 同步呈现）+ `TMF1` 分片 / `ScreenAssembler` 重组 + 接入侧 decompress 链 + `ScreenIntervalTracker`（wall-clock 微秒，bounded 1024，`screen_latency_p95_us()` 暴露 p95）。`tetherly run` 注入 `SystemSink` + 16ms 帧泵（非 Streaming 跳过 grab）。`--screen-adb <serial>` 选用 `AdbSource`（云手机屏幕，PNG→BGRA8，不变屏 `Ok(None)`）。非 Windows 返回诚实 `ScreenRefused`。UI：`/api/screen/start` 自动拨号 screen 通道；Snapshot 的 received/dropped/bytes 来自 visitor 侧 `screen_rx_stats`。
+10. **v1.9 键鼠真机链**：受控端 `SystemInputSink`（SendInput：1000 单位→65535 绝对坐标、按钮 mask 位、滚轮、VK 键盘；`NodeConfig.input_sink` 注入，CI 缺省 None）+ 主控端 `spawn_input_capture`（`WH_MOUSE_LL` 恒挂过边检测、`WH_KEYBOARD_LL` 仅远程座位挂、`LLMHF/LLKHF_INJECTED` 过滤防回环）+ 受控端观察者 trace 镜像转发。注入探针实测：过边→光标左缘 (0,539)、中心移动精确、键盘 Win/Esc；DXGI 真实像素捕获 1920x1080（M5.1 收窄）。`TIN1` 语义：VK 码 / 1000 单位 / `BTN_LEFT=1,BTN_RIGHT=2,BTN_MIDDLE=4`。双桌面 100 次物理往返仍 Manual-required。

@@ -5,8 +5,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tetherly_core::NotifyPush;
-use tetherly_node::{Node, NodeConfig};
+use tetherly_node::{Node, NodeConfig, SystemSink};
 use tracing::info;
 
 #[derive(Parser)]
@@ -35,6 +36,19 @@ enum Cmd {
         /// Disable overlay bind/scan (LAN only).
         #[arg(long, default_value_t = false)]
         no_overlay: bool,
+        /// Stream an adb device's screen (serial, e.g. 10.144.144.51:5555)
+        /// instead of the local DXGI desktop.
+        #[arg(long)]
+        screen_adb: Option<String>,
+        /// Bind a second node on one host: file/input/screen/UI ports.
+        #[arg(long)]
+        file_port: Option<u16>,
+        #[arg(long)]
+        input_port: Option<u16>,
+        #[arg(long)]
+        screen_port: Option<u16>,
+        #[arg(long)]
+        ui_port: Option<u16>,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -93,8 +107,40 @@ async fn main() -> Result<()> {
             port,
             overlay_cidr,
             no_overlay,
+            screen_adb,
+            file_port,
+            input_port,
+            screen_port,
+            ui_port,
         } => {
             cfg.control_port = port;
+            // Real presentation: received frames open a window via GDI BitBlt.
+            cfg.screen_sink = Some(Arc::new(SystemSink::new()));
+            // Real injection for the controlled side (45719): received key and
+            // mouse events drive SendInput. Harmless while no visitor holds
+            // the seat (nothing arrives until the controller crosses an edge).
+            cfg.input_sink = Some(Arc::new(std::sync::Mutex::new(
+                tetherly_node::SystemInputSink,
+            )));
+            if let Some(serial) = screen_adb {
+                // The screen is the adb device; encode it losslessly like DXGI.
+                cfg.screen_source = Some(Arc::new(tetherly_node::EncodedSource::new(
+                    tetherly_node::AdbSource::new(Some(serial)),
+                    Arc::new(tetherly_node::ZstdCodec::default()),
+                )));
+            }
+            if let Some(v) = file_port {
+                cfg.file_port = v;
+            }
+            if let Some(v) = input_port {
+                cfg.input_port = v;
+            }
+            if let Some(v) = screen_port {
+                cfg.screen_port = v;
+            }
+            if let Some(v) = ui_port {
+                cfg.ui_port = v;
+            }
             if no_overlay {
                 cfg.overlay.enabled = false;
             }
@@ -104,6 +150,35 @@ async fn main() -> Result<()> {
             let node = Node::start(cfg)?;
             info!(device_id = %node.identity().device_id(), "run");
             info!("ui http://127.0.0.1:45716");
+            // Controller-side capture: low-level mouse hook for edge crossings;
+            // the keyboard hook is armed only while the seat is remote.
+            if let Err(e) = node.spawn_input_capture() {
+                info!(%e, "input capture unavailable (key/mouse sharing stays off)");
+            }
+            // Frame pump: grab + encode + send while a visitor is streaming.
+            // Idle ticks are cheap (Ok(false)). Source errors are recoverable
+            // (adb respawns on the next grab, DXGI retries): log and back off
+            // instead of killing the pump, or the stream would be dead for
+            // every future visitor until process restart.
+            let pump = node.clone_handle();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(16));
+                // A blocking grab overruns the 16ms tick constantly: skip
+                // missed ticks instead of bursting catch-up grabs.
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut backoff = std::time::Duration::from_millis(250);
+                loop {
+                    tick.tick().await;
+                    match pump.screen_send_frame().await {
+                        Ok(_) => backoff = std::time::Duration::from_millis(250),
+                        Err(e) => {
+                            tracing::warn!(%e, "screen pump tick failed; backing off");
+                            tokio::time::sleep(backoff).await;
+                            backoff = (backoff * 2).min(std::time::Duration::from_secs(5));
+                        }
+                    }
+                }
+            });
             node.run().await?;
         }
         Cmd::Dial { addr, pin } => {

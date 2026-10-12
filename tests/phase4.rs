@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tetherly_core::{
     AncsCharacteristic, AncsState, Clock, ConnectOutcome, ManualClock, MemoryAncsTransport,
-    OpenAllowlist, OpenRule,
+    OpenAllowlist, OpenRule, APP_NAME_WAIT_MS,
 };
 use tetherly_node::{MemoryOpener, Node, NodeConfig, OverlayConfig};
 
@@ -59,6 +59,9 @@ fn cfg(dir: PathBuf, ancs: Option<Arc<MemoryAncsTransport>>) -> NodeConfig {
         ancs: ancs.map(|t| t as Arc<dyn tetherly_core::AncsTransport>),
         ancs_peripheral: "test-iphone".into(),
         screen_source: None,
+        screen_codec: None,
+        screen_sink: None,
+        input_sink: None,
     }
 }
 
@@ -275,17 +278,22 @@ async fn m4_1_ingest_latency_stays_inside_the_budget() {
     .await
     .unwrap();
     node.ancs_tick().await.unwrap();
-    // The app name is the only reason we wait at all; the phone answers fast.
-    clock.set(t0 + 120);
+    // The notification is held for at most `APP_NAME_WAIT_MS` waiting for the
+    // display name; advance the clock to exactly that deadline and it must be
+    // released, not held longer.
+    clock.set(t0 + APP_NAME_WAIT_MS);
     node.ancs_data_source(&app_response("com.apple.MobileSMS", "信息"))
         .await
         .unwrap();
+    node.ancs_tick().await.unwrap();
 
+    // The hold is bounded by `APP_NAME_WAIT_MS`, well inside the M4.1 budget.
     let elapsed = clock.unix_ms() - t0;
-    assert!(
-        elapsed < 2_000,
-        "simulated end-to-end latency {elapsed}ms is outside the M4.1 budget"
+    assert_eq!(
+        elapsed, APP_NAME_WAIT_MS,
+        "the app-name wait is the only delay, and it is capped"
     );
+    assert!(elapsed < 2_000, "M4.1 budget");
     let c = node
         .candidates()
         .into_iter()
@@ -309,10 +317,18 @@ async fn m4_1_held_notification_is_bounded_by_the_app_name_wait() {
     node.ancs_data_source(&notif_response(8, "com.unknown.app", "t", "b"))
         .await
         .unwrap();
-    // The app never answers; the wait is capped, so the candidate still lands.
-    clock.set(t0 + 400);
+    // One tick before the deadline: still held, nothing emitted yet.
+    clock.set(t0 + APP_NAME_WAIT_MS - 1);
     node.ancs_tick().await.unwrap();
-    assert!(clock.unix_ms() - t0 < 2_000);
+    assert!(
+        node.candidates().iter().all(|c| c.uid != "8"),
+        "notification must still be held before the deadline"
+    );
+    // At the deadline the wait is capped and the candidate lands even though
+    // the app never answered.
+    clock.set(t0 + APP_NAME_WAIT_MS);
+    node.ancs_tick().await.unwrap();
+    assert!(clock.unix_ms() - t0 <= APP_NAME_WAIT_MS);
     let c = node
         .candidates()
         .into_iter()

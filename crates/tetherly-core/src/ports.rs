@@ -131,8 +131,26 @@ pub trait Notifier: Send + Sync {
 
 /// Pull one screen frame from the OS. Implemented in tetherly-node only; the
 /// core never captures. `grab` is called on the sender's own cadence.
+/// Returns Ok(None) when the desktop has not changed since the last call
+/// (on-change source like DXGI Desktop Duplication). The caller may sleep
+/// and retry. Memory sources always return Some for deterministic CI.
 pub trait ScreenSource: Send + Sync {
-    fn grab(&self) -> Result<crate::screen::ScreenFrame, CoreError>;
+    fn grab(&self) -> Result<Option<crate::screen::ScreenFrame>, CoreError>;
+
+    /// Best-effort unblock of an in-flight `grab`. The caller invokes this
+    /// when a grab overruns its budget (e.g. a device stream wedged without
+    /// EOF); the next `grab` must behave as if the source had just been
+    /// created. Default: nothing to do (sources that cannot hang).
+    fn interrupt(&self) {}
+}
+
+/// Transform a raw pixel body to or form the wire format carried in
+/// `ScreenFrame.bytes`. Lossless zstd is the default production codec;
+/// lossy codecs (OpenH264, rav1e) drop in as `ScreenSource`-port
+/// decorators later per the "先无损帧 + 后接编码器" decision.
+pub trait ScreenCodec: Send + Sync {
+    fn compress(&self, raw: &[u8]) -> Result<Vec<u8>, CoreError>;
+    fn decompress(&self, compressed: &[u8], expected_len: usize) -> Result<Vec<u8>, CoreError>;
 }
 
 /// Present one screen frame. In-memory fake for CI; the OS path is Manual.

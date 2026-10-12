@@ -33,11 +33,18 @@ jobs:
 
   android:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: android
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - name: build native .so (arm64-v8a)
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p tetherly-android --release
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -46,8 +53,10 @@ jobs:
         with:
           gradle-version: "8.9"
       - name: unit tests
+        working-directory: android
         run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
       - name: assemble debug
+        working-directory: android
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
   deny:

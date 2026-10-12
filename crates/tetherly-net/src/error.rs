@@ -14,8 +14,6 @@ pub enum NetError {
     TooLarge,
     #[error("handshake incomplete")]
     Handshake,
-    #[error("business frame before Noise")]
-    Premature,
     #[error("device_id mismatch")]
     DeviceIdMismatch,
     #[error("locked out")]
@@ -34,8 +32,6 @@ pub enum NetError {
     RateLimited,
     #[error("replayed inner frame")]
     Replay,
-    #[error("noise rekey required")]
-    RekeyRequired,
     #[error("file channel: {0}")]
     File(String),
     #[error("input channel requires trust; pairing belongs on 45717")]

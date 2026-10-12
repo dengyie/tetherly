@@ -68,6 +68,9 @@ fn cfg(dir: PathBuf, name: &str, overlay: OverlayConfig) -> NodeConfig {
         ancs: None,
         ancs_peripheral: "test-iphone".into(),
         screen_source: None,
+        screen_codec: None,
+        screen_sink: None,
+        input_sink: None,
     }
 }
 
@@ -186,6 +189,61 @@ async fn m2_5_unicast_peer_list_without_mdns() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     wait_otp(&a, Duration::from_secs(3)).await;
+    a.shutdown();
+    b.shutdown();
+    drop((ga, gb));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn m2_6_notify_reply_reaches_the_phone_and_is_consumed_once() {
+    let (da, ga) = temp_dir("a6");
+    let (db, gb) = temp_dir("b6");
+    let a = Node::start(cfg(da, "desk", overlay_off())).unwrap();
+    let b = Node::start(cfg(db, "phone", overlay_off())).unwrap();
+    pair(&a, &b).await;
+    // Phone → desktop notification, so the desktop has a candidate to answer.
+    let dest = a.identity().device_id().clone();
+    let start = std::time::Instant::now();
+    loop {
+        if b.send_notify(&dest, otp_push("u6")).await.is_ok() {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("session not ready");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    wait_otp(&a, Duration::from_secs(3)).await;
+    let cand = a
+        .candidates()
+        .into_iter()
+        .find(|c| c.uid == "u6")
+        .expect("candidate");
+    // Desktop answers in place; the text travels back to the phone's inbox.
+    a.reply_to_candidate(&cand.id, "收到,马上回电")
+        .await
+        .unwrap();
+    let start = std::time::Instant::now();
+    let view = loop {
+        let v = b.reply_views();
+        if !v.is_empty() {
+            break v.into_iter().next().unwrap();
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("reply did not reach the phone");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(view.uid, "u6");
+    assert_eq!(view.app_id, "com.example.sms");
+    let (view, text) = b.take_reply(&view.id).expect("queued reply");
+    assert_eq!(view.uid, "u6");
+    assert_eq!(text, "收到,马上回电");
+    // Drained exactly once.
+    assert!(b.take_reply(&view.id).is_none());
+    assert!(b.reply_views().is_empty());
+    // An empty reply is refused locally, not sent.
+    assert!(a.reply_to_candidate(&cand.id, "   ").await.is_err());
     a.shutdown();
     b.shutdown();
     drop((ga, gb));

@@ -17,3 +17,8 @@ android/build/
 android/app/build/
 android/local.properties
 android/.idea/
+# Native lib is built by cargo-ndk (CI: android job), never committed.
+android/app/src/main/jniLibs/
+# Local scratch for on-device smoke tests: holds a live identity.bin + trust
+# state. Never committed.
+.tmp-apk-test/

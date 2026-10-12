@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Incoming file offers. Default is confirm-to-receive. Names are basename-only.
 //! Nothing is written until the user accepts.
+//!
+//! Transfers are content-addressed (`transfer_id == sha256[..16]` of the file),
+//! so a re-offer of the *same* bytes after an interrupted transfer can resume
+//! from the last chunk-aligned offset the receiver persisted.
 
 use crate::allowlist::sanitize_file_name;
 use crate::device_id::DeviceId;
 use crate::error::CoreError;
-use crate::frame::{FileDecision, FileDone, FileMeta, FileOffer, FILE_TOKEN_TTL_MS};
+use crate::frame::{FileDecision, FileDone, FileMeta, FileOffer, FILE_CHUNK, FILE_TOKEN_TTL_MS};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,12 +27,83 @@ pub struct IncomingTransfer {
     pub files: Vec<FileMeta>,
     pub status: TransferStatus,
     pub offered_ms: u64,
+    /// Chunk-aligned offset this transfer may resume from (if the receiver
+    /// already holds a matching persisted partial). Set at offer time.
+    pub resume_from: Option<u64>,
+}
+
+/// A chunk-aligned progress marker for an interrupted incoming transfer, kept
+/// in memory for the session and (by the node) as a sidecar on disk so it
+/// survives a process restart. `offset` is always a multiple of `FILE_CHUNK`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeState {
+    pub transfer_id: String,
+    pub source: DeviceId,
+    pub total: u64,
+    pub offset: u64,
+}
+
+/// Core-owned resume planner over persisted partial-transfer markers. The node
+/// supplies the markers it loaded from disk; core decides whether and where a
+/// re-offer may resume. Pure/OS-free.
+#[derive(Debug, Default)]
+pub struct ResumeTable {
+    states: HashMap<String, ResumeState>,
+}
+
+impl ResumeTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record/overwrite a marker, snapping the offset down to a chunk boundary.
+    pub fn put(&mut self, st: ResumeState) {
+        let offset = align_down(st.offset, FILE_CHUNK as u64).min(st.total);
+        self.states
+            .insert(st.transfer_id.clone(), ResumeState { offset, ..st });
+    }
+
+    pub fn remove(&mut self, transfer_id: &str) {
+        self.states.remove(transfer_id);
+    }
+
+    pub fn get(&self, transfer_id: &str) -> Option<&ResumeState> {
+        self.states.get(transfer_id)
+    }
+
+    pub fn all(&self) -> Vec<ResumeState> {
+        self.states.values().cloned().collect()
+    }
+
+    /// A resume is valid only when the caller proves it holds the transfer:
+    /// the marker's `source` must match the re-offering peer, the total size
+    /// must match, and the offset must be >0, chunk-aligned and < total.
+    pub fn claim(&self, source: &DeviceId, transfer_id: &str, total: u64) -> Option<u64> {
+        let st = self.states.get(transfer_id)?;
+        if &st.source != source || st.total != total {
+            return None;
+        }
+        if st.offset == 0 || st.offset >= total || st.offset % FILE_CHUNK as u64 != 0 {
+            return None;
+        }
+        Some(st.offset)
+    }
+}
+
+fn align_down(v: u64, unit: u64) -> u64 {
+    v - (v % unit)
 }
 
 #[derive(Debug, Default)]
 pub struct FileHub {
     incoming: HashMap<String, IncomingTransfer>,
 }
+
+/// Terminal or expired offers are dropped on the next offer. Only the `Offered`
+/// state is reachable without a local click, so this bounds a peer that floods
+/// offers; `Accepted`/`Done` entries would otherwise sit here for the process
+/// life (`forget` has no production caller).
+const INCOMING_MAX: usize = 256;
 
 impl FileHub {
     pub fn offer(
@@ -37,7 +112,24 @@ impl FileHub {
         offer: FileOffer,
         now_ms: u64,
     ) -> Result<IncomingTransfer, CoreError> {
+        self.offer_resumable(source, offer, now_ms, None)
+    }
+
+    /// `resume_hint` is a chunk-aligned offset the receiver may resume from
+    /// (from a persisted partial). It is accepted only if it fits this offer's
+    /// size; otherwise the transfer starts from 0.
+    pub fn offer_resumable(
+        &mut self,
+        source: DeviceId,
+        offer: FileOffer,
+        now_ms: u64,
+        resume_hint: Option<u64>,
+    ) -> Result<IncomingTransfer, CoreError> {
         if offer.transfer_id.is_empty() || offer.files.is_empty() {
+            return Err(CoreError::UnknownTransfer);
+        }
+        self.prune(now_ms);
+        if self.incoming.len() >= INCOMING_MAX {
             return Err(CoreError::UnknownTransfer);
         }
         let mut files = Vec::with_capacity(offer.files.len());
@@ -52,12 +144,16 @@ impl FileHub {
                 sha256: f.sha256.to_ascii_lowercase(),
             });
         }
+        let total = files.first().map(|f| f.size).unwrap_or(0);
+        let resume_from =
+            resume_hint.filter(|&off| off > 0 && off < total && off % FILE_CHUNK as u64 == 0);
         let t = IncomingTransfer {
             transfer_id: offer.transfer_id.clone(),
             source,
             files,
             status: TransferStatus::Offered,
             offered_ms: now_ms,
+            resume_from,
         };
         self.incoming.insert(offer.transfer_id, t.clone());
         tracing::info!(
@@ -68,7 +164,29 @@ impl FileHub {
         Ok(t)
     }
 
+    /// Total byte size of the transfer's first file (v1 is single-file).
+    fn total_of(t: &IncomingTransfer) -> u64 {
+        t.files.first().map(|f| f.size).unwrap_or(0)
+    }
+
+    /// Accept. Resumes from the offer's stored resume hint if the receiver
+    /// already holds a matching partial, otherwise starts at 0.
     pub fn accept(&mut self, transfer_id: &str, now_ms: u64) -> Result<FileDecision, CoreError> {
+        let hint = self
+            .incoming
+            .get(transfer_id)
+            .ok_or(CoreError::UnknownTransfer)?
+            .resume_from;
+        self.accept_at(transfer_id, now_ms, hint)
+    }
+
+    /// Accept, optionally resuming from a chunk-aligned offset.
+    pub fn accept_at(
+        &mut self,
+        transfer_id: &str,
+        now_ms: u64,
+        resume_from: Option<u64>,
+    ) -> Result<FileDecision, CoreError> {
         let t = self
             .incoming
             .get_mut(transfer_id)
@@ -76,16 +194,24 @@ impl FileHub {
         if now_ms.saturating_sub(t.offered_ms) > FILE_TOKEN_TTL_MS {
             return Err(CoreError::CandidateExpired);
         }
-        match t.status {
-            TransferStatus::Offered => {
-                t.status = TransferStatus::Accepted;
-                Ok(FileDecision {
-                    transfer_id: transfer_id.to_string(),
-                })
-            }
-            TransferStatus::Accepted => Err(CoreError::FileAlreadyDecided),
-            _ => Err(CoreError::FileAlreadyDecided),
+        if t.status != TransferStatus::Offered {
+            return Err(CoreError::FileAlreadyDecided);
         }
+        let total = Self::total_of(t);
+        let resume = match resume_from {
+            None => None,
+            Some(off) => {
+                if off == 0 || off >= total || off % FILE_CHUNK as u64 != 0 {
+                    return Err(CoreError::ResumeOffset);
+                }
+                Some(off)
+            }
+        };
+        t.status = TransferStatus::Accepted;
+        Ok(FileDecision {
+            transfer_id: transfer_id.to_string(),
+            resume_from: resume,
+        })
     }
 
     pub fn reject(&mut self, transfer_id: &str) -> Result<FileDecision, CoreError> {
@@ -99,6 +225,7 @@ impl FileHub {
         t.status = TransferStatus::Rejected;
         Ok(FileDecision {
             transfer_id: transfer_id.to_string(),
+            resume_from: None,
         })
     }
 
@@ -148,6 +275,18 @@ impl FileHub {
 
     pub fn forget(&mut self, transfer_id: &str) {
         self.incoming.remove(transfer_id);
+    }
+
+    /// Drop decided transfers and offers past their token TTL, so the map holds
+    /// at most the live offers instead of every transfer ever seen. `Accepted`
+    /// is kept: it is user-approved and `mark_done` still needs it until the
+    /// peer reports completion.
+    fn prune(&mut self, now_ms: u64) {
+        self.incoming.retain(|_, t| match t.status {
+            TransferStatus::Accepted => true,
+            TransferStatus::Offered => now_ms.saturating_sub(t.offered_ms) <= FILE_TOKEN_TTL_MS,
+            TransferStatus::Done | TransferStatus::Rejected => false,
+        });
     }
 }
 
@@ -206,5 +345,55 @@ mod tests {
             hub.offer(src, bad, 1).unwrap_err(),
             CoreError::UnsafeFileName
         );
+    }
+
+    #[test]
+    fn resume_claim_requires_source_and_size_and_alignment() {
+        let mut table = ResumeTable::new();
+        let src = DeviceId::from_id_pk(&[5u8; 32]);
+        let other = DeviceId::from_id_pk(&[6u8; 32]);
+        table.put(ResumeState {
+            transfer_id: "tr_1".into(),
+            source: src.clone(),
+            total: 10 * FILE_CHUNK as u64,
+            // deliberately misaligned + partial chunk to prove snapping
+            offset: 3 * FILE_CHUNK as u64 + 7,
+        });
+        assert_eq!(table.get("tr_1").unwrap().offset, 3 * FILE_CHUNK as u64);
+        // right source + size -> the snapped offset
+        assert_eq!(
+            table.claim(&src, "tr_1", 10 * FILE_CHUNK as u64),
+            Some(3 * FILE_CHUNK as u64)
+        );
+        // wrong source rejected
+        assert_eq!(table.claim(&other, "tr_1", 10 * FILE_CHUNK as u64), None);
+        // size mismatch rejected
+        assert_eq!(table.claim(&src, "tr_1", 11 * FILE_CHUNK as u64), None);
+        // unknown transfer rejected
+        assert_eq!(table.claim(&src, "tr_nope", 1), None);
+    }
+
+    #[test]
+    fn accept_at_validates_resume_offset() {
+        let mut hub = FileHub::default();
+        let src = DeviceId::from_id_pk(&[7u8; 32]);
+        let total = 4 * FILE_CHUNK as u64;
+        let mut o = offer("big.bin");
+        o.files[0].size = total;
+        hub.offer(src, o, 1).unwrap();
+        // misaligned resume refused
+        assert_eq!(
+            hub.accept_at("tr_1", 2, Some(FILE_CHUNK as u64 + 1))
+                .unwrap_err(),
+            CoreError::ResumeOffset
+        );
+        // out-of-range resume refused
+        assert_eq!(
+            hub.accept_at("tr_1", 2, Some(total)).unwrap_err(),
+            CoreError::ResumeOffset
+        );
+        // valid resume echoed in the decision
+        let d = hub.accept_at("tr_1", 2, Some(FILE_CHUNK as u64)).unwrap();
+        assert_eq!(d.resume_from, Some(FILE_CHUNK as u64));
     }
 }

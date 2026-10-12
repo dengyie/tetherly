@@ -74,6 +74,15 @@ impl NoiseHandshake {
         self.state.is_handshake_finished()
     }
 
+    /// The peer's static public key, once it has been received. In `Noise_IK`
+    /// the **responder** learns the initiator's static from message 1; the
+    /// caller MUST compare it to the key it trusts, or a peer that replays a
+    /// trusted `Hello` (public) while running IK with its own static would be
+    /// accepted as that trusted peer.
+    pub fn remote_static(&self) -> Option<&[u8]> {
+        self.state.get_remote_static()
+    }
+
     pub fn into_transport(self) -> Result<NoiseTransport, CryptoError> {
         let mut hash = [0u8; 32];
         let raw = self.state.get_handshake_hash();
@@ -120,6 +129,14 @@ impl NoiseTransport {
         self.msgs >= REKEY_AFTER_MSGS
             || (self.started_unix > 0
                 && now_unix.saturating_sub(self.started_unix) >= REKEY_AFTER_SECS)
+    }
+
+    /// Test-only: mark the transport as having hit the message limit so a
+    /// rekey is due on the next send/recv. Production never calls this; it
+    /// exists so the rekey path can be exercised without 2^16 real frames.
+    #[doc(hidden)]
+    pub fn debug_force_rekey_due(&mut self) {
+        self.msgs = REKEY_AFTER_MSGS;
     }
 
     /// Noise chaining key / handshake hash. Used to HKDF the file-channel token.
@@ -183,5 +200,36 @@ mod tests {
         let mut resp = NoiseHandshake::responder(&b, &p).unwrap();
         let m1 = init.write_message(b"").unwrap();
         assert!(resp.read_message(&m1).is_err());
+    }
+
+    #[test]
+    fn responder_learns_the_initiator_static() {
+        // In IK the responder must be able to read the initiator's static key
+        // from message 1 and compare it to the key it trusts. Without this the
+        // responder would accept ANY initiator that replayed a trusted Hello,
+        // even one running IK with an unrelated static key.
+        let a = Identity::from_secrets([11u8; 32], [12u8; 32]);
+        let b = Identity::from_secrets([21u8; 32], [22u8; 32]);
+        let c = Identity::from_secrets([31u8; 32], [32u8; 32]);
+        let ha = a.hello("a", "linux", &["notify"]);
+        let hb = b.hello("b", "linux", &["notify"]);
+        let p = prologue(&ha, &hb).unwrap();
+
+        // Attacker C replays A's public Hello (same prologue) but uses its own
+        // static.The responder must see C's static, not A's, after message 1.
+        let mut atk = NoiseHandshake::initiator(&c, b.n_pk(), &p).unwrap();
+        let mut resp = NoiseHandshake::responder(&b, &p).unwrap();
+        let m1 = atk.write_message(b"").unwrap();
+        resp.read_message(&m1).unwrap();
+        assert_eq!(resp.remote_static(), Some(c.n_pk().as_slice()));
+        assert_ne!(resp.remote_static(), Some(a.n_pk().as_slice()));
+
+        // And for the honest initiator it exposes A's key.
+        let mut good = NoiseHandshake::initiator(&a, b.n_pk(), &p).unwrap();
+        let mut resp2 = NoiseHandshake::responder(&b, &p).unwrap();
+        resp2
+            .read_message(&good.write_message(b"").unwrap())
+            .unwrap();
+        assert_eq!(resp2.remote_static(), Some(a.n_pk().as_slice()));
     }
 }
