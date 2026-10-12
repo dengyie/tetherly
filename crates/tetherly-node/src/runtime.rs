@@ -1884,7 +1884,8 @@ impl Node {
     /// Start the controller-side capture: low-level mouse hook (edge
     /// detection) and a keyboard hook armed only while the seat is remote.
     /// Events feed the same edge state machine `drive_input` uses, so CI and
-    /// production share one path. Non-Windows: honest error, no hooks.
+    /// production share one path.
+    #[cfg(windows)]
     pub fn spawn_input_capture(&self) -> Result<(), CoreError> {
         let (tx, rx) = std::sync::mpsc::channel::<crate::platform::RawInput>();
         let control = crate::platform::start_input_hooks(tx)?;
@@ -1928,6 +1929,17 @@ impl Node {
             }
         });
         Ok(())
+    }
+
+    /// Non-Windows builds have no low-level input hooks: report an honest
+    /// error rather than silently doing nothing (macOS/Linux capture is
+    /// Manual-required per the SSOT).
+    #[cfg(not(windows))]
+    pub fn spawn_input_capture(&self) -> Result<(), CoreError> {
+        Err(CoreError::Json(
+            "input capture is Windows-only in this build; macOS/Linux hooks are Manual-required"
+                .into(),
+        ))
     }
 
     /// Push local cursor position toward the edge state machine. Crossing the

@@ -738,7 +738,7 @@ impl SystemSource {
         }
         #[cfg(not(windows))]
         {
-            Self
+            Self {}
         }
     }
 

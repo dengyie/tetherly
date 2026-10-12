@@ -15,10 +15,9 @@ pub mod uihttp;
 
 pub use events::{CandidateViewDto, UiEvent};
 
-pub use platform::{
-    cursor_pos, screen_size, start_input_hooks, HookControl, MemoryInsertor, MemoryOpener,
-    RawInput, SystemInputSink, SystemOpener,
-};
+#[cfg(windows)]
+pub use platform::{cursor_pos, screen_size, start_input_hooks, HookControl, RawInput};
+pub use platform::{MemoryInsertor, MemoryOpener, SystemInputSink, SystemOpener};
 pub use runtime::{LivePeer, Node, NodeConfig, UserCommand};
 pub use screen::{AdbSource, DxgiSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
 pub use sidecar::{parse_overlay_cidrs, OverlayConfig, OverlaySource, OverlayStatus};
