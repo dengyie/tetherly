@@ -85,7 +85,7 @@ class NotifyListener : NotificationListenerService() {
         val intent = Intent()
         val bundle = Bundle()
         for (ri in inputs) bundle.putCharSequence(ri.resultKey, text)
-        RemoteInput.addResultsToIntents(inputs, intent, bundle)
+        RemoteInput.addResultsToIntent(inputs, intent, bundle)
         return try {
             action.actionIntent.send(this, 0, intent)
             true
