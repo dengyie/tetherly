@@ -58,14 +58,18 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: create GitHub release
+      - name: publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           ls -l dist
-          gh release create "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "Tetherly ${GITHUB_REF_NAME}" \
-            --generate-notes \
-            dist/*
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber dist/*
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Tetherly ${GITHUB_REF_NAME}" \
+              --generate-notes \
+              dist/*
+          fi

@@ -52,9 +52,18 @@ mod backend;
 #[path = "cred/other.rs"]
 mod backend;
 
+/// Run a vault call on a plain thread. The Linux Secret Service client (zbus)
+/// drives its blocking API with its own runtime and panics if invoked from
+/// within one — the node's `#[tokio::main]` binary and every `#[tokio::test]`
+/// are exactly that. A panicking backend degrades to `fallback` instead of
+/// taking the process down, matching the file-fallback contract.
+fn off_runtime<T: Send>(fallback: T, f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| scope.spawn(f).join().unwrap_or(fallback))
+}
+
 /// Whether the OS vault is usable on this platform/build.
 pub fn vault_available() -> bool {
-    backend::available()
+    off_runtime(false, backend::available)
 }
 
 /// Load the identity for `dir`, creating one on first use.
@@ -111,7 +120,7 @@ fn known_device_id(dir: &Path) -> Option<String> {
 /// pointer/no usable entry (which selects the file path).
 fn load_from_vault(dir: &Path) -> Option<Identity> {
     let device_id = known_device_id(dir)?;
-    let bytes = backend::read(&target_for(&device_id))?;
+    let bytes = off_runtime(None, || backend::read(&target_for(&device_id)))?;
     match Identity::from_bytes(&bytes) {
         Ok(id) => {
             tracing::info!(device_id = %id.device_id(), "loaded identity from credential vault");
@@ -125,17 +134,19 @@ fn load_from_vault(dir: &Path) -> Option<Identity> {
 /// store, so it is only appropriate for the **installed** data dir; a
 /// temp-dir node (every integration test) keeps its identity in that dir's
 /// `identity.bin` and never touches the operator's real vault. An explicit
-/// `TETHERLY_VAULT=1`/`0` overrides the decision (used by tests).
+/// `TETHERLY_VAULT=1`/`0` overrides the decision (used by tests). The cheap
+/// env/dir checks run first so a non-installed dir never probes D-Bus.
 fn vault_enabled_for(dir: &Path) -> bool {
-    if !vault_available() {
-        return false;
-    }
     match std::env::var("TETHERLY_VAULT").ok().as_deref() {
-        Some("1") => return true,
+        Some("1") => {}
         Some("0") => return false,
-        _ => {}
+        _ => {
+            if dir != crate::store::default_data_dir() {
+                return false;
+            }
+        }
     }
-    dir == crate::store::default_data_dir()
+    vault_available()
 }
 
 /// Persist an identity's secrets to the vault. Returns false when unsupported
@@ -145,7 +156,8 @@ pub fn vault_store(identity: &Identity) -> bool {
         return false;
     }
     let target = target_for(&identity.device_id().to_string());
-    if backend::write(&target, &identity.to_bytes()) {
+    let blob = identity.to_bytes();
+    if off_runtime(false, || backend::write(&target, &blob)) {
         tracing::info!(device_id = %identity.device_id(), "identity stored in credential vault");
         true
     } else {
@@ -160,7 +172,7 @@ pub fn vault_delete(device_id: &str) -> bool {
     if !vault_available() {
         return true;
     }
-    backend::delete(&target_for(device_id))
+    off_runtime(true, || backend::delete(&target_for(device_id)))
 }
 
 fn target_for(device_id: &str) -> String {
