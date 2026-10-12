@@ -29,7 +29,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: build release binaries
-        run: cargo build --release --locked -p tetherly -p tetherly-cli
+        run: cargo build --release --locked -p tetherly-node -p tetherly-cli
       - name: stage artifacts
         shell: bash
         run: |
