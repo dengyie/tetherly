@@ -48,6 +48,8 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 if-addrs = "0.13"
 arboard = "3"
+# Property tests for the untrusted decoders (spec §13 `proptest` layer). MIT.
+proptest = "1"
 
 [package]
 name = "tetherly"

@@ -3,6 +3,7 @@
 - (none)
 
 ## Next
+- [ ] libfuzzer / `cargo-fuzz` coverage-guided fuzz of the decoders (needs nightly) — Manual-required; the stable-toolchain deterministic mutation driver landed v1.16 as the honest substitute
 - [ ] DXGI-side real pixel capture + Windows cross-desktop p95 verification (AdbSource cross-device loop landed+verified v1.8) — Manual-required
 - [ ] Real open screen encoder (OpenH264 / rav1e) as `ScreenCodec` port impl — Manual-required
 - [ ] macOS screen capture/present (core-graphics CGImage / CGWindow), Linux X11 SHM (Wayland portal) — Manual-required
@@ -22,6 +23,7 @@
 - [ ] Phase 6 backlog: Android controlled device, WinFsp mount, embedded EasyTier FFI
 
 ## Done
+- [x] §13 proptest + fuzz layers (v1.16): core `tests/decoders.rs` (27 props — every inbound decoder never panics on arbitrary input, every encodable message round-trips, sanitize_file_name stays a basename, DataAssembler bounded) + net `tests/decoders.rs` (7 props — len-prefixed/tagged/file-header never panic, oversized prefix refused, TFL1=start0) + core `tests/fuzz_decoders.rs` (2 deterministic xorshift mutation drivers over a valid corpus, `catch_unwind`, fixed seed); `proptest="1"` (MIT) workspace dev-dep; **no decoder bug found** (v1.15 fixes hold); 251 green; DEVELOPMENT.md v1.16
 - [x] Peer-input hardening (v1.15): `ReplayGuard::check_and_record` `msg_id + 1024` overflow on a peer `u64` (debug panic / release accepts ancient id) → `saturating_add`; `ScreenAssembler::push` `total - off` underflow on a lying fragment `idx` (remote panic on 45720) → `checked_mul` + `off < total` guard; +3 regression tests, 205 green
 - [x] macOS Keychain + Linux libsecret credential backends (v1.14): `cred/{windows,macos,linux,other}.rs`; each compiles for its target (probe-verified: caught a Linux lifetime bug); real vault runtime Manual-required; CI macos/ubuntu build them
 - [x] Windows Credential Manager identity storage (v1.13): generic credential `tetherly.identity:<device_id>` + public `identity.ref`; old `identity.bin` auto-migrated; installed-dir-only gate keeps tests out of the real vault; real CredRead/CredWrite round-trip test green on Windows

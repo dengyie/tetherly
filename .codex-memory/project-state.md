@@ -12,11 +12,14 @@
   **Windows credential-vault identity landed (v1.13)** — Credential Manager generic credential + `identity.ref`, file fallback kept;
   **macOS Keychain / Linux libsecret backends landed (v1.14)** — backend-per-platform `cred/*.rs`, compile-verified per target, runtime Manual-required;
   **peer-input hardening (v1.15)** — `ReplayGuard` msg_id overflow + `ScreenAssembler` fragment-idx underflow fixed (both remote-triggerable), +3 regression tests, 205 green;
+  **proptest + fuzz layers landed (v1.16)** — §13's two declared-but-missing layers now real on the stable toolchain: decoder never-panic + round-trip properties (core 27, net 7) and a deterministic xorshift mutation corpus driver (core 2); no decoder bug found (v1.15 fixes hold), 251 green;
   RustDesk architecture borrow only, AGPL not linkable.
 
 ## Current Phase
-- Spec `docs/DEVELOPMENT.md` **v1.15**. Phase 5 real-machine loop + Phase 3 real-machine chain +
-  Phase 1 Android native lib + `notify.reply` quick reply + file cross-process resume + Windows credential-vault identity storage + macOS Keychain / Linux libsecret backends all landed.
+- Spec `docs/DEVELOPMENT.md` **v1.16**. Phase 5 real-machine loop + Phase 3 real-machine chain +
+  Phase 1 Android native lib + `notify.reply` quick reply + file cross-process resume + Windows credential-vault identity storage + macOS Keychain / Linux libsecret backends + **§13 proptest/fuzz layers** all landed.
+- **§13 proptest + fuzz layers (v1.16)**: `tetherly-core/tests/decoders.rs` (27 props) — every inbound decoder never panics on arbitrary input, every encodable message round-trips (notify push/dismiss/reply, clip set, file offer/decision/done, caps update, input event, screen frame, control msg, hello, JSON control-plane); plus sanitize_file_name stays a basename (non-empty, != "."/"..", no '/', no NUL), DataAssembler bounded to 8 KiB, any-order reassembly. `tetherly-net/tests/decoders.rs` (7 props) — `read_len_prefixed`/`read_tagged`/`read_header` never panic, oversized length prefix refused (anti-DoS), valid headers round-trip, `TFL1` reads as `start=0`, wrong magic refused. `tetherly-core/tests/fuzz_decoders.rs` (2) — deterministic xorshift mutator over a valid corpus (inner frames, all 7 control JSON types, all 7 input kinds, whole+fragmented screen frames, control msgs, ANCS source events + data-source tuples, canonical Hello) applying 6 mutation kinds (bit flip, extreme byte, truncate, extend, multi-byte overwrite, splice), feeding every decoder under `catch_unwind`; fixed seed `0x9E3779B97F4A7C15`, 512 mutations/seed, every 4th stacked. `proptest = "1"` (MIT) added as a workspace dev-dependency.
+- **Honest boundary**: libfuzzer / `cargo-fuzz` (nightly) remains Manual-required; the deterministic mutation driver is the stable-toolchain substitute (documented in the spec §13 row).
 - **`notify.reply` (v1.11)**: `tetherly-core::frame::NotifyReply{uid,app_id,text}` + `NOTIFY_TEXT_MAX=4 KiB`
   (UTF-8-safe truncate); `TYPE_NOTIFY_REPLY=0x0103`. `tetherly-net` `SessionEvent::ReplyStub` replaced by
   `SessionEvent::Reply(NotifyReply)`. `NotifyHub` reply inbox (`ingest_reply`/`take_reply_id`/`take_reply`/
@@ -112,8 +115,12 @@
 
 ## Last Verified
 - Local: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo test --workspace --locked` all green — **188 passed, 0 failed** (loopback 10, phase1 7, phase2 5,
-  phase3 4, phase4 10, phase5 5, core 119, crypto 10, net 1, node 11, android 3 unit + 3 e2e).
+  `cargo test --workspace --locked` all green — **251 passed, 0 failed** (v1.16: +27 core props,
+  +7 net props, +2 fuzz drivers over the prior 205).
+- Cross-check: `cargo clippy --target x86_64-unknown-linux-gnu --workspace --all-targets --locked -- -D warnings`
+  clean (needs `CC_x86_64_unknown_linux_gnu=gcc AR_...=ar` since Phase 5's `zstd-sys` wants a target C
+  compiler that isn't installed; check-only, nothing links). macOS cross-check not possible on this host.
+- `cargo deny check` → advisories ok, bans ok, licenses ok, sources ok (proptest 1.x MIT passes the allow-list).
 - `cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p tetherly-android --release` →
   `libtetherly_android.so` (aarch64 ELF, NDK r29, ~1.6 MB), all 7 `Java_app_tetherly_*` symbols exported.
 - Review hardening (2026-10-11): `ScreenSource::interrupt` port method + 10s grab timeout in
@@ -162,18 +169,18 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
-- v1.11 (`notify.reply` quick reply + SSOT/memory sync) complete and fully green locally;
-  in-flight: file persistent resume, Windows Credential Manager identity storage.
-  Awaiting an explicit user instruction before any commit/push.
+- v1.16 (SSOT §13 proptest + fuzz layers + SSOT/memory sync) complete and fully green locally;
+  awaiting an explicit user instruction before any commit/push.
 
 ## Next Milestone
 - Phase 6 (single-item): Android controlled device, WinFsp mount, file persistent resume,
   Linux ANCS experience, embedded EasyTier FFI. (`notify.reply` closed v1.11; removed from backlog.)
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.11)
+- `docs/DEVELOPMENT.md` (SSOT v1.16)
 - `crates/tetherly-{core,crypto,net,node,android}` + `crates/tetherly-core/src/{ancs,screen}.rs`
   + `crates/tetherly-node/src/screen.rs` + `crates/tetherly-android/src/{store,client,jni}.rs`
+- `crates/tetherly-core/tests/{decoders,fuzz_decoders}.rs`, `crates/tetherly-net/tests/decoders.rs`
 - `bins/tetherly-cli`, `tests/{loopback,phase1,phase2,phase3,phase4,phase5}.rs`, `ui/`, `android/`
 - GitHub: `dengyie/tetherly`
 - Vault: `Note/Project/tetherly/tetherly 开发文档.md`

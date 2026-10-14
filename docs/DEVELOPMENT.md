@@ -3,12 +3,21 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.15** |
+| 文档版本 | **1.16** |
 | 日期 | 2026-10-11 |
-| 状态 | Phase 5 远程屏幕**真机闭环**（Windows DXGI 采集 + zstd 编码 + GDI 呈现 + 跨设备云手机源 467/467 帧零丢失 + 注入驱动的真实像素捕获已验）；**Phase 1 Android 原生库已落地**——`crates/tetherly-android` 产出真实 Ed25519 身份 + Noise IK 会话的 `libtetherly_android.so`，已在两台 Galaxy Fold（arm64-v8a / Android 13）完成真实配对 + notify 投递 + 断线重连（resume）验证；Phase 3 键鼠真机链已落地；CI 全绿；**v1.14 落地 macOS Keychain / Linux libsecret 凭据库**(`cred` 后端化：Windows Credential Manager + macOS Keychain + Linux Secret Service，各自可编译验证，运行时 Manual-required）；v1.13 Windows 凭据库（Credential Manager 泛型凭据 + `identity.ref` 指针，旧 `identity.bin` 自动迁移）；v1.12 文件跨进程续传(内容寻址 transfer_id + TFL2 起始偏移 + .part/.resume.json 侧车,重启后按持久偏移续传);双桌面 100 次物理往返仍 Manual-required；v1.15 加固两处**对端可控输入**的健壮性缺陷（`ReplayGuard` msg_id 溢出、`ScreenAssembler` 碎片 idx 越界下溢），各补回归测试；RustDesk 仅作架构借鉴，AGPL 不可链 |
+| 状态 | Phase 5 远程屏幕**真机闭环**（Windows DXGI 采集 + zstd 编码 + GDI 呈现 + 跨设备云手机源 467/467 帧零丢失 + 注入驱动的真实像素捕获已验）；**Phase 1 Android 原生库已落地**——`crates/tetherly-android` 产出真实 Ed25519 身份 + Noise IK 会话的 `libtetherly_android.so`，已在两台 Galaxy Fold（arm64-v8a / Android 13）完成真实配对 + notify 投递 + 断线重连（resume）验证；Phase 3 键鼠真机链已落地；CI 全绿；**v1.16 落地 §13 的 `proptest` 与 `fuzz` 两层**（控制 JSON + 全部解码器往返；稳定工具链确定性变异语料驱动，251 全绿）；**v1.14 落地 macOS Keychain / Linux libsecret 凭据库**(`cred` 后端化：Windows Credential Manager + macOS Keychain + Linux Secret Service，各自可编译验证，运行时 Manual-required）；v1.13 Windows 凭据库（Credential Manager 泛型凭据 + `identity.ref` 指针，旧 `identity.bin` 自动迁移）；v1.12 文件跨进程续传(内容寻址 transfer_id + TFL2 起始偏移 + .part/.resume.json 侧车,重启后按持久偏移续传);双桌面 100 次物理往返仍 Manual-required；v1.15 加固两处**对端可控输入**的健壮性缺陷（`ReplayGuard` msg_id 溢出、`ScreenAssembler` 碎片 idx 越界下溢），各补回归测试；RustDesk 仅作架构借鉴，AGPL 不可链 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.16 相对 1.15（落地 §13 的 `proptest` 与 `fuzz` 两层：解码器属性测试 + 确定性变异语料）**
+
+- **补上了 §13 声明的两层**：此前 §13 表已列 `proptest`（控制 JSON 往返）与 `fuzz`（内层帧、ANCS tuple），但仓库里**只有单测/向量/集成**三层真实存在。v1.16 把 `proptest` 与 `fuzz` 落成可复现、可在**稳定工具链**与 CI 上跑的测试，不再依赖 nightly。
+- **`proptest`（core，`crates/tetherly-core/tests/decoders.rs`，27 条）**：以策略生成任意输入，对**每个入站解码器**断言「永不 panic」，并对**每个可编码消息**断言「往返一致」。never-panic：`InnerFrame::decode`、`ScreenFrame::decode_payload`、`ControlMsg::decode_payload`、`ScreenAssembler::push`、`InputEvent::from_frame`、`NotificationEvent::parse`、`Hello::from_bytes`、`DeviceId::parse`、`parse_pin`、`sanitize_file_name`、JSON 控制面 `from_payload`、`DataAssembler`（附 8 KiB 上界断言）。往返：notify push/dismiss/reply、clip set、file offer/decision/done、caps update、input event、screen frame、control msg、hello。分片：任意顺序重组、不完整流拒绝、载荷上限。
+- **`proptest`（net，`crates/tetherly-net/tests/decoders.rs`，7 条）**：`read_len_prefixed`/`read_tagged`/`read_header` 对任意字节**永不 panic**；oversized 长度前缀被拒（`MAX_OUTER` 之上，防对端驱动的分配 DoS）；合法头往返；`TFL1` 旧格式读作 `start=0`；错误 magic 拒绝。`&[u8]` 直接作 `AsyncRead`（`tokio` 实现），`prop_assert!` 不入 `async` 块，一律用 panic 式断言。
+- **`fuzz`（core，`crates/tetherly-core/tests/fuzz_decoders.rs`，2 条）**：因只有 stable 工具链（无 libfuzzer/`cargo-fuzz`），以**确定性 xorshift 变异器**驱动一个「每个解码器都有合法语料」的种子集（内层帧、全部 7 类控制 JSON、全部 7 类输入事件、整帧 + 分片屏幕帧、控制 msg、ANCS 通知源事件 + 数据源 tuple、规范 Hello JSON），施加 6 类变异（位翻、极端字节、截断、扩展、多字节覆写、拼接）后喂给**全部解码器**，`catch_unwind` 捕获 panic。`mutating_the_valid_corpus_never_panics_a_decoder`（固定种子 `0x9E3779B97F4A7C15`，每种子 512 次、每 4 次叠加，稳定可复现）+ `adversarial_edge_inputs_are_rejected_cleanly`。
+- **结果**：**未发现任何解码器缺陷**——v1.15 的两处修复成立，新属性未再击穿。全量 `cargo test` 由 205 升至 **251 全绿**。新测试位于既有 `cargo test --workspace --locked` 步骤，CI 无需新增 job。
+- **诚实边界（Manual-required 顺延）**：**libfuzzer/`cargo-fuzz`（需 nightly）仍是 Manual-required 的后续**；本轮的确定性变异驱动是**稳定工具链下的诚实替代**——覆盖面与可复现性明确写在用例里，不冒充 coverage-guided fuzz。
 
 **1.15 相对 1.14（对端可控输入健壮性加固：重放窗口溢出 + 屏幕碎片越界）**
 
@@ -770,8 +779,8 @@ Android 被控、WinFsp 挂载、文件持久续传、Linux ANCS 体验、嵌入
 |---|---|
 | 单测 | OTP、帧、状态机、白名单、路径净化、去重、device_id |
 | 向量 | Argon2+SPAKE2+Noise prologue |
-| proptest | 控制 JSON 往返 |
-| fuzz | 内层帧、ANCS tuple（Phase 4） |
+| proptest | `tetherly-core/tests/decoders.rs`（27）：控制 JSON 全类型 + notify/clip/file/caps/input/screen 往返；每个入站解码器任意输入不 panic（帧、屏幕帧、控制 msg、屏幕重组、输入、ANCS、Hello、device_id、PIN、路径净化）。`tetherly-net/tests/decoders.rs`（7）：长度前缀/带标签/文件头任意字节不 panic、oversized 拒绝、合法头往返、TFL1 兼容。**v1.16 落地** |
+| fuzz | `tetherly-core/tests/fuzz_decoders.rs`（2）：确定性 xorshift 变异驱动（稳定工具链替代 libfuzzer）：合法语料 → 6 类变异 → 全部解码器不 panic，`catch_unwind` 捕获；固定种子可复现。**v1.16 落地**；libfuzzer/`cargo-fuzz`（nightly）仍 Manual-required |
 | 集成 | `tests/loopback.rs`：配对、错误 PIN、MITM Hello。`tests/phase1.rs`：notify、clip TTL、insert 拒绝、persist 重拨、日志脱敏、文件拒绝/接受、**跨进程续传(M1.8)**。`tests/phase2.rs`：缺侧车、停侧车、无 mDNS 单播、LAN 优先。`tests/phase3.rs`：45719 拒绝配对、过边按键、断线回光标、聚焦时剪贴板。`tests/phase4.rs`：M4.1 模拟时延、M4.2 白名单门控打开、M4.3 重连不连弹、Control Point 串行、分片重组、`Removed` 清候选、退避。`tests/phase5.rs`：M5.1 consent-then-start 帧序严格递增、M5.2 Start-before-allow 被拒且计数、M5.3 对端离开→`Idle` 重置 seq、M5.4 45720 拒绝未配对 dial |
 | 真机 | 发版清单：Win × Android；Phase 4 再加 iPhone |
 
