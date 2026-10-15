@@ -21,10 +21,20 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: point apt at the bullseye archive
+        run: |
+          set -euo pipefail
+          # bullseye reached end of LTS, so deb.debian.org no longer serves its
+          # pool (every update 404s). The frozen archive still does.
+          printf '%s\n' \
+            'deb http://archive.debian.org/debian bullseye main' \
+            'deb http://archive.debian.org/debian-security bullseye-security main' \
+            > /etc/apt/sources.list
+          rm -rf /var/lib/apt/lists/*
       - name: install build dependencies
         run: |
           set -euo pipefail
-          apt-get update
+          apt-get -o Acquire::Check-Valid-Until=false update
           apt-get install -y --no-install-recommends \
             build-essential ca-certificates curl git pkg-config binutils xz-utils
       - uses: actions/checkout@v7
