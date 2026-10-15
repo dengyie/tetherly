@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             name: linux-x86_64
           - os: windows-latest
             name: windows-x86_64
@@ -30,6 +30,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: build release binaries
         run: cargo build --release --locked -p tetherly-node -p tetherly-cli
+      - name: refuse a linux binary newer than glibc 2.35
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          # The binary is fully static except glibc/libgcc, so the runner's glibc is the floor.
+          # ubuntu-22.04 provides glibc 2.35; ubuntu-latest (24.04) is glibc 2.39.
+          # Any GLIBC_2.36+ in the binary will fail on glibc 2.31 hosts.
+          if objdump -T target/release/tetherly | grep -E 'GLIBC_2\.(3[6-9]|[4-9][0-9])' ; then
+            echo "linux binary requires a glibc newer than 2.35" >&2
+            exit 1
+          fi
       - name: stage artifacts
         shell: bash
         run: |

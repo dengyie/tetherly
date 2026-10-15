@@ -226,6 +226,28 @@ struct DialBody {
 }
 
 #[derive(serde::Deserialize)]
+struct NotifyBody {
+    title: String,
+    body: String,
+    #[serde(default = "default_notify_app")]
+    app_id: String,
+    peer: Option<String>,
+}
+
+fn default_notify_app() -> String {
+    "com.example.sms".into()
+}
+
+/// Wall clock for a locally originated push. The node clock is the handshake
+/// clock; a notify timestamp only has to be monotone enough for the peer's TTL.
+fn node_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[derive(serde::Deserialize)]
 struct IdBody {
     id: String,
 }
@@ -264,6 +286,48 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                         Err(e) => err(400, &e.to_string()),
                     },
                     Err(_) => err(400, "bad addr"),
+                }
+            }
+            Err(_) => err(400, "bad json"),
+        },
+        // Deliver a notify.push on the live Noise session. Only this process
+        // holds the session, so a second binary cannot do it. One live peer is
+        // implied; more than one needs an explicit `peer`. The body is delivered
+        // and never logged.
+        ("POST", "/api/notify") => match serde_json::from_slice::<NotifyBody>(body) {
+            Ok(d) => {
+                let mut peers = node.live_peers();
+                peers.sort_by_key(|p| p.device_id.to_string());
+                let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
+                    Some(raw) => match tetherly_core::DeviceId::parse(raw) {
+                        Ok(id) => {
+                            if peers.iter().any(|p| p.device_id == id) {
+                                id
+                            } else {
+                                return err(400, "peer is not connected");
+                            }
+                        }
+                        Err(_) => return err(400, "bad peer id"),
+                    },
+                    None => match peers.len() {
+                        0 => return err(400, "no connected peer"),
+                        1 => peers[0].device_id.clone(),
+                        _ => return err(400, "multiple peers connected; pass peer (tdev_…)"),
+                    },
+                };
+                let push = tetherly_core::NotifyPush {
+                    uid: format!("local-{}", node_clock_ms()),
+                    app_id: d.app_id,
+                    app_name: "tetherly".into(),
+                    title: d.title,
+                    body: d.body,
+                    ts: node_clock_ms(),
+                    actions: vec!["copy".into()],
+                }
+                .truncate();
+                match node.send_notify(&target, push).await {
+                    Ok(()) => json_ok(&serde_json::json!({ "ok": true, "peer": target.as_str() })),
+                    Err(e) => err(400, &e.to_string()),
                 }
             }
             Err(_) => err(400, "bad json"),

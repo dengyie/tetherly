@@ -6,7 +6,6 @@ use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tetherly_core::NotifyPush;
 use tetherly_node::{Node, NodeConfig, SystemSink};
 use tracing::info;
 
@@ -62,21 +61,40 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
-    /// Dial a peer and pair or resume.
+    /// Ask the *running* node to dial a peer and pair or resume.
+    ///
+    /// Starting a second node here would bind the same LAN ports as the daemon
+    /// and fail with "no LAN address bound". The live node already holds the
+    /// identity, the PIN, and the listeners, so this only posts to its loopback
+    /// UI API — the same route the desktop shell's 「连接」 button uses.
     Dial {
         #[arg(long)]
         addr: SocketAddr,
         #[arg(long)]
         pin: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
     },
-    /// Inject a synthetic notify.push (tests / demos). Body is not logged.
-    InjectNotify {
+    /// Ask the *running* node to deliver a notify.push to one live peer.
+    ///
+    /// The body is the user's own text: it is delivered, never executed, and
+    /// never logged. A second node cannot deliver it — only the process that
+    /// holds the Noise session can. With one live peer the target is implied;
+    /// with more than one, `--peer` is required.
+    Notify {
         #[arg(long)]
         title: String,
         #[arg(long)]
         body: String,
         #[arg(long, default_value = "com.example.sms")]
         app_id: String,
+        /// `tdev_…` of the peer. Omit only when exactly one peer is live.
+        #[arg(long)]
+        peer: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
     },
 }
 
@@ -210,37 +228,59 @@ async fn main() -> Result<()> {
             });
             node.run().await?;
         }
-        Cmd::Dial { addr, pin } => {
-            let node = Node::start(cfg)?;
-            if let Some(p) = pin {
-                let digits = tetherly_core::pin::parse_pin(&p)?;
-                node.set_pin(digits);
+        Cmd::Dial { addr, pin, ui_port } => {
+            // The running node owns the listeners. A second `Node::start` binds
+            // the same ports and dies with "no LAN address bound".
+            let payload = serde_json::json!({ "addr": addr.to_string(), "pin": pin });
+            let body = serde_json::to_vec(&payload)?;
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/dial", &body)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "node refused dial (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
             }
-            node.dial(addr).await?;
-            println!("connected {}", node.identity().device_id());
-            node.run().await?;
+            println!("dialed {addr}");
         }
-        Cmd::InjectNotify {
+        Cmd::Notify {
             title,
             body,
             app_id,
+            peer,
+            ui_port,
         } => {
-            let node = Node::start(cfg)?;
-            let push = NotifyPush {
-                uid: "inject".into(),
-                app_id,
-                app_name: "inject".into(),
-                title,
-                body,
-                ts: 1,
-                actions: vec!["copy".into()],
-            };
-            let _ = node
-                .ingest_local_push(node.identity().device_id().clone(), push)
-                .await;
-            for c in node.candidates() {
-                println!("candidate {} has_otp={}", c.id, c.has_otp);
+            let payload = serde_json::json!({
+                "title": title,
+                "body": body,
+                "app_id": app_id,
+                "peer": peer,
+            });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/notify", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "node refused notify (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
             }
+            let v: serde_json::Value =
+                serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            let peer = v.get("peer").and_then(|p| p.as_str()).unwrap_or("?");
+            println!("notified {peer}");
         }
     }
     Ok(())

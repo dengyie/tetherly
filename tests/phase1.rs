@@ -487,6 +487,64 @@ async fn pin_shown_by_the_live_node_api_is_the_one_that_pairs() {
     stale.shutdown();
 }
 
+/// `tetherly notify` cannot start a second node: only the process holding the
+/// Noise session can deliver on it, and a second `Node::start` would collide on
+/// the LAN ports ("no LAN address bound"). It posts to the live node's loopback
+/// API instead. This drives that route end to end: the text posted to
+/// `/api/notify` is what arrives at the paired peer's candidate list.
+#[tokio::test(flavor = "multi_thread")]
+async fn notify_posted_to_the_live_node_api_reaches_the_paired_peer() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let ui_port = host.spawn_ui().await.unwrap();
+    assert_ne!(ui_port, 0, "test node must serve the loopback UI API");
+
+    let mut rx = peer.subscribe();
+    let payload = serde_json::json!({
+        "title": "来自桌面",
+        "body": "【测试】验证码：524681",
+        "app_id": "com.example.sms",
+    });
+    let (code, body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/notify",
+        &serde_json::to_vec(&payload).unwrap(),
+    )
+    .await
+    .expect("live node API reachable");
+    assert_eq!(code, 200, "body: {}", String::from_utf8_lossy(&body));
+
+    let mut seen = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(UiEvent::Candidate { candidate })) =
+            tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+        {
+            assert_eq!(candidate.title, "来自桌面");
+            assert!(candidate.has_otp, "the peer must extract the code");
+            seen = true;
+            break;
+        }
+    }
+    assert!(seen, "peer never showed the posted notification");
+
+    // An unknown target is refused, so a 200 cannot be a blanket "accepted".
+    let missing = serde_json::json!({
+        "title": "x", "body": "y",
+        "peer": "tdev_2222222222222222",
+    });
+    let (code, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/notify",
+        &serde_json::to_vec(&missing).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, 400, "a peer that is not connected must be refused");
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
