@@ -42,19 +42,6 @@
   binary that refused to start on glibc 2.31 VPS hosts. Verification: fmt / clippy `-D warnings` /
   **271 tests** (phase1 9→10, adding `notify_posted_to_the_live_node_api_reaches_the_paired_peer`) /
   deny all green.
-- **Session liveness + backpressure + glibc 2.31 release anchor (v1.21)**: the cross-VPS test proved
-  v1.20 notify works (an OTP push reached the peer's candidate list) and then found that a
-  **silently black-holed** TCP path makes every later `notify` report success while the peer logs
-  nothing — the control session `await`ed a write inside `select!`, `write_tagged`'s `flush()` parks
-  forever on a full send buffer, the outbound queue was **unbounded**, and no ping was ever sent.
-  Fix: `tetherly-core::liveness` (clock-injected heartbeat/deadline policy, "no inbound for 45s ⇒ dead",
-  +4 deterministic tests); `tetherly-net` `SESSION_WRITE_TIMEOUT` + `NetError::WriteStalled` +
-  `ActiveSession::send_bounded()`; `tetherly-node` bounded channels (`mpsc::channel` 256/32) with
-  `try_send` backpressure, a 15s keepalive ping on the control session, the liveness teardown, and
-  `send_bounded` at all 8 write sites (screen drops whole frames under pressure). The Linux release
-  build moved into a **`debian:bullseye` (glibc 2.31) container** so the artifact's floor is ≤ 2.31
-  (the v1.20 `ubuntu-22.04` artifact required `GLIBC_2.34` and could not run on the glibc 2.31 hosts
-  §14 promises); the guard now refuses `GLIBC_2.32+` and prints the floor. 271 → **275 green**.
   **Session liveness + backpressure, and a glibc 2.31 Linux release anchor (v1.21)** — the cross-VPS
   test (two VPS hosts, real internet) first showed the v1.20 notify feature works end-to-end (an OTP push
   landed as a candidate), then exposed a genuine defect: after the first push every later `notify`
@@ -75,8 +62,13 @@
   claims), so the Linux build now runs in a **`debian:bullseye` (glibc 2.31) container** (`build-linux`
   job; `build-desktop` matrix separate; `publish` needs both) and the guard refuses `GLIBC_2.32+` while
   printing the actual floor. Verification: fmt / clippy `-D warnings` / **275 tests** (=271 + `liveness`
-  4) / deny all green; cross-VPS reconnect then two notifies both ingested (`has_otp:true` +
-  `has_otp:false`). Honest boundary: the container build path is CI-only here.
+  4) / deny all green; `ci.yml` green on all five jobs; cross-VPS reconnect then two notifies both ingested
+  (`has_otp:true` + `has_otp:false`). **Shipped as `v0.1.3`** (tag `1883377`; `release.yml` green, measured
+  glibc floor **`GLIBC_2.30`**, six assets published). Two container fixes were required en route: the job's
+  run shell pinned to `bash` (`debian:bullseye`'s `/bin/sh` is dash, which rejects `pipefail`) and
+  `sources.list` pointed at `archive.debian.org` (bullseye is past LTS, so `deb.debian.org` no longer serves
+  its pool and `apt-get update` 404s). Honest boundary: the container build path is CI-only here, so a real
+  glibc 2.31 host should still confirm the binary starts once.
   RustDesk architecture borrow only, AGPL not linkable.
 
 ## Current Phase
@@ -238,8 +230,10 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
-- v1.21 (session liveness/backpressure + glibc 2.31 Linux release anchor + SSOT/memory sync) complete
-  and fully green locally (275 tests); committed and pushed to trigger CI, then cross-VPS re-verified.
+- v1.21 **shipped**: session liveness/backpressure + glibc 2.31 Linux release anchor landed, SSOT/memory
+  synced, 275 tests green locally, `ci.yml` green on all five jobs, and `v0.1.3` tagged + released
+  (`release.yml` green, measured glibc floor `GLIBC_2.30`, six assets published). Next work is the
+  Manual-required real-machine items (see Active Blockers).
 
 ## Next Milestone
 - Phase 6 (single-item): Android controlled device, WinFsp mount, file persistent resume,
