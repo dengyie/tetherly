@@ -35,6 +35,12 @@ pub const SCREEN_PORT: u16 = 45720;
 /// slow LAN plus KDF without hanging forever on a half-open TCP.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Budget for one inner-frame write. A peer that stops reading leaves
+/// `write_all` parked on a full kernel buffer with no error and no EOF, so an
+/// unbounded write would wedge the session task forever while the caller keeps
+/// queueing frames into the void. 15s is far past any healthy LAN round trip.
+pub const SESSION_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub struct ActiveSession {
     pub peer_id: DeviceId,
     pub peer_hello: Hello,
@@ -105,6 +111,18 @@ impl ActiveSession {
         // A fresh transport never needs a rekey, so this does not re-enter.
         let ct = self.transport.encrypt(&plain)?;
         write_tagged(&mut self.writer, TAG_DATA, &ct).await
+    }
+
+    /// [`send_inner`] under [`SESSION_WRITE_TIMEOUT`]. Bounding the write turns
+    /// a silently wedged peer into a hard [`NetError::WriteStalled`] so the
+    /// caller tears the session down instead of buffering into a black hole.
+    /// On timeout the write half may be mid-frame, so the session must not be
+    /// reused afterwards — every caller treats the error as fatal.
+    pub async fn send_bounded(&mut self, frame: InnerFrame) -> Result<(), NetError> {
+        match tokio::time::timeout(SESSION_WRITE_TIMEOUT, self.send_inner(frame)).await {
+            Ok(res) => res,
+            Err(_) => Err(NetError::WriteStalled),
+        }
     }
 
     pub async fn recv_inner(&mut self) -> Result<InnerFrame, NetError> {

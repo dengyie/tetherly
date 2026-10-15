@@ -42,11 +42,46 @@
   binary that refused to start on glibc 2.31 VPS hosts. Verification: fmt / clippy `-D warnings` /
   **271 tests** (phase1 9→10, adding `notify_posted_to_the_live_node_api_reaches_the_paired_peer`) /
   deny all green.
+- **Session liveness + backpressure + glibc 2.31 release anchor (v1.21)**: the cross-VPS test proved
+  v1.20 notify works (an OTP push reached the peer's candidate list) and then found that a
+  **silently black-holed** TCP path makes every later `notify` report success while the peer logs
+  nothing — the control session `await`ed a write inside `select!`, `write_tagged`'s `flush()` parks
+  forever on a full send buffer, the outbound queue was **unbounded**, and no ping was ever sent.
+  Fix: `tetherly-core::liveness` (clock-injected heartbeat/deadline policy, "no inbound for 45s ⇒ dead",
+  +4 deterministic tests); `tetherly-net` `SESSION_WRITE_TIMEOUT` + `NetError::WriteStalled` +
+  `ActiveSession::send_bounded()`; `tetherly-node` bounded channels (`mpsc::channel` 256/32) with
+  `try_send` backpressure, a 15s keepalive ping on the control session, the liveness teardown, and
+  `send_bounded` at all 8 write sites (screen drops whole frames under pressure). The Linux release
+  build moved into a **`debian:bullseye` (glibc 2.31) container** so the artifact's floor is ≤ 2.31
+  (the v1.20 `ubuntu-22.04` artifact required `GLIBC_2.34` and could not run on the glibc 2.31 hosts
+  §14 promises); the guard now refuses `GLIBC_2.32+` and prints the floor. 271 → **275 green**.
+  **Session liveness + backpressure, and a glibc 2.31 Linux release anchor (v1.21)** — the cross-VPS
+  test (two VPS hosts, real internet) first showed the v1.20 notify feature works end-to-end (an OTP push
+  landed as a candidate), then exposed a genuine defect: after the first push every later `notify`
+  returned `notified tdev_...` while the peer logged nothing, both directions, with the sockets still
+  `ESTAB` and unacknowledged bytes stuck in Send-Q (a silently black-holed path). Root cause: the
+  control-session task `await`ed the write inside its `select!` body, and `write_tagged`'s trailing
+  `flush()` parks forever on a full kernel send buffer (zero window) — so the task went deaf while the
+  **unbounded** queue kept accepting, and nothing ever sent a ping so `ESTABLISHED` was treated as alive.
+  Fix, three layers: `tetherly-core::liveness` (clock-injected, no `now()`; `SESSION_HEARTBEAT=15s`,
+  `SESSION_LIVENESS_DEADLINE=45s`, "45s with no inbound frame is dead", saturating so a backwards clock
+  never misreads; +4 deterministic tests), `tetherly-net` (`SESSION_WRITE_TIMEOUT=15s`,
+  `NetError::WriteStalled`, `ActiveSession::send_bounded()` turning a silent hang into a hard error), and
+  `tetherly-node` (all four outbound channels bounded — `mpsc::channel`, 256/32 — with `try_send`
+  backpressure errors; the control session gains a 15s keepalive ping + the liveness check → tear down,
+  `PeerDown`, so later sends fail fast; all 8 session writes use `send_bounded`; the screen queue drops
+  whole frames when full). Also fixed the doc-vs-artifact mismatch: the v1.20 `ubuntu-22.04` artifact
+  demanded `GLIBC_2.34` (fine on every reachable host but unable to run on the glibc 2.31 hosts §14
+  claims), so the Linux build now runs in a **`debian:bullseye` (glibc 2.31) container** (`build-linux`
+  job; `build-desktop` matrix separate; `publish` needs both) and the guard refuses `GLIBC_2.32+` while
+  printing the actual floor. Verification: fmt / clippy `-D warnings` / **275 tests** (=271 + `liveness`
+  4) / deny all green; cross-VPS reconnect then two notifies both ingested (`has_otp:true` +
+  `has_otp:false`). Honest boundary: the container build path is CI-only here.
   RustDesk architecture borrow only, AGPL not linkable.
 
 ## Current Phase
-- Spec `docs/DEVELOPMENT.md` **v1.20**. Phase 5 real-machine loop + Phase 3 real-machine chain +
-  Phase 1 Android native lib + `notify.reply` quick reply + file cross-process resume + Windows credential-vault identity storage + macOS Keychain / Linux libsecret backends + **§13 proptest/fuzz layers** + **§13 stateful state-machine properties** + **real-device APK end-to-end + `tetherly pin` fix + on-device M1.1 p95** + **macOS/Linux screen backends** + **CLI control plane as live-node loopback clients + Linux glibc 2.35 release anchor** all landed.
+- Spec `docs/DEVELOPMENT.md` **v1.21**. Phase 5 real-machine loop + Phase 3 real-machine chain +
+  Phase 1 Android native lib + `notify.reply` quick reply + file cross-process resume + Windows credential-vault identity storage + macOS Keychain / Linux libsecret backends + **§13 proptest/fuzz layers** + **§13 stateful state-machine properties** + **real-device APK end-to-end + `tetherly pin` fix + on-device M1.1 p95** + **macOS/Linux screen backends** + **CLI control plane as live-node loopback clients + Linux glibc 2.35 release anchor** + **session liveness/backpressure + glibc 2.31 Linux release anchor (v1.21)** all landed.
 - **CLI control plane as live-node loopback clients + glibc 2.35 release anchor (v1.20)**: `tetherly dial` used to `Node::start(cfg)?` a second node — with the daemon already running it re-bound the same LAN ports and died with `no LAN address bound`; `tetherly inject-notify` built a `NotifyPush` in its own process and only called `ingest_local_push`, so it never crossed the Noise session and never reached a peer. Both were the v1.18 `pin` defect class (only the process holding the in-process state can arm a PIN / hold the session / deliver a push). Fix: `Cmd::Dial { addr, pin, ui_port }` → `loopback_post(ui_port, "/api/dial", {addr,pin})`; `InjectNotify` removed, replaced by `Cmd::Notify { title, body, app_id, peer, ui_port }` → `loopback_post(ui_port, "/api/notify", …)` backed by a new `POST /api/notify` route that resolves the target (one live peer implied, multiple need explicit `--peer` parsed as a `DeviceId` and checked against the live set, unknown/offline → 400 `peer is not connected`, zero → 400 `no connected peer`), builds a `.truncate()`d push (`app_name="tetherly"`, actions `["copy"]`, uid from the wall clock), and calls `Node::send_notify()`. `.github/workflows/release.yml`: Linux build row `ubuntu-latest` → `ubuntu-22.04` (glibc 2.35) plus a guard step `objdump -T target/release/tetherly | grep -E 'GLIBC_2\.(3[6-9]|[4-9][0-9])'` that fails the build rather than shipping a binary that cannot start on glibc 2.31 hosts. Not committed: the local Windows-GNU MinGW.org 6.3.0 is a 32-bit toolchain whose `ld` rejects rustc 1.99's `--high-entropy-va`, so the local test run used rustup's bundled 64-bit self-contained MinGW (gcc 14.2) as linker plus NDK clang 20 for the missing `as`/C frontend (`zstd-sys`); `.cargo/config.toml` stays machine-agnostic and CI's MSVC host is unaffected. Regression: `tests/phase1.rs::notify_posted_to_the_live_node_api_reaches_the_paired_peer` (the posted text reaches the peer's candidate list, and an unconnected `--peer` is refused, so a 200 cannot be a blanket accept). 270 → **271 green**.
 - **Real-device APK E2E + `tetherly pin` fix + M1.1 p95 (v1.18)**: cloud-phone Galaxy Fold (SM-F900F / arm64-v8a / Android 13, over `adb reverse`) run of the **shipped APK** — front-end `NotificationListenerService` → JNI `Java_app_tetherly_NativeBridge_*` → `libtetherly_android.so` live Noise session → desktop node extracts candidate `{app_id:"com.android.shell", title:"Your verification code", has_otp:true, source:tdev_...}` (**body/OTP never in snapshot or logs**). On-device M1.1 notify round-trip measured `rtt_min≈17.4ms / p50≈17.9ms / mean≈37.5ms / p95≈56.9ms / p99≈361.8ms / max≈361.8ms` — inside the <1.0s budget (≈18× margin); **honest boundary**: this is the cloud phone over the `adb reverse` tunnel, NOT a LAN-direct pair (same model on LAN ≈15–16ms), the p99 tail is adb-tunnel jitter, 8h soak still Manual-required. Two-process live proof: `tetherly pin --ui-port 45726` printed a PIN, `POST /api/dial` with it returned `{"ok":true}`, host logged `path lan peer=tdev_...`; off-port (`45999`) fails honestly with exit 1.
 - **`tetherly pin` defect (found by the real-device run, cost hours of false diagnosis)**: `Cmd::Pin` used to do `Node::start(cfg)?; println!(node.generate_pin()?)` — a **throwaway process** whose PIN (`pin_created_ms` is pure in-process state, never persisted) **no listener can ever accept**, so the live daemon always logged `pin expired`. The working route was always the live daemon's loopback API `POST 127.0.0.1:45716/api/pin` (the UI 「显示 8 位 PIN」 button). Fix: `Cmd::Pin { ui_port }` (default 45716) now calls the new `tetherly_node::loopback_post(port, "/api/pin", b"{}")` to arm the **live** node, and fails honestly (non-zero, actionable message) when nothing is listening. Support: `uihttp::spawn` → `bind_and_spawn` (sync bind, returns the real port; a taken port is now a hard error, not a silent `warn!`), `Node::spawn_ui()`/`Node::ui_port()` (`Shared.bound_ui: AtomicU16`), `run()` binds the UI before returning so "node up" ⇒ port really reachable. Regression: `tests/phase1.rs::pin_shown_by_the_live_node_api_is_the_one_that_pairs` (asserts a third node armed with a hardcoded PIN cannot be dialed, so the claim cannot pass by accident). 269 → **270 green**.
@@ -203,15 +238,15 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
-- v1.17 (SSOT §13 stateful state-machine properties + SSOT/memory sync) complete and fully green
-  locally; awaiting an explicit user instruction before any commit/push.
+- v1.21 (session liveness/backpressure + glibc 2.31 Linux release anchor + SSOT/memory sync) complete
+  and fully green locally (275 tests); committed and pushed to trigger CI, then cross-VPS re-verified.
 
 ## Next Milestone
 - Phase 6 (single-item): Android controlled device, WinFsp mount, file persistent resume,
   Linux ANCS experience, embedded EasyTier FFI. (`notify.reply` closed v1.11; removed from backlog.)
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.17)
+- `docs/DEVELOPMENT.md` (SSOT v1.21)
 - `crates/tetherly-{core,crypto,net,node,android}` + `crates/tetherly-core/src/{ancs,screen}.rs`
   + `crates/tetherly-node/src/screen.rs` + `crates/tetherly-android/src/{store,client,jni}.rs`
 - `crates/tetherly-core/tests/{decoders,fuzz_decoders,state_machines}.rs`, `crates/tetherly-net/tests/decoders.rs`

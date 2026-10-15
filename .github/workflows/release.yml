@@ -9,13 +9,54 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  # Building on ubuntu-22.04 (glibc 2.35) leaves the artifact demanding
+  # GLIBC_2.34, which will not load on the glibc 2.31 hosts the spec claims to
+  # support. Build inside a Debian 11 (glibc 2.31) container instead: the
+  # dynamic symbol floor then stays <= 2.31, so one binary runs on Debian 11 /
+  # Ubuntu 20.04 and everything newer.
+  build-linux:
+    runs-on: ubuntu-latest
+    container: debian:bullseye
+    steps:
+      - name: install build dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git pkg-config binutils xz-utils
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build release binaries
+        run: cargo build --release --locked -p tetherly-node -p tetherly-cli
+      - name: refuse a linux binary newer than glibc 2.31
+        run: |
+          set -euo pipefail
+          # bullseye is glibc 2.31, so any GLIBC_2.32+ symbol means the build
+          # did not happen against the pinned container and must not ship.
+          objdump -T target/release/tetherly | grep -Eo 'GLIBC_[0-9]+\.[0-9]+' | sort -u
+          if objdump -T target/release/tetherly | grep -E 'GLIBC_2\.(3[2-9]|[4-9][0-9])' ; then
+            echo "linux binary requires a glibc newer than 2.31" >&2
+            exit 1
+          fi
+      - name: stage artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/tetherly dist/tetherly-linux-x86_64
+          cp target/release/tetherly-cli dist/tetherly-cli-linux-x86_64
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tetherly-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  build-desktop:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
-            name: linux-x86_64
           - os: windows-latest
             name: windows-x86_64
           - os: macos-latest
@@ -30,17 +71,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: build release binaries
         run: cargo build --release --locked -p tetherly-node -p tetherly-cli
-      - name: refuse a linux binary newer than glibc 2.35
-        if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          # The binary is fully static except glibc/libgcc, so the runner's glibc is the floor.
-          # ubuntu-22.04 provides glibc 2.35; ubuntu-latest (24.04) is glibc 2.39.
-          # Any GLIBC_2.36+ in the binary will fail on glibc 2.31 hosts.
-          if objdump -T target/release/tetherly | grep -E 'GLIBC_2\.(3[6-9]|[4-9][0-9])' ; then
-            echo "linux binary requires a glibc newer than 2.35" >&2
-            exit 1
-          fi
       - name: stage artifacts
         shell: bash
         run: |
@@ -58,7 +88,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [build-linux, build-desktop]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:

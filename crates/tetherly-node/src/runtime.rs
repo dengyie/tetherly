@@ -13,8 +13,9 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tetherly_core::frame::{
-    pong, CapsUpdate, ClipSet, FileDone, FileOffer, InnerFrame, NotifyPush, NotifyReply,
+    ping, pong, CapsUpdate, ClipSet, FileDone, FileOffer, InnerFrame, NotifyPush, NotifyReply,
 };
+use tetherly_core::liveness::{Liveness, SESSION_HEARTBEAT};
 use tetherly_core::pin::{format_pin, generate_pin};
 use tetherly_core::ports::{Clip, Clock, Rng, SystemClock};
 use tetherly_core::session::LockoutTable;
@@ -49,6 +50,14 @@ impl Rng for OsRng {
 
 /// Hard budget for one `ScreenSource::grab` before the runtime interrupts it.
 const SCREEN_GRAB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Depth of the per-session outbound queues. A bounded queue is the backpressure
+/// that stops a wedged peer from turning a live session into unbounded memory
+/// growth; a full queue surfaces as an error instead of silently buffering.
+const SESSION_QUEUE_DEPTH: usize = 256;
+/// Screen fragments are large, so their queue is short: a frame that cannot fit
+/// is dropped rather than queued behind a slow link.
+const SCREEN_QUEUE_DEPTH: usize = 32;
 
 #[derive(Clone)]
 
@@ -265,8 +274,8 @@ struct Shared {
     clip: Arc<dyn Clip>,
     pin: Mutex<Option<([u8; 8], u64)>>,
     events: broadcast::Sender<UiEvent>,
-    sessions: AsyncMutex<HashMap<DeviceId, mpsc::UnboundedSender<InnerFrame>>>,
-    input_out: AsyncMutex<Option<mpsc::UnboundedSender<InnerFrame>>>,
+    sessions: AsyncMutex<HashMap<DeviceId, mpsc::Sender<InnerFrame>>>,
+    input_out: AsyncMutex<Option<mpsc::Sender<InnerFrame>>>,
     live: Mutex<HashMap<DeviceId, LivePeer>>,
     pending_out: Mutex<HashMap<String, OutboundFile>>,
     bound_control: AtomicU16,
@@ -284,7 +293,7 @@ struct Shared {
     /// Seq lives here so repeated edge crossings do not replay seq 1.
     input_engine: Mutex<InputServer>,
     /// Frames outbound to the screen controller on 45720. None until attached.
-    screen_out: AsyncMutex<Option<mpsc::UnboundedSender<InnerFrame>>>,
+    screen_out: AsyncMutex<Option<mpsc::Sender<InnerFrame>>>,
     /// Sender-side screen state machine: consent, seq, refusal counts.
     screen_engine: Mutex<ScreenSender>,
     /// Where sender-side frames come from. MemorySource in CI; real capture
@@ -293,7 +302,7 @@ struct Shared {
     /// Controller-side trace of presented frames. Clone() shares inner state.
     screen_observer: Mutex<MemoryScreenSink>,
     /// Visitor-side control channel. None until a visitor attaches.
-    screen_ctl: AsyncMutex<Option<mpsc::UnboundedSender<ControlMsg>>>,
+    screen_ctl: AsyncMutex<Option<mpsc::Sender<ControlMsg>>>,
     /// Visitor-side decompressor. Defaults to zstd lossless.
     screen_codec: Arc<dyn ScreenCodec>,
     /// Visitor-side output. Defaults to the in-memory observer; production
@@ -815,9 +824,15 @@ impl Node {
             map.get(peer).cloned()
         };
         match tx {
-            Some(tx) => tx
-                .send(frame)
-                .map_err(|_| CoreError::Json("peer gone".into())),
+            Some(tx) => match tx.try_send(frame) {
+                Ok(()) => Ok(()),
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    Err(CoreError::Json("peer busy; send queue full".into()))
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    Err(CoreError::Json("peer gone".into()))
+                }
+            },
             None => Err(CoreError::Json("not connected".into())),
         }
     }
@@ -1239,7 +1254,7 @@ impl Node {
             PathKind::Lan => info!(peer = %peer_id, %addr, "path lan"),
             PathKind::Overlay => info!(peer = %peer_id, %addr, "path overlay"),
         }
-        let (tx, mut rx) = mpsc::unbounded_channel::<InnerFrame>();
+        let (tx, mut rx) = mpsc::channel::<InnerFrame>(SESSION_QUEUE_DEPTH);
         {
             self.shared
                 .sessions
@@ -1263,12 +1278,40 @@ impl Node {
             ],
         };
         if let Ok(frame) = caps.to_frame() {
-            let _ = tx.send(frame);
+            let _ = tx.try_send(frame);
         }
         let node = self.clone_handle();
+        let clock = self.shared.clock.clone();
         let mut stop = self.shared.shutdown.subscribe();
         let sess_addr = addr;
+        // Keepalive: a ping every heartbeat keeps the NAT mapping warm and, more
+        // importantly, gives the peer something to answer, so `Liveness` can tell
+        // a merely-quiet session from a dead one. The task ends when the session
+        // task drops its receiver (try_send then reports Closed) or on shutdown.
+        let keep_tx = tx.clone();
+        let keep_clock = clock.clone();
+        let mut keep_stop = self.shared.shutdown.subscribe();
         tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = keep_stop.changed() => {
+                        if *keep_stop.borrow() {
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(SESSION_HEARTBEAT) => {
+                        match keep_tx.try_send(ping(keep_clock.unix_ms())) {
+                            Ok(()) => {}
+                            // A full queue is backpressure, not a dead peer.
+                            Err(mpsc::error::TrySendError::Full(_)) => {}
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                        }
+                    }
+                }
+            }
+        });
+        tokio::spawn(async move {
+            let mut live = Liveness::new(clock.unix_ms());
             loop {
                 tokio::select! {
                     _ = stop.changed() => {
@@ -1279,7 +1322,11 @@ impl Node {
                     outbound = rx.recv() => {
                         match outbound {
                             Some(frame) => {
-                                if let Err(e) = sess.send_inner(frame).await {
+                                if live.is_expired(clock.unix_ms()) {
+                                    warn!(peer = %peer_id, "session liveness lost");
+                                    break;
+                                }
+                                if let Err(e) = sess.send_bounded(frame).await {
                                     warn!(%e, "send");
                                     break;
                                 }
@@ -1290,6 +1337,7 @@ impl Node {
                     inbound = sess.recv_event() => {
                         match inbound {
                             Ok(ev) => {
+                                live.on_inbound(clock.unix_ms());
                                 if let Err(e) = node.handle_event(&peer_id, ev, &mut sess).await {
                                     warn!(%e, "event");
                                     break;
@@ -1330,7 +1378,7 @@ impl Node {
     ) -> Result<(), tetherly_net::NetError> {
         match ev {
             SessionEvent::Ping(ts) => {
-                sess.send_inner(pong(ts)).await?;
+                sess.send_bounded(pong(ts)).await?;
             }
             SessionEvent::Pong(_) => {}
             SessionEvent::Notify(push) => {
@@ -1637,7 +1685,7 @@ impl Node {
         };
         // Token is derived from the live session handshake hash.
         if let Some(sess_tx) = self.shared.sessions.lock().await.get(&source).cloned() {
-            let _ = sess_tx.send(decision.accept_frame()?);
+            let _ = sess_tx.try_send(decision.accept_frame()?);
         }
         Ok(())
     }
@@ -2051,8 +2099,15 @@ impl Node {
             .clone()
             .ok_or_else(|| CoreError::Json("input channel closed".into()))?;
         for ev in events {
-            tx.send(ev.to_frame()?)
-                .map_err(|_| CoreError::Json("input peer gone".into()))?;
+            match tx.try_send(ev.to_frame()?) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    return Err(CoreError::Json("input queue full; peer too slow".into()));
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(CoreError::Json("input peer gone".into()));
+                }
+            }
         }
         Ok(())
     }
@@ -2085,7 +2140,7 @@ impl Node {
     }
 
     async fn attach_input_server(&self, mut sess: ActiveSession) {
-        let (tx, mut rx) = mpsc::unbounded_channel::<InnerFrame>();
+        let (tx, mut rx) = mpsc::channel::<InnerFrame>(SESSION_QUEUE_DEPTH);
         *self.shared.input_out.lock().await = Some(tx);
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
@@ -2100,7 +2155,7 @@ impl Node {
                     outbound = rx.recv() => {
                         match outbound {
                             Some(frame) => {
-                                if sess.send_inner(frame).await.is_err() {
+                                if sess.send_bounded(frame).await.is_err() {
                                     tracing::warn!("input server: peer send failed; closing");
                                     break;
                                 }
@@ -2158,7 +2213,7 @@ impl Node {
                             Ok(frame) => {
                                 if let Ok(ev) = InputEvent::from_frame(&frame) {
                                     if let Ok(Some(leave)) = client.apply(ev) {
-                                        let _ = sess.send_inner(match leave.to_frame() {
+                                        let _ = sess.send_bounded(match leave.to_frame() {
                                             Ok(f) => f,
                                             Err(_) => continue,
                                         }).await;
@@ -2220,7 +2275,7 @@ impl Node {
     /// run locally. Frames are pushed by the app calling `screen_send_frame()`
     /// at its own cadence (CLI loop on real hardware).
     async fn attach_screen_server(&self, mut sess: ActiveSession) {
-        let (tx, mut rx) = mpsc::unbounded_channel::<InnerFrame>();
+        let (tx, mut rx) = mpsc::channel::<InnerFrame>(SCREEN_QUEUE_DEPTH);
         *self.shared.screen_out.lock().await = Some(tx);
         {
             self.shared
@@ -2245,7 +2300,7 @@ impl Node {
                     outbound = rx.recv() => {
                         match outbound {
                             Some(frame) => {
-                                if sess.send_inner(frame).await.is_err() {
+                                if sess.send_bounded(frame).await.is_err() {
                                     break;
                                 }
                             }
@@ -2264,7 +2319,7 @@ impl Node {
                                         .on_control(msg);
                                     if let Ok(Some(reply)) = reply {
                                         if let Ok(f) = reply.to_frame() {
-                                            let _ = sess.send_inner(f).await;
+                                            let _ = sess.send_bounded(f).await;
                                         }
                                     }
                                 }
@@ -2287,7 +2342,7 @@ impl Node {
     /// Reassembles `TMF1` fragments, decodes the codec, presents through the
     /// sink, and acks the sequence it accepted.
     async fn attach_screen_client(&self, mut sess: ActiveSession) {
-        let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel::<ControlMsg>();
+        let (ctl_tx, mut ctl_rx) = mpsc::channel::<ControlMsg>(SCREEN_QUEUE_DEPTH);
         *self.shared.screen_ctl.lock().await = Some(ctl_tx);
         let mut receiver = ScreenReceiver::new();
         let mut assembler = ScreenAssembler::new();
@@ -2306,7 +2361,7 @@ impl Node {
                             Some(msg) => {
                                 match msg.to_frame() {
                                     Ok(f) => {
-                                        if sess.send_inner(f).await.is_err() {
+                                        if sess.send_bounded(f).await.is_err() {
                                             break;
                                         }
                                     }
@@ -2360,7 +2415,7 @@ impl Node {
                                                         .present(&present_frame);
                                                     let ack = ControlMsg::Ack { seq };
                                                     if let Ok(f) = ack.to_frame() {
-                                                        let _ = sess.send_inner(f).await;
+                                                        let _ = sess.send_bounded(f).await;
                                                     }
                                                 }
                                             }
@@ -2453,9 +2508,22 @@ impl Node {
             .clone()
             .ok_or_else(|| CoreError::Json("screen channel closed".into()))?;
         for f in frames {
-            for frag in f.to_frames()? {
-                tx.send(frag)
-                    .map_err(|_| CoreError::Json("screen peer gone".into()))?;
+            let frags = f.to_frames()?;
+            // Live video: under backpressure drop the whole frame rather than
+            // stall the pump or grow memory without bound. A partial frame is
+            // never queued, so the peer's assembler is never left mid-frame.
+            if tx.capacity() < frags.len() {
+                warn!(
+                    need = frags.len(),
+                    have = tx.capacity(),
+                    "screen queue full; dropping frame"
+                );
+                continue;
+            }
+            for frag in frags {
+                if tx.try_send(frag).is_err() {
+                    return Err(CoreError::Json("screen peer gone".into()));
+                }
             }
         }
         Ok(())
@@ -2469,8 +2537,15 @@ impl Node {
             .await
             .clone()
             .ok_or_else(|| CoreError::Json("screen control channel closed".into()))?;
-        tx.send(msg)
-            .map_err(|_| CoreError::Json("screen peer gone".into()))
+        match tx.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                Err(CoreError::Json("screen control queue full".into()))
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(CoreError::Json("screen peer gone".into()))
+            }
+        }
     }
 
     /// Local consent for the currently connected visitor. This is the ONLY path

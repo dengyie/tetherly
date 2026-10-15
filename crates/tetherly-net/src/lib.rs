@@ -19,5 +19,5 @@ pub use filechan::{
 pub use mdns::SERVICE_TYPE;
 pub use session::{
     accept_session, dial_session, serve_pong_once, ActiveSession, SessionConfig, CONTROL_PORT,
-    FILE_PORT, HANDSHAKE_TIMEOUT, INPUT_PORT, SCREEN_PORT,
+    FILE_PORT, HANDSHAKE_TIMEOUT, INPUT_PORT, SCREEN_PORT, SESSION_WRITE_TIMEOUT,
 };

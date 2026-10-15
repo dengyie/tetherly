@@ -16,6 +16,7 @@ pub mod frame;
 pub mod hello;
 pub mod input;
 pub mod insertion;
+pub mod liveness;
 pub mod notify;
 pub mod otp;
 pub mod overlay;
@@ -53,6 +54,7 @@ pub use input::{
     TYPE_INPUT_MOVE, TYPE_INPUT_WHEEL,
 };
 pub use insertion::{plan as insertion_plan, InsertionDecision, InsertionPlan};
+pub use liveness::{Liveness, SESSION_HEARTBEAT, SESSION_LIVENESS_DEADLINE};
 pub use notify::{is_desktop_platform, CandidateView, IngestOutcome, NotifyHub, ReplyView};
 pub use otp::{extract_otp, DefaultOtpExtractor, OtpExtractor, DEFAULT_MIN_SCORE};
 pub use overlay::{

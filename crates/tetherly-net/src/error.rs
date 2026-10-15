@@ -28,6 +28,8 @@ pub enum NetError {
     Discovery(String),
     #[error("handshake timed out")]
     Timeout,
+    #[error("session write stalled; peer stopped reading")]
+    WriteStalled,
     #[error("tcp rate limited")]
     RateLimited,
     #[error("replayed inner frame")]
