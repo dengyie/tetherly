@@ -52,8 +52,16 @@ enum Cmd {
     },
     /// Print device_id of the persisted identity.
     Identity,
-    /// Show an 8-digit PIN for pairing (3 min TTL).
-    Pin,
+    /// Show an 8-digit PIN (3 min TTL) on the *running* node.
+    ///
+    /// A PIN is only meaningful to the process holding it, so this asks the
+    /// already-running node (its loopback UI API) to arm one. Starting a second
+    /// node here would print a code no listener could ever accept.
+    Pin {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Dial a peer and pair or resume.
     Dial {
         #[arg(long)]
@@ -98,10 +106,31 @@ async fn main() -> Result<()> {
             let node = Node::start(cfg)?;
             println!("{}", node.identity().device_id());
         }
-        Cmd::Pin => {
-            let node = Node::start(cfg)?;
-            println!("{}", node.generate_pin()?);
-            println!("不要把数字发给任何人，只在你自己的另一台设备上输入。");
+        Cmd::Pin { ui_port } => {
+            // Arm the PIN in the live node via its loopback API: the code is
+            // only usable by the process that generated it.
+            let (code, body) = tetherly_node::loopback_post(ui_port, "/api/pin", b"{}")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "node refused PIN request (HTTP {code}): {}",
+                    String::from_utf8_lossy(&body)
+                );
+            }
+            let v: serde_json::Value =
+                serde_json::from_slice(&body).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            let pin = v
+                .get("pin")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| anyhow::anyhow!("node returned no pin"))?;
+            println!("{pin}");
+            println!("不要把数字发给任何人,只在你自己的另一台设备上输入。");
         }
         Cmd::Run {
             port,

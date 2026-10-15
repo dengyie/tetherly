@@ -273,6 +273,8 @@ struct Shared {
     bound_file: AtomicU16,
     bound_input: AtomicU16,
     bound_screen: AtomicU16,
+    /// Loopback UI API port actually bound. 0 until `run()` serves it.
+    bound_ui: AtomicU16,
     /// Input cursor owner. None until a trusted desktop dials 45719.
     input_seat: Mutex<Option<CursorSeat>>,
     input_sink: Mutex<MemorySink>,
@@ -393,6 +395,7 @@ impl Node {
         let bound_file = AtomicU16::new(cfg.file_port);
         let bound_input = AtomicU16::new(cfg.input_port);
         let bound_screen = AtomicU16::new(cfg.screen_port);
+        let bound_ui = AtomicU16::new(0);
         let ancs_source = ancs_source_id(&cfg.ancs_peripheral);
         let ancs = cfg.ancs.clone().map(|t| AncsIngress::new(t, clock.clone()));
         let screen_source: Arc<dyn ScreenSource> = cfg.screen_source.clone().unwrap_or_else(|| {
@@ -443,6 +446,7 @@ impl Node {
             bound_file,
             bound_input,
             bound_screen,
+            bound_ui,
             input_seat: Mutex::new(None),
             input_sink: Mutex::new(MemorySink::default()),
             input_real_sink,
@@ -835,7 +839,11 @@ impl Node {
     pub async fn run(&self) -> anyhow::Result<()> {
         self.spawn_listeners().await?;
         if self.shared.cfg.ui_port != 0 {
-            crate::uihttp::spawn(self.clone_handle(), self.shared.cfg.ui_port);
+            // Bind before returning so the port is real the moment `run()`
+            // reports the node up; `tetherly pin` reaches it via this port.
+            self.spawn_ui().await.map_err(|e| {
+                anyhow::anyhow!("ui port {} unavailable: {e}", self.shared.cfg.ui_port)
+            })?;
         }
         info!(
             device_id = %self.shared.identity.device_id(),
@@ -843,6 +851,17 @@ impl Node {
         );
         std::future::pending::<()>().await;
         Ok(())
+    }
+
+    /// Bind and serve the loopback UI API, recording the port actually bound (a
+    /// `cfg.ui_port` of 0 resolves to an ephemeral one). Callers that need the
+    /// UI before `run()` — integration tests driving `/api/pin` — call this
+    /// directly; `run()` calls it when a concrete port is configured.
+    pub async fn spawn_ui(&self) -> std::io::Result<u16> {
+        let bound =
+            crate::uihttp::bind_and_spawn(self.clone_handle(), self.shared.cfg.ui_port).await?;
+        self.shared.bound_ui.store(bound, Ordering::SeqCst);
+        Ok(bound)
     }
 
     pub async fn spawn_listeners(&self) -> anyhow::Result<()> {
@@ -1775,6 +1794,18 @@ impl Node {
 
     pub fn control_port(&self) -> u16 {
         self.shared.bound_control.load(Ordering::SeqCst)
+    }
+
+    /// Loopback UI API port. Reads the port actually bound by `run()`; falls
+    /// back to the configured value before the UI is up, and 0 when this node
+    /// serves no UI (tests, or a second node launched with `--ui-port 0`).
+    pub fn ui_port(&self) -> u16 {
+        let bound = self.shared.bound_ui.load(Ordering::SeqCst);
+        if bound != 0 {
+            bound
+        } else {
+            self.shared.cfg.ui_port
+        }
     }
 
     pub fn file_port(&self) -> u16 {

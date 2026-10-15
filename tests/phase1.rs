@@ -435,6 +435,58 @@ async fn m1_8_file_resumes_from_persisted_offset() {
     a.shutdown();
     b.shutdown();
 }
+/// A PIN only means anything to the process that armed it. `tetherly pin`
+/// therefore arms the *live* node through its loopback API; a second process
+/// printing its own PIN would advertise a code no listener can ever accept.
+/// This drives that exact route: the PIN handed back by `/api/pin` must be the
+/// one the running listener accepts.
+#[tokio::test(flavor = "multi_thread")]
+async fn pin_shown_by_the_live_node_api_is_the_one_that_pairs() {
+    let (host_dir, _g1) = temp_dir("livenode-host");
+    let (peer_dir, _g2) = temp_dir("livenode-peer");
+    let host = Node::start(cfg(host_dir, "host", "windows")).unwrap();
+    let peer = Node::start(cfg(peer_dir, "peer", "android")).unwrap();
+    host.spawn_listeners().await.unwrap();
+    peer.spawn_listeners().await.unwrap();
+
+    // The route `tetherly pin` uses. Any other port has no listener.
+    let ui_port = host.spawn_ui().await.unwrap();
+    assert_ne!(ui_port, 0, "test node must serve the loopback UI API");
+    let (code, body) = tetherly_node::loopback_post(ui_port, "/api/pin", b"{}")
+        .await
+        .expect("live node API reachable");
+    assert_eq!(code, 200, "body: {}", String::from_utf8_lossy(&body));
+    let pin_str = serde_json::from_slice::<serde_json::Value>(&body)
+        .unwrap()
+        .get("pin")
+        .and_then(|p| p.as_str().map(str::to_string))
+        .expect("pin field");
+    peer.set_pin(tetherly_core::pin::parse_pin(&pin_str).unwrap());
+
+    peer.dial(host.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&peer, Duration::from_secs(25)).await;
+    assert_eq!(
+        host.live_peers().first().map(|p| p.device_id.clone()),
+        Some(peer.identity().device_id().clone())
+    );
+
+    // A PIN never armed at a live node (the defect's failure mode) is refused,
+    // so this assertion cannot pass by accident on a stale/hardcoded code.
+    let (other_dir, _g3) = temp_dir("livenode-stale");
+    let stale = Node::start(cfg(other_dir, "stale", "windows")).unwrap();
+    stale.spawn_listeners().await.unwrap();
+    stale.set_pin(tetherly_core::pin::parse_pin("25170394").unwrap());
+    assert!(
+        peer.dial(stale.control_addr()).await.is_err(),
+        "a peer that never served /api/pin must not be pairable"
+    );
+
+    host.shutdown();
+    peer.shutdown();
+    stale.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

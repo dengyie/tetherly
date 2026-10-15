@@ -12,19 +12,24 @@ use tracing::{info, warn};
 const INDEX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/index.html"));
 const MAX_BODY: usize = 8 * 1024;
 
-pub fn spawn(node: Node, port: u16) {
+/// Bind the loopback UI and serve it in the background, returning the port
+/// actually bound (a `0` request resolves to an ephemeral one). Binding
+/// synchronously means a taken port is a hard error the caller can report,
+/// rather than a `warn!` that leaves the UI silently absent.
+pub async fn bind_and_spawn(node: Node, port: u16) -> std::io::Result<u16> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?.port();
+    info!(port = bound, "ui listening (loopback only)");
     tokio::spawn(async move {
-        if let Err(e) = serve(node, port).await {
+        if let Err(e) = accept_loop(listener, node).await {
             warn!(%e, "ui http");
         }
     });
+    Ok(bound)
 }
 
-async fn serve(node: Node, port: u16) -> std::io::Result<()> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = TcpListener::bind(addr).await?;
-    let bound = listener.local_addr()?;
-    info!(%bound, "ui listening (loopback only)");
+async fn accept_loop(listener: TcpListener, node: Node) -> std::io::Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         if !peer.ip().is_loopback() {
@@ -125,6 +130,37 @@ async fn write_http(
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body).await?;
     stream.flush().await
+}
+
+/// POST a small JSON body to a node's own loopback UI API and return the HTTP
+/// status with the response body. The CLI uses this so `tetherly pin` arms the
+/// *running* daemon: a freshly started process would print a code no listener
+/// can honour. Loopback only, and the response body is the sole place a PIN is
+/// ever surfaced (never logged).
+pub async fn loopback_post(port: u16, path: &str, body: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect(addr).await?;
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let text = String::from_utf8_lossy(&buf);
+    let code = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let payload = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .map(|b| b.as_bytes().to_vec())
+        .unwrap_or_default();
+    Ok((code, payload))
 }
 
 #[derive(Serialize)]

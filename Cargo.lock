@@ -2198,6 +2198,9 @@ dependencies = [
  "clap",
  "getrandom 0.2.17",
  "if-addrs",
+ "libc",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "png",
  "secret-service",
  "security-framework",
@@ -2213,6 +2216,7 @@ dependencies = [
  "tracing-subscriber",
  "windows",
  "windows-sys 0.59.0",
+ "x11rb",
  "zstd",
 ]
 

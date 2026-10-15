@@ -59,10 +59,14 @@
   - Manual-required: real on-device `RemoteInput` firing (needs a foreground notification with a reply
     action + notification-listener grant).
 - Manual-required (narrowed, v1.10):
-  - Physical Android M1.1 **p95 timing** (listener → visible window) and 8h soak — the `.so`-missing
-    blocker is GONE.
-  - Real APK end-to-end (Kotlin NLService → JNI → live session) on a physical phone.
+  - ~~Physical Android M1.1 **p95 timing**~~ **CLOSED v1.18**: on-device notify round-trip
+    `rtt_p50≈17.9ms / p95≈56.9ms / p99≈361.8ms` (cloud phone over `adb reverse`, not LAN;
+    LAN same-model ≈15–16ms), inside the <1.0s budget. **8h soak still Manual-required.**
+  - ~~Real APK end-to-end (Kotlin NLService → JNI → live session) on a physical phone~~ **CLOSED
+    v1.18**: the shipped `app.tetherly` front-end NLService → JNI → `libtetherly_android.so` live
+    Noise session → desktop candidate `has_otp:true` (body/OTP never in snapshot/logs).
   - macOS M1.1 (mac next iteration).
+  - LAN-direct dual-physical round-trip (the v1.18 p95 is over the adb-reverse tunnel, not LAN).
 - Red lines honored: no EasyTier/DeskFlow/RustDesk/AGPL/GPL/LGPL linked; core stays OS-free
   (`cfg(target_os)`) with `#![forbid(unsafe_code)]`; the JNI `unsafe` is exempted in exactly one file and
   gated to Android; no `0.0.0.0` binds; pairing stays on 45717; OTP scoring untouched; no OTP/SMS body/

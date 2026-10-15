@@ -13,12 +13,30 @@
   **macOS Keychain / Linux libsecret backends landed (v1.14)** — backend-per-platform `cred/*.rs`, compile-verified per target, runtime Manual-required;
   **peer-input hardening (v1.15)** — `ReplayGuard` msg_id overflow + `ScreenAssembler` fragment-idx underflow fixed (both remote-triggerable), +3 regression tests, 205 green;
   **proptest + fuzz layers landed (v1.16)** — §13's two declared-but-missing layers now real on the stable toolchain: decoder never-panic + round-trip properties (core 27, net 7) and a deterministic xorshift mutation corpus driver (core 2); no decoder bug found (v1.15 fixes hold), 251 green;
+  **stateful/model-based property tests landed (v1.17)** — §13's property layer extended from single decoders/messages to sequence-driven state machines: `tetherly-core/tests/state_machines.rs` (11 proptest + 7 deterministic witnesses) drives `ReplayGuard`/`TokenBucket`/`NotifyLimiter`/`ClipLimiter`/`NotifyHub`/`FileHub`/`ResumeTable`/`ScreenSender`/`ScreenReceiver`/`ScreenAssembler`/`AncsIngress` with arbitrary byte op-programs, asserting the safety contract after every step; no new bug found (v1.15 fixes hold at the state level), 269 green;
+  **real-device APK end-to-end closed (v1.18)** — the shipped `app.tetherly` front-end `NotificationListenerService` → JNI → `libtetherly_android.so` live Noise session → desktop candidate `{app_id:"com.android.shell", has_otp:true, source:tdev_...}` (body never in snapshot/logs), closing v1.10's "APK Kotlin→JNI→session UI path still manual" gap; on-device M1.1 notify round-trip **p95 measured** (`p50≈17.9ms / p95≈56.9ms / p99≈361.8ms` over the `adb reverse` cloud-phone tunnel; LAN same-model ~15–16ms), inside the <1.0s budget; **`tetherly pin` defect fixed** (it used to generate a PIN in a throwaway `Node::start` process, so no listener could ever accept it — now a loopback client of the running daemon via `tetherly_node::loopback_post("/api/pin")`, honest non-zero exit when no daemon is up) + regression test, 270 green;
+  **macOS/Linux screen-capture backends landed (v1.19)** — the gap §9.7/§14 had long marked
+  "next iteration" is closed: `screen/macos.rs` (`MacSource`, CoreGraphics `CGDisplayCreateImage`
+  into an explicit BGRA8 `CGBitmapContext`, 16-byte-aligned stride requested then the framework's
+  actual stride de-padded; Screen-Recording denied → honest `ScreenRefused`, not a blank frame;
+  present needs AppKit `NSWindow` and is honestly refused) and `screen/x11.rs` (`X11Source`, MIT-SHM
+  fast path + plain `GetImage` fallback, `shm_query_version >= 1.2` gate, reads exactly `reply.size`;
+  present = override-redirect window + `PutImage` with the depth read from the root, not hardcoded).
+  Each is a self-contained file (absolute imports only) per the `cred.rs` precedent; target-deps added
+  (macOS `objc2-core-*` default-features=false, Linux `x11rb` shm + `libc`) with **no new packages**
+  (all already in the lockfile via `arboard`). Verified only by per-target `clippy -D warnings`
+  type-check on a throwaway probe (whole `screen.rs` + a stub `zstd`); 7+7 backend unit tests are
+  pure logic and run natively in CI. Real capture (needs a display/permission), macOS present,
+  Wayland portal, and the open encoder remain Manual-required.
   RustDesk architecture borrow only, AGPL not linkable.
 
 ## Current Phase
-- Spec `docs/DEVELOPMENT.md` **v1.16**. Phase 5 real-machine loop + Phase 3 real-machine chain +
-  Phase 1 Android native lib + `notify.reply` quick reply + file cross-process resume + Windows credential-vault identity storage + macOS Keychain / Linux libsecret backends + **§13 proptest/fuzz layers** all landed.
+- Spec `docs/DEVELOPMENT.md` **v1.19**. Phase 5 real-machine loop + Phase 3 real-machine chain +
+  Phase 1 Android native lib + `notify.reply` quick reply + file cross-process resume + Windows credential-vault identity storage + macOS Keychain / Linux libsecret backends + **§13 proptest/fuzz layers** + **§13 stateful state-machine properties** + **real-device APK end-to-end + `tetherly pin` fix + on-device M1.1 p95** all landed.
+- **Real-device APK E2E + `tetherly pin` fix + M1.1 p95 (v1.18)**: cloud-phone Galaxy Fold (SM-F900F / arm64-v8a / Android 13, over `adb reverse`) run of the **shipped APK** — front-end `NotificationListenerService` → JNI `Java_app_tetherly_NativeBridge_*` → `libtetherly_android.so` live Noise session → desktop node extracts candidate `{app_id:"com.android.shell", title:"Your verification code", has_otp:true, source:tdev_...}` (**body/OTP never in snapshot or logs**). On-device M1.1 notify round-trip measured `rtt_min≈17.4ms / p50≈17.9ms / mean≈37.5ms / p95≈56.9ms / p99≈361.8ms / max≈361.8ms` — inside the <1.0s budget (≈18× margin); **honest boundary**: this is the cloud phone over the `adb reverse` tunnel, NOT a LAN-direct pair (same model on LAN ≈15–16ms), the p99 tail is adb-tunnel jitter, 8h soak still Manual-required. Two-process live proof: `tetherly pin --ui-port 45726` printed a PIN, `POST /api/dial` with it returned `{"ok":true}`, host logged `path lan peer=tdev_...`; off-port (`45999`) fails honestly with exit 1.
+- **`tetherly pin` defect (found by the real-device run, cost hours of false diagnosis)**: `Cmd::Pin` used to do `Node::start(cfg)?; println!(node.generate_pin()?)` — a **throwaway process** whose PIN (`pin_created_ms` is pure in-process state, never persisted) **no listener can ever accept**, so the live daemon always logged `pin expired`. The working route was always the live daemon's loopback API `POST 127.0.0.1:45716/api/pin` (the UI 「显示 8 位 PIN」 button). Fix: `Cmd::Pin { ui_port }` (default 45716) now calls the new `tetherly_node::loopback_post(port, "/api/pin", b"{}")` to arm the **live** node, and fails honestly (non-zero, actionable message) when nothing is listening. Support: `uihttp::spawn` → `bind_and_spawn` (sync bind, returns the real port; a taken port is now a hard error, not a silent `warn!`), `Node::spawn_ui()`/`Node::ui_port()` (`Shared.bound_ui: AtomicU16`), `run()` binds the UI before returning so "node up" ⇒ port really reachable. Regression: `tests/phase1.rs::pin_shown_by_the_live_node_api_is_the_one_that_pairs` (asserts a third node armed with a hardcoded PIN cannot be dialed, so the claim cannot pass by accident). 269 → **270 green**.
 - **§13 proptest + fuzz layers (v1.16)**: `tetherly-core/tests/decoders.rs` (27 props) — every inbound decoder never panics on arbitrary input, every encodable message round-trips (notify push/dismiss/reply, clip set, file offer/decision/done, caps update, input event, screen frame, control msg, hello, JSON control-plane); plus sanitize_file_name stays a basename (non-empty, != "."/"..", no '/', no NUL), DataAssembler bounded to 8 KiB, any-order reassembly. `tetherly-net/tests/decoders.rs` (7 props) — `read_len_prefixed`/`read_tagged`/`read_header` never panic, oversized length prefix refused (anti-DoS), valid headers round-trip, `TFL1` reads as `start=0`, wrong magic refused. `tetherly-core/tests/fuzz_decoders.rs` (2) — deterministic xorshift mutator over a valid corpus (inner frames, all 7 control JSON types, all 7 input kinds, whole+fragmented screen frames, control msgs, ANCS source events + data-source tuples, canonical Hello) applying 6 mutation kinds (bit flip, extreme byte, truncate, extend, multi-byte overwrite, splice), feeding every decoder under `catch_unwind`; fixed seed `0x9E3779B97F4A7C15`, 512 mutations/seed, every 4th stacked. `proptest = "1"` (MIT) added as a workspace dev-dependency.
+- **§13 stateful state-machine properties (v1.17)**: `tetherly-core/tests/state_machines.rs` (18 tests = 11 proptest + 7 deterministic witnesses). A `program(max_ops)` strategy yields an arbitrary byte op-program (`Vec<u8>` as an instruction stream: one byte selects the action, more bytes supply parameters); a `Cur` cursor **saturates** on out-of-range reads so the program itself can never panic, attributing every panic to the machine under test. Covered machines and the contract asserted after each step: `ReplayGuard` (an accepted id is never re-accepted; ancient ids below the high-water mark are always refused; no overflow panic — pins v1.15's `saturating_add`), `TokenBucket` (a frozen clock releases exactly `floor(burst)` and refuses the next), `NotifyLimiter` (releases never exceed the leaky bound `10 + 2t/1000 + 1`), `ClipLimiter` (a backwards clock grants no extra budget — monotonicity), `FileHub` (every name is sanitized to a safe basename; never self-accepted before a user click; the incoming table stays bounded at `INCOMING_MAX = 256` under a flood), `ResumeTable` (`claim` offsets are `0 < off < total`, `FILE_CHUNK`-aligned, and source-bound), `NotifyHub` (dedup / reply-correlation / expiry invariants hold under any push-reply-tick sequence), `ScreenSender` (`is_streaming()` implies local consent — never streams without it), `ScreenReceiver` (cursor monotone; `stats().received` equals actual receipts), `ScreenAssembler` (any-order reassembly, incomplete stream refused, never panics — pins v1.15's `checked_mul`), `AncsIngress` (no panic on any event sequence; callbacks are inert unless `Ready`, so a `PRE_EXISTING` uid never leaks into `drain_events()` — M4.3).
 - **Honest boundary**: libfuzzer / `cargo-fuzz` (nightly) remains Manual-required; the deterministic mutation driver is the stable-toolchain substitute (documented in the spec §13 row).
 - **`notify.reply` (v1.11)**: `tetherly-core::frame::NotifyReply{uid,app_id,text}` + `NOTIFY_TEXT_MAX=4 KiB`
   (UTF-8-safe truncate); `TYPE_NOTIFY_REPLY=0x0103`. `tetherly-net` `SessionEvent::ReplyStub` replaced by
@@ -115,8 +133,9 @@
 
 ## Last Verified
 - Local: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo test --workspace --locked` all green — **251 passed, 0 failed** (v1.16: +27 core props,
-  +7 net props, +2 fuzz drivers over the prior 205).
+  `cargo test --workspace --locked` all green — **269 passed, 0 failed** (v1.17: +18 state-machine
+  tests over the prior 251; the 18 = 11 proptest over arbitrary op-programs + 7 deterministic
+  non-vacuity witnesses).
 - Cross-check: `cargo clippy --target x86_64-unknown-linux-gnu --workspace --all-targets --locked -- -D warnings`
   clean (needs `CC_x86_64_unknown_linux_gnu=gcc AR_...=ar` since Phase 5's `zstd-sys` wants a target C
   compiler that isn't installed; check-only, nothing links). macOS cross-check not possible on this host.
@@ -169,18 +188,18 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
-- v1.16 (SSOT §13 proptest + fuzz layers + SSOT/memory sync) complete and fully green locally;
-  awaiting an explicit user instruction before any commit/push.
+- v1.17 (SSOT §13 stateful state-machine properties + SSOT/memory sync) complete and fully green
+  locally; awaiting an explicit user instruction before any commit/push.
 
 ## Next Milestone
 - Phase 6 (single-item): Android controlled device, WinFsp mount, file persistent resume,
   Linux ANCS experience, embedded EasyTier FFI. (`notify.reply` closed v1.11; removed from backlog.)
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.16)
+- `docs/DEVELOPMENT.md` (SSOT v1.17)
 - `crates/tetherly-{core,crypto,net,node,android}` + `crates/tetherly-core/src/{ancs,screen}.rs`
   + `crates/tetherly-node/src/screen.rs` + `crates/tetherly-android/src/{store,client,jni}.rs`
-- `crates/tetherly-core/tests/{decoders,fuzz_decoders}.rs`, `crates/tetherly-net/tests/decoders.rs`
+- `crates/tetherly-core/tests/{decoders,fuzz_decoders,state_machines}.rs`, `crates/tetherly-net/tests/decoders.rs`
 - `bins/tetherly-cli`, `tests/{loopback,phase1,phase2,phase3,phase4,phase5}.rs`, `ui/`, `android/`
 - GitHub: `dengyie/tetherly`
 - Vault: `Note/Project/tetherly/tetherly 开发文档.md`

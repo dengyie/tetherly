@@ -2,12 +2,18 @@
 //! OS screen capture, encoder, and presentation.
 //!
 //! Production chain:
-//!   `DxgiSource` -> `EncodedSource<SystemSource>` (zstd lossless) -> wire.
-//! Visitor decodes -> `SystemSink` (GDI window) presents.
+//!   `<platform source>` -> `EncodedSource` (zstd lossless) -> wire.
+//! Visitor decodes -> `<platform sink>` presents.
+//!
+//! Per platform:
+//! - Windows: `DxgiSource` (DXGI Desktop Duplication) / `SystemSink` (GDI).
+//! - macOS: `MacSource` (CoreGraphics `CGDisplayCreateImage`) capture;
+//!   present needs an AppKit `NSWindow` and is honestly refused.
+//! - Linux/BSD X11: `X11Source` (MIT-SHM, `GetImage` fallback) /
+//!   `SystemSink` (`PutImage` into an override-redirect window).
+//! - Anything else (and pure Wayland): honest `ScreenRefused`.
 //!
 //! Lossy codec (OpenH264/rav1e) swaps in via `ScreenCodec` the same way.
-//! Non-Windows returns honest `ScreenRefused`; macOS/Linux remain next
-//! iteration. Wayland is unsupported.
 
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +21,16 @@ use tetherly_core::{
     CoreError, PixelFormat, ScreenCodec as ScreenCodecPort, ScreenFrame, ScreenRect, ScreenSink,
     ScreenSource,
 };
+
+// The per-platform capture/present bodies live in their own files, the same
+// shape `cred` uses: each imports only absolute paths so it compiles for its
+// target standalone. `screen.rs` stays the OS-agnostic assembly point.
+#[cfg(target_os = "macos")]
+#[path = "screen/macos.rs"]
+mod macos;
+#[cfg(all(unix, not(target_os = "macos")))]
+#[path = "screen/x11.rs"]
+mod x11;
 
 // ---------------------------------------------------------------------------
 // Zstd codec (cross-platform)
@@ -698,34 +714,22 @@ mod dxgi {
 
 #[cfg(windows)]
 pub use dxgi::DxgiSource;
+#[cfg(target_os = "macos")]
+pub use macos::MacSource;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use x11::X11Source;
 
-#[cfg(not(windows))]
+/// The production capture source for the host platform. One concrete `inner`
+/// per target keeps `SystemSource` monomorphic, so `encoded_with` needs no
+/// dynamic dispatch.
 #[derive(Debug, Clone, Default)]
-pub struct DxgiSource;
-
-#[cfg(not(windows))]
-impl ScreenSource for DxgiSource {
-    fn grab(&self) -> Result<Option<ScreenFrame>, CoreError> {
-        Err(CoreError::ScreenRefused(
-            "DXGI capture requires Windows; macOS/Linux remain next iteration".into(),
-        ))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SystemSource — the production screen capture source
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
 pub struct SystemSource {
     #[cfg(windows)]
     inner: DxgiSource,
-}
-
-impl Default for SystemSource {
-    fn default() -> Self {
-        Self::new()
-    }
+    #[cfg(target_os = "macos")]
+    inner: MacSource,
+    #[cfg(all(unix, not(target_os = "macos")))]
+    inner: X11Source,
 }
 
 impl SystemSource {
@@ -736,7 +740,19 @@ impl SystemSource {
                 inner: DxgiSource::new(),
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            Self {
+                inner: MacSource::new(),
+            }
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            Self {
+                inner: X11Source::new(),
+            }
+        }
+        #[cfg(not(any(windows, target_os = "macos", unix)))]
         {
             Self {}
         }
@@ -748,15 +764,16 @@ impl SystemSource {
 }
 
 impl ScreenSource for SystemSource {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos", unix))]
     fn grab(&self) -> Result<Option<ScreenFrame>, CoreError> {
         self.inner.grab()
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos", unix)))]
     fn grab(&self) -> Result<Option<ScreenFrame>, CoreError> {
         Err(CoreError::ScreenRefused(
-            "system screen capture not on this platform; Windows DXGI is the first target".into(),
+            "no system screen capture on this target (Windows DXGI / macOS CoreGraphics / X11)"
+                .into(),
         ))
     }
 }
@@ -1223,10 +1240,21 @@ impl ScreenSink for SystemSink {
         dxgi::present(frame)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    fn present(&self, frame: &ScreenFrame) -> Result<(), CoreError> {
+        macos::present(frame)
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn present(&self, frame: &ScreenFrame) -> Result<(), CoreError> {
+        x11::present(frame)
+    }
+
+    #[cfg(not(any(windows, target_os = "macos", unix)))]
     fn present(&self, _frame: &ScreenFrame) -> Result<(), CoreError> {
         Err(CoreError::ScreenRefused(
-            "system screen present not on this platform; Windows GDI is the first target".into(),
+            "no system screen present on this target (Windows GDI / macOS NSWindow / X11 PutImage)"
+                .into(),
         ))
     }
 }

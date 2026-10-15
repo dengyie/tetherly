@@ -56,8 +56,28 @@ windows = { version = "0.59", features = [
 # Keychain generic-password storage for the identity secret (src/cred/macos.rs).
 security-framework = "3"
 security-framework-sys = "2"
+# CoreGraphics capture for src/screen/macos.rs. `default-features = false`
+# keeps the objc2-metal/dispatch2 surface out; `arboard` already pulls these
+# same crates, so no new package enters the lockfile.
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFCGTypes",
+] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGDirectDisplay",
+    "CGImage",
+] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # Secret Service (libsecret) storage over the session bus (src/cred/linux.rs).
 # `rt-tokio-crypto-rust` uses the pure-Rust crypto backend (no openssl).
 secret-service = { version = "4", default-features = false, features = ["rt-tokio-crypto-rust"] }
+# X11 capture/present for src/screen/x11.rs. `shm` enables MIT-SHM; without it
+# every frame would cross the socket via plain `GetImage`. `libc` is declared
+# here because x11rb's own libc sits behind its `allow-unsafe-code` feature.
+x11rb = { version = "0.13", features = ["shm"] }
+libc = "0.2"

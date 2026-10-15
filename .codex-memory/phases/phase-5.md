@@ -1,6 +1,6 @@
 # Phase 5 — Remote screen (screen streaming) CI slice
 
-- Closed: 2026-10-10 (CI slice) / 2026-10-11 (real-machine loop)
+- Closed: 2026-10-10 (CI slice) / 2026-10-11 (real-machine loop) / 2026-10-15 (macOS + X11 backends, v1.19)
 - Spec: `docs/DEVELOPMENT.md` v1.8 (Phase 5 opened on owner waiver; encoder route: lossless-first, encoder-later;
   v1.8 added DXGI Desktop Duplication capture + zstd lossless encode + GDI BitBlt present + p95 budget on Windows)
 - Delivered:
@@ -22,9 +22,8 @@
     `spawn_listeners`/`spawn_overlay` each add 45720 bind + accept, caps add `"screen"` + `screenport=`,
     `LivePeer.screen_port`, `open_screen`/`accept_screen`/`attach_screen_server`/`attach_screen_client`/
     `screen_send_frame`, public methods `screen_allow/revoke/start/stop/state/stats/send_frame/sink_snapshot/port/addr`.
-  - `crates/tetherly-node/src/screen.rs`: `SystemSource`/`SystemSink` stubs (return `ScreenRefused`),
-    comments mark DXGI/WGC (Win), core-graphics (mac), x11rb (Linux) as next iteration;
-    Wayland honestly marked unsupported.
+  - `crates/tetherly-node/src/screen.rs`: per-target backends selected by `#[cfg]` — Windows
+    `DxgiSource` (v1.8), macOS `MacSource` + Linux/BSD X11 `X11Source` (v1.19).
   - `deny.toml` bans `hbb_common`/`rustdesk`/`rustdesk-server`/`scrap` (AGPL structured red line).
   - UI: `POST /api/screen/allow|start|stop` routes + `ui/index.html`「远程屏幕（实验）」section
     (① local allow required to stream; ② Wayland unsupported; ③ real capture Manual-required).
@@ -49,12 +48,27 @@
   (residual = animation phase + DWM color management), p95 ≈0.9–1.45s (adb source-rate-bound).
   Live M5.2 refusal observed. Two UI gaps fixed: `/api/screen/start` auto-dials the screen channel;
   visitor `screen_rx_stats` in Snapshot.
+  - **macOS + Linux capture/present backends (v1.19, 2026-10-15)**: `screen/macos.rs` (`MacSource` —
+    `CGMainDisplayID` → `CGDisplayCreateImage` → explicit BGRA8 `CGBitmapContext`
+    (`PremultipliedFirst | Order32Little`); a 16-byte-aligned stride is requested and the framework's
+    actual stride de-padded, so a 1365-px row (5460 B) no longer fails; Screen-Recording denied →
+    honest `ScreenRefused`, never a blank frame; `present` needs AppKit `NSWindow` and says so) and
+    `screen/x11.rs` (`X11Source` — MIT-SHM fast path `shm_create_segment` + `shm_get_image` with the
+    server writing into our `mmap`, plain `GetImage` fallback, `shm_query_version ≥ 1.2` gate, reads
+    exactly `reply.size`; refuses MSB-first byte order and root depth outside {24,32}; depth-24 high
+    byte → 0xFF; present = override-redirect window + `PutImage` at the depth read from the root,
+    not a hardcoded 24). Each is a self-contained file (absolute imports only) per the `cred.rs`
+    precedent; `lib.rs` cfg-gates the source re-exports; target-deps macOS `objc2-core-foundation` +
+    `objc2-core-graphics` (`default-features = false`) and Linux `x11rb`(`shm`) + `libc`, with **no new
+    lockfile package** (all already arrive via `arboard 3.6.1`).
   Perf pass (same day): persistent zstd bulk contexts (1080p enc 16.1→12.6ms, dec 4.7→4.1ms), offset
   `ScreenAssembler` (3.0→1.28ms), single-copy `SystemSink::present`, release LTO profile; `AdbSource`
   persistent length-prefixed PNG stream (grab 543→436ms; raw 3.7MB/frame=17.5s on the overlay vs
   PNG 31KB=0.17s — PNG default, `TETHERLY_ADB_RAW=1` opt-in). Bench example `bench_screen` kept.
 - Manual-required (narrowed): DXGI-side pixel capture (needs interactive desktop); **Windows DXGI cross-desktop** p95 data; real open encoder
-  (OpenH264/rav1e) as `ScreenCodec` port; macOS CGImage/CGWindow, Linux X11 SHM (Wayland portal).
+  (OpenH264/rav1e) as `ScreenCodec` port; **real capture on a real display/permission** for the v1.19 macOS
+  CoreGraphics and X11 MIT-SHM backends (type-checked per target, unit tests are pure logic and run in CI);
+  macOS **present** (AppKit `NSWindow`); Wayland portal.
   M5.5 hardware encoder / real injection not started.
 - Stop: Do not claim Windows DXGI cross-desktop remote desktop is usable (DXGI init + idle + present verified; the cross-device AdbSource loop IS verified; DXGI pixel capture and cross-desktop p95 still Manual-required). RustDesk AGPL code not linked (deny.toml enforces).
   Encoder route is lossless-first, swappable port later. Phase 6 is a separate single-item立项.
