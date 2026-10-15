@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.82"
@@ -19,11 +19,11 @@ authors = ["Tetherly contributors"]
 description = "Personal-device mesh: LAN first, OTP on-device, desktop input later"
 
 [workspace.dependencies]
-tetherly-core = { path = "crates/tetherly-core", version = "0.1.1" }
-tetherly-crypto = { path = "crates/tetherly-crypto", version = "0.1.1" }
-tetherly-net = { path = "crates/tetherly-net", version = "0.1.1" }
-tetherly-node = { path = "crates/tetherly-node", version = "0.1.1" }
-tetherly-android = { path = "crates/tetherly-android", version = "0.1.1" }
+tetherly-core = { path = "crates/tetherly-core", version = "0.1.2" }
+tetherly-crypto = { path = "crates/tetherly-crypto", version = "0.1.2" }
+tetherly-net = { path = "crates/tetherly-net", version = "0.1.2" }
+tetherly-node = { path = "crates/tetherly-node", version = "0.1.2" }
+tetherly-android = { path = "crates/tetherly-android", version = "0.1.2" }
 
 argon2 = "0.5"
 base64 = "0.22"
