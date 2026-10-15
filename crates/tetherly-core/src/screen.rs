@@ -24,11 +24,11 @@ pub const SCREEN_PROTO: u8 = 1;
 pub const SCREEN_SEQ_WINDOW: u64 = 65_536;
 
 /// Payload bytes accepted for one screen frame. The Noise inner frame caps at
-/// 64 KiB per fragment, so a full-resolution frame travels as several inner
-/// frames (see `SCREEN_FRAG_MAGIC` and `ScreenFrame::to_frames`); this is the
-/// hard ceiling the codec enforces on the concatenated pixel body. 8 MiB fits
-/// one 1920x1080 BGRA frame worst case even uncompressed; any realistic
-/// zstd-compressed frame sits far below it.
+/// `INNER_PAYLOAD_MAX` per fragment, so a full-resolution frame travels as
+/// several inner frames (see `SCREEN_FRAG_MAGIC` and `ScreenFrame::to_frames`);
+/// this is the hard ceiling the codec enforces on the concatenated pixel body.
+/// 8 MiB fits one 1920x1080 BGRA frame worst case even uncompressed; any
+/// realistic zstd-compressed frame sits far below it.
 pub const SCREEN_PAYLOAD_MAX: usize = 8 * 1024 * 1024;
 
 /// Fragment transport for screen frames too large for one inner frame.
@@ -42,7 +42,11 @@ pub const SCREEN_FRAG_MAGIC: [u8; 4] = *b"TMF1";
 /// | seq(8) = 24 bytes, followed by the chunk.
 pub const SCREEN_FRAG_HEADER: usize = 24;
 
-/// Per-fragment chunk budget so every inner frame stays within 64 KiB.
+/// Per-fragment chunk budget so every fragment inner frame stays inside the
+/// transport budget: `SCREEN_FRAG_HEADER + chunk <= INNER_PAYLOAD_MAX`, i.e. the
+/// fragment payload plus the 12-byte inner header plus the 16-byte AEAD tag all
+/// fit one Noise message. `INNER_PAYLOAD_MAX` already accounts for those, so
+/// `to_frames` never hands the transport a plaintext it cannot encrypt.
 pub const SCREEN_FRAG_CHUNK_MAX: usize = INNER_PAYLOAD_MAX - SCREEN_FRAG_HEADER;
 
 /// Most recent presented frames the memory sink retains, so a long-lived

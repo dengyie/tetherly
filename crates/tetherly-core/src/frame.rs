@@ -3,7 +3,21 @@
 use crate::error::CoreError;
 use serde::{Deserialize, Serialize};
 
-pub const INNER_PAYLOAD_MAX: usize = 64 * 1024;
+/// Bytes [`InnerFrame::encode`] prepends to every payload: `ty u16 | flags u16 |
+/// msg_id u64`.
+pub const INNER_HEADER: usize = 12;
+
+/// One Noise transport message is capped at 65535 bytes (`snow`), and the
+/// 16-byte AEAD tag rides inside that budget, so the transport refuses any
+/// plaintext above `65535 - 16`. The 12-byte inner header is part of that
+/// plaintext. The largest payload an inner frame can carry and still encrypt
+/// in a single transport message is therefore `65535 - 16 - 12`. This is the
+/// single source of that budget — measured in
+/// `tetherly-crypto/tests/limits.rs` — so no frame layer can drift above it
+/// and hand the transport a plaintext it cannot encrypt.
+pub const NOISE_MESSAGE_MAX: usize = 65_535;
+pub const INNER_PAYLOAD_MAX: usize = NOISE_MESSAGE_MAX - 16 - INNER_HEADER;
+
 pub const FILE_FRAME_MAX: usize = 256 * 1024;
 pub const FLAG_MUST_UNDERSTAND: u16 = 0x0001;
 
@@ -45,7 +59,7 @@ impl InnerFrame {
         if self.payload.len() > INNER_PAYLOAD_MAX {
             return Err(CoreError::PayloadTooLarge);
         }
-        let mut out = Vec::with_capacity(12 + self.payload.len());
+        let mut out = Vec::with_capacity(INNER_HEADER + self.payload.len());
         out.extend_from_slice(&self.ty.to_be_bytes());
         out.extend_from_slice(&self.flags.to_be_bytes());
         out.extend_from_slice(&self.msg_id.to_be_bytes());
@@ -54,7 +68,7 @@ impl InnerFrame {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, CoreError> {
-        if bytes.len() < 12 {
+        if bytes.len() < INNER_HEADER {
             return Err(CoreError::TruncatedFrame);
         }
         let ty = u16::from_be_bytes([bytes[0], bytes[1]]);
@@ -64,7 +78,7 @@ impl InnerFrame {
                 .try_into()
                 .map_err(|_| CoreError::TruncatedFrame)?,
         );
-        let payload = bytes[12..].to_vec();
+        let payload = bytes[INNER_HEADER..].to_vec();
         if payload.len() > INNER_PAYLOAD_MAX {
             return Err(CoreError::PayloadTooLarge);
         }

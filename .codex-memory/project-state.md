@@ -70,10 +70,32 @@
   its pool and `apt-get update` 404s). Honest boundary: the container build path is CI-only here, so a real
   glibc 2.31 host should still confirm the binary starts once.
   RustDesk architecture borrow only, AGPL not linkable.
+  **Inner-frame payload budget corrected (v1.22)** — while writing the v1.21 write-stall regression I hit
+  `Crypto(Noise("input error"))` with a full-size inner frame and traced it to a **latent production
+  defect, not a test bug**: `INNER_PAYLOAD_MAX` was a flat `64 * 1024`, ignoring the 12-byte inner header
+  that `InnerFrame::encode` prepends and the 16-byte AEAD tag — both of which live inside the Noise
+  transport's 65535-byte single-message cap. Measured (real IK handshake) the transport accepts exactly
+  **65519** plaintext bytes, so an inner payload can be at most `65519 - 12 = 65507`; the old constant was
+  **29 bytes too large**. Consequence: the screen fragmentation `SCREEN_FRAG_CHUNK_MAX = INNER_PAYLOAD_MAX
+  - SCREEN_FRAG_HEADER` produced fragment payloads of `24 + 65512 = 65536` → 65548-byte plaintext, which
+  the transport **refuses to encrypt** — so **any screen frame large enough to fragment could not be sent
+  at all**. zstd keeps most real frames small, which is why the shipped end-to-end path never hit it (a
+  "success the process cannot prove" sibling of the v1.18 `pin` class). The same root cause touched
+  `to_frame()`'s single-frame path. The **file channel is unaffected** (it uses its own ChaCha20-Poly1305 +
+  length prefix on the second TCP port, not the Noise transport). Fix: derive the budget instead of
+  hardcoding it — `frame.rs` gains `INNER_HEADER = 12` and `NOISE_MESSAGE_MAX = 65_535`,
+  `INNER_PAYLOAD_MAX = NOISE_MESSAGE_MAX - 16 - INNER_HEADER` (= **65507**), and `encode`/`decode` use
+  `INNER_HEADER`. Fragment payload is now exactly 65507 → 65519 plaintext = the transport ceiling, exactly
+  encryptable. Wire-compatible: no version ever successfully sent a payload in (65507, 65536] (encryption
+  fails before the write). New regressions (275 → **280 green**): `tetherly-crypto/tests/limits.rs` (2 —
+  measured ceiling 65519 pass / 65520 refuse, and a max inner frame is encryptable while one byte more is
+  refused), `tetherly-net/tests/screen_wire.rs` (1 — a 4 MiB 1024x1024 BGRA frame fragments, crosses a
+  real session fragment-by-fragment, and reassembles byte-identical), `tetherly-net/tests/backpressure.rs`
+  (2 — the v1.21 write-stall session regression). fmt / clippy `-D warnings` / 280 tests / deny all green.
 
 ## Current Phase
-- Spec `docs/DEVELOPMENT.md` **v1.21**. Phase 5 real-machine loop + Phase 3 real-machine chain +
-  Phase 1 Android native lib + `notify.reply` quick reply + file cross-process resume + Windows credential-vault identity storage + macOS Keychain / Linux libsecret backends + **§13 proptest/fuzz layers** + **§13 stateful state-machine properties** + **real-device APK end-to-end + `tetherly pin` fix + on-device M1.1 p95** + **macOS/Linux screen backends** + **CLI control plane as live-node loopback clients + Linux glibc 2.35 release anchor** + **session liveness/backpressure + glibc 2.31 Linux release anchor (v1.21)** all landed.
+- Spec `docs/DEVELOPMENT.md` **v1.22**. Phase 5 real-machine loop + Phase 3 real-machine chain +
+  Phase 1 Android native lib + `notify.reply` quick reply + file cross-process resume + Windows credential-vault identity storage + macOS Keychain / Linux libsecret backends + **§13 proptest/fuzz layers** + **§13 stateful state-machine properties** + **real-device APK end-to-end + `tetherly pin` fix + on-device M1.1 p95** + **macOS/Linux screen backends** + **CLI control plane as live-node loopback clients + Linux glibc 2.35 release anchor** + **session liveness/backpressure + glibc 2.31 Linux release anchor (v1.21)** + **inner-frame payload budget corrected (v1.22)** all landed.
 - **CLI control plane as live-node loopback clients + glibc 2.35 release anchor (v1.20)**: `tetherly dial` used to `Node::start(cfg)?` a second node — with the daemon already running it re-bound the same LAN ports and died with `no LAN address bound`; `tetherly inject-notify` built a `NotifyPush` in its own process and only called `ingest_local_push`, so it never crossed the Noise session and never reached a peer. Both were the v1.18 `pin` defect class (only the process holding the in-process state can arm a PIN / hold the session / deliver a push). Fix: `Cmd::Dial { addr, pin, ui_port }` → `loopback_post(ui_port, "/api/dial", {addr,pin})`; `InjectNotify` removed, replaced by `Cmd::Notify { title, body, app_id, peer, ui_port }` → `loopback_post(ui_port, "/api/notify", …)` backed by a new `POST /api/notify` route that resolves the target (one live peer implied, multiple need explicit `--peer` parsed as a `DeviceId` and checked against the live set, unknown/offline → 400 `peer is not connected`, zero → 400 `no connected peer`), builds a `.truncate()`d push (`app_name="tetherly"`, actions `["copy"]`, uid from the wall clock), and calls `Node::send_notify()`. `.github/workflows/release.yml`: Linux build row `ubuntu-latest` → `ubuntu-22.04` (glibc 2.35) plus a guard step `objdump -T target/release/tetherly | grep -E 'GLIBC_2\.(3[6-9]|[4-9][0-9])'` that fails the build rather than shipping a binary that cannot start on glibc 2.31 hosts. Not committed: the local Windows-GNU MinGW.org 6.3.0 is a 32-bit toolchain whose `ld` rejects rustc 1.99's `--high-entropy-va`, so the local test run used rustup's bundled 64-bit self-contained MinGW (gcc 14.2) as linker plus NDK clang 20 for the missing `as`/C frontend (`zstd-sys`); `.cargo/config.toml` stays machine-agnostic and CI's MSVC host is unaffected. Regression: `tests/phase1.rs::notify_posted_to_the_live_node_api_reaches_the_paired_peer` (the posted text reaches the peer's candidate list, and an unconnected `--peer` is refused, so a 200 cannot be a blanket accept). 270 → **271 green**.
 - **Real-device APK E2E + `tetherly pin` fix + M1.1 p95 (v1.18)**: cloud-phone Galaxy Fold (SM-F900F / arm64-v8a / Android 13, over `adb reverse`) run of the **shipped APK** — front-end `NotificationListenerService` → JNI `Java_app_tetherly_NativeBridge_*` → `libtetherly_android.so` live Noise session → desktop node extracts candidate `{app_id:"com.android.shell", title:"Your verification code", has_otp:true, source:tdev_...}` (**body/OTP never in snapshot or logs**). On-device M1.1 notify round-trip measured `rtt_min≈17.4ms / p50≈17.9ms / mean≈37.5ms / p95≈56.9ms / p99≈361.8ms / max≈361.8ms` — inside the <1.0s budget (≈18× margin); **honest boundary**: this is the cloud phone over the `adb reverse` tunnel, NOT a LAN-direct pair (same model on LAN ≈15–16ms), the p99 tail is adb-tunnel jitter, 8h soak still Manual-required. Two-process live proof: `tetherly pin --ui-port 45726` printed a PIN, `POST /api/dial` with it returned `{"ok":true}`, host logged `path lan peer=tdev_...`; off-port (`45999`) fails honestly with exit 1.
 - **`tetherly pin` defect (found by the real-device run, cost hours of false diagnosis)**: `Cmd::Pin` used to do `Node::start(cfg)?; println!(node.generate_pin()?)` — a **throwaway process** whose PIN (`pin_created_ms` is pure in-process state, never persisted) **no listener can ever accept**, so the live daemon always logged `pin expired`. The working route was always the live daemon's loopback API `POST 127.0.0.1:45716/api/pin` (the UI 「显示 8 位 PIN」 button). Fix: `Cmd::Pin { ui_port }` (default 45716) now calls the new `tetherly_node::loopback_post(port, "/api/pin", b"{}")` to arm the **live** node, and fails honestly (non-zero, actionable message) when nothing is listening. Support: `uihttp::spawn` → `bind_and_spawn` (sync bind, returns the real port; a taken port is now a hard error, not a silent `warn!`), `Node::spawn_ui()`/`Node::ui_port()` (`Shared.bound_ui: AtomicU16`), `run()` binds the UI before returning so "node up" ⇒ port really reachable. Regression: `tests/phase1.rs::pin_shown_by_the_live_node_api_is_the_one_that_pairs` (asserts a third node armed with a hardcoded PIN cannot be dialed, so the claim cannot pass by accident). 269 → **270 green**.
@@ -230,17 +252,21 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
-- v1.21 **shipped**: session liveness/backpressure + glibc 2.31 Linux release anchor landed, SSOT/memory
-  synced, 275 tests green locally, `ci.yml` green on all five jobs, and `v0.1.3` tagged + released
-  (`release.yml` green, measured glibc floor `GLIBC_2.30`, six assets published). Next work is the
-  Manual-required real-machine items (see Active Blockers).
+- v1.22: the inner-frame payload budget is corrected at its root (`INNER_PAYLOAD_MAX` derived from the
+  measured 65519-byte transport plaintext ceiling), closing the latent defect where any fragmenting
+  screen frame could not be encrypted; 280 tests green locally (fmt / clippy `-D warnings` / `cargo test
+  --workspace --locked` / `cargo deny` all green). SSOT/memory being synced and the change committed+pushed
+  to trigger CI. v1.21 already **shipped** as `v0.1.3` (session liveness/backpressure + glibc 2.31 Linux
+  release anchor; `ci.yml` green on all five jobs, `release.yml` green, measured glibc floor
+  `GLIBC_2.30`, six assets published). Next work is the Manual-required real-machine items (see Active
+  Blockers).
 
 ## Next Milestone
 - Phase 6 (single-item): Android controlled device, WinFsp mount, file persistent resume,
   Linux ANCS experience, embedded EasyTier FFI. (`notify.reply` closed v1.11; removed from backlog.)
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.21)
+- `docs/DEVELOPMENT.md` (SSOT v1.22)
 - `crates/tetherly-{core,crypto,net,node,android}` + `crates/tetherly-core/src/{ancs,screen}.rs`
   + `crates/tetherly-node/src/screen.rs` + `crates/tetherly-android/src/{store,client,jni}.rs`
 - `crates/tetherly-core/tests/{decoders,fuzz_decoders,state_machines}.rs`, `crates/tetherly-net/tests/decoders.rs`
