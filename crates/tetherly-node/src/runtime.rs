@@ -3038,7 +3038,7 @@ impl Node {
     pub fn active_transfers(&self) -> Vec<ActiveTransfer> {
         let transfers = self.shared.active_transfers.lock().expect("transfers");
         let mut list: Vec<ActiveTransfer> = transfers.values().cloned().collect();
-        list.sort_by(|a, b| b.started_ms.cmp(&a.started_ms));
+        list.sort_by_key(|a| std::cmp::Reverse(a.started_ms));
         list
     }
 }
