@@ -44,6 +44,8 @@ pub enum CoreError {
     ClipboardTooLarge,
     #[error("file not accepted")]
     FileNotAccepted,
+    #[error("file exceeds the {0}-byte v1 limit")]
+    FileTooLarge(u64),
     #[error("unknown transfer")]
     UnknownTransfer,
     #[error("file already decided")]

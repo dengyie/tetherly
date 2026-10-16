@@ -105,6 +105,17 @@ pub struct FileHub {
 /// life (`forget` has no production caller).
 const INCOMING_MAX: usize = 256;
 
+/// Largest single file v1 will accept or send, in bytes.
+///
+/// The v1 path is whole-file resident: the receiver accumulates the body in a
+/// `Vec<u8>` and only then `atomic_write`s it, and the sender holds the bytes in
+/// `pending_out` on top of the caller's buffer. This cap is therefore a
+/// *memory* bound, enforced before any allocation (at offer time, on the
+/// unauthenticated declared size) and again on the file channel. True streaming
+/// (write-as-you-go + incremental sha256) is the follow-up that would let this
+/// rise; until then the cap keeps a single transfer inside ~1 GiB of RAM.
+pub const FILE_MAX: u64 = 512 * 1024 * 1024;
+
 impl FileHub {
     pub fn offer(
         &mut self,
@@ -137,6 +148,9 @@ impl FileHub {
             let name = sanitize_file_name(&f.name)?;
             if f.sha256.len() != 64 || !f.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err(CoreError::Sha256Mismatch);
+            }
+            if f.size > FILE_MAX {
+                return Err(CoreError::FileTooLarge(FILE_MAX));
             }
             files.push(FileMeta {
                 name,
@@ -345,6 +359,28 @@ mod tests {
             hub.offer(src, bad, 1).unwrap_err(),
             CoreError::UnsafeFileName
         );
+    }
+
+    #[test]
+    fn an_oversized_offer_is_refused_before_it_becomes_a_candidate() {
+        let mut hub = FileHub::default();
+        let src = DeviceId::from_id_pk(&[4u8; 32]);
+        let sized = |size: u64| FileOffer {
+            transfer_id: "tr_big".into(),
+            files: vec![FileMeta {
+                name: "huge.bin".into(),
+                size,
+                sha256: "c".repeat(64),
+            }],
+        };
+        // One byte over the cap is refused; the cap itself is allowed.
+        assert_eq!(
+            hub.offer(src.clone(), sized(FILE_MAX + 1), 1).unwrap_err(),
+            CoreError::FileTooLarge(FILE_MAX)
+        );
+        assert!(hub.get("tr_big").is_none());
+        assert!(hub.offer(src, sized(FILE_MAX), 2).is_ok());
+        assert!(!hub.is_accepted("tr_big"));
     }
 
     #[test]

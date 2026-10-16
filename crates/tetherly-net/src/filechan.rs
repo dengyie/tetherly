@@ -343,6 +343,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_declared_size_over_the_cap_is_refused_on_the_header_alone() {
+        // The channel header is unauthenticated, so a peer may claim any `total`.
+        // The cap must fire before a single chunk is read or a byte is buffered.
+        let token = [2u8; 32];
+        let (mut w, mut r) = duplex(64 * 1024);
+        tokio::spawn(async move {
+            w.write_all(&FILE_MAGIC_V2).await.unwrap();
+            write_len_prefixed(&mut w, b"tr_cap").await.unwrap();
+            write_len_prefixed(&mut w, &1025u64.to_be_bytes())
+                .await
+                .unwrap();
+            write_len_prefixed(&mut w, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+        });
+        let mut out = Vec::new();
+        let err = recv_chunks_into(&mut r, &token, "tr_cap", 1024, &mut out, |_, _| Ok(()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, NetError::TooLarge), "{err:?}");
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
     async fn tfl1_legacy_header_is_read_as_start_zero() {
         // The pre-resume format must still decode (treated as start=0) so an old
         // sender is not silently dropped.

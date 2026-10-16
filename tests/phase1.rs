@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tetherly_core::{hex_sha256, ManualClock, NotifyPush, CANDIDATE_TTL_MS};
+use tetherly_core::{hex_sha256, FileMeta, FileOffer, ManualClock, NotifyPush, CANDIDATE_TTL_MS};
 use tetherly_node::{MemoryInsertor, Node, NodeConfig, OverlayConfig, UiEvent};
 
 const OTP_BODY: &str = "【测试】验证码：524681，您正在登录";
@@ -360,6 +360,64 @@ async fn m1_7_file_reject_then_accept_sha256() {
     b.shutdown();
 }
 
+/// M1.7c — an offer whose declared size exceeds `FILE_MAX` is refused at the
+/// receiver before the user is ever asked, and the refusal must not be fatal to
+/// the session (the file hub rejects the offer, not the connection).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oversized_offer_is_refused_without_dropping_the_session() {
+    let (a_dir, _g1) = temp_dir("cap-a");
+    let (b_dir, _g2) = temp_dir("cap-b");
+    let a = Node::start(cfg(a_dir, "a", "windows")).unwrap();
+    let b = Node::start(cfg(b_dir.clone(), "b", "windows")).unwrap();
+    a.spawn_listeners().await.unwrap();
+    b.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    a.set_pin(pin);
+    b.set_pin(pin);
+    a.dial(b.control_addr()).await.unwrap();
+    wait_live(&a, Duration::from_secs(25)).await;
+    wait_live(&b, Duration::from_secs(25)).await;
+    let start = std::time::Instant::now();
+    while !a.live_peers().iter().any(|p| p.file_port.is_some())
+        || !b.live_peers().iter().any(|p| p.file_port.is_some())
+    {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("fileport caps.update never arrived");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let peer_b = b.identity().device_id().clone();
+    // The digest is well-formed, so only the size check can refuse this offer.
+    let oversized = FileOffer {
+        transfer_id: "tr_oversized".into(),
+        files: vec![FileMeta {
+            name: "huge.bin".into(),
+            size: tetherly_core::FILE_MAX + 1,
+            sha256: "d".repeat(64),
+        }],
+    };
+    a.send_to(&peer_b, oversized.to_frame().unwrap())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        b.offered_files().is_empty(),
+        "an oversized offer must never become a candidate the user can accept"
+    );
+    // The session must still be usable: a normal transfer lands on it.
+    let payload = vec![0x11u8; 64 * 1024];
+    let id = a
+        .offer_and_send_bytes(&peer_b, "small.bin", &payload, false)
+        .await
+        .unwrap();
+    wait_offered(&b, Duration::from_secs(3)).await;
+    b.user_accept_file(&id).await.unwrap();
+    let got = wait_inbox(&b_dir, "small.bin", Duration::from_secs(20)).await;
+    assert_eq!(hex_sha256(&got), hex_sha256(&payload));
+    a.shutdown();
+    b.shutdown();
+}
 /// M1.7b — an interrupted incoming transfer resumes from a persisted,
 /// chunk-aligned offset after a restart, sending only the missing tail.
 #[tokio::test(flavor = "multi_thread")]

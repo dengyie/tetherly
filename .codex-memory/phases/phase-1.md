@@ -1,7 +1,7 @@
 # Phase 1 — LAN desktop + Android
 
-- Closed: 2026-10-09 (CI slice, v1.3) / 2026-10-11 (Android native library, v1.10) / 2026-10-11 (notify.reply, v1.11)
-- Spec: `docs/DEVELOPMENT.md` v1.11 (§9.6 rewritten; §7.2 notify.reply now real; M1.1/M1.5 rows updated)
+- Closed: 2026-10-09 (CI slice, v1.3) / 2026-10-11 (Android native library, v1.10) / 2026-10-11 (notify.reply, v1.11) / 2026-10-16 (file/iface boundary gates, v1.24)
+- Spec: `docs/DEVELOPMENT.md` v1.11 (§9.6 rewritten; §7.2 notify.reply now real; M1.1/M1.5 rows updated); v1.24 adds the FILE_MAX offer/channel/sender gate + the single-source-of-truth `BindClass` classifier (§9.6 file-cap clause)
 - Delivered (CI slice, v1.3):
   - `tetherly-node`: identity/trust persistence (temp+rename, 0600), LAN bind (never `0.0.0.0`, skips the
     EasyTier `10.144.144.0/24`), mDNS `_tetherly._tcp`, session loop, caps advertise `fileport=`.
@@ -67,6 +67,14 @@
     Noise session → desktop candidate `has_otp:true` (body/OTP never in snapshot/logs).
   - macOS M1.1 (mac next iteration).
   - LAN-direct dual-physical round-trip (the v1.18 p95 is over the adb-reverse tunnel, not LAN).
+- Delivered (file/iface boundary gates, v1.24): `FILE_MAX = 512 MiB` (the **memory** bound of the whole-file-resident v1
+  transfer) is now a real gate at three points — `FileHub::offer_resumable` (new `CoreError::FileTooLarge`), the 45718
+  channel (`accept_file` plus `recv_chunks_after_header`'s `max_size`), and the sender entry `offer_and_send_bytes`; the old
+  `accept_file` guard `total > size.max(32 MiB)` was dead (a local `max()` always picked the larger operand). A refused
+  offer no longer tears the session down (`SessionEvent::FileOffer` logs and continues). Interface classification became
+  one rule: `tetherly_core::bind::BindClass` + `classify` + `reason()` (new `LoopbackAlias` for `127/8` aliases like
+  `127.0.0.53`, and `CgnatOverlay` for RFC 6598 `100.64.0.0/10`), with `lan::interface_report()` + `Snapshot.lan` +
+  `log_skipped_interfaces()` letting the UI explain “nothing found” without logs. 5 regressions (285 → 290 green).
 - Red lines honored: no EasyTier/DeskFlow/RustDesk/AGPL/GPL/LGPL linked; core stays OS-free
   (`cfg(target_os)`) with `#![forbid(unsafe_code)]`; the JNI `unsafe` is exempted in exactly one file and
   gated to Android; no `0.0.0.0` binds; pairing stays on 45717; OTP scoring untouched; no OTP/SMS body/

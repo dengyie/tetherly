@@ -189,6 +189,9 @@ struct Snapshot {
     /// Input channel state: whether 45719 is dialled and where the seat is.
     input_channel: bool,
     input_seat: String,
+    /// Every local address and why it is or is not in the LAN listen set. Lets
+    /// the UI explain "nothing found" without the user reading logs.
+    lan: Vec<crate::lan::IfaceReport>,
 }
 
 #[derive(Serialize)]
@@ -566,6 +569,7 @@ async fn snapshot(node: &Node) -> Snapshot {
         },
         input_channel: node.input_channel_open().await,
         input_seat: node.input_seat_str().to_string(),
+        lan: crate::lan::interface_report(),
     }
 }
 

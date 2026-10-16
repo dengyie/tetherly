@@ -35,12 +35,14 @@ pub use ancs::{
     ATTR_TITLE, NOTIF_ATTR_REQUEST, UUID_ANCS_SERVICE, UUID_CONTROL_POINT, UUID_DATA_SOURCE,
     UUID_NOTIFICATION_SOURCE,
 };
-pub use bind::{is_unspecified_bind, should_listen, should_listen_v4};
+pub use bind::{
+    classify, classify_v4, is_unspecified_bind, should_listen, should_listen_v4, BindClass,
+};
 pub use clip::{ClipApply, ClipHub};
 pub use dedup::{ClipLimiter, NotifyLimiter, TcpLimiter, TokenBucket};
 pub use device_id::DeviceId;
 pub use error::CoreError;
-pub use filexfer::{FileHub, IncomingTransfer, ResumeState, ResumeTable, TransferStatus};
+pub use filexfer::{FileHub, IncomingTransfer, ResumeState, ResumeTable, TransferStatus, FILE_MAX};
 pub use frame::{
     hex_lower, hex_sha256, CapsUpdate, ClipSet, FileDecision, FileDone, FileMeta, FileOffer,
     InnerFrame, NotifyDismiss, NotifyPush, NotifyReply, CANDIDATE_TTL_MS, CLIPBOARD_OTP_CLEAR_MS,

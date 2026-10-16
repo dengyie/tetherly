@@ -126,10 +126,14 @@
   tests / deny all green. **Honest boundary**: the real iPhone runtime (pairing, live notifications, M4.1 p95)
   stays Manual-required.
 
+  **文件单文件上限成为真门 + 网卡分类可解释且单一真理源 (v1.24)** — 两个边界修复，同属「成功但不可证 / 静默跳过」缺陷族：
+  (1) `tetherly_core::filexfer::FILE_MAX = 512 MiB` 此前是**死常量**；v1 文件路径两端整文件驻留内存，故它本质是**内存**上界，却没有任何一处真正把门。现在三处设卡：offer 校验（`offer_resumable` 里 `size > FILE_MAX → CoreError::FileTooLarge`，新错误变体）、45718 通道（`recv_chunks_after_header` 的 `max_size` 由 `u64::MAX` 收紧为 `FILE_MAX`，`accept_file` 的旧「死守卫」`total > size.max(32 MiB)` 换成真判据）、发送端入口（`offer_and_send_bytes`）。并且**拒收不再拆会话**：`SessionEvent::FileOffer` 臂的 `?` 冒泡改为 `warn!` + 继续（超限/坏名/坏哈希只拒这一单，不杀会话）。
+  (2) 网卡分类此前散落在 `should_listen` 的 IP 区间判断里，读者看不到「为什么这个地址被跳过」。现在 `tetherly_core::bind::{BindClass, classify, classify_v4}` 是**单一真理源**：新增 `LoopbackAlias`（非 `127.0.0.1` 的 `127/8` 别名，如 systemd-resolved 的 `127.0.0.53`——`if_addrs` 会枚举它，旧 `lan_ips` 靠 `is_loopback()` 隐式跳过，与 `should_listen` 判据会漂移）与 `CgnatOverlay`（RFC 6598 `100.64.0.0/10` = Tailscale/NetBird 承载网，在 Rust 里既非 `is_private()` 也非 link-local，故 v1 默认静默跳过，需显式 `--overlay-cidr`）；`BindClass::reason()` 给每条被跳过的地址一句可读理由。node 侧 `lan::interface_report()` 做成只读出口，`uihttp::Snapshot.lan` 让 UI 不读日志也能解释「什么都没找到」，启动时 `log_skipped_interfaces()` 逐个打一行 info。**290 全绿**（285 → +5）。
 ## Current Phase
-- Spec `docs/DEVELOPMENT.md` **v1.23**. Phase 5 real-machine loop + Phase 3 real-machine chain +
+- Spec `docs/DEVELOPMENT.md` **v1.24**. Phase 5 real-machine loop + Phase 3 real-machine chain +
   Phase 1 Android native lib + `notify.reply` quick reply + file cross-process resume + Windows credential-vault identity storage + macOS Keychain / Linux libsecret backends + **§13 proptest/fuzz layers** + **§13 stateful state-machine properties** + **real-device APK end-to-end + `tetherly pin` fix + on-device M1.1 p95** + **macOS/Linux screen backends** + **CLI control plane as live-node loopback clients + Linux glibc 2.35 release anchor** + **session liveness/backpressure + glibc 2.31 Linux release anchor (v1.21)** + **inner-frame payload budget corrected (v1.22)** + **Windows ANCS BLE GATT transport + inbound pump (v1.23)** all landed.
 - **Windows ANCS BLE GATT transport + inbound pump (v1.23)**: `crates/tetherly-node/src/ancs.rs` (`AncsInbound` four-state channel; `open(address) -> Result<Option<AncsLink>, CoreError>`, non-Windows honestly `Ok(None)`) + `crates/tetherly-node/src/ancs/win_gatt.rs` (self-contained `#[cfg(windows)]`). Dedicated `tetherly-ancs` thread + MTA apartment owns all WinRT interfaces; front-end `AncsTransport` holds only a `Sender`. Property-validated characteristics; CCCD `Notify`; `ValueChanged` copies bytes only; Control Point written on that thread with a 10s ack bound; `ConnectionStatusChanged` → backoff (1s→30s); `Session::drop` deregisters. Blocking `IAsyncOperation::get()` → no new dep, no executor. `Node::spawn_ancs_pump` (own thread + current-thread runtime) wires `AncsInbound` into the `ancs_*` entries + `ancs_tick` (500ms); CLI `--ancs <addr>`. 280 → **285 green**; `Cargo.lock` unchanged.
+- **FILE_MAX 成为真门 + 网卡分类单一真理源 (v1.24)**: `crates/tetherly-core/src/{bind.rs,filexfer.rs,error.rs,lib.rs}`、`crates/tetherly-node/src/{lan.rs,runtime.rs,uihttp.rs}`、`crates/tetherly-net/src/filechan.rs`、`tests/phase1.rs`。`BindClass{Listen,LoopbackAlias,Unspecified,Broadcast,Multicast,Overlay,CgnatOverlay,Ipv6,NotLan}` + `classify()`；`FileTooLarge(u64)`；`FILE_MAX` 三处设卡（offer / 45718 通道 / 发送端）；`SessionEvent::FileOffer` 拒收改为 `warn!` 不拆会话；`lan::IfaceReport` + `interface_report()` + `log_skipped_interfaces()`；`Snapshot.lan`。新增 5 条回归：`bind::classify_names_the_reason_and_stays_consistent`、`filexfer::an_oversized_offer_is_refused_before_it_becomes_a_candidate`、`filechan::a_declared_size_over_the_cap_is_refused_on_the_header_alone`、`lan::interface_report_matches_the_actual_listen_set`、`phase1::an_oversized_offer_is_refused_without_dropping_the_session`。SSOT v1.24。
 - **CLI control plane as live-node loopback clients + glibc 2.35 release anchor (v1.20)**: `tetherly dial` used to `Node::start(cfg)?` a second node — with the daemon already running it re-bound the same LAN ports and died with `no LAN address bound`; `tetherly inject-notify` built a `NotifyPush` in its own process and only called `ingest_local_push`, so it never crossed the Noise session and never reached a peer. Both were the v1.18 `pin` defect class (only the process holding the in-process state can arm a PIN / hold the session / deliver a push). Fix: `Cmd::Dial { addr, pin, ui_port }` → `loopback_post(ui_port, "/api/dial", {addr,pin})`; `InjectNotify` removed, replaced by `Cmd::Notify { title, body, app_id, peer, ui_port }` → `loopback_post(ui_port, "/api/notify", …)` backed by a new `POST /api/notify` route that resolves the target (one live peer implied, multiple need explicit `--peer` parsed as a `DeviceId` and checked against the live set, unknown/offline → 400 `peer is not connected`, zero → 400 `no connected peer`), builds a `.truncate()`d push (`app_name="tetherly"`, actions `["copy"]`, uid from the wall clock), and calls `Node::send_notify()`. `.github/workflows/release.yml`: Linux build row `ubuntu-latest` → `ubuntu-22.04` (glibc 2.35) plus a guard step `objdump -T target/release/tetherly | grep -E 'GLIBC_2\.(3[6-9]|[4-9][0-9])'` that fails the build rather than shipping a binary that cannot start on glibc 2.31 hosts. Not committed: the local Windows-GNU MinGW.org 6.3.0 is a 32-bit toolchain whose `ld` rejects rustc 1.99's `--high-entropy-va`, so the local test run used rustup's bundled 64-bit self-contained MinGW (gcc 14.2) as linker plus NDK clang 20 for the missing `as`/C frontend (`zstd-sys`); `.cargo/config.toml` stays machine-agnostic and CI's MSVC host is unaffected. Regression: `tests/phase1.rs::notify_posted_to_the_live_node_api_reaches_the_paired_peer` (the posted text reaches the peer's candidate list, and an unconnected `--peer` is refused, so a 200 cannot be a blanket accept). 270 → **271 green**.
 - **Real-device APK E2E + `tetherly pin` fix + M1.1 p95 (v1.18)**: cloud-phone Galaxy Fold (SM-F900F / arm64-v8a / Android 13, over `adb reverse`) run of the **shipped APK** — front-end `NotificationListenerService` → JNI `Java_app_tetherly_NativeBridge_*` → `libtetherly_android.so` live Noise session → desktop node extracts candidate `{app_id:"com.android.shell", title:"Your verification code", has_otp:true, source:tdev_...}` (**body/OTP never in snapshot or logs**). On-device M1.1 notify round-trip measured `rtt_min≈17.4ms / p50≈17.9ms / mean≈37.5ms / p95≈56.9ms / p99≈361.8ms / max≈361.8ms` — inside the <1.0s budget (≈18× margin); **honest boundary**: this is the cloud phone over the `adb reverse` tunnel, NOT a LAN-direct pair (same model on LAN ≈15–16ms), the p99 tail is adb-tunnel jitter, 8h soak still Manual-required. Two-process live proof: `tetherly pin --ui-port 45726` printed a PIN, `POST /api/dial` with it returned `{"ok":true}`, host logged `path lan peer=tdev_...`; off-port (`45999`) fails honestly with exit 1.
 - **`tetherly pin` defect (found by the real-device run, cost hours of false diagnosis)**: `Cmd::Pin` used to do `Node::start(cfg)?; println!(node.generate_pin()?)` — a **throwaway process** whose PIN (`pin_created_ms` is pure in-process state, never persisted) **no listener can ever accept**, so the live daemon always logged `pin expired`. The working route was always the live daemon's loopback API `POST 127.0.0.1:45716/api/pin` (the UI 「显示 8 位 PIN」 button). Fix: `Cmd::Pin { ui_port }` (default 45716) now calls the new `tetherly_node::loopback_post(port, "/api/pin", b"{}")` to arm the **live** node, and fails honestly (non-zero, actionable message) when nothing is listening. Support: `uihttp::spawn` → `bind_and_spawn` (sync bind, returns the real port; a taken port is now a hard error, not a silent `warn!`), `Node::spawn_ui()`/`Node::ui_port()` (`Shared.bound_ui: AtomicU16`), `run()` binds the UI before returning so "node up" ⇒ port really reachable. Regression: `tests/phase1.rs::pin_shown_by_the_live_node_api_is_the_one_that_pairs` (asserts a third node armed with a hardcoded PIN cannot be dialed, so the claim cannot pass by accident). 269 → **270 green**.
@@ -231,7 +235,7 @@
 
 ## Last Verified
 - Local: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo test --workspace --locked` all green — **269 passed, 0 failed** (v1.17: +18 state-machine
+  `cargo test --workspace --locked` all green — **290 passed, 0 failed** (v1.24: 285 → 290, the 5 boundary regressions — core `bind` classifier invariants, core oversized-offer refusal, net declared-size-over-cap header refusal, node iface-report/listen-set agreement, and an end-to-end oversized offer that leaves the session alive; v1.17 had added 18 state-machine tests).
   tests over the prior 251; the 18 = 11 proptest over arbitrary op-programs + 7 deterministic
   non-vacuity witnesses).
 - Cross-check: `cargo clippy --target x86_64-unknown-linux-gnu --workspace --all-targets --locked -- -D warnings`
@@ -276,6 +280,7 @@
 - `snow` 0.9 has no `rekey()`; sessions **rebuild a fresh IK handshake in band** when the transport hits 2^16 msgs or 3600s (initiator-driven, cancellation-safe; `RekeyRequired` is retired).
 - Screen `seq` must stay session-monotonic; `on_peer_gone` resets it and a reconnect must not replay old frames.
 - Phase 4's Windows BLE transport now exists (v1.23), but its **runtime** behaviour against a physical iPhone is unverified, and macOS (CoreBluetooth) / Linux (BlueZ) GATT stacks are still unimplemented (`open()` honestly `Ok(None)`).
+- No production file-**send** path exists (v1.24 finding): `offer_and_send_bytes` is called only from `tests/phase1.rs`; there is no `/api/file/send` route and no CLI subcommand, so the file feature is receive-only end-to-end. And the v1 path is whole-file resident in memory on both ends, which is why `FILE_MAX` (512 MiB) is a memory bound — real streaming (write-as-you-go + incremental sha256, chunked/mmap send) is the follow-up that would let it rise.
 - AGPL/GPL screen-capture crates are banned by deny.toml; only permissive impls (windows, core-graphics, x11rb) are eligible.
 
 ## Active Blockers
@@ -286,23 +291,29 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
-- v1.23: the computer-side ANCS real transport stack lands — `tetherly-node::ancs::win_gatt` (WinRT BLE GATT,
-  dedicated thread + MTA apartment, property-validated characteristics, 10s-bounded serial Control Point,
-  backoff reconnect) plus `Node::spawn_ancs_pump` and `tetherly run --ancs <addr>`, closing the §9.4 gap
-  where the port existed but nothing was plugged in. **285 tests green** locally (fmt / clippy `-D warnings`
-  / `cargo test --workspace --locked` / `cargo deny` all green); `Cargo.lock` unchanged. SSOT/memory being
-  synced and the change committed+pushed to trigger CI. v1.21 already **shipped** as `v0.1.3` (session
-  liveness/backpressure + glibc 2.31 Linux release anchor; `ci.yml` green on all five jobs, `release.yml`
-  green, measured glibc floor `GLIBC_2.30`, six assets published). Next work is the Manual-required
-  real-machine items (see Active Blockers) — for Phase 4 that means a physical iPhone against the new
-  Windows stack.
+- v1.24: two boundary fixes land — (1) `FILE_MAX` (512 MiB) stops being a dead constant: it is the
+  **memory** bound of the whole-file-resident v1 path and is now enforced at three points (offer
+  validation in `FileHub::offer_resumable`, the 45718 channel via `recv_chunks_after_header`'s `max_size`
+  plus `accept_file`'s guard, and the sender entry `offer_and_send_bytes`), and a refused offer no longer
+  tears the session down (the `SessionEvent::FileOffer` arm logs and continues). (2) Interface
+  classification becomes a single source of truth: `tetherly_core::bind::BindClass` + `classify` give each
+  local address a class and a human-readable `reason()`, adding `LoopbackAlias` (a `127/8` alias other than
+  `127.0.0.1`, e.g. systemd-resolved's `127.0.0.53`) and `CgnatOverlay` (RFC 6598 `100.64.0.0/10` — the
+  Tailscale/NetBird fabric, neither RFC1918 nor link-local, so v1 skips it silently unless the user passes
+  `--overlay-cidr`); `lan::interface_report()` exposes it read-only, `Snapshot.lan` surfaces it in the UI,
+  and `log_skipped_interfaces()` prints one line per skipped address at startup. **290 tests green**
+  locally (285 → +5); fmt / clippy `-D warnings` / `cargo deny` clean; `Cargo.lock` unchanged.
+  Two adjacent gaps found and reported (not fixed): there is **no production file-send path**
+  (`offer_and_send_bytes` is test-only — the receiver is fully wired, the sender is not), and the
+  whole-file-in-memory design means true streaming is the follow-up that would let `FILE_MAX` rise.
+  Next work is the Manual-required real-machine items (see Active Blockers).
 
 ## Next Milestone
 - Phase 6 (single-item): Android controlled device, WinFsp mount, file persistent resume,
   Linux ANCS experience, embedded EasyTier FFI. (`notify.reply` closed v1.11; removed from backlog.)
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.23)
+- `docs/DEVELOPMENT.md` (SSOT v1.24)
 - `crates/tetherly-{core,crypto,net,node,android}` + `crates/tetherly-core/src/{ancs,screen}.rs`
   + `crates/tetherly-node/src/{screen.rs,ancs.rs,ancs/win_gatt.rs}` + `crates/tetherly-android/src/{store,client,jni}.rs`
 - `crates/tetherly-core/tests/{decoders,fuzz_decoders,state_machines}.rs`, `crates/tetherly-net/tests/decoders.rs`

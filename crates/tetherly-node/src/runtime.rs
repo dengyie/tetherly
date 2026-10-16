@@ -984,6 +984,10 @@ impl Node {
         let screen_listeners =
             data_listeners!(self.shared.cfg.screen_port, self.shared.bound_screen);
 
+        // One startup line per address left out of the LAN set, so a user whose
+        // only path is a CGNAT overlay (Tailscale/NetBird) can see why nothing
+        // was discovered instead of guessing.
+        crate::lan::log_skipped_interfaces();
         if self.shared.cfg.advertise {
             self.advertise_mdns();
         }
@@ -1495,16 +1499,22 @@ impl Node {
                 if let Some(off) = hint {
                     info!(transfer = %tid, offset = off, "resuming interrupted transfer");
                 }
-                let t = {
+                // A refused offer (unsafe name, bad digest, over `FILE_MAX`, or a
+                // full candidate table) is a peer-side protocol fault, not a
+                // session fault: log and drop this one offer, keep the session.
+                let offered = {
                     let mut hubs = self.shared.hubs.lock().expect("hubs");
                     hubs.files.offer_resumable(
                         peer.clone(),
                         offer,
                         self.shared.clock.unix_ms(),
                         hint,
-                    )?
+                    )
                 };
-                self.emit(file_offered(&t));
+                match offered {
+                    Ok(t) => self.emit(file_offered(&t)),
+                    Err(e) => warn!(%e, transfer = %tid, "refused file offer"),
+                }
             }
             SessionEvent::FileAccept(d) => {
                 debug!(transfer = %d.transfer_id, resume = ?d.resume_from, "peer accepted");
@@ -1603,8 +1613,12 @@ impl Node {
         if total != size || start != resume_hint {
             return Err(tetherly_net::NetError::Handshake);
         }
-        // The offer's size is authoritative; also refuse an absurd declared size.
-        if total > size.max(32 * 1024 * 1024) {
+        // The offer's size is authoritative (already capped by the hub), but the
+        // channel header is unauthenticated, so re-assert the cap here and hand
+        // the channel the real bound instead of `u64::MAX`: the whole body is
+        // buffered in memory below, so an unbounded `total` would be an
+        // unbounded allocation.
+        if total > tetherly_core::FILE_MAX {
             return Err(tetherly_net::NetError::TooLarge);
         }
         let token = self
@@ -1647,7 +1661,7 @@ impl Node {
             &transfer_id,
             total,
             start,
-            u64::MAX,
+            tetherly_core::FILE_MAX,
             &mut out,
             |buf, new_len| {
                 let mut f = std::fs::OpenOptions::new().append(true).open(&part)?;
@@ -1817,6 +1831,11 @@ impl Node {
         data: &[u8],
         _wait_accept: bool,
     ) -> Result<String, CoreError> {
+        // Symmetric with the receiver's cap: never offer bytes the peer is
+        // obliged to refuse, and never clone a body we cannot hold.
+        if data.len() as u64 > tetherly_core::FILE_MAX {
+            return Err(CoreError::FileTooLarge(tetherly_core::FILE_MAX));
+        }
         // Content-addressed: the same bytes re-offered after an interruption
         // carry the same id, so the receiver's persisted partial can be matched
         // and resumed. Different content -> different id -> fresh transfer.
