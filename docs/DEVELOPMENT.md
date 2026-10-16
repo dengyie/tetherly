@@ -3,12 +3,32 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.26** |
+| 文档版本 | **1.27** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.26 落地流式大文件传输引擎（$O(1)$ 内存常数界、64 KiB 块对齐增量流水线、增量 SHA-256 校验）**——(1) **构建与验证体系**：全面执行 GitHub CI-First（ADR-018），Linux glibc 2.31 容器、Windows x86_64、macOS arm64、Android 原生库矩阵及 `cargo deny` 许可审计 100% 依托 GitHub Actions；(2) **流式大文件传输全面闭环（ADR-019）**：彻底消除 sender 与 receiver 端全量 `Vec<u8>` 内存驻留，实现基于 64 KiB `FILE_CHUNK` 块对齐的纯流式边读/边发/边收/边写与 `IncrementalSha256` 增量校验，将传输过程内存开销严格限定为 $O(1)$ 常数界；(3) **全量回归 100% 全绿**：新增核心单测与端到端多块流式集成测试 `multi_chunk_file_streamed_via_live_node_api_reaches_inbox`，全工作区测试全过。+ v1.25 补齐文件发送生产闭环（`/api/file/send` 与 `tetherly send` CLI）+ v1.24 文件大小真门与网卡分类真理源（290 全绿）+ v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.27 落地大文件传输全链路实时追踪与 Web UI 进度可视化（ADR-020）**——(1) **流式进度回调**：`tetherly-net::filechan` 扩充 `send_stream_from_with_progress` 与 `recv_chunks_to_sink`，每块完成精确触发 `(chan_offset, chunk_len)`；(2) **运行时活跃传输状态机**：`tetherly-node::runtime` 新增 `ActiveTransfer` 模型（区分 `inbound`/`outbound` 方向与 `transferring`/`verifying`/`completed`/`failed` 阶段），支持多任务并发与断点进度累加；(3) **回环接口与 UI 可视化**：`GET /api/state`（45716 端口）暴露 `Snapshot.transfers`，`ui/index.html` 实现卡片式进度条、字节计数、方向标签与平滑动画；(4) **CI-First 全绿验证**：集成测试覆盖流式分块传输过程中的瞬态监控、落盘验证与状态迁移，GitHub Actions CI（Ubuntu、macOS、Windows、Android、cargo deny）5/5 任务全绿。+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.27 相对 1.26(大文件传输实时追踪、双向进度观测与 Web UI 可视化进度条全闭环)**
+
+- **动机(消除传输黑盒，实现传输过程全透明与双向可观测性)**:
+  在 v1.26 引入流式大文件传输引擎后，系统成功消除了内存暴涨并达成了 $O(1)$ 内存常数界。然而，流式传输在运行时对上层系统呈现为「黑盒」：
+  1. 发送端在网络通道推送大文件（耗时数秒至数分钟）时，UI 与 CLI 无法感知当前已发送字节数与传输速率；
+  2. 接收端在分块落盘 `.part` 阶段，缺少向回环控制面汇报当前进度的统一状态机；
+  3. 最终落盘校验（`IncrementalSha256` 匹配）与原子重命名阶段缺乏明确的阶段区分；
+  必须建立一套从底层网络通道、节点运行时状态机、回环 API 到前端界面的端到端可观测性机制。
+
+- **架构与协议设计(ADR-020 实时传输追踪)**:
+  1. **数据通道分块进度回调 (`send_stream_from_with_progress`)**:
+     - 在 `tetherly-net::filechan` 扩充发送流原语，接收 `FnMut(u64, usize) -> Result<(), NetError>` 闭包，每次 64 KiB 加密块写出并刷新到 Socket 后精确触发，汇报 `(chan_offset, chunk_len)`。
+  2. **节点运行时状态机 (`ActiveTransfer`)**:
+     - 在 `tetherly-node::runtime` 定义传输方向 `TransferDirection`（`Inbound`, `Outbound`）与生命周期阶段 `TransferPhase`（`Transferring`, `Verifying`, `Completed`, `Failed`）。
+     - `Shared` 注册 `active_transfers: Mutex<HashMap<String, ActiveTransfer>>`。在发起发送、对端接受、数据写入、增量校验与落盘完成各个阶段精准流转状态，支持按开始时间倒序输出。
+  3. **回环 UI 控制平面集成 (`Snapshot.transfers`)**:
+     - 在 `tetherly-node::uihttp` 中将节点活跃传输列表暴露至 `GET /api/state` 的 `Snapshot.transfers` 字段。
+  4. **Web UI 实时进度条与卡片渲染 (`ui/index.html`)**:
+     - 增加现代风格的进度条容器与动态颜色填充，展示传输方向（上传/下载）、文件名、已传字节/总字节、实时百分比以及当前阶段徽章。
 
 **1.26 相对 1.25(流式大文件传输引擎全面落地: $O(1)$ 内存常数界、零整文件驻留、增量 SHA-256 与跨平台生产闭环)**
 
@@ -1147,3 +1167,41 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
    - 网络单测：`streaming_roundtrip_with_sink_and_incremental_hasher`、`streaming_resume_from_chunk_boundary`；
    - 端到端回归：`tests/phase1.rs::multi_chunk_file_streamed_via_live_node_api_reaches_inbox`，跨多个 64 KiB 块验证端到端流式落盘与 SHA-256 完整性；
    - 遵循 ADR-018 GitHub CI-First 准则，GitHub Actions 工作流 `ci.yml`（run `38973071906`，5 个跨平台矩阵任务）与 `release.yml`（run `38973572292`，Debian 11 bullseye glibc 2.31 容器构建、Windows x86_64、macOS arm64）全量 100% 绿灯通过。
+
+---
+
+## 26. v1.27 实施与交付清单（传输进度实时追踪、双向观测状态机与 UI 进度可视化）
+
+1. **动机与设计准则（ADR-020）**：
+   - 彻底解决 v1.26 大文件流式传输过程中的黑盒问题，让用户与控制面实时掌握传输瞬态与最终状态；
+   - 维持 ADR-019 的 $O(1)$ 内存常数界与零拷贝流式性能，进度汇报以零额外内存分配的闭包形式挂载；
+   - 保持 ADR-013 回环客户端架构与 ADR-018 GitHub CI-First 自动化工程原则。
+2. **核心模块重构与增量演进**：
+   - **`tetherly-net::filechan` 发送端进度通知**：
+     - 新增 `send_stream_from_with_progress<R, W, F>`，支持在每次分块写出后执行 `on_chunk(chan_offset, want)`；
+     - 原 `send_stream_from` 作为零开销特化委托调用新原语；
+     - 增设单测 `streaming_send_with_progress_reports_accurate_offsets`，断言每个 64 KiB 偏移量的单调递增性与准确性。
+   - **`tetherly-node::runtime` 传输跟踪状态机**：
+     - 定义 `TransferDirection`（`Inbound`, `Outbound`）与 `TransferPhase`（`Transferring`, `Verifying`, `Completed`, `Failed`）；
+     - 定义 `ActiveTransfer` 模型，包含 `transfer_id`, `peer`, `direction`, `filename`, `total`, `transferred`, `phase`, `error`, `started_ms`, `updated_ms`；
+     - 在 `Node` 运行时中维护 `shared.active_transfers` 哈希表，提供 `update_transfer_progress`、`set_transfer_phase` 及 `active_transfers(&self) -> Vec<ActiveTransfer>`（按 `started_ms` 降序排列，严格符合 Clippy `sort_by_key` 规范）；
+     - 完整覆盖从 `offer_and_send_file`、`on_peer_accepted_file` 到 `user_accept_file` 及 `handle_file_stream` 的双向全生命周期流转。
+   - **`tetherly-node::uihttp` 回环 API 呈现**：
+     - `Snapshot` 增加 `transfers: Vec<crate::runtime::ActiveTransfer>` 字段；
+     - `GET /api/state` 实时序列化输出当前活跃与近期完成的文件传输列表。
+   - **`ui/index.html` Web UI 实时动态呈现**：
+     - 新增「实时传输状态」区块与现代化 UI 样式（`.progress-bar-bg`, `.progress-bar-fill`, `.badge`）；
+     - 渲染文件传输卡片，动态计算传输百分比，格式化字节显示（B/KB/MB/GB），根据阶段渲染不同色彩标识。
+3. **测试覆盖与 GitHub CI 验证**：
+   - `tests/phase1.rs` 新增端到端集成测试 `streaming_file_transfer_tracks_active_progress_and_completion_states`：
+     - 发起真实大文件流式发送，断言发送端初始状态为 `Outbound`、`Transferring`、`transferred: 0`；
+     - 对端确认接收后，断言文件到达收件箱并验证 SHA-256 哈希值；
+     - 验证发送端与接收端均平滑跃迁至 `Completed` 阶段，且 `transferred == total`；
+     - 通过直接向 `127.0.0.1:45716` 发送 `GET /api/state` 请求，断言回环接口中的 `transfers` 数组内容 100% 匹配；
+   - 遵循 ADR-018 GitHub CI-First 原则，在 GitHub Actions CI（run `38979042878`）上全量验证：
+     - `check (ubuntu-latest)`: fmt, clippy, test 耗时 3m 2s 全部通过；
+     - `check (windows-latest)`: fmt, clippy, test 耗时 2m 47s 全部通过；
+     - `check (macos-latest)`: fmt, clippy, test 耗时 2m 16s 全部通过；
+     - `android`: NDK arm64-v8a 原生库构建、Gradle 测试与 APK 打包耗时 1m 43s 全部通过；
+     - `deny`: 许可证与依赖合规审计耗时 51s 全部通过。
+
