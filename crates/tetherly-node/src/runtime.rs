@@ -2059,7 +2059,7 @@ impl Node {
         let offer = FileOffer {
             transfer_id: transfer_id.clone(),
             files: vec![tetherly_core::FileMeta {
-                name: safe_name,
+                name: safe_name.clone(),
                 size,
                 sha256: digest,
             }],
