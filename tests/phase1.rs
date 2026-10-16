@@ -714,6 +714,52 @@ async fn file_sent_via_live_node_api_reaches_the_paired_peer() {
     peer.shutdown();
 }
 
+/// Multi-chunk streaming file transfer: a file spanning multiple 64 KiB chunks
+/// is streamed through `offer_and_send_file` with O(1) memory, received into
+/// `.part` with incremental SHA-256 hashing, and atomically placed in the inbox.
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_chunk_file_streamed_via_live_node_api_reaches_inbox() {
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    let ui_port = host.spawn_ui().await.unwrap();
+
+    let (send_dir, _g_send) = temp_dir("stream-send");
+    let file_path = send_dir.join("large_archive.bin");
+    let total_size = 3 * tetherly_core::FILE_CHUNK + 12345;
+    let file_content: Vec<u8> = (0..total_size).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&file_path, &file_content).unwrap();
+    let expected_hash = hex_sha256(&file_content);
+
+    let payload = serde_json::json!({
+        "path": file_path.to_str().unwrap(),
+        "name": "large_archive.bin",
+    });
+    let (code, body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/send",
+        &serde_json::to_vec(&payload).unwrap(),
+    )
+    .await
+    .expect("live node API reachable");
+    assert_eq!(
+        code,
+        200,
+        "send response: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let transfer_id = resp["transfer_id"].as_str().unwrap();
+
+    wait_offered(&peer, Duration::from_secs(5)).await;
+    peer.user_accept_file(transfer_id).await.unwrap();
+
+    let received = wait_inbox(g2.path(), "large_archive.bin", Duration::from_secs(10)).await;
+    assert_eq!(received.len(), total_size);
+    assert_eq!(hex_sha256(&received), expected_hash);
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

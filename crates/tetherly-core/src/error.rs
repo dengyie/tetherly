@@ -86,10 +86,18 @@ pub enum CoreError {
     ScreenFragment,
     #[error("screen compression codec failed: {0}")]
     ScreenCodec(String),
+    #[error("file error: {0}")]
+    File(String),
 }
 
 impl From<serde_json::Error> for CoreError {
     fn from(value: serde_json::Error) -> Self {
         Self::Json(value.to_string())
+    }
+}
+
+impl From<std::io::Error> for CoreError {
+    fn from(value: std::io::Error) -> Self {
+        Self::File(value.to_string())
     }
 }

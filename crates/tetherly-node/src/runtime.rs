@@ -32,7 +32,7 @@ use tetherly_core::{
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
-use tetherly_net::filechan::{read_header as read_file_header, recv_chunks_after_header};
+use tetherly_net::filechan::read_header as read_file_header;
 use tetherly_net::session::{
     accept_session, dial_session, ActiveSession, SessionConfig, CONTROL_PORT, FILE_PORT,
     HANDSHAKE_TIMEOUT, INPUT_PORT, SCREEN_PORT,
@@ -205,9 +205,15 @@ struct Hubs {
     resume: tetherly_core::ResumeTable,
 }
 
+enum OutboundSource {
+    Bytes(Vec<u8>),
+    Path(std::path::PathBuf),
+}
+
 struct OutboundFile {
     peer: DeviceId,
-    data: Vec<u8>,
+    source: OutboundSource,
+    size: u64,
 }
 
 /// Sidecar persisted next to a `.part` file: lets an interrupted incoming
@@ -1627,70 +1633,85 @@ impl Node {
         let dest_dir = self.shared.cfg.data_dir.join("inbox");
         std::fs::create_dir_all(&dest_dir)?;
         let part = dest_dir.join(format!(".{}.part", transfer_id));
-        // Preload the resume prefix from the durable partial, refusing a resume
-        // the local file cannot actually honor.
-        let mut out = if start > 0 {
-            let bytes = std::fs::read(&part).unwrap_or_default();
-            let aligned =
-                bytes.len() as u64 - (bytes.len() as u64 % tetherly_core::FILE_CHUNK as u64);
+
+        let mut hasher = tetherly_core::IncrementalSha256::new();
+        // If resuming, verify that the on-disk partial exists and matches start,
+        // feeding the prefix [0..start] into the incremental hasher.
+        if start > 0 {
+            let meta = std::fs::metadata(&part)?;
+            let aligned = meta.len() - (meta.len() % tetherly_core::FILE_CHUNK as u64);
             if aligned < start {
                 return Err(tetherly_net::NetError::Handshake);
             }
-            let mut v = bytes;
-            v.truncate(start as usize);
-            v
-        } else {
-            Vec::new()
-        };
-        let mut written = out.len() as u64;
-        // Make the on-disk partial exactly `start` bytes so appends land at the
-        // right offset (a stale/un-aligned tail from a previous attempt is
-        // dropped; the sender re-sends that whole chunk).
-        {
+            use std::io::Read;
+            let mut f = std::fs::File::open(&part)?;
+            let mut buf = [0u8; tetherly_core::FILE_CHUNK];
+            let mut read_total = 0u64;
+            while read_total < start {
+                let want = ((start - read_total) as usize).min(buf.len());
+                f.read_exact(&mut buf[..want])?;
+                hasher.update(&buf[..want]);
+                read_total += want as u64;
+            }
+        }
+        let mut written = start;
+        // Open the .part file for writing chunks at offset `start`.
+        let mut part_file = {
             let f = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
                 .truncate(false)
                 .open(&part)?;
-            f.set_len(written)?;
+            f.set_len(start)?;
             f.sync_all()?;
-        }
-        let res = recv_chunks_after_header(
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&part)
+                .await?
+        };
+        use tokio::io::AsyncSeekExt;
+        part_file.seek(std::io::SeekFrom::Start(start)).await?;
+
+        let res = tetherly_net::filechan::recv_chunks_to_sink(
             &mut stream,
+            &mut part_file,
             &token,
             &transfer_id,
             total,
             start,
             tetherly_core::FILE_MAX,
-            &mut out,
-            |buf, new_len| {
-                let mut f = std::fs::OpenOptions::new().append(true).open(&part)?;
-                use std::io::Write;
-                f.write_all(&buf[written as usize..new_len as usize])?;
-                f.sync_all()?;
-                written = new_len;
+            hasher,
+            |chan_offset, chunk_len| {
+                written = chan_offset + chunk_len as u64;
                 Ok(())
             },
         )
         .await;
+
         if let Err(e) = res {
             // Persist a chunk-aligned resume marker (in memory + sidecar) so the
             // next offer resumes instead of restarting.
             self.note_resume(&source, &transfer_id, total, written);
             return Err(e);
         }
-        if tetherly_core::hex_sha256(&out) != expected {
+
+        let computed_digest = tetherly_core::hex_lower(&res.unwrap());
+        if computed_digest != expected {
             let _ = std::fs::remove_file(&part);
             self.clear_resume(&transfer_id);
             return Err(tetherly_net::NetError::File("sha256".into()));
         }
+
+        // Drop part_file so the file handle is released before rename.
+        drop(part_file);
+
         let path = dest_dir.join(&name);
-        crate::store::atomic_write(&path, &out)?;
-        let _ = std::fs::remove_file(&part);
+        let _ = std::fs::remove_file(&path);
+        std::fs::rename(&part, &path)?;
         self.clear_resume(&transfer_id);
         let done = FileDone {
             transfer_id: transfer_id.clone(),
-            sha256: tetherly_core::hex_sha256(&out),
+            sha256: computed_digest,
         };
         {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
@@ -1853,11 +1874,75 @@ impl Node {
             transfer_id.clone(),
             OutboundFile {
                 peer: peer.clone(),
-                data: data.to_vec(),
+                source: OutboundSource::Bytes(data.to_vec()),
+                size: data.len() as u64,
             },
         );
         self.send_to(peer, offer.to_frame()?).await?;
         let _ = _wait_accept;
+        Ok(transfer_id)
+    }
+
+    /// Offer and stream a file directly from a filesystem path. Reads the file
+    /// in 64 KiB chunks for incremental SHA-256 calculation and outbound streaming,
+    /// avoiding full in-memory buffering (O(1) memory bound).
+    pub async fn offer_and_send_file(
+        &self,
+        peer: &DeviceId,
+        path: &std::path::Path,
+        name: Option<&str>,
+    ) -> Result<String, CoreError> {
+        if !path.is_file() {
+            return Err(CoreError::File("not a regular file".into()));
+        }
+        let meta = std::fs::metadata(path)?;
+        let size = meta.len();
+        if size > tetherly_core::FILE_MAX {
+            return Err(CoreError::FileTooLarge(tetherly_core::FILE_MAX));
+        }
+        let filename = name
+            .map(|s| s.to_string())
+            .or_else(|| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "file.bin".to_string());
+        let safe_name = tetherly_core::sanitize_file_name(&filename)?;
+
+        // Stream file in 64 KiB chunks to compute SHA-256 with O(1) memory.
+        let mut hasher = tetherly_core::IncrementalSha256::new();
+        {
+            use std::io::Read;
+            let mut f = std::fs::File::open(path)?;
+            let mut buf = [0u8; tetherly_core::FILE_CHUNK];
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+        }
+        let digest = hasher.finalize_hex();
+        let transfer_id = format!("tr_{}", &digest[..16]);
+        let offer = FileOffer {
+            transfer_id: transfer_id.clone(),
+            files: vec![tetherly_core::FileMeta {
+                name: safe_name,
+                size,
+                sha256: digest,
+            }],
+        };
+        self.shared.pending_out.lock().expect("pending").insert(
+            transfer_id.clone(),
+            OutboundFile {
+                peer: peer.clone(),
+                source: OutboundSource::Path(path.to_path_buf()),
+                size,
+            },
+        );
+        self.send_to(peer, offer.to_frame()?).await?;
         Ok(transfer_id)
     }
 
@@ -1882,22 +1967,52 @@ impl Node {
             (peer.addr, peer.file_port.unwrap_or(self.file_port()), token)
         };
         let start = decision.resume_from.unwrap_or(0);
-        if start > outbound.data.len() as u64 {
+        if start > outbound.size {
             warn!(transfer = %transfer_id, "resume offset beyond local data; aborting");
             return;
         }
-        if let Err(e) = self
-            .send_file_data(
-                addr,
-                file_port,
-                &token,
-                transfer_id,
-                outbound.data.len() as u64,
-                start,
-                &outbound.data,
-            )
-            .await
-        {
+        let res = match outbound.source {
+            OutboundSource::Path(p) => match tokio::fs::File::open(&p).await {
+                Ok(mut f) => {
+                    if start > 0 {
+                        use tokio::io::AsyncSeekExt;
+                        if let Err(e) = f.seek(std::io::SeekFrom::Start(start)).await {
+                            warn!(%e, transfer = %transfer_id, "failed to seek in source file");
+                            return;
+                        }
+                    }
+                    let dest = SocketAddr::new(addr.ip(), file_port);
+                    match TcpStream::connect(dest).await {
+                        Ok(mut stream) => {
+                            tetherly_net::filechan::send_stream_from(
+                                &mut f,
+                                &mut stream,
+                                &token,
+                                transfer_id,
+                                outbound.size,
+                                start,
+                            )
+                            .await
+                        }
+                        Err(e) => Err(tetherly_net::NetError::Io(e)),
+                    }
+                }
+                Err(e) => Err(tetherly_net::NetError::Io(e)),
+            },
+            OutboundSource::Bytes(ref b) => {
+                self.send_file_data(
+                    addr,
+                    file_port,
+                    &token,
+                    transfer_id,
+                    outbound.size,
+                    start,
+                    b,
+                )
+                .await
+            }
+        };
+        if let Err(e) = res {
             warn!(%e, transfer = %transfer_id, "file data send failed");
         }
     }

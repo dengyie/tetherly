@@ -430,7 +430,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                     },
                 };
 
-                let (bytes, filename) = if let Some(ref path_str) = d.path {
+                if let Some(ref path_str) = d.path {
                     let p = std::path::Path::new(path_str);
                     if !p.is_file() {
                         return err(400, "file not found or not a regular file");
@@ -442,17 +442,32 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                     if meta.len() > tetherly_core::FILE_MAX {
                         return err(400, "file exceeds FILE_MAX (512 MiB)");
                     }
-                    let file_bytes = match std::fs::read(p) {
-                        Ok(b) => b,
-                        Err(e) => return err(400, &format!("failed to read file: {e}")),
-                    };
-                    let fname = d.name.clone().unwrap_or_else(|| {
-                        p.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("file.bin")
-                            .to_string()
-                    });
-                    (file_bytes, fname)
+                    let size = meta.len() as usize;
+                    match node
+                        .offer_and_send_file(&target, p, d.name.as_deref())
+                        .await
+                    {
+                        Ok(transfer_id) => {
+                            let fname = d.name.clone().unwrap_or_else(|| {
+                                p.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("file.bin")
+                                    .to_string()
+                            });
+                            let safe_name = match tetherly_core::sanitize_file_name(&fname) {
+                                Ok(n) => n,
+                                Err(e) => return err(400, &format!("invalid file name: {e}")),
+                            };
+                            json_ok(&serde_json::json!({
+                                "ok": true,
+                                "transfer_id": transfer_id,
+                                "name": safe_name,
+                                "size": size,
+                                "peer": target.as_str(),
+                            }))
+                        }
+                        Err(e) => err(400, &e.to_string()),
+                    }
                 } else if let Some(ref b64) = d.data_base64 {
                     use base64::Engine;
                     let decoded =
@@ -464,31 +479,28 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                         return err(400, "file exceeds FILE_MAX (512 MiB)");
                     }
                     let fname = d.name.clone().unwrap_or_else(|| "upload.bin".to_string());
-                    (decoded, fname)
+                    let safe_name = match tetherly_core::sanitize_file_name(&fname) {
+                        Ok(n) => n,
+                        Err(e) => return err(400, &format!("invalid file name: {e}")),
+                    };
+                    let digest = tetherly_core::hex_sha256(&decoded);
+                    let size = decoded.len();
+                    match node
+                        .offer_and_send_bytes(&target, &safe_name, &decoded, false)
+                        .await
+                    {
+                        Ok(transfer_id) => json_ok(&serde_json::json!({
+                            "ok": true,
+                            "transfer_id": transfer_id,
+                            "name": safe_name,
+                            "size": size,
+                            "sha256": digest,
+                            "peer": target.as_str(),
+                        })),
+                        Err(e) => err(400, &e.to_string()),
+                    }
                 } else {
-                    return err(400, "either path or data_base64 must be provided");
-                };
-
-                let safe_name = match tetherly_core::sanitize_file_name(&filename) {
-                    Ok(n) => n,
-                    Err(e) => return err(400, &format!("invalid file name: {e}")),
-                };
-
-                let digest = tetherly_core::hex_sha256(&bytes);
-                let size = bytes.len();
-                match node
-                    .offer_and_send_bytes(&target, &safe_name, &bytes, false)
-                    .await
-                {
-                    Ok(transfer_id) => json_ok(&serde_json::json!({
-                        "ok": true,
-                        "transfer_id": transfer_id,
-                        "name": safe_name,
-                        "size": size,
-                        "sha256": digest,
-                        "peer": target.as_str(),
-                    })),
-                    Err(e) => err(400, &e.to_string()),
+                    err(400, "either path or data_base64 must be provided")
                 }
             }
             Err(_) => err(400, "bad json"),

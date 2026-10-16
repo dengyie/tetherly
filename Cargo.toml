@@ -39,7 +39,7 @@ sha2 = "0.10"
 snow = "0.9"
 spake2 = "0.4"
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }

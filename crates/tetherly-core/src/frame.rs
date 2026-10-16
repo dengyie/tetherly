@@ -359,6 +359,37 @@ pub fn hex_sha256(bytes: &[u8]) -> String {
     hex_lower(&digest)
 }
 
+/// Incremental SHA-256 computation over streaming bytes (OS-free and pure).
+#[derive(Clone, Default)]
+pub struct IncrementalSha256 {
+    hasher: sha2::Sha256,
+}
+
+impl IncrementalSha256 {
+    pub fn new() -> Self {
+        use sha2::Digest;
+        Self {
+            hasher: sha2::Sha256::new(),
+        }
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        use sha2::Digest;
+        self.hasher.update(bytes);
+    }
+
+    pub fn finalize_hex(self) -> String {
+        use sha2::Digest;
+        let digest = self.hasher.finalize();
+        hex_lower(&digest)
+    }
+
+    pub fn finalize_bytes(self) -> [u8; 32] {
+        use sha2::Digest;
+        self.hasher.finalize().into()
+    }
+}
+
 pub fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -481,5 +512,22 @@ mod tests {
         let mut f = r.to_frame().unwrap();
         f.flags = FLAG_MUST_UNDERSTAND;
         assert!(InnerFrame::decode(&f.encode().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn incremental_sha256_matches_one_shot_hex_sha256() {
+        let data: Vec<u8> = (0..200_000).map(|i| (i % 251) as u8).collect();
+        let expected = hex_sha256(&data);
+
+        let mut inc = IncrementalSha256::new();
+        for chunk in data.chunks(1024) {
+            inc.update(chunk);
+        }
+        assert_eq!(inc.finalize_hex(), expected);
+
+        let mut inc2 = IncrementalSha256::new();
+        inc2.update(&data);
+        let bytes = inc2.finalize_bytes();
+        assert_eq!(hex_lower(&bytes), expected);
     }
 }

@@ -1,5 +1,44 @@
 # Session log
 
+## 2026-10-17 (23) - O(1) memory chunked streaming file transfer and incremental SHA-256 (v1.26)
+- Task: 突破整文件内存驻留限制，实现 $O(1)$ 内存常数界的 64 KiB 分块流式收发管线与增量 SHA-256。
+- **背景与缺陷根因**:
+  在 v1.24/v1.25 中，虽然将 `FILE_MAX = 512 MiB` 确立为内存保护边界并打通了生产发送入口，但底层架构依旧采用「整文件缓冲」模式：
+  1. 发送端：`offer_and_send_bytes` 会在 `pending_out` 中持久化整份 `Vec<u8>`，同时调用方还持有原始 buffer；
+  2. 接收端：`accept_file` 在内存中用 `Vec<u8>` 接收全部解密块，直至全部收齐后方才执行一次性原子刷盘 `atomic_write`。
+  当网络传输数百兆乃至数吉字节大文件时，双端内存暴涨、GC/分配器压力激增，直接限制了低配设备（如天翼云手机、老旧轻薄本）的稳定运行。必须重构传输管线为真正的 $O(1)$ 内存流式架构。
+- **架构设计与落地 (ADR-019)**:
+  1. `IncrementalSha256` (`crates/tetherly-core/src/frame.rs`): 纯净、无 OS 依赖的增量 SHA-256 状态机，包装 `sha2::Sha256`，支持对任意流式切片持续 update 与 finalize，单元测试证明与 `hex_sha256` 逐位一致。
+  2. `send_stream_from` (`crates/tetherly-net/src/filechan.rs`): 针对任意 `R: AsyncRead + Unpin` 与 `W: AsyncWrite + Unpin`，严格以 `CHUNK = 64 KiB` 边界分块加密并传输，结合 `counter_nonce` 与 `aad_for(transfer_id, chan_offset)`，内存常数界限定为单块 64 KiB 缓冲区。
+  3. `recv_chunks_to_sink` (`crates/tetherly-net/src/filechan.rs`): 边收边验 AEAD 标签，解密数据实时送入 `IncrementalSha256` 并异步刷盘至 `W: AsyncWrite + Unpin`（即 `.part` 文件），达成接收端 $O(1)$ 内存驻留。
+  4. 节点层直接流水线集成 (`crates/tetherly-node/src/runtime.rs`):
+     - `offer_and_send_file`: 接收磁盘文件路径，增量分块计算整体 SHA-256 生成 `transfer_id`，挂载 `OutboundSource::Path(PathBuf)`；
+     - `on_peer_accepted_file`: 若对端接受，异步打开 `tokio::fs::File`，快速 seek 到 `resume_from` 块对齐偏移，直接建立 TCP 流并通过 `send_stream_from` 直冲网卡；
+     - `accept_file`: 恢复断点或新建 `.part` 文件，通过 `recv_chunks_to_sink` 增量写入，传输完毕比对增量 SHA-256 摘要，校验通过后原子重命名至 `inbox/<filename>`，彻底解除 512 MiB 内存驻留上限。
+  5. API 闭环 (`crates/tetherly-node/src/uihttp.rs`): `POST /api/file/send` 传入 `path` 时直接触发底层零拷贝磁盘流式通道。
+- **新增回归与集成覆盖**:
+  - `tetherly-core`: `incremental_sha256_matches_one_shot_hex_sha256`
+  - `tetherly-net`: `streaming_roundtrip_with_sink_and_incremental_hasher`、`streaming_resume_from_chunk_boundary`
+  - `tests/phase1.rs`: `multi_chunk_file_streamed_via_live_node_api_reaches_inbox`
+- **全套验证**:
+  - `cargo test --workspace` 全绿（涵盖 core、net、crypto、android、node、cli 及 loopback、phase1~phase5、backpressure、screen_wire、rekey 等全量测试）。
+  - `cargo fmt --check` 全绿。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 全绿（0 警告 0 报错）。
+  - `cargo deny check`（advisories/bans/licenses/sources 全部通过）。
+
+## 2026-10-17 (22) - Production file-sending loopback path and GitHub CI-First doctrine (v1.25)
+- Task: 全面接手开发、确立 GitHub CI-First 开发准则、闭环生产文件发送入口并同步 Obsidian 知识库。
+- **GitHub CI-First 架构准则 (ADR-018)**: 遵循指示，将多平台编译（Windows x86_64、Linux glibc 2.31 容器、macOS arm64、Android NDK arm64-v8a + Gradle）、代码风格（`cargo fmt`）、代码质量（`clippy -D warnings`）、多平台集成测试（`cargo test --workspace --locked`）与安全/合规审计（`cargo deny check`）全面移交 GitHub Actions CI。本地开发机专注代码开发与单测回归，杜绝本地跨平台工具链漂移。
+- **生产文件发送闭环**:
+  1. 回环 HTTP API (`crates/tetherly-node/src/uihttp.rs`): 新增 `POST /api/file/send`，支持 `{ path: "...", peer?: "...", name?: "..." }` 或 `{ data_base64: "...", peer?: "...", name?: "..." }`。执行目标 peer 校验、文件可读性与 `FILE_MAX` (512 MiB) 强校验、文件名安全净化（`sanitize_file_name`）、计算 SHA-256，并调用 `Node::offer_and_send_bytes`。
+  2. CLI 回环客户端 (`crates/tetherly-node/src/bin/tetherly.rs` 与 `bins/tetherly-cli/src/main.rs`): 新增 `tetherly send <path> [--name <name>] [--peer <tdev_...>] [--ui-port <port>]` 子命令，作为 127.0.0.1 活节点回环客户端（ADR-013 标准）。
+  3. UI 交互 (`ui/index.html`): 增设文件发送表单（目标设备下拉、文件选择器、发送按钮与动态状态提示），在网页中通过 `FileReader` 读取为 base64 发起发送。
+  4. 端到端集成回归 (`tests/phase1.rs`): 新增 `file_sent_via_live_node_api_reaches_the_paired_peer`，覆盖磁盘路径发送、Web base64 发送、收件箱 SHA-256 对账与异常校验（未知设备/不存在文件均返回 400）。
+- **验证与发布**:
+  - 本地与 CI 验证：全工作区 291 项测试全部通过（290 → 291）。
+  - GitHub Actions CI (Run ID `38966810057` on commit `f1b59c3`) 5 项任务全部通过（`deny` 52s、`ubuntu-latest` 2m37s、`macos-latest` 3m0s、`android` 1m46s、`windows-latest` 4m31s）。
+  - SSOT `docs/DEVELOPMENT.md` 升至 v1.25，同步写入 Obsidian 知识库及路由表。
+
 ## 2026-10-16 (21) - FILE_MAX becomes a real gate and interface classification explains itself (v1.24)
 - Task: 你把值得做的做下吧 — implement the two items proposed after reviewing https://github.com/motto1/Lancat: (D) turn the dead `FILE_MAX` guard into a real gate with a regression, and (B-1) add a read-only, explainable interface-classification outlet. Lancat is **GPL-3.0**, so only publicly-known architectural ideas were borrowed — no code linked or copied, and none of its ports (`47820`, `5353`), service name (`_lancat._tcp.local.`) or message names appear in Tetherly.
 - **Defect (D): the cap was a dead constant.** `tetherly_core::filexfer::FILE_MAX = 512 MiB` existed but nothing used it to refuse anything: `accept_file` had `if total > size.max(32 * 1024 * 1024)` — a local `max()` that always picked the larger operand, so a file larger than 32 MiB slipped through by construction — and the 45718 receive path was invoked with `max_size = u64::MAX`. The v1 path is **whole-file resident in memory** on both ends (the receiver buffers a `Vec<u8>` then `atomic_write`s; the sender's `pending_out.data = data.to_vec()` copies on top of the caller's buffer), so `FILE_MAX` is really a *memory* bound — which is why one number, enforced everywhere, is the honest design.

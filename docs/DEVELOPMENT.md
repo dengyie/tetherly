@@ -3,12 +3,46 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.25** |
+| 文档版本 | **1.26** |
 | 日期 | 2026-10-17 |
-| 状态 | **全面接手开发与 v1.25 开工**——(1) **确立 GitHub CI-First 构建与多端验证体系**：项目跨平台矩阵构建（Windows x86_64、Ubuntu Linux、macOS arm64）、Android 原生库（`libtetherly_android.so` arm64-v8a + Gradle）、代码规范与安全审计（`cargo fmt`、`clippy -D warnings`、`cargo deny check`），以及基于 `debian:bullseye`（glibc ≤ 2.31 守卫）的 Linux 发布产物打包**全面依托 GitHub Actions（`ci.yml` 与 `release.yml`）**；本地开发机专注轻量单测与逻辑演进，杜绝环境依赖污染与构建发版漂移。(2) **v1.25 核心攻坚方向**：① 补齐生产级文件发送入口（解决长期「只收不发」缺口）：落地 `/api/file/send` 回环 API 与 `tetherly send <file> --peer <id>` CLI 命令；② 设计基于 64 KiB 块对齐增量 SHA-256 与流式收发的大文件流式传输协议演进，消除全量 `Vec<u8>` 内存驻留对 `FILE_MAX = 512 MiB` 的束缚。+ v1.24 把两处「写的是保护、实际不生效」的边界修实（FILE_MAX 512 MiB 成为真门、网卡分类可解释且单一真理源，290 全绿）+ v1.23 落地 Windows ANCS 真机传输栈（WinRT BLE GATT，285 全绿）+ v1.22 修正内层帧预算（推导 65507，280 全绿）+ v1.21 存活检测与背压 + v1.20 CLI 控制面回环客户端 + v1.19 macOS/Linux 采集后端 + v1.18 APK 端到端真机闭环 + v1.8 DXGI 远程屏幕闭环 |
+| 状态 | **v1.26 落地流式大文件传输引擎（$O(1)$ 内存常数界、64 KiB 块对齐增量流水线、增量 SHA-256 校验）**——(1) **构建与验证体系**：全面执行 GitHub CI-First（ADR-018），Linux glibc 2.31 容器、Windows x86_64、macOS arm64、Android 原生库矩阵及 `cargo deny` 许可审计 100% 依托 GitHub Actions；(2) **流式大文件传输全面闭环（ADR-019）**：彻底消除 sender 与 receiver 端全量 `Vec<u8>` 内存驻留，实现基于 64 KiB `FILE_CHUNK` 块对齐的纯流式边读/边发/边收/边写与 `IncrementalSha256` 增量校验，将传输过程内存开销严格限定为 $O(1)$ 常数界；(3) **全量回归 100% 全绿**：新增核心单测与端到端多块流式集成测试 `multi_chunk_file_streamed_via_live_node_api_reaches_inbox`，全工作区测试全过。+ v1.25 补齐文件发送生产闭环（`/api/file/send` 与 `tetherly send` CLI）+ v1.24 文件大小真门与网卡分类真理源（290 全绿）+ v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.26 相对 1.25(流式大文件传输引擎全面落地: $O(1)$ 内存常数界、零整文件驻留、增量 SHA-256 与跨平台生产闭环)**
+
+- **动机(突破全量内存驻留对大文件传输的物理束缚)**:
+  在 v1.24/v1.25 中，虽然将 `FILE_MAX = 512 MiB` 确立为内存保护边界并打通了生产发送入口，但底层架构依旧采用「整文件缓冲」模式：
+  1. 发送端：`offer_and_send_bytes` 会在 `pending_out` 中持久化整份 `Vec<u8>`，同时调用方还持有原始 buffer；
+  2. 接收端：`accept_file` 在内存中用 `Vec<u8>` 接收全部解密块，直至全部收齐后方才执行一次性原子刷盘 `atomic_write`。
+  当网络传输数百兆乃至数吉字节大文件时，双端内存暴涨、GC/分配器压力激增，直接限制了低配设备（如天翼云手机、老旧轻薄本）的稳定运行。必须重构传输管线为真正的 $O(1)$ 内存流式架构。
+
+- **架构与协议设计(ADR-019 流式数据管线)**:
+  1. **纯净增量哈希状态机 (`IncrementalSha256`)**:
+     - 在 `tetherly-core::frame` 增加 `IncrementalSha256` 结构体，无 OS 依赖、纯 Rust 实现，内部维护 `sha2::Sha256` 状态。
+     - 支持任意粒度的流式数据块 `update(&[u8])`，并支持输出 32 字节原生指纹或 64 位小写十六进制字符串。单元测试证明其与一次性 `hex_sha256` 计算结果 100% 逐位一致。
+  2. **流式加密发送器 (`send_stream_from`)**:
+     - 在 `tetherly-net::filechan` 引入 `send_stream_from<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>`。
+     - 严格按 64 KiB（`CHUNK`）对齐读取与封包，维持 `TFL2` 魔数规范；
+     - 每次仅在栈上分配单一 64 KiB 缓冲，使用 `counter_nonce(chan_offset / CHUNK + 1)` 与 `aad_for(transfer_id, chan_offset)` 进行 ChaCha20-Poly1305 密封，直接通过流写入 Socket。
+  3. **流式落盘接收器 (`recv_chunks_to_sink`)**:
+     - 在 `tetherly-net::filechan` 引入 `recv_chunks_to_sink<R, W, F>`。
+     - 边接收密文边进行 AEAD 校验，解密后的明文数据实时喂给 `IncrementalSha256`，并即刻异步写进目标 `W: AsyncWrite + Unpin`（即 `.part` 文件句柄）；
+     - 触发每块进度的回调通知 `on_chunk(chan_offset, chunk_len)`，在传输过程中内存上限恒为单个块大小（64 KiB）。
+  4. **节点运行时流式集成 (`tetherly-node::runtime`)**:
+     - 发送源抽象：`OutboundFile` 抽象为 `OutboundSource::Path(PathBuf)` 与 `OutboundSource::Bytes(Vec<u8>)`。
+     - `offer_and_send_file(&self, peer, path, name)`：基于分块迭代器快速增量计算大文件 SHA-256，无需整文件读入内存；
+     - `on_peer_accepted_file`：对端同意接收后，直接异步打开文件流（`tokio::fs::File`），按块对齐精确 seek 到 `resume_from` 位置，直接将文件流连通至 TCP 传输管道；
+     - `accept_file`：恢复续传时仅需增量读取磁盘已有的有效前缀并注入 `hasher`，随后直接将网络块流追加至 `.part` 临时文件，最后核对增量 SHA-256 签名并原子重命名为最终文件。
+  5. **生产 API 对接**:
+     - `POST /api/file/send` 识别到 `path` 入参时，直接走 `offer_and_send_file` 流式路径，杜绝了 `std::fs::read` 导致的整文件内存拷贝。
+
+- **新增回归与集成覆盖**:
+  - `tetherly-core`: `incremental_sha256_matches_one_shot_hex_sha256`（增量哈希与全量哈希一致性）；
+  - `tetherly-net`: `streaming_roundtrip_with_sink_and_incremental_hasher`（多块端到端解密、落盘与摘要校验）；
+  - `tetherly-net`: `streaming_resume_from_chunk_boundary`（断点续传块对齐流式校验）；
+  - `tests/phase1.rs`: `multi_chunk_file_streamed_via_live_node_api_reaches_inbox`（跨多个 64 KiB 块的大文件通过真实回环 HTTP API 发送、对端接受、落盘与完整性校验）。
 
 **1.25 相对 1.24(全面接手、CI-First 开发与构建体系确立、文件发送生产闭环与流式化蓝图)**
 

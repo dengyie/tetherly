@@ -71,6 +71,45 @@ pub async fn send_chunks_from<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Send from an AsyncRead stream as encrypted chunks, starting from `start`
+/// (which must be `CHUNK`-aligned). Reads up to `CHUNK` bytes at a time
+/// until `total` bytes from `start` have been read and sent. Memory is bounded to
+/// one chunk (64 KiB) throughout the transfer.
+pub async fn send_stream_from<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    r: &mut R,
+    w: &mut W,
+    token: &[u8; 32],
+    transfer_id: &str,
+    total: u64,
+    start: u64,
+) -> Result<(), NetError> {
+    debug_assert_eq!(
+        start % CHUNK as u64,
+        0,
+        "resume start must be chunk-aligned"
+    );
+    w.write_all(&FILE_MAGIC_V2).await?;
+    write_len_prefixed(w, transfer_id.as_bytes()).await?;
+    write_len_prefixed(w, &total.to_be_bytes()).await?;
+    write_len_prefixed(w, &start.to_be_bytes()).await?;
+
+    let mut buf = vec![0u8; CHUNK];
+    let mut sent = start;
+    while sent < total {
+        let want = ((total - sent) as usize).min(CHUNK);
+        r.read_exact(&mut buf[..want]).await?;
+        let chan_offset = sent;
+        let counter = chan_offset / CHUNK as u64 + 1;
+        let nonce = counter_nonce(counter);
+        let aad = aad_for(transfer_id, chan_offset);
+        let ct = aead_seal(token, &nonce, &aad, &buf[..want])?;
+        write_len_prefixed(w, &ct).await?;
+        sent += want as u64;
+    }
+    w.flush().await?;
+    Ok(())
+}
+
 /// If `path` exists, truncate it back to a chunk boundary and return the
 /// resumable offset. Any trailing partial chunk from an interrupted write is
 /// discarded (the sender re-sends that whole chunk). `Ok(0)` when absent.
@@ -184,6 +223,60 @@ where
         return Err(NetError::Handshake);
     }
     parse_sha256_hex(&hex_sha256(out))
+}
+
+/// Stream chunks directly to an asynchronous writer `W` with O(1) memory
+/// (bounding allocations to a single chunk buffer), while verifying AEAD
+/// tags and updating an incremental SHA-256 hasher.
+///
+/// `hasher` should be pre-seeded with any existing prefix if `start > 0`.
+/// Calls `on_chunk(chan_offset, chunk_len)` after writing each chunk.
+/// Returns the finalized 32-byte SHA-256 digest of the entire stream.
+#[allow(clippy::too_many_arguments)]
+pub async fn recv_chunks_to_sink<R, W, F>(
+    r: &mut R,
+    w: &mut W,
+    token: &[u8; 32],
+    expected_id: &str,
+    total: u64,
+    start: u64,
+    max_size: u64,
+    mut hasher: tetherly_core::IncrementalSha256,
+    mut on_chunk: F,
+) -> Result<[u8; 32], NetError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    F: FnMut(u64, usize) -> Result<(), NetError>,
+{
+    if total > max_size {
+        return Err(NetError::TooLarge);
+    }
+    if start % CHUNK as u64 != 0 || start > total {
+        return Err(NetError::Handshake);
+    }
+    let mut received = start;
+    while received < total {
+        let ct = read_len_prefixed(r).await?;
+        let chan_offset = received;
+        let counter = chan_offset / CHUNK as u64 + 1;
+        let nonce = counter_nonce(counter);
+        let aad = aad_for(expected_id, chan_offset);
+        let pt = aead_open(token, &nonce, &aad, &ct)?;
+        let chunk_len = pt.len();
+        if received + chunk_len as u64 > total {
+            return Err(NetError::TooLarge);
+        }
+        hasher.update(&pt);
+        w.write_all(&pt).await?;
+        received += chunk_len as u64;
+        on_chunk(chan_offset, chunk_len)?;
+    }
+    if received != total {
+        return Err(NetError::Handshake);
+    }
+    w.flush().await?;
+    Ok(hasher.finalize_bytes())
 }
 
 /// Non-resumable whole-buffer send (start 0). Kept for callers/tests that do
@@ -390,5 +483,112 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out, payload);
+    }
+
+    #[tokio::test]
+    async fn streaming_roundtrip_with_sink_and_incremental_hasher() {
+        let token = [11u8; 32];
+        let total = 3 * CHUNK + 777;
+        let payload: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        let expected_sha = hex_sha256(&payload);
+
+        let (mut w, mut r) = duplex(8 * CHUNK);
+        let mut source_cursor = std::io::Cursor::new(payload.clone());
+        let send_handle = tokio::spawn(async move {
+            send_stream_from(
+                &mut source_cursor,
+                &mut w,
+                &token,
+                "tr_stream",
+                total as u64,
+                0,
+            )
+            .await
+        });
+
+        let (read_hdr, total_wire, start_wire) = read_header(&mut r).await.unwrap();
+        assert_eq!(read_hdr, "tr_stream");
+        assert_eq!(total_wire, total as u64);
+        assert_eq!(start_wire, 0);
+
+        let mut sink_buf = Vec::new();
+        let mut cursor_writer = std::io::Cursor::new(&mut sink_buf);
+        let hasher = tetherly_core::IncrementalSha256::new();
+        let mut chunks_count = 0;
+        let recv = recv_chunks_to_sink(
+            &mut r,
+            &mut cursor_writer,
+            &token,
+            "tr_stream",
+            total_wire,
+            start_wire,
+            u64::MAX,
+            hasher,
+            |_offset, _len| {
+                chunks_count += 1;
+                Ok(())
+            },
+        );
+
+        let (s_res, r_res) = tokio::join!(send_handle, recv);
+        s_res.unwrap().unwrap();
+        let digest_bytes = r_res.unwrap();
+        assert_eq!(tetherly_core::hex_lower(&digest_bytes), expected_sha);
+        assert_eq!(sink_buf, payload);
+        assert_eq!(chunks_count, 4); // 3 full chunks + 1 partial chunk
+    }
+
+    #[tokio::test]
+    async fn streaming_resume_from_chunk_boundary() {
+        let token = [12u8; 32];
+        let total = 2 * CHUNK + 100;
+        let payload: Vec<u8> = (0..total).map(|i| (i % 239) as u8).collect();
+        let expected_sha = hex_sha256(&payload);
+
+        let start = CHUNK as u64;
+        let tail_bytes = payload[start as usize..].to_vec();
+        let (mut w, mut r) = duplex(8 * CHUNK);
+        let mut source_cursor = std::io::Cursor::new(tail_bytes);
+        let send_handle = tokio::spawn(async move {
+            send_stream_from(
+                &mut source_cursor,
+                &mut w,
+                &token,
+                "tr_res_st",
+                total as u64,
+                start,
+            )
+            .await
+        });
+
+        let (read_hdr, total_wire, start_wire) = read_header(&mut r).await.unwrap();
+        assert_eq!(read_hdr, "tr_res_st");
+        assert_eq!(total_wire, total as u64);
+        assert_eq!(start_wire, start);
+
+        let mut sink_buf = payload[..start as usize].to_vec();
+        let mut cursor_writer = std::io::Cursor::new(&mut sink_buf);
+        cursor_writer.set_position(start);
+
+        let mut hasher = tetherly_core::IncrementalSha256::new();
+        hasher.update(&payload[..start as usize]);
+
+        let recv = recv_chunks_to_sink(
+            &mut r,
+            &mut cursor_writer,
+            &token,
+            "tr_res_st",
+            total_wire,
+            start_wire,
+            u64::MAX,
+            hasher,
+            |_offset, _len| Ok(()),
+        );
+
+        let (s_res, r_res) = tokio::join!(send_handle, recv);
+        s_res.unwrap().unwrap();
+        let digest_bytes = r_res.unwrap();
+        assert_eq!(tetherly_core::hex_lower(&digest_bytes), expected_sha);
+        assert_eq!(sink_buf, payload);
     }
 }

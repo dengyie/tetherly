@@ -13,8 +13,9 @@ pub mod session;
 pub use dispatch::SessionEvent;
 pub use error::NetError;
 pub use filechan::{
-    read_header as read_file_header, recv_chunks_after_header, recv_chunks_into, send_chunks_from,
-    CHUNK as FILE_CHUNK_NET, FILE_MAGIC_V2,
+    read_header as read_file_header, recv_chunks_after_header, recv_chunks_into,
+    recv_chunks_to_sink, send_chunks_from, send_stream_from, CHUNK as FILE_CHUNK_NET,
+    FILE_MAGIC_V2,
 };
 pub use mdns::SERVICE_TYPE;
 pub use session::{
