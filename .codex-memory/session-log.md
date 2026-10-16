@@ -25,6 +25,9 @@
   - `cargo fmt --check` 全绿。
   - `cargo clippy --workspace --all-targets -- -D warnings` 全绿（0 警告 0 报错）。
   - `cargo deny check`（advisories/bans/licenses/sources 全部通过）。
+  - **GitHub Actions CI-First 自动化验证通过**:
+    - `ci.yml` (run `38973071906` on commit `b73e88d`): 5 个平台矩阵任务 100% 成功（`android` NDK arm64-v8a + Gradle 1m54s、`check macos-latest` 2m15s、`check ubuntu-latest` 1m48s、`check windows-latest` 3m43s、`cargo deny check` 54s）。
+    - `release.yml` (run `38973572292` on commit `b73e88d`): 3 个发布编译矩阵任务 100% 成功（`build-linux` debian:bullseye glibc 2.31 容器构建通过 objdump 符号校验 2m54s、`build-desktop macos-arm64` 2m51s、`build-desktop windows-x86_64` 4m6s），生成三端 release 二进制工件。
 
 ## 2026-10-17 (22) - Production file-sending loopback path and GitHub CI-First doctrine (v1.25)
 - Task: 全面接手开发、确立 GitHub CI-First 开发准则、闭环生产文件发送入口并同步 Obsidian 知识库。

@@ -1119,3 +1119,31 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
    - 验证通过 `POST /api/file/send` 触发真实双节点文件传输，断言对端接收端收到 offer、点击确认后接收完整、sha256 一致且双方会话存活；
    - 断言文件不存在、超限文件报价被拒且错误码可解释；
    - 维持全量 290+ 测试通过。
+
+---
+
+## 25. v1.26 实施与交付清单（流式大文件传输引擎与 O(1) 内存常数界）
+
+1. **动机与设计准则（ADR-019）**：
+   - 突破 v1.24/v1.25 中将 `FILE_MAX = 512 MiB` 绑定到内存驻留的妥协方案；
+   - 彻底消灭发送端和接收端整文件 `Vec<u8>` 缓冲，将两端内存占用彻底收敛至单个 64 KiB 传输块的 $O(1)$ 常数界；
+   - 采用纯 Rust 零 OS 依赖的增量 SHA-256 状态机，兼顾流式数据吞吐与逐字节校验完整性。
+2. **核心模块重构与增量演进**：
+   - **`tetherly-core::frame::IncrementalSha256`**：
+     - 基于 `sha2::Sha256` 构建流式哈希抽象，支持任意字节分片的 `update`，并提供 32 字节原生指纹与 64 位小写十六进制字符串输出；
+     - 纯内存状态机，单测证明与一次性 `hex_sha256` 100% 逐位一致。
+   - **`tetherly-net::filechan` 流式收发原语**：
+     - `send_stream_from<R, W>`：严格遵循 `TFL2` 魔数规范，按 64 KiB 分块流式读取与封包，维持 `counter_nonce(chan_offset / CHUNK + 1)` 与 `aad_for(transfer_id, chan_offset)` 的 ChaCha20-Poly1305 加密安全约束，直写 Socket；
+     - `recv_chunks_to_sink<R, W, F>`：边收边解密边校验 AAD，解密明文即刻异步刷入目标 `AsyncWrite`（`.part` 临时文件句柄）并同步推进 `IncrementalSha256` 状态，触发 `on_chunk` 回调。
+   - **`tetherly-node::runtime` 流式节点管线**：
+     - `OutboundFile` 抽象为 `OutboundSource::Path(PathBuf)` 与 `OutboundSource::Bytes(Vec<u8>)`；
+     - `offer_and_send_file`：通过流式块迭代器增量计算目标文件 SHA-256，免去全量读盘；
+     - `on_peer_accepted_file`：对端同意后，异步打开 `tokio::fs::File`，按块对齐精确 seek 到断点续传位置，直接直通网络写入流；
+     - `accept_file`：续传时先流式读取磁盘已有前缀注入 `hasher`，随后直接将网络块流追加到 `.part` 临时文件，校验成功后原子重命名为目标文件。
+   - **回环 API 对接**：
+     - `POST /api/file/send` 检测到 `d.path` 时直接路由至 `offer_and_send_file`，完全杜绝内存二次拷贝。
+3. **测试覆盖与 GitHub CI 验证**：
+   - 核心单测：`incremental_sha256_matches_one_shot_hex_sha256`；
+   - 网络单测：`streaming_roundtrip_with_sink_and_incremental_hasher`、`streaming_resume_from_chunk_boundary`；
+   - 端到端回归：`tests/phase1.rs::multi_chunk_file_streamed_via_live_node_api_reaches_inbox`，跨多个 64 KiB 块验证端到端流式落盘与 SHA-256 完整性；
+   - 遵循 ADR-018 GitHub CI-First 准则，GitHub Actions 工作流 `ci.yml`（run `38973071906`，5 个跨平台矩阵任务）与 `release.yml`（run `38973572292`，Debian 11 bullseye glibc 2.31 容器构建、Windows x86_64、macOS arm64）全量 100% 绿灯通过。

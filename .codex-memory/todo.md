@@ -1,6 +1,6 @@
 # TODO
 ## In Progress
-- [ ] 验证全量代码在 GitHub Actions CI 上的跨平台构建并完成发布流水线验证
+- [ ] 规划并推进下一阶段功能迭代（macOS ANCS CoreBluetooth 传输栈调研与抽象 / Tauri 桌面客户端演进）
 
 ## Next
 - [ ] libfuzzer / `cargo-fuzz` coverage-guided fuzz of the decoders (needs nightly) — Manual-required; the stable-toolchain deterministic mutation driver landed v1.16, extended to state-machine op-programs in v1.17, as the honest substitute
@@ -22,6 +22,7 @@
 - [ ] Phase 6 backlog: Android controlled device, WinFsp mount, embedded EasyTier FFI
 
 ## Done
+- [x] **GitHub Actions CI 与多平台发布流水线双绿灯验证 (v1.26)**: (1) `ci.yml` run `38973071906` 5 矩阵任务（`android` NDK arm64-v8a + Gradle 打包 1m54s、`check macos-latest` 2m15s、`check ubuntu-latest` 1m48s、`check windows-latest` 3m43s、`cargo deny check` 54s）100% 成功；(2) `release.yml` run `38973572292` 3 发布构建任务（`build-linux` debian:bullseye glibc 2.31 容器构建 + objdump 符号守卫 2m54s、`build-desktop macos-arm64` 2m51s、`build-desktop windows-x86_64` 4m6s）全绿，成功上传 3 端 release 二进制工件。
 - [x] **流式大文件传输引擎全面落地与 O(1) 内存常数界 (v1.26)**: (1) 彻底消除 sender/receiver 双端整文件 `Vec<u8>` 内存驻留与 OOM 隐患；(2) `tetherly-core` 落地纯净无 OS 依赖的 `IncrementalSha256` 状态机；(3) `tetherly-net` 引入 `send_stream_from`（64 KiB 块对齐增量分块加密流）与 `recv_chunks_to_sink`（增量解密落盘 + 增量摘要计算）；(4) `tetherly-node` 实现 `offer_and_send_file` 与直接流水线刷盘的 `accept_file`，`/api/file/send` 传入本地路径直接走流式管线；(5) 新增端到端流式集成测试 `multi_chunk_file_streamed_via_live_node_api_reaches_inbox` 与分块断点续传流式校验，全工作区测试全绿；(6) SSOT 升至 v1.26，确立 ADR-019。
 - [x] **生产文件发送闭环与 CI-First 规范确立 (v1.25)**: (1) 补齐生产级文件发送入口：`/api/file/send` 回环 API（支持本地路径与 base64 双模式，FILE_MAX 强校验与安全文件名过滤）+ CLI `tetherly send` 回环客户端（`tetherly-node` 与 `tetherly-cli`）+ `ui/index.html` 网页文件选取直发交互；(2) 增设端到端测试 `file_sent_via_live_node_api_reaches_the_paired_peer`（覆盖磁盘路径与 Web base64 上传、SHA-256 完整性与 400 异常拒绝）；(3) 确立 GitHub CI-First 架构准则（ADR-018），全平台矩阵验证（Linux bullseye glibc 2.31、Windows x86_64、macOS arm64、Android NDK arm64-v8a）全面依托 GitHub Actions 自动化（5 任务全绿）；(4) 同步更新 SSOT `docs/DEVELOPMENT.md` v1.25、Obsidian 知识库与路由表。291 项单测/集成测试全绿。
 - [x] **GitHub CI-First 准则确立与新开发文档发布 (v1.25)**: SSOT `docs/DEVELOPMENT.md` 升至 v1.25，确立 GitHub CI-First 跨平台多端验证准则，全面同步 Obsidian 知识库 `tetherly 开发文档.md` 与路由表 `AI-DOC-ROUTER.md`；确立 ADR-18；规划生产文件发送闭环与流式蓝图
