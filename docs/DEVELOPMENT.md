@@ -3,14 +3,33 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.24** |
-| 日期 | 2026-10-16 |
-| 状态 | **v1.24 把两处「写的是保护、实际不生效」的边界修实**——(1) 文件接收路径里那句 `total > size.max(32 * 1024 * 1024)` 是**死代码**:紧邻上一行已强制 `total == size`,故它恒为假,「拒绝荒谬的声明大小」**从未触发过**;现引入 `tetherly-core::FILE_MAX = 512 MiB`(v1 整文件驻留内存,故这是**内存边界**),在**报价时**按声明大小拒绝(`CoreError::FileTooLarge`,超限文件**永不进入用户候选**)、在 45718 通道把**真实**上限交给 `recv_chunks_after_header`(不再传 `u64::MAX`,使通道自带的检查恢复效力)、发送端 `offer_and_send_bytes` 同向拒绝;并且**报价被拒不等于断链**——`FileOffer` 分支此前用 `?`,不安全文件名/坏摘要/超限/候选表满都会冒泡**拆掉整个会话**,现改为记录即丢。(2) 网卡分类此前只有 IP 段判据、且**无法解释自己**:新增 `tetherly-core::BindClass`/`classify`(让 `should_listen` **就是** `classify(..).listens()`,单一真理源)、`tetherly-node::lan::interface_report()`(随 `/api/state` 的 `lan` 字段)与启动日志,使「Tailscale/NetBird 的 `100.64.0.0/10` 既非 RFC1918 也非链路本地、故被静默跳过」变成一条**可读的原因**(`cgnat-overlay-needs-explicit-cidr`),并把 `127/8` 非规范别名(如解析器 stub 的 `127.0.0.53`)显式定为 `LoopbackAlias`;**290 全绿**(+5)。 + **v1.23 落地 Windows ANCS 真机传输栈（WinRT BLE GATT）**——§9.4 此前只有 OS-free 协议与 `AncsTransport` 端口，电脑侧**并无任何真实栈**（`NodeConfig.ancs` 在生产路径里恒为 `None`，从未被接上）。v1.23 补上电脑侧那一段：`crates/tetherly-node/src/ancs.rs`（装配点 + `AncsInbound` 通道）与 `crates/tetherly-node/src/ancs/win_gatt.rs`（自包含、`#[cfg(windows)]`，照 `screen/macos.rs` 先例）。专属驱动线程持有全部 WinRT 对象并自建 MTA 公寓；`FromBluetoothAddressAsync` → ANCS 服务（`GetGattServicesForUuidAsync`）→ 三个特征并**校验属性**（两个 Source 必须 `Notify`、Control Point 必须 `Write`）；CCCD 写 `Notify` 订阅、`ValueChanged` 回调把字节经无界通道回灌；`AncsTransport` 前端只搬命令 + 有界 ack 等待（**10s 上界**，超时即报错，不留「成功但不可证」）；断线由 `ConnectionStatusChanged` 上报、按 `ancs_backoff_delay` 指数退避重连（上限 30s）；`Session::drop` 显式注销三个回调。node 侧 `Node::spawn_ancs_pump` 独占线程（自带 current-thread 运行时）把入站值喂给 `ancs_notification_source`/`ancs_data_source` 并驱动 `ancs_tick`；CLI 新增 `--ancs <addr>`（非 Windows 目标 `open()` 诚实返回 `None`）。**285 全绿**（+4 WinRT 纯逻辑单测：地址记法/非法输入拒绝/UUID↔GUID 映射；+1 pump 端到端 `phase4::m4_5`：`Ready`→订阅顺序 Data Source 先、回调只入队→tick 才写 Control Point、DataSource 成候选、`Disconnected`→`Backoff`）；`Cargo.lock` **无新包**（WinRT 蓝牙只是 `windows` 既有 crate 的特性开关）。物理 iPhone 的运行时仍 **Manual-required**。 + **v1.22 修正内层帧预算（潜伏缺陷）**——`INNER_PAYLOAD_MAX` 原为写死的 64 KiB，未计入 `encode()` 的 12 字节内层帧头与 16 字节 AEAD tag，二者都挤占 Noise 单条消息的 65535 字节上限（实测可加密明文上限 **65519**）。于是**任何需要分片的屏幕帧**（压缩后 payload > 64 KiB）产出的分片 payload 恰为 `24+65512=65536`、编码后 65548 字节明文，传输层**拒绝加密**（`Crypto(Noise("input error"))`）——zstd 常把真实帧压小故线上未暴露，属潜伏炸弹。改为由传输上限推导（`INNER_PAYLOAD_MAX = 65535−16−12 = 65507`），新增 `limits`（实测边界）/`screen_wire`（真实会话分片往返）/`backpressure`（v1.21 写停滞）回归，**280 全绿**。 + **v1.21 修复会话「静默黑洞」并下移 Linux 发版锚点**(跨 VPS 实测暴露:TCP 被中间设备黑洞化后 `notify` **谎报成功**——根因是控制会话在 `select!` 里 `await` **无界**写、且节点**从不主动 ping**,`ESTABLISHED` 被一路当作「活着」;新增 `tetherly-core::liveness` 存活判据 + `tetherly-net` `send_bounded`/`WriteStalled` 写超时 + node 侧**有界队列(背压)/心跳/全量写超时**,275 全绿;Linux 产物改在 **`debian:bullseye`(glibc 2.31)容器**内构建、守卫拒绝 `GLIBC_2.32+`,真正兑现「覆盖 glibc 2.31」) + **v1.20 把 CLI 控制面全部改为「活节点回环客户端」并补齐通知投递路径**(`tetherly dial` 此前自起第二个节点、与运行中守护进程抢 LAN 端口而死于 `no LAN address bound`;`tetherly notify` 此前根本不存在,`inject-notify` 只在**本进程**灌一条假推送、无法跨已配对节点投递——两者均改为回环 `POST /api/dial` / `/api/notify`,与 v1.18 的 `tetherly pin` 同一形状)+ **Linux 发版锚定 glibc 2.35**(release 矩阵 `ubuntu-latest`→`ubuntu-22.04`,并加 `objdump` 守卫:二进制含 `GLIBC_2.36+` 即构建失败;24.04 产物曾在 glibc 2.31 主机上拒绝启动)；**v1.19 落地 macOS/Linux 屏幕采集后端**(`MacSource` CoreGraphics / `X11Source` MIT-SHM，各为自包含文件、按目标编译验证；X11 呈现一并落地;macOS 呈现需 NSWindow 诚实拒绝;Wayland 不支持)，真机采集仍 Manual-required；真机 APK 端到端**已验**(云手机 `app.tetherly` 前台 `NotificationListenerService` → JNI → `libtetherly_android.so` 实时 Noise 会话 → 桌面候选 `has_otp:true`)+ **`tetherly pin` 缺陷修复**(此前在一次性进程里生成 PIN,永远无法被运行中守护进程接受;改为运行中节点的回环 API 客户端)+ 手机通知往返 **p95 上机实测**(p95≈57ms、p50≈18ms,经 `adb reverse` 云手机隧道);Phase 5 远程屏幕**真机闭环**（Windows DXGI 采集 + zstd 编码 + GDI 呈现 + 跨设备云手机源 467/467 帧零丢失 + 注入驱动的真实像素捕获已验）；**Phase 1 Android 原生库已落地**——`crates/tetherly-android` 产出真实 Ed25519 身份 + Noise IK 会话的 `libtetherly_android.so`，已在两台 Galaxy Fold（arm64-v8a / Android 13）完成真实配对 + notify 投递 + 断线重连（resume）验证；Phase 3 键鼠真机链已落地；CI 全绿；**v1.17 把 §13 的属性测试从单个解码器推进到有状态状态机**（`ReplayGuard`/限流器/`NotifyHub`/`FileHub`/`ResumeTable`/屏幕收发/`AncsIngress` 用任意**操作序列**驱动，断言安全契约对任意顺序成立，269 全绿）；**v1.16 落地 §13 的 `proptest` 与 `fuzz` 两层**（控制 JSON + 全部解码器往返；稳定工具链确定性变异语料驱动，251 全绿）；**v1.14 落地 macOS Keychain / Linux libsecret 凭据库**(`cred` 后端化：Windows Credential Manager + macOS Keychain + Linux Secret Service，各自可编译验证，运行时 Manual-required）；v1.13 Windows 凭据库（Credential Manager 泛型凭据 + `identity.ref` 指针，旧 `identity.bin` 自动迁移）；v1.12 文件跨进程续传(内容寻址 transfer_id + TFL2 起始偏移 + .part/.resume.json 侧车,重启后按持久偏移续传);双桌面 100 次物理往返仍 Manual-required；v1.15 加固两处**对端可控输入**的健壮性缺陷（`ReplayGuard` msg_id 溢出、`ScreenAssembler` 碎片 idx 越界下溢），各补回归测试；RustDesk 仅作架构借鉴，AGPL 不可链 |
+| 文档版本 | **1.25** |
+| 日期 | 2026-10-17 |
+| 状态 | **全面接手开发与 v1.25 开工**——(1) **确立 GitHub CI-First 构建与多端验证体系**：项目跨平台矩阵构建（Windows x86_64、Ubuntu Linux、macOS arm64）、Android 原生库（`libtetherly_android.so` arm64-v8a + Gradle）、代码规范与安全审计（`cargo fmt`、`clippy -D warnings`、`cargo deny check`），以及基于 `debian:bullseye`（glibc ≤ 2.31 守卫）的 Linux 发布产物打包**全面依托 GitHub Actions（`ci.yml` 与 `release.yml`）**；本地开发机专注轻量单测与逻辑演进，杜绝环境依赖污染与构建发版漂移。(2) **v1.25 核心攻坚方向**：① 补齐生产级文件发送入口（解决长期「只收不发」缺口）：落地 `/api/file/send` 回环 API 与 `tetherly send <file> --peer <id>` CLI 命令；② 设计基于 64 KiB 块对齐增量 SHA-256 与流式收发的大文件流式传输协议演进，消除全量 `Vec<u8>` 内存驻留对 `FILE_MAX = 512 MiB` 的束缚。+ v1.24 把两处「写的是保护、实际不生效」的边界修实（FILE_MAX 512 MiB 成为真门、网卡分类可解释且单一真理源，290 全绿）+ v1.23 落地 Windows ANCS 真机传输栈（WinRT BLE GATT，285 全绿）+ v1.22 修正内层帧预算（推导 65507，280 全绿）+ v1.21 存活检测与背压 + v1.20 CLI 控制面回环客户端 + v1.19 macOS/Linux 采集后端 + v1.18 APK 端到端真机闭环 + v1.8 DXGI 远程屏幕闭环 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
 
-**1.23 相对 1.22(落地电脑侧 ANCS 真实传输栈:WinRT BLE GATT + 入站泵)**
+**1.25 相对 1.24(全面接手、CI-First 开发与构建体系确立、文件发送生产闭环与流式化蓝图)**
+
+- **动机(全面接手开发与生产缺口攻坚)**:接手后经过全套 290 项测试验证与代码拓扑审查,确定核心传输与安全架构已高度稳固,但在工程实践与生产可用性上面临两个关键断层:
+  1. **构建与验证体系必须 CI-First**:Tetherly 涉及 Windows(WinRT GATT/DXGI/SendInput)、Linux(bullseye glibc 2.31/X11)、macOS(CoreGraphics)以及 Android(NDK arm64-v8a + Gradle JNI)等多端复杂编译链。若依赖本地环境多端拼装,极易重蹈旧 MinGW 32/64 位混淆或 glibc 符号过高的覆辙。遵循用户指示:「构建什么的能用 github ci 的就用 ci」,正式将 GitHub Actions 确立为构建、多平台矩阵回归与安全审计的第一责任面。
+  2. **生产文件「只收不发」缺口(v1.24 诚实报告的待办)**:自 v1.12 引入断点续传以来,文件发送功能 `offer_and_send_bytes` 仅在集成测试 `tests/phase1.rs` 中被调用;Node 服务的生产 Web UI 只有接收确认交互,CLI 亦缺少 `tetherly send` 指令。生产节点处于「接收链路健全、发送入口缺失」的半闭环状态。
+  3. **大文件流式化架构演进**:当前 `FILE_MAX = 512 MiB` 是受制于两端整文件 `Vec<u8>` 内存驻留的妥协上限。必须设计基于 64 KiB 块对齐的边读/边收/边写与增量 SHA-256 流式协议,将内存占用降至 $O(1)$,为解除 512 MiB 上限铺平道路。
+- **CI-First 开发与交付规约**:
+  - **多平台矩阵集成 (`ci.yml`)**:每次功能提交与 PR 必须由 GitHub Actions 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 上原生执行 `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo test --workspace --locked`;同步触发 `android` 容器化任务跑 `cargo ndk` 编译 `libtetherly_android.so` 并跑通 Gradle 单测与打包;通过 `cargo-deny-action` 执行许可、漏洞（advisories/licenses/bans/sources）全量守卫。
+  - **Linux 发版安全容器 (`release.yml`)**:发布构建严格在 `debian:bullseye`(glibc 2.31)容器中执行,并以 `objdump` 强校验拒绝 `GLIBC_2.32+` 动态符号,确保二进制向下兼容 Debian 11 / Ubuntu 20.04。发版时自动合并 Windows 与 macOS 产物并推送到 GitHub Releases。
+  - **本地开发机准则**:本地开发机只负责代码编写、局部语法检查与单测调优,禁止在本地维护脆弱的多端打包交叉编译器,发版制品一律以 GitHub Actions 生成并由 `gh release` / `actions/upload-artifact` 托管为准。
+- **v1.25 实施方案(生产文件发送入口闭环)**:
+  - **回环 HTTP API**:在 `crates/tetherly-node/src/uihttp.rs` 增设 `POST /api/file/send` 路由,接收 JSON `{ "path": "/path/to/file", "peer": "tdev_..." }`。调用方验证文件可读性、存在性与不超过 `FILE_MAX`,解析目标 `peer` 在 `live_peers` 集合内,调用 `node.send_file(path, peer)`。
+  - **CLI 客户端命令**:在 `bins/tetherly-cli/src/main.rs` 与 `crates/tetherly-node/src/bin/tetherly.rs` 增设 `tetherly send <file_path> [--peer <device_id>] [--ui-port <port>]` 子命令。作为 127.0.0.1 活节点回环客户端,与 `tetherly pin`/`dial`/`notify` 保持完全一致的 loopback client 模式（ADR-013）。
+  - **流式架构蓝图**:规划基于既有 `TFL2`（魔数 + 块对齐起始偏移）协议的零拷贝流式发送引擎（`FileStreamSource`/`FileStreamSink`）,分块读取（64 KiB）+ `ring::digest::Context` 增量 SHA-256 哈希 + 增量落盘 `.part`,彻底解耦内存大小与文件大小。
+- **新增回归与验证目标**:
+  - `tests/phase1.rs` 增补 `file_sent_via_live_node_api_reaches_the_paired_peer` 端到端集成回归；
+  - UI 自动化测试覆盖 `/api/file/send` 成功与超限/离线错误码处理；
+  - 维持 290+ 全绿与零破坏性变更。
+
+**1.24 相对 1.23(文件单文件上限成为真门;网卡分类可解释且单一真理源)**
 
 - **动机(补齐 §9.4 只缺的一段)**:§9.4 明写「Windows:`windows` crate GATT」,但仓库里只有 `tetherly-core::ancs`(协议编解码 + `AncsIngress` 状态机 + `AncsTransport` 端口 + `MemoryAncsTransport`)。真实栈、乃至**入站的接线**都不存在:`NodeConfig.ancs` 在生产路径里恒为 `None`,`tetherly-core` 也刻意不知道「值变了」这件事。于是 ANCS 在真机上**根本无从启动**——端口有了,插头没接。
 - **实现**:新增 `crates/tetherly-node/src/ancs.rs`(装配点:`AncsInbound` 四态通道 `Ready`/`NotificationSource`/`DataSource`/`Disconnected`;`open(address) -> Result<Option<AncsLink>, CoreError>`,非 Windows 目标诚实 `Ok(None)`)与 `crates/tetherly-node/src/ancs/win_gatt.rs`(自包含,只 import 绝对路径,照 `screen/macos.rs`、`screen/x11.rs` 先例)。
@@ -896,11 +915,18 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 
 ## 14. CI、发版、默认端口
 
-- CI：Windows、macOS、Ubuntu（fmt / clippy `-D warnings` / test `--locked`）。Phase 1 另加 Ubuntu `android` job：先 `cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p tetherly-android --release` 产出 `libtetherly_android.so`（NDK + `cargo-ndk`），再 Java 17 + Gradle 8.9 跑 `:app:testDebugUnitTest`、`assembleDebug`；以及 `deny`（licenses/bans/sources + audit）。`jniLibs/` 为构建产物，不入库。
+- **CI-First 开发与验证准则（v1.25 确立）**：本项目跨多端与复杂环境（Windows WinRT/DXGI/SendInput、macOS CoreGraphics、Linux glibc 2.31/X11、Android NDK JNI），多平台矩阵构建与安全合规**全面以 GitHub Actions 为核心准绳**。本地开发机保持纯净，仅负责代码实现与单机快速逻辑验证；所有的多平台矩阵测试（Windows/macOS/Ubuntu）、Android NDK 原生构建与 Gradle 打包、`cargo deny` 许可/漏洞守卫，以及 Linux 发布容器打包**一律由 GitHub CI 承担**。开发者通过 `git push` 触发，借助 GitHub CLI（`gh run list`、`gh run watch`）验收云端构建。
+- **CI 工作流架构 (`.github/workflows/ci.yml`)**：
+  1. `check` 矩阵作业：在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三平台上并行执行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings` 以及 `cargo test --workspace --locked`。任何平台格式、警告或测试不通过即时熔断。
+  2. `android` 容器化作业：在 `ubuntu-latest` 上安装 Rust `aarch64-linux-android` 目标与 `cargo-ndk`，编译生成 `libtetherly_android.so`（arm64-v8a）放入 `android/app/src/main/jniLibs`；再经 Java 17 (Temurin) + Gradle 8.9 原生执行 `:app:testDebugUnitTest` 与 `:app:assembleDebug`。构建产物 `jniLibs/` 动态产生、绝不入版本库。
+  3. `deny` 安全合规作业：使用 `EmbarkStudios/cargo-deny-action@v2` 针对 RustSec 漏洞数据库与 `deny.toml` 进行 `advisories`、`licenses`、`bans`、`sources` 四重核查，杜绝 AGPL/GPL 链入与已知 CVE 依赖。
+- **发布产物与容器守卫 (`.github/workflows/release.yml`)**：
+  - Linux 发布二进制在 **`debian:bullseye`(glibc 2.31) 容器**内构建并加 `GLIBC_2.32+` 守卫（`objdump -T` 打印实际地板），确保符号地板 **≤ 2.31**，完全覆盖 Debian 11 / Ubuntu 20.04 及更新主机。容器内强制 `bash` 且 `sources.list` 指向 `archive.debian.org`。
+  - Windows 与 macOS 产物分别在 `windows-latest` 与 `macos-latest` 上编译为 `tetherly` 与 `tetherly-cli` 剥离二进制。
+  - 打 tag `v*` 时触发 `publish` 作业，自动将三端产物归档并发布至 GitHub Releases。
 - 版本号 workspace 统一 bump。
 - 控制 **45717/tcp**，文件 **45718/tcp**，键鼠 **45719/tcp**，远程屏幕 **45720/tcp**。本机 UI **45716/tcp** 仅 127.0.0.1。DeskFlow 网关默认关。
-- 本机 UI **45716** 同时是 CLI 的**控制面入口**(v1.20):`tetherly pin` / `dial` / `notify` 均以它为回环客户端目标(`POST /api/pin` / `/api/dial` / `/api/notify`),不再自起节点。该 HTTP 面**永不**绑非回环地址,且请求须带 `Host: 127.0.0.1|localhost`,否则 403。
-- Linux 发布产物在 **`debian:bullseye`(glibc 2.31)容器**内构建并加 `GLIBC_2.32+` 守卫(打印实际地板),使动态符号地板 **≤ 2.31**,真正覆盖 glibc 2.31/2.35 的老发行版主机(Debian 11 / Ubuntu 20.04 及更新);该 job 在容器内用 `bash` 而且 `sources.list` 指向 `archive.debian.org`(bullseye 已过 LTS,`deb.debian.org` 不再供 pool)。CI 测试矩阵仍为 `ubuntu-latest`/`windows-latest`/`macos-latest`(v1.21 前锚点为 `ubuntu-22.04`,其产物实测要求 `GLIBC_2.34`,跑不了 2.31 主机,与本节承诺不符,已修正;v0.1.3 实测地板 `GLIBC_2.30`)。
+- 本机 UI **45716** 同时是 CLI 的**控制面入口**(v1.20):`tetherly pin` / `dial` / `notify` / `send`(v1.25) 均以它为回环客户端目标(`POST /api/pin` / `/api/dial` / `/api/notify` / `/api/file/send`),不再自起节点。该 HTTP 面**永不**绑非回环地址,且请求须带 `Host: 127.0.0.1|localhost`,否则 403。
 - 安装程序提示放行 45717–45720；默认 **LAN** 监听：`127.0.0.1` + RFC1918 / 链路本地，不含公网、**跳过** EasyTier `10.144.144.0/24`（避免 mDNS 打到 TUN）。Phase 2 另绑 overlay CIDR 内的本机 IP，仍永不 `0.0.0.0`/`::`。
 - Phase 1 桌面不要求 WebView2（loopback HTTP）。Tauri 壳下一迭代才需要 WebView2、MSVC 运行库；ANCS 需要蓝牙。
 - **单文件上限 `FILE_MAX = 512 MiB`（v1.24）**（§12 M1.7）：v1 文件路径**整文件驻留内存**（接收端 `Vec<u8>` 全量 + 发送端 `pending_out` 再存一份），故该上限是**内存边界**而非磁盘策略；在**报价时**按声明大小拒绝（`CoreError::FileTooLarge`，用户看不到候选），在 45718 通道以真实 `max_size` 再钉一次，发送端同向拒绝。流式化（边收边写 + 增量 sha256）完成后可抬高。
@@ -1031,3 +1057,31 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 8. **不越线**：不链接 RustDesk/AGPL/GPL/LGPL 源码；core 无 `cfg(target_os)`、保持 `#![forbid(unsafe_code)]`；真实采集/编码/注入落在 `tetherly-node` 平台模块并 `#[cfg]` 门控；不绑 `0.0.0.0`；配对永不在 45720；OTP 评分不动；日志与提交信息不含验证码/正文/剪贴板。
 9. **v1.8 真机闭环**：`DxgiSource`（DXGI 采集，WAIT_TIMEOUT→`Ok(None)`）+ `ZstdCodec`/`EncodedSource<S>`（无损编码可换端口）+ `SystemSink`（GDI BitBlt 同步呈现）+ `TMF1` 分片 / `ScreenAssembler` 重组 + 接入侧 decompress 链 + `ScreenIntervalTracker`（wall-clock 微秒，bounded 1024，`screen_latency_p95_us()` 暴露 p95）。`tetherly run` 注入 `SystemSink` + 16ms 帧泵（非 Streaming 跳过 grab）。`--screen-adb <serial>` 选用 `AdbSource`（云手机屏幕，PNG→BGRA8，不变屏 `Ok(None)`）。非 Windows 返回诚实 `ScreenRefused`。UI：`/api/screen/start` 自动拨号 screen 通道；Snapshot 的 received/dropped/bytes 来自 visitor 侧 `screen_rx_stats`。
 10. **v1.9 键鼠真机链**：受控端 `SystemInputSink`（SendInput：1000 单位→65535 绝对坐标、按钮 mask 位、滚轮、VK 键盘；`NodeConfig.input_sink` 注入，CI 缺省 None）+ 主控端 `spawn_input_capture`（`WH_MOUSE_LL` 恒挂过边检测、`WH_KEYBOARD_LL` 仅远程座位挂、`LLMHF/LLKHF_INJECTED` 过滤防回环）+ 受控端观察者 trace 镜像转发。注入探针实测：过边→光标左缘 (0,539)、中心移动精确、键盘 Win/Esc；DXGI 真实像素捕获 1920x1080（M5.1 收窄）。`TIN1` 语义：VK 码 / 1000 单位 / `BTN_LEFT=1,BTN_RIGHT=2,BTN_MIDDLE=4`。双桌面 100 次物理往返仍 Manual-required。
+
+---
+
+## 24. v1.25 开工与实施清单（文件发送闭环与 CI-First）
+
+1. **GitHub CI-First 构建体系确立**：
+   - 任何涉及 Windows（WinRT/DXGI/SendInput）、macOS（CoreGraphics）、Linux（X11/bullseye 容器）以及 Android（NDK arm64-v8a）的跨平台构建、格式检查（`cargo fmt`）、代码规范（`clippy -D warnings`）、单元/集成测试（`cargo test --workspace --locked`）与安全审计（`cargo deny check`）均以 GitHub Actions 为核心准绳。
+   - 本地主机仅做轻量代码编写与局部功能调试，禁止在本地维护不可靠的交叉构建链。
+   - 发布二进制打包必须由 `.github/workflows/release.yml` 驱动，Linux 严格受限于 `debian:bullseye`（glibc ≤ 2.31 守卫）容器。
+2. **生产文件发送入口闭环 (v1.25 核心功能)**：
+   - **回环 API 扩充**：在 `tetherly-node::uihttp` 新增 `POST /api/file/send` 路由，接收 JSON 载荷 `{ "path": "<file_path>", "peer": "<device_id>" }`。
+   - **API 契约与校验**：
+     - 校验 `path` 必须存在且为常规文件，读取长度不超过 `FILE_MAX`（512 MiB）；
+     - 目标 `peer` 必须在当前活跃连接列表中（`live_peers`），若无对端或目标不在线返回诚实 400 错误；
+     - 校验通过后，调用 `Node::send_file`，内部发起 `FileOffer` 并监听数据通道分块推送。
+   - **CLI 客户端扩充**：在 `bins/tetherly-cli` 与 `tetherly` 二进制中增设 `tetherly send <file_path> [--peer <device_id>] [--ui-port <port>]` 子命令。与 `tetherly pin`/`dial`/`notify` 保持一致的 ADR-013 回环客户端机制，严格向 `127.0.0.1:45716` 发送请求，不得自起节点。
+   - **UI 呈现**：在 `ui/index.html` 增设「发送文件」表单，允许用户输入或选择本机文件路径，指定目标设备发起直传。
+3. **大文件流式架构演进设计 (Blueprint)**：
+   - **核心痛点**：目前单文件上限 `FILE_MAX = 512 MiB` 受制于收发双端整文件全量驻留 `Vec<u8>` 内存缓冲。
+   - **流式解耦目标**：
+     - 发送端：将 `offer_and_send_bytes` 演进为 `offer_and_send_stream`，按 64 KiB 块流式读取磁盘并直接输入 ChaCha20-Poly1305 加密块，内存仅保留单块缓冲；
+     - 接收端：分块验证通过后直接写盘 `.part` 文件，同时以 `ring::digest::Context` 流式累积计算 SHA-256 哈希；全部块传输完成后比较最终摘要并原子重命名；
+     - 该架构落地后，可平滑将 `FILE_MAX` 提升至数十 GiB 乃至无限制（仅受目标磁盘容量限制）。
+4. **测试与回归断言**：
+   - `tests/phase1.rs` 新增 `file_sent_via_live_node_api_reaches_the_paired_peer` 端到端回归；
+   - 验证通过 `POST /api/file/send` 触发真实双节点文件传输，断言对端接收端收到 offer、点击确认后接收完整、sha256 一致且双方会话存活；
+   - 断言文件不存在、超限文件报价被拒且错误码可解释；
+   - 维持全量 290+ 测试通过。

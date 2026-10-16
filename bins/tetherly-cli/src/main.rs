@@ -14,6 +14,7 @@ use tetherly_crypto::Identity;
 use tetherly_net::session::{
     accept_session, dial_session, serve_pong_once, SessionConfig, CONTROL_PORT, HANDSHAKE_TIMEOUT,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
@@ -50,6 +51,20 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         reconnect: u32,
     },
+    /// Send a file to a live peer via the running daemon's loopback UI API.
+    Send {
+        /// Path to the file to send.
+        path: std::path::PathBuf,
+        /// Optional filename override to declare to the peer.
+        #[arg(long)]
+        name: Option<String>,
+        /// `tdev_…` of the peer. Omit only when exactly one peer is live.
+        #[arg(long)]
+        peer: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 struct OsRng;
@@ -81,6 +96,32 @@ fn cfg(identity: Identity, name: &str, pin: [u8; 8]) -> SessionConfig {
         screen_only: false,
         caps: None,
     }
+}
+
+async fn loopback_post(port: u16, path: &str, body: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect(addr).await?;
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let text = String::from_utf8_lossy(&buf);
+    let code = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let payload = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .map(|b| b.as_bytes().to_vec())
+        .unwrap_or_default();
+    Ok((code, payload))
 }
 
 #[tokio::main]
@@ -146,6 +187,43 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Cmd::Send {
+            path,
+            name,
+            peer,
+            ui_port,
+        } => {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("path contains invalid UTF-8"))?;
+            let payload = serde_json::json!({
+                "path": path_str,
+                "name": name,
+                "peer": peer,
+            });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = loopback_post(ui_port, "/api/file/send", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "node refused file send (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let v: serde_json::Value =
+                serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            let transfer_id = v.get("transfer_id").and_then(|p| p.as_str()).unwrap_or("?");
+            let target_peer = v.get("peer").and_then(|p| p.as_str()).unwrap_or("?");
+            let file_name = v.get("name").and_then(|p| p.as_str()).unwrap_or("?");
+            let size = v.get("size").and_then(|p| p.as_u64()).unwrap_or(0);
+            println!("offered {file_name} ({size} bytes) to {target_peer} [{transfer_id}]");
         }
     }
     Ok(())

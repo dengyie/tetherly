@@ -80,6 +80,18 @@
       <h2>待确认文件</h2>
       <div id="files"><div class="empty">没有待接收文件。</div></div>
     </section>
+    <section style="margin-top:16px">
+      <h2>发送文件</h2>
+      <div class="hint">选择要发送给对端的文件（限制 512 MiB 以内）。</div>
+      <div class="row" style="margin-top:8px">
+        <select id="sendpeer" style="background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%"></select>
+      </div>
+      <div class="row">
+        <input id="sendfile" type="file"/>
+        <button id="sendbtn" type="button">发送</button>
+      </div>
+      <div id="sendstatus" class="hint"></div>
+    </section>
   </div>
   <div>
     <section>
@@ -232,10 +244,22 @@ function render(s) {
   const p = $("peers");
   p.innerHTML = "";
   if (!s.peers.length) p.appendChild(el('<div class="empty">无会话</div>'));
+  const sp = $("sendpeer");
+  const prevPeer = sp ? sp.value : "";
+  if (sp) {
+    sp.innerHTML = '<option value="">自动（唯一在线对端）</option>';
+  }
   for (const x of s.peers) {
     p.appendChild(el('<div class="card"><div><div class="title"></div><div class="meta"></div></div></div>'));
     p.lastChild.querySelector(".title").textContent = x.name;
     p.lastChild.querySelector(".meta").textContent = x.platform + " · " + (x.path || "lan") + " · " + x.device_id;
+    if (sp) {
+      const opt = document.createElement("option");
+      opt.value = x.device_id;
+      opt.textContent = x.name + " (" + x.device_id + ")";
+      if (opt.value === prevPeer) opt.selected = true;
+      sp.appendChild(opt);
+    }
   }
   const a = $("ancs");
   if (a) {
@@ -272,6 +296,40 @@ $("screenstart").onclick = () => api("/api/screen/start", {});
 $("screenstop").onclick = () => api("/api/screen/stop", {});
 $("inputstart").onclick = () => api("/api/input/start", {});
 $("inputstop").onclick = () => api("/api/input/stop", {});
+$("sendbtn").onclick = async () => {
+  const fileInput = $("sendfile");
+  const file = fileInput.files && fileInput.files[0];
+  const st = $("sendstatus");
+  if (!file) {
+    if (st) st.textContent = "请先选择文件";
+    return;
+  }
+  if (st) st.textContent = "读取并准备发送中…";
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const b64 = reader.result.split(",")[1];
+      const peer = $("sendpeer") ? $("sendpeer").value : "";
+      const r = await api("/api/file/send", {
+        name: file.name,
+        data_base64: b64,
+        peer: peer || undefined,
+      });
+      if (r && r.ok) {
+        if (st) st.textContent = "已向 " + r.peer + " 发起传输: " + r.name + " (" + r.size + " 字节, " + r.transfer_id + ")";
+        fileInput.value = "";
+      } else {
+        if (st) st.textContent = "发送失败: " + (r ? (r.error || JSON.stringify(r)) : "未知错误");
+      }
+    } catch (e) {
+      if (st) st.textContent = "发送异常: " + e;
+    }
+  };
+  reader.onerror = (e) => {
+    if (st) st.textContent = "文件读取失败: " + e;
+  };
+  reader.readAsDataURL(file);
+};
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
 }

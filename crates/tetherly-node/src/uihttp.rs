@@ -267,6 +267,15 @@ struct OpenRuleBody {
     url: String,
 }
 
+#[derive(serde::Deserialize)]
+struct SendFileBody {
+    path: Option<String>,
+    #[serde(default)]
+    data_base64: Option<String>,
+    peer: Option<String>,
+    name: Option<String>,
+}
+
 async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'static str, Vec<u8>) {
     match (method, path) {
         ("GET", "/") | ("GET", "/index.html") => (200, "text/html", INDEX.as_bytes().to_vec()),
@@ -397,6 +406,91 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
                 Err(e) => err(400, &e.to_string()),
             },
+            Err(_) => err(400, "bad json"),
+        },
+        ("POST", "/api/file/send") => match serde_json::from_slice::<SendFileBody>(body) {
+            Ok(d) => {
+                let mut peers = node.live_peers();
+                peers.sort_by_key(|p| p.device_id.to_string());
+                let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
+                    Some(raw) => match tetherly_core::DeviceId::parse(raw) {
+                        Ok(id) => {
+                            if peers.iter().any(|p| p.device_id == id) {
+                                id
+                            } else {
+                                return err(400, "peer is not connected");
+                            }
+                        }
+                        Err(_) => return err(400, "bad peer id"),
+                    },
+                    None => match peers.len() {
+                        0 => return err(400, "no connected peer"),
+                        1 => peers[0].device_id.clone(),
+                        _ => return err(400, "multiple peers connected; pass peer (tdev_…)"),
+                    },
+                };
+
+                let (bytes, filename) = if let Some(ref path_str) = d.path {
+                    let p = std::path::Path::new(path_str);
+                    if !p.is_file() {
+                        return err(400, "file not found or not a regular file");
+                    }
+                    let meta = match std::fs::metadata(p) {
+                        Ok(m) => m,
+                        Err(e) => return err(400, &format!("cannot read file metadata: {e}")),
+                    };
+                    if meta.len() > tetherly_core::FILE_MAX {
+                        return err(400, "file exceeds FILE_MAX (512 MiB)");
+                    }
+                    let file_bytes = match std::fs::read(p) {
+                        Ok(b) => b,
+                        Err(e) => return err(400, &format!("failed to read file: {e}")),
+                    };
+                    let fname = d.name.clone().unwrap_or_else(|| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("file.bin")
+                            .to_string()
+                    });
+                    (file_bytes, fname)
+                } else if let Some(ref b64) = d.data_base64 {
+                    use base64::Engine;
+                    let decoded =
+                        match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                            Ok(b) => b,
+                            Err(e) => return err(400, &format!("invalid base64: {e}")),
+                        };
+                    if decoded.len() as u64 > tetherly_core::FILE_MAX {
+                        return err(400, "file exceeds FILE_MAX (512 MiB)");
+                    }
+                    let fname = d.name.clone().unwrap_or_else(|| "upload.bin".to_string());
+                    (decoded, fname)
+                } else {
+                    return err(400, "either path or data_base64 must be provided");
+                };
+
+                let safe_name = match tetherly_core::sanitize_file_name(&filename) {
+                    Ok(n) => n,
+                    Err(e) => return err(400, &format!("invalid file name: {e}")),
+                };
+
+                let digest = tetherly_core::hex_sha256(&bytes);
+                let size = bytes.len();
+                match node
+                    .offer_and_send_bytes(&target, &safe_name, &bytes, false)
+                    .await
+                {
+                    Ok(transfer_id) => json_ok(&serde_json::json!({
+                        "ok": true,
+                        "transfer_id": transfer_id,
+                        "name": safe_name,
+                        "size": size,
+                        "sha256": digest,
+                        "peer": target.as_str(),
+                    })),
+                    Err(e) => err(400, &e.to_string()),
+                }
+            }
             Err(_) => err(400, "bad json"),
         },
         // Step 1 of the phone wizard: the user connected the iPhone in the OS

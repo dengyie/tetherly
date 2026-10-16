@@ -2098,6 +2098,7 @@ dependencies = [
 name = "tetherly"
 version = "0.1.3"
 dependencies = [
+ "base64",
  "serde_json",
  "tetherly-core",
  "tetherly-crypto",
@@ -2195,6 +2196,7 @@ version = "0.1.3"
 dependencies = [
  "anyhow",
  "arboard",
+ "base64",
  "clap",
  "getrandom 0.2.17",
  "if-addrs",

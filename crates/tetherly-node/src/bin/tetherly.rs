@@ -102,6 +102,24 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Ask the *running* node to send a file to one live peer.
+    ///
+    /// The file is read from the local filesystem and offered over the live
+    /// session. With one live peer the target is implied; with more than one,
+    /// `--peer` is required.
+    Send {
+        /// Path to the file to send.
+        path: PathBuf,
+        /// Optional filename override to declare to the peer.
+        #[arg(long)]
+        name: Option<String>,
+        /// `tdev_…` of the peer. Omit only when exactly one peer is live.
+        #[arg(long)]
+        peer: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[tokio::main]
@@ -310,6 +328,43 @@ async fn main() -> Result<()> {
                 serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
             let peer = v.get("peer").and_then(|p| p.as_str()).unwrap_or("?");
             println!("notified {peer}");
+        }
+        Cmd::Send {
+            path,
+            name,
+            peer,
+            ui_port,
+        } => {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("path contains invalid UTF-8"))?;
+            let payload = serde_json::json!({
+                "path": path_str,
+                "name": name,
+                "peer": peer,
+            });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/file/send", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "node refused file send (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let v: serde_json::Value =
+                serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            let transfer_id = v.get("transfer_id").and_then(|p| p.as_str()).unwrap_or("?");
+            let target_peer = v.get("peer").and_then(|p| p.as_str()).unwrap_or("?");
+            let file_name = v.get("name").and_then(|p| p.as_str()).unwrap_or("?");
+            let size = v.get("size").and_then(|p| p.as_u64()).unwrap_or(0);
+            println!("offered {file_name} ({size} bytes) to {target_peer} [{transfer_id}]");
         }
     }
     Ok(())

@@ -13,6 +13,12 @@ const OTP: &str = "524681";
 
 struct DirGuard(PathBuf);
 
+impl DirGuard {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
 impl Drop for DirGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -598,6 +604,111 @@ async fn notify_posted_to_the_live_node_api_reaches_the_paired_peer() {
     .await
     .unwrap();
     assert_eq!(code, 400, "a peer that is not connected must be refused");
+
+    host.shutdown();
+    peer.shutdown();
+}
+
+/// v1.25 production file-sending loop: a file posted to the live node's loopback
+/// API (`POST /api/file/send`) via disk path or base64 payload arrives at the
+/// paired peer as a FileOffer, is accepted, and is written to inbox matching SHA-256.
+#[tokio::test(flavor = "multi_thread")]
+async fn file_sent_via_live_node_api_reaches_the_paired_peer() {
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    let ui_port = host.spawn_ui().await.unwrap();
+    assert_ne!(ui_port, 0, "test node must serve the loopback UI API");
+
+    // 1. Create a temporary test file on disk
+    let (send_dir, _g_send) = temp_dir("send-file");
+    let file_path = send_dir.join("report.pdf");
+    let file_content = b"PDF-1.7 Test Document Content Tetherly v1.25";
+    std::fs::write(&file_path, file_content).unwrap();
+    let expected_hash = hex_sha256(file_content);
+
+    // 2. Post to /api/file/send with file path
+    let payload = serde_json::json!({
+        "path": file_path.to_str().unwrap(),
+        "name": "report.pdf",
+    });
+    let (code, body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/send",
+        &serde_json::to_vec(&payload).unwrap(),
+    )
+    .await
+    .expect("live node API reachable");
+    assert_eq!(
+        code,
+        200,
+        "send response: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let transfer_id = resp["transfer_id"].as_str().unwrap();
+
+    // 3. Peer waits for the offer, then accepts the file
+    wait_offered(&peer, Duration::from_secs(5)).await;
+    peer.user_accept_file(transfer_id).await.unwrap();
+
+    // 4. Peer receives and saves the file in inbox
+    let received = wait_inbox(g2.path(), "report.pdf", Duration::from_secs(10)).await;
+    assert_eq!(hex_sha256(&received), expected_hash);
+
+    // 5. Test with base64 data upload directly (the web UI upload route)
+    use base64::Engine;
+    let b64_content = b"Base64 Upload Test Tetherly v1.25";
+    let b64_str = base64::engine::general_purpose::STANDARD.encode(b64_content);
+    let payload_b64 = serde_json::json!({
+        "data_base64": b64_str,
+        "name": "b64_doc.txt",
+    });
+    let (code, body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/send",
+        &serde_json::to_vec(&payload_b64).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        code,
+        200,
+        "b64 send response: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let resp_b64: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let transfer_id_b64 = resp_b64["transfer_id"].as_str().unwrap();
+
+    wait_offered(&peer, Duration::from_secs(5)).await;
+    peer.user_accept_file(transfer_id_b64).await.unwrap();
+    let received_b64 = wait_inbox(g2.path(), "b64_doc.txt", Duration::from_secs(10)).await;
+    assert_eq!(hex_sha256(&received_b64), hex_sha256(b64_content));
+
+    // 6. Test negative assertion: unknown peer returns 400
+    let missing_peer = serde_json::json!({
+        "path": file_path.to_str().unwrap(),
+        "peer": "tdev_2222222222222222",
+    });
+    let (code, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/send",
+        &serde_json::to_vec(&missing_peer).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, 400, "an unknown peer must be refused with 400");
+
+    // 7. Test negative assertion: missing file returns 400
+    let missing_file = serde_json::json!({
+        "path": send_dir.join("nonexistent.txt").to_str().unwrap(),
+    });
+    let (code, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/send",
+        &serde_json::to_vec(&missing_file).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, 400, "a missing file must be refused with 400");
 
     host.shutdown();
     peer.shutdown();
