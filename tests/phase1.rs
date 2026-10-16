@@ -865,6 +865,104 @@ async fn streaming_file_transfer_tracks_active_progress_and_completion_states() 
     peer.shutdown();
 }
 
+/// v1.28: Enterprise file transfer limits (64 GiB), transfer velocity (speed_bps)
+/// tracking, and loopback GET status observability pipeline (ADR-021).
+#[tokio::test(flavor = "multi_thread")]
+async fn enterprise_file_limits_speed_and_status_observability() {
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    let ui_port = host.spawn_ui().await.unwrap();
+
+    // 1. Verify loopback_get retrieves valid node state for CLI status command
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/state")
+        .await
+        .expect("loopback_get state succeeds");
+    assert_eq!(code, 200);
+    let state: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        state["device_id"].as_str().unwrap(),
+        host.identity().device_id().as_str()
+    );
+    assert_eq!(state["name"].as_str().unwrap(), "phone");
+    let peers_arr = state["peers"].as_array().expect("peers array");
+    assert_eq!(peers_arr.len(), 1);
+    assert_eq!(
+        peers_arr[0]["device_id"].as_str().unwrap(),
+        peer.identity().device_id().as_str()
+    );
+
+    // 2. Perform a multi-chunk streaming transfer to test progress and velocity tracking
+    let (send_dir, _g_send) = temp_dir("obs-send");
+    let file_path = send_dir.join("speed_test.bin");
+    let total_size = 4 * tetherly_core::FILE_CHUNK + 2048;
+    let file_content: Vec<u8> = (0..total_size).map(|i| (i % 179) as u8).collect();
+    std::fs::write(&file_path, &file_content).unwrap();
+
+    let payload = serde_json::json!({
+        "path": file_path.to_str().unwrap(),
+        "name": "speed_test.bin",
+    });
+    let (send_code, send_body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/send",
+        &serde_json::to_vec(&payload).unwrap(),
+    )
+    .await
+    .expect("send succeeds");
+    assert_eq!(send_code, 200);
+    let send_resp: serde_json::Value = serde_json::from_slice(&send_body).unwrap();
+    let transfer_id = send_resp["transfer_id"].as_str().unwrap();
+
+    // Verify ActiveTransfer structure contains speed_bps field in runtime
+    let initial_transfers = host.active_transfers();
+    assert_eq!(initial_transfers.len(), 1);
+    assert_eq!(initial_transfers[0].transfer_id, transfer_id);
+    assert_eq!(initial_transfers[0].speed_bps, 0); // initially 0 before transfer
+
+    wait_offered(&peer, Duration::from_secs(5)).await;
+    peer.user_accept_file(transfer_id).await.unwrap();
+
+    let received = wait_inbox(g2.path(), "speed_test.bin", Duration::from_secs(10)).await;
+    assert_eq!(received.len(), total_size);
+
+    // 3. Verify loopback_get /api/state reveals updated transfer with completed phase and speed_bps zeroed out
+    let (sc_code, sc_body) = tetherly_node::loopback_get(ui_port, "/api/state")
+        .await
+        .expect("loopback_get state succeeds");
+    assert_eq!(sc_code, 200);
+    let final_state: serde_json::Value = serde_json::from_slice(&sc_body).unwrap();
+    let transfers = final_state["transfers"].as_array().expect("transfers array");
+    assert_eq!(transfers.len(), 1);
+    assert_eq!(transfers[0]["transfer_id"], transfer_id);
+    assert_eq!(transfers[0]["phase"], "completed");
+    assert_eq!(transfers[0]["transferred"], total_size as u64);
+    assert_eq!(transfers[0]["total"], total_size as u64);
+    // On terminal phase, speed_bps must be settled to 0
+    assert_eq!(transfers[0]["speed_bps"], 0);
+
+    // 4. Test 64 GiB limit boundary via wire offer to peer
+    let peer_dev_id = peer.identity().device_id().clone();
+    let sixty_four_gib: u64 = 64 * 1024 * 1024 * 1024;
+    let oversized = tetherly_core::FileOffer {
+        transfer_id: "tr_64g_plus_1".into(),
+        files: vec![tetherly_core::FileMeta {
+            name: "huge_virtual_disk.img".into(),
+            size: sixty_four_gib + 1,
+            sha256: "f".repeat(64),
+        }],
+    };
+    host.send_to(&peer_dev_id, oversized.to_frame().unwrap())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        peer.offered_files().iter().all(|f| f.transfer_id != "tr_64g_plus_1"),
+        "an offer exceeding 64 GiB must be dropped by the receiver"
+    );
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

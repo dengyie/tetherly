@@ -163,6 +163,30 @@ pub async fn loopback_post(port: u16, path: &str, body: &[u8]) -> std::io::Resul
     Ok((code, payload))
 }
 
+/// GET a path from a node's loopback UI API and return the HTTP status with
+/// the response body.
+pub async fn loopback_get(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect(addr).await?;
+    let head = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    stream.write_all(head.as_bytes()).await?;
+    stream.flush().await?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let text = String::from_utf8_lossy(&buf);
+    let code = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let payload = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .map(|b| b.as_bytes().to_vec())
+        .unwrap_or_default();
+    Ok((code, payload))
+}
+
 #[derive(Serialize)]
 struct Snapshot {
     device_id: String,
@@ -441,9 +465,9 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                         Err(e) => return err(400, &format!("cannot read file metadata: {e}")),
                     };
                     if meta.len() > tetherly_core::FILE_MAX {
-                        return err(400, "file exceeds FILE_MAX (512 MiB)");
+                        return err(400, "file exceeds FILE_MAX (64 GiB)");
                     }
-                    let size = meta.len() as usize;
+                    let size = meta.len();
                     match node
                         .offer_and_send_file(&target, p, d.name.as_deref())
                         .await
@@ -477,7 +501,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                             Err(e) => return err(400, &format!("invalid base64: {e}")),
                         };
                     if decoded.len() as u64 > tetherly_core::FILE_MAX {
-                        return err(400, "file exceeds FILE_MAX (512 MiB)");
+                        return err(400, "file exceeds FILE_MAX (64 GiB)");
                     }
                     let fname = d.name.clone().unwrap_or_else(|| "upload.bin".to_string());
                     let safe_name = match tetherly_core::sanitize_file_name(&fname) {
@@ -485,7 +509,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                         Err(e) => return err(400, &format!("invalid file name: {e}")),
                     };
                     let digest = tetherly_core::hex_sha256(&decoded);
-                    let size = decoded.len();
+                    let size = decoded.len() as u64;
                     match node
                         .offer_and_send_bytes(&target, &safe_name, &decoded, false)
                         .await

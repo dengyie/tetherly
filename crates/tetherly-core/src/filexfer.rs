@@ -107,14 +107,11 @@ const INCOMING_MAX: usize = 256;
 
 /// Largest single file v1 will accept or send, in bytes.
 ///
-/// The v1 path is whole-file resident: the receiver accumulates the body in a
-/// `Vec<u8>` and only then `atomic_write`s it, and the sender holds the bytes in
-/// `pending_out` on top of the caller's buffer. This cap is therefore a
-/// *memory* bound, enforced before any allocation (at offer time, on the
-/// unauthenticated declared size) and again on the file channel. True streaming
-/// (write-as-you-go + incremental sha256) is the follow-up that would let this
-/// rise; until then the cap keeps a single transfer inside ~1 GiB of RAM.
-pub const FILE_MAX: u64 = 512 * 1024 * 1024;
+/// With v1.26's O(1) streaming pipeline and v1.27's chunked tracking, file transfer
+/// memory is strictly bounded to a single 64 KiB buffer. This cap is raised to
+/// 64 GiB to accommodate large modern files (ISO images, VM disks, archives)
+/// while guarding against integer overflow and unbounded disk exhaustion.
+pub const FILE_MAX: u64 = 64 * 1024 * 1024 * 1024;
 
 impl FileHub {
     pub fn offer(
@@ -379,8 +376,25 @@ mod tests {
             CoreError::FileTooLarge(FILE_MAX)
         );
         assert!(hub.get("tr_big").is_none());
-        assert!(hub.offer(src, sized(FILE_MAX), 2).is_ok());
+        assert!(hub.offer(src.clone(), sized(FILE_MAX), 2).is_ok());
         assert!(!hub.is_accepted("tr_big"));
+
+        // Exact 64 GiB boundary validation (ADR-021)
+        let sixty_four_gib: u64 = 64 * 1024 * 1024 * 1024;
+        assert_eq!(FILE_MAX, sixty_four_gib);
+        let sized_64g = |id: &str, size: u64| FileOffer {
+            transfer_id: id.into(),
+            files: vec![FileMeta {
+                name: "enterprise_disk.img".into(),
+                size,
+                sha256: "d".repeat(64),
+            }],
+        };
+        assert!(hub.offer(src.clone(), sized_64g("tr_64g_ok", sixty_four_gib), 3).is_ok());
+        assert_eq!(
+            hub.offer(src, sized_64g("tr_64g_over", sixty_four_gib + 1), 4).unwrap_err(),
+            CoreError::FileTooLarge(FILE_MAX)
+        );
     }
 
     #[test]

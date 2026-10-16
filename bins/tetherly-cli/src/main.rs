@@ -61,6 +61,24 @@ enum Cmd {
         /// `tdev_…` of the peer. Omit only when exactly one peer is live.
         #[arg(long)]
         peer: Option<String>,
+        /// Watch transfer progress until completion.
+        #[arg(long)]
+        watch: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
+    Status {
+        /// Watch mode: refresh status periodically until interrupted.
+        #[arg(long, short)]
+        watch: bool,
+        /// Refresh interval in seconds for --watch (default: 1).
+        #[arg(long, default_value_t = 1)]
+        interval: u64,
+        /// Output raw JSON snapshot instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -107,6 +125,28 @@ async fn loopback_post(port: u16, path: &str, body: &[u8]) -> std::io::Result<(u
     );
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body).await?;
+    stream.flush().await?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let text = String::from_utf8_lossy(&buf);
+    let code = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let payload = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .map(|b| b.as_bytes().to_vec())
+        .unwrap_or_default();
+    Ok((code, payload))
+}
+
+async fn loopback_get(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect(addr).await?;
+    let head = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    stream.write_all(head.as_bytes()).await?;
     stream.flush().await?;
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await?;
@@ -192,6 +232,7 @@ async fn main() -> Result<()> {
             path,
             name,
             peer,
+            watch,
             ui_port,
         } => {
             let path_str = path
@@ -224,7 +265,173 @@ async fn main() -> Result<()> {
             let file_name = v.get("name").and_then(|p| p.as_str()).unwrap_or("?");
             let size = v.get("size").and_then(|p| p.as_u64()).unwrap_or(0);
             println!("offered {file_name} ({size} bytes) to {target_peer} [{transfer_id}]");
+
+            if watch {
+                println!("watching transfer progress for [{transfer_id}]...");
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    let (status_code, state_resp) =
+                        loopback_get(ui_port, "/api/state").await?;
+                    if status_code != 200 {
+                        continue;
+                    }
+                    let state: serde_json::Value = match serde_json::from_slice(&state_resp) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    let transfers = state.get("transfers").and_then(|t| t.as_array());
+                    let current = transfers.and_then(|list| {
+                        list.iter().find(|t| {
+                            t.get("transfer_id")
+                                .and_then(|id| id.as_str())
+                                == Some(transfer_id)
+                        })
+                    });
+                    if let Some(t) = current {
+                        let transferred = t.get("transferred").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let total = t.get("total").and_then(|v| v.as_u64()).unwrap_or(size);
+                        let speed_bps = t.get("speed_bps").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let phase = t.get("phase").and_then(|v| v.as_str()).unwrap_or("transferring");
+                        let pct = if total > 0 {
+                            (transferred as f64 / total as f64) * 100.0
+                        } else {
+                            0.0
+                        };
+                        print!(
+                            "\r[{:>5.1}%] {} / {} ({}) [{}]      ",
+                            pct,
+                            format_bytes(transferred),
+                            format_bytes(total),
+                            format_speed(speed_bps),
+                            phase
+                        );
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+
+                        if phase == "completed" {
+                            println!("\n✓ Transfer completed: {file_name} ({})", format_bytes(total));
+                            break;
+                        } else if phase == "failed" {
+                            let err_msg = t
+                                .get("error")
+                                .and_then(|e| e.as_str())
+                                .unwrap_or("transfer failed");
+                            bail!("\n✗ Transfer failed: {err_msg}");
+                        }
+                    }
+                }
+            }
+        }
+        Cmd::Status {
+            watch,
+            interval,
+            json,
+            ui_port,
+        } => {
+            loop {
+                let (code, resp) = loopback_get(ui_port, "/api/state")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "node refused status query (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    if watch {
+                        print!("\x1b[2J\x1b[H");
+                    }
+                    print_status_summary(&v);
+                }
+                if !watch {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
+            }
         }
     }
     Ok(())
+}
+
+fn print_status_summary(v: &serde_json::Value) {
+    let device_id = v.get("device_id").and_then(|s| s.as_str()).unwrap_or("?");
+    let name = v.get("name").and_then(|s| s.as_str()).unwrap_or("?");
+    let platform = v.get("platform").and_then(|s| s.as_str()).unwrap_or("?");
+    let pin_active = v.get("pin_active").and_then(|s| s.as_bool()).unwrap_or(false);
+    let lan_only = v.get("lan_only").and_then(|s| s.as_bool()).unwrap_or(false);
+
+    println!("Tetherly Node Status:");
+    println!("  Device ID:  {device_id}");
+    println!("  Node Name:  {name} ({platform})");
+    println!("  PIN Active: {pin_active}");
+    println!("  LAN Only:   {lan_only}");
+
+    if let Some(peers) = v.get("peers").and_then(|p| p.as_array()) {
+        println!("  Connected Peers ({}):", peers.len());
+        for p in peers {
+            let id = p.get("device_id").and_then(|s| s.as_str()).unwrap_or("?");
+            let name = p.get("name").and_then(|s| s.as_str()).unwrap_or("?");
+            let addr = p.get("addr").and_then(|s| s.as_str()).unwrap_or("?");
+            let path = p.get("path").and_then(|s| s.as_str()).unwrap_or("?");
+            println!("    - {id} ({name}) at {addr} [{path}]");
+        }
+    }
+
+    if let Some(transfers) = v.get("transfers").and_then(|t| t.as_array()) {
+        println!("  Transfers ({}):", transfers.len());
+        for t in transfers {
+            let id = t.get("transfer_id").and_then(|s| s.as_str()).unwrap_or("?");
+            let dir = t.get("direction").and_then(|s| s.as_str()).unwrap_or("?");
+            let filename = t.get("filename").and_then(|s| s.as_str()).unwrap_or("?");
+            let transferred = t.get("transferred").and_then(|s| s.as_u64()).unwrap_or(0);
+            let total = t.get("total").and_then(|s| s.as_u64()).unwrap_or(0);
+            let speed = t.get("speed_bps").and_then(|s| s.as_u64()).unwrap_or(0);
+            let phase = t.get("phase").and_then(|s| s.as_str()).unwrap_or("?");
+            let pct = if total > 0 {
+                (transferred as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
+            let speed_str = if speed > 0 {
+                format!("{} ", format_speed(speed))
+            } else {
+                "".to_string()
+            };
+            println!(
+                "    - [{dir}] {filename} ({:>5.1}%, {} / {}) {speed_str}[{phase}] ({id})",
+                pct,
+                format_bytes(transferred),
+                format_bytes(total)
+            );
+        }
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.2} GiB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MiB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KiB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_speed(bps: u64) -> String {
+    format!("{}/s", format_bytes(bps))
 }

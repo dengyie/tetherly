@@ -229,6 +229,7 @@ pub struct ActiveTransfer {
     pub filename: String,
     pub total: u64,
     pub transferred: u64,
+    pub speed_bps: u64,
     pub phase: TransferPhase,
     pub error: Option<String>,
     pub started_ms: u64,
@@ -1713,6 +1714,7 @@ impl Node {
                     filename: name.clone(),
                     total,
                     transferred: start,
+                    speed_bps: 0,
                     phase: TransferPhase::Transferring,
                     error: None,
                     started_ms: now,
@@ -1884,6 +1886,7 @@ impl Node {
                     filename: name,
                     total,
                     transferred: resume_from,
+                    speed_bps: 0,
                     phase: TransferPhase::Transferring,
                     error: None,
                     started_ms: now,
@@ -2002,6 +2005,7 @@ impl Node {
                     filename: name.into(),
                     total: data.len() as u64,
                     transferred: 0,
+                    speed_bps: 0,
                     phase: TransferPhase::Transferring,
                     error: None,
                     started_ms: now,
@@ -2087,6 +2091,7 @@ impl Node {
                     filename: safe_name,
                     total: size,
                     transferred: 0,
+                    speed_bps: 0,
                     phase: TransferPhase::Transferring,
                     error: None,
                     started_ms: now,
@@ -2144,6 +2149,7 @@ impl Node {
                     filename: outbound.name.clone(),
                     total: outbound.size,
                     transferred: start,
+                    speed_bps: 0,
                     phase: TransferPhase::Transferring,
                     error: None,
                     started_ms: now,
@@ -3015,6 +3021,16 @@ impl Node {
         let now = self.shared.clock.unix_ms();
         let mut transfers = self.shared.active_transfers.lock().expect("transfers");
         if let Some(t) = transfers.get_mut(transfer_id) {
+            let delta_bytes = transferred.saturating_sub(t.transferred);
+            let delta_ms = now.saturating_sub(t.updated_ms);
+            if delta_ms > 0 && delta_bytes > 0 {
+                let inst_speed = (delta_bytes * 1000) / delta_ms;
+                t.speed_bps = if t.speed_bps == 0 {
+                    inst_speed
+                } else {
+                    (t.speed_bps * 7 + inst_speed * 3) / 10
+                };
+            }
             t.transferred = transferred;
             t.updated_ms = now;
         }
@@ -3029,6 +3045,9 @@ impl Node {
         let now = self.shared.clock.unix_ms();
         let mut transfers = self.shared.active_transfers.lock().expect("transfers");
         if let Some(t) = transfers.get_mut(transfer_id) {
+            if phase == TransferPhase::Completed || phase == TransferPhase::Failed {
+                t.speed_bps = 0;
+            }
             t.phase = phase;
             t.error = error;
             t.updated_ms = now;
