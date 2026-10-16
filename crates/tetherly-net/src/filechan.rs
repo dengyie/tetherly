@@ -75,14 +75,23 @@ pub async fn send_chunks_from<W: AsyncWrite + Unpin>(
 /// (which must be `CHUNK`-aligned). Reads up to `CHUNK` bytes at a time
 /// until `total` bytes from `start` have been read and sent. Memory is bounded to
 /// one chunk (64 KiB) throughout the transfer.
-pub async fn send_stream_from<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+///
+/// Calls `on_chunk(chan_offset, chunk_len)` after encrypting and writing each chunk.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_stream_from_with_progress<R, W, F>(
     r: &mut R,
     w: &mut W,
     token: &[u8; 32],
     transfer_id: &str,
     total: u64,
     start: u64,
-) -> Result<(), NetError> {
+    mut on_chunk: F,
+) -> Result<(), NetError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    F: FnMut(u64, usize) -> Result<(), NetError>,
+{
     debug_assert_eq!(
         start % CHUNK as u64,
         0,
@@ -105,9 +114,28 @@ pub async fn send_stream_from<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let ct = aead_seal(token, &nonce, &aad, &buf[..want])?;
         write_len_prefixed(w, &ct).await?;
         sent += want as u64;
+        on_chunk(chan_offset, want)?;
     }
     w.flush().await?;
     Ok(())
+}
+
+/// Send from an AsyncRead stream as encrypted chunks, starting from `start`
+/// (which must be `CHUNK`-aligned). Reads up to `CHUNK` bytes at a time
+/// until `total` bytes from `start` have been read and sent. Memory is bounded to
+/// one chunk (64 KiB) throughout the transfer.
+pub async fn send_stream_from<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    r: &mut R,
+    w: &mut W,
+    token: &[u8; 32],
+    transfer_id: &str,
+    total: u64,
+    start: u64,
+) -> Result<(), NetError> {
+    send_stream_from_with_progress(r, w, token, transfer_id, total, start, |_offset, _len| {
+        Ok(())
+    })
+    .await
 }
 
 /// If `path` exists, truncate it back to a chunk boundary and return the
@@ -590,5 +618,63 @@ mod tests {
         let digest_bytes = r_res.unwrap();
         assert_eq!(tetherly_core::hex_lower(&digest_bytes), expected_sha);
         assert_eq!(sink_buf, payload);
+    }
+
+    #[tokio::test]
+    async fn streaming_send_with_progress_reports_accurate_offsets() {
+        let token = [7u8; 32];
+        let total = 2 * CHUNK + 500;
+        let payload: Vec<u8> = vec![42u8; total];
+        let (mut w, mut r) = duplex(8 * CHUNK);
+        let mut source_cursor = std::io::Cursor::new(payload);
+
+        let progress_chunks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pc = progress_chunks.clone();
+
+        let send_handle = tokio::spawn(async move {
+            send_stream_from_with_progress(
+                &mut source_cursor,
+                &mut w,
+                &token,
+                "tr_prog",
+                total as u64,
+                0,
+                |offset, len| {
+                    pc.lock().unwrap().push((offset, len));
+                    Ok(())
+                },
+            )
+            .await
+        });
+
+        let (read_hdr, total_wire, start_wire) = read_header(&mut r).await.unwrap();
+        assert_eq!(read_hdr, "tr_prog");
+        assert_eq!(total_wire, total as u64);
+        assert_eq!(start_wire, 0);
+
+        let mut sink_buf = Vec::new();
+        let mut cursor_writer = std::io::Cursor::new(&mut sink_buf);
+        let hasher = tetherly_core::IncrementalSha256::new();
+        let recv = recv_chunks_to_sink(
+            &mut r,
+            &mut cursor_writer,
+            &token,
+            "tr_prog",
+            total_wire,
+            start_wire,
+            u64::MAX,
+            hasher,
+            |_offset, _len| Ok(()),
+        );
+
+        let (s_res, r_res) = tokio::join!(send_handle, recv);
+        s_res.unwrap().unwrap();
+        r_res.unwrap();
+
+        let recorded = progress_chunks.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 3);
+        assert_eq!(recorded[0], (0, CHUNK));
+        assert_eq!(recorded[1], (CHUNK as u64, CHUNK));
+        assert_eq!(recorded[2], (2 * CHUNK as u64, 500));
     }
 }

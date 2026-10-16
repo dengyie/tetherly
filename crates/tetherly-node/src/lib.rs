@@ -19,7 +19,9 @@ pub use events::{CandidateViewDto, UiEvent};
 #[cfg(windows)]
 pub use platform::{cursor_pos, screen_size, start_input_hooks, HookControl, RawInput};
 pub use platform::{MemoryInsertor, MemoryOpener, SystemInputSink, SystemOpener};
-pub use runtime::{LivePeer, Node, NodeConfig, UserCommand};
+pub use runtime::{
+    ActiveTransfer, LivePeer, Node, NodeConfig, TransferDirection, TransferPhase, UserCommand,
+};
 pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
 
 #[cfg(windows)]

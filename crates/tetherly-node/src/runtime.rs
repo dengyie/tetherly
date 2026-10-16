@@ -205,6 +205,36 @@ struct Hubs {
     resume: tetherly_core::ResumeTable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransferDirection {
+    Inbound,
+    Outbound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransferPhase {
+    Transferring,
+    Verifying,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActiveTransfer {
+    pub transfer_id: String,
+    pub peer: DeviceId,
+    pub direction: TransferDirection,
+    pub filename: String,
+    pub total: u64,
+    pub transferred: u64,
+    pub phase: TransferPhase,
+    pub error: Option<String>,
+    pub started_ms: u64,
+    pub updated_ms: u64,
+}
+
 enum OutboundSource {
     Bytes(Vec<u8>),
     Path(std::path::PathBuf),
@@ -212,6 +242,7 @@ enum OutboundSource {
 
 struct OutboundFile {
     peer: DeviceId,
+    name: String,
     source: OutboundSource,
     size: u64,
 }
@@ -285,6 +316,7 @@ struct Shared {
     input_out: AsyncMutex<Option<mpsc::Sender<InnerFrame>>>,
     live: Mutex<HashMap<DeviceId, LivePeer>>,
     pending_out: Mutex<HashMap<String, OutboundFile>>,
+    active_transfers: Mutex<HashMap<String, ActiveTransfer>>,
     bound_control: AtomicU16,
     bound_file: AtomicU16,
     bound_input: AtomicU16,
@@ -458,6 +490,7 @@ impl Node {
             input_out: AsyncMutex::new(None),
             live: Mutex::new(HashMap::new()),
             pending_out: Mutex::new(HashMap::new()),
+            active_transfers: Mutex::new(HashMap::new()),
             bound_control,
             bound_file,
             bound_input,
@@ -1535,13 +1568,21 @@ impl Node {
                     .lock()
                     .expect("pending")
                     .remove(&d.transfer_id);
+                self.set_transfer_phase(
+                    &d.transfer_id,
+                    TransferPhase::Failed,
+                    Some("rejected by peer".into()),
+                );
             }
             SessionEvent::FileDone(done) => {
                 let mut hubs = self.shared.hubs.lock().expect("hubs");
                 match hubs.files.mark_done(&done) {
-                    Ok(_) => self.emit(UiEvent::FileDone {
-                        transfer_id: done.transfer_id,
-                    }),
+                    Ok(_) => {
+                        self.set_transfer_phase(&done.transfer_id, TransferPhase::Completed, None);
+                        self.emit(UiEvent::FileDone {
+                            transfer_id: done.transfer_id,
+                        });
+                    }
                     Err(e) => warn!(%e, "file done"),
                 }
             }
@@ -1655,6 +1696,29 @@ impl Node {
             }
         }
         let mut written = start;
+        let now = self.shared.clock.unix_ms();
+        {
+            let mut transfers = self.shared.active_transfers.lock().expect("transfers");
+            transfers
+                .entry(transfer_id.clone())
+                .and_modify(|t| {
+                    t.transferred = start;
+                    t.phase = TransferPhase::Transferring;
+                    t.updated_ms = now;
+                })
+                .or_insert_with(|| ActiveTransfer {
+                    transfer_id: transfer_id.clone(),
+                    peer: source.clone(),
+                    direction: TransferDirection::Inbound,
+                    filename: name.clone(),
+                    total,
+                    transferred: start,
+                    phase: TransferPhase::Transferring,
+                    error: None,
+                    started_ms: now,
+                    updated_ms: now,
+                });
+        }
         // Open the .part file for writing chunks at offset `start`.
         let mut part_file = {
             let f = std::fs::OpenOptions::new()
@@ -1672,6 +1736,8 @@ impl Node {
         use tokio::io::AsyncSeekExt;
         part_file.seek(std::io::SeekFrom::Start(start)).await?;
 
+        let node = self.clone_handle();
+        let tid = transfer_id.clone();
         let res = tetherly_net::filechan::recv_chunks_to_sink(
             &mut stream,
             &mut part_file,
@@ -1683,6 +1749,7 @@ impl Node {
             hasher,
             |chan_offset, chunk_len| {
                 written = chan_offset + chunk_len as u64;
+                node.update_transfer_progress(&tid, written);
                 Ok(())
             },
         )
@@ -1692,13 +1759,21 @@ impl Node {
             // Persist a chunk-aligned resume marker (in memory + sidecar) so the
             // next offer resumes instead of restarting.
             self.note_resume(&source, &transfer_id, total, written);
+            self.set_transfer_phase(&transfer_id, TransferPhase::Failed, Some(e.to_string()));
             return Err(e);
         }
+
+        self.set_transfer_phase(&transfer_id, TransferPhase::Verifying, None);
 
         let computed_digest = tetherly_core::hex_lower(&res.unwrap());
         if computed_digest != expected {
             let _ = std::fs::remove_file(&part);
             self.clear_resume(&transfer_id);
+            self.set_transfer_phase(
+                &transfer_id,
+                TransferPhase::Failed,
+                Some("sha256 mismatch".into()),
+            );
             return Err(tetherly_net::NetError::File("sha256".into()));
         }
 
@@ -1718,6 +1793,7 @@ impl Node {
             let _ = hubs.files.mark_done(&done);
         }
         let _ = self.send_to(&source, done.to_frame()?).await;
+        self.set_transfer_phase(&transfer_id, TransferPhase::Completed, None);
         self.emit(UiEvent::FileDone { transfer_id });
         Ok(())
     }
@@ -1780,13 +1856,41 @@ impl Node {
             hubs.files
                 .accept(transfer_id, self.shared.clock.unix_ms())?
         };
-        let source = {
+        let (source, name, total, resume_from) = {
             let hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.files
+            let t = hubs
+                .files
                 .get(transfer_id)
-                .map(|t| t.source.clone())
-                .ok_or(CoreError::UnknownTransfer)?
+                .ok_or(CoreError::UnknownTransfer)?;
+            (
+                t.source.clone(),
+                t.files
+                    .first()
+                    .map(|f| f.name.clone())
+                    .unwrap_or_else(|| "file.bin".into()),
+                t.files.iter().map(|f| f.size).sum::<u64>(),
+                t.resume_from.unwrap_or(0),
+            )
         };
+        let now = self.shared.clock.unix_ms();
+        {
+            let mut transfers = self.shared.active_transfers.lock().expect("transfers");
+            transfers.insert(
+                transfer_id.to_string(),
+                ActiveTransfer {
+                    transfer_id: transfer_id.to_string(),
+                    peer: source.clone(),
+                    direction: TransferDirection::Inbound,
+                    filename: name,
+                    total,
+                    transferred: resume_from,
+                    phase: TransferPhase::Transferring,
+                    error: None,
+                    started_ms: now,
+                    updated_ms: now,
+                },
+            );
+        }
         // Token is derived from the live session handshake hash.
         if let Some(sess_tx) = self.shared.sessions.lock().await.get(&source).cloned() {
             let _ = sess_tx.try_send(decision.accept_frame()?);
@@ -1809,6 +1913,11 @@ impl Node {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
             hubs.files.reject(transfer_id)?
         };
+        self.set_transfer_phase(
+            transfer_id,
+            TransferPhase::Failed,
+            Some("rejected locally".into()),
+        );
         let source = {
             let hubs = self.shared.hubs.lock().expect("hubs");
             hubs.files
@@ -1874,8 +1983,25 @@ impl Node {
             transfer_id.clone(),
             OutboundFile {
                 peer: peer.clone(),
+                name: name.into(),
                 source: OutboundSource::Bytes(data.to_vec()),
                 size: data.len() as u64,
+            },
+        );
+        let now = self.shared.clock.unix_ms();
+        self.shared.active_transfers.lock().expect("transfers").insert(
+            transfer_id.clone(),
+            ActiveTransfer {
+                transfer_id: transfer_id.clone(),
+                peer: peer.clone(),
+                direction: TransferDirection::Outbound,
+                filename: name.into(),
+                total: data.len() as u64,
+                transferred: 0,
+                phase: TransferPhase::Transferring,
+                error: None,
+                started_ms: now,
+                updated_ms: now,
             },
         );
         self.send_to(peer, offer.to_frame()?).await?;
@@ -1938,8 +2064,25 @@ impl Node {
             transfer_id.clone(),
             OutboundFile {
                 peer: peer.clone(),
+                name: safe_name.clone(),
                 source: OutboundSource::Path(path.to_path_buf()),
                 size,
+            },
+        );
+        let now = self.shared.clock.unix_ms();
+        self.shared.active_transfers.lock().expect("transfers").insert(
+            transfer_id.clone(),
+            ActiveTransfer {
+                transfer_id: transfer_id.clone(),
+                peer: peer.clone(),
+                direction: TransferDirection::Outbound,
+                filename: safe_name,
+                total: size,
+                transferred: 0,
+                phase: TransferPhase::Transferring,
+                error: None,
+                started_ms: now,
+                updated_ms: now,
             },
         );
         self.send_to(peer, offer.to_frame()?).await?;
@@ -1969,8 +2112,38 @@ impl Node {
         let start = decision.resume_from.unwrap_or(0);
         if start > outbound.size {
             warn!(transfer = %transfer_id, "resume offset beyond local data; aborting");
+            self.set_transfer_phase(
+                transfer_id,
+                TransferPhase::Failed,
+                Some("invalid resume offset".into()),
+            );
             return;
         }
+        let now = self.shared.clock.unix_ms();
+        {
+            let mut transfers = self.shared.active_transfers.lock().expect("transfers");
+            transfers
+                .entry(transfer_id.to_string())
+                .and_modify(|t| {
+                    t.transferred = start;
+                    t.phase = TransferPhase::Transferring;
+                    t.updated_ms = now;
+                })
+                .or_insert_with(|| ActiveTransfer {
+                    transfer_id: transfer_id.to_string(),
+                    peer: outbound.peer.clone(),
+                    direction: TransferDirection::Outbound,
+                    filename: outbound.name.clone(),
+                    total: outbound.size,
+                    transferred: start,
+                    phase: TransferPhase::Transferring,
+                    error: None,
+                    started_ms: now,
+                    updated_ms: now,
+                });
+        }
+        let node = self.clone_handle();
+        let tid = transfer_id.to_string();
         let res = match outbound.source {
             OutboundSource::Path(p) => match tokio::fs::File::open(&p).await {
                 Ok(mut f) => {
@@ -1978,19 +2151,28 @@ impl Node {
                         use tokio::io::AsyncSeekExt;
                         if let Err(e) = f.seek(std::io::SeekFrom::Start(start)).await {
                             warn!(%e, transfer = %transfer_id, "failed to seek in source file");
+                            self.set_transfer_phase(
+                                transfer_id,
+                                TransferPhase::Failed,
+                                Some(e.to_string()),
+                            );
                             return;
                         }
                     }
                     let dest = SocketAddr::new(addr.ip(), file_port);
                     match TcpStream::connect(dest).await {
                         Ok(mut stream) => {
-                            tetherly_net::filechan::send_stream_from(
+                            tetherly_net::filechan::send_stream_from_with_progress(
                                 &mut f,
                                 &mut stream,
                                 &token,
                                 transfer_id,
                                 outbound.size,
                                 start,
+                                move |offset, len| {
+                                    node.update_transfer_progress(&tid, offset + len as u64);
+                                    Ok(())
+                                },
                             )
                             .await
                         }
@@ -2012,8 +2194,14 @@ impl Node {
                 .await
             }
         };
-        if let Err(e) = res {
-            warn!(%e, transfer = %transfer_id, "file data send failed");
+        match res {
+            Ok(()) => {
+                self.set_transfer_phase(transfer_id, TransferPhase::Completed, None);
+            }
+            Err(ref e) => {
+                warn!(%e, transfer = %transfer_id, "file data send failed");
+                self.set_transfer_phase(transfer_id, TransferPhase::Failed, Some(e.to_string()));
+            }
         }
     }
 
@@ -2032,7 +2220,7 @@ impl Node {
     ) -> Result<(), tetherly_net::NetError> {
         let dest = SocketAddr::new(peer_addr.ip(), file_port);
         let mut stream = TcpStream::connect(dest).await?;
-        tetherly_net::filechan::send_chunks_from(
+        let res = tetherly_net::filechan::send_chunks_from(
             &mut stream,
             token,
             transfer_id,
@@ -2040,7 +2228,11 @@ impl Node {
             start,
             &data[start as usize..],
         )
-        .await
+        .await;
+        if res.is_ok() {
+            self.update_transfer_progress(transfer_id, total);
+        }
+        res
     }
 
     pub fn control_port(&self) -> u16 {
@@ -2809,6 +3001,37 @@ impl Node {
 
     pub fn offered_files(&self) -> Vec<tetherly_core::IncomingTransfer> {
         self.shared.hubs.lock().expect("hubs").files.offered()
+    }
+
+    pub fn update_transfer_progress(&self, transfer_id: &str, transferred: u64) {
+        let now = self.shared.clock.unix_ms();
+        let mut transfers = self.shared.active_transfers.lock().expect("transfers");
+        if let Some(t) = transfers.get_mut(transfer_id) {
+            t.transferred = transferred;
+            t.updated_ms = now;
+        }
+    }
+
+    pub fn set_transfer_phase(
+        &self,
+        transfer_id: &str,
+        phase: TransferPhase,
+        error: Option<String>,
+    ) {
+        let now = self.shared.clock.unix_ms();
+        let mut transfers = self.shared.active_transfers.lock().expect("transfers");
+        if let Some(t) = transfers.get_mut(transfer_id) {
+            t.phase = phase;
+            t.error = error;
+            t.updated_ms = now;
+        }
+    }
+
+    pub fn active_transfers(&self) -> Vec<ActiveTransfer> {
+        let transfers = self.shared.active_transfers.lock().expect("transfers");
+        let mut list: Vec<ActiveTransfer> = transfers.values().cloned().collect();
+        list.sort_by(|a, b| b.started_ms.cmp(&a.started_ms));
+        list
     }
 }
 

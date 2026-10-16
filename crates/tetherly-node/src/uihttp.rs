@@ -178,6 +178,7 @@ struct Snapshot {
     replies: Vec<crate::events::ReplyViewDto>,
     peers: Vec<PeerView>,
     files: Vec<FileSnap>,
+    transfers: Vec<crate::runtime::ActiveTransfer>,
     /// "off" when no BLE transport is attached, else the ingress state.
     ancs_state: String,
     /// Allowlisted app ids, so the wizard can show what may be opened.
@@ -658,6 +659,7 @@ async fn snapshot(node: &Node) -> Snapshot {
                 size: t.files.first().map(|f| f.size).unwrap_or(0),
             })
             .collect(),
+        transfers: node.active_transfers(),
         screen_state: node.screen_state().as_str().to_string(),
         screen: {
             let s = node.screen_stats();

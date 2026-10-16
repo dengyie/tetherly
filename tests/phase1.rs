@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tetherly_core::{hex_sha256, FileMeta, FileOffer, ManualClock, NotifyPush, CANDIDATE_TTL_MS};
-use tetherly_node::{MemoryInsertor, Node, NodeConfig, OverlayConfig, UiEvent};
+use tetherly_node::{
+    ActiveTransfer, MemoryInsertor, Node, NodeConfig, OverlayConfig, TransferDirection,
+    TransferPhase, UiEvent,
+};
 
 const OTP_BODY: &str = "【测试】验证码：524681，您正在登录";
 const OTP: &str = "524681";
@@ -755,6 +758,92 @@ async fn multi_chunk_file_streamed_via_live_node_api_reaches_inbox() {
     let received = wait_inbox(g2.path(), "large_archive.bin", Duration::from_secs(10)).await;
     assert_eq!(received.len(), total_size);
     assert_eq!(hex_sha256(&received), expected_hash);
+
+    host.shutdown();
+    peer.shutdown();
+}
+
+/// Streaming file transfer tracks active transfers, progress accumulation,
+/// and terminal completion state both in runtime and via loopback HTTP snapshot.
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_file_transfer_tracks_active_progress_and_completion_states() {
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    let ui_port = host.spawn_ui().await.unwrap();
+
+    let (send_dir, _g_send) = temp_dir("stream-prog");
+    let file_path = send_dir.join("large_progress.bin");
+    let total_size = 3 * tetherly_core::FILE_CHUNK + 4096;
+    let file_content: Vec<u8> = (0..total_size).map(|i| (i % 233) as u8).collect();
+    std::fs::write(&file_path, &file_content).unwrap();
+    let expected_hash = hex_sha256(&file_content);
+
+    let payload = serde_json::json!({
+        "path": file_path.to_str().unwrap(),
+        "name": "large_progress.bin",
+    });
+    let (code, body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/send",
+        &serde_json::to_vec(&payload).unwrap(),
+    )
+    .await
+    .expect("live node API reachable");
+    assert_eq!(code, 200, "send response: {}", String::from_utf8_lossy(&body));
+    let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let transfer_id = resp["transfer_id"].as_str().unwrap();
+
+    // Verify initial outbound active transfer in host runtime
+    let initial_host_transfers: Vec<ActiveTransfer> = host.active_transfers();
+    assert_eq!(initial_host_transfers.len(), 1);
+    assert_eq!(initial_host_transfers[0].transfer_id, transfer_id);
+    assert_eq!(initial_host_transfers[0].direction, TransferDirection::Outbound);
+    assert_eq!(initial_host_transfers[0].total, total_size as u64);
+    assert_eq!(initial_host_transfers[0].filename, "large_progress.bin");
+
+    wait_offered(&peer, Duration::from_secs(5)).await;
+    peer.user_accept_file(transfer_id).await.unwrap();
+
+    let received = wait_inbox(g2.path(), "large_progress.bin", Duration::from_secs(10)).await;
+    assert_eq!(received.len(), total_size);
+    assert_eq!(hex_sha256(&received), expected_hash);
+
+    // Host should reflect completed outbound transfer with full progress
+    let host_transfers = host.active_transfers();
+    assert_eq!(host_transfers.len(), 1);
+    assert_eq!(host_transfers[0].phase, TransferPhase::Completed);
+    assert_eq!(host_transfers[0].transferred, total_size as u64);
+
+    // Peer should reflect completed inbound transfer with full progress
+    let peer_transfers = peer.active_transfers();
+    assert_eq!(peer_transfers.len(), 1);
+    assert_eq!(peer_transfers[0].phase, TransferPhase::Completed);
+    assert_eq!(peer_transfers[0].direction, TransferDirection::Inbound);
+    assert_eq!(peer_transfers[0].transferred, total_size as u64);
+
+    // Snapshot HTTP endpoint should expose transfers array
+    let (sc_code, sc_body) = {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], ui_port));
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let head = "GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let text = String::from_utf8_lossy(&buf);
+        let code = text.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+        let payload = text.split("\r\n\r\n").nth(1).map(|b| b.as_bytes().to_vec()).unwrap_or_default();
+        (code, payload)
+    };
+    assert_eq!(sc_code, 200);
+    let snapshot: serde_json::Value = serde_json::from_slice(&sc_body).unwrap();
+    let snap_transfers = snapshot["transfers"].as_array().expect("transfers array");
+    assert_eq!(snap_transfers.len(), 1);
+    assert_eq!(snap_transfers[0]["transfer_id"], transfer_id);
+    assert_eq!(snap_transfers[0]["phase"], "completed");
+    assert_eq!(snap_transfers[0]["transferred"], total_size as u64);
+    assert_eq!(snap_transfers[0]["total"], total_size as u64);
+    assert_eq!(snap_transfers[0]["filename"], "large_progress.bin");
 
     host.shutdown();
     peer.shutdown();

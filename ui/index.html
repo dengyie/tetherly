@@ -58,6 +58,24 @@
   }
   .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
   .empty { color: var(--muted); padding: 12px 0; }
+  .progress-bar-bg {
+    background: #0d1218; border-radius: 4px; height: 8px; width: 100%; overflow: hidden; margin-top: 6px;
+    border: 1px solid var(--line);
+  }
+  .progress-bar-fill {
+    background: var(--accent); height: 100%; width: 0%; transition: width .2s ease;
+  }
+  .progress-bar-fill.completed { background: var(--ok); }
+  .progress-bar-fill.failed { background: var(--bad); }
+  .progress-bar-fill.verifying { background: var(--warn); }
+  .badge {
+    display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 600;
+  }
+  .badge.inbound { background: rgba(62, 207, 142, 0.15); color: var(--ok); }
+  .badge.outbound { background: rgba(61, 156, 240, 0.15); color: var(--accent); }
+  .badge.verifying { background: rgba(240, 180, 41, 0.15); color: var(--warn); }
+  .badge.completed { background: rgba(62, 207, 142, 0.2); color: var(--ok); }
+  .badge.failed { background: rgba(232, 93, 93, 0.2); color: var(--bad); }
   @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -79,6 +97,10 @@
     <section style="margin-top:16px">
       <h2>待确认文件</h2>
       <div id="files"><div class="empty">没有待接收文件。</div></div>
+    </section>
+    <section style="margin-top:16px">
+      <h2>实时传输状态</h2>
+      <div id="transfers"><div class="empty">暂无活跃或近期传输。</div></div>
     </section>
     <section style="margin-top:16px">
       <h2>发送文件</h2>
@@ -240,6 +262,40 @@ function render(s) {
     card.querySelector(".row").appendChild(ok);
     card.querySelector(".row").appendChild(no);
     f.appendChild(card);
+  }
+  const tf = $("transfers");
+  if (tf) {
+    tf.innerHTML = "";
+    const list = s.transfers || [];
+    if (!list.length) {
+      tf.appendChild(el('<div class="empty">暂无活跃或近期传输。</div>'));
+    } else {
+      for (const t of list) {
+        const pct = t.total > 0 ? Math.min(100, Math.round((t.transferred / t.total) * 100)) : 0;
+        const dirBadge = t.direction === "inbound" ? '<span class="badge inbound">接收</span>' : '<span class="badge outbound">发送</span>';
+        let phaseBadge = '';
+        if (t.phase === "transferring") phaseBadge = '<span class="badge outbound">' + pct + '% 传输中</span>';
+        else if (t.phase === "verifying") phaseBadge = '<span class="badge verifying">校验哈希中</span>';
+        else if (t.phase === "completed") phaseBadge = '<span class="badge completed">完成 100%</span>';
+        else if (t.phase === "failed") phaseBadge = '<span class="badge failed">失败' + (t.error ? (': ' + t.error) : '') + '</span>';
+
+        const card = el('<div class="card" style="flex-direction:column;align-items:stretch;gap:4px">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center">' +
+            '<div><span class="title"></span> ' + dirBadge + '</div>' +
+            '<div>' + phaseBadge + '</div>' +
+          '</div>' +
+          '<div class="meta" style="display:flex;justify-content:space-between">' +
+            '<span>' + (t.transferred) + ' / ' + (t.total) + ' 字节</span>' +
+            '<span>' + (t.peer) + '</span>' +
+          '</div>' +
+          '<div class="progress-bar-bg">' +
+            '<div class="progress-bar-fill ' + t.phase + '" style="width:' + pct + '%"></div>' +
+          '</div>' +
+        '</div>');
+        card.querySelector(".title").textContent = t.filename;
+        tf.appendChild(card);
+      }
+    }
   }
   const p = $("peers");
   p.innerHTML = "";
