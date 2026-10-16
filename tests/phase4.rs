@@ -12,6 +12,7 @@ use tetherly_core::{
     AncsCharacteristic, AncsState, Clock, ConnectOutcome, ManualClock, MemoryAncsTransport,
     OpenAllowlist, OpenRule, APP_NAME_WAIT_MS,
 };
+use tetherly_node::ancs::AncsInbound;
 use tetherly_node::{MemoryOpener, Node, NodeConfig, OverlayConfig};
 
 struct DirGuard(PathBuf);
@@ -509,4 +510,68 @@ async fn ui_routes_are_not_the_only_way_in() {
     )
     .await;
     assert_eq!(actions_of(&node, 40), vec!["copy", "dismiss", "open"]);
+}
+
+// --- transport pump (v1.23) --------------------------------------------
+
+/// Poll a condition until it holds. The pump runs on its own thread, so the
+/// effects below are observed rather than assumed.
+async fn wait_for(mut ready: impl FnMut() -> bool) {
+    for _ in 0..400 {
+        if ready() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("condition never became true");
+}
+
+/// The inbound channel is what a real stack feeds. Driving it end to end proves
+/// the pump wires the transport to the ingress: subscribe order, the value
+/// callbacks becoming queued Control Point work, and the disconnect backoff.
+/// The GATT stack and the physical phone stay Manual-required.
+#[tokio::test]
+async fn m4_5_the_transport_pump_subscribes_in_order_and_feeds_the_ingress() {
+    let transport = Arc::new(MemoryAncsTransport::default());
+    let (node, _clock, _guard) = start("pump", Some(transport.clone()));
+    let (feed, inbound) = tokio::sync::mpsc::unbounded_channel();
+    node.spawn_ancs_pump(inbound);
+
+    // The stack reports the session up; §9.4 demands Data Source first.
+    feed.send(AncsInbound::Ready).expect("feed");
+    wait_for(|| transport.subscribes().len() == 2).await;
+    assert_eq!(
+        transport.subscribes(),
+        vec![
+            AncsCharacteristic::DataSource,
+            AncsCharacteristic::NotificationSource
+        ],
+        "Data Source must be subscribed before Notification Source"
+    );
+
+    // A Notification Source callback only enqueues; the pump's tick is what
+    // writes the Control Point.
+    feed.send(AncsInbound::NotificationSource(ns_event(0, 0, 77)))
+        .expect("feed");
+    wait_for(|| !transport.writes().is_empty()).await;
+
+    // The Data Source response becomes a candidate, i.e. the bytes reached the
+    // ingress rather than dying on the channel.
+    feed.send(AncsInbound::DataSource(notif_response(
+        77,
+        "com.apple.MobileSMS",
+        "网易",
+        "验证码 424242",
+    )))
+    .expect("feed");
+    feed.send(AncsInbound::DataSource(app_response(
+        "com.apple.MobileSMS",
+        "信息",
+    )))
+    .expect("feed");
+    wait_for(|| node.candidates().iter().any(|c| c.uid == "77")).await;
+
+    // The phone going away schedules the backoff reconnect.
+    feed.send(AncsInbound::Disconnected).expect("feed");
+    wait_for(|| matches!(node.ancs_state(), Some(AncsState::Backoff { .. }))).await;
 }

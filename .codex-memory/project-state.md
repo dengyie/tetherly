@@ -92,10 +92,44 @@
   refused), `tetherly-net/tests/screen_wire.rs` (1 — a 4 MiB 1024x1024 BGRA frame fragments, crosses a
   real session fragment-by-fragment, and reassembles byte-identical), `tetherly-net/tests/backpressure.rs`
   (2 — the v1.21 write-stall session regression). fmt / clippy `-D warnings` / 280 tests / deny all green.
+  **Windows ANCS BLE GATT transport landed (v1.23)** — §9.4 named "Windows: the `windows` crate GATT" but
+  the repo only had the OS-free `tetherly-core::ancs` (codec + `AncsIngress` + `AncsTransport` port +
+  `MemoryAncsTransport`); the real stack **and the inbound wiring** did not exist (`NodeConfig.ancs` is
+  `None` on every production path), so ANCS could not start at all on a real machine — the port existed,
+  the plug did not. New `crates/tetherly-node/src/ancs.rs` (assembly point: `AncsInbound`
+  `Ready`/`NotificationSource`/`DataSource`/`Disconnected`, `open(address) -> Result<Option<AncsLink>, CoreError>`
+  honestly `Ok(None)` off Windows) + `crates/tetherly-node/src/ancs/win_gatt.rs` (self-contained
+  `#[cfg(windows)]`, absolute imports only, per the `screen/macos.rs` precedent). Thread model: a dedicated
+  `tetherly-ancs` thread owns every WinRT interface and creates its own **MTA** apartment
+  (`CoInitializeEx(COINIT_MULTITHREADED)`; `windows` 0.59 has no `initialize_mta` wrapper), while the
+  `AncsTransport` front-end holds only a `Sender` — so the port is `Send + Sync` **by construction** and the
+  node never touches a COM interface. Chain: `FromBluetoothAddressAsync` →
+  `GetGattServicesForUuidAsync(ANCS)` → `GetCharacteristicsAsync` → find the three characteristics and
+  **validate properties** (Notification Source / Data Source must be `Notify`, Control Point must be `Write`);
+  CCCD writes `Notify`; `ValueChanged` callbacks **only copy bytes** into an unbounded channel (§9.4 forbids
+  writing the Control Point from that thread); `write_control_point` goes through `DataWriter` →
+  `WriteValueWithResultAsync` and checks `GattWriteResult::Status`, **blocking until the result is true** so
+  "serial, one in flight" is a fact; the front-end bounds every ack wait at **10s** and reports
+  `AncsSubscribe`/`AncsWrite` on timeout rather than a success it cannot prove. `ConnectionStatusChanged`
+  raises a flag → the session ends → `ancs_backoff_delay` exponential backoff (1s→30s); `Session::drop`
+  explicitly `RemoveValueChanged`/`RemoveConnectionStatusChanged`. The three **synchronous port methods use
+  `windows` 0.59's blocking `IAsyncOperation::get()`** (an OS `Waiter`, no busy-wait), so **no new dependency
+  and no hand-rolled executor**. Node side: `Node::spawn_ancs_pump` (own thread + current-thread runtime) feeds
+  `AncsInbound` into `ancs_connect`/`ancs_notification_source`/`ancs_data_source`/`ancs_disconnected` and drives
+  `ancs_tick` every 500ms; CLI `tetherly run --ancs <11:22:33:44:55:66>`. macOS (CoreBluetooth) / Linux (BlueZ)
+  stay unimplemented (`open()` honestly `Ok(None)`). New regressions (280 → **285 green**): 4 pure-logic
+  `win_gatt` unit tests (Windows address notation, 6 malformed inputs refused, the four ANCS UUIDs' LE decode
+  ↔ canonical GUID field-for-field, malformed UUID reported) + 1 end-to-end `tests/phase4.rs::m4_5` driving the
+  pump (subscribe order — Data Source first; callbacks only enqueue while the Control Point is written on `tick`;
+  a Data Source response becomes a candidate; `Disconnected` → `Backoff`). `Cargo.lock` **unchanged** (the WinRT
+  Bluetooth stack is a feature flag on the already-present `windows` crate). fmt / clippy `-D warnings` / 285
+  tests / deny all green. **Honest boundary**: the real iPhone runtime (pairing, live notifications, M4.1 p95)
+  stays Manual-required.
 
 ## Current Phase
-- Spec `docs/DEVELOPMENT.md` **v1.22**. Phase 5 real-machine loop + Phase 3 real-machine chain +
-  Phase 1 Android native lib + `notify.reply` quick reply + file cross-process resume + Windows credential-vault identity storage + macOS Keychain / Linux libsecret backends + **§13 proptest/fuzz layers** + **§13 stateful state-machine properties** + **real-device APK end-to-end + `tetherly pin` fix + on-device M1.1 p95** + **macOS/Linux screen backends** + **CLI control plane as live-node loopback clients + Linux glibc 2.35 release anchor** + **session liveness/backpressure + glibc 2.31 Linux release anchor (v1.21)** + **inner-frame payload budget corrected (v1.22)** all landed.
+- Spec `docs/DEVELOPMENT.md` **v1.23**. Phase 5 real-machine loop + Phase 3 real-machine chain +
+  Phase 1 Android native lib + `notify.reply` quick reply + file cross-process resume + Windows credential-vault identity storage + macOS Keychain / Linux libsecret backends + **§13 proptest/fuzz layers** + **§13 stateful state-machine properties** + **real-device APK end-to-end + `tetherly pin` fix + on-device M1.1 p95** + **macOS/Linux screen backends** + **CLI control plane as live-node loopback clients + Linux glibc 2.35 release anchor** + **session liveness/backpressure + glibc 2.31 Linux release anchor (v1.21)** + **inner-frame payload budget corrected (v1.22)** + **Windows ANCS BLE GATT transport + inbound pump (v1.23)** all landed.
+- **Windows ANCS BLE GATT transport + inbound pump (v1.23)**: `crates/tetherly-node/src/ancs.rs` (`AncsInbound` four-state channel; `open(address) -> Result<Option<AncsLink>, CoreError>`, non-Windows honestly `Ok(None)`) + `crates/tetherly-node/src/ancs/win_gatt.rs` (self-contained `#[cfg(windows)]`). Dedicated `tetherly-ancs` thread + MTA apartment owns all WinRT interfaces; front-end `AncsTransport` holds only a `Sender`. Property-validated characteristics; CCCD `Notify`; `ValueChanged` copies bytes only; Control Point written on that thread with a 10s ack bound; `ConnectionStatusChanged` → backoff (1s→30s); `Session::drop` deregisters. Blocking `IAsyncOperation::get()` → no new dep, no executor. `Node::spawn_ancs_pump` (own thread + current-thread runtime) wires `AncsInbound` into the `ancs_*` entries + `ancs_tick` (500ms); CLI `--ancs <addr>`. 280 → **285 green**; `Cargo.lock` unchanged.
 - **CLI control plane as live-node loopback clients + glibc 2.35 release anchor (v1.20)**: `tetherly dial` used to `Node::start(cfg)?` a second node — with the daemon already running it re-bound the same LAN ports and died with `no LAN address bound`; `tetherly inject-notify` built a `NotifyPush` in its own process and only called `ingest_local_push`, so it never crossed the Noise session and never reached a peer. Both were the v1.18 `pin` defect class (only the process holding the in-process state can arm a PIN / hold the session / deliver a push). Fix: `Cmd::Dial { addr, pin, ui_port }` → `loopback_post(ui_port, "/api/dial", {addr,pin})`; `InjectNotify` removed, replaced by `Cmd::Notify { title, body, app_id, peer, ui_port }` → `loopback_post(ui_port, "/api/notify", …)` backed by a new `POST /api/notify` route that resolves the target (one live peer implied, multiple need explicit `--peer` parsed as a `DeviceId` and checked against the live set, unknown/offline → 400 `peer is not connected`, zero → 400 `no connected peer`), builds a `.truncate()`d push (`app_name="tetherly"`, actions `["copy"]`, uid from the wall clock), and calls `Node::send_notify()`. `.github/workflows/release.yml`: Linux build row `ubuntu-latest` → `ubuntu-22.04` (glibc 2.35) plus a guard step `objdump -T target/release/tetherly | grep -E 'GLIBC_2\.(3[6-9]|[4-9][0-9])'` that fails the build rather than shipping a binary that cannot start on glibc 2.31 hosts. Not committed: the local Windows-GNU MinGW.org 6.3.0 is a 32-bit toolchain whose `ld` rejects rustc 1.99's `--high-entropy-va`, so the local test run used rustup's bundled 64-bit self-contained MinGW (gcc 14.2) as linker plus NDK clang 20 for the missing `as`/C frontend (`zstd-sys`); `.cargo/config.toml` stays machine-agnostic and CI's MSVC host is unaffected. Regression: `tests/phase1.rs::notify_posted_to_the_live_node_api_reaches_the_paired_peer` (the posted text reaches the peer's candidate list, and an unconnected `--peer` is refused, so a 200 cannot be a blanket accept). 270 → **271 green**.
 - **Real-device APK E2E + `tetherly pin` fix + M1.1 p95 (v1.18)**: cloud-phone Galaxy Fold (SM-F900F / arm64-v8a / Android 13, over `adb reverse`) run of the **shipped APK** — front-end `NotificationListenerService` → JNI `Java_app_tetherly_NativeBridge_*` → `libtetherly_android.so` live Noise session → desktop node extracts candidate `{app_id:"com.android.shell", title:"Your verification code", has_otp:true, source:tdev_...}` (**body/OTP never in snapshot or logs**). On-device M1.1 notify round-trip measured `rtt_min≈17.4ms / p50≈17.9ms / mean≈37.5ms / p95≈56.9ms / p99≈361.8ms / max≈361.8ms` — inside the <1.0s budget (≈18× margin); **honest boundary**: this is the cloud phone over the `adb reverse` tunnel, NOT a LAN-direct pair (same model on LAN ≈15–16ms), the p99 tail is adb-tunnel jitter, 8h soak still Manual-required. Two-process live proof: `tetherly pin --ui-port 45726` printed a PIN, `POST /api/dial` with it returned `{"ok":true}`, host logged `path lan peer=tdev_...`; off-port (`45999`) fails honestly with exit 1.
 - **`tetherly pin` defect (found by the real-device run, cost hours of false diagnosis)**: `Cmd::Pin` used to do `Node::start(cfg)?; println!(node.generate_pin()?)` — a **throwaway process** whose PIN (`pin_created_ms` is pure in-process state, never persisted) **no listener can ever accept**, so the live daemon always logged `pin expired`. The working route was always the live daemon's loopback API `POST 127.0.0.1:45716/api/pin` (the UI 「显示 8 位 PIN」 button). Fix: `Cmd::Pin { ui_port }` (default 45716) now calls the new `tetherly_node::loopback_post(port, "/api/pin", b"{}")` to arm the **live** node, and fails honestly (non-zero, actionable message) when nothing is listening. Support: `uihttp::spawn` → `bind_and_spawn` (sync bind, returns the real port; a taken port is now a hard error, not a silent `warn!`), `Node::spawn_ui()`/`Node::ui_port()` (`Shared.bound_ui: AtomicU16`), `run()` binds the UI before returning so "node up" ⇒ port really reachable. Regression: `tests/phase1.rs::pin_shown_by_the_live_node_api_is_the_one_that_pairs` (asserts a third node armed with a hardcoded PIN cannot be dialed, so the claim cannot pass by accident). 269 → **270 green**.
@@ -241,7 +275,7 @@
 - Cloud phones reach the host only via adb (overlay is host→phone); on-device E2E uses `adb reverse`.
 - `snow` 0.9 has no `rekey()`; sessions **rebuild a fresh IK handshake in band** when the transport hits 2^16 msgs or 3600s (initiator-driven, cancellation-safe; `RekeyRequired` is retired).
 - Screen `seq` must stay session-monotonic; `on_peer_gone` resets it and a reconnect must not replay old frames.
-- Phase 4 real BLE transport does not exist yet; ANCS ingress is untested on Windows/macOS/Linux GATT drivers.
+- Phase 4's Windows BLE transport now exists (v1.23), but its **runtime** behaviour against a physical iPhone is unverified, and macOS (CoreBluetooth) / Linux (BlueZ) GATT stacks are still unimplemented (`open()` honestly `Ok(None)`).
 - AGPL/GPL screen-capture crates are banned by deny.toml; only permissive impls (windows, core-graphics, x11rb) are eligible.
 
 ## Active Blockers
@@ -252,23 +286,25 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
-- v1.22: the inner-frame payload budget is corrected at its root (`INNER_PAYLOAD_MAX` derived from the
-  measured 65519-byte transport plaintext ceiling), closing the latent defect where any fragmenting
-  screen frame could not be encrypted; 280 tests green locally (fmt / clippy `-D warnings` / `cargo test
-  --workspace --locked` / `cargo deny` all green). SSOT/memory being synced and the change committed+pushed
-  to trigger CI. v1.21 already **shipped** as `v0.1.3` (session liveness/backpressure + glibc 2.31 Linux
-  release anchor; `ci.yml` green on all five jobs, `release.yml` green, measured glibc floor
-  `GLIBC_2.30`, six assets published). Next work is the Manual-required real-machine items (see Active
-  Blockers).
+- v1.23: the computer-side ANCS real transport stack lands — `tetherly-node::ancs::win_gatt` (WinRT BLE GATT,
+  dedicated thread + MTA apartment, property-validated characteristics, 10s-bounded serial Control Point,
+  backoff reconnect) plus `Node::spawn_ancs_pump` and `tetherly run --ancs <addr>`, closing the §9.4 gap
+  where the port existed but nothing was plugged in. **285 tests green** locally (fmt / clippy `-D warnings`
+  / `cargo test --workspace --locked` / `cargo deny` all green); `Cargo.lock` unchanged. SSOT/memory being
+  synced and the change committed+pushed to trigger CI. v1.21 already **shipped** as `v0.1.3` (session
+  liveness/backpressure + glibc 2.31 Linux release anchor; `ci.yml` green on all five jobs, `release.yml`
+  green, measured glibc floor `GLIBC_2.30`, six assets published). Next work is the Manual-required
+  real-machine items (see Active Blockers) — for Phase 4 that means a physical iPhone against the new
+  Windows stack.
 
 ## Next Milestone
 - Phase 6 (single-item): Android controlled device, WinFsp mount, file persistent resume,
   Linux ANCS experience, embedded EasyTier FFI. (`notify.reply` closed v1.11; removed from backlog.)
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.22)
+- `docs/DEVELOPMENT.md` (SSOT v1.23)
 - `crates/tetherly-{core,crypto,net,node,android}` + `crates/tetherly-core/src/{ancs,screen}.rs`
-  + `crates/tetherly-node/src/screen.rs` + `crates/tetherly-android/src/{store,client,jni}.rs`
+  + `crates/tetherly-node/src/{screen.rs,ancs.rs,ancs/win_gatt.rs}` + `crates/tetherly-android/src/{store,client,jni}.rs`
 - `crates/tetherly-core/tests/{decoders,fuzz_decoders,state_machines}.rs`, `crates/tetherly-net/tests/decoders.rs`
 - `bins/tetherly-cli`, `tests/{loopback,phase1,phase2,phase3,phase4,phase5}.rs`, `ui/`, `android/`
 - GitHub: `dengyie/tetherly`

@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tetherly_node::{Node, NodeConfig, SystemSink};
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(
@@ -48,6 +48,12 @@ enum Cmd {
         screen_port: Option<u16>,
         #[arg(long)]
         ui_port: Option<u16>,
+        /// Receive iPhone notifications over ANCS/BLE from the paired device with
+        /// this Bluetooth address (Windows notation, e.g. `11:22:33:44:55:66`).
+        /// Pair the phone in Windows Bluetooth settings first. Runtime against a
+        /// real iPhone is Manual-required.
+        #[arg(long)]
+        ancs: Option<String>,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -159,6 +165,7 @@ async fn main() -> Result<()> {
             input_port,
             screen_port,
             ui_port,
+            ancs,
         } => {
             cfg.control_port = port;
             // Real presentation: received frames open a window via GDI BitBlt.
@@ -194,9 +201,31 @@ async fn main() -> Result<()> {
             if let Some(c) = overlay_cidr {
                 cfg.overlay.cidrs = tetherly_node::parse_overlay_cidrs(&c);
             }
+            // ANCS is optional and, on targets without a stack yet, honestly
+            // absent; the pump below is only started when a link comes up.
+            let ancs_link = match ancs.as_deref() {
+                Some(address) => match tetherly_node::ancs::open(address) {
+                    Ok(Some(link)) => Some(link),
+                    Ok(None) => {
+                        info!("ANCS is not implemented on this platform; iPhone notifications stay off");
+                        None
+                    }
+                    Err(e) => {
+                        warn!(%e, "ANCS address {address} is malformed; iPhone notifications stay off");
+                        None
+                    }
+                },
+                None => None,
+            };
             let node = Node::start(cfg)?;
             info!(device_id = %node.identity().device_id(), "run");
             info!("ui http://127.0.0.1:45716");
+            if let Some((_transport, inbound)) = ancs_link {
+                node.spawn_ancs_pump(inbound);
+                info!(
+                    "ANCS link up; pair the iPhone in Windows Bluetooth settings if you have not"
+                );
+            }
             // Controller-side capture: low-level mouse hook for edge crossings;
             // the keyboard hook is armed only while the seat is remote.
             if let Err(e) = node.spawn_input_capture() {

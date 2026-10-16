@@ -50,6 +50,16 @@ windows = { version = "0.59", features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Com",
+    # ANCS over BLE (src/ancs/win_gatt.rs): the WinRT Bluetooth stack, the
+    # `IVectorView` the service/characteristic queries return, and the
+    # `IBuffer`/`DataReader`/`DataWriter` used to move GATT values in and out.
+    # All are feature flags on the already-present `windows` crate, so no new
+    # package enters the lockfile.
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_GenericAttributeProfile",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

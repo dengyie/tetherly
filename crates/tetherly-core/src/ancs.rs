@@ -422,6 +422,13 @@ pub enum AncsCharacteristic {
 
 /// The BLE side of ANCS. Implemented for real by `windows`/CoreBluetooth/BlueZ
 /// in the platform layer; [`MemoryAncsTransport`] covers CI.
+///
+/// The three methods are outbound (subscribe + one Control Point write). Inbound
+/// traffic — the Notification Source and Data Source value-changed callbacks —
+/// is **not** a trait method: a real transport owns its own stack callback
+/// thread and pushes decrypted values to the `AncsIngress` feed points
+/// (`on_notification_source`/`on_data_source`) that the node wires up. The trait
+/// stays synchronous and hardware-free so `tetherly-core` needs no async BLE.
 pub trait AncsTransport: Send + Sync {
     fn subscribe_data_source(&self) -> Result<(), CoreError>;
     fn subscribe_notification_source(&self) -> Result<(), CoreError>;

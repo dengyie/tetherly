@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! LAN + optional EasyTier sidecar overlay. Overlay is unicast only; no mDNS on TUN.
 
+use crate::ancs::AncsInbound;
 use crate::events::{file_offered, peer_up, CandidateViewDto, UiEvent};
 use crate::lan::{bind_many, bind_many_optional, bind_overlay, control_bind_addrs, lan_ips};
 use crate::platform::{insert_foreground, MemoryClip, SystemClip};
@@ -813,6 +814,74 @@ impl Node {
                 };
                 for id in ids {
                     let _ = self.shared.events.send(UiEvent::CandidateExpired { id });
+                }
+            }
+        }
+    }
+
+    /// Own the ANCS link end to end: drive the ingress from the stack's inbound
+    /// channel and tick it so the serial Control Point queue drains.
+    ///
+    /// Runs on its own thread with a current-thread runtime. The transport's
+    /// subscribe/write calls block until the BLE stack answers (bounded by the
+    /// stack's own ack timeout), and an ANCS link is far too low-rate to justify
+    /// letting that land on the node's async workers.
+    pub fn spawn_ancs_pump(&self, inbound: tokio::sync::mpsc::UnboundedReceiver<AncsInbound>) {
+        let node = self.clone_handle();
+        let spawned = std::thread::Builder::new()
+            .name("tetherly-ancs-pump".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(e) => {
+                        warn!(%e, "ancs: pump runtime unavailable");
+                        return;
+                    }
+                };
+                runtime.block_on(node.ancs_pump(inbound));
+            });
+        if let Err(e) = spawned {
+            warn!(%e, "ancs: pump thread unavailable");
+        }
+    }
+
+    async fn ancs_pump(&self, mut inbound: tokio::sync::mpsc::UnboundedReceiver<AncsInbound>) {
+        let mut tick = tokio::time::interval(Duration::from_millis(500));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                maybe = inbound.recv() => match maybe {
+                    None => break,
+                    // The session is up: subscribe Data Source then Notification
+                    // Source (the ingress fixes that order; §9.4).
+                    Some(AncsInbound::Ready) => {
+                        if let Err(e) = self.ancs_connect() {
+                            warn!(%e, "ancs: subscribing to the phone failed");
+                        }
+                    }
+                    Some(AncsInbound::NotificationSource(value)) => {
+                        if let Err(e) = self.ancs_notification_source(&value).await {
+                            warn!(%e, "ancs: notification source rejected");
+                        }
+                    }
+                    Some(AncsInbound::DataSource(value)) => {
+                        if let Err(e) = self.ancs_data_source(&value).await {
+                            warn!(%e, "ancs: data source rejected");
+                        }
+                    }
+                    Some(AncsInbound::Disconnected) => {
+                        if let Some(retry_at) = self.ancs_disconnected() {
+                            info!(retry_at, "ancs: phone gone; backing off");
+                        }
+                    }
+                },
+                _ = tick.tick() => {
+                    if let Err(e) = self.ancs_tick().await {
+                        warn!(%e, "ancs: control point tick failed");
+                    }
                 }
             }
         }

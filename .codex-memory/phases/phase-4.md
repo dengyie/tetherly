@@ -30,5 +30,31 @@
   core 93, crypto 10, net 1, node 4), `cargo deny check` all ok.
 - Manual-required: real BLE GATT (Windows `windows` crate / macOS CoreBluetooth / Linux BlueZ),
   physical iPhone p95 < 2s, Bluetooth-off-30s-then-on real-device reproduction.
+
+## v1.23 follow-up (2026-10-16) — Windows real transport stack landed
+
+- Spec: `docs/DEVELOPMENT.md` v1.23.
+- Gap closed: the port existed but nothing was plugged in — `NodeConfig.ancs` was `None` on every
+  production path and `tetherly-node` had no `src/ancs/`.
+- Delivered:
+  - `crates/tetherly-node/src/ancs.rs`: assembly point — `AncsInbound` (`Ready` /
+    `NotificationSource` / `DataSource` / `Disconnected`), `AncsLink`, and
+    `open(address) -> Result<Option<AncsLink>, CoreError>` (Windows delegates to `win_gatt`;
+    everything else honestly `Ok(None)`).
+  - `crates/tetherly-node/src/ancs/win_gatt.rs` (self-contained, `#[cfg(windows)]`): dedicated
+    `tetherly-ancs` thread + MTA apartment owning all WinRT interfaces; `AncsTransport` front-end
+    holds only a `Sender` (`Send + Sync` by construction). Property-validated characteristics
+    (Notification Source / Data Source `Notify`, Control Point `Write`), CCCD `Notify` subscribe,
+    `ValueChanged` copies bytes only, Control Point written on that thread and **blocked until
+    `GattWriteResult::Status == Success`** with a 10 s front-end ack bound, `ConnectionStatusChanged`
+    → backoff (1 s → 30 s), `Session::drop` deregisters all three handlers.
+  - `tetherly-node/src/runtime.rs`: `Node::spawn_ancs_pump` (own thread + current-thread runtime)
+    feeds `AncsInbound` into the `ancs_*` entries and drives `ancs_tick` every 500 ms.
+  - `tetherly-node/src/bin/tetherly.rs`: `tetherly run --ancs <addr>`.
+- Regressions: 4 pure-logic `win_gatt` unit tests + `tests/phase4.rs::m4_5`; 280 → **285 green**;
+  `Cargo.lock` unchanged (WinRT Bluetooth is a feature flag on the existing `windows` crate).
+- Still Manual-required: real iPhone runtime (pairing, live notifications, M4.1 p95).
+- Still not implemented: macOS (CoreBluetooth) and Linux (BlueZ) stacks — `open()` honestly
+  `Ok(None)` rather than a stub that pretends.
 - Not started: M4.4 / M4.5 optional iOS App (same-LAN 50MB sha256, no VPN / Network Extension).
 - Stop: Do not claim M4.1/M4.3 device verification. Phase 5 is a separate single-item立项.
