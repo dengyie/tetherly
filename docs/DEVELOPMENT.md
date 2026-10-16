@@ -3,12 +3,41 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.27** |
+| 文档版本 | **1.28** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.27 落地大文件传输全链路实时追踪与 Web UI 进度可视化（ADR-020）**——(1) **流式进度回调**：`tetherly-net::filechan` 扩充 `send_stream_from_with_progress` 与 `recv_chunks_to_sink`，每块完成精确触发 `(chan_offset, chunk_len)`；(2) **运行时活跃传输状态机**：`tetherly-node::runtime` 新增 `ActiveTransfer` 模型（区分 `inbound`/`outbound` 方向与 `transferring`/`verifying`/`completed`/`failed` 阶段），支持多任务并发与断点进度累加；(3) **回环接口与 UI 可视化**：`GET /api/state`（45716 端口）暴露 `Snapshot.transfers`，`ui/index.html` 实现卡片式进度条、字节计数、方向标签与平滑动画；(4) **CI-First 全绿验证**：集成测试覆盖流式分块传输过程中的瞬态监控、落盘验证与状态迁移，GitHub Actions CI（Ubuntu、macOS、Windows、Android、cargo deny）5/5 任务全绿。+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.28 落地 64 GiB 企业级文件传输上限与全链路速率/CLI/UI 全景可观测性（ADR-021）**——(1) **传输上限拓展（FILE_MAX = 64 GiB）**：基于 v1.26 $O(1)$ 内存流式引擎，彻底解除 512 MiB 内存保护历史束缚，单文件上限扩展至 64 GiB，三处设卡严格断言拒收；(2) **传输速率 EWMA 平滑计算（speed_bps）**：运行时 `ActiveTransfer` 新增速率追踪，在 `update_transfer_progress` 采用 70% 历史 + 30% 瞬态指数加权移动平均消除抖动，终态归零；(3) **控制面回环与 CLI 生产可观测性（tetherly status 与 send --watch）**：`tetherly-node::uihttp` 增加异步 `loopback_get` 客户端，CLI 新增 `status` 子命令（支持 `--watch`/`--interval`/`--json`）与 `send --watch`（终端单行 `\r` 实时进度条、速率与阶段刷新）；(4) **Web UI 速率与 ETA 可视化**：引入 `formatBytes`、`formatSpeed` 与 `formatEta`，卡片动态显示传输速度与剩余预估时间；(5) **CI-First 全绿验证**：集成测试覆盖 64 GiB 边界拒收、活跃速度更新与状态机终态，GitHub Actions CI 5/5 任务全绿。+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.28 相对 1.27(64 GiB 企业级文件传输上限、EWMA 速率平滑、CLI 状态监控与 Web UI 速率/ETA 全景可观测性)**
+
+- **动机(突破历史内存束缚，打通全链路速度与控制面动态交互)**:
+  在 v1.26 引入流式传输引擎与 v1.27 引入活跃传输状态机后，传输体系在性能与结构上已高度成熟，但生产落地依然存在核心诉求：
+  1. **历史上限解绑**：原 `FILE_MAX = 512 MiB` 诞生于全量 `Vec<u8>` 内存驻留时代。在拥有 $O(1)$ 常数界后，该限制成为阻碍企业级超大文件（如 OS 磁盘镜像、RAW 视频素材）传输的无谓枷锁，需彻底提升至 64 GiB；
+  2. **传输速率感知**：网络波动、磁盘 I/O 抖动使得用户无法准确获知当前的吞吐表现，需要引入经平滑处理的实时速率计量；
+  3. **终端交互体验**：CLI 缺少对节点全局状态和对端连接情况的查询能力（`status`），且 `tetherly send` 发送大文件时缺乏如 `rsync`/`curl` 般流畅的终端行内进度刷新；
+  4. **Web 界面动态预估**：Web UI 虽有进度条，但缺乏人性化的单位换算（KiB/MiB/GiB/TiB）、速率展示及剩余时间（ETA）预测。
+
+- **架构与协议设计(ADR-021 企业级文件上限与全景可观测性)**:
+  1. **64 GiB 传输上限拓展 (`FILE_MAX`)**:
+     - `tetherly-core::filexfer::FILE_MAX` 正式升级为 `64 * 1024 * 1024 * 1024`（64 GiB）；
+     - `FileHub::offer_resumable`（报价解析门）、45718 接收头校验（`recv_chunks_after_header`）以及发送端入口（`offer_and_send_file`/`offer_and_send_bytes` 与 `POST /api/file/send`）三处严格保持一致，确保在分配 0 额外内存前拒绝超限请求；
+     - 清除各处 32 位转 64 位平台溢出隐患，直接断言精确到字节的 64 GiB 边界拒收。
+  2. **EWMA 传输速率平滑计算 (`speed_bps`)**:
+     - `ActiveTransfer` 结构体新增 `pub speed_bps: u64` 字段，并在 5 处状态机创建点规范初始化为 0；
+     - 在 `update_transfer_progress` 触发时，计算 `delta_bytes` 与 `delta_ms`。采用经典指数加权移动平均算法（70% 历史权重 + 30% 瞬态权重）消除瞬态网络波动带来的速率跳跃；
+     - 当传输跃迁至终态（`Completed` 或 `Failed`）时，实时速率显式清零。
+  3. **控制面异步回环与 CLI 状态监控 (`tetherly status`)**:
+     - 在 `tetherly-node::uihttp` 实现异步 `loopback_get(port, path) -> io::Result<(u16, Vec<u8>)>`；
+     - 在 `tetherly` 和 `tetherly-cli` 引入 `status` 子命令，提供清晰的文本概览（设备 ID、节点名称、PIN 活跃状态、LAN 监听与已连接对端列表），支持 `--watch`（配合 ANSI 清屏代码实时轮询）、`--interval` 与 `--json` 输出。
+  4. **终端发送交互式进度跟随 (`tetherly send --watch`)**:
+     - 为 `tetherly send` 扩充 `--watch` 参数。发起发送后，客户端持续轮询回环状态机，在终端使用单行回车符（`\r`）实时输出：
+       `[ 45.2%] 1.20 GiB / 2.65 GiB (48.50 MiB/s) [transferring]`；
+     - 传输完成输出绿标确认并退出，失败即刻报错退出。
+  5. **Web UI 人性化渲染 (`ui/index.html`)**:
+     - 落地 `formatBytes`（自动适配 B、KiB、MiB、GiB、TiB）、`formatSpeed` 与 `formatEta` 辅助函数；
+     - 卡片内实时动态展示当前吞吐速率（如 `52.40 MiB/s`）与动态剩余倒计时（如 `剩余 1m25s`）。
 
 **1.27 相对 1.26(大文件传输实时追踪、双向进度观测与 Web UI 可视化进度条全闭环)**
 
@@ -980,10 +1009,10 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
   - 打 tag `v*` 时触发 `publish` 作业，自动将三端产物归档并发布至 GitHub Releases。
 - 版本号 workspace 统一 bump。
 - 控制 **45717/tcp**，文件 **45718/tcp**，键鼠 **45719/tcp**，远程屏幕 **45720/tcp**。本机 UI **45716/tcp** 仅 127.0.0.1。DeskFlow 网关默认关。
-- 本机 UI **45716** 同时是 CLI 的**控制面入口**(v1.20):`tetherly pin` / `dial` / `notify` / `send`(v1.25) 均以它为回环客户端目标(`POST /api/pin` / `/api/dial` / `/api/notify` / `/api/file/send`),不再自起节点。该 HTTP 面**永不**绑非回环地址,且请求须带 `Host: 127.0.0.1|localhost`,否则 403。
+- 本机 UI **45716** 同时是 CLI 的**控制面入口**(v1.20):`tetherly pin` / `dial` / `notify` / `send`(v1.25) / `status`(v1.28) 均以它为回环客户端目标(`POST /api/pin` / `/api/dial` / `/api/notify` / `/api/file/send` 与 `GET /api/state`),不再自起节点。该 HTTP 面**永不**绑非回环地址,且请求须带 `Host: 127.0.0.1|localhost`,否则 403。
 - 安装程序提示放行 45717–45720；默认 **LAN** 监听：`127.0.0.1` + RFC1918 / 链路本地，不含公网、**跳过** EasyTier `10.144.144.0/24`（避免 mDNS 打到 TUN）。Phase 2 另绑 overlay CIDR 内的本机 IP，仍永不 `0.0.0.0`/`::`。
 - Phase 1 桌面不要求 WebView2（loopback HTTP）。Tauri 壳下一迭代才需要 WebView2、MSVC 运行库；ANCS 需要蓝牙。
-- **单文件上限 `FILE_MAX = 512 MiB`（v1.24）**（§12 M1.7）：v1 文件路径**整文件驻留内存**（接收端 `Vec<u8>` 全量 + 发送端 `pending_out` 再存一份），故该上限是**内存边界**而非磁盘策略；在**报价时**按声明大小拒绝（`CoreError::FileTooLarge`，用户看不到候选），在 45718 通道以真实 `max_size` 再钉一次，发送端同向拒绝。流式化（边收边写 + 增量 sha256）完成后可抬高。
+- **单文件上限 `FILE_MAX = 64 GiB`（v1.28）**（§12 M1.7）：v1.26 全面确立了 $O(1)$ 内存常数界流式引擎（64 KiB 分块加密与增量 SHA-256 流水线），消除了整文件内存驻留束缚。v1.28 正式将单文件传输上限提升至 64 GiB（`64 * 1024 * 1024 * 1024` 字节）；在报价时按声明大小拒绝（`CoreError::FileTooLarge(FILE_MAX)`），在 45718 数据通道头校验（`recv_chunks_after_header`）与发送端入口严格把关，超限在分配零字节内存前即刻拒绝且绝不拆除已有会话。
 - **网卡分类可解释（v1.24）**：`tetherly-core::BindClass`/`classify` 是**唯一真理源**（`should_listen` 即 `classify(..).listens()`）；被跳过的地址在启动日志各占一行 `reason`，并随 `/api/state` 的 `lan` 字段回给本机 UI。关键一类：**CGNAT 段 `100.64.0.0/10`（Tailscale/NetBird）既非 RFC1918 也非链路本地**，v1 **不会**自动绑定，须显式 `--overlay-cidr 100.64.0.0/10`（reason `cgnat-overlay-needs-explicit-cidr`）；`127/8` 非规范别名（如解析器 stub 的 `127.0.0.53`）归 `LoopbackAlias`。
 
 ---
@@ -1204,4 +1233,54 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - `check (macos-latest)`: fmt, clippy, test 耗时 2m 16s 全部通过；
      - `android`: NDK arm64-v8a 原生库构建、Gradle 测试与 APK 打包耗时 1m 43s 全部通过；
      - `deny`: 许可证与依赖合规审计耗时 51s 全部通过。
+
+---
+
+## 27. v1.28 实施与交付清单（64 GiB 企业级传输上限、EWMA 速率平滑、CLI 状态监控与 Web UI 可观测性）
+
+1. **动机与设计准则（ADR-021）**：
+   - 基于 v1.26 全面落地的 $O(1)$ 内存常数界流式引擎，彻底解除 v1.24/v1.25 的 512 MiB 内存保护边界限制；
+   - 将单文件传输上限安全拓展至 64 GiB（`64 * 1024 * 1024 * 1024` 字节），覆盖操作系统磁盘镜像、4K/8K 超高清工程视频等大容量传输场景；
+   - 建立传输速率度量模型，采用指数加权移动平均（EWMA）算法平滑消除网络抖动，杜绝瞬态速率毛刺；
+   - 增强 CLI 控制面能力，提供 `tetherly status` 状态汇总与动态巡检，为 `tetherly send` 提供终端光标原地回退的交互式进度条；
+   - 强化 Web UI 呈现，增加符合人类阅读直觉的字节单位转换、实时传输速率与动态剩余时间（ETA）估算；
+   - 严格遵循 ADR-018 GitHub CI-First 构建体系与 ADR-013 进程唯一回环架构。
+
+2. **核心模块重构与增量演进**：
+   - **`tetherly-core::filexfer` 企业级上限拓展**：
+     - `pub const FILE_MAX: u64 = 64 * 1024 * 1024 * 1024;`（64 GiB）；
+     - `FileHub::offer_resumable` 在报价解析层对 `size > FILE_MAX` 严格返回 `CoreError::FileTooLarge(FILE_MAX)`；
+     - 增加单测精确验证 64 GiB 边界条件（恰好 64 GiB 允许，64 GiB + 1 字节拒绝）。
+   - **`tetherly-node::runtime` EWMA 速率平滑模型**：
+     - `ActiveTransfer` 模型新增 `pub speed_bps: u64` 属性，在所有出站与入站传输创建点均规范初始化为 0；
+     - `update_transfer_progress` 计量 `delta_bytes` 与 `delta_ms`，应用 EWMA 经典平滑权重：
+       $$\text{speed\_bps} = \frac{\text{speed\_bps} \times 7 + \text{inst\_speed} \times 3}{10}$$
+     - 当传输跃迁进入 `Completed` 或 `Failed` 终态时，显式将 `speed_bps` 复位为 0。
+   - **`tetherly-node::uihttp` 回环客户端拓展**：
+     - 提供 `loopback_get(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8>)>`，与 `loopback_post` 共同构成标准回环客户端底座；
+     - `POST /api/file/send` 内部元数据检查与 64 GiB `FILE_MAX` 对齐，安全强转 `meta.len() as u64`。
+   - **`tetherly` 与 `tetherly-cli` 命令行可观测性加固**：
+     - 新增 `Cmd::Status { watch, interval, json, ui_port }` 子命令，向 `127.0.0.1:45716/api/state` 查询运行时状态，提供节点身份、PIN 状态、LAN 监听与已连接对端列表；`--watch` 支持清屏动态轮询；
+     - `Cmd::Send` 扩充 `--watch` 参数：向回环接口发起发送后，每 250ms 轮询活跃传输状态，终端以 `\r` 刷新实时进度：
+       `[ 68.4%] 43.78 GiB / 64.00 GiB (84.20 MiB/s) [transferring]`
+     - 终态检测：`completed` 打印绿标确认退出，`failed` 提取错误信息退出。
+   - **`ui/index.html` Web UI 可视化升级**：
+     - 实现 `formatBytes(bytes)`（自适应 B / KiB / MiB / GiB / TiB 双精度浮点）；
+     - 实现 `formatSpeed(bps)`（格式化字节速率并添加 `/s` 后缀）；
+     - 实现 `formatEta(remainingBytes, bps)`（基于当前速率计算剩余秒数并格式化为 `XmYs` 或 `Xs`）；
+     - 在传输卡片中实时呈现传输速率与动态剩余时间。
+
+3. **测试覆盖与 GitHub CI 全量验证**：
+   - `tests/phase1.rs` 新增端到端集成测试 `enterprise_file_limits_speed_and_status_observability`：
+     - 启动配对节点并初始化回环 UI 服务；
+     - 发送伪造的大于 64 GiB 报价，断言对端拒绝且候选列表为空（边界门禁有效）；
+     - 通过 `loopback_get(port, "/api/state")` 验证回环客户端连通性；
+     - 验证流式传输过程中的 `speed_bps` 动态计算与终态复位；
+   - 遵循 ADR-018 GitHub CI-First 原则，在 GitHub Actions CI（run `38982885049`，commit `abdca31`）上全量验证：
+     - `check (ubuntu-latest)`: fmt, clippy, test（Debian 11 bullseye glibc 2.31 容器）耗时 1m 50s 全部通过；
+     - `check (macos-latest)`: fmt, clippy, test（macOS arm64）耗时 2m 48s 全部通过；
+     - `check (windows-latest)`: fmt, clippy, test（Windows x86_64）耗时 4m 26s 全部通过；
+     - `android`: NDK arm64-v8a 原生库编译与 Gradle 打包耗时 1m 57s 全部通过；
+     - `deny`: 许可证与漏洞合规审计耗时 1m 1s 全部通过。
+
 

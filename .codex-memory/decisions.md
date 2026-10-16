@@ -1,5 +1,30 @@
 # Decisions
 
+## 2026-10-17 (21) - 64 GiB enterprise file transfer ceiling with EWMA rate smoothing, CLI status inspection, and interactive progress observation
+- Decision: Scale single file transfer ceiling `FILE_MAX` from 512 MiB to 64 GiB (`64 * 1024 * 1024 * 1024`), implement real-time transfer velocity (`speed_bps`) using EWMA smoothing, add loopback client `loopback_get`, introduce CLI `status` subcommand, add `--watch` interactive progress flag to `tetherly send`, and update Web UI with human-readable byte units, speed, and ETA calculations.
+  - Scale `FILE_MAX`: `tetherly_core::filexfer::FILE_MAX = 64 * 1024 * 1024 * 1024`. Three gates enforce this limit synchronously: `FileHub::offer_resumable` (returns `CoreError::FileTooLarge(FILE_MAX)`), 45718 wire header (`recv_chunks_after_header` returns `NetError::TooLarge`), and send path (`POST /api/file/send`). Casts cleaned to avoid 32/64 bit truncations.
+  - Transfer Velocity & EWMA Smoothing: Added `pub speed_bps: u64` to `ActiveTransfer`. In `update_transfer_progress`, delta bytes and delta ms calculate instantaneous speed, smoothed with 70% previous and 30% instantaneous: `(speed_bps * 7 + inst_speed * 3) / 10`. Reset to `0` when transfer transitions to `Completed` or `Failed`.
+  - Loopback Client & CLI Status: `uihttp::loopback_get(port, path)` added. `tetherly status` queries `GET /api/state`, supports `--watch` (ANSI clear), `--interval`, and `--json`.
+  - Interactive Send Watch: `tetherly send <path> --watch` tracks active progress via loopback API, printing dynamic `\r` carriage-return progress bars with percentage, formatted bytes, smoothed speed, and current phase.
+  - Web UI: Added `formatBytes`, `formatSpeed`, and `formatEta` functions in `ui/index.html` displaying dynamic rate and remaining duration on active transfer cards.
+- Rationale: With v1.26's $O(1)$ streaming engine bounding memory to 64 KiB chunks, `FILE_MAX = 512 MiB` was an obsolete artifact of the old full-file buffering design. 64 GiB unlocks multi-gigabyte OS disk images and video files. Instantaneous transfer speed fluctuates heavily on typical network links; an EWMA filter provides human-readable velocity without UI jitter. CLI commands must adhere strictly to ADR-013 loopback architecture.
+- Alternatives considered: Raw unbounded file size without cap (rejected — arbitrary unverified offers could cause integer overflows or exhaust disk space without an upfront threshold); Client-side speed calculation in CLI only (rejected — node-level EWMA allows Web UI, CLI, and future mobile UIs to consume uniform velocity metrics via `/api/state`).
+- Impact: `tetherly-core`, `tetherly-node`, `tetherly-cli`, `ui/index.html`, and `tests/phase1.rs`. Full GitHub Actions CI run `38982885049` passed green across Windows, macOS, Linux (Debian 11 Bullseye container), Android NDK Gradle, and cargo-deny.
+- Rollback trigger: None — backwards compatible on wire.
+- Related files: `crates/tetherly-core/src/filexfer.rs`, `crates/tetherly-node/src/runtime.rs`, `crates/tetherly-node/src/uihttp.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `bins/tetherly-cli/src/main.rs`, `ui/index.html`, `tests/phase1.rs`, `docs/DEVELOPMENT.md` §1.28 & §27
+
+## 2026-10-17 (20) - Real-time active transfer tracking state machine with chunk callbacks and Web UI progress visualization
+- Decision: Expose real-time file transfer progress and lifecycle states end-to-end from the streaming file channel up to the node runtime, loopback HTTP API, and Web UI.
+  - Channel layer: Added `send_stream_from_with_progress` taking an `on_chunk(chan_offset, chunk_len)` closure called after each 64 KiB encrypted chunk is flushed to the TCP socket.
+  - Node runtime: Defined `ActiveTransfer` with `TransferDirection` (`Inbound`, `Outbound`) and `TransferPhase` (`Transferring`, `Verifying`, `Completed`, `Failed`). `Shared` manages `active_transfers: Mutex<HashMap<String, ActiveTransfer>>`.
+  - Loopback API: `GET /api/state` includes `Snapshot.transfers` sorted descending by `started_ms`.
+  - Web UI: `ui/index.html` renders card-based progress bars with percentage, byte counts, direction labels, and status badges.
+- Rationale: Large file transfers in v1.26 were a black box to users while in-flight. Progress visibility on both sender and receiver sides is essential for usability.
+- Alternatives considered: Polling disk file size on receiver (rejected — inaccurate for sparse writes or buffered I/O, does not provide sender progress); WebSockets / SSE for progress push (rejected — loopback polling of `/api/state` keeps the architecture simpler, stateless, and consistent with ADR-013).
+- Impact: `tetherly-net::filechan`, `tetherly-node::runtime`, `tetherly-node::uihttp`, `ui/index.html`, `tests/phase1.rs`. GitHub Actions CI run `38979042878` 100% green across all 5 jobs.
+- Rollback trigger: None — pure observability addition.
+- Related files: `crates/tetherly-net/src/filechan.rs`, `crates/tetherly-node/src/runtime.rs`, `crates/tetherly-node/src/uihttp.rs`, `ui/index.html`, `tests/phase1.rs`, `docs/DEVELOPMENT.md` §1.27 & §26
+
 ## 2026-10-17 (19) - O(1) memory chunked streaming file transfer with IncrementalSha256 and zero whole-file resident buffers
 - Decision: Eliminate whole-file resident `Vec<u8>` buffers on both sending and receiving nodes by establishing an $O(1)$ memory streaming pipeline.
   - Sender: `tetherly_core::IncrementalSha256` calculates file SHA-256 in 64 KiB slices. `OutboundFile` stores `OutboundSource::Path(PathBuf)`. When the peer accepts, `tetherly_net::filechan::send_stream_from` reads 64 KiB chunks from `tokio::fs::File`, encrypts them with counter nonce and position-bound AAD, and writes them directly to the TCP socket with a single 64 KiB buffer.
