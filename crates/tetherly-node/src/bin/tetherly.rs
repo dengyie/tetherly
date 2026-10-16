@@ -401,16 +401,18 @@ async fn main() -> Result<()> {
                     let transfers = state.get("transfers").and_then(|t| t.as_array());
                     let current = transfers.and_then(|list| {
                         list.iter().find(|t| {
-                            t.get("transfer_id")
-                                .and_then(|id| id.as_str())
-                                == Some(transfer_id)
+                            t.get("transfer_id").and_then(|id| id.as_str()) == Some(transfer_id)
                         })
                     });
                     if let Some(t) = current {
-                        let transferred = t.get("transferred").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let transferred =
+                            t.get("transferred").and_then(|v| v.as_u64()).unwrap_or(0);
                         let total = t.get("total").and_then(|v| v.as_u64()).unwrap_or(size);
                         let speed_bps = t.get("speed_bps").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let phase = t.get("phase").and_then(|v| v.as_str()).unwrap_or("transferring");
+                        let phase = t
+                            .get("phase")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("transferring");
                         let pct = if total > 0 {
                             (transferred as f64 / total as f64) * 100.0
                         } else {
@@ -428,7 +430,10 @@ async fn main() -> Result<()> {
                         let _ = std::io::stdout().flush();
 
                         if phase == "completed" {
-                            println!("\n✓ Transfer completed: {file_name} ({})", format_bytes(total));
+                            println!(
+                                "\n✓ Transfer completed: {file_name} ({})",
+                                format_bytes(total)
+                            );
                             break;
                         } else if phase == "failed" {
                             let err_msg = t
@@ -446,38 +451,36 @@ async fn main() -> Result<()> {
             interval,
             json,
             ui_port,
-        } => {
-            loop {
-                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/state")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                             start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
-                if code != 200 {
-                    anyhow::bail!(
-                        "node refused status query (HTTP {code}): {}",
-                        String::from_utf8_lossy(&resp)
-                    );
-                }
-                if json {
-                    println!("{}", String::from_utf8_lossy(&resp));
-                } else {
-                    let v: serde_json::Value = serde_json::from_slice(&resp)
-                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-                    if watch {
-                        print!("\x1b[2J\x1b[H");
-                    }
-                    print_status_summary(&v);
-                }
-                if !watch {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
+        } => loop {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/state")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "node refused status query (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
             }
-        }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+            } else {
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                if watch {
+                    print!("\x1b[2J\x1b[H");
+                }
+                print_status_summary(&v);
+            }
+            if !watch {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
+        },
     }
     Ok(())
 }
@@ -486,7 +489,10 @@ fn print_status_summary(v: &serde_json::Value) {
     let device_id = v.get("device_id").and_then(|s| s.as_str()).unwrap_or("?");
     let name = v.get("name").and_then(|s| s.as_str()).unwrap_or("?");
     let platform = v.get("platform").and_then(|s| s.as_str()).unwrap_or("?");
-    let pin_active = v.get("pin_active").and_then(|s| s.as_bool()).unwrap_or(false);
+    let pin_active = v
+        .get("pin_active")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
     let lan_only = v.get("lan_only").and_then(|s| s.as_bool()).unwrap_or(false);
 
     println!("Tetherly Node Status:");

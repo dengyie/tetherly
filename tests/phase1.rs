@@ -930,7 +930,9 @@ async fn enterprise_file_limits_speed_and_status_observability() {
         .expect("loopback_get state succeeds");
     assert_eq!(sc_code, 200);
     let final_state: serde_json::Value = serde_json::from_slice(&sc_body).unwrap();
-    let transfers = final_state["transfers"].as_array().expect("transfers array");
+    let transfers = final_state["transfers"]
+        .as_array()
+        .expect("transfers array");
     assert_eq!(transfers.len(), 1);
     assert_eq!(transfers[0]["transfer_id"], transfer_id);
     assert_eq!(transfers[0]["phase"], "completed");
@@ -955,7 +957,9 @@ async fn enterprise_file_limits_speed_and_status_observability() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
-        peer.offered_files().iter().all(|f| f.transfer_id != "tr_64g_plus_1"),
+        peer.offered_files()
+            .iter()
+            .all(|f| f.transfer_id != "tr_64g_plus_1"),
         "an offer exceeding 64 GiB must be dropped by the receiver"
     );
 

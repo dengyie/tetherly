@@ -390,9 +390,12 @@ mod tests {
                 sha256: "d".repeat(64),
             }],
         };
-        assert!(hub.offer(src.clone(), sized_64g("tr_64g_ok", sixty_four_gib), 3).is_ok());
+        assert!(hub
+            .offer(src.clone(), sized_64g("tr_64g_ok", sixty_four_gib), 3)
+            .is_ok());
         assert_eq!(
-            hub.offer(src, sized_64g("tr_64g_over", sixty_four_gib + 1), 4).unwrap_err(),
+            hub.offer(src, sized_64g("tr_64g_over", sixty_four_gib + 1), 4)
+                .unwrap_err(),
             CoreError::FileTooLarge(FILE_MAX)
         );
     }
