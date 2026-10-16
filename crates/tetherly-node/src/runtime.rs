@@ -1989,21 +1989,25 @@ impl Node {
             },
         );
         let now = self.shared.clock.unix_ms();
-        self.shared.active_transfers.lock().expect("transfers").insert(
-            transfer_id.clone(),
-            ActiveTransfer {
-                transfer_id: transfer_id.clone(),
-                peer: peer.clone(),
-                direction: TransferDirection::Outbound,
-                filename: name.into(),
-                total: data.len() as u64,
-                transferred: 0,
-                phase: TransferPhase::Transferring,
-                error: None,
-                started_ms: now,
-                updated_ms: now,
-            },
-        );
+        self.shared
+            .active_transfers
+            .lock()
+            .expect("transfers")
+            .insert(
+                transfer_id.clone(),
+                ActiveTransfer {
+                    transfer_id: transfer_id.clone(),
+                    peer: peer.clone(),
+                    direction: TransferDirection::Outbound,
+                    filename: name.into(),
+                    total: data.len() as u64,
+                    transferred: 0,
+                    phase: TransferPhase::Transferring,
+                    error: None,
+                    started_ms: now,
+                    updated_ms: now,
+                },
+            );
         self.send_to(peer, offer.to_frame()?).await?;
         let _ = _wait_accept;
         Ok(transfer_id)
@@ -2070,21 +2074,25 @@ impl Node {
             },
         );
         let now = self.shared.clock.unix_ms();
-        self.shared.active_transfers.lock().expect("transfers").insert(
-            transfer_id.clone(),
-            ActiveTransfer {
-                transfer_id: transfer_id.clone(),
-                peer: peer.clone(),
-                direction: TransferDirection::Outbound,
-                filename: safe_name,
-                total: size,
-                transferred: 0,
-                phase: TransferPhase::Transferring,
-                error: None,
-                started_ms: now,
-                updated_ms: now,
-            },
-        );
+        self.shared
+            .active_transfers
+            .lock()
+            .expect("transfers")
+            .insert(
+                transfer_id.clone(),
+                ActiveTransfer {
+                    transfer_id: transfer_id.clone(),
+                    peer: peer.clone(),
+                    direction: TransferDirection::Outbound,
+                    filename: safe_name,
+                    total: size,
+                    transferred: 0,
+                    phase: TransferPhase::Transferring,
+                    error: None,
+                    started_ms: now,
+                    updated_ms: now,
+                },
+            );
         self.send_to(peer, offer.to_frame()?).await?;
         Ok(transfer_id)
     }

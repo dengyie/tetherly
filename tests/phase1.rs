@@ -788,7 +788,12 @@ async fn streaming_file_transfer_tracks_active_progress_and_completion_states() 
     )
     .await
     .expect("live node API reachable");
-    assert_eq!(code, 200, "send response: {}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        code,
+        200,
+        "send response: {}",
+        String::from_utf8_lossy(&body)
+    );
     let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let transfer_id = resp["transfer_id"].as_str().unwrap();
 
@@ -796,7 +801,10 @@ async fn streaming_file_transfer_tracks_active_progress_and_completion_states() 
     let initial_host_transfers: Vec<ActiveTransfer> = host.active_transfers();
     assert_eq!(initial_host_transfers.len(), 1);
     assert_eq!(initial_host_transfers[0].transfer_id, transfer_id);
-    assert_eq!(initial_host_transfers[0].direction, TransferDirection::Outbound);
+    assert_eq!(
+        initial_host_transfers[0].direction,
+        TransferDirection::Outbound
+    );
     assert_eq!(initial_host_transfers[0].total, total_size as u64);
     assert_eq!(initial_host_transfers[0].filename, "large_progress.bin");
 
@@ -831,8 +839,16 @@ async fn streaming_file_transfer_tracks_active_progress_and_completion_states() 
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await.unwrap();
         let text = String::from_utf8_lossy(&buf);
-        let code = text.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
-        let payload = text.split("\r\n\r\n").nth(1).map(|b| b.as_bytes().to_vec()).unwrap_or_default();
+        let code = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        let payload = text
+            .split("\r\n\r\n")
+            .nth(1)
+            .map(|b| b.as_bytes().to_vec())
+            .unwrap_or_default();
         (code, payload)
     };
     assert_eq!(sc_code, 200);
