@@ -2252,11 +2252,7 @@ impl Node {
                 }
                 Err(ref e) => {
                     warn!(%e, transfer = %tid, "file data send failed");
-                    node.set_transfer_phase(
-                        &tid,
-                        TransferPhase::Failed,
-                        Some(e.to_string()),
-                    );
+                    node.set_transfer_phase(&tid, TransferPhase::Failed, Some(e.to_string()));
                 }
             }
         });

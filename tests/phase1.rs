@@ -1134,9 +1134,7 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
                 .active_transfers()
                 .into_iter()
                 .find(|t| t.transfer_id == ok_transfer_id);
-            panic!(
-                "inbox file missing after 20s: host={host_t:?}, peer={peer_t:?}"
-            );
+            panic!("inbox file missing after 20s: host={host_t:?}, peer={peer_t:?}");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
