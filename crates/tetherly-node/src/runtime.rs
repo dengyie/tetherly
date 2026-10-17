@@ -212,7 +212,7 @@ pub enum TransferDirection {
     Outbound,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TransferPhase {
     Transferring,
@@ -3164,7 +3164,7 @@ impl Node {
             t.error = error;
             t.updated_ms = now;
 
-            if phase == TransferPhase::Completed || phase == TransferPhase::Failed {
+            if t.phase == TransferPhase::Completed || t.phase == TransferPhase::Failed {
                 Self::prune_terminal_transfers_locked(&mut transfers);
             }
         }
