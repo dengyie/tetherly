@@ -1037,6 +1037,21 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
     assert_eq!(t.error.as_deref(), Some("cancelled by user"));
     assert_eq!(t.speed_bps, 0);
 
+    // Verify peer state also transitions to Failed via bilateral wire rejection
+    let start_peer = std::time::Instant::now();
+    loop {
+        let peer_transfers = peer.active_transfers();
+        if let Some(pt) = peer_transfers.iter().find(|x| x.transfer_id == transfer_id) {
+            if pt.phase == TransferPhase::Failed {
+                break;
+            }
+        }
+        if start_peer.elapsed() > Duration::from_secs(5) {
+            panic!("peer transfer failed to settle to Failed state after cancellation");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
     // 5. Verify cancel idempotency / error handling: cancelling again returns 400
     let (cancel_code2, _) = tetherly_node::loopback_post(
         ui_port,

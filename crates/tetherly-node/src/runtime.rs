@@ -1572,6 +1572,19 @@ impl Node {
                     .lock()
                     .expect("pending")
                     .remove(&d.transfer_id);
+                let cancel_tx = self
+                    .shared
+                    .transfer_cancels
+                    .lock()
+                    .expect("cancels")
+                    .remove(&d.transfer_id);
+                if let Some(tx) = cancel_tx {
+                    let _ = tx.send(());
+                }
+                {
+                    let mut hubs = self.shared.hubs.lock().expect("hubs");
+                    hubs.files.forget(&d.transfer_id);
+                }
                 self.set_transfer_phase(
                     &d.transfer_id,
                     TransferPhase::Failed,
@@ -3108,8 +3121,8 @@ impl Node {
     }
 
     /// Cancel an active in-flight transfer (inbound or outbound).
-    pub fn cancel_transfer(&self, transfer_id: &str) -> Result<(), CoreError> {
-        let cancel_tx = {
+    pub async fn cancel_transfer(&self, transfer_id: &str) -> Result<(), CoreError> {
+        let (cancel_tx, peer_to_notify) = {
             let mut cancels = self.shared.transfer_cancels.lock().expect("cancels");
             let mut pending = self.shared.pending_out.lock().expect("pending");
             let mut transfers = self.shared.active_transfers.lock().expect("transfers");
@@ -3125,13 +3138,23 @@ impl Node {
             t.speed_bps = 0;
             t.updated_ms = self.shared.clock.unix_ms();
 
+            let peer = t.peer.clone();
             pending.remove(transfer_id);
-            cancels.remove(transfer_id)
+            (cancels.remove(transfer_id), peer)
         };
 
         if let Some(tx) = cancel_tx {
             let _ = tx.send(());
         }
+
+        let reject_decision = tetherly_core::FileDecision {
+            transfer_id: transfer_id.to_string(),
+            resume_from: None,
+        };
+        if let Ok(frame) = reject_decision.reject_frame() {
+            let _ = self.send_to(&peer_to_notify, frame).await;
+        }
+
         info!(transfer = %transfer_id, "transfer cancelled by user");
         Ok(())
     }

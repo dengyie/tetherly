@@ -434,7 +434,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             Err(_) => err(400, "bad json"),
         },
         ("POST", "/api/file/cancel") => match serde_json::from_slice::<IdBody>(body) {
-            Ok(d) => match node.cancel_transfer(&d.id) {
+            Ok(d) => match node.cancel_transfer(&d.id).await {
                 Ok(()) => json_ok(&serde_json::json!({ "ok": true, "transfer_id": d.id })),
                 Err(e) => err(400, &e.to_string()),
             },
