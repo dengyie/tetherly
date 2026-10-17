@@ -739,8 +739,8 @@ async fn main() -> Result<()> {
                 match list {
                     Some(items) if !items.is_empty() => {
                         println!(
-                            "{:<32} {:<24} {:<6} {:<10} {}",
-                            "ID", "APP", "OTP", "EXPIRES", "TITLE"
+                            "{:<32} {:<24} {:<6} {:<10} TITLE",
+                            "ID", "APP", "OTP", "EXPIRES"
                         );
                         let now_ms = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -875,7 +875,7 @@ async fn main() -> Result<()> {
                 let list = v.get("replies").and_then(|r| r.as_array());
                 match list {
                     Some(items) if !items.is_empty() => {
-                        println!("{:<32} {:<24} {}", "ID", "APP", "UID");
+                        println!("{:<32} {:<24} UID", "ID", "APP");
                         for item in items {
                             let id = item.get("id").and_then(|s| s.as_str()).unwrap_or("-");
                             let app = item.get("app_id").and_then(|s| s.as_str()).unwrap_or("-");
