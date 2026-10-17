@@ -175,6 +175,27 @@ enum Cmd {
         #[command(subcommand)]
         action: InputCmd,
     },
+    /// List connected and trusted peer devices.
+    Peers {
+        /// Include offline trusted devices.
+        #[arg(long, short)]
+        trusted: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// List cached physical addressing routes.
+    Routes {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -1105,7 +1126,101 @@ async fn main() -> Result<()> {
                     println!("  Cursor Seat:  {seat}");
                 }
             }
-        },
+        }
+        Cmd::Peers {
+            trusted,
+            json,
+            ui_port,
+        } => {
+            let (code, resp) = loopback_get(ui_port, "/api/peers").await.map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+            if code != 200 {
+                bail!(
+                    "node returned HTTP {code}: {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+                return Ok(());
+            }
+            let v: serde_json::Value =
+                serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            let self_id = v["self_id"].as_str().unwrap_or("unknown");
+            let live_arr = v["live"].as_array();
+            let live_count = v["live_count"].as_u64().unwrap_or(0);
+            let trusted_count = v["trusted_count"].as_u64().unwrap_or(0);
+
+            println!("Node: {self_id} (live: {live_count}, trusted: {trusted_count})");
+            println!("\nActive Live Peers:");
+            match live_arr {
+                Some(arr) if !arr.is_empty() => {
+                    for p in arr {
+                        let dev = p["device_id"].as_str().unwrap_or("-");
+                        let name = p["name"].as_str().unwrap_or("-");
+                        let platform = p["platform"].as_str().unwrap_or("-");
+                        let addr = p["addr"].as_str().unwrap_or("-");
+                        let path = p["path"].as_str().unwrap_or("-");
+                        println!("  * {name} ({platform}) · {addr} [{path}] · {dev}");
+                    }
+                }
+                _ => println!("  (no live peers connected)"),
+            }
+
+            if trusted {
+                println!("\nTrusted Peers Inventory:");
+                if let Some(arr) = v["trusted"].as_array() {
+                    if arr.is_empty() {
+                        println!("  (no trusted peers)");
+                    } else {
+                        for tp in arr {
+                            let dev = tp["device_id"].as_str().unwrap_or("-");
+                            let alias = tp["alias"].as_str().unwrap_or("-");
+                            let online = tp["online"].as_bool().unwrap_or(false);
+                            let status = if online { "ONLINE" } else { "OFFLINE" };
+                            println!("  * [{status}] {alias} · {dev}");
+                        }
+                    }
+                }
+            }
+        }
+        Cmd::Routes { json, ui_port } => {
+            let (code, resp) = loopback_get(ui_port, "/api/routes").await.map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+            if code != 200 {
+                bail!(
+                    "node returned HTTP {code}: {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+                return Ok(());
+            }
+            let v: serde_json::Value =
+                serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            let routes_arr = v["routes"].as_array();
+            let count = v["count"].as_u64().unwrap_or(0);
+            println!("Cached Physical Routes ({count}):");
+            match routes_arr {
+                Some(arr) if !arr.is_empty() => {
+                    for r in arr {
+                        let dev = r["device_id"].as_str().unwrap_or("-");
+                        let addr = r["addr"].as_str().unwrap_or("-");
+                        println!("  * {dev} -> {addr}");
+                    }
+                }
+                _ => println!("  (no cached routes)"),
+            }
+        }
         Cmd::Status {
             watch,
             interval,

@@ -1753,6 +1753,131 @@ async fn notify_candidate_lifecycle_and_quick_reply_via_loopback_api() {
     peer.shutdown();
 }
 
+/// Tests that peers inspection (`GET /api/peers`) and routes caching inspection (`GET /api/routes`)
+/// correctly report live vs trusted devices with online/offline state, expose physical route cache,
+/// persist routes across session offline transitions, and clean up both trust and route cache upon unpair.
+#[tokio::test(flavor = "multi_thread")]
+async fn peers_and_routes_inspection_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_id = peer.identity().device_id().clone();
+    let host_id = host.identity().device_id().clone();
+
+    // 1. Initial live check: GET /api/peers on host
+    let (code, body) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .expect("get peers succeeds");
+    assert_eq!(code, 200);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["self_id"], host_id.as_str());
+    assert_eq!(v["live_count"], 1);
+    assert_eq!(v["trusted_count"], 1);
+
+    let live = v["live"].as_array().expect("live array");
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0]["device_id"], peer_id.as_str());
+    assert_eq!(live[0]["online"], true);
+    assert!(live[0].get("file_port").is_some());
+    assert!(live[0].get("screen_port").is_some());
+    assert!(live[0].get("input_port").is_some());
+    assert_eq!(live[0]["path"], "lan");
+
+    let trusted = v["trusted"].as_array().expect("trusted array");
+    assert_eq!(trusted.len(), 1);
+    assert_eq!(trusted[0]["device_id"], peer_id.as_str());
+    assert_eq!(trusted[0]["online"], true);
+    assert_eq!(trusted[0]["revoked"], false);
+
+    // 2. Initial route check: GET /api/routes on host
+    let (rcode, rbody) = tetherly_node::loopback_get(host_ui, "/api/routes")
+        .await
+        .expect("get routes succeeds");
+    assert_eq!(rcode, 200);
+    let rv: serde_json::Value = serde_json::from_slice(&rbody).unwrap();
+    assert_eq!(rv["ok"], true);
+    assert!(rv["count"].as_u64().unwrap_or(0) >= 1);
+    let routes = rv["routes"].as_array().expect("routes array");
+    assert!(routes.iter().any(|r| r["device_id"] == peer_id.as_str()));
+
+    // 3. GET /api/state snapshot also exposes trusted inventory
+    let (scode, sbody) = tetherly_node::loopback_get(host_ui, "/api/state")
+        .await
+        .expect("get state succeeds");
+    assert_eq!(scode, 200);
+    let sv: serde_json::Value = serde_json::from_slice(&sbody).unwrap();
+    let snap_trusted = sv["trusted"].as_array().expect("trusted in snapshot");
+    assert!(snap_trusted.iter().any(|t| t["device_id"] == peer_id.as_str() && t["online"] == true));
+
+    // 4. Simulate peer going offline
+    peer.shutdown();
+
+    let start = std::time::Instant::now();
+    loop {
+        let (pcode, pbody) = tetherly_node::loopback_get(host_ui, "/api/peers")
+            .await
+            .unwrap();
+        assert_eq!(pcode, 200);
+        let pv: serde_json::Value = serde_json::from_slice(&pbody).unwrap();
+        if pv["live_count"] == 0 {
+            // Live peer is severed, but trusted peer persists marked offline
+            assert_eq!(pv["trusted_count"], 1);
+            let t_arr = pv["trusted"].as_array().unwrap();
+            assert_eq!(t_arr[0]["device_id"], peer_id.as_str());
+            assert_eq!(t_arr[0]["online"], false);
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("peer was not marked offline in /api/peers within 10s");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // 5. Verify cached route persists after peer disconnected
+    let (r2_code, r2_body) = tetherly_node::loopback_get(host_ui, "/api/routes")
+        .await
+        .unwrap();
+    assert_eq!(r2_code, 200);
+    let r2_v: serde_json::Value = serde_json::from_slice(&r2_body).unwrap();
+    let r2_routes = r2_v["routes"].as_array().unwrap();
+    assert!(r2_routes.iter().any(|r| r["device_id"] == peer_id.as_str()));
+
+    // 6. Unpair offline peer via POST /api/peers/unpair
+    let unpair_payload = serde_json::json!({
+        "device_id": peer_id.as_str(),
+    });
+    let (ucode, ubody) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/unpair",
+        &serde_json::to_vec(&unpair_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ucode, 200);
+    let uresp: serde_json::Value = serde_json::from_slice(&ubody).unwrap();
+    assert_eq!(uresp["ok"], true);
+    assert_eq!(uresp["unpaired"], true);
+
+    // 7. After unpair, trusted inventory and routes are empty
+    let (p3_code, p3_body) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .unwrap();
+    assert_eq!(p3_code, 200);
+    let p3_v: serde_json::Value = serde_json::from_slice(&p3_body).unwrap();
+    assert_eq!(p3_v["trusted_count"], 0);
+    assert_eq!(p3_v["live_count"], 0);
+
+    let (r3_code, r3_body) = tetherly_node::loopback_get(host_ui, "/api/routes")
+        .await
+        .unwrap();
+    assert_eq!(r3_code, 200);
+    let r3_v: serde_json::Value = serde_json::from_slice(&r3_body).unwrap();
+    let r3_routes = r3_v["routes"].as_array().unwrap();
+    assert!(!r3_routes.iter().any(|r| r["device_id"] == peer_id.as_str()));
+
+    host.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

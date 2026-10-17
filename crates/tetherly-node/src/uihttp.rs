@@ -203,6 +203,7 @@ struct Snapshot {
     /// Inbound quick replies awaiting hand-off. No text is included.
     replies: Vec<crate::events::ReplyViewDto>,
     peers: Vec<PeerView>,
+    trusted: Vec<TrustedPeerView>,
     files: Vec<FileSnap>,
     transfers: Vec<crate::runtime::ActiveTransfer>,
     transfer_stats: crate::runtime::TransferStats,
@@ -240,6 +241,15 @@ struct PeerView {
     name: String,
     platform: String,
     path: String,
+}
+
+#[derive(Serialize)]
+pub struct TrustedPeerView {
+    pub device_id: String,
+    pub alias: String,
+    pub paired_at: u64,
+    pub revoked: bool,
+    pub online: bool,
 }
 
 #[derive(Serialize)]
@@ -360,6 +370,74 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             },
             Err(_) => err(400, "bad json"),
         },
+        ("GET", "/api/peers") => {
+            let live = node.live_peers();
+            let trusted = node.trusted();
+            let live_ids: std::collections::HashSet<tetherly_core::DeviceId> =
+                live.iter().map(|p| p.device_id.clone()).collect();
+
+            let live_dtos: Vec<serde_json::Value> = live
+                .into_iter()
+                .map(|p| {
+                    let path_str = match p.path {
+                        crate::runtime::PathKind::Lan => "lan",
+                        crate::runtime::PathKind::Overlay => "overlay",
+                        crate::runtime::PathKind::Loopback => "loopback",
+                    };
+                    serde_json::json!({
+                        "device_id": p.device_id.to_string(),
+                        "name": p.name,
+                        "platform": p.platform,
+                        "addr": p.addr.to_string(),
+                        "path": path_str,
+                        "file_port": p.file_port,
+                        "input_port": p.input_port,
+                        "screen_port": p.screen_port,
+                        "online": true,
+                    })
+                })
+                .collect();
+
+            let trusted_dtos: Vec<serde_json::Value> = trusted
+                .into_iter()
+                .map(|tp| {
+                    let online = live_ids.contains(&tp.device_id);
+                    serde_json::json!({
+                        "device_id": tp.device_id.to_string(),
+                        "alias": tp.alias,
+                        "paired_at": tp.paired_at,
+                        "revoked": tp.revoked,
+                        "online": online,
+                    })
+                })
+                .collect();
+
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "self_id": node.identity().device_id().to_string(),
+                "live_count": live_dtos.len(),
+                "trusted_count": trusted_dtos.len(),
+                "live": live_dtos,
+                "trusted": trusted_dtos,
+            }))
+        }
+        ("GET", "/api/routes") => {
+            let routes = node.routes();
+            let dtos: Vec<serde_json::Value> = routes
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "device_id": r.device_id,
+                        "addr": r.addr,
+                    })
+                })
+                .collect();
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "count": dtos.len(),
+                "routes": dtos,
+            }))
+        }
         ("GET", "/api/clip") => match node.get_clipboard_text() {
             Ok(Some(text)) => {
                 let hash = tetherly_core::hex_sha256(text.as_bytes());
@@ -872,6 +950,23 @@ async fn snapshot(node: &Node) -> Snapshot {
             format!("backoff until {retry_at_ms}")
         }
     };
+    let live = node.live_peers();
+    let live_ids: std::collections::HashSet<tetherly_core::DeviceId> =
+        live.iter().map(|p| p.device_id.clone()).collect();
+    let trusted: Vec<TrustedPeerView> = node
+        .trusted()
+        .into_iter()
+        .map(|tp| {
+            let online = live_ids.contains(&tp.device_id);
+            TrustedPeerView {
+                device_id: tp.device_id.to_string(),
+                alias: tp.alias,
+                paired_at: tp.paired_at,
+                revoked: tp.revoked,
+                online,
+            }
+        })
+        .collect();
     Snapshot {
         device_id: node.identity().device_id().to_string(),
         name: node.name().to_string(),
@@ -894,8 +989,7 @@ async fn snapshot(node: &Node) -> Snapshot {
             .iter()
             .map(|r| r.app_id.clone())
             .collect(),
-        peers: node
-            .live_peers()
+        peers: live
             .into_iter()
             .map(|p| PeerView {
                 device_id: p.device_id.to_string(),
@@ -907,6 +1001,7 @@ async fn snapshot(node: &Node) -> Snapshot {
                 },
             })
             .collect(),
+        trusted,
         files: node
             .offered_files()
             .into_iter()

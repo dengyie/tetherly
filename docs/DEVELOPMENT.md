@@ -3,12 +3,79 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.34** |
+| 文档版本 | **1.35** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）**——(1) **轻量级屏幕与键鼠通道回环 API (`GET /api/screen`、`GET /api/input`、`POST /api/screen/revoke`)**：增设无全量快照序列化开销的高性能轻量状态查询接口，并正式暴露 `node.screen_revoke()` 撤销许可控制端点，形成「允许-撤销-开始-停止」严密状态闭环；(2) **定向设备目标拨号与消除盲区**：升级 `POST /api/screen/start` 与 `POST /api/input/start` 支持可选入参 `{"peer": "tdev_..."}`，打破以往多对端在线时返回「未实现」的死局，实现单设备自动推导、多设备定向拨号与非法/离线设备 400 严格校验；(3) **CLI 双端命令全量同构**：`tetherly` 与 `tetherly-cli` 增设 `screen`（`allow`、`revoke`、`start [--peer <id>]`、`stop`、`status [--json]`）与 `input`（`start [--peer <id>]`、`stop`、`status [--json]`）子命令群，赋能终端/无头自动化交互；(4) **Web UI 补全**：在远程屏幕卡片中增设「撤销允许」按钮并支持状态联动；(5) **端到端集成测试全覆盖**（`tests/phase5.rs` 增设 `screen_and_input_lifecycle_and_peer_targeting_via_loopback_api` 完整覆盖许可流转、多端定向启动与停止）。+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.35 对端拓扑全景可观测性、物理路由缓存透视、轻量级对端与网络检索及命令行同构（ADR-028）**——(1) **轻量级对端与路由回环 API (`GET /api/peers`、`GET /api/routes`)**：增设无全量快照序列化开销的高性能轻量查询接口，不仅返回当前活跃的 TCP 会话对端 (`live`)，更全景透视持久化受信任设备库 (`trusted`，包含离线对端设备 ID、别名、配对时间戳与在线状态)，以及底层物理寻址路由缓存 (`routes`)；(2) **全景受信任资产与在线/离线态可视化**：彻底消除离线受信任设备“隐形”黑盒，支持在 Web UI 与命令行中直观审视全量信任资产并一键离线解绑；(3) **CLI 双端命令全量同构**：`tetherly` 与 `tetherly-cli` 增设 `peers [--json] [--trusted]` 与 `routes [--json]` 子命令群，提供表格化美化输出与结构化 JSON 管道输出；(4) **Web UI 补全**：在 `ui/index.html` 增设「受信任设备（全景）」分组，配备在线/离线状态指示徽标；(5) **端到端集成测试全覆盖**（`tests/phase1.rs` 增设 `peers_and_routes_inspection_via_loopback_api` 完整覆盖在线对端检索、受信任全景穿透、路由缓存映射与离线/解绑联动闭环）。+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.35 相对 1.34(对端拓扑全景可观测性、物理路由缓存透视、轻量级对端与网络检索及命令行同构)**
+
+- **动机(对端拓扑与物理路由黑盒、离线信任对端不可见与轻量级检索缺失)**:
+  在 v1.0 至 v1.34 架构中，节点虽然在内存 `Shared.live` 维持在线会话，在 `Shared.trust` (`trusted.json`) 维护配对设备信任库，在 `routes.json` 维护物理寻址缓存，但在生产使用与多设备组网中暴露出以下三类严重痛点：
+  1. **离线受信任对端完全“隐形”**：此前无论是在 Web UI 还是 `GET /api/state` 导出的快照中，仅包含当前在线建立 TCP 会话的 `live` 列表。一旦受信任对端（如手机或离线电脑）关机或断网，用户便无法查看已信任设备列表，不仅无法确认自身信任圈的资产全貌，更导致离线解绑 (`unpair`) 无法在 UI 操作（只能凭记忆手动输入 device_id）；
+  2. **物理寻址路由缓存黑盒化**：`routes.json` 记录了节点与各对端建立会话的最后物理 IP:Port，但系统缺乏针对路由缓存的直接透视接口，无法确认当前物理网络通道是走局域网还是 EasyTier 虚拟网；
+  3. **缺少轻量级对端与路由轮询端点**：外部监控、状态探针或脚本若想得知对端连接状态，不得不拉取庞大的全量快照 `GET /api/state`，带来多余的传输与序列化损耗；
+  4. **CLI 缺乏独立的对端与路由检索命令**：用户在终端无法通过 `tetherly peers` 或 `tetherly routes` 快速获取对端拓扑与物理路由，只能通过混合式的 `status` 命令查看。
+
+- **架构与协议设计(ADR-028 对端拓扑全景可观测性与物理路由缓存透视)**:
+  1. **回环 HTTP API 扩充 (`GET /api/peers` 与 `GET /api/routes`)**:
+     - `GET /api/peers`：轻量级返回当前在线对端与全部受信任设备列表：
+       ```json
+       {
+         "ok": true,
+         "self_id": "tdev_...",
+         "live_count": 1,
+         "trusted_count": 2,
+         "live": [
+           {
+             "device_id": "tdev_...",
+             "name": "peer_node",
+             "platform": "macos",
+             "addr": "127.0.0.1:45717",
+             "rtt_ms": 15,
+             "caps": ["notify", "clip", "file"],
+             "state": "connected"
+           }
+         ],
+         "trusted": [
+           {
+             "device_id": "tdev_...",
+             "alias": "peer_node",
+             "paired_at": 1700000000,
+             "revoked": false,
+             "online": true
+           }
+         ]
+       }
+       ```
+     - `GET /api/routes`：轻量级返回物理寻址路由缓存列表：
+       ```json
+       {
+         "ok": true,
+         "count": 1,
+         "routes": [
+           {
+             "device_id": "tdev_...",
+             "addr": "192.168.1.100:45717",
+             "last_seen_ms": 1700000000000
+           }
+         ]
+       }
+       ```
+  2. **双 CLI 二进制 (`tetherly` 与 `tetherly-cli`) 命令全量同构**:
+     - `tetherly peers [--json] [--trusted] [--ui-port <port>]`：格式化输出在线对端列表，支持 `--trusted` 展现受信任资产全景（标记在线/离线），支持 `--json` 输出结构化数据；
+     - `tetherly routes [--json] [--ui-port <port>]`：格式化展示物理路由缓存表；
+  3. **Web UI 补全**:
+     - 在 `ui/index.html` 的对端卡片区域增设「受信任设备」视图，显示绿色的「在线」与灰色的「离线」徽标，并对离线对端提供直观的「解除配对」交互支持。
+  4. **端到端集成测试与 CI 全量验证**:
+     - 在 `tests/phase1.rs` 增设 `peers_and_routes_inspection_via_loopback_api`：
+       - 验证未配对时 `peers` 与 `routes` 均为空；
+       - 验证配对后 `GET /api/peers` 呈现 `live` 与 `trusted` 均包含对端且 `online: true`；
+       - 验证配对后 `GET /api/routes` 包含物理寻址记录；
+       - 验证对端节点离线后，`GET /api/peers` 中对端从 `live` 移除但在 `trusted` 中保留且 `online: false`；
+       - 验证调用 `POST /api/peers/unpair` 后，`trusted` 与 `routes` 对应项同步清除。
 
 **1.34 相对 1.33(远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环)**
 
@@ -1625,3 +1692,28 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - 验证未授权时 `POST /api/screen/start` 被 400 拦截；
      - 验证定向 `--peer` 跨节点成功开启屏幕推流且帧数递增；
      - 验证 `POST /api/input/start` 定向建链与光标座位转移，断开后安全复位。
+
+## 34. 对端拓扑全景可观测性、物理路由缓存透视、轻量级对端与网络检索及命令行同构 (v1.35 / ADR-028)
+
+1. **动机与设计准则（ADR-028）**：
+   - 彻底打破对端在线状态与底层物理路由信息的黑盒化；
+   - 消除受信任离线设备的“隐形”问题，使得信任库中的全量资产无论在线与否均清晰可查，支持离线解绑；
+   - 提供轻量级专用轮询 API（`GET /api/peers` 与 `GET /api/routes`），避免调用全量 `GET /api/state` 带来的沉重序列化开销；
+   - 严格维护 ADR-010 与 ADR-013 原则：127.0.0.1 绑核、Host 头校验与命令行回环客户端模式。
+
+2. **核心机制与实现**：
+   - **轻量级对端全景与路由查询 API**：
+     - `GET /api/peers`：返回本机 ID、在线设备统计、受信任设备统计，以及在线对端列表（`live`）与全景受信任列表（`trusted`，标记 `online: true/false`）；
+     - `GET /api/routes`：返回节点在 `routes.json` 中记录的物理寻址路由缓存列表；
+   - **CLI 终端全功能命令群（`tetherly` 与 `tetherly-cli` 全量同构）**：
+     - `peers [--json] [--trusted]`：展示在线对端表格或全量受信任设备（含离线标记）；
+     - `routes [--json]`：展示物理寻址缓存表格（对端 ID、物理地址、最后活跃时间）。
+   - **Web UI 补全**：在 `ui/index.html` 增设受信任设备区块，呈现红绿在线/离线指示徽标，并支持一键解除配对。
+
+3. **测试覆盖与 GitHub CI 验证**：
+   - `tests/phase1.rs` 增设 `peers_and_routes_inspection_via_loopback_api` 集成测试：
+     - 验证未配对前 `peers` 与 `routes` 均为空；
+     - 验证配对并建立会话后，`GET /api/peers` 准确反映在线设备与受信任设备且 `online: true`；
+     - 验证配对后 `GET /api/routes` 包含该设备的物理路由条目；
+     - 验证对端节点下线后，受信任对端状态准确跃迁为 `online: false`；
+     - 验证执行 `POST /api/peers/unpair` 后，`trusted` 与 `routes` 同步抹除。

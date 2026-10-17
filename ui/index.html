@@ -76,6 +76,7 @@
   .badge.verifying { background: rgba(240, 180, 41, 0.15); color: var(--warn); }
   .badge.completed { background: rgba(62, 207, 142, 0.2); color: var(--ok); }
   .badge.failed { background: rgba(232, 93, 93, 0.2); color: var(--bad); }
+  .badge.offline { background: rgba(150, 150, 150, 0.15); color: #888; }
   @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -188,8 +189,10 @@
       <div id="net" class="hint">探测 EasyTier 侧车…</div>
     </section>
     <section style="margin-top:16px">
-      <h2>在线对端</h2>
+      <h2>对端与受信任设备</h2>
       <div id="peers"><div class="empty">无会话</div></div>
+      <h3 style="font-size:13px;color:var(--text-dim);margin:14px 0 6px 0">已受信任设备（全景）</h3>
+      <div id="trusted"><div class="empty">无已配对设备</div></div>
     </section>
   </div>
 </main>
@@ -389,6 +392,31 @@ function render(s) {
       opt.textContent = x.name + " (" + x.device_id + ")";
       if (opt.value === prevPeer) opt.selected = true;
       sp.appendChild(opt);
+    }
+  }
+  const tr = $("trusted");
+  if (tr) {
+    tr.innerHTML = "";
+    const list = s.trusted || [];
+    if (!list.length) {
+      tr.appendChild(el('<div class="empty">无已配对设备</div>'));
+    } else {
+      for (const t of list) {
+        const badge = t.online
+          ? '<span class="badge completed" style="margin-right:6px">在线</span>'
+          : '<span class="badge offline" style="margin-right:6px">离线</span>';
+        const card = el('<div class="card"><div style="flex:1"><div class="title">' + badge + '<span></span></div><div class="meta"></div></div><div class="row"><button class="bad ghost" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
+        card.querySelector(".title span").textContent = t.alias || t.device_id;
+        card.querySelector(".meta").textContent = t.device_id;
+        const unpairBtn = card.querySelector("button");
+        unpairBtn.onclick = async () => {
+          if (confirm("确认解除与设备 " + (t.alias || t.device_id) + " (" + t.device_id + ") 的配对？")) {
+            await api("/api/peers/unpair", { device_id: t.device_id });
+            poll();
+          }
+        };
+        tr.appendChild(card);
+      }
     }
   }
   const a = $("ancs");

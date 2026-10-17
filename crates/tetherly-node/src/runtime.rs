@@ -635,6 +635,10 @@ impl Node {
         self.shared.trust.lock().expect("trust").all()
     }
 
+    pub fn routes(&self) -> Vec<crate::store::Route> {
+        crate::store::load_routes(&self.shared.cfg.data_dir).routes
+    }
+
     pub fn emit(&self, ev: UiEvent) {
         let _ = self.shared.events.send(ev);
     }
