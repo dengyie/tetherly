@@ -749,30 +749,37 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             } else {
                 None
             };
-            let open = if node.screen_channel_open().await {
-                Ok(())
-            } else {
-                let mut peers = node.live_peers();
-                peers.sort_by_key(|p| p.device_id.to_string());
-                match target_opt.as_deref().filter(|s| !s.is_empty()) {
-                    Some(raw) => match tetherly_core::DeviceId::parse(raw) {
-                        Ok(id) => {
-                            if peers.iter().any(|p| p.device_id == id) {
-                                node.open_screen(&id).await.map_err(|e| e.to_string())
+            let open = match target_opt.as_deref().filter(|s| !s.is_empty()) {
+                Some(raw) => match tetherly_core::DeviceId::parse(raw) {
+                    Ok(id) => {
+                        let peers = node.live_peers();
+                        if peers.iter().any(|p| p.device_id == id) {
+                            if node.screen_channel_open().await {
+                                Ok(())
                             } else {
-                                Err("peer is not connected".to_string())
+                                node.open_screen(&id).await.map_err(|e| e.to_string())
                             }
+                        } else {
+                            Err("peer is not connected".to_string())
                         }
-                        Err(_) => Err("bad peer id".to_string()),
-                    },
-                    None => match peers.len() {
-                        0 => Err("no connected peer".to_string()),
-                        1 => node
-                            .open_screen(&peers[0].device_id)
-                            .await
-                            .map_err(|e| e.to_string()),
-                        _ => Err("multiple peers connected; pass peer (tdev_…)".to_string()),
-                    },
+                    }
+                    Err(_) => Err("bad peer id".to_string()),
+                },
+                None => {
+                    if node.screen_channel_open().await {
+                        Ok(())
+                    } else {
+                        let mut peers = node.live_peers();
+                        peers.sort_by_key(|p| p.device_id.to_string());
+                        match peers.len() {
+                            0 => Err("no connected peer".to_string()),
+                            1 => node
+                                .open_screen(&peers[0].device_id)
+                                .await
+                                .map_err(|e| e.to_string()),
+                            _ => Err("multiple peers connected; pass peer (tdev_…)".to_string()),
+                        }
+                    }
                 }
             };
             match open {
@@ -807,30 +814,37 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             } else {
                 None
             };
-            let open = if node.input_channel_open().await {
-                Ok(())
-            } else {
-                let mut peers = node.live_peers();
-                peers.sort_by_key(|p| p.device_id.to_string());
-                match target_opt.as_deref().filter(|s| !s.is_empty()) {
-                    Some(raw) => match tetherly_core::DeviceId::parse(raw) {
-                        Ok(id) => {
-                            if peers.iter().any(|p| p.device_id == id) {
-                                node.open_input(&id).await.map_err(|e| e.to_string())
+            let open = match target_opt.as_deref().filter(|s| !s.is_empty()) {
+                Some(raw) => match tetherly_core::DeviceId::parse(raw) {
+                    Ok(id) => {
+                        let peers = node.live_peers();
+                        if peers.iter().any(|p| p.device_id == id) {
+                            if node.input_channel_open().await {
+                                Ok(())
                             } else {
-                                Err("peer is not connected".to_string())
+                                node.open_input(&id).await.map_err(|e| e.to_string())
                             }
+                        } else {
+                            Err("peer is not connected".to_string())
                         }
-                        Err(_) => Err("bad peer id".to_string()),
-                    },
-                    None => match peers.len() {
-                        0 => Err("no connected peer".to_string()),
-                        1 => node
-                            .open_input(&peers[0].device_id)
-                            .await
-                            .map_err(|e| e.to_string()),
-                        _ => Err("multiple peers connected; pass peer (tdev_…)".to_string()),
-                    },
+                    }
+                    Err(_) => Err("bad peer id".to_string()),
+                },
+                None => {
+                    if node.input_channel_open().await {
+                        Ok(())
+                    } else {
+                        let mut peers = node.live_peers();
+                        peers.sort_by_key(|p| p.device_id.to_string());
+                        match peers.len() {
+                            0 => Err("no connected peer".to_string()),
+                            1 => node
+                                .open_input(&peers[0].device_id)
+                                .await
+                                .map_err(|e| e.to_string()),
+                            _ => Err("multiple peers connected; pass peer (tdev_…)".to_string()),
+                        }
+                    }
                 }
             };
             match open {

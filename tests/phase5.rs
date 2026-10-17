@@ -447,6 +447,12 @@ async fn screen_and_input_lifecycle_and_peer_targeting_via_loopback_api() {
     assert_eq!(c, 200);
     let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(v["state"], "requested");
+
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(v["channel_open"], true);
 
     // 3. POST /api/screen/allow and POST /api/screen/revoke on host
