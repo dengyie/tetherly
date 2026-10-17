@@ -2942,13 +2942,10 @@ async fn node_config_inspection_and_dynamic_flags_via_loopback_api() {
     assert_eq!(code_ctrl, 400);
 
     // e. Malformed JSON returns 400
-    let (code_bad_json, _) = tetherly_node::loopback_post(
-        ui_port,
-        "/api/config",
-        b"this is not json",
-    )
-    .await
-    .unwrap();
+    let (code_bad_json, _) =
+        tetherly_node::loopback_post(ui_port, "/api/config", b"this is not json")
+            .await
+            .unwrap();
     assert_eq!(code_bad_json, 400);
 
     // 10. Clean shutdown

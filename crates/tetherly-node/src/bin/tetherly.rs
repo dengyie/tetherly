@@ -2027,19 +2027,11 @@ async fn main() -> Result<()> {
                 );
                 println!(
                     "  mDNS Advertise:   {}",
-                    if rep.advertise {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
+                    if rep.advertise { "enabled" } else { "disabled" }
                 );
                 println!(
                     "  Auto Reconnect:   {}",
-                    if rep.reconnect {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
+                    if rep.reconnect { "enabled" } else { "disabled" }
                 );
                 println!("  Memory Clip:      {}", rep.memory_clip);
                 println!(

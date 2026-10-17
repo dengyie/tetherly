@@ -828,7 +828,13 @@ impl Node {
         if prev != enabled {
             if enabled {
                 self.advertise_mdns();
-            } else if let Some(tx) = self.shared.advertise_stop.lock().expect("advertise_stop").take() {
+            } else if let Some(tx) = self
+                .shared
+                .advertise_stop
+                .lock()
+                .expect("advertise_stop")
+                .take()
+            {
                 let _ = tx.send(true);
             }
             self.emit_config_changed();
@@ -851,7 +857,9 @@ impl Node {
     pub fn set_node_name(&self, name: &str) -> Result<String, CoreError> {
         let trimmed = name.trim();
         if trimmed.is_empty() {
-            return Err(CoreError::InvalidConfig("node name cannot be empty".to_string()));
+            return Err(CoreError::InvalidConfig(
+                "node name cannot be empty".to_string(),
+            ));
         }
         if trimmed.len() > 64 {
             return Err(CoreError::InvalidConfig(
@@ -868,7 +876,13 @@ impl Node {
             *n = trimmed.to_string();
         }
         if self.is_advertise_enabled() {
-            if let Some(tx) = self.shared.advertise_stop.lock().expect("advertise_stop").take() {
+            if let Some(tx) = self
+                .shared
+                .advertise_stop
+                .lock()
+                .expect("advertise_stop")
+                .take()
+            {
                 let _ = tx.send(true);
             }
             self.advertise_mdns();
@@ -886,7 +900,9 @@ impl Node {
         if let Some(n) = name {
             let trimmed = n.trim();
             if trimmed.is_empty() {
-                return Err(CoreError::InvalidConfig("node name cannot be empty".to_string()));
+                return Err(CoreError::InvalidConfig(
+                    "node name cannot be empty".to_string(),
+                ));
             }
             if trimmed.len() > 64 {
                 return Err(CoreError::InvalidConfig(
@@ -905,17 +921,35 @@ impl Node {
             if prev != adv {
                 if adv {
                     self.advertise_mdns();
-                } else if let Some(tx) = self.shared.advertise_stop.lock().expect("advertise_stop").take() {
+                } else if let Some(tx) = self
+                    .shared
+                    .advertise_stop
+                    .lock()
+                    .expect("advertise_stop")
+                    .take()
+                {
                     let _ = tx.send(true);
                 }
             } else if adv && name.is_some() {
-                if let Some(tx) = self.shared.advertise_stop.lock().expect("advertise_stop").take() {
+                if let Some(tx) = self
+                    .shared
+                    .advertise_stop
+                    .lock()
+                    .expect("advertise_stop")
+                    .take()
+                {
                     let _ = tx.send(true);
                 }
                 self.advertise_mdns();
             }
         } else if name.is_some() && self.is_advertise_enabled() {
-            if let Some(tx) = self.shared.advertise_stop.lock().expect("advertise_stop").take() {
+            if let Some(tx) = self
+                .shared
+                .advertise_stop
+                .lock()
+                .expect("advertise_stop")
+                .take()
+            {
                 let _ = tx.send(true);
             }
             self.advertise_mdns();
@@ -934,11 +968,31 @@ impl Node {
         let bound_screen = self.shared.bound_screen.load(Ordering::SeqCst);
         let bound_ui = self.shared.bound_ui.load(Ordering::SeqCst);
 
-        let ctrl_port = if bound_ctrl != 0 { bound_ctrl } else { self.shared.cfg.control_port };
-        let file_port = if bound_file != 0 { bound_file } else { self.shared.cfg.file_port };
-        let input_port = if bound_input != 0 { bound_input } else { self.shared.cfg.input_port };
-        let screen_port = if bound_screen != 0 { bound_screen } else { self.shared.cfg.screen_port };
-        let ui_port = if bound_ui != 0 { bound_ui } else { self.shared.cfg.ui_port };
+        let ctrl_port = if bound_ctrl != 0 {
+            bound_ctrl
+        } else {
+            self.shared.cfg.control_port
+        };
+        let file_port = if bound_file != 0 {
+            bound_file
+        } else {
+            self.shared.cfg.file_port
+        };
+        let input_port = if bound_input != 0 {
+            bound_input
+        } else {
+            self.shared.cfg.input_port
+        };
+        let screen_port = if bound_screen != 0 {
+            bound_screen
+        } else {
+            self.shared.cfg.screen_port
+        };
+        let ui_port = if bound_ui != 0 {
+            bound_ui
+        } else {
+            self.shared.cfg.ui_port
+        };
 
         let ancs_attached = self.shared.ancs.lock().expect("ancs").is_some();
 
@@ -1859,7 +1913,13 @@ impl Node {
 
     pub fn shutdown(&self) {
         let _ = self.shared.shutdown.send(true);
-        if let Some(tx) = self.shared.advertise_stop.lock().expect("advertise_stop").take() {
+        if let Some(tx) = self
+            .shared
+            .advertise_stop
+            .lock()
+            .expect("advertise_stop")
+            .take()
+        {
             let _ = tx.send(true);
         }
         if let Ok(mut sessions) = self.shared.sessions.try_lock() {
