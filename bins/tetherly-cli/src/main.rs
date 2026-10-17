@@ -705,14 +705,12 @@ async fn main() -> Result<()> {
                     }
                 }
             } else if status {
-                let (code, resp) = loopback_get(ui_port, "/api/pin")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                             start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                let (code, resp) = loopback_get(ui_port, "/api/pin").await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
                 if code != 200 {
                     anyhow::bail!(
                         "node refused PIN status request (HTTP {code}): {}",
@@ -738,14 +736,15 @@ async fn main() -> Result<()> {
                     }
                 }
             } else {
-                let (code, resp) = loopback_post(ui_port, "/api/pin", b"{}")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                             start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                let (code, resp) =
+                    loopback_post(ui_port, "/api/pin", b"{}")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
                 if code != 200 {
                     anyhow::bail!(
                         "node refused PIN request (HTTP {code}): {}",

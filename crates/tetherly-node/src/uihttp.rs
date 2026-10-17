@@ -532,7 +532,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
         ("POST", "/api/pin/clear") | ("DELETE", "/api/pin") => {
             let cleared = node.clear_pin();
             json_ok(&serde_json::json!({ "ok": true, "cleared": cleared }))
-        },
+        }
         ("POST", "/api/dial") => match serde_json::from_slice::<DialBody>(body) {
             Ok(d) => {
                 if let Some(p) = d.pin {
