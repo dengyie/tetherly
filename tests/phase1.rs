@@ -1944,7 +1944,10 @@ async fn storage_inspection_and_partial_cleanup_via_loopback_api() {
 
     // 5. Verify the regular file remains untouched
     assert!(inbox_dir.join("file1.txt").exists());
-    assert_eq!(std::fs::read(inbox_dir.join("file1.txt")).unwrap().len(), 50);
+    assert_eq!(
+        std::fs::read(inbox_dir.join("file1.txt")).unwrap().len(),
+        50
+    );
 
     // 6. Query /api/storage again to ensure partials are now zero
     let (code, body) = tetherly_node::loopback_get(ui_port, "/api/storage")

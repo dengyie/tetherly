@@ -1538,15 +1538,14 @@ async fn main() -> Result<()> {
             StorageCmd::Clean { all, ui_port } => {
                 let payload = serde_json::json!({ "orphaned_only": !all });
                 let bytes = serde_json::to_vec(&payload)?;
-                let (code, resp) =
-                    loopback_post(ui_port, "/api/storage/clean", &bytes)
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                                 start one with `tetherly --data-dir <dir> run` first"
-                            )
-                        })?;
+                let (code, resp) = loopback_post(ui_port, "/api/storage/clean", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
                 if code != 200 {
                     anyhow::bail!(
                         "storage clean failed (HTTP {code}): {}",

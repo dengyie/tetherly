@@ -942,7 +942,12 @@ impl Node {
             }
         }
 
-        for meta_file in ["identity.bin", "identity.ref", "trusted.json", "routes.json"] {
+        for meta_file in [
+            "identity.bin",
+            "identity.ref",
+            "trusted.json",
+            "routes.json",
+        ] {
             let p = data_dir.join(meta_file);
             if let Ok(m) = std::fs::metadata(&p) {
                 meta_bytes += m.len();

@@ -833,7 +833,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             };
             let rep = node.clean_storage(orphaned_only);
             json_ok(&rep)
-        },
+        }
         // Remote screen: consent is local and explicit. `allow` is the only
         // gate into streaming; nothing a peer sends can flip it.
         ("GET", "/api/screen") => {
