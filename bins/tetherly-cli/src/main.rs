@@ -520,10 +520,22 @@ fn print_status_summary(v: &serde_json::Value) {
     }
 
     if let Some(stats) = v.get("transfer_stats") {
-        let sent = stats.get("bytes_sent").and_then(|v| v.as_u64()).unwrap_or(0);
-        let recv = stats.get("bytes_received").and_then(|v| v.as_u64()).unwrap_or(0);
-        let completed = stats.get("completed_count").and_then(|v| v.as_u64()).unwrap_or(0);
-        let failed = stats.get("failed_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let sent = stats
+            .get("bytes_sent")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let recv = stats
+            .get("bytes_received")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let completed = stats
+            .get("completed_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let failed = stats
+            .get("failed_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         println!(
             "  Transfer Metrics: sent: {}, received: {}, completed: {}, failed: {}",
             format_bytes(sent),

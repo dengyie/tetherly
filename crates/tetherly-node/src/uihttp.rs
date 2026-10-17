@@ -444,7 +444,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
         ("POST", "/api/file/clear") => {
             let cleared = node.clear_terminal_transfers();
             json_ok(&serde_json::json!({ "ok": true, "cleared": cleared }))
-        },
+        }
         ("POST", "/api/file/send") => match serde_json::from_slice::<SendFileBody>(body) {
             Ok(d) => {
                 let mut peers = node.live_peers();

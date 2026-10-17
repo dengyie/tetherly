@@ -3135,8 +3135,8 @@ impl Node {
             if t.phase == TransferPhase::Failed && phase != TransferPhase::Failed {
                 return;
             }
-            let was_in_flight = t.phase == TransferPhase::Transferring
-                || t.phase == TransferPhase::Verifying;
+            let was_in_flight =
+                t.phase == TransferPhase::Transferring || t.phase == TransferPhase::Verifying;
             if was_in_flight {
                 let mut stats = self.shared.transfer_stats.lock().expect("transfer_stats");
                 match phase {
@@ -3178,7 +3178,11 @@ impl Node {
     }
 
     pub fn transfer_stats(&self) -> TransferStats {
-        self.shared.transfer_stats.lock().expect("transfer_stats").clone()
+        self.shared
+            .transfer_stats
+            .lock()
+            .expect("transfer_stats")
+            .clone()
     }
 
     pub fn clear_terminal_transfers(&self) -> usize {

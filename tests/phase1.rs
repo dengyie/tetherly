@@ -1356,10 +1356,9 @@ async fn transfer_lifecycle_governance_and_stats() {
     let host_transfers = host.active_transfers();
     assert_eq!(host_transfers.len(), 2);
 
-    let (clear_code, clear_body) =
-        tetherly_node::loopback_post(ui_port, "/api/file/clear", b"{}")
-            .await
-            .expect("clear succeeds");
+    let (clear_code, clear_body) = tetherly_node::loopback_post(ui_port, "/api/file/clear", b"{}")
+        .await
+        .expect("clear succeeds");
     assert_eq!(clear_code, 200);
     let clear_resp: serde_json::Value = serde_json::from_slice(&clear_body).unwrap();
     assert_eq!(clear_resp["ok"], true);
