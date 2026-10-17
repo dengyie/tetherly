@@ -1207,33 +1207,9 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
     peer.shutdown();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn transfer_lifecycle_governance_and_stats() {
-    let (host_dir, _g_host) = temp_dir("lifecycle-host");
-    let (peer_dir, _g_peer) = temp_dir("lifecycle-peer");
-    let (mut host_cfg, mut peer_cfg) = (
-        NodeConfig::default_with_dir(&host_dir),
-        NodeConfig::default_with_dir(&peer_dir),
-    );
-    host_cfg.name = "host".into();
-    peer_cfg.name = "peer".into();
-    host_cfg.control_port = pick_free_port();
-    host_cfg.file_port = pick_free_port();
-    peer_cfg.control_port = pick_free_port();
-    peer_cfg.file_port = pick_free_port();
-
-    let host = Node::start(host_cfg).unwrap();
-    let peer = Node::start(peer_cfg).unwrap();
-    let (p1, _p2) = host.bound_ports().unwrap();
-    let p_addr = SocketAddr::from(([127, 0, 0, 1], p1));
-
-    let pin = peer.generate_pin().unwrap();
-    let digits = tetherly_core::pin::parse_pin(&pin).unwrap();
-    host.set_pin(digits);
-    host.dial(p_addr).await.unwrap();
-    wait_peers(&host, 1, Duration::from_secs(5)).await;
-    wait_peers(&peer, 1, Duration::from_secs(5)).await;
-
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
     let ui_port = host.spawn_ui().await.unwrap();
 
     // 1. Initial transfer stats are zero
@@ -1274,19 +1250,8 @@ async fn transfer_lifecycle_governance_and_stats() {
     peer.user_accept_file(&transfer_id).await.unwrap();
 
     // Wait until peer receives the file
-    let start = std::time::Instant::now();
-    loop {
-        let path = peer_dir.join("inbox").join("stats_test.bin");
-        if let Ok(bytes) = std::fs::read(&path) {
-            if bytes.len() == total_size {
-                break;
-            }
-        }
-        if start.elapsed() > Duration::from_secs(10) {
-            panic!("file did not arrive in peer inbox within 10s");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let received = wait_inbox(&g2.0, "stats_test.bin", Duration::from_secs(10)).await;
+    assert_eq!(received.len(), total_size);
 
     // Wait until host transfer settles to Completed
     let start = std::time::Instant::now();
