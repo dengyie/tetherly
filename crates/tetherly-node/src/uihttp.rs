@@ -10,7 +10,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 
 const INDEX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/index.html"));
-const MAX_BODY: usize = 8 * 1024;
+const MAX_HEADER: usize = 16 * 1024;
+const MAX_BODY: usize = 2 * 1024 * 1024;
 
 /// Bind the loopback UI and serve it in the background, returning the port
 /// actually bound (a `0` request resolves to an ephemeral one). Binding
@@ -48,21 +49,21 @@ async fn handle(mut stream: TcpStream, node: Node) -> std::io::Result<()> {
     let mut buf = vec![0u8; 4096];
     let mut n = 0usize;
     loop {
+        if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if n >= MAX_HEADER {
+            write_http(&mut stream, 413, "text/plain", b"headers too large").await?;
+            return Ok(());
+        }
         if n >= buf.len() {
-            buf.resize((buf.len() * 2).min(MAX_BODY + 4096), 0);
+            buf.resize((buf.len() * 2).min(MAX_HEADER), 0);
         }
         let k = stream.read(&mut buf[n..]).await?;
         if k == 0 {
             return Ok(());
         }
         n += k;
-        if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-        if n > MAX_BODY + 2048 {
-            write_http(&mut stream, 413, "text/plain", b"too large").await?;
-            return Ok(());
-        }
     }
     let head_end = buf[..n]
         .windows(4)
@@ -97,7 +98,8 @@ async fn handle(mut stream: TcpStream, node: Node) -> std::io::Result<()> {
     }
     let mut body = buf[head_end..n].to_vec();
     while body.len() < content_len {
-        let mut more = vec![0u8; content_len - body.len()];
+        let to_read = (content_len - body.len()).min(64 * 1024);
+        let mut more = vec![0u8; to_read];
         let k = stream.read(&mut more).await?;
         if k == 0 {
             break;
