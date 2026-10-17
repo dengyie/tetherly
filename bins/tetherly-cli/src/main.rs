@@ -2268,18 +2268,31 @@ async fn do_transfers(
     }
 
     let active_count = v.get("active_count").and_then(|s| s.as_u64()).unwrap_or(0);
-    let terminal_count = v.get("terminal_count").and_then(|s| s.as_u64()).unwrap_or(0);
+    let terminal_count = v
+        .get("terminal_count")
+        .and_then(|s| s.as_u64())
+        .unwrap_or(0);
     let total_count = v.get("total_count").and_then(|s| s.as_u64()).unwrap_or(0);
 
-    println!(
-        "Transfers: {total_count} total ({active_count} active, {terminal_count} terminal)"
-    );
+    println!("Transfers: {total_count} total ({active_count} active, {terminal_count} terminal)");
 
     if let Some(stats) = v.get("stats") {
-        let sent = stats.get("bytes_sent").and_then(|v| v.as_u64()).unwrap_or(0);
-        let recv = stats.get("bytes_received").and_then(|v| v.as_u64()).unwrap_or(0);
-        let completed = stats.get("completed_count").and_then(|v| v.as_u64()).unwrap_or(0);
-        let failed = stats.get("failed_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let sent = stats
+            .get("bytes_sent")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let recv = stats
+            .get("bytes_received")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let completed = stats
+            .get("completed_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let failed = stats
+            .get("failed_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         println!(
             "  Cumulative Metrics: sent: {}, received: {}, completed: {}, failed: {}",
             format_bytes(sent),
@@ -2326,4 +2339,3 @@ async fn do_transfers(
 
     Ok(())
 }
-

@@ -2409,10 +2409,9 @@ async fn file_transfers_inspection_and_query_via_loopback_api() {
     assert_eq!(out_rep.transfers.len(), 1);
 
     // 10. POST /api/file/clear to purge completed transfer history
-    let (clear_code, clear_body) =
-        tetherly_node::loopback_post(ui_port, "/api/file/clear", b"{}")
-            .await
-            .expect("clear completed transfers");
+    let (clear_code, clear_body) = tetherly_node::loopback_post(ui_port, "/api/file/clear", b"{}")
+        .await
+        .expect("clear completed transfers");
     assert_eq!(clear_code, 200);
     let clear_val: serde_json::Value = serde_json::from_slice(&clear_body).unwrap();
     assert_eq!(clear_val["ok"], true);

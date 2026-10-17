@@ -508,12 +508,7 @@ fn parse_query_map(q: &str) -> std::collections::HashMap<String, String> {
     map
 }
 
-async fn route(
-    method: &str,
-    path: &str,
-    body: &[u8],
-    node: &Node,
-) -> (u16, &'static str, Vec<u8>) {
+async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'static str, Vec<u8>) {
     let (path_only, query_str) = match path.split_once('?') {
         Some((p, q)) => (p, Some(q)),
         None => (path, None),
