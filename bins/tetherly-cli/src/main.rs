@@ -165,6 +165,16 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Manage remote screen viewing (allow, revoke, start, stop, status).
+    Screen {
+        #[command(subcommand)]
+        action: ScreenCmd,
+    },
+    /// Manage remote keyboard and mouse control (start, stop, status).
+    Input {
+        #[command(subcommand)]
+        action: InputCmd,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -206,6 +216,74 @@ enum ClipCmd {
     },
     /// Get the current local clipboard content from the running daemon.
     Get {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenCmd {
+    /// Allow the local screen to be viewed by a connected visitor (local consent).
+    Allow {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Revoke local screen viewing consent.
+    Revoke {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Start viewing a remote peer's screen (as visitor).
+    Start {
+        /// Target peer device_id (tdev_...). Required if multiple peers are connected.
+        #[arg(long)]
+        peer: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Stop screen streaming.
+    Stop {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Show remote screen channel status, counters and frame intervals.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum InputCmd {
+    /// Connect and start remote keyboard/mouse channel to a peer.
+    Start {
+        /// Target peer device_id (tdev_...). Required if multiple peers are connected.
+        #[arg(long)]
+        peer: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Stop remote keyboard/mouse channel and return cursor locally.
+    Stop {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Show remote keyboard/mouse channel status and cursor seat.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -838,6 +916,200 @@ async fn main() -> Result<()> {
             let text = v.get("text").and_then(|s| s.as_str()).unwrap_or("");
             println!("app_id: {app}, uid: {uid}, text: {text}");
         }
+        Cmd::Screen { action } => match action {
+            ScreenCmd::Allow { ui_port } => {
+                let (code, resp) = loopback_post(ui_port, "/api/screen/allow", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "screen allow failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                println!("Screen viewing allowed (local consent granted).");
+            }
+            ScreenCmd::Revoke { ui_port } => {
+                let (code, resp) = loopback_post(ui_port, "/api/screen/revoke", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "screen revoke failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                println!("Screen viewing consent revoked.");
+            }
+            ScreenCmd::Start { peer, ui_port } => {
+                let payload = serde_json::json!({ "peer": peer });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) = loopback_post(ui_port, "/api/screen/start", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "screen start failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                println!("Screen streaming started.");
+            }
+            ScreenCmd::Stop { ui_port } => {
+                let (code, resp) = loopback_post(ui_port, "/api/screen/stop", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "screen stop failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                println!("Screen streaming stopped.");
+            }
+            ScreenCmd::Status { json, ui_port } => {
+                let (code, resp) = loopback_get(ui_port, "/api/screen")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "screen status query failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let open = v
+                        .get("channel_open")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
+                    let sent = v.get("sent").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let received = v.get("received").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let dropped = v.get("dropped").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let refused = v.get("refused").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let bytes = v.get("bytes").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let p95 = v.get("p95_frame_interval_us").and_then(|n| n.as_u64());
+
+                    println!("Screen Channel Status:");
+                    println!("  State:        {state}");
+                    println!("  Channel Open: {open}");
+                    println!("  Frames Sent:  {sent}");
+                    println!("  Frames Recv:  {received}");
+                    println!("  Dropped:      {dropped}");
+                    println!("  Refused:      {refused}");
+                    println!("  Bytes:        {bytes}");
+                    match p95 {
+                        Some(us) => {
+                            println!("  p95 Interval: {:.2} ms ({us} us)", us as f64 / 1000.0);
+                        }
+                        None => println!("  p95 Interval: (not yet measurable)"),
+                    }
+                }
+            }
+        },
+        Cmd::Input { action } => match action {
+            InputCmd::Start { peer, ui_port } => {
+                let payload = serde_json::json!({ "peer": peer });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) = loopback_post(ui_port, "/api/input/start", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "input start failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let seat = v.get("seat").and_then(|s| s.as_str()).unwrap_or("unknown");
+                println!("Input channel connected. Cursor seat: {seat}");
+            }
+            InputCmd::Stop { ui_port } => {
+                let (code, resp) = loopback_post(ui_port, "/api/input/stop", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "input stop failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let seat = v.get("seat").and_then(|s| s.as_str()).unwrap_or("local");
+                println!("Input channel disconnected. Cursor seat: {seat}");
+            }
+            InputCmd::Status { json, ui_port } => {
+                let (code, resp) = loopback_get(ui_port, "/api/input")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "input status query failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let open = v
+                        .get("channel_open")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
+                    let seat = v.get("seat").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    println!("Input Channel Status:");
+                    println!("  Channel Open: {open}");
+                    println!("  Cursor Seat:  {seat}");
+                }
+            }
+        },
         Cmd::Status {
             watch,
             interval,

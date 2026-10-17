@@ -3,12 +3,48 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.33** |
+| 文档版本 | **1.34** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）**——(1) **轻量级通知候选与回复回环 API (`GET /api/notify/candidates`、`GET /api/notify/replies`、`POST /api/otp/get`)**：提供受 127.0.0.1 绑核与 Host 校验保护的高效轻量接口，支持秒级轮询候选状态与直接当次提取 OTP 验证码（严格遵守 ADR-010 当次触发与日志零泄露安全红线）；(2) **CLI 全功能交互闭环**：`tetherly` 与 `tetherly-cli` 全面对齐增设 `candidates`（列表展示/JSON 格式化）、`otp <id> [--copy]`（提取或复制验证码）、`dismiss <id>`（忽略注销候选）、`reply <id> <text>`（向对端手机快捷回复短信）、`replies`（列出待处理入站回复）与 `take-reply <id>`（单次安全消费回复文本）；(3) **回复单次消费与回环安全**：`take-reply` 严格落实一次性消费语义，避免同一快速回复被多次投递至移动端系统通道；(4) **端到端集成测试全覆盖**（`notify_candidate_lifecycle_and_quick_reply_via_loopback_api` 覆盖通知推送、候选解析、OTP 提取与剪贴板注入、双向回复跨网投递、单次消费校验、忽略注销与负向边界防护）。+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）**——(1) **轻量级屏幕与键鼠通道回环 API (`GET /api/screen`、`GET /api/input`、`POST /api/screen/revoke`)**：增设无全量快照序列化开销的高性能轻量状态查询接口，并正式暴露 `node.screen_revoke()` 撤销许可控制端点，形成「允许-撤销-开始-停止」严密状态闭环；(2) **定向设备目标拨号与消除盲区**：升级 `POST /api/screen/start` 与 `POST /api/input/start` 支持可选入参 `{"peer": "tdev_..."}`，打破以往多对端在线时返回「未实现」的死局，实现单设备自动推导、多设备定向拨号与非法/离线设备 400 严格校验；(3) **CLI 双端命令全量同构**：`tetherly` 与 `tetherly-cli` 增设 `screen`（`allow`、`revoke`、`start [--peer <id>]`、`stop`、`status [--json]`）与 `input`（`start [--peer <id>]`、`stop`、`status [--json]`）子命令群，赋能终端/无头自动化交互；(4) **Web UI 补全**：在远程屏幕卡片中增设「撤销允许」按钮并支持状态联动；(5) **端到端集成测试全覆盖**（`tests/phase5.rs` 增设 `screen_and_input_lifecycle_and_peer_targeting_via_loopback_api` 完整覆盖许可流转、多端定向启动与停止）。+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.34 相对 1.33(远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环)**
+
+- **动机(无头环境屏幕/KVM控制断层、多对端定向盲区与撤销许可缺失)**:
+  在 v1.0 至 v1.33 架构中，系统已在 45720 端口建立了远程桌面串流通道，在 45719 端口建立了远程键鼠控制通道。但在生产应用与工程落地中暴露出以下三类严重断层：
+  1. **无头/终端 CLI 交互完全缺失**：用户在纯终端、SSH 会话或无图形桌面环境下，完全无法通过命令行管理远程屏幕与键鼠通道，双端 CLI (`tetherly` 与 `tetherly-cli`) 均缺少 `screen` 与 `input` 子命令群；
+  2. **多端在线时的定向拨号死局**：此前 `uihttp.rs` 中的 `POST /api/screen/start` 与 `POST /api/input/start` 在多于一个对端在线时直接硬编码报错 `"multiple peers connected; ... target selection not implemented"`，且不接受任何请求参数，导致在多设备组网场景下屏幕与键鼠通道彻底瘫痪；
+  3. **屏幕许可撤销接口未暴露**：核心运行时 `Node::screen_revoke()` 已经实现，但回环 HTTP API 仅提供了 `POST /api/screen/allow`，却未暴露撤销端点（`POST /api/screen/revoke`），Web UI 亦无撤销按钮，一旦误点允许只能强杀进程或等待超时断开；
+  4. **缺少轻量级状态轮询 API**：外部状态监控或 CLI 必须请求庞大的 `GET /api/state` 才能知晓当前的屏幕帧率、流状态与输入座位，造成不必要的系统资源浪费。
+
+- **架构与协议设计(ADR-027 远程屏幕与键鼠通道全域控制与定向闭环)**:
+  1. **回环 HTTP API 扩充 (`GET /api/screen`、`GET /api/input`、`POST /api/screen/revoke`)**:
+     - `GET /api/screen`：轻量级返回 `{ "ok": true, "state": "idle"|"requested"|"allowed"|"streaming", "channel_open": bool, "sent": u64, "received": u64, "dropped": u64, "bytes": u64, "refused": u64, "p95_frame_interval_us": Option<u64> }`；
+     - `GET /api/input`：轻量级返回 `{ "ok": true, "channel_open": bool, "seat": "local"|"remote" }`；
+     - `POST /api/screen/revoke`：调用 `node.screen_revoke()`，重置流状态回 `Idle`，清空发送通道并返回 `{ "ok": true, "state": "idle" }`。
+  2. **定向设备目标拨号与鲁棒通道打开**:
+     - 升级 `POST /api/screen/start` 与 `POST /api/input/start`，支持解析 JSON `{ "peer": "tdev_..." }`；
+     - 单设备在线时若未传 `peer` 则自动匹配；多设备在线时若未传 `peer` 则诚实返回 `400 multiple peers connected; pass peer (tdev_…)`；若传入目标则校验合法性与在线状态，有效打破此前未实现的盲区。
+  3. **双 CLI 二进制 (`tetherly` 与 `tetherly-cli`) 命令全量同构**:
+     - `tetherly screen allow [--ui-port <port>]`：授权本机屏幕被观看；
+     - `tetherly screen revoke [--ui-port <port>]`：撤销本机屏幕观看许可；
+     - `tetherly screen start [--peer <id>] [--ui-port <port>]`：发起屏幕推流（可选定向设备）；
+     - `tetherly screen stop [--ui-port <port>]`：停止屏幕推流；
+     - `tetherly screen status [--json] [--ui-port <port>]`：展示屏幕通道状态、帧统计与 p95 间隔；
+     - `tetherly input start [--peer <id>] [--ui-port <port>]`：建立并激活远程键鼠控制通道；
+     - `tetherly input stop [--ui-port <port>]`：停止远程键鼠控制；
+     - `tetherly input status [--json] [--ui-port <port>]`：展示键鼠通道状态与光标座位。
+  4. **Web UI 补全**:
+     - 在 `ui/index.html` 的「远程屏幕（实验）」卡片增设「撤销允许」按钮，对接 `POST /api/screen/revoke`。
+  5. **端到端集成测试与 CI 全量验证**:
+     - 在 `tests/phase5.rs` 增设 `screen_and_input_lifecycle_and_peer_targeting_via_loopback_api`：
+       - 验证 `GET /api/screen` 与 `GET /api/input` 初始状态；
+       - 验证 `POST /api/screen/allow` 激活许可与 `POST /api/screen/revoke` 成功撤销；
+       - 验证未获许可时 `POST /api/screen/start` 被宿主拒绝；
+       - 验证通过 `POST /api/screen/start`（带 `--peer` 参数）跨节点成功启动屏幕串流与帧递增；
+       - 验证通过 `POST /api/input/start` 建立键鼠通道并成功转移光标座位，断开后安全归还。
 
 **1.33 相对 1.32(通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环)**
 
@@ -1557,6 +1593,35 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - 验证 `POST /api/reply/take` 成功提取并遵循单次消费不变量；
      - 验证 `POST /api/dismiss` 销毁候选与非法参数 400 保护。
 
+## 33. 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环 (v1.34 / ADR-027)
 
+1. **动机与设计准则（ADR-027）**：
+   - 彻底打破无头、终端与 SSH 会话环境下的远程桌面串流与键鼠控制交互屏障；
+   - 严格维护 ADR-010 与 ADR-013 原则：屏幕推流严格依赖本机显式授权（Local Consent），且一切控制命令必须作用于 127.0.0.1 活节点回环客户端；
+   - 消除多对端在线时的定向盲区：全面支持可选 `--peer <device_id>` 参数，多设备组网时精准定向建链，单设备时智能推导；
+   - 补齐状态管理与可观测性闭环：暴露 `POST /api/screen/revoke` 撤销端点以及 `GET /api/screen`、`GET /api/input` 轻量级低延迟查询接口。
 
+2. **核心机制与实现**：
+   - **轻量级查询与控制回环 API**：
+     - `GET /api/screen`：返回当前屏幕流状态、通道是否建立、已发/接收/丢弃/字节/拒绝计数以及 p95 帧间隔；
+     - `GET /api/input`：返回键鼠通道是否连接以及光标当前归属座位 (`local` / `remote`)；
+     - `POST /api/screen/revoke`：撤销本机授权，丢弃在途帧并将状态置回 `Idle`；
+     - 升级 `POST /api/screen/start` 与 `POST /api/input/start`：接收 JSON `{ "peer": "tdev_..." }`，定向连接指定设备的 45720 / 45719 端口。
+   - **CLI 终端全功能命令群（`tetherly` 与 `tetherly-cli` 全量同构）**：
+     - `screen allow`：本机授权对端观看屏幕；
+     - `screen revoke`：撤销屏幕观看许可；
+     - `screen start [--peer <id>]`：发起屏幕推流；
+     - `screen stop`：停止屏幕推流；
+     - `screen status [--json]`：展示屏幕通道与帧指标；
+     - `input start [--peer <id>]`：连接远程键鼠控制通道；
+     - `input stop`：断开键鼠控制通道并归还本地光标；
+     - `input status [--json]`：展示键鼠通道连接状态与当前座位。
+   - **Web UI 补齐**：在 `ui/index.html` 远程屏幕卡片中增设「撤销允许」按钮。
 
+3. **测试覆盖与 GitHub CI 验证**：
+   - `tests/phase5.rs` 增设 `screen_and_input_lifecycle_and_peer_targeting_via_loopback_api` 集成测试：
+     - 验证 `GET /api/screen` 与 `GET /api/input` 查询；
+     - 验证 `POST /api/screen/allow` 与 `POST /api/screen/revoke` 状态跃迁；
+     - 验证未授权时 `POST /api/screen/start` 被 400 拦截；
+     - 验证定向 `--peer` 跨节点成功开启屏幕推流且帧数递增；
+     - 验证 `POST /api/input/start` 定向建链与光标座位转移，断开后安全复位。

@@ -96,6 +96,23 @@ async fn wait_screen_port(node: &Node, peer: &tetherly_core::DeviceId, timeout: 
     }
 }
 
+async fn wait_input_port(node: &Node, peer: &tetherly_core::DeviceId, timeout: Duration) {
+    let start = std::time::Instant::now();
+    loop {
+        if node
+            .live_peers()
+            .iter()
+            .any(|p| &p.device_id == peer && p.input_port.is_some())
+        {
+            return;
+        }
+        if start.elapsed() > timeout {
+            panic!("inputport= never advertised");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn mem_source() -> Arc<dyn tetherly_core::ScreenSource> {
     Arc::new(MemoryScreenSource::new(16, 16).expect("16x16 screen"))
 }
@@ -380,6 +397,166 @@ async fn grab_failure_does_not_poison_the_next_frame() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+
+    host.shutdown();
+    visitor.shutdown();
+}
+
+// --------------------------------------------------------------------------
+// v1.34 / ADR-027 — Screen & input loopback API, revoke, and peer targeting.
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn screen_and_input_lifecycle_and_peer_targeting_via_loopback_api() {
+    let (host, visitor, _ga, _gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_input_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_input_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial GET /api/screen on host
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["state"], "idle");
+    assert_eq!(v["channel_open"], false);
+    assert_eq!(v["sent"], 0);
+
+    // 2. Initial GET /api/input on visitor
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/input")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["channel_open"], false);
+    assert_eq!(v["seat"], "local");
+
+    // 3. POST /api/screen/allow and POST /api/screen/revoke on host
+    let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["state"], "allowed");
+
+    let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/revoke", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["state"], "idle");
+
+    // 4. Reject screen start when targeting an unknown peer
+    let bad_payload = serde_json::json!({ "peer": "tdev_nonexistent" });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&bad_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 400);
+
+    // 5. Host grants consent again
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    // 6. Visitor starts screen streaming targeting the host peer
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200, "screen start body: {}", String::from_utf8_lossy(&b));
+
+    // Wait until host enters streaming state
+    let start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        if v["state"] == "streaming" {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state via loopback API");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host pushes 2 frames
+    assert!(host.screen_send_frame().await.unwrap());
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Verify GET /api/screen reflects frames sent
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert!(v["sent"].as_u64().unwrap() >= 2);
+
+    // 7. Visitor stops screen streaming
+    let (c, _) = tetherly_node::loopback_post(visitor_ui, "/api/screen/stop", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    // 8. Test input channel start, query, and stop
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/input/start",
+        &serde_json::to_vec(&bad_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 400);
+
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/input/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200, "input start: {}", String::from_utf8_lossy(&b));
+
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/input")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["channel_open"], true);
+
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/input/stop", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["seat"], "local");
+
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/input")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["channel_open"], false);
 
     host.shutdown();
     visitor.shutdown();

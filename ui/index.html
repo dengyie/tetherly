@@ -168,6 +168,7 @@
       <div id="screen" class="hint">状态：读取中…</div>
       <div class="row" style="margin-top:8px">
         <button id="screenallow" type="button">① 允许本机被观看</button>
+        <button id="screenrevoke" class="ghost" type="button">撤销允许</button>
         <button id="screenstart" type="button">② 开始推流</button>
         <button id="screenstop" type="button">停止</button>
       </div>
@@ -421,6 +422,7 @@ $("dial").onclick = () => api("/api/dial", { addr: $("addr").value, pin: $("peer
 $("ancsgo").onclick = () => api("/api/ancs/connect", {});
 $("openadd").onclick = () => api("/api/ancs/allow", { app_id: $("openapp").value, url: $("openurl").value });
 $("screenallow").onclick = () => api("/api/screen/allow", {});
+$("screenrevoke").onclick = () => api("/api/screen/revoke", {});
 $("screenstart").onclick = () => api("/api/screen/start", {});
 $("screenstop").onclick = () => api("/api/screen/stop", {});
 $("inputstart").onclick = () => api("/api/input/start", {});
