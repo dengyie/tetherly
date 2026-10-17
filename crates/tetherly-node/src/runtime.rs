@@ -22,7 +22,7 @@ use tetherly_core::ports::{Clip, Clock, Rng, SystemClock};
 use tetherly_core::session::LockoutTable;
 use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
-    ancs_actions, ancs_source_id, is_desktop_platform, path_kind, AncsEvent, AncsIngress,
+    ancs_actions, ancs_source_id, path_kind, AncsEvent, AncsIngress,
     AncsState, AncsTransport, ClipApply, ClipHub, ConnectOutcome, ControlMsg, CoreError,
     CursorSeat, DeviceId, FileHub, IngestOutcome, InputClient, InputEvent, InputServer, InputSink,
     MemoryScreenSink, MemorySink, MemoryTrustStore, NotifyHub, OpenAllowlist, PathKind, ReplyView,
@@ -2024,30 +2024,87 @@ impl Node {
         self.send_to(&source, decision.reject_frame()?).await
     }
 
-    pub async fn send_clipboard(&self) -> Result<(), CoreError> {
+    /// Syncs local clipboard to a specific peer or all connected peers.
+    /// Returns the number of peers that were sent the frame (0 if unchanged/echo or no peers).
+    pub async fn send_clipboard_to(
+        &self,
+        target_peer: Option<&DeviceId>,
+    ) -> Result<usize, CoreError> {
         let text = self
             .shared
             .clip
             .get_text()?
             .ok_or_else(|| CoreError::Json("empty clipboard".into()))?;
+        if text.len() > tetherly_core::CLIP_TEXT_MAX {
+            return Err(CoreError::ClipboardTooLarge);
+        }
         let set = {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
             hubs.clip.prepare_local(&text)?
         };
         let Some(set) = set else {
-            return Ok(());
+            return Ok(0);
         };
         let frame = set.to_frame()?;
-        let peers: Vec<DeviceId> = self
-            .live_peers()
-            .into_iter()
-            .filter(|p| is_desktop_platform(&p.platform))
-            .map(|p| p.device_id)
-            .collect();
-        for p in peers {
+        let targets = self.resolve_clip_targets(target_peer)?;
+        let count = targets.len();
+        for p in targets {
             let _ = self.send_to(&p, frame.clone()).await;
         }
-        Ok(())
+        Ok(count)
+    }
+
+    /// Syncs local clipboard to all connected peers.
+    pub async fn send_clipboard(&self) -> Result<(), CoreError> {
+        self.send_clipboard_to(None).await.map(|_| ())
+    }
+
+    /// Explicitly broadcasts `text` to a specific peer or all connected peers.
+    /// Writes `text` to the local clipboard and advances sequence even if previously sent.
+    pub async fn send_clipboard_text(
+        &self,
+        text: &str,
+        target_peer: Option<&DeviceId>,
+    ) -> Result<usize, CoreError> {
+        if text.len() > tetherly_core::CLIP_TEXT_MAX {
+            return Err(CoreError::ClipboardTooLarge);
+        }
+        self.shared.clip.set_text(text)?;
+        let set = {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.clip.force_prepare_local(text)?
+        };
+        let frame = set.to_frame()?;
+        let targets = self.resolve_clip_targets(target_peer)?;
+        let count = targets.len();
+        for p in targets {
+            let _ = self.send_to(&p, frame.clone()).await;
+        }
+        Ok(count)
+    }
+
+    fn resolve_clip_targets(
+        &self,
+        target_peer: Option<&DeviceId>,
+    ) -> Result<Vec<DeviceId>, CoreError> {
+        match target_peer {
+            Some(target) => {
+                if !self.live_peers().iter().any(|p| &p.device_id == target) {
+                    return Err(CoreError::Json(format!("peer {} is not connected", target)));
+                }
+                Ok(vec![target.clone()])
+            }
+            None => Ok(self
+                .live_peers()
+                .into_iter()
+                .map(|p| p.device_id)
+                .collect()),
+        }
+    }
+
+    /// Reads the current text from the local clipboard.
+    pub fn get_clipboard_text(&self) -> Result<Option<String>, CoreError> {
+        self.shared.clip.get_text()
     }
 
     pub async fn offer_and_send_bytes(

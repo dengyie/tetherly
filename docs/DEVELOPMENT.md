@@ -3,12 +3,49 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.31** |
+| 文档版本 | **1.32** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.31 落地信任关系主动解绑与设备安全生命周期治理（ADR-024）**——(1) **端到端信任解绑原语 (`Node::unpair`)**：在 `Shared.trust` 内存信任库中彻底移除对端设备凭据，原子重写并落盘 `trusted.json`，同步调用 `forget_route` 清除 `routes.json` 寻址缓存；(2) **即时会话熔断与状态清理**：在持有 `Shared.sessions` 异步锁下弹出对端发送信道并丢弃，即刻触发对端会话任务与底层 TCP 链接安全断开；从 `Shared.live` 活跃对端表注销，重置远程键鼠座位所有权并向全域广播 `UiEvent::PeerDown`；(3) **回环 API 扩充 (`POST /api/peers/unpair`)**：提供受严格 127.0.0.1 绑核与 Host 头校验保护的回环 API，安全接收 `{"device_id": "tdev_..."}` 并返回解绑结果；(4) **CLI 与 Web UI 全闭环**：`tetherly unpair <device_id>` 与 `tetherly-cli unpair <device_id>` 终端直通，Web UI（`ui/index.html`）对端卡片新增“解除配对”确认交互；(5) **端到端集成测试全覆盖与 5 平台 CI 矩阵全绿**。+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）**——(1) **运行时剪贴板控制原语升级 (`send_clipboard_to` / `send_clipboard_text` / `get_clipboard_text`)**：移除发送侧人工平台限制（使 Android 与跨平台设备均可接收剪贴板流），在 `ClipHub` 增加 `force_prepare_local` 显式广播原语与序号推进，支持定向对端发送或全域广播，维持自动防回环不变量；(2) **回环 API 扩充 (`POST /api/clip/sync` 与 `GET /api/clip`)**：提供受严格 127.0.0.1 绑核与 Host 头校验保护的回环控制 API，安全支持本机剪贴板推送与自定义文本广播，强校验 1 MiB 上限，脱敏响应（**红线守卫：正文永不入守护进程日志**）；(3) **CLI 与 Web UI 全闭环**：`tetherly clip sync/send/get` 与 `tetherly-cli clip sync/send/get` 终端直通，Web UI（`ui/index.html`）增设“剪贴板同步”交互卡片（支持一键同步本机与输入广播）；(4) **端到端集成测试全覆盖**（`clip_sync_and_send_via_live_node_api_reaches_peers` 覆盖回环查询、同步推送、重复回环抑制、定向投递与 1 MiB 边界）。+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.32 相对 1.31(跨端安全剪贴板主动同步、回环控制与全端闭环)**
+
+- **动机(剪贴板生产控制入口缺失与平台互通断层修复)**:
+  在此前版本中，剪贴板（`ClipHub` 与 `ClipSet`）的核心编解码与去重逻辑已在 `tetherly-core` 建立，但生产链路面临关键痛点：
+  1. **生产控制与交互入口缺失**：回环 HTTP API（45716）完全没有剪贴板路由，Web UI 与 CLI 终端无法发起剪贴板主动同步，亦无法将指定文本推送给对端；
+  2. **平台过滤人为隔断移动端互通**：原 `Node::send_clipboard` 内部通过 `filter(|p| is_desktop_platform(&p.platform))` 仅向桌面平台广播，导致具有 `clip` 能力的 Android 设备无法接收来自桌面的剪贴板更新，与 §7.5 全平台信任圈初衷冲突；
+  3. **缺乏显式广播与序号步进机制**：原 `prepare_local` 在相同哈希时严格返回 `None`（用于后台高频轮询防重复推送），但当用户显式点击「发送」或终端重发文本时，缺乏强行广播并递增 `clip_seq` 的原语；
+  4. **必须严守脱敏红线**：依据安全红线「公开 issue / 日志禁止贴短信正文、一次性码、配对码、剪贴板」，剪贴板文本必须严格限制在 127.0.0.1 回环内流转，任何守护进程日志与指标接口均严禁打印或泄露明文剪贴板内容。
+
+- **架构与协议设计(ADR-025 跨端安全剪贴板主动同步与回环控制全闭环)**:
+  1. **核心状态机显式广播原语 (`ClipHub::force_prepare_local`)**:
+     - 在 `crates/tetherly-core/src/clip.rs` 增加 `pub fn force_prepare_local(&mut self, text: &str) -> Result<ClipSet, CoreError>`；
+     - 显式递增 `last_seq`，记录 `last_hash`，强制生成新 `ClipSet`，同时保留 `prepare_local` 的静默防回环能力。
+  2. **节点运行时剪贴板控制原语全链路打通**:
+     - 在 `crates/tetherly-node/src/runtime.rs` 实现 `send_clipboard_to(&self, target_peer: Option<&DeviceId>) -> Result<usize, CoreError>`、`send_clipboard_text(&self, text: &str, target_peer: Option<&DeviceId>) -> Result<usize, CoreError>` 与 `get_clipboard_text(&self) -> Result<Option<String>, CoreError>`；
+     - 彻底移除 `is_desktop_platform` 过滤，只要对端处于活跃连接表且通过 Noise 认证即可同步；
+     - 支持指定 `--peer` 定向投递与全域广播，校验 `CLIP_TEXT_MAX = 1 MiB` 上限。
+  3. **回环 API 扩充 (`POST /api/clip/sync` 与 `GET /api/clip`)**:
+     - 在 `crates/tetherly-node/src/uihttp.rs` 增加：
+       - `POST /api/clip/sync`：支持载荷 `{"text": "...", "peer": "tdev_..."}` 或空载荷读取本地系统剪贴板并广播，响应 `{"ok": true, "bytes": N, "hash": "...", "sent_peers": M}`；
+       - `GET /api/clip`：安全读取当前剪贴板状态，响应 `{"ok": true, "has_text": bool, "bytes": N, "hash": "...", "text": "..."}`；
+       - 严格 127.0.0.1 绑核与 Host 头校验，**守护进程日志严禁打印剪贴板文本**。
+  4. **全端 CLI 与 Web UI 对接**:
+     - `tetherly` 与 `tetherly-cli` 引入 `clip` 子命令群：
+       - `tetherly clip sync [--peer <device_id>]`：同步本机系统剪贴板至对端；
+       - `tetherly clip send [text] [--peer <device_id>]`：发送指定文本或从标准输入管道读取；
+       - `tetherly clip get`：获取当前剪贴板内容（支持管道输出）；
+     - Web UI（`ui/index.html`）增设「剪贴板同步」卡片：包含「同步本机剪贴板至所有对端」快捷按钮、文本输入框与「发送文本」按钮，并实时展示脱敏状态反馈。
+  5. **端到端集成测试与 CI 全量验证**:
+     - 在 `tests/phase1.rs` 增加 `clip_sync_and_send_via_live_node_api_reaches_peers`：
+       - 验证初始状态查询；
+       - 验证设置本地剪贴板后经 `POST /api/clip/sync` 成功投递至对端并落地；
+       - 验证相同内容的重复同步被本地防回环机制静默抑制（`sent_peers: 0`）；
+       - 验证显式文本广播与本地系统剪贴板同步写入；
+       - 验证定向设备投递与非法设备 400 校验；
+       - 验证超过 1 MiB（`CLIP_TEXT_MAX`）文本被严格 400 拦截拒绝。
 
 **1.31 相对 1.30(信任关系主动解绑与设备安全生命周期治理)**
 

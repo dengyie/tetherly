@@ -118,6 +118,18 @@
       </div>
       <div id="sendstatus" class="hint"></div>
     </section>
+    <section style="margin-top:16px">
+      <h2>剪贴板同步</h2>
+      <div class="hint">将文本或本机系统剪贴板安全推送到已配对的活跃设备。</div>
+      <div class="row" style="margin-top:8px">
+        <button id="clipsyncbtn" type="button">同步本机剪贴板至所有对端</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="cliptext" placeholder="输入要同步给对端的文本内容…" style="flex:1"/>
+        <button id="clipsendbtn" type="button">发送文本</button>
+      </div>
+      <div id="clipstatus" class="hint" style="margin-top:6px"></div>
+    </section>
   </div>
   <div>
     <section>
@@ -449,6 +461,46 @@ $("sendbtn").onclick = async () => {
   };
   reader.readAsDataURL(file);
 };
+const clipSyncBtn = $("clipsyncbtn");
+if (clipSyncBtn) {
+  clipSyncBtn.onclick = async () => {
+    const st = $("clipstatus");
+    if (st) st.textContent = "正在读取本机剪贴板并同步…";
+    try {
+      const r = await api("/api/clip/sync", {});
+      if (r && r.ok) {
+        if (st) st.textContent = "已同步 " + r.bytes + " 字节到 " + r.sent_peers + " 台设备 (sha256:" + r.hash.slice(0, 12) + "…)";
+      } else {
+        if (st) st.textContent = "同步失败: " + (r && r.error ? r.error : "未知错误");
+      }
+    } catch (err) {
+      if (st) st.textContent = "同步请求异常: " + err;
+    }
+  };
+}
+const clipSendBtn = $("clipsendbtn");
+if (clipSendBtn) {
+  clipSendBtn.onclick = async () => {
+    const text = $("cliptext") ? $("cliptext").value : "";
+    const st = $("clipstatus");
+    if (!text) {
+      if (st) st.textContent = "请输入文本内容";
+      return;
+    }
+    if (st) st.textContent = "正在向对端广播文本…";
+    try {
+      const r = await api("/api/clip/sync", { text: text });
+      if (r && r.ok) {
+        if (st) st.textContent = "已广播 " + r.bytes + " 字节到 " + r.sent_peers + " 台设备 (sha256:" + r.hash.slice(0, 12) + "…)";
+        if ($("cliptext")) $("cliptext").value = "";
+      } else {
+        if (st) st.textContent = "发送失败: " + (r && r.error ? r.error : "未知错误");
+      }
+    } catch (err) {
+      if (st) st.textContent = "发送请求异常: " + err;
+    }
+  };
+}
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
 }

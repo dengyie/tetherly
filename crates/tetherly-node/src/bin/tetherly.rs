@@ -145,6 +145,11 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Manage and synchronize clipboard with paired peers.
+    Clip {
+        #[command(subcommand)]
+        action: ClipCmd,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -156,6 +161,36 @@ enum Cmd {
         /// Output raw JSON snapshot instead of formatted text.
         #[arg(long)]
         json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ClipCmd {
+    /// Sync the current local clipboard to connected peers.
+    Sync {
+        /// Target peer device_id (tdev_...). Omit to broadcast to all live peers.
+        #[arg(long)]
+        peer: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Send explicit text to connected peers' clipboards.
+    Send {
+        /// Text content to send. If omitted, read from stdin.
+        text: Option<String>,
+        /// Target peer device_id (tdev_...). Omit to broadcast to all live peers.
+        #[arg(long)]
+        peer: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Get the current local clipboard content from the running daemon.
+    Get {
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -530,6 +565,93 @@ async fn main() -> Result<()> {
                 println!("unpaired and severed connection with {device_id}");
             } else {
                 println!("peer {device_id} was not in trusted peers list");
+            }
+        }
+        Cmd::Clip { action } => match action {
+            ClipCmd::Sync { peer, ui_port } => {
+                let payload = serde_json::json!({ "peer": peer });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/clip/sync", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "clipboard sync failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let v: serde_json::Value =
+                    serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                let sent_peers = v.get("sent_peers").and_then(|c| c.as_u64()).unwrap_or(0);
+                let bytes = v.get("bytes").and_then(|c| c.as_u64()).unwrap_or(0);
+                let hash = v.get("hash").and_then(|h| h.as_str()).unwrap_or("");
+                let short_hash = if hash.len() >= 12 { &hash[..12] } else { hash };
+                println!("synced clipboard ({bytes} bytes, sha256:{short_hash}...) to {sent_peers} peer(s)");
+            }
+            ClipCmd::Send { text, peer, ui_port } => {
+                let content = match text {
+                    Some(t) => t,
+                    None => {
+                        use std::io::Read;
+                        let mut buf = String::new();
+                        std::io::stdin().read_to_string(&mut buf)?;
+                        buf
+                    }
+                };
+                let payload = serde_json::json!({
+                    "text": content,
+                    "peer": peer,
+                });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/clip/sync", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "clipboard send failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let v: serde_json::Value =
+                    serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                let sent_peers = v.get("sent_peers").and_then(|c| c.as_u64()).unwrap_or(0);
+                let bytes = v.get("bytes").and_then(|c| c.as_u64()).unwrap_or(0);
+                let hash = v.get("hash").and_then(|h| h.as_str()).unwrap_or("");
+                let short_hash = if hash.len() >= 12 { &hash[..12] } else { hash };
+                println!("sent {bytes} bytes to {sent_peers} peer(s) (sha256:{short_hash}...)");
+            }
+            ClipCmd::Get { ui_port } => {
+                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/clip")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "clipboard get failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let v: serde_json::Value =
+                    serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                    print!("{text}");
+                } else {
+                    eprintln!("(clipboard is empty)");
+                }
             }
         }
         Cmd::Status {

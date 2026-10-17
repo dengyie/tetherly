@@ -1418,6 +1418,151 @@ async fn peer_unpair_and_trust_revocation() {
     peer.shutdown();
 }
 
+/// Tests that clipboard synchronization via live loopback HTTP API correctly
+/// inspects local clipboard state, broadcasts text to connected peers, respects
+/// echo suppression, handles targeted peer delivery, and rejects oversized payloads.
+#[tokio::test(flavor = "multi_thread")]
+async fn clip_sync_and_send_via_live_node_api_reaches_peers() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let ui_port = host.spawn_ui().await.unwrap();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Initial GET /api/clip returns has_text: false when clipboard is empty
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/clip")
+        .await
+        .expect("get clip succeeds");
+    assert_eq!(code, 200);
+    let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["has_text"], false);
+
+    // 2. Setting local clipboard on host reflects in GET /api/clip
+    let initial_msg = "tetherly-v1.32-clipboard-sync";
+    host.clip().set_text(initial_msg).unwrap();
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/clip")
+        .await
+        .unwrap();
+    assert_eq!(code, 200);
+    let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["has_text"], true);
+    assert_eq!(resp["text"], initial_msg);
+    assert_eq!(resp["bytes"], initial_msg.len());
+
+    // 3. POST /api/clip/sync broadcasts local clipboard to connected peer
+    let (sync_code, sync_body) = tetherly_node::loopback_post(ui_port, "/api/clip/sync", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(sync_code, 200);
+    let sync_resp: serde_json::Value = serde_json::from_slice(&sync_body).unwrap();
+    assert_eq!(sync_resp["ok"], true);
+    assert_eq!(sync_resp["sent_peers"], 1);
+    assert_eq!(sync_resp["bytes"], initial_msg.len());
+
+    // Wait until peer receives the clipboard content
+    let start = std::time::Instant::now();
+    loop {
+        if peer.clip().get_text().unwrap().as_deref() == Some(initial_msg) {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!(
+                "peer did not receive synced clipboard within 10s; current: {:?}",
+                peer.clip().get_text().unwrap()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    // 4. Repeated sync of identical unchanged clipboard is suppressed (sent_peers = 0)
+    let (echo_code, echo_body) = tetherly_node::loopback_post(ui_port, "/api/clip/sync", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(echo_code, 200);
+    let echo_resp: serde_json::Value = serde_json::from_slice(&echo_body).unwrap();
+    assert_eq!(echo_resp["sent_peers"], 0);
+
+    // 5. POST /api/clip/sync with explicit text payload broadcasts and sets local clipboard
+    let explicit_text = "explicit broadcast to peer";
+    let explicit_payload = serde_json::json!({
+        "text": explicit_text,
+    });
+    let (exp_code, exp_body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/clip/sync",
+        &serde_json::to_vec(&explicit_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(exp_code, 200);
+    let exp_resp: serde_json::Value = serde_json::from_slice(&exp_body).unwrap();
+    assert_eq!(exp_resp["ok"], true);
+    assert_eq!(exp_resp["sent_peers"], 1);
+
+    let start = std::time::Instant::now();
+    loop {
+        if peer.clip().get_text().unwrap().as_deref() == Some(explicit_text) {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("peer did not receive explicit clipboard within 10s");
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert_eq!(
+        host.clip().get_text().unwrap().as_deref(),
+        Some(explicit_text)
+    );
+
+    // 6. Targeted sync to specific peer
+    let targeted_text = "targeted message to peer";
+    let targeted_payload = serde_json::json!({
+        "text": targeted_text,
+        "peer": peer_id.as_str(),
+    });
+    let (targ_code, targ_body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/clip/sync",
+        &serde_json::to_vec(&targeted_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(targ_code, 200);
+    let targ_resp: serde_json::Value = serde_json::from_slice(&targ_body).unwrap();
+    assert_eq!(targ_resp["sent_peers"], 1);
+
+    // Negative: targeted sync to unknown peer returns 400
+    let unknown_payload = serde_json::json!({
+        "text": "lost text",
+        "peer": "tdev_2222222222222222",
+    });
+    let (bad_peer_code, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/clip/sync",
+        &serde_json::to_vec(&unknown_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(bad_peer_code, 400);
+
+    // 7. Oversized text (>1 MiB CLIP_TEXT_MAX) is refused with 400
+    let oversized_text = "o".repeat(tetherly_core::CLIP_TEXT_MAX + 1);
+    let oversized_payload = serde_json::json!({
+        "text": oversized_text,
+    });
+    let (oversized_code, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/clip/sync",
+        &serde_json::to_vec(&oversized_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(oversized_code, 400);
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

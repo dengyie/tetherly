@@ -307,6 +307,12 @@ struct SendFileBody {
     name: Option<String>,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct ClipSyncBody {
+    peer: Option<String>,
+    text: Option<String>,
+}
+
 async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'static str, Vec<u8>) {
     match (method, path) {
         ("GET", "/") | ("GET", "/index.html") => (200, "text/html", INDEX.as_bytes().to_vec()),
@@ -346,6 +352,89 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 Err(_) => err(400, "invalid device_id"),
             },
             Err(_) => err(400, "bad json"),
+        },
+        ("GET", "/api/clip") => match node.get_clipboard_text() {
+            Ok(Some(text)) => {
+                let hash = tetherly_core::hex_sha256(text.as_bytes());
+                let bytes = text.len();
+                json_ok(&serde_json::json!({
+                    "ok": true,
+                    "has_text": true,
+                    "bytes": bytes,
+                    "hash": hash,
+                    "text": text,
+                }))
+            }
+            Ok(None) => json_ok(&serde_json::json!({
+                "ok": true,
+                "has_text": false,
+                "bytes": 0,
+                "hash": null,
+                "text": null,
+            })),
+            Err(e) => err(500, &e.to_string()),
+        },
+        ("POST", "/api/clip/sync") => {
+            let d: ClipSyncBody = if body.is_empty() {
+                ClipSyncBody::default()
+            } else {
+                match serde_json::from_slice::<ClipSyncBody>(body) {
+                    Ok(v) => v,
+                    Err(_) => return err(400, "bad json"),
+                }
+            };
+            let mut peers = node.live_peers();
+            peers.sort_by_key(|p| p.device_id.to_string());
+            let target_peer = match d.peer.as_deref().filter(|s| !s.is_empty()) {
+                Some(raw) => match tetherly_core::DeviceId::parse(raw) {
+                    Ok(id) => {
+                        if peers.iter().any(|p| p.device_id == id) {
+                            Some(id)
+                        } else {
+                            return err(400, "peer is not connected");
+                        }
+                    }
+                    Err(_) => return err(400, "bad peer id"),
+                },
+                None => None,
+            };
+
+            if let Some(text) = d.text {
+                if text.len() > tetherly_core::CLIP_TEXT_MAX {
+                    return err(400, "clipboard text exceeds 1 MiB limit");
+                }
+                let hash = tetherly_core::hex_sha256(text.as_bytes());
+                let bytes = text.len();
+                match node.send_clipboard_text(&text, target_peer.as_ref()).await {
+                    Ok(sent_count) => json_ok(&serde_json::json!({
+                        "ok": true,
+                        "bytes": bytes,
+                        "hash": hash,
+                        "sent_peers": sent_count,
+                    })),
+                    Err(e) => err(400, &e.to_string()),
+                }
+            } else {
+                let cur = match node.get_clipboard_text() {
+                    Ok(Some(t)) => t,
+                    Ok(None) => return err(400, "local clipboard is empty"),
+                    Err(e) => return err(400, &e.to_string()),
+                };
+                if cur.len() > tetherly_core::CLIP_TEXT_MAX {
+                    return err(400, "clipboard text exceeds 1 MiB limit");
+                }
+                let hash = tetherly_core::hex_sha256(cur.as_bytes());
+                let bytes = cur.len();
+                match node.send_clipboard_to(target_peer.as_ref()).await {
+                    Ok(sent_count) => json_ok(&serde_json::json!({
+                        "ok": true,
+                        "bytes": bytes,
+                        "hash": hash,
+                        "sent_peers": sent_count,
+                    })),
+                    Err(e) => err(400, &e.to_string()),
+                }
+            }
         },
         // Deliver a notify.push on the live Noise session. Only this process
         // holds the session, so a second binary cannot do it. One live peer is

@@ -43,6 +43,18 @@ impl ClipHub {
         Ok(Some(ClipSet::text(self.last_seq, text)?))
     }
 
+    /// User or loopback client explicitly requested to broadcast `text`.
+    /// Generates a new `ClipSet` and advances `last_seq` even if the hash matches.
+    pub fn force_prepare_local(&mut self, text: &str) -> Result<ClipSet, CoreError> {
+        if text.len() > CLIP_TEXT_MAX {
+            return Err(CoreError::ClipboardTooLarge);
+        }
+        let hash = hex_sha256(text.as_bytes());
+        self.last_seq = self.last_seq.saturating_add(1);
+        self.last_hash = Some(hash);
+        ClipSet::text(self.last_seq, text)
+    }
+
     /// Record that we wrote `text` locally (OTP copy, insert side-effect).
     pub fn note_local_write(&mut self, text: &str) {
         self.last_hash = Some(hex_sha256(text.as_bytes()));
@@ -103,6 +115,18 @@ mod tests {
             _ => panic!("expected apply"),
         }
         assert!(hub.prepare_local("from-peer").unwrap().is_none());
+    }
+
+    #[test]
+    fn force_prepare_local_advances_and_broadcasts() {
+        let mut hub = ClipHub::default();
+        let set1 = hub.prepare_local("repeat-content").unwrap().unwrap();
+        assert_eq!(set1.clip_seq, 1);
+        assert!(hub.prepare_local("repeat-content").unwrap().is_none());
+
+        let set2 = hub.force_prepare_local("repeat-content").unwrap();
+        assert_eq!(set2.clip_seq, 2);
+        assert_eq!(set2.text.as_deref(), Some("repeat-content"));
     }
 
     #[test]
