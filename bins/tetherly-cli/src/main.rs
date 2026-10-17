@@ -1619,7 +1619,7 @@ async fn main() -> Result<()> {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
-        }
+        },
         Cmd::Health { json, ui_port } => {
             let t0 = std::time::Instant::now();
             let (code, resp) = loopback_get(ui_port, "/api/health").await.map_err(|e| {
