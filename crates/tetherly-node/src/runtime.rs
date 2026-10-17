@@ -527,7 +527,24 @@ impl Node {
             screen_interval: Mutex::new(ScreenIntervalTracker::new()),
             screen_rx_stats: Mutex::new(ScreenStats::default()),
             shutdown,
-            overlay: Mutex::new(OverlayStatus::lan_only()),
+            overlay: Mutex::new(if cfg.overlay.enabled && !cfg.overlay.extra_peers.is_empty() {
+                OverlayStatus {
+                    present: true,
+                    local_ips: Vec::new(),
+                    peers: cfg
+                        .overlay
+                        .extra_peers
+                        .iter()
+                        .filter_map(|ep| match ep {
+                            SocketAddr::V4(v4) => Some(*v4.ip()),
+                            _ => None,
+                        })
+                        .collect(),
+                    source: OverlaySource::Manual,
+                }
+            } else {
+                OverlayStatus::lan_only()
+            }),
             ancs: Mutex::new(ancs),
             ancs_source,
             allowlist: Mutex::new(OpenAllowlist::default()),

@@ -274,6 +274,7 @@ async fn network_interface_classification_and_sidecar_inspection_via_loopback_ap
     // 1. Inspect default node with overlay disabled
     let (d1, g1) = temp_dir("net1");
     let n1 = Node::start(cfg(d1, "desk-net", overlay_off())).expect("start node 1");
+    n1.spawn_listeners().await.expect("spawn listeners 1");
     let ui1 = n1.spawn_ui().await.expect("spawn ui 1");
 
     let (code1, resp1) = tetherly_node::loopback_get(ui1, "/api/net")
@@ -322,6 +323,8 @@ async fn network_interface_classification_and_sidecar_inspection_via_loopback_ap
         "10.144.144.99:45717".parse().unwrap(),
     ];
     let n2 = Node::start(cfg(d2, "desk-ov", ov_cfg)).expect("start node 2");
+    n2.spawn_listeners().await.expect("spawn listeners 2");
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let ui2 = n2.spawn_ui().await.expect("spawn ui 2");
 
     let (code2, resp2) = tetherly_node::loopback_get(ui2, "/api/net")
