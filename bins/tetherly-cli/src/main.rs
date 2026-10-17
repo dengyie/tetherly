@@ -110,6 +110,61 @@ enum Cmd {
         #[command(subcommand)]
         action: ClipCmd,
     },
+    /// List active notification candidates.
+    Candidates {
+        /// Output raw JSON instead of table.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Get or copy the OTP verification code from an active candidate.
+    Otp {
+        /// Candidate ID (e.g. ntc_...).
+        id: String,
+        /// Also copy the OTP to the local system clipboard.
+        #[arg(long)]
+        copy: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Dismiss an active notification candidate.
+    Dismiss {
+        /// Candidate ID (e.g. ntc_...).
+        id: String,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Send a quick reply to the mobile device for a notification candidate.
+    Reply {
+        /// Candidate ID (e.g. ntc_...).
+        id: String,
+        /// Reply message text to send.
+        text: String,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// List queued inbound replies awaiting OS delivery.
+    Replies {
+        /// Output raw JSON instead of table.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Take and consume an inbound quick reply by ID (single-use).
+    TakeReply {
+        /// Reply ID (e.g. ntr_...).
+        id: String,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -519,7 +574,9 @@ async fn main() -> Result<()> {
                 let bytes = v.get("bytes").and_then(|c| c.as_u64()).unwrap_or(0);
                 let hash = v.get("hash").and_then(|h| h.as_str()).unwrap_or("");
                 let short_hash = if hash.len() >= 12 { &hash[..12] } else { hash };
-                println!("synced clipboard ({bytes} bytes, sha256:{short_hash}...) to {sent_peers} peer(s)");
+                println!(
+                    "synced clipboard ({bytes} bytes, sha256:{short_hash}...) to {sent_peers} peer(s)"
+                );
             }
             ClipCmd::Send {
                 text,
@@ -584,6 +641,240 @@ async fn main() -> Result<()> {
                 }
             }
         },
+        Cmd::Candidates { json, ui_port } => {
+            let (code, resp) = loopback_get(
+                ui_port,
+                "/api/notify/candidates",
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+            if code != 200 {
+                bail!(
+                    "candidates query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+            } else {
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let list = v.get("candidates").and_then(|c| c.as_array());
+                match list {
+                    Some(items) if !items.is_empty() => {
+                        println!(
+                            "{:<32} {:<24} {:<6} {:<10} {}",
+                            "ID", "APP", "OTP", "EXPIRES", "TITLE"
+                        );
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        for item in items {
+                            let id = item.get("id").and_then(|s| s.as_str()).unwrap_or("-");
+                            let app = item
+                                .get("app_id")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("-");
+                            let has_otp = item
+                                .get("has_otp")
+                                .and_then(|b| b.as_bool())
+                                .unwrap_or(false);
+                            let exp = item
+                                .get("expires_ms")
+                                .and_then(|n| n.as_u64())
+                                .unwrap_or(0);
+                            let title = item
+                                .get("title")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("");
+                            let rem_sec = exp.saturating_sub(now_ms) / 1000;
+                            println!(
+                                "{:<32} {:<24} {:<6} {:<10} {}",
+                                id,
+                                app,
+                                if has_otp { "YES" } else { "NO" },
+                                format!("{}s", rem_sec),
+                                title
+                            );
+                        }
+                    }
+                    _ => println!("(no active notification candidates)"),
+                }
+            }
+        }
+        Cmd::Otp { id, copy, ui_port } => {
+            let payload = serde_json::json!({ "id": id });
+            let bytes = serde_json::to_vec(&payload)?;
+            if copy {
+                let (c_code, c_resp) = loopback_post(
+                    ui_port,
+                    "/api/copy",
+                    &bytes,
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if c_code != 200 {
+                    bail!(
+                        "copy OTP failed (HTTP {c_code}): {}",
+                        String::from_utf8_lossy(&c_resp)
+                    );
+                }
+            }
+            let (code, resp) = loopback_post(
+                ui_port,
+                "/api/otp/get",
+                &bytes,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+            if code != 200 {
+                bail!(
+                    "get OTP failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let v: serde_json::Value = serde_json::from_slice(&resp)
+                .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+            let otp = v
+                .get("otp")
+                .and_then(|o| o.as_str())
+                .ok_or_else(|| anyhow::anyhow!("no OTP in response"))?;
+            println!("{otp}");
+            if copy {
+                eprintln!("(copied to system clipboard)");
+            }
+        }
+        Cmd::Dismiss { id, ui_port } => {
+            let payload = serde_json::json!({ "id": id });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = loopback_post(
+                ui_port,
+                "/api/dismiss",
+                &bytes,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+            if code != 200 {
+                bail!(
+                    "dismiss failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            println!("dismissed candidate {id}");
+        }
+        Cmd::Reply { id, text, ui_port } => {
+            let payload = serde_json::json!({ "id": id, "text": text });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = loopback_post(
+                ui_port,
+                "/api/reply",
+                &bytes,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+            if code != 200 {
+                bail!(
+                    "reply failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            println!("reply sent for candidate {id}");
+        }
+        Cmd::Replies { json, ui_port } => {
+            let (code, resp) = loopback_get(
+                ui_port,
+                "/api/notify/replies",
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+            if code != 200 {
+                bail!(
+                    "replies query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+            } else {
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let list = v.get("replies").and_then(|r| r.as_array());
+                match list {
+                    Some(items) if !items.is_empty() => {
+                        println!("{:<32} {:<24} {}", "ID", "APP", "UID");
+                        for item in items {
+                            let id = item.get("id").and_then(|s| s.as_str()).unwrap_or("-");
+                            let app = item
+                                .get("app_id")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("-");
+                            let uid = item.get("uid").and_then(|s| s.as_str()).unwrap_or("-");
+                            println!("{:<32} {:<24} {}", id, app, uid);
+                        }
+                    }
+                    _ => println!("(no queued inbound replies)"),
+                }
+            }
+        }
+        Cmd::TakeReply { id, ui_port } => {
+            let payload = serde_json::json!({ "id": id });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = loopback_post(
+                ui_port,
+                "/api/reply/take",
+                &bytes,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+            if code != 200 {
+                bail!(
+                    "take reply failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let v: serde_json::Value = serde_json::from_slice(&resp)
+                .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+            let app = v.get("app_id").and_then(|s| s.as_str()).unwrap_or("-");
+            let uid = v.get("uid").and_then(|s| s.as_str()).unwrap_or("-");
+            let text = v.get("text").and_then(|s| s.as_str()).unwrap_or("");
+            println!("app_id: {app}, uid: {uid}, text: {text}");
+        }
         Cmd::Status {
             watch,
             interval,

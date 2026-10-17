@@ -686,6 +686,14 @@ impl Node {
         self.shared.hubs.lock().expect("hubs").notify.dismiss(id)
     }
 
+    /// Retrieve the OTP code associated with a candidate directly without
+    /// copying to the system clipboard. Follows ADR-010 (on explicit user action)
+    /// and never logs the returned code.
+    pub fn get_candidate_otp(&self, id: &str) -> Result<String, CoreError> {
+        let mut hubs = self.shared.hubs.lock().expect("hubs");
+        hubs.notify.copy_otp(id, &*self.shared.clock)
+    }
+
     /// Open the app that produced a candidate, on explicit user click. The url
     /// always comes from the allowlist; a url carried by the notification is
     /// never consulted (M4.2).

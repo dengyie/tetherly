@@ -480,6 +480,35 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             }
             Err(_) => err(400, "bad json"),
         },
+        ("GET", "/api/notify/candidates") => {
+            let list = node.candidates();
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "candidates": list,
+            }))
+        }
+        ("GET", "/api/notify/replies") => {
+            let replies: Vec<crate::events::ReplyViewDto> = node
+                .reply_views()
+                .into_iter()
+                .map(crate::events::ReplyViewDto::from)
+                .collect();
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "replies": replies,
+            }))
+        }
+        ("POST", "/api/otp/get") => match serde_json::from_slice::<IdBody>(body) {
+            Ok(d) => match node.get_candidate_otp(&d.id) {
+                Ok(otp) => json_ok(&serde_json::json!({
+                    "ok": true,
+                    "id": d.id,
+                    "otp": otp,
+                })),
+                Err(e) => err(400, &e.to_string()),
+            },
+            Err(_) => err(400, "bad json"),
+        },
         ("POST", "/api/copy") => match serde_json::from_slice::<IdBody>(body) {
             Ok(d) => match node.copy_candidate(&d.id).await {
                 Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
@@ -521,10 +550,12 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
         // Hand a previously received reply to the local OS path exactly once.
         ("POST", "/api/reply/take") => match serde_json::from_slice::<IdBody>(body) {
             Ok(d) => match node.take_reply(&d.id) {
-                Some((view, _text)) => json_ok(&serde_json::json!({
+                Some((view, text)) => json_ok(&serde_json::json!({
                     "ok": true,
+                    "id": d.id,
                     "uid": view.uid,
                     "app_id": view.app_id,
+                    "text": text,
                 })),
                 None => err(400, "unknown reply"),
             },

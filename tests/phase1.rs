@@ -1563,6 +1563,212 @@ async fn clip_sync_and_send_via_live_node_api_reaches_peers() {
     peer.shutdown();
 }
 
+/// Tests the full notification candidate lifecycle, OTP inspection and copying,
+/// quick reply transmission, queued replies querying, and single-use reply consumption
+/// via loopback HTTP API and live Noise session.
+#[tokio::test(flavor = "multi_thread")]
+async fn notify_candidate_lifecycle_and_quick_reply_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let peer_ui = peer.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let _peer_id = peer.identity().device_id().clone();
+
+    // 1. Initial candidates on host should be empty
+    let (code, body) = tetherly_node::loopback_get(
+        host_ui,
+        "/api/notify/candidates",
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, 200);
+    let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(resp["ok"], true);
+    assert!(resp["candidates"].as_array().unwrap().is_empty());
+
+    // 2. Peer (phone) sends a notification containing an OTP verification code
+    let push = tetherly_core::NotifyPush {
+        uid: "test-sms-1001".into(),
+        app_id: "com.example.bank".into(),
+        app_name: "ExampleBank".into(),
+        title: "验证码通知".into(),
+        body: "【示例银行】您的短信验证码为 849201，5分钟内有效。".into(),
+        ts: 1_700_000_000,
+        actions: vec!["copy".into(), "dismiss".into()],
+    };
+    peer.send_notify(&host_id, push).await.unwrap();
+
+    // 3. Wait until host receives the candidate
+    let mut cand_id = String::new();
+    let start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(
+            host_ui,
+            "/api/notify/candidates",
+        )
+        .await
+        .unwrap();
+        assert_eq!(c, 200);
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        let list = v["candidates"].as_array().unwrap();
+        if !list.is_empty() {
+            let cand = &list[0];
+            assert_eq!(cand["app_id"], "com.example.bank");
+            assert_eq!(cand["has_otp"], true);
+            cand_id = cand["id"].as_str().unwrap().to_string();
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("host did not ingest candidate within 10s");
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    // 4. Retrieve OTP directly via POST /api/otp/get
+    let get_otp_payload = serde_json::json!({ "id": cand_id });
+    let (otp_code, otp_body) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/otp/get",
+        &serde_json::to_vec(&get_otp_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(otp_code, 200);
+    let otp_resp: serde_json::Value = serde_json::from_slice(&otp_body).unwrap();
+    assert_eq!(otp_resp["ok"], true);
+    assert_eq!(otp_resp["otp"], "849201");
+
+    // 5. Copy OTP to system clipboard via POST /api/copy
+    let (copy_code, copy_body) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/copy",
+        &serde_json::to_vec(&get_otp_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(copy_code, 200);
+    let copy_resp: serde_json::Value = serde_json::from_slice(&copy_body).unwrap();
+    assert_eq!(copy_resp["ok"], true);
+    assert_eq!(host.clip().get_text().unwrap().as_deref(), Some("849201"));
+
+    // 6. Send a quick reply back to peer via POST /api/reply
+    let reply_text = "验证码已收到";
+    let reply_payload = serde_json::json!({
+        "id": cand_id,
+        "text": reply_text,
+    });
+    let (reply_code, reply_body) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/reply",
+        &serde_json::to_vec(&reply_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply_code, 200);
+    let reply_resp: serde_json::Value = serde_json::from_slice(&reply_body).unwrap();
+    assert_eq!(reply_resp["ok"], true);
+
+    // 7. Wait until peer ingests the reply in its replies queue
+    let mut reply_id = String::new();
+    let start = std::time::Instant::now();
+    loop {
+        let (rc, rb) = tetherly_node::loopback_get(
+            peer_ui,
+            "/api/notify/replies",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rc, 200);
+        let rv: serde_json::Value = serde_json::from_slice(&rb).unwrap();
+        let replies = rv["replies"].as_array().unwrap();
+        if !replies.is_empty() {
+            let r = &replies[0];
+            assert_eq!(r["app_id"], "com.example.bank");
+            assert_eq!(r["uid"], "test-sms-1001");
+            reply_id = r["id"].as_str().unwrap().to_string();
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("peer did not receive reply within 10s");
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    // 8. Peer takes the reply via POST /api/reply/take
+    let take_payload = serde_json::json!({ "id": reply_id });
+    let (take_code, take_body) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/reply/take",
+        &serde_json::to_vec(&take_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(take_code, 200);
+    let take_resp: serde_json::Value = serde_json::from_slice(&take_body).unwrap();
+    assert_eq!(take_resp["ok"], true);
+    assert_eq!(take_resp["text"], reply_text);
+    assert_eq!(take_resp["app_id"], "com.example.bank");
+    assert_eq!(take_resp["uid"], "test-sms-1001");
+
+    // Single-use: taking the reply again returns 400
+    let (take2_code, _) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/reply/take",
+        &serde_json::to_vec(&take_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(take2_code, 400);
+
+    // 9. Host dismisses candidate via POST /api/dismiss
+    let (dismiss_code, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/dismiss",
+        &serde_json::to_vec(&get_otp_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(dismiss_code, 200);
+
+    // Candidates list is now empty
+    let (c_after, b_after) = tetherly_node::loopback_get(
+        host_ui,
+        "/api/notify/candidates",
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_after, 200);
+    let v_after: serde_json::Value = serde_json::from_slice(&b_after).unwrap();
+    assert!(v_after["candidates"].as_array().unwrap().is_empty());
+
+    // 10. Negative tests: invalid ID returns 400
+    let bad_payload = serde_json::json!({ "id": "unknown-cand-id" });
+    let (bad_otp_code, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/otp/get",
+        &serde_json::to_vec(&bad_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(bad_otp_code, 400);
+
+    let empty_reply_payload = serde_json::json!({
+        "id": "unknown-cand-id",
+        "text": "   ",
+    });
+    let (empty_reply_code, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/reply",
+        &serde_json::to_vec(&empty_reply_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(empty_reply_code, 400);
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

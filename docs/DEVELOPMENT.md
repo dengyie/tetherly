@@ -3,12 +3,45 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.32** |
+| 文档版本 | **1.33** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）**——(1) **运行时剪贴板控制原语升级 (`send_clipboard_to` / `send_clipboard_text` / `get_clipboard_text`)**：移除发送侧人工平台限制（使 Android 与跨平台设备均可接收剪贴板流），在 `ClipHub` 增加 `force_prepare_local` 显式广播原语与序号推进，支持定向对端发送或全域广播，维持自动防回环不变量；(2) **回环 API 扩充 (`POST /api/clip/sync` 与 `GET /api/clip`)**：提供受严格 127.0.0.1 绑核与 Host 头校验保护的回环控制 API，安全支持本机剪贴板推送与自定义文本广播，强校验 1 MiB 上限，脱敏响应（**红线守卫：正文永不入守护进程日志**）；(3) **CLI 与 Web UI 全闭环**：`tetherly clip sync/send/get` 与 `tetherly-cli clip sync/send/get` 终端直通，Web UI（`ui/index.html`）增设“剪贴板同步”交互卡片（支持一键同步本机与输入广播）；(4) **端到端集成测试全覆盖**（`clip_sync_and_send_via_live_node_api_reaches_peers` 覆盖回环查询、同步推送、重复回环抑制、定向投递与 1 MiB 边界）。+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）**——(1) **轻量级通知候选与回复回环 API (`GET /api/notify/candidates`、`GET /api/notify/replies`、`POST /api/otp/get`)**：提供受 127.0.0.1 绑核与 Host 校验保护的高效轻量接口，支持秒级轮询候选状态与直接当次提取 OTP 验证码（严格遵守 ADR-010 当次触发与日志零泄露安全红线）；(2) **CLI 全功能交互闭环**：`tetherly` 与 `tetherly-cli` 全面对齐增设 `candidates`（列表展示/JSON 格式化）、`otp <id> [--copy]`（提取或复制验证码）、`dismiss <id>`（忽略注销候选）、`reply <id> <text>`（向对端手机快捷回复短信）、`replies`（列出待处理入站回复）与 `take-reply <id>`（单次安全消费回复文本）；(3) **回复单次消费与回环安全**：`take-reply` 严格落实一次性消费语义，避免同一快速回复被多次投递至移动端系统通道；(4) **端到端集成测试全覆盖**（`notify_candidate_lifecycle_and_quick_reply_via_loopback_api` 覆盖通知推送、候选解析、OTP 提取与剪贴板注入、双向回复跨网投递、单次消费校验、忽略注销与负向边界防护）。+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.33 相对 1.32(通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环)**
+
+- **动机(终端无头环境通知交互断层与 OTP 安全消费原语缺失)**:
+  在 v1.0 至 v1.32 架构中，系统通过 `NotifyHub` 实现了短信/通知接收、OTP 正则提取与 120s 暂态候选存储。但在无头或终端环境下存在明显断层：
+  1. **CLI 缺乏通知与验证码交互原语**：用户在服务器、SSH 远程终端或纯 CLI 环境下，完全无法查询当前待处理通知候选 (`candidates`)，无法在终端提取或管道传递验证码 (`tetherly otp <id> | pbcopy`)，无法手动忽略失效通知 (`dismiss`)，亦无法向对端手机快捷回复短信 (`reply`)；
+  2. **缺少轻量级轮询接口**：原先查询候选只能调用庞大的 `GET /api/state` 获取全量快照，对高频监控脚本造成不必要的序列化开销；
+  3. **OTP 提取缺少纯净返回通道**：原有的 `POST /api/copy` 强制将验证码写入本机剪贴板，无法以独立纯文本方式返回给终端管道或自动化程序；
+  4. **严格遵循安全红线**：验证码与短信正文严禁在非 127.0.0.1 泄露，严禁打印至守护进程日志（ADR-010）。
+
+- **架构与协议设计(ADR-026 通知候选生命周期全域治理与双向回复闭环)**:
+  1. **回环 API 扩充 (`GET /api/notify/candidates`、`GET /api/notify/replies` 与 `POST /api/otp/get`)**:
+     - `GET /api/notify/candidates`：轻量级返回未过期的 `Vec<CandidateViewDto>`，包含 ID、app_id、title、has_otp、created_ms、expires_ms 及 actions；
+     - `GET /api/notify/replies`：返回当前待交付至宿主系统的 `Vec<ReplyViewDto>`；
+     - `POST /api/otp/get`：接收 `{"id": "..."}`，调用 `node.get_candidate_otp(&d.id)`，仅在 HTTP 响应体中返回 `{"ok": true, "id": "...", "otp": "..."}`，**守护进程日志严禁打印**；
+     - 升级 `POST /api/reply/take`：在一次性消费回复时返回 `{"ok": true, "uid": "...", "app_id": "...", "text": "..."}`，提供单次安全的回复内容消费保障。
+  2. **节点运行时 OTP 提取原语 (`Node::get_candidate_otp`)**:
+     - 在 `crates/tetherly-node/src/runtime.rs` 实现 `get_candidate_otp(&self, id: &str) -> Result<String, CoreError>`；
+     - 安全获取 `Shared.hubs` 锁并调用 `hubs.notify.copy_otp(id, &*clock)`，精准处理过期 (`CandidateExpired`) 与无验证码 (`NoOtp`) 错误。
+  3. **双 CLI 二进制 (`tetherly` 与 `tetherly-cli`) 命令全量对齐**:
+     - `candidates [--json]`：美化表格或 JSON 输出当前活跃通知候选与剩余有效期；
+     - `otp <id> [--copy]`：直接打印验证码，支持 `--copy` 同时写入系统剪贴板；
+     - `dismiss <id>`：显式注销并丢弃指定通知候选；
+     - `reply <id> <text>`：针对指定候选向对端设备发送快捷回复；
+     - `replies [--json]`：查看待处理入站快速回复队列；
+     - `take-reply <id>`：单次消费并打印入站回复文本（二次消费返回 400）。
+  4. **端到端集成测试与 CI 全量验证**:
+     - 在 `tests/phase1.rs` 增加 `notify_candidate_lifecycle_and_quick_reply_via_loopback_api`：
+       - 验证通知推送后候选自动生成与 `has_otp: true` 识别；
+       - 验证 `POST /api/otp/get` 提取与 `POST /api/copy` 写入剪贴板；
+       - 验证通过 `POST /api/reply` 发送回复并在对端安全入队；
+       - 验证 `POST /api/reply/take` 成功提取并遵循单次消费不变量；
+       - 验证 `POST /api/dismiss` 销毁候选与非法参数 400 保护。
 
 **1.32 相对 1.31(跨端安全剪贴板主动同步、回环控制与全端闭环)**
 
@@ -1442,6 +1475,88 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - 验证重复取消返回 400 幂等保护；
      - 验证 45717 控制通道未受影响，通知可秒级送达对端；
      - 验证后续全新文件传输可正常完成并校验哈希。
+
+## 29. 传输生命周期全域管控、会话级传输度量与有限留存治理 (v1.30 / ADR-023)
+
+1. **动机与设计准则（ADR-023）**：
+   - 守护进程长期驻留运行时，历史传输记录若无限累积会导致内存与回环快照无限膨胀；
+   - 终态记录（`Completed`、`Failed`）必须实施有限留存治理（`MAX_TERMINAL_TRANSFERS = 64`），按淘汰时间戳淘汰最久远的终态项；
+   - 处于传输中或校验中的在途任务具有绝对隔离保护，决不能被误淘汰；
+   - 引入节点生命周期累积的传输度量（`TransferStats`），持久化统计收发字节数与成功/失败计数；
+   - 提供回环 API `POST /api/transfers/clear` 与 CLI 子命令 `clear-transfers` 支持用户手动清理历史记录。
+
+2. **核心机制与实现**：
+   - **终态记录受控治理**：在 `crates/tetherly-node/src/runtime.rs` 定义 `MAX_TERMINAL_TRANSFERS = 64`，实现 `prune_terminal_transfers_locked` 算法；
+   - **会话级度量统计**：定义 `TransferStats { bytes_sent, bytes_received, completed_count, failed_count }`，在出站与入站传输终态变更时原子累加；
+   - **手动历史清理**：暴露 `clear_terminal_transfers(&self) -> usize` 原语与 `POST /api/transfers/clear` 路由；
+   - **终端与 Web 控制台对接**：`tetherly clear-transfers` 与 `tetherly-cli clear-transfers`，并在 `ui/index.html` 增设「清除完成记录」按钮。
+
+3. **测试覆盖与 GitHub CI 验证**：
+   - `tests/phase1.rs` 增设 `terminal_transfers_pruning_and_stats_accumulation` 集成测试，验证 64 项上限滚动淘汰、在途传输免疫、度量单调递增及手动清理接口。
+
+## 30. 信任关系主动解绑与设备安全生命周期治理 (v1.31 / ADR-024)
+
+1. **动机与设计准则（ADR-024）**：
+   - 设备配对后公钥持久化保存在 `trusted.json`，遗失、转借或淘汰设备必须具备主动撤销信任（Unpair）能力；
+   - 撤销信任必须具备原子级熔断特性：同时清理内存信任库、持久化覆盖磁盘 `trusted.json`、清除物理寻址缓存 `routes.json`，并立即强行关闭所有活跃网络通道（45717 会话与流通道）；
+   - 驱逐对端输入控制权，重置回本地模式，广播 `UiEvent::PeerDown`。
+
+2. **核心机制与实现**：
+   - **存储层路由遗忘原语**：在 `crates/tetherly-node/src/store.rs` 实现 `forget_route(dir, device_id)`，原子重写 `routes.json`；
+   - **节点运行时解绑原语**：在 `crates/tetherly-node/src/runtime.rs` 实现 `unpair(&self, device_id) -> bool`，原子清理内存信任、磁盘信任文件、寻址路由、丢弃通道发送端以即时掐断底层 TCP 连接；
+   - **回环控制面与前端**：暴露 `POST /api/peers/unpair`（严格校验 base32 设备 ID 格式），CLI 增加 `unpair <device_id>` 子命令，Web UI 在对端卡片上增加危险解除按钮。
+
+3. **测试覆盖与 GitHub CI 验证**：
+   - `tests/phase1.rs` 增设 `peer_unpair_and_trust_revocation` 集成测试，验证初始信任与活跃连接、调用解绑后内存与磁盘信任彻底擦除、网络会话即时断开、输入座位释放及幂等操作安全性。
+
+## 31. 跨端安全剪贴板主动同步、回环控制与全端闭环 (v1.32 / ADR-025)
+
+1. **动机与设计准则（ADR-025）**：
+   - 消除发送端人工平台限制，解除 `filter(|p| is_desktop_platform(&p.platform))` 限制，使 Android 与各平台设备均能安全接收剪贴板流；
+   - 提供显式序号推进与广播原语 (`ClipHub::force_prepare_local`)，支持手动发送与轮询防回环解耦；
+   - 提供受 127.0.0.1 绑核与 Host 头校验保护的回环 API (`POST /api/clip/sync`、`GET /api/clip`)；
+   - 严格遵循红线守卫：剪贴板正文绝不打印到守护进程日志；
+   - CLI 增设 `clip sync/send/get` 子命令，Web UI 增设「剪贴板同步」交互卡片。
+
+2. **核心机制与实现**：
+   - **核心状态机显式步进**：`ClipHub::force_prepare_local` 显式递增 `last_seq` 并更新 `last_hash`，强制生成广播帧；
+   - **运行时原语强化**：`send_clipboard_to`、`send_clipboard_text` 与 `get_clipboard_text`；
+   - **回环 API 与缓冲区扩容**：`MAX_HEADER = 16 KiB`，`MAX_BODY = 2 MiB`，安全支撑 1 MiB (`CLIP_TEXT_MAX`) 剪贴板文本；
+   - **CLI 终端直通**：支持文本参数、标准输入管道 (`stdin`) 与定向 `--peer` 投递。
+
+3. **测试覆盖与 GitHub CI 验证**：
+   - `tests/phase1.rs` 增设 `clip_sync_and_send_via_live_node_api_reaches_peers` 集成测试，验证空状态查询、剪贴板主动同步、重复内容回环抑制、显式文本广播、定向投递及超 1 MiB 严格 400 拦截。
+
+## 32. 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环 (v1.33 / ADR-026)
+
+1. **动机与设计准则（ADR-026）**：
+   - 彻底打通无头/终端环境下的通知候选查询与 OTP 提取闭环，满足开发机、服务器与脚本化自动化运维场景；
+   - 严格遵循 ADR-010（验证码写入与读取必须用户当次触发，禁止任何静默外部泄露或日志打印）；
+   - 提供轻量级专用轮询 API (`GET /api/notify/candidates`、`GET /api/notify/replies`、`POST /api/otp/get`)，避免拉取全量节点状态快照的性能损耗；
+   - 确保双向快速回复单次消费（Single-use）原则，避免同一短信回复被重复触发给移动端底层通道。
+
+2. **核心机制与实现**：
+   - **轻量级查询与安全提取 API**：
+     - `GET /api/notify/candidates`：返回当前未过期的候选列表 (`Vec<CandidateViewDto>`)；
+     - `GET /api/notify/replies`：返回当前待交付至宿主系统的回复列表 (`Vec<ReplyViewDto>`)；
+     - `POST /api/otp/get`：显式提取当前候选关联的 OTP 纯文本，脱敏返回，日志绝不打印；
+     - `POST /api/reply/take`：增强返回值携带 `text`，严格执行单次消费后即从队列移除。
+   - **CLI 终端全功能命令群**：
+     - `candidates [--json]`：列表或 JSON 呈现待处理候选与过期倒计时；
+     - `otp <id> [--copy]`：直接打印验证码（支持管道传参）并可选复制到剪贴板；
+     - `dismiss <id>`：主动丢弃失效候选；
+     - `reply <id> <text>`：针对候选通知反向发送快速回复短信；
+     - `replies [--json]` 与 `take-reply <id>`：查询和单次消费入站回复。
+   - **双端 CLI 同构**：`tetherly` 与 `tetherly-cli` 具备完全一致的命令行参数与回环客户端机制。
+
+3. **测试覆盖与 GitHub CI 验证**：
+   - `tests/phase1.rs` 增设 `notify_candidate_lifecycle_and_quick_reply_via_loopback_api` 集成测试：
+     - 验证端到端通知推送与候选正则解析；
+     - 验证 `POST /api/otp/get` 提取与 `POST /api/copy` 写入剪贴板；
+     - 验证通过 `POST /api/reply` 发送回复并在对端安全入队；
+     - 验证 `POST /api/reply/take` 成功提取并遵循单次消费不变量；
+     - 验证 `POST /api/dismiss` 销毁候选与非法参数 400 保护。
+
 
 
 
