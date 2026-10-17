@@ -257,6 +257,30 @@ pub struct AncsReport {
     pub allowlist: Vec<String>,
 }
 
+/// Lightweight status report for node data directory and storage consumption.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StorageReport {
+    pub ok: bool,
+    pub data_dir: String,
+    pub inbox_dir: String,
+    pub inbox_total_bytes: u64,
+    pub inbox_file_count: usize,
+    pub partial_bytes: u64,
+    pub partial_count: usize,
+    pub orphaned_partial_count: usize,
+    pub orphaned_partial_bytes: u64,
+    pub meta_bytes: u64,
+}
+
+/// Report returned by a storage cleanup operation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StorageCleanReport {
+    pub ok: bool,
+    pub freed_bytes: u64,
+    pub deleted_files_count: usize,
+    pub cleared_resume_entries: usize,
+}
+
 enum OutboundSource {
     Bytes(Vec<u8>),
     Path(std::path::PathBuf),
@@ -866,6 +890,174 @@ impl Node {
             state,
             retry_at_ms,
             allowlist,
+        }
+    }
+
+    /// Inspect local storage, inbox files, in-flight/orphaned partial transfers and metadata.
+    pub fn storage_report(&self) -> StorageReport {
+        let data_dir = self.shared.cfg.data_dir.clone();
+        let inbox_dir = data_dir.join("inbox");
+        let mut inbox_total_bytes: u64 = 0;
+        let mut inbox_file_count: usize = 0;
+        let mut partial_bytes: u64 = 0;
+        let mut partial_count: usize = 0;
+        let mut orphaned_partial_count: usize = 0;
+        let mut orphaned_partial_bytes: u64 = 0;
+        let mut meta_bytes: u64 = 0;
+
+        let active = self.shared.active_transfers.lock().expect("transfers");
+        let hubs = self.shared.hubs.lock().expect("hubs");
+
+        if let Ok(entries) = std::fs::read_dir(&inbox_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let file_len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with('.') && name.ends_with(".part") {
+                    let transfer_id = name
+                        .strip_prefix('.')
+                        .and_then(|s| s.strip_suffix(".part"))
+                        .unwrap_or("");
+                    partial_count += 1;
+                    partial_bytes += file_len;
+
+                    let is_active = active.get(transfer_id).is_some_and(|t| {
+                        t.phase == TransferPhase::Transferring
+                            || t.phase == TransferPhase::Verifying
+                    });
+                    let is_resumable = hubs.resume.get(transfer_id).is_some();
+                    if !is_active && !is_resumable {
+                        orphaned_partial_count += 1;
+                        orphaned_partial_bytes += file_len;
+                    }
+                } else if name.starts_with('.') && name.ends_with(".resume.json") {
+                    meta_bytes += file_len;
+                } else if !name.starts_with('.') {
+                    inbox_file_count += 1;
+                    inbox_total_bytes += file_len;
+                }
+            }
+        }
+
+        for meta_file in ["identity.bin", "identity.ref", "trusted.json", "routes.json"] {
+            let p = data_dir.join(meta_file);
+            if let Ok(m) = std::fs::metadata(&p) {
+                meta_bytes += m.len();
+            }
+        }
+
+        StorageReport {
+            ok: true,
+            data_dir: data_dir.to_string_lossy().to_string(),
+            inbox_dir: inbox_dir.to_string_lossy().to_string(),
+            inbox_total_bytes,
+            inbox_file_count,
+            partial_bytes,
+            partial_count,
+            orphaned_partial_count,
+            orphaned_partial_bytes,
+            meta_bytes,
+        }
+    }
+
+    /// Garbage-collect incomplete or orphaned partial transfers in the inbox.
+    pub fn clean_storage(&self, orphaned_only: bool) -> StorageCleanReport {
+        let inbox_dir = self.shared.cfg.data_dir.join("inbox");
+        let mut freed_bytes: u64 = 0;
+        let mut deleted_files_count: usize = 0;
+        let mut cleared_resume_entries: usize = 0;
+
+        let active = self.shared.active_transfers.lock().expect("transfers");
+        let mut hubs = self.shared.hubs.lock().expect("hubs");
+
+        let active_ids: std::collections::HashSet<String> = active
+            .iter()
+            .filter(|(_, t)| {
+                t.phase == TransferPhase::Transferring || t.phase == TransferPhase::Verifying
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        if let Ok(entries) = std::fs::read_dir(&inbox_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let file_len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+                if name.starts_with('.') && name.ends_with(".part") {
+                    let transfer_id = name
+                        .strip_prefix('.')
+                        .and_then(|s| s.strip_suffix(".part"))
+                        .unwrap_or("");
+                    if active_ids.contains(transfer_id) {
+                        continue;
+                    }
+                    let is_resumable = hubs.resume.get(transfer_id).is_some();
+                    if orphaned_only {
+                        if !is_resumable && std::fs::remove_file(&path).is_ok() {
+                            freed_bytes += file_len;
+                            deleted_files_count += 1;
+                            let sidecar = inbox_dir.join(format!(".{transfer_id}.resume.json"));
+                            if sidecar.exists() {
+                                if let Ok(sm) = std::fs::metadata(&sidecar) {
+                                    freed_bytes += sm.len();
+                                }
+                                if std::fs::remove_file(&sidecar).is_ok() {
+                                    deleted_files_count += 1;
+                                }
+                            }
+                        }
+                    } else {
+                        if std::fs::remove_file(&path).is_ok() {
+                            freed_bytes += file_len;
+                            deleted_files_count += 1;
+                        }
+                        if hubs.resume.remove(transfer_id).is_some() {
+                            cleared_resume_entries += 1;
+                        }
+                        let sidecar = inbox_dir.join(format!(".{transfer_id}.resume.json"));
+                        if sidecar.exists() {
+                            if let Ok(sm) = std::fs::metadata(&sidecar) {
+                                freed_bytes += sm.len();
+                            }
+                            if std::fs::remove_file(&sidecar).is_ok() {
+                                deleted_files_count += 1;
+                            }
+                        }
+                    }
+                } else if name.starts_with('.') && name.ends_with(".resume.json") {
+                    let transfer_id = name
+                        .strip_prefix('.')
+                        .and_then(|s| s.strip_suffix(".resume.json"))
+                        .unwrap_or("");
+                    if active_ids.contains(transfer_id) {
+                        continue;
+                    }
+                    let matching_part = inbox_dir.join(format!(".{transfer_id}.part"));
+                    if !matching_part.exists() {
+                        if hubs.resume.remove(transfer_id).is_some() {
+                            cleared_resume_entries += 1;
+                        }
+                        if std::fs::remove_file(&path).is_ok() {
+                            freed_bytes += file_len;
+                            deleted_files_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        StorageCleanReport {
+            ok: true,
+            freed_bytes,
+            deleted_files_count,
+            cleared_resume_entries,
         }
     }
 

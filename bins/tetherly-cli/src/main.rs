@@ -213,6 +213,11 @@ enum Cmd {
         #[command(subcommand)]
         action: AncsCmd,
     },
+    /// Manage local storage, inbox directory, and partial transfer files.
+    Storage {
+        #[command(subcommand)]
+        action: StorageCmd,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -352,6 +357,28 @@ enum AncsCmd {
         /// Optional URL scheme or template (e.g. weixin://).
         #[arg(long)]
         url: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum StorageCmd {
+    /// Query local storage and inbox space consumption.
+    Status {
+        /// Output raw JSON snapshot instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Clean orphaned or incomplete partial transfer files in the inbox.
+    Clean {
+        /// Clean all incomplete partials, not just orphaned ones.
+        #[arg(long)]
+        all: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -1459,6 +1486,85 @@ async fn main() -> Result<()> {
                     );
                 }
                 println!("Allowed open action for '{app_id}'.");
+            }
+        },
+        Cmd::Storage { action } => match action {
+            StorageCmd::Status { json, ui_port } => {
+                let (code, resp) = loopback_get(ui_port, "/api/storage").await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "storage status query failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let data_dir = v["data_dir"].as_str().unwrap_or("-");
+                    let inbox_dir = v["inbox_dir"].as_str().unwrap_or("-");
+                    let inbox_total_bytes = v["inbox_total_bytes"].as_u64().unwrap_or(0);
+                    let inbox_file_count = v["inbox_file_count"].as_u64().unwrap_or(0);
+                    let partial_bytes = v["partial_bytes"].as_u64().unwrap_or(0);
+                    let partial_count = v["partial_count"].as_u64().unwrap_or(0);
+                    let orphaned_partial_count = v["orphaned_partial_count"].as_u64().unwrap_or(0);
+                    let orphaned_partial_bytes = v["orphaned_partial_bytes"].as_u64().unwrap_or(0);
+                    let meta_bytes = v["meta_bytes"].as_u64().unwrap_or(0);
+
+                    println!("Node Storage Status:");
+                    println!("  Data Directory:    {data_dir}");
+                    println!("  Inbox Directory:   {inbox_dir}");
+                    println!(
+                        "  Inbox Files:       {inbox_file_count} ({})",
+                        format_bytes(inbox_total_bytes)
+                    );
+                    println!(
+                        "  Partial In-flight: {partial_count} ({})",
+                        format_bytes(partial_bytes)
+                    );
+                    println!(
+                        "  Orphaned Partials: {orphaned_partial_count} ({})",
+                        format_bytes(orphaned_partial_bytes)
+                    );
+                    println!("  Metadata Storage:  {}", format_bytes(meta_bytes));
+                }
+            }
+            StorageCmd::Clean { all, ui_port } => {
+                let payload = serde_json::json!({ "orphaned_only": !all });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) =
+                    loopback_post(ui_port, "/api/storage/clean", &bytes)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "storage clean failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let freed_bytes = v["freed_bytes"].as_u64().unwrap_or(0);
+                let deleted_files = v["deleted_files_count"].as_u64().unwrap_or(0);
+                let cleared_resumes = v["cleared_resume_entries"].as_u64().unwrap_or(0);
+
+                println!("Storage cleanup complete:");
+                println!("  Freed Space:     {}", format_bytes(freed_bytes));
+                println!("  Deleted Files:   {deleted_files}");
+                if cleared_resumes > 0 {
+                    println!("  Cleared Resumes: {cleared_resumes}");
+                }
             }
         },
         Cmd::Status {

@@ -311,6 +311,12 @@ struct OpenRuleBody {
     url: String,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct StorageCleanBody {
+    #[serde(default)]
+    orphaned_only: Option<bool>,
+}
+
 fn default_open_url() -> String {
     "tetherly://open".to_string()
 }
@@ -811,6 +817,22 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 Err(e) => err(400, &e.to_string()),
             },
             Err(_) => err(400, "bad json"),
+        },
+        ("GET", "/api/storage") => {
+            let rep = node.storage_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/storage/clean") => {
+            let orphaned_only = if body.is_empty() {
+                true
+            } else {
+                match serde_json::from_slice::<StorageCleanBody>(body) {
+                    Ok(d) => d.orphaned_only.unwrap_or(true),
+                    Err(_) => return err(400, "bad json"),
+                }
+            };
+            let rep = node.clean_storage(orphaned_only);
+            json_ok(&rep)
         },
         // Remote screen: consent is local and explicit. `allow` is the only
         // gate into streaming; nothing a peer sends can flip it.

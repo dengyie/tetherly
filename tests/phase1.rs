@@ -1880,6 +1880,86 @@ async fn peers_and_routes_inspection_via_loopback_api() {
     host.shutdown();
 }
 
+/// ADR-031: Node storage inspection and safe orphaned partial garbage collection.
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_inspection_and_partial_cleanup_via_loopback_api() {
+    let (data_dir, _guard) = temp_dir("storage-test");
+    let node = Node::start(cfg(data_dir.clone(), "storage-node", "macos")).unwrap();
+    let ui_port = node.spawn_ui().await.unwrap();
+    assert_ne!(ui_port, 0, "test node must serve loopback UI");
+
+    // 1. Initial state check: clean data_dir and inbox
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/storage")
+        .await
+        .expect("storage get");
+    assert_eq!(code, 200);
+    let mut rep: tetherly_node::StorageReport = serde_json::from_slice(&body).unwrap();
+    assert!(rep.ok);
+    assert_eq!(rep.inbox_file_count, 0);
+    assert_eq!(rep.inbox_total_bytes, 0);
+    assert_eq!(rep.partial_count, 0);
+    assert_eq!(rep.orphaned_partial_count, 0);
+
+    // 2. Populate inbox with:
+    //    - A regular received file: "file1.txt" (50 bytes)
+    //    - An orphaned partial transfer: ".tfl_orphaned1.part" (120 bytes)
+    //    - A matching orphaned sidecar: ".tfl_orphaned1.resume.json" (40 bytes)
+    //    - A lonely orphaned sidecar: ".tfl_orphaned2.resume.json" (30 bytes)
+    let inbox_dir = data_dir.join("inbox");
+    std::fs::create_dir_all(&inbox_dir).unwrap();
+    std::fs::write(inbox_dir.join("file1.txt"), vec![b'A'; 50]).unwrap();
+    std::fs::write(inbox_dir.join(".tfl_orphaned1.part"), vec![b'B'; 120]).unwrap();
+    std::fs::write(inbox_dir.join(".tfl_orphaned1.resume.json"), vec![b'C'; 40]).unwrap();
+    std::fs::write(inbox_dir.join(".tfl_orphaned2.resume.json"), vec![b'D'; 30]).unwrap();
+
+    // 3. Re-query /api/storage to verify metrics
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/storage")
+        .await
+        .unwrap();
+    assert_eq!(code, 200);
+    rep = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rep.inbox_file_count, 1);
+    assert_eq!(rep.inbox_total_bytes, 50);
+    assert_eq!(rep.partial_count, 1);
+    assert_eq!(rep.partial_bytes, 120);
+    assert_eq!(rep.orphaned_partial_count, 1);
+    assert_eq!(rep.orphaned_partial_bytes, 120);
+    assert!(rep.meta_bytes >= 70); // 40 + 30 + any identity/trusted files
+
+    // 4. Trigger orphaned-only cleanup via POST /api/storage/clean with {"orphaned_only": true}
+    let payload = serde_json::json!({ "orphaned_only": true });
+    let (code, body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/storage/clean",
+        &serde_json::to_vec(&payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, 200);
+    let clean_rep: tetherly_node::StorageCleanReport = serde_json::from_slice(&body).unwrap();
+    assert!(clean_rep.ok);
+    // Deleted: .tfl_orphaned1.part (120) + .tfl_orphaned1.resume.json (40) + .tfl_orphaned2.resume.json (30) = 190 bytes, 3 files
+    assert_eq!(clean_rep.freed_bytes, 190);
+    assert_eq!(clean_rep.deleted_files_count, 3);
+
+    // 5. Verify the regular file remains untouched
+    assert!(inbox_dir.join("file1.txt").exists());
+    assert_eq!(std::fs::read(inbox_dir.join("file1.txt")).unwrap().len(), 50);
+
+    // 6. Query /api/storage again to ensure partials are now zero
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/storage")
+        .await
+        .unwrap();
+    assert_eq!(code, 200);
+    rep = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rep.inbox_file_count, 1);
+    assert_eq!(rep.inbox_total_bytes, 50);
+    assert_eq!(rep.partial_count, 0);
+    assert_eq!(rep.orphaned_partial_count, 0);
+
+    node.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

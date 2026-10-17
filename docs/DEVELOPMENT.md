@@ -3,12 +3,58 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.37** |
+| 文档版本 | **1.38** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）**——(1) **轻量级 ANCS 回环 API (`GET /api/ancs`)**：提供无全量快照序列化负担的高性能接口，透视蓝牙底层传输栈连接状态（`attached: bool`）、入站 Ingress 状态（`state: String` 如 `off`/`idle`/`subscribing`/`ready`/`backoff`）、重连退避倒计时（`retry_at_ms: Option<u64>`）及白名单规则清单（`allowlist: Vec<String>`）；(2) **白名单规则治理与全闭环控制**：在原有 `POST /api/ancs/connect` 与 `POST /api/ancs/allow` 基础上，支持在 `GET /api/ancs` 中直接获取已加载白名单规则；(3) **CLI 全量同构命令群 (`tetherly ancs` 与 `tetherly-cli ancs`)**：增设 `ancs status [--json]`、`ancs connect`、`ancs allow <app_id> [--url <template>]`；(4) **Web UI 补全**：在 `ui/index.html` 增设「ANCS 苹果通知服务」管理面板（传输栈状态指示、主动重连、白名单 App 标签展示与规则追加）；(5) **端到端集成测试全覆盖**（`tests/phase4.rs` 增设 `ancs_status_inspection_connection_and_allowlist_via_loopback_api`）。+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）**——(1) **轻量级存储可观测性回环 API (`GET /api/storage`)**：单遍扫描 `data_dir` 与 `inbox` 目录，无缝透视数据目录实际路径、收件箱完整接收文件数与容量、传输临时分块（`.part`）数量与占用、孤儿分块（`orphaned`）数量与容量以及核心身份与路由元数据存储开销；(2) **安全孤儿分块垃圾回收 API (`POST /api/storage/clean`)**：建立强隔离机制，绝对保护正在传输（`Transferring`/`Verifying`）的活跃分块，按需安全清除未匹配的孤儿 `.part` 与失去匹配的 `.resume.json` 侧车，或在用户显式指定时清空非在途的全部历史分块并注销内存断点续传表；(3) **CLI 全量同构命令群 (`tetherly storage` 与 `tetherly-cli storage`)**：增设 `storage status [--json]` 与 `storage clean [--all]`，支持自适应单位容量排版与机器可读 JSON 输出；(4) **Web UI 补全**：在 `ui/index.html` 增设「存储与数据目录」面板，提供容量结构多维透视与一键清理孤儿分块交互；(5) **端到端集成测试全覆盖**（`tests/phase1.rs` 增设 `storage_inspection_and_partial_cleanup_via_loopback_api`）。+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.38 相对 1.37(节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收)**
+
+- **动机(存储状态黑盒、大文件传输孤儿分块堆积隐患与控制面治理空白)**:
+  在 Phase 1（v1.26 至 v1.28）落地流式大文件传输（最高 64 GiB）与断点续传（`ResumeTable` / `.resume.json` 侧车）后，文件传输引擎运行高度稳健。然而在长周期的系统运维与无头环境下暴露了存储治理盲区：
+  1. **存储状态黑盒**：外部监控、无头命令行与 Web UI 无法获取当前节点数据目录（`data_dir`）实际路径、接收收件箱（`inbox`）空间占用、已接收文件总数、元数据占用与临时分块文件状况；
+  2. **大文件传输孤儿分块堆积隐患**：当传输发生网络异常、对端设备永久离线、传输被用户取消或节点进程异常中断时，临时分块文件 `.{transfer_id}.part` 与 `.resume.json` 侧车可能长期滞留磁盘，缺乏统一可观测透视与安全垃圾回收机制；
+  3. **命令行与回环控制面缺口**：CLI 与 Web UI 缺少专属的 `storage` 命令群与轻量级回环端点，无法在不借助外部 OS shell 的前提下直接排查与清理存储空间。
+
+- **架构与协议设计(ADR-031 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收)**:
+  1. **轻量级回环 HTTP 控制面 (`GET /api/storage` 与 `POST /api/storage/clean`)**:
+     - 严格遵循 127.0.0.1 绑核与 Host 头校验；
+     - `GET /api/storage` 返回模型：
+       ```json
+       {
+         "ok": true,
+         "data_dir": "/path/to/data",
+         "inbox_dir": "/path/to/data/inbox",
+         "inbox_total_bytes": 1048576,
+         "inbox_file_count": 5,
+         "partial_bytes": 2097152,
+         "partial_count": 2,
+         "orphaned_partial_count": 1,
+         "orphaned_partial_bytes": 1048576,
+         "meta_bytes": 4096
+       }
+       ```
+     - `POST /api/storage/clean` 支持接收可选 JSON `{"orphaned_only": bool}`（默认 `true`），返回清理报告：
+       ```json
+       {
+         "ok": true,
+         "freed_bytes": 1048576,
+         "deleted_files_count": 2,
+         "cleared_resume_entries": 0
+       }
+       ```
+  2. **节点运行时透视与垃圾回收 (`Node::storage_report` 与 `Node::clean_storage`)**:
+     - 单遍扫描 `data_dir` 与 `inbox`，精准分类已完成文件、活跃分块、可续传分块与孤儿分块；
+     - 垃圾回收严格实行安全隔离：处于 `Transferring` 或 `Verifying` 阶段的在途任务严禁删除；`orphaned_only: true` 仅清理失配孤儿文件，`orphaned_only: false` 清理所有非在途未决分块并注销内存断点续传表；
+  3. **CLI 命令行全量同构 (`tetherly` 与 `tetherly-cli`)**:
+     - `storage status [--json] [--ui-port <port>]`：展示数据目录、收件箱用量、分块用量与孤儿统计；
+     - `storage clean [--all] [--ui-port <port>]`：触发垃圾回收，打印释放空间与删除文件数；
+  4. **Web UI 补全 (`ui/index.html`)**:
+     - 在 Web UI 中增设「存储与数据目录」面板，提供存储用量多维透视与一键清理孤儿分块交互；
+  5. **端到端集成测试全覆盖**:
+     - 在 `tests/phase1.rs` 增设 `storage_inspection_and_partial_cleanup_via_loopback_api`，全面验证初始指标、收件箱文件计数、孤儿分块识别、安全清理执行与正常文件保护。
 
 **1.37 相对 1.36(ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构)**
 

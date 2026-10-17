@@ -136,6 +136,32 @@
       </div>
       <div id="clipstatus" class="hint" style="margin-top:6px"></div>
     </section>
+    <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>存储与数据目录</h2>
+        <button id="cleanstoragebtn" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--text);border-radius:4px;cursor:pointer">清理孤儿分块</button>
+      </div>
+      <div class="hint">监控数据目录磁盘空间、收件箱已接收文件与分块传输临时文件。</div>
+      <div id="storagestatus" style="margin-top:8px;font-size:12px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">数据目录：</span>
+          <span id="st-datadir" style="font-family:ui-monospace, Consolas, monospace">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">收件箱文件：</span>
+          <span id="st-inbox">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">传输分块 (.part)：</span>
+          <span id="st-partials">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">元数据存储：</span>
+          <span id="st-meta">-</span>
+        </div>
+      </div>
+      <div id="cleanmsg" class="hint" style="margin-top:6px"></div>
+    </section>
   </div>
   <div>
     <section>
@@ -583,11 +609,47 @@ if (clipSendBtn) {
     }
   };
 }
+async function updateStorage() {
+  try {
+    const s = await api("/api/storage");
+    if (!s || !s.ok) return;
+    if ($("st-datadir")) $("st-datadir").textContent = s.data_dir;
+    if ($("st-inbox")) $("st-inbox").textContent = s.inbox_file_count + " 个文件 (" + formatBytes(s.inbox_total_bytes) + ")";
+    if ($("st-partials")) {
+      let partText = s.partial_count + " 个 (" + formatBytes(s.partial_bytes) + ")";
+      if (s.orphaned_partial_count > 0) {
+        partText += ' · <span style="color:var(--warn)">含 ' + s.orphaned_partial_count + ' 个孤儿分块 (' + formatBytes(s.orphaned_partial_bytes) + ')</span>';
+      }
+      $("st-partials").innerHTML = partText;
+    }
+    if ($("st-meta")) $("st-meta").textContent = formatBytes(s.meta_bytes);
+  } catch (e) { /* node down */ }
+}
+const cleanBtn = $("cleanstoragebtn");
+if (cleanBtn) {
+  cleanBtn.onclick = async () => {
+    const msg = $("cleanmsg");
+    if (msg) msg.textContent = "正在清理孤儿分块…";
+    try {
+      const r = await api("/api/storage/clean", { orphaned_only: true });
+      if (r && r.ok) {
+        if (msg) msg.textContent = "清理完成：释放 " + formatBytes(r.freed_bytes) + "，删除 " + r.deleted_files_count + " 个孤儿文件";
+        updateStorage();
+      } else {
+        if (msg) msg.textContent = "清理失败";
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "清理异常: " + e;
+    }
+  };
+}
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
 }
 tick();
 setInterval(tick, 700);
+updateStorage();
+setInterval(updateStorage, 3000);
 </script>
 </body>
 </html>

@@ -253,6 +253,11 @@ enum Cmd {
         #[command(subcommand)]
         action: AncsCmd,
     },
+    /// Manage local storage, inbox directory, and partial transfer files.
+    Storage {
+        #[command(subcommand)]
+        action: StorageCmd,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -392,6 +397,28 @@ enum AncsCmd {
         /// Optional URL scheme or template (e.g. weixin://).
         #[arg(long)]
         url: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum StorageCmd {
+    /// Query local storage and inbox space consumption.
+    Status {
+        /// Output raw JSON snapshot instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Clean orphaned or incomplete partial transfer files in the inbox.
+    Clean {
+        /// Clean all incomplete partials, not just orphaned ones.
+        #[arg(long)]
+        all: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -1549,6 +1576,74 @@ async fn main() -> Result<()> {
                     );
                 }
                 println!("Allowed open action for '{app_id}'.");
+            }
+        },
+        Cmd::Storage { action } => match action {
+            StorageCmd::Status { json, ui_port } => {
+                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/storage")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "storage status query failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let rep: tetherly_node::StorageReport = serde_json::from_slice(&resp)?;
+                    println!("Node Storage Status:");
+                    println!("  Data Directory:    {}", rep.data_dir);
+                    println!("  Inbox Directory:   {}", rep.inbox_dir);
+                    println!(
+                        "  Inbox Files:       {} ({})",
+                        rep.inbox_file_count,
+                        format_bytes(rep.inbox_total_bytes)
+                    );
+                    println!(
+                        "  Partial In-flight: {} ({})",
+                        rep.partial_count,
+                        format_bytes(rep.partial_bytes)
+                    );
+                    println!(
+                        "  Orphaned Partials: {} ({})",
+                        rep.orphaned_partial_count,
+                        format_bytes(rep.orphaned_partial_bytes)
+                    );
+                    println!("  Metadata Storage:  {}", format_bytes(rep.meta_bytes));
+                }
+            }
+            StorageCmd::Clean { all, ui_port } => {
+                let payload = serde_json::json!({ "orphaned_only": !all });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) =
+                    tetherly_node::loopback_post(ui_port, "/api/storage/clean", &bytes)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "storage clean failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let rep: tetherly_node::StorageCleanReport = serde_json::from_slice(&resp)?;
+                println!("Storage cleanup complete:");
+                println!("  Freed Space:     {}", format_bytes(rep.freed_bytes));
+                println!("  Deleted Files:   {}", rep.deleted_files_count);
+                if rep.cleared_resume_entries > 0 {
+                    println!("  Cleared Resumes: {}", rep.cleared_resume_entries);
+                }
             }
         },
         Cmd::Status {
