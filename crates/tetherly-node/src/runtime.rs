@@ -3268,7 +3268,7 @@ mod tests {
     #[test]
     fn bounded_retention_prunes_oldest_terminal_transfers() {
         let mut transfers = HashMap::new();
-        let peer = DeviceId::parse("tdev_a1b2c3d4e5f6g7h8").unwrap();
+        let peer = DeviceId::from_id_pk(&[1u8; 32]);
 
         // 1 in-flight transfer
         transfers.insert(
