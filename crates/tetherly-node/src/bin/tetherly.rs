@@ -1386,7 +1386,9 @@ async fn main() -> Result<()> {
                             Some(rtt) => format!("{rtt}ms"),
                             None => "n/a".to_string(),
                         };
-                        println!("  * {name} ({platform}) · {addr} [{path}] · rtt: {rtt_str} · {dev}");
+                        println!(
+                            "  * {name} ({platform}) · {addr} [{path}] · rtt: {rtt_str} · {dev}"
+                        );
                     }
                 }
                 _ => println!("  (no live peers connected)"),
@@ -2128,8 +2130,8 @@ async fn do_peer_ping(
                 String::from_utf8_lossy(&resp)
             );
         }
-        let v: serde_json::Value = serde_json::from_slice(&resp)
-            .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+        let v: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
         let rtt = v["rtt_ms"].as_u64().unwrap_or(0);
         let dev = v["device_id"].as_str().unwrap_or("-");
         let path = v["path"].as_str().unwrap_or("-");
@@ -2166,4 +2168,3 @@ async fn do_peer_ping(
     }
     Ok(())
 }
-

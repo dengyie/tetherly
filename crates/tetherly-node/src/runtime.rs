@@ -1486,7 +1486,11 @@ impl Node {
             sessions.clear();
         }
         self.shared.live.lock().expect("live").clear();
-        self.shared.ping_waiters.lock().expect("ping_waiters").clear();
+        self.shared
+            .ping_waiters
+            .lock()
+            .expect("ping_waiters")
+            .clear();
     }
 
     pub fn forget(&self, device_id: &DeviceId) {

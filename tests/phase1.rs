@@ -2173,7 +2173,10 @@ async fn active_peer_rtt_probing_and_latency_reporting_via_loopback_api() {
     let bogus_dev = tetherly_core::DeviceId::parse("tdev_aaaaaaaaaaaaaaaa").unwrap();
     let err_res = host.ping_peer(&bogus_dev).await;
     assert!(
-        matches!(err_res, Err(tetherly_core::error::CoreError::NoConnectedPeer)),
+        matches!(
+            err_res,
+            Err(tetherly_core::error::CoreError::NoConnectedPeer)
+        ),
         "pinging disconnected peer should return NoConnectedPeer"
     );
 
