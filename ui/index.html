@@ -99,12 +99,16 @@
       <div id="files"><div class="empty">没有待接收文件。</div></div>
     </section>
     <section style="margin-top:16px">
-      <h2>实时传输状态</h2>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>实时传输状态</h2>
+        <button id="cleartransfers" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--dim);border-radius:4px;cursor:pointer">清除完成记录</button>
+      </div>
+      <div id="transferstats" class="hint" style="margin-bottom:8px"></div>
       <div id="transfers"><div class="empty">暂无活跃或近期传输。</div></div>
     </section>
     <section style="margin-top:16px">
       <h2>发送文件</h2>
-      <div class="hint">选择要发送给对端的文件（限制 512 MiB 以内）。</div>
+      <div class="hint">选择要发送给对端的文件（限制 64 GiB 以内）。</div>
       <div class="row" style="margin-top:8px">
         <select id="sendpeer" style="background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%"></select>
       </div>
@@ -286,6 +290,18 @@ function render(s) {
     card.querySelector(".row").appendChild(no);
     f.appendChild(card);
   }
+  const tstat = $("transferstats");
+  if (tstat) {
+    const st = s.transfer_stats;
+    if (st) {
+      tstat.textContent = "累计统计：发送 " + formatBytes(st.bytes_sent)
+        + " · 接收 " + formatBytes(st.bytes_received)
+        + " · 完成 " + (st.completed_count || 0) + " 笔"
+        + " · 失败 " + (st.failed_count || 0) + " 笔";
+    } else {
+      tstat.textContent = "";
+    }
+  }
   const tf = $("transfers");
   if (tf) {
     tf.innerHTML = "";
@@ -389,6 +405,8 @@ $("screenstart").onclick = () => api("/api/screen/start", {});
 $("screenstop").onclick = () => api("/api/screen/stop", {});
 $("inputstart").onclick = () => api("/api/input/start", {});
 $("inputstop").onclick = () => api("/api/input/stop", {});
+const clearBtn = $("cleartransfers");
+if (clearBtn) clearBtn.onclick = () => api("/api/file/clear", {});
 $("sendbtn").onclick = async () => {
   const fileInput = $("sendfile");
   const file = fileInput.files && fileInput.files[0];

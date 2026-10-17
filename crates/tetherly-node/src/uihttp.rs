@@ -203,6 +203,7 @@ struct Snapshot {
     peers: Vec<PeerView>,
     files: Vec<FileSnap>,
     transfers: Vec<crate::runtime::ActiveTransfer>,
+    transfer_stats: crate::runtime::TransferStats,
     /// "off" when no BLE transport is attached, else the ingress state.
     ancs_state: String,
     /// Allowlisted app ids, so the wizard can show what may be opened.
@@ -439,6 +440,10 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 Err(e) => err(400, &e.to_string()),
             },
             Err(_) => err(400, "bad json"),
+        },
+        ("POST", "/api/file/clear") => {
+            let cleared = node.clear_terminal_transfers();
+            json_ok(&serde_json::json!({ "ok": true, "cleared": cleared }))
         },
         ("POST", "/api/file/send") => match serde_json::from_slice::<SendFileBody>(body) {
             Ok(d) => {
@@ -691,6 +696,7 @@ async fn snapshot(node: &Node) -> Snapshot {
             })
             .collect(),
         transfers: node.active_transfers(),
+        transfer_stats: node.transfer_stats(),
         screen_state: node.screen_state().as_str().to_string(),
         screen: {
             let s = node.screen_stats();

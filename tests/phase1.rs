@@ -1207,6 +1207,175 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
     peer.shutdown();
 }
 
+#[tokio::test]
+async fn transfer_lifecycle_governance_and_stats() {
+    let (host_dir, _g_host) = temp_dir("lifecycle-host");
+    let (peer_dir, _g_peer) = temp_dir("lifecycle-peer");
+    let (mut host_cfg, mut peer_cfg) = (
+        NodeConfig::default_with_dir(&host_dir),
+        NodeConfig::default_with_dir(&peer_dir),
+    );
+    host_cfg.name = "host".into();
+    peer_cfg.name = "peer".into();
+    host_cfg.control_port = pick_free_port();
+    host_cfg.file_port = pick_free_port();
+    peer_cfg.control_port = pick_free_port();
+    peer_cfg.file_port = pick_free_port();
+
+    let host = Node::start(host_cfg).unwrap();
+    let peer = Node::start(peer_cfg).unwrap();
+    let (p1, _p2) = host.bound_ports().unwrap();
+    let p_addr = SocketAddr::from(([127, 0, 0, 1], p1));
+
+    let pin = peer.generate_pin().unwrap();
+    let digits = tetherly_core::pin::parse_pin(&pin).unwrap();
+    host.set_pin(digits);
+    host.dial(p_addr).await.unwrap();
+    wait_peers(&host, 1, Duration::from_secs(5)).await;
+    wait_peers(&peer, 1, Duration::from_secs(5)).await;
+
+    let ui_port = host.spawn_ui().await.unwrap();
+
+    // 1. Initial transfer stats are zero
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/state")
+        .await
+        .expect("get state");
+    assert_eq!(code, 200);
+    let state_v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let stats = &state_v["transfer_stats"];
+    assert_eq!(stats["bytes_sent"], 0);
+    assert_eq!(stats["bytes_received"], 0);
+    assert_eq!(stats["completed_count"], 0);
+    assert_eq!(stats["failed_count"], 0);
+
+    // 2. Perform a successful transfer and check stats accumulation
+    let (send_dir, _g_send) = temp_dir("lifecycle-send");
+    let file_path = send_dir.join("stats_test.bin");
+    let total_size = 2 * tetherly_core::FILE_CHUNK + 512;
+    let file_content: Vec<u8> = vec![0x77; total_size];
+    std::fs::write(&file_path, &file_content).unwrap();
+
+    let payload = serde_json::json!({
+        "path": file_path.to_str().unwrap(),
+        "name": "stats_test.bin",
+    });
+    let (send_code, send_body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/send",
+        &serde_json::to_vec(&payload).unwrap(),
+    )
+    .await
+    .expect("send succeeds");
+    assert_eq!(send_code, 200);
+    let send_resp: serde_json::Value = serde_json::from_slice(&send_body).unwrap();
+    let transfer_id = send_resp["transfer_id"].as_str().unwrap().to_string();
+
+    wait_offered(&peer, Duration::from_secs(5)).await;
+    peer.user_accept_file(&transfer_id).await.unwrap();
+
+    // Wait until peer receives the file
+    let start = std::time::Instant::now();
+    loop {
+        let path = peer_dir.join("inbox").join("stats_test.bin");
+        if let Ok(bytes) = std::fs::read(&path) {
+            if bytes.len() == total_size {
+                break;
+            }
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("file did not arrive in peer inbox within 10s");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Wait until host transfer settles to Completed
+    let start = std::time::Instant::now();
+    loop {
+        let transfers = host.active_transfers();
+        if let Some(t) = transfers.iter().find(|x| x.transfer_id == transfer_id) {
+            if t.phase == TransferPhase::Completed {
+                break;
+            }
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("host transfer did not settle to Completed");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let h_stats = host.transfer_stats();
+    assert_eq!(h_stats.bytes_sent, total_size as u64);
+    assert_eq!(h_stats.completed_count, 1);
+    assert_eq!(h_stats.failed_count, 0);
+
+    let p_stats = peer.transfer_stats();
+    assert_eq!(p_stats.bytes_received, total_size as u64);
+    assert_eq!(p_stats.completed_count, 1);
+
+    // 3. Perform a rejected transfer and verify failed_count increments
+    let file2_path = send_dir.join("reject_test.bin");
+    std::fs::write(&file2_path, b"quick fail").unwrap();
+    let payload2 = serde_json::json!({
+        "path": file2_path.to_str().unwrap(),
+        "name": "reject_test.bin",
+    });
+    let (s2_code, s2_body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/send",
+        &serde_json::to_vec(&payload2).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(s2_code, 200);
+    let s2_resp: serde_json::Value = serde_json::from_slice(&s2_body).unwrap();
+    let transfer_id2 = s2_resp["transfer_id"].as_str().unwrap().to_string();
+
+    wait_offered(&peer, Duration::from_secs(5)).await;
+    peer.user_reject_file(&transfer_id2).await.unwrap();
+
+    let start = std::time::Instant::now();
+    loop {
+        let transfers = host.active_transfers();
+        if let Some(t) = transfers.iter().find(|x| x.transfer_id == transfer_id2) {
+            if t.phase == TransferPhase::Failed {
+                break;
+            }
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!("host transfer did not settle to Failed on peer rejection");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let h_stats2 = host.transfer_stats();
+    assert_eq!(h_stats2.bytes_sent, total_size as u64);
+    assert_eq!(h_stats2.completed_count, 1);
+    assert_eq!(h_stats2.failed_count, 1);
+
+    // 4. Test clearing finished transfers via loopback API
+    let host_transfers = host.active_transfers();
+    assert_eq!(host_transfers.len(), 2);
+
+    let (clear_code, clear_body) =
+        tetherly_node::loopback_post(ui_port, "/api/file/clear", b"{}")
+            .await
+            .expect("clear succeeds");
+    assert_eq!(clear_code, 200);
+    let clear_resp: serde_json::Value = serde_json::from_slice(&clear_body).unwrap();
+    assert_eq!(clear_resp["ok"], true);
+    assert_eq!(clear_resp["cleared"], 2);
+
+    // Transfers list is now empty, but transfer_stats remain preserved
+    assert!(host.active_transfers().is_empty());
+    let h_stats3 = host.transfer_stats();
+    assert_eq!(h_stats3.bytes_sent, total_size as u64);
+    assert_eq!(h_stats3.completed_count, 1);
+    assert_eq!(h_stats3.failed_count, 1);
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

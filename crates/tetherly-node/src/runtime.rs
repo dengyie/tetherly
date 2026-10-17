@@ -236,6 +236,18 @@ pub struct ActiveTransfer {
     pub updated_ms: u64,
 }
 
+/// Maximum number of completed/failed transfer records retained in memory.
+pub const MAX_TERMINAL_TRANSFERS: usize = 64;
+
+/// Session aggregate transfer metrics across all inbound and outbound files.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TransferStats {
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub completed_count: u64,
+    pub failed_count: u64,
+}
+
 enum OutboundSource {
     Bytes(Vec<u8>),
     Path(std::path::PathBuf),
@@ -320,6 +332,7 @@ struct Shared {
     pending_out: Mutex<HashMap<String, OutboundFile>>,
     active_transfers: Mutex<HashMap<String, ActiveTransfer>>,
     transfer_cancels: Mutex<HashMap<String, oneshot::Sender<()>>>,
+    transfer_stats: Mutex<TransferStats>,
     bound_control: AtomicU16,
     bound_file: AtomicU16,
     bound_input: AtomicU16,
@@ -495,6 +508,7 @@ impl Node {
             pending_out: Mutex::new(HashMap::new()),
             active_transfers: Mutex::new(HashMap::new()),
             transfer_cancels: Mutex::new(HashMap::new()),
+            transfer_stats: Mutex::new(TransferStats::default()),
             bound_control,
             bound_file,
             bound_input,
@@ -3092,6 +3106,23 @@ impl Node {
         }
     }
 
+    fn prune_terminal_transfers_locked(transfers: &mut HashMap<String, ActiveTransfer>) {
+        let mut terminal: Vec<(String, u64)> = transfers
+            .iter()
+            .filter(|(_, t)| {
+                t.phase == TransferPhase::Completed || t.phase == TransferPhase::Failed
+            })
+            .map(|(id, t)| (id.clone(), t.updated_ms))
+            .collect();
+        if terminal.len() > MAX_TERMINAL_TRANSFERS {
+            terminal.sort_by_key(|(_, ts)| *ts);
+            let excess = terminal.len() - MAX_TERMINAL_TRANSFERS;
+            for (id, _) in terminal.into_iter().take(excess) {
+                transfers.remove(&id);
+            }
+        }
+    }
+
     pub fn set_transfer_phase(
         &self,
         transfer_id: &str,
@@ -3104,12 +3135,38 @@ impl Node {
             if t.phase == TransferPhase::Failed && phase != TransferPhase::Failed {
                 return;
             }
+            let was_in_flight = t.phase == TransferPhase::Transferring
+                || t.phase == TransferPhase::Verifying;
+            if was_in_flight {
+                let mut stats = self.shared.transfer_stats.lock().expect("transfer_stats");
+                match phase {
+                    TransferPhase::Completed => {
+                        match t.direction {
+                            TransferDirection::Outbound => {
+                                stats.bytes_sent = stats.bytes_sent.saturating_add(t.total);
+                            }
+                            TransferDirection::Inbound => {
+                                stats.bytes_received = stats.bytes_received.saturating_add(t.total);
+                            }
+                        }
+                        stats.completed_count = stats.completed_count.saturating_add(1);
+                    }
+                    TransferPhase::Failed => {
+                        stats.failed_count = stats.failed_count.saturating_add(1);
+                    }
+                    _ => {}
+                }
+            }
             if phase == TransferPhase::Completed || phase == TransferPhase::Failed {
                 t.speed_bps = 0;
             }
             t.phase = phase;
             t.error = error;
             t.updated_ms = now;
+
+            if phase == TransferPhase::Completed || phase == TransferPhase::Failed {
+                Self::prune_terminal_transfers_locked(&mut transfers);
+            }
         }
     }
 
@@ -3118,6 +3175,25 @@ impl Node {
         let mut list: Vec<ActiveTransfer> = transfers.values().cloned().collect();
         list.sort_by_key(|a| std::cmp::Reverse(a.started_ms));
         list
+    }
+
+    pub fn transfer_stats(&self) -> TransferStats {
+        self.shared.transfer_stats.lock().expect("transfer_stats").clone()
+    }
+
+    pub fn clear_terminal_transfers(&self) -> usize {
+        let mut transfers = self.shared.active_transfers.lock().expect("transfers");
+        let to_remove: Vec<String> = transfers
+            .iter()
+            .filter(|(_, t)| {
+                t.phase == TransferPhase::Completed || t.phase == TransferPhase::Failed
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &to_remove {
+            transfers.remove(id);
+        }
+        to_remove.len()
     }
 
     /// Cancel an active in-flight transfer (inbound or outbound).
@@ -3133,6 +3209,10 @@ impl Node {
             if t.phase != TransferPhase::Transferring && t.phase != TransferPhase::Verifying {
                 return Err(CoreError::File("transfer is not active".into()));
             }
+            {
+                let mut stats = self.shared.transfer_stats.lock().expect("transfer_stats");
+                stats.failed_count = stats.failed_count.saturating_add(1);
+            }
             t.phase = TransferPhase::Failed;
             t.error = Some("cancelled by user".into());
             t.speed_bps = 0;
@@ -3140,6 +3220,7 @@ impl Node {
 
             let peer = t.peer.clone();
             pending.remove(transfer_id);
+            Self::prune_terminal_transfers_locked(&mut transfers);
             (cancels.remove(transfer_id), peer)
         };
 
@@ -3174,6 +3255,85 @@ fn parse_file_port(caps: &[String]) -> Option<u16> {
 
 fn parse_input_port(caps: &[String]) -> Option<u16> {
     parse_port_cap(caps, "inputport=")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_retention_prunes_oldest_terminal_transfers() {
+        let mut transfers = HashMap::new();
+        let peer = DeviceId::parse("tdev_a1b2c3d4e5f6g7h8").unwrap();
+
+        // 1 in-flight transfer
+        transfers.insert(
+            "active_1".to_string(),
+            ActiveTransfer {
+                transfer_id: "active_1".to_string(),
+                peer: peer.clone(),
+                direction: TransferDirection::Outbound,
+                filename: "active.bin".to_string(),
+                total: 1000,
+                transferred: 500,
+                speed_bps: 100,
+                phase: TransferPhase::Transferring,
+                error: None,
+                started_ms: 100,
+                updated_ms: 200,
+            },
+        );
+
+        // Add MAX_TERMINAL_TRANSFERS + 20 terminal transfers with increasing timestamps
+        for i in 0..(MAX_TERMINAL_TRANSFERS + 20) {
+            let tid = format!("term_{i}");
+            transfers.insert(
+                tid.clone(),
+                ActiveTransfer {
+                    transfer_id: tid,
+                    peer: peer.clone(),
+                    direction: TransferDirection::Inbound,
+                    filename: format!("file_{i}.bin"),
+                    total: 100,
+                    transferred: 100,
+                    speed_bps: 0,
+                    phase: if i % 2 == 0 {
+                        TransferPhase::Completed
+                    } else {
+                        TransferPhase::Failed
+                    },
+                    error: None,
+                    started_ms: (i as u64) * 10,
+                    updated_ms: (i as u64) * 10 + 5,
+                },
+            );
+        }
+
+        Node::prune_terminal_transfers_locked(&mut transfers);
+
+        // The active transfer MUST NOT be pruned
+        assert!(transfers.contains_key("active_1"));
+        assert_eq!(
+            transfers.get("active_1").unwrap().phase,
+            TransferPhase::Transferring
+        );
+
+        // Terminal count must be exactly MAX_TERMINAL_TRANSFERS
+        let terminal_count = transfers
+            .values()
+            .filter(|t| t.phase == TransferPhase::Completed || t.phase == TransferPhase::Failed)
+            .count();
+        assert_eq!(terminal_count, MAX_TERMINAL_TRANSFERS);
+
+        // The 20 oldest terminal transfers (i = 0..20) must have been pruned
+        for i in 0..20 {
+            assert!(!transfers.contains_key(&format!("term_{i}")));
+        }
+        // Newer terminal transfers must be kept
+        for i in 20..(MAX_TERMINAL_TRANSFERS + 20) {
+            assert!(transfers.contains_key(&format!("term_{i}")));
+        }
+    }
 }
 
 fn parse_screen_port(caps: &[String]) -> Option<u16> {

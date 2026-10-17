@@ -3,12 +3,45 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.29** |
+| 文档版本 | **1.30** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.29 落地全双工传输任务取消机制、控制面非阻塞解耦与回环控制全闭环（ADR-022）**——(1) **控制通道非阻塞解耦 (`tokio::spawn`)**：将出站大文件数据流从 45717 控制会话的 `handle_event` 轮询循环中解耦至后台 `tokio::spawn` 异步任务，彻底消除大文件传输引起的控制帧饥饿，保证心跳与即时消息毫秒级吞吐；(2) **全双工原子取消控制原语 (`transfer_cancels`)**：`Shared` 引入 `transfer_cancels: Mutex<HashMap<String, oneshot::Sender<()>>>`，入站与出站传输经 `tokio::select!` 挂载，`cancel_transfer` 触发即刻通过 RAII 熔断 TCP 传输流与文件句柄，将状态跃迁至 `Failed` 并清零 `speed_bps`；(3) **回环 API 与 CLI/UI 联动 (`POST /api/file/cancel`)**：暴露回环取消接口，`tetherly cancel <id>` 与 `tetherly-cli cancel <id>` 命令行直通，并补齐 `tetherly-cli notify`；Web UI 活跃传输卡片增加动态 `[取消]` 操作按钮；(4) **CI-First 全绿验证**：集成测试覆盖流式传输取消、速率清零、幂等校验、后续通知与新文件传输全链路健康度。+ v1.28 落地 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.30 落地传输生命周期全域管控、会话级传输度量与有限留存治理（ADR-023）**——(1) **终态有限留存上限治理 (`MAX_TERMINAL_TRANSFERS = 64`)**：在 `Shared.active_transfers` 引入 `prune_terminal_transfers_locked` 机制，当终态记录（`Completed` / `Failed`）超出上限时按时间戳淘汰最旧记录，彻底根除长期运行守护进程的内存泄漏，同时严格保护在途传输（`Transferring` / `Verifying`）绝不被逐出；(2) **会话级持久化传输度量 (`TransferStats`)**：引入持久化聚合计数器，解耦瞬态传输卡片与长期吞吐统计，精准度量 `bytes_sent`、`bytes_received`、`completed_count` 与 `failed_count`，并在终态跃迁与取消时原子累加；(3) **原子安全历史清理控制原语 (`clear_terminal_transfers` 与 `POST /api/file/clear`)**：提供锁保护下的单次原子过滤清理，仅清除终态记录，在途传输完全免受影响，回环控制端暴露 API；(4) **CLI 与 Web UI 全端呈现**：`tetherly clear-transfers` 与 `tetherly-cli clear-transfers` 命令行直通，`status` 命令格式化呈现传输聚合度量；Web UI（`ui/index.html`）新增“清除完成记录”快捷按钮与实时累计传输度量概览条；(5) **端到端集成测试与 5 平台 CI 全绿闭环**。+ v1.29 落地全双工传输任务取消机制、控制面非阻塞解耦与回环控制全闭环（ADR-022）+ v1.28 落地 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.30 相对 1.29(传输生命周期全域管控、会话级传输度量与有限留存治理)**
+
+- **动机(长期运行守护进程内存膨胀隐患与生命周期管理缺失)**:
+  在 v1.27 引入 `ActiveTransfer` 与 v1.29 完善取消控制后，所有入站和出站的文件传输任务（无论处于 `Completed` 还是 `Failed` 终态）均长期滞留在 `Shared.active_transfers: Mutex<HashMap<String, ActiveTransfer>>` 中。
+  1. **内存泄漏与快照膨胀**：在长周期运行的节点（如桌面常驻服务、连续同步数百个文件的场景）中，已完成的历史传输记录无限累积，造成堆内存单调增长，且使回环接口 `GET /api/state` 响应体中的 `Snapshot.transfers` 无限膨胀，拖慢前端与 CLI 轮询性能；
+  2. **全局传输吞吐度量缺失**：系统缺乏会话生命周期内的累加传输度量（总发送字节、总接收字节、成功计数、失败计数），若直接清空传输列表，用户将丢失长期传输统计；
+  3. **历史记录缺乏原子安全清理机制**：前端与终端缺少清除已完成任务的入口，且清理必须在原子锁保护下严格过滤终态项，决不能误删正在网络中分块传输（`Transferring`）或 SHA-256 校验中（`Verifying`）的在途任务。
+
+- **架构与协议设计(ADR-023 传输生命周期全域管控与会话级度量)**:
+  1. **终态有限留存治理 (`MAX_TERMINAL_TRANSFERS = 64`)**:
+     - 在 `tetherly-node::runtime` 定义上限常量 `pub const MAX_TERMINAL_TRANSFERS: usize = 64`；
+     - 实现 `prune_terminal_transfers_locked(transfers: &mut HashMap<String, ActiveTransfer>)`：仅当终态记录（`Completed` 或 `Failed`）数量超过 64 条时，提取对应的时间戳（`updated_ms`）按升序排列，逐一淘汰最久远的终态项；
+     - **强隔离不变量**：处于 `Transferring` 或 `Verifying` 的在途活跃传输绝不被标记为候选淘汰项，无论累积多少条终态记录，在途传输永远免于被淘汰。
+  2. **会话级持久化传输度量 (`TransferStats`)**:
+     - 引入结构体 `TransferStats { pub bytes_sent: u64, pub bytes_received: u64, pub completed_count: u64, pub failed_count: u64 }`；
+     - 挂载于 `Shared.transfer_stats: Mutex<TransferStats>`，与易失的传输卡片彻底解耦；
+     - 在传输状态流转（`set_transfer_phase`）跃迁至 `Completed` 时，依据传输方向分别累加 `bytes_sent` 或 `bytes_received` 并递增 `completed_count`；
+     - 在传输跃迁至 `Failed` 或调用 `cancel_transfer` 时原子递增 `failed_count`，设置防重计数守卫（仅在非终态跃迁时累加一次）；
+     - 即使清空或淘汰历史卡片，节点运行期间的全局度量数据依然准确持久存在。
+  3. **原子安全历史清理控制原语 (`clear_terminal_transfers`)**:
+     - `Node::clear_terminal_transfers(&self) -> usize`：在单次获取 `active_transfers` 锁的过程中，原子收集所有处于 `Completed` 或 `Failed` 的键并将其移除，返回清理数量；
+     - 正在进行的传输任务不受任何影响，避免并发网络流读写异常或状态混乱。
+  4. **回环 API 扩充 (`POST /api/file/clear`)**:
+     - 在 `crates/tetherly-node/src/uihttp.rs` 增加 `POST /api/file/clear` 路由，执行 `clear_terminal_transfers` 并响应 `{"ok": true, "cleared": N}`；
+     - 将 `transfer_stats` 聚合度量挂入 `GET /api/state` 的 `Snapshot` 模型中向客户端持续广播。
+  5. **CLI 与 Web UI 全端呈现**:
+     - `tetherly` 与 `tetherly-cli` 引入 `clear-transfers` 子命令，一键清理已完成历史；
+     - `tetherly status` 命令在概览中呈现会话累计度量：`Transfer Metrics: sent: ..., received: ..., completed: ..., failed: ...`；
+     - Web UI（`ui/index.html`）在卡片栏添加快捷操作按钮 `<button id="cleartransfers">清除完成记录</button>`，并在传输区顶部渲染累计吞吐与成功/失败总计状态条。
+  6. **端到端集成测试与 CI 全量验证**:
+     - 单元测试：`bounded_retention_prunes_oldest_terminal_transfers` 验证自动淘汰逻辑与在途保护；
+     - 集成测试：`transfer_lifecycle_governance_and_stats` 验证端到端成功/失败传输度量累加、API 清理终态记录以及在途传输不受干扰的不变量。
 
 **1.29 相对 1.28(全双工传输任务取消机制、控制面非阻塞解耦与回环控制全闭环)**
 

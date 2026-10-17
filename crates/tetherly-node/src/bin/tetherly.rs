@@ -131,6 +131,12 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Clear completed and failed file transfers from history.
+    ClearTransfers {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -472,6 +478,26 @@ async fn main() -> Result<()> {
             }
             println!("cancelled transfer [{id}]");
         }
+        Cmd::ClearTransfers { ui_port } => {
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/file/clear", b"{}")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "clear failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let v: serde_json::Value =
+                serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            let cleared = v.get("cleared").and_then(|c| c.as_u64()).unwrap_or(0);
+            println!("cleared {cleared} finished transfer(s) from history");
+        }
         Cmd::Status {
             watch,
             interval,
@@ -565,6 +591,20 @@ fn print_status_summary(v: &serde_json::Value) {
                 format_bytes(total)
             );
         }
+    }
+
+    if let Some(stats) = v.get("transfer_stats") {
+        let sent = stats.get("bytes_sent").and_then(|v| v.as_u64()).unwrap_or(0);
+        let recv = stats.get("bytes_received").and_then(|v| v.as_u64()).unwrap_or(0);
+        let completed = stats.get("completed_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let failed = stats.get("failed_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        println!(
+            "  Transfer Metrics: sent: {}, received: {}, completed: {}, failed: {}",
+            format_bytes(sent),
+            format_bytes(recv),
+            completed,
+            failed
+        );
     }
 }
 
