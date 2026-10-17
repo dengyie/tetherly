@@ -243,6 +243,7 @@ enum OutboundSource {
 
 struct OutboundFile {
     peer: DeviceId,
+    #[allow(dead_code)]
     name: String,
     source: OutboundSource,
     size: u64,
