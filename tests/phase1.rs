@@ -1345,7 +1345,7 @@ async fn peer_unpair_and_trust_revocation() {
     let (host, peer, g1, _g2) = pair_phone_desktop().await;
     let ui_port = host.spawn_ui().await.unwrap();
 
-    let peer_id = peer.device_id();
+    let peer_id = peer.identity().device_id().clone();
 
     // 1. Peer is initially in trusted and live peers
     let trusted_init = host.trusted();
