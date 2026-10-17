@@ -1115,6 +1115,39 @@ impl Node {
         }
     }
 
+    /// Revoke trust and actively sever any connection with `device_id`.
+    ///
+    /// Purges the peer from the in-memory `TrustStore`, atomically re-persists
+    /// `trusted.json`, forgets remembered routes in `routes.json`, terminates
+    /// active session streaming by dropping its outbound sender, evicts the peer
+    /// from live state, and emits `PeerDown`. Returns `true` if the peer was known
+    /// and removed, `false` otherwise.
+    pub async fn unpair(&self, device_id: &DeviceId) -> bool {
+        let mut store = self.shared.trust.lock().expect("trust");
+        let had_trust = store.peers.remove(device_id).is_some();
+        drop(store);
+        self.persist_trust();
+        let _ = crate::store::forget_route(&self.shared.cfg.data_dir, device_id.as_str());
+
+        let had_session = self.shared.sessions.lock().await.remove(device_id).is_some();
+        let had_live = self
+            .shared
+            .live
+            .lock()
+            .expect("live")
+            .remove(device_id)
+            .is_some();
+        if *self.shared.input_seat.lock().expect("seat") == Some(CursorSeat::Remote) {
+            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        }
+        if had_session || had_live {
+            self.emit(UiEvent::PeerDown {
+                device_id: device_id.to_string(),
+            });
+        }
+        had_trust || had_session || had_live
+    }
+
     fn already_live_on_ip(&self, addr: SocketAddr) -> bool {
         self.shared
             .live

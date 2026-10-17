@@ -1340,6 +1340,84 @@ async fn transfer_lifecycle_governance_and_stats() {
     peer.shutdown();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_unpair_and_trust_revocation() {
+    let (host, peer, g1, _g2) = pair_phone_desktop().await;
+    let ui_port = host.spawn_ui().await.unwrap();
+
+    let peer_id = peer.device_id();
+
+    // 1. Peer is initially in trusted and live peers
+    let trusted_init = host.trusted();
+    assert!(trusted_init.iter().any(|p| p.device_id == peer_id));
+    assert_eq!(host.live_peers().len(), 1);
+
+    // 2. Unpair via loopback API
+    let payload = serde_json::json!({
+        "device_id": peer_id.as_str(),
+    });
+    let (code, body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/peers/unpair",
+        &serde_json::to_vec(&payload).unwrap(),
+    )
+    .await
+    .expect("unpair post succeeds");
+    assert_eq!(code, 200);
+    let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["device_id"], peer_id.as_str());
+    assert_eq!(resp["unpaired"], true);
+
+    // 3. Peer is immediately removed from in-memory trust store
+    let trusted_after = host.trusted();
+    assert!(!trusted_after.iter().any(|p| p.device_id == peer_id));
+
+    // 4. Peer is removed from persisted trusted.json on disk
+    let loaded_store = tetherly_node::store::load_trust(g1.path()).unwrap();
+    assert!(!loaded_store.all().iter().any(|p| p.device_id == peer_id));
+
+    // 5. Active connection is severed
+    let start = std::time::Instant::now();
+    loop {
+        if host.live_peers().is_empty() {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!("live peer was not evicted within 5s after unpair");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // 6. Idempotent unpair of already-removed peer returns unpaired: false
+    let (code2, body2) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/peers/unpair",
+        &serde_json::to_vec(&payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code2, 200);
+    let resp2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+    assert_eq!(resp2["unpaired"], false);
+
+    // 7. Invalid device_id returns 400 Bad Request
+    let bad_payload = serde_json::json!({
+        "device_id": "invalid_id_format",
+    });
+    let (code3, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/peers/unpair",
+        &serde_json::to_vec(&bad_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code3, 400);
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

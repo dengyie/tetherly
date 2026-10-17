@@ -282,6 +282,11 @@ struct IdBody {
 }
 
 #[derive(serde::Deserialize)]
+struct UnpairBody {
+    device_id: String,
+}
+
+#[derive(serde::Deserialize)]
 struct ReplyBody {
     id: String,
     text: String,
@@ -326,6 +331,20 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                     Err(_) => err(400, "bad addr"),
                 }
             }
+            Err(_) => err(400, "bad json"),
+        },
+        ("POST", "/api/peers/unpair") => match serde_json::from_slice::<UnpairBody>(body) {
+            Ok(d) => match tetherly_core::DeviceId::parse(&d.device_id) {
+                Ok(id) => {
+                    let removed = node.unpair(&id).await;
+                    json_ok(&serde_json::json!({
+                        "ok": true,
+                        "device_id": id.as_str(),
+                        "unpaired": removed
+                    }))
+                }
+                Err(_) => err(400, "invalid device_id"),
+            },
             Err(_) => err(400, "bad json"),
         },
         // Deliver a notify.push on the live Noise session. Only this process

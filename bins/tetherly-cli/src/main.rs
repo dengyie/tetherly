@@ -97,6 +97,14 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Unpair and revoke trust for a paired peer device by device_id.
+    Unpair {
+        /// Device ID of the peer to unpair (tdev_...).
+        device_id: String,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -425,6 +433,32 @@ async fn main() -> Result<()> {
                 serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
             let cleared = v.get("cleared").and_then(|c| c.as_u64()).unwrap_or(0);
             println!("cleared {cleared} finished transfer(s) from history");
+        }
+        Cmd::Unpair { device_id, ui_port } => {
+            let payload = serde_json::json!({ "device_id": device_id });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = loopback_post(ui_port, "/api/peers/unpair", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "node refused unpair (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let v: serde_json::Value =
+                serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            let unpaired = v.get("unpaired").and_then(|u| u.as_bool()).unwrap_or(false);
+            if unpaired {
+                println!("unpaired and severed connection with {device_id}");
+            } else {
+                println!("peer {device_id} was not in trusted peers list");
+            }
         }
         Cmd::Status {
             watch,

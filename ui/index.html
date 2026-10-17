@@ -359,9 +359,17 @@ function render(s) {
     sp.innerHTML = '<option value="">自动（唯一在线对端）</option>';
   }
   for (const x of s.peers) {
-    p.appendChild(el('<div class="card"><div><div class="title"></div><div class="meta"></div></div></div>'));
-    p.lastChild.querySelector(".title").textContent = x.name;
-    p.lastChild.querySelector(".meta").textContent = x.platform + " · " + (x.path || "lan") + " · " + x.device_id;
+    const card = el('<div class="card"><div style="flex:1"><div class="title"></div><div class="meta"></div></div><div class="row"><button class="bad ghost" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
+    card.querySelector(".title").textContent = x.name;
+    card.querySelector(".meta").textContent = x.platform + " · " + (x.path || "lan") + " · " + x.device_id;
+    const unpairBtn = card.querySelector("button");
+    unpairBtn.onclick = async () => {
+      if (confirm("确认解除与设备 " + x.name + " (" + x.device_id + ") 的配对？")) {
+        await api("/api/peers/unpair", { device_id: x.device_id });
+        poll();
+      }
+    };
+    p.appendChild(card);
     if (sp) {
       const opt = document.createElement("option");
       opt.value = x.device_id;

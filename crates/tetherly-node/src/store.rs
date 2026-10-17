@@ -148,6 +148,12 @@ pub fn remember_route(dir: &Path, device_id: &str, addr: &str) -> Result<(), Nod
     save_routes(dir, &table)
 }
 
+pub fn forget_route(dir: &Path, device_id: &str) -> Result<(), NodeStoreError> {
+    let mut table = load_routes(dir);
+    table.routes.retain(|r| r.device_id != device_id);
+    save_routes(dir, &table)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -198,6 +204,25 @@ mod tests {
         save_trust(&dir, &store).unwrap();
         let loaded = load_trust(&dir).unwrap();
         assert_eq!(loaded.all().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn route_remember_and_forget_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("tetherly-route-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        remember_route(&dir, "tdev_peer1", "127.0.0.1:45717").unwrap();
+        remember_route(&dir, "tdev_peer2", "127.0.0.1:45718").unwrap();
+        let routes = load_routes(&dir);
+        assert_eq!(routes.routes.len(), 2);
+
+        forget_route(&dir, "tdev_peer1").unwrap();
+        let routes2 = load_routes(&dir);
+        assert_eq!(routes2.routes.len(), 1);
+        assert_eq!(routes2.routes[0].device_id, "tdev_peer2");
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

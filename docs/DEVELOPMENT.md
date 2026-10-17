@@ -3,12 +3,47 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.30** |
+| 文档版本 | **1.31** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.30 落地传输生命周期全域管控、会话级传输度量与有限留存治理（ADR-023）**——(1) **终态有限留存上限治理 (`MAX_TERMINAL_TRANSFERS = 64`)**：在 `Shared.active_transfers` 引入 `prune_terminal_transfers_locked` 机制，当终态记录（`Completed` / `Failed`）超出上限时按时间戳淘汰最旧记录，彻底根除长期运行守护进程的内存泄漏，同时严格保护在途传输（`Transferring` / `Verifying`）绝不被逐出；(2) **会话级持久化传输度量 (`TransferStats`)**：引入持久化聚合计数器，解耦瞬态传输卡片与长期吞吐统计，精准度量 `bytes_sent`、`bytes_received`、`completed_count` 与 `failed_count`，并在终态跃迁与取消时原子累加；(3) **原子安全历史清理控制原语 (`clear_terminal_transfers` 与 `POST /api/file/clear`)**：提供锁保护下的单次原子过滤清理，仅清除终态记录，在途传输完全免受影响，回环控制端暴露 API；(4) **CLI 与 Web UI 全端呈现**：`tetherly clear-transfers` 与 `tetherly-cli clear-transfers` 命令行直通，`status` 命令格式化呈现传输聚合度量；Web UI（`ui/index.html`）新增“清除完成记录”快捷按钮与实时累计传输度量概览条；(5) **端到端集成测试与 5 平台 CI 全绿闭环**。+ v1.29 落地全双工传输任务取消机制、控制面非阻塞解耦与回环控制全闭环（ADR-022）+ v1.28 落地 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.31 落地信任关系主动解绑与设备安全生命周期治理（ADR-024）**——(1) **端到端信任解绑原语 (`Node::unpair`)**：在 `Shared.trust` 内存信任库中彻底移除对端设备凭据，原子重写并落盘 `trusted.json`，同步调用 `forget_route` 清除 `routes.json` 寻址缓存；(2) **即时会话熔断与状态清理**：在持有 `Shared.sessions` 异步锁下弹出对端发送信道并丢弃，即刻触发对端会话任务与底层 TCP 链接安全断开；从 `Shared.live` 活跃对端表注销，重置远程键鼠座位所有权并向全域广播 `UiEvent::PeerDown`；(3) **回环 API 扩充 (`POST /api/peers/unpair`)**：提供受严格 127.0.0.1 绑核与 Host 头校验保护的回环 API，安全接收 `{"device_id": "tdev_..."}` 并返回解绑结果；(4) **CLI 与 Web UI 全闭环**：`tetherly unpair <device_id>` 与 `tetherly-cli unpair <device_id>` 终端直通，Web UI（`ui/index.html`）对端卡片新增“解除配对”确认交互；(5) **端到端集成测试全覆盖与 5 平台 CI 矩阵全绿**。+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.31 相对 1.30(信任关系主动解绑与设备安全生命周期治理)**
+
+- **动机(配对设备永久驻留风险与主动安全解除机制缺失)**:
+  在此前版本中，设备经 SPAKE2 验证及 Noise IK 握手成功后，其公钥和设备凭据将持久化保存在 `trusted.json` 中。
+  1. **无法撤销配对关系**：系统缺乏主动解绑（Unpair）或撤销信任的控制原语。当用户设备淘汰、遗失、转借或不再需要同步时，无法通过系统命令或控制台移除对端信任，唯一途径是手动停止服务并手动编辑底层 JSON 文件；
+  2. **活跃会话未能即时熔断**：即使通过外部手段修改信任文件，正在运行中的守护进程仍维系着 45717 会话通道与 45718/45719/45720 流通道，被移除的设备仍能继续触发通知、传输文件或操控键鼠；
+  3. **寻址路由未同步清理**：`routes.json` 中残留的过往寻址信息会导致守护进程后台仍周期性重拨已失信的对端设备。
+
+- **架构与协议设计(ADR-024 信任关系主动解绑与设备生命周期治理)**:
+  1. **存储层路由遗忘原语 (`forget_route`)**:
+     - 在 `crates/tetherly-node/src/store.rs` 增加 `pub fn forget_route(dir: &Path, device_id: &str) -> Result<(), NodeStoreError>`；
+     - 依据 `device_id` 原子过滤并更新 `routes.json`，防止后续自动重连尝试；
+     - 增加单元测试 `route_remember_and_forget_roundtrip` 验证路由增删的一致性。
+  2. **节点运行时解绑控制原语 (`Node::unpair`)**:
+     - 在 `crates/tetherly-node/src/runtime.rs` 实现 `pub async fn unpair(&self, device_id: &DeviceId) -> bool`；
+     - **原子清理内存信任库**：获取 `Shared.trust: Mutex<MemoryTrustStore>` 锁，调用 `store.peers.remove(device_id)` 彻底销毁凭据；
+     - **原子落盘**：调用 `self.persist_trust()` 将更新后的信任表原子同步至磁盘上的 `trusted.json`；
+     - **路由清除**：调用 `forget_route` 移除物理寻址缓存；
+     - **即时会话断开**：异步锁定 `Shared.sessions` 并移除对应的 `mpsc::Sender<InnerFrame>`，丢弃发送端以关闭 channel，底层连接监听循环侦测到关闭后立即终止 TCP 链路；
+     - **状态驱逐与事件广播**：从 `Shared.live` 移除对端记录，若该对端持有输入座位则重置回本地模式，最后广播 `UiEvent::PeerDown`。
+  3. **回环 API 扩充 (`POST /api/peers/unpair`)**:
+     - 在 `crates/tetherly-node/src/uihttp.rs` 增加 `POST /api/peers/unpair` 路由；
+     - 接收 JSON 载荷 `{"device_id": "tdev_..."}`，校验 RFC 4648 base32 格式合法性（非法格式返回 400 Bad Request）；
+     - 响应 `{"ok": true, "device_id": "...", "unpaired": bool}`，幂等支持重复解绑查询。
+  4. **全端 CLI 与 Web UI 对接**:
+     - `tetherly` 与 `tetherly-cli` 引入 `unpair <device_id>` 子命令；
+     - Web UI（`ui/index.html`）在对端卡片上增设 `<button class="bad ghost">解除配对</button>` 按钮，点击经确认后调用解绑 API 并自动刷新对端列表。
+  5. **端到端集成测试与 CI 全量验证**:
+     - 在 `tests/phase1.rs` 增加端到端测试 `peer_unpair_and_trust_revocation`：
+       - 验证初始信任与活跃连接；
+       - 验证调用 `POST /api/peers/unpair` 成功解绑；
+       - 验证内存 `trusted()` 与磁盘 `trusted.json` 均彻底无对端记录；
+       - 验证活跃网络会话被立刻切断且 `live_peers()` 降为 0；
+       - 验证幂等解绑返回 `unpaired: false` 与非法设备 ID 校验拒绝。
 
 **1.30 相对 1.29(传输生命周期全域管控、会话级传输度量与有限留存治理)**
 
