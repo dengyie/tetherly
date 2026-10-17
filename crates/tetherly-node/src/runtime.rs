@@ -1217,9 +1217,7 @@ impl Node {
                         Some(t.alias.clone())
                     }
                 });
-                let name = matched_live
-                    .map(|l| l.name.clone())
-                    .or_else(|| matched_trusted.map(|t| t.name.clone()));
+                let name = matched_live.map(|l| l.name.clone());
 
                 RouteEntryDto {
                     device_id: r.device_id,
