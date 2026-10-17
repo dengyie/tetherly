@@ -1123,9 +1123,10 @@ impl Node {
     /// from live state, and emits `PeerDown`. Returns `true` if the peer was known
     /// and removed, `false` otherwise.
     pub async fn unpair(&self, device_id: &DeviceId) -> bool {
-        let mut store = self.shared.trust.lock().expect("trust");
-        let had_trust = store.peers.remove(device_id).is_some();
-        drop(store);
+        let had_trust = {
+            let mut store = self.shared.trust.lock().expect("trust");
+            store.peers.remove(device_id).is_some()
+        };
         self.persist_trust();
         let _ = crate::store::forget_route(&self.shared.cfg.data_dir, device_id.as_str());
 
