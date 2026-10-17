@@ -982,7 +982,7 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
     // 1. Prepare a test file
     let (send_dir, _g_send) = temp_dir("cancel-send");
     let file_path = send_dir.join("cancellable.bin");
-    let total_size = 5 * tetherly_core::FILE_CHUNK + 1024;
+    let total_size = 10 * tetherly_core::FILE_CHUNK + 1024;
     let file_content: Vec<u8> = vec![0x42; total_size];
     std::fs::write(&file_path, &file_content).unwrap();
 
@@ -1005,6 +1005,21 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
     // Peer accepts the offer so the transfer is actively in flight
     wait_offered(&peer, Duration::from_secs(5)).await;
     peer.user_accept_file(&transfer_id).await.unwrap();
+
+    // Wait until the transfer is actively in-flight and streaming chunks
+    let start_stream = std::time::Instant::now();
+    loop {
+        let transfers = host.active_transfers();
+        if let Some(t) = transfers.iter().find(|x| x.transfer_id == transfer_id) {
+            if t.transferred > 0 {
+                break;
+            }
+        }
+        if start_stream.elapsed() > Duration::from_secs(5) {
+            panic!("transfer did not begin streaming chunks within 5s");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     // 3. Cancel the in-flight transfer via loopback API
     let cancel_payload = serde_json::json!({
