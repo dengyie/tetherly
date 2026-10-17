@@ -5,7 +5,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tetherly_core::{hex_sha256, FileMeta, FileOffer, ManualClock, NotifyPush, CANDIDATE_TTL_MS};
+use tetherly_core::{
+    hex_sha256, FileMeta, FileOffer, ManualClock, NotifyPush, TrustStore, CANDIDATE_TTL_MS,
+};
 use tetherly_node::{
     ActiveTransfer, MemoryInsertor, Node, NodeConfig, OverlayConfig, TransferDirection,
     TransferPhase, UiEvent,
