@@ -1981,7 +1981,8 @@ async fn main() -> Result<()> {
                     "advertise": advertise,
                     "reconnect": reconnect,
                 });
-                tetherly_node::loopback_post(ui_port, "/api/config", &body.to_string())
+                let bytes = serde_json::to_vec(&body)?;
+                tetherly_node::loopback_post(ui_port, "/api/config", &bytes)
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!(
