@@ -577,7 +577,9 @@ fn print_event(v: &serde_json::Value) {
         "candidate" => {
             let c = &v["candidate"];
             let id = c["id"].as_str().unwrap_or("?");
-            let app = c["app_name"].as_str().unwrap_or(c["app_id"].as_str().unwrap_or("?"));
+            let app = c["app_name"]
+                .as_str()
+                .unwrap_or(c["app_id"].as_str().unwrap_or("?"));
             let title = c["title"].as_str().unwrap_or("");
             println!("[candidate] id={id} app={app} title={title}");
         }
@@ -1836,7 +1838,7 @@ async fn main() -> Result<()> {
                 );
             }
             println!("Node daemon shutdown initiated (HTTP 200).");
-        },
+        }
         Cmd::Events {
             count,
             timeout_secs,
@@ -1892,7 +1894,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-        },
+        }
     }
     Ok(())
 }
