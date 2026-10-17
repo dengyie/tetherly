@@ -635,12 +635,14 @@ async fn main() -> Result<()> {
                 println!("sent {bytes} bytes to {sent_peers} peer(s) (sha256:{short_hash}...)");
             }
             ClipCmd::Get { ui_port } => {
-                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/clip").await.map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                         start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/clip")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
                 if code != 200 {
                     anyhow::bail!(
                         "clipboard get failed (HTTP {code}): {}",
