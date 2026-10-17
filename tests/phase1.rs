@@ -1067,7 +1067,7 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
         if peer
             .candidates()
             .iter()
-            .any(|c| c.title.as_deref() == Some("Session Health Check"))
+            .any(|c| c.title == "Session Health Check")
         {
             break;
         }
