@@ -1507,14 +1507,15 @@ async fn main() -> Result<()> {
                 }
             }
             AncsCmd::Connect { ui_port } => {
-                let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/ancs/connect", b"{}")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                let (code, resp) =
+                    tetherly_node::loopback_post(ui_port, "/api/ancs/connect", b"{}")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                              start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                            )
+                        })?;
                 if code != 200 {
                     anyhow::bail!(
                         "ANCS connect failed (HTTP {code}): {}",

@@ -661,7 +661,9 @@ async fn ancs_status_inspection_connection_and_allowlist_via_loopback_api() {
         serde_json::from_slice(&resp).expect("parse AncsReport");
     assert_eq!(report.allowlist.len(), 2);
     assert!(report.allowlist.contains(&"com.tencent.xin".to_string()));
-    assert!(report.allowlist.contains(&"com.eg.android.AlipayGphone".to_string()));
+    assert!(report
+        .allowlist
+        .contains(&"com.eg.android.AlipayGphone".to_string()));
 
     node1.shutdown();
 
