@@ -1653,15 +1653,14 @@ async fn main() -> Result<()> {
                     "addr": addr,
                 });
                 let bytes = serde_json::to_vec(&payload)?;
-                let (code, resp) =
-                    tetherly_node::loopback_post(ui_port, "/api/routes", &bytes)
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                                 start one with `tetherly --data-dir <dir> run` first"
-                            )
-                        })?;
+                let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/routes", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
                 if code != 200 {
                     anyhow::bail!(
                         "route add failed (HTTP {code}): {}",
@@ -1686,15 +1685,14 @@ async fn main() -> Result<()> {
                 ui_port,
             } => {
                 let path = format!("/api/routes?peer={}", peer.trim());
-                let (code, resp) =
-                    tetherly_node::loopback_delete(ui_port, &path)
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                                 start one with `tetherly --data-dir <dir> run` first"
-                            )
-                        })?;
+                let (code, resp) = tetherly_node::loopback_delete(ui_port, &path)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
                 if code != 200 {
                     anyhow::bail!(
                         "route remove failed (HTTP {code}): {}",

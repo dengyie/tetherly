@@ -1716,7 +1716,10 @@ async fn main() -> Result<()> {
                 }
                 let v: serde_json::Value = serde_json::from_slice(&resp)
                     .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-                let action = v.get("action").and_then(|s| s.as_str()).unwrap_or("updated");
+                let action = v
+                    .get("action")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("updated");
                 let device_id = v.get("device_id").and_then(|s| s.as_str()).unwrap_or(&peer);
                 let addr_res = v.get("addr").and_then(|s| s.as_str()).unwrap_or(&addr);
                 println!("Route {action}: {device_id} -> {addr_res}");
@@ -1745,7 +1748,10 @@ async fn main() -> Result<()> {
                 }
                 let v: serde_json::Value = serde_json::from_slice(&resp)
                     .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-                let action = v.get("action").and_then(|s| s.as_str()).unwrap_or("removed");
+                let action = v
+                    .get("action")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("removed");
                 let device_id = v.get("device_id").and_then(|s| s.as_str()).unwrap_or(&peer);
                 println!("Route {action}: {device_id}");
             }

@@ -3117,12 +3117,10 @@ async fn route_table_governance_and_static_injection_via_loopback_api() {
     }
 
     // 9. Delete route via DELETE /api/routes?peer=... (using loopback_delete)
-    let (code_del1, body_del1) = tetherly_node::loopback_delete(
-        host_ui,
-        &format!("/api/routes?peer={static_device_id}"),
-    )
-    .await
-    .expect("delete route query succeeds");
+    let (code_del1, body_del1) =
+        tetherly_node::loopback_delete(host_ui, &format!("/api/routes?peer={static_device_id}"))
+            .await
+            .expect("delete route query succeeds");
     assert_eq!(code_del1, 200);
     let del1_rep: tetherly_node::RouteMutateReport = serde_json::from_slice(&body_del1).unwrap();
     assert!(del1_rep.ok);
@@ -3138,9 +3136,7 @@ async fn route_table_governance_and_static_injection_via_loopback_api() {
         .expect("some ui event");
     match sse_event3 {
         tetherly_node::UiEvent::RouteChanged {
-            device_id,
-            action,
-            ..
+            device_id, action, ..
         } => {
             assert_eq!(device_id, static_device_id);
             assert_eq!(action, "removed");
@@ -3171,12 +3167,10 @@ async fn route_table_governance_and_static_injection_via_loopback_api() {
 
     // 11. Negative and validation test cases:
     // a. Deleting non-existent route returns 404
-    let (code_404, _) = tetherly_node::loopback_delete(
-        host_ui,
-        &format!("/api/routes?peer={static_device_id}"),
-    )
-    .await
-    .unwrap();
+    let (code_404, _) =
+        tetherly_node::loopback_delete(host_ui, &format!("/api/routes?peer={static_device_id}"))
+            .await
+            .unwrap();
     assert_eq!(code_404, 404);
 
     // b. Invalid socket address returns 400
