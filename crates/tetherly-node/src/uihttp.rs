@@ -592,6 +592,9 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                     }
                     let id = match node.resolve_peer(&target_query) {
                         Ok(id) => id,
+                        Err(tetherly_core::CoreError::PeerNotFound(_)) => {
+                            return err(404, "peer not found in trust store");
+                        }
                         Err(e) => return err(400, &e.to_string()),
                     };
                     match node.set_peer_alias(&id, &d.alias) {
@@ -627,7 +630,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                             return err(400, "peer is not connected");
                         }
                     }
-                    Err(e) => return err(400, &e.to_string()),
+                    Err(e) => return err(400, &format!("bad peer id: {e}")),
                 },
                 None => match peers.len() {
                     0 => return err(400, "no connected peer"),
@@ -772,7 +775,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                             return err(400, "peer is not connected");
                         }
                     }
-                    Err(e) => return err(400, &e.to_string()),
+                    Err(e) => return err(400, &format!("bad peer id: {e}")),
                 },
                 None => None,
             };
@@ -831,7 +834,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                                 return err(400, "peer is not connected");
                             }
                         }
-                        Err(e) => return err(400, &e.to_string()),
+                        Err(e) => return err(400, &format!("bad peer id: {e}")),
                     },
                     None => match peers.len() {
                         0 => return err(400, "no connected peer"),
@@ -1061,7 +1064,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                                 return err(400, "peer is not connected");
                             }
                         }
-                        Err(e) => return err(400, &e.to_string()),
+                        Err(e) => return err(400, &format!("bad peer id: {e}")),
                     },
                     None => match peers.len() {
                         0 => return err(400, "no connected peer"),
@@ -1256,7 +1259,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                             Err("peer is not connected".to_string())
                         }
                     }
-                    Err(e) => Err(e.to_string()),
+                    Err(e) => Err(format!("bad peer id: {e}")),
                 },
                 None => {
                     if node.screen_channel_open().await {
@@ -1321,7 +1324,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                             Err("peer is not connected".to_string())
                         }
                     }
-                    Err(e) => Err(e.to_string()),
+                    Err(e) => Err(format!("bad peer id: {e}")),
                 },
                 None => {
                     if node.input_channel_open().await {

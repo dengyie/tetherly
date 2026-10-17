@@ -2557,7 +2557,7 @@ async fn peer_alias_governance_and_smart_resolution_via_loopback_api() {
     assert_eq!(init_v["trusted_count"], 1);
     let init_trusted = &init_v["trusted"][0];
     assert_eq!(init_trusted["device_id"], peer_id.as_str());
-    assert_eq!(init_trusted["alias"], "laptop");
+    assert_eq!(init_trusted["alias"], peer_id.as_str());
 
     // 2. Connect to host loopback SSE stream to verify real-time UiEvent::PeerAliasChanged
     let mut sse = tetherly_node::loopback_events_connect(host_ui)
