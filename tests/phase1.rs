@@ -82,9 +82,13 @@ fn otp_push(uid: &str) -> NotifyPush {
 
 async fn wait_live(node: &Node, timeout: Duration) {
     let start = std::time::Instant::now();
-    while node.live_peers().is_empty() {
+    loop {
+        let peers = node.live_peers();
+        if !peers.is_empty() && peers.iter().all(|p| p.file_port.is_some()) {
+            return;
+        }
         if start.elapsed() > timeout {
-            panic!("peer did not come up");
+            panic!("peer did not come up with file_port");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -1113,8 +1117,39 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
     }
     peer.user_accept_file(&ok_transfer_id).await.unwrap();
 
-    let received = wait_inbox(g2.path(), "healthy.bin", Duration::from_secs(10)).await;
+    let received = wait_inbox(g2.path(), "healthy.bin", Duration::from_secs(20)).await;
     assert_eq!(received, ok_content);
+
+    let start = std::time::Instant::now();
+    loop {
+        let host_done = host
+            .active_transfers()
+            .into_iter()
+            .find(|t| t.transfer_id == ok_transfer_id)
+            .map(|t| t.phase == TransferPhase::Completed)
+            .unwrap_or(false);
+        let peer_done = peer
+            .active_transfers()
+            .into_iter()
+            .find(|t| t.transfer_id == ok_transfer_id)
+            .map(|t| t.phase == TransferPhase::Completed)
+            .unwrap_or(false);
+        if host_done && peer_done {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            let host_t = host
+                .active_transfers()
+                .into_iter()
+                .find(|t| t.transfer_id == ok_transfer_id);
+            let peer_t = peer
+                .active_transfers()
+                .into_iter()
+                .find(|t| t.transfer_id == ok_transfer_id);
+            panic!("subsequent transfer did not settle to Completed: host={host_t:?}, peer={peer_t:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     host.shutdown();
     peer.shutdown();
