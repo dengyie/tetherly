@@ -2223,16 +2223,8 @@ impl Node {
                         Err(e) => Err(tetherly_net::NetError::Io(e)),
                     },
                     OutboundSource::Bytes(ref b) => {
-                        node.send_file_data(
-                            addr,
-                            file_port,
-                            &token,
-                            &tid,
-                            outbound.size,
-                            start,
-                            b,
-                        )
-                        .await
+                        node.send_file_data(addr, file_port, &token, &tid, outbound.size, start, b)
+                            .await
                     }
                 }
             };
