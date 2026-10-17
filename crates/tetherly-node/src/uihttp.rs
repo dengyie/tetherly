@@ -380,9 +380,8 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 .into_iter()
                 .map(|p| {
                     let path_str = match p.path {
-                        crate::runtime::PathKind::Lan => "lan",
-                        crate::runtime::PathKind::Overlay => "overlay",
-                        crate::runtime::PathKind::Loopback => "loopback",
+                        tetherly_core::PathKind::Lan => "lan",
+                        tetherly_core::PathKind::Overlay => "overlay",
                     };
                     serde_json::json!({
                         "device_id": p.device_id.to_string(),
