@@ -2148,6 +2148,135 @@ async fn node_events_stream_sse_via_loopback_api() {
     assert_eq!(term2, None);
 }
 
+/// ADR-034: Active peer round-trip latency (RTT) probing, keepalive telemetry, and live peers latency reporting.
+#[tokio::test(flavor = "multi_thread")]
+async fn active_peer_rtt_probing_and_latency_reporting_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Direct Rust API invocation: host pings peer
+    let report = host
+        .ping_peer(&peer_id)
+        .await
+        .expect("direct ping_peer succeeds");
+    assert!(report.ok);
+    assert_eq!(report.device_id, peer_id.as_str());
+    assert_eq!(report.path, "lan");
+    assert!(
+        report.rtt_ms < 500,
+        "LAN ping RTT should be fast: {}ms",
+        report.rtt_ms
+    );
+
+    // 2. Direct Rust API error cases
+    let bogus_dev = tetherly_core::DeviceId::parse("tdev_aaaaaaaaaaaaaaaa").unwrap();
+    let err_res = host.ping_peer(&bogus_dev).await;
+    assert!(
+        matches!(err_res, Err(tetherly_core::error::CoreError::NoConnectedPeer)),
+        "pinging disconnected peer should return NoConnectedPeer"
+    );
+
+    // 3. HTTP Loopback API: POST /api/peers/ping with specific peer
+    let ping_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+    });
+    let (code, body) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/ping",
+        &serde_json::to_vec(&ping_req).unwrap(),
+    )
+    .await
+    .expect("ping post succeeds");
+    assert_eq!(code, 200);
+    let ping_val: tetherly_node::PeerPingReport =
+        serde_json::from_slice(&body).expect("valid ping report");
+    assert!(ping_val.ok);
+    assert_eq!(ping_val.device_id, peer_id.as_str());
+    assert_eq!(ping_val.path, "lan");
+
+    // 4. HTTP Loopback API: POST /api/peers/ping with empty body (auto-resolves single connected peer)
+    let (code_auto, body_auto) = tetherly_node::loopback_post(host_ui, "/api/peers/ping", b"{}")
+        .await
+        .expect("auto ping succeeds");
+    assert_eq!(code_auto, 200);
+    let auto_val: tetherly_node::PeerPingReport =
+        serde_json::from_slice(&body_auto).expect("valid auto ping report");
+    assert!(auto_val.ok);
+    assert_eq!(auto_val.device_id, peer_id.as_str());
+
+    // 5. HTTP Loopback API error handling: invalid peer id format
+    let bad_req = serde_json::json!({
+        "peer": "not_a_valid_device_id",
+    });
+    let (code_bad, body_bad) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/ping",
+        &serde_json::to_vec(&bad_req).unwrap(),
+    )
+    .await
+    .expect("bad ping post");
+    assert_eq!(code_bad, 400);
+    assert!(String::from_utf8_lossy(&body_bad).contains("bad peer id"));
+
+    // 6. Verify live peer RTT and last_seen_ms in GET /api/peers
+    let (p_code, p_body) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .expect("get peers succeeds");
+    assert_eq!(p_code, 200);
+    let p_val: serde_json::Value = serde_json::from_slice(&p_body).unwrap();
+    let live_peers = p_val["live"].as_array().expect("live peers array");
+    assert_eq!(live_peers.len(), 1);
+    let peer_entry = &live_peers[0];
+    assert_eq!(peer_entry["device_id"], peer_id.as_str());
+    assert!(
+        peer_entry["rtt_ms"].as_u64().is_some(),
+        "live peer should expose measured rtt_ms"
+    );
+    assert!(
+        peer_entry["last_seen_ms"].as_u64().unwrap_or(0) > 0,
+        "last_seen_ms should be updated"
+    );
+
+    // 7. Verify live peer RTT in GET /api/state snapshot
+    let (s_code, s_body) = tetherly_node::loopback_get(host_ui, "/api/state")
+        .await
+        .expect("get state succeeds");
+    assert_eq!(s_code, 200);
+    let s_val: serde_json::Value = serde_json::from_slice(&s_body).unwrap();
+    let snap_peers = s_val["peers"].as_array().expect("snapshot peers array");
+    assert_eq!(snap_peers.len(), 1);
+    assert_eq!(snap_peers[0]["device_id"], peer_id.as_str());
+    assert!(snap_peers[0]["rtt_ms"].as_u64().is_some());
+
+    // 8. Verify SSE event stream receives UiEvent::PeerLatency
+    let mut sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect loopback sse");
+
+    // Trigger ping probe to emit PeerLatency event
+    host.ping_peer(&peer_id).await.unwrap();
+
+    let sse_event = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse peer latency event")
+        .expect("read sse event")
+        .expect("some ui event");
+
+    match sse_event {
+        tetherly_node::UiEvent::PeerLatency {
+            device_id,
+            rtt_ms: _,
+        } => {
+            assert_eq!(device_id, peer_id.as_str());
+        }
+        other => panic!("expected PeerLatency event, got: {other:?}"),
+    }
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

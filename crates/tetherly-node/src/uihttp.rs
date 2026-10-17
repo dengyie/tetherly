@@ -383,6 +383,8 @@ struct PeerView {
     name: String,
     platform: String,
     path: String,
+    rtt_ms: Option<u64>,
+    last_seen_ms: u64,
 }
 
 #[derive(Serialize)]
@@ -523,6 +525,39 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             },
             Err(_) => err(400, "bad json"),
         },
+        ("POST", "/api/peers/ping") => {
+            let d: PeerTargetBody = if body.is_empty() {
+                PeerTargetBody::default()
+            } else {
+                match serde_json::from_slice::<PeerTargetBody>(body) {
+                    Ok(v) => v,
+                    Err(_) => return err(400, "bad json"),
+                }
+            };
+            let mut peers = node.live_peers();
+            peers.sort_by_key(|p| p.device_id.to_string());
+            let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
+                Some(raw) => match tetherly_core::DeviceId::parse(raw) {
+                    Ok(id) => {
+                        if peers.iter().any(|p| p.device_id == id) {
+                            id
+                        } else {
+                            return err(400, "peer is not connected");
+                        }
+                    }
+                    Err(_) => return err(400, "bad peer id"),
+                },
+                None => match peers.len() {
+                    0 => return err(400, "no connected peer"),
+                    1 => peers[0].device_id.clone(),
+                    _ => return err(400, "multiple peers connected; pass peer (tdev_…)"),
+                },
+            };
+            match node.ping_peer(&target).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         ("GET", "/api/peers") => {
             let live = node.live_peers();
             let trusted = node.trusted();
@@ -546,6 +581,8 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                         "input_port": p.input_port,
                         "screen_port": p.screen_port,
                         "online": true,
+                        "rtt_ms": p.rtt_ms,
+                        "last_seen_ms": p.last_seen_ms,
                     })
                 })
                 .collect();
@@ -1204,6 +1241,8 @@ async fn snapshot(node: &Node) -> Snapshot {
                     tetherly_core::PathKind::Lan => "lan".into(),
                     tetherly_core::PathKind::Overlay => "overlay".into(),
                 },
+                rtt_ms: p.rtt_ms,
+                last_seen_ms: p.last_seen_ms,
             })
             .collect(),
         trusted,

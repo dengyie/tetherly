@@ -43,6 +43,10 @@ pub enum UiEvent {
         present: bool,
         lan_only: bool,
     },
+    PeerLatency {
+        device_id: String,
+        rtt_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

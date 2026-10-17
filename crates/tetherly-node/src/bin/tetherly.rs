@@ -215,11 +215,20 @@ enum Cmd {
         #[command(subcommand)]
         action: InputCmd,
     },
-    /// List connected and trusted peer devices.
+    /// List connected and trusted peer devices, or probe peer latency.
     Peers {
         /// Include offline trusted devices.
         #[arg(long, short)]
         trusted: bool,
+        /// Probe peer round-trip latency (RTT) over the encrypted Noise session.
+        #[arg(long)]
+        ping: bool,
+        /// Specific peer to target for ping probe (defaults to single connected peer).
+        #[arg(long)]
+        peer: Option<String>,
+        /// Number of ping probes to send when probing latency.
+        #[arg(long, default_value_t = 1)]
+        count: u32,
         /// Output raw JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -282,8 +291,17 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
-    /// Fast ping to verify node daemon responsiveness and measure loopback RTT.
+    /// Fast ping to verify node daemon responsiveness or probe a connected peer's Noise session RTT.
     Ping {
+        /// Optional peer ID to probe (e.g. tdev_...). When omitted, probes the local daemon loopback.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Number of ping probes to send (default: 1).
+        #[arg(long, default_value_t = 1)]
+        count: u32,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -1320,9 +1338,15 @@ async fn main() -> Result<()> {
         },
         Cmd::Peers {
             trusted,
+            ping,
+            peer,
+            count,
             json,
             ui_port,
         } => {
+            if ping {
+                return do_peer_ping(ui_port, peer, count, json).await;
+            }
             let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/peers")
                 .await
                 .map_err(|e| {
@@ -1358,7 +1382,11 @@ async fn main() -> Result<()> {
                         let platform = p["platform"].as_str().unwrap_or("-");
                         let addr = p["addr"].as_str().unwrap_or("-");
                         let path = p["path"].as_str().unwrap_or("-");
-                        println!("  * {name} ({platform}) · {addr} [{path}] · {dev}");
+                        let rtt_str = match p["rtt_ms"].as_u64() {
+                            Some(rtt) => format!("{rtt}ms"),
+                            None => "n/a".to_string(),
+                        };
+                        println!("  * {name} ({platform}) · {addr} [{path}] · rtt: {rtt_str} · {dev}");
                     }
                 }
                 _ => println!("  (no live peers connected)"),
@@ -1759,32 +1787,61 @@ async fn main() -> Result<()> {
                 println!("  Loopback Latency: {:.2}ms", rtt.as_secs_f64() * 1000.0);
             }
         }
-        Cmd::Ping { ui_port } => {
-            let t0 = std::time::Instant::now();
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/health")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                         start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
-            let rtt = t0.elapsed();
-            if code != 200 {
-                anyhow::bail!(
-                    "node ping failed (HTTP {code}): {}",
-                    String::from_utf8_lossy(&resp)
-                );
+        Cmd::Ping {
+            peer,
+            count,
+            json,
+            ui_port,
+        } => {
+            if peer.is_some() {
+                return do_peer_ping(ui_port, peer, count, json).await;
             }
-            let rep: tetherly_node::HealthReport = serde_json::from_slice(&resp)?;
-            println!(
-                "pong: node {}, rtt: {:.2}ms, uptime: {} (pid: {}, v{})",
-                rep.status,
-                rtt.as_secs_f64() * 1000.0,
-                format_uptime(rep.uptime_secs),
-                rep.pid,
-                rep.version
-            );
+            let count = count.max(1);
+            let mut rtts = Vec::new();
+            let mut last_rep = None;
+            for i in 1..=count {
+                let t0 = std::time::Instant::now();
+                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/health")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                let rtt = t0.elapsed();
+                if code != 200 {
+                    anyhow::bail!(
+                        "node ping failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let rep: tetherly_node::HealthReport = serde_json::from_slice(&resp)?;
+                let rtt_ms = rtt.as_secs_f64() * 1000.0;
+                rtts.push(rtt_ms);
+                last_rep = Some(rep.clone());
+                if !json {
+                    println!(
+                        "[{i}/{count}] pong: node {}, rtt: {rtt_ms:.2}ms, uptime: {} (pid: {}, v{})",
+                        rep.status,
+                        format_uptime(rep.uptime_secs),
+                        rep.pid,
+                        rep.version
+                    );
+                }
+                if i < count {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+            if json {
+                if let Some(rep) = last_rep {
+                    let avg_rtt = rtts.iter().copied().sum::<f64>() / rtts.len() as f64;
+                    let mut val = serde_json::to_value(&rep)?;
+                    val["rtt_ms"] = serde_json::json!(avg_rtt);
+                    val["count"] = serde_json::json!(count);
+                    println!("{val}");
+                }
+            }
         }
         Cmd::Stop { ui_port } => {
             let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/daemon/shutdown", b"")
@@ -2044,3 +2101,69 @@ fn format_bytes(bytes: u64) -> String {
 fn format_speed(bps: u64) -> String {
     format!("{}/s", format_bytes(bps))
 }
+
+async fn do_peer_ping(
+    ui_port: u16,
+    peer: Option<String>,
+    count: u32,
+    json: bool,
+) -> anyhow::Result<()> {
+    let body = serde_json::json!({ "peer": peer });
+    let body_bytes = serde_json::to_vec(&body)?;
+    let count = count.max(1);
+    let mut rtts: Vec<u64> = Vec::new();
+    let mut last_rep: Option<serde_json::Value> = None;
+    for i in 1..=count {
+        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/ping", &body_bytes)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+        if code != 200 {
+            anyhow::bail!(
+                "peer ping failed (HTTP {code}): {}",
+                String::from_utf8_lossy(&resp)
+            );
+        }
+        let v: serde_json::Value = serde_json::from_slice(&resp)
+            .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+        let rtt = v["rtt_ms"].as_u64().unwrap_or(0);
+        let dev = v["device_id"].as_str().unwrap_or("-");
+        let path = v["path"].as_str().unwrap_or("-");
+        let addr = v["addr"].as_str().unwrap_or("-");
+        rtts.push(rtt);
+        last_rep = Some(v);
+        if !json {
+            println!("[{i}/{count}] Ping {dev} ({addr} [{path}]): time={rtt}ms");
+        }
+        if i < count {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    if json {
+        if let Some(mut rep) = last_rep {
+            let min_rtt = rtts.iter().copied().min().unwrap_or(0);
+            let max_rtt = rtts.iter().copied().max().unwrap_or(0);
+            let avg_rtt = (rtts.iter().copied().sum::<u64>() as f64) / (rtts.len() as f64);
+            rep["count"] = serde_json::json!(count);
+            rep["min_rtt_ms"] = serde_json::json!(min_rtt);
+            rep["max_rtt_ms"] = serde_json::json!(max_rtt);
+            rep["avg_rtt_ms"] = serde_json::json!(avg_rtt);
+            rep["history"] = serde_json::json!(rtts);
+            println!("{rep}");
+        }
+    } else if count > 1 {
+        let min_rtt = rtts.iter().copied().min().unwrap_or(0);
+        let max_rtt = rtts.iter().copied().max().unwrap_or(0);
+        let avg_rtt = (rtts.iter().copied().sum::<u64>() as f64) / (rtts.len() as f64);
+        println!(
+            "\n--- Ping Statistics ({count} probes) ---\nmin/avg/max = {min_rtt}/{avg_rtt:.1}/{max_rtt} ms"
+        );
+    }
+    Ok(())
+}
+

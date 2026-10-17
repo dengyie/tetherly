@@ -3,12 +3,50 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.40** |
+| 文档版本 | **1.41** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）**——(1) **W3C 标准 Server-Sent Events 流式推送端点 (`GET /api/events` 与 `GET /api/events/stream`)**：彻底替代高频定时轮询 `/api/state`（由 700ms 降至 2000ms+），将内部 `UiEvent` 广播总线通过 HTTP 流式长连接实时推送至客户端，内置 15s 心跳保活与受控平滑断连机制；(2) **CLI 全量同构事件监听命令群 (`tetherly events` 与 `tetherly-cli events`)**：增设 `events [--count <n>] [--timeout-secs <s>] [--json]` 命令，支持实时终端高亮显示与 JSON 管道流处理；(3) **Web UI 实时响应化**：在 `ui/index.html` 接入 `EventSource`，实现节点事件实时驱动页面刷新，增设实时事件流指示器与最近事件跑马灯；(4) **严格遵守安全红线**：`UiEvent` 始终严禁携带短信正文、OTP 验证码、配对码与剪贴板纯文本；(5) **端到端集成测试全覆盖**（`tests/phase1.rs` 增设 `node_events_stream_sse_via_loopback_api`）。+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）**——(1) **Noise 会话级端到端时延度量引擎**：利用 `TYPE_PING` (0x0001) 与 `TYPE_PONG` (0x0002) 帧时间戳，在不增加协议开销的前提下测量加密隧道单次往返精确微秒/毫秒级时延 (RTT)；(2) **异步等待派发器与按需探测端点 (`POST /api/peers/ping`)**：支持主动向指定对端（或单对端自解析）发起链路探测，内置 oneshot 异步等待与 5 秒超时保护，返回包含 `device_id`、`rtt_ms`、`path` 与 `addr` 的结构化报告 `PeerPingReport`；(3) **LivePeer 链路质量可观测性透视**：在 `LivePeer` 引入 `rtt_ms: Option<u64>` 与 `last_seen_ms: u64`，并在 `GET /api/peers` 与 `GET /api/state` 快照中完整暴露；(4) **实时时延流式广播 (`UiEvent::PeerLatency`)**：每次收到 Pong 响应自动向 SSE 事件总线广播时延更新事件；(5) **CLI 全量同构测速命令 (`tetherly` 与 `tetherly-cli`)**：`peers --ping [--peer <id>] [--count <n>] [--json]` 与 `ping --peer <id> [--count <n>] [--json]`，支持多包探测与最小/平均/最大值统计；(6) **Web UI 实时时延徽标与一键测速**：在 `ui/index.html` 对端卡片增设动态时延状态徽标与「测速」按钮；(7) **端到端集成测试全覆盖**（`tests/phase1.rs` 增设 `active_peer_rtt_probing_and_latency_reporting_via_loopback_api`）。+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.41 相对 1.40(对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测)**
+
+- **动机(网络质量与链路状态黑盒化、对端时延不可见与按需主动探测缺失)**:
+  在 v1.0 至 v1.40 的演进中，节点各核心通信通道均已建立在 Noise 加密隧道之上，并在后台由心跳循环定时发送 `TYPE_PING` (0x0001) 与 `TYPE_PONG` (0x0002) 帧。然而在实际多设备组网与网络质量运维中暴露出以下痛点：
+  1. **链路时延黑盒化**：此前节点虽然在后台相互回应 Ping/Pong 帧，但在收到 Pong 时直接在事件匹配分支 `SessionEvent::Pong(_) => {}` 中丢弃了时间戳，从未记录或计算网络往返时延 (RTT)；
+  2. **网络瓶颈无法定位**：当大文件传输降速、远程屏幕卡顿或跨局域网/EasyTier 虚网链路发生拥塞抖动时，运维人员与用户无法得知物理链路真实时延，无法判断是网络丢包、延迟激增还是系统负载高；
+  3. **缺乏按需链路主动探测与度量能力**：CLI 与 Web UI 均无法主动向特定在线对端发送探测包并获取实时响应时延；
+  4. **事件总线与控制面状态缺失时延度量**：`LivePeer` 缺少 RTT 字段，`GET /api/peers` 与 `GET /api/state` 无法呈现链路健康度。
+
+- **架构与协议设计(ADR-034 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测)**:
+  1. **Noise 加密通道内微秒级往返时延 (RTT) 闭环度量**:
+     - 充分复用已有的内层帧线协议 `TYPE_PING` (0x0001) 与 `TYPE_PONG` (0x0002)，其负载为大端序 8 字节毫秒时间戳 `unix_ms: u64`；
+     - 接收端在收到 Ping 帧时立即原样返回 Pong 帧；
+     - 发送端在收到 Pong 帧时，计算 `rtt_ms = now_ms.saturating_sub(ts)`，即刻获得经过 Noise 端到端加密隧道的精确往返时延；
+  2. **异步等待派发器与按需探测端点 (`POST /api/peers/ping`)**:
+     - 在运行时 `Shared` 中维护 `ping_waiters: Mutex<HashMap<DeviceId, Vec<oneshot::Sender<u64>>>>`；
+     - `POST /api/peers/ping` 支持入参 `{"peer": "<tdev_...>"}`：若未指定且仅有一个在线对端则自动解析；
+     - 调用 `Node::ping_peer(&self, peer_id: &DeviceId) -> Result<PeerPingReport, CoreError>`；
+     - 立即向对端发送 Ping 帧并在 oneshot channel 上异步等待，设 5 秒超时保护；
+     - 收到 Pong 时唤醒所有等待者并返回结构化 `PeerPingReport { ok: true, device_id, rtt_ms, path, addr }`；
+  3. **LivePeer 状态暴露与拓扑可观测性**:
+     - `LivePeer` 结构增加 `rtt_ms: Option<u64>` 与 `last_seen_ms: u64`；
+     - 收到 Pong 响应时自动更新对应 peer 的 `rtt_ms` 与 `last_seen_ms`；
+     - `GET /api/peers` 与 `GET /api/state` 快照全量暴露该度量数据；
+  4. **实时时延流式广播 (`UiEvent::PeerLatency`)**:
+     - 每次收到 Pong 响应时，通过节点内部事件总线广播 `UiEvent::PeerLatency { device_id: String, rtt_ms: u64 }`，经由 SSE 连接流式推送至所有前端监听者；
+  5. **双端 CLI 同构测速命令 (`tetherly` 与 `tetherly-cli`)**:
+     - `tetherly peers --ping [--peer <id>] [--count <n>] [--json]`：对在线对端进行加密通道延迟探测；
+     - `tetherly ping --peer <id> [--count <n>] [--json]`：定向探测对端 Noise 通道时延；无 `--peer` 参数时保持原有对本地守护进程的回环健康探针行为；
+     - 支持 `--count <n>` 多包探测并统计 `min / avg / max` 毫秒时延，支持 `--json` 管道输出；
+  6. **Web UI 实时时延徽标与一键测速 (`ui/index.html`)**:
+     - 对端卡片增设动态时延徽标（<50ms 绿，<150ms 蓝，>=150ms 黄）；
+     - 增设一键「测速」交互按钮，完成后动态更新时延数值与徽标状态；
+  7. **严格安全红线**:
+     - Ping 探测帧全程运行在已建立的 Noise 加密隧道内部，严禁明文传输任何探测包，绝对不泄露私钥或凭据信息；
+  8. **端到端集成测试全覆盖**:
+     - 在 `tests/phase1.rs` 增设 `active_peer_rtt_probing_and_latency_reporting_via_loopback_api`，全面验证直接 Rust API、HTTP 回环 API（单对端自解析与定向探测）、错误参数拒绝、`GET /api/peers` RTT 更新、`GET /api/state` 镜像与 SSE `PeerLatency` 事件流分发。
 
 **1.40 相对 1.39(节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环)**
 

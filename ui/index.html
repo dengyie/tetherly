@@ -462,14 +462,39 @@ function render(s) {
     sp.innerHTML = '<option value="">自动（唯一在线对端）</option>';
   }
   for (const x of s.peers) {
-    const card = el('<div class="card"><div style="flex:1"><div class="title"></div><div class="meta"></div></div><div class="row"><button class="bad ghost" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
-    card.querySelector(".title").textContent = x.name;
+    let rttBadge = '<span class="badge offline" style="margin-left:6px">RTT 未测</span>';
+    if (x.rtt_ms != null) {
+      const cls = x.rtt_ms < 50 ? 'completed' : (x.rtt_ms < 150 ? 'outbound' : 'verifying');
+      rttBadge = '<span class="badge ' + cls + '" style="margin-left:6px">' + x.rtt_ms + ' ms</span>';
+    }
+    const pathBadge = '<span class="badge ' + (x.path === 'overlay' ? 'outbound' : 'completed') + '" style="margin-left:6px">' + (x.path || 'lan').toUpperCase() + '</span>';
+    const card = el('<div class="card"><div style="flex:1"><div class="title"><span></span>' + pathBadge + rttBadge + '</div><div class="meta"></div></div><div class="row"><button class="ghost ping-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">测速</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
+    card.querySelector(".title span").textContent = x.name;
     card.querySelector(".meta").textContent = x.platform + " · " + (x.path || "lan") + " · " + x.device_id;
-    const unpairBtn = card.querySelector("button");
+    const pingBtn = card.querySelector(".ping-btn");
+    pingBtn.onclick = async () => {
+      pingBtn.disabled = true;
+      pingBtn.textContent = "测速中…";
+      try {
+        const rep = await api("/api/peers/ping", { peer: x.device_id });
+        if (rep && rep.ok) {
+          pingBtn.textContent = rep.rtt_ms + " ms";
+          setTimeout(() => { pingBtn.textContent = "测速"; pingBtn.disabled = false; }, 2000);
+        } else {
+          pingBtn.textContent = "失败";
+          setTimeout(() => { pingBtn.textContent = "测速"; pingBtn.disabled = false; }, 2000);
+        }
+      } catch (e) {
+        pingBtn.textContent = "超时";
+        setTimeout(() => { pingBtn.textContent = "测速"; pingBtn.disabled = false; }, 2000);
+      }
+      tick();
+    };
+    const unpairBtn = card.querySelector(".unpair-btn");
     unpairBtn.onclick = async () => {
       if (confirm("确认解除与设备 " + x.name + " (" + x.device_id + ") 的配对？")) {
         await api("/api/peers/unpair", { device_id: x.device_id });
-        poll();
+        tick();
       }
     };
     p.appendChild(card);
@@ -757,6 +782,7 @@ function setupEventSource() {
           else if (ev.kind === "file_offered") desc = "文件到达: " + ev.transfer_id;
           else if (ev.kind === "file_done") desc = "文件完成: " + ev.transfer_id;
           else if (ev.kind === "pairing_needed") desc = "待配对: " + ev.device_id;
+          else if (ev.kind === "peer_latency") desc = "时延度量: " + ev.device_id + " (" + ev.rtt_ms + "ms)";
           $("ev-last").textContent = "[" + t + "] " + desc;
         }
       } catch (err) {

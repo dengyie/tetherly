@@ -21,7 +21,8 @@ pub use platform::{cursor_pos, screen_size, start_input_hooks, HookControl, RawI
 pub use platform::{MemoryInsertor, MemoryOpener, SystemInputSink, SystemOpener};
 pub use runtime::{
     ActiveTransfer, AncsReport, HealthReport, LivePeer, Node, NodeConfig, NodePorts,
-    StorageCleanReport, StorageReport, TransferDirection, TransferPhase, UserCommand,
+    PeerPingReport, StorageCleanReport, StorageReport, TransferDirection, TransferPhase,
+    UserCommand,
 };
 pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
 

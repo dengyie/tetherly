@@ -88,6 +88,10 @@ pub enum CoreError {
     ScreenCodec(String),
     #[error("file error: {0}")]
     File(String),
+    #[error("no connected peer")]
+    NoConnectedPeer,
+    #[error("peer ping timed out")]
+    PingTimeout,
 }
 
 impl From<serde_json::Error> for CoreError {

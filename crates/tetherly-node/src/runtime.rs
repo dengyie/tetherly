@@ -193,6 +193,18 @@ pub struct LivePeer {
     /// Advertised via caps.update `screenport=`. None until the peer tells us.
     pub screen_port: Option<u16>,
     pub path: PathKind,
+    pub rtt_ms: Option<u64>,
+    pub last_seen_ms: u64,
+}
+
+/// Report returned by an on-demand peer ping probe over the Noise session.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PeerPingReport {
+    pub ok: bool,
+    pub device_id: String,
+    pub rtt_ms: u64,
+    pub path: String,
+    pub addr: String,
 }
 
 struct Hubs {
@@ -388,6 +400,7 @@ struct Shared {
     sessions: AsyncMutex<HashMap<DeviceId, mpsc::Sender<InnerFrame>>>,
     input_out: AsyncMutex<Option<mpsc::Sender<InnerFrame>>>,
     live: Mutex<HashMap<DeviceId, LivePeer>>,
+    ping_waiters: Mutex<HashMap<DeviceId, Vec<oneshot::Sender<u64>>>>,
     pending_out: Mutex<HashMap<String, OutboundFile>>,
     active_transfers: Mutex<HashMap<String, ActiveTransfer>>,
     transfer_cancels: Mutex<HashMap<String, oneshot::Sender<()>>>,
@@ -583,6 +596,7 @@ impl Node {
             sessions: AsyncMutex::new(HashMap::new()),
             input_out: AsyncMutex::new(None),
             live: Mutex::new(HashMap::new()),
+            ping_waiters: Mutex::new(HashMap::new()),
             pending_out: Mutex::new(HashMap::new()),
             active_transfers: Mutex::new(HashMap::new()),
             transfer_cancels: Mutex::new(HashMap::new()),
@@ -1295,6 +1309,53 @@ impl Node {
         }
     }
 
+    /// Actively send a ping frame to a connected peer over the Noise session,
+    /// await its pong reply, and measure the round-trip latency (RTT) in milliseconds.
+    pub async fn ping_peer(&self, peer_id: &DeviceId) -> Result<PeerPingReport, CoreError> {
+        let (path, addr) = {
+            let live = self.shared.live.lock().expect("live");
+            let peer = live.get(peer_id).ok_or(CoreError::NoConnectedPeer)?;
+            let path_str = match peer.path {
+                PathKind::Lan => "lan",
+                PathKind::Overlay => "overlay",
+            };
+            (path_str.to_string(), peer.addr.to_string())
+        };
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pw = self.shared.ping_waiters.lock().expect("ping_waiters");
+            pw.entry(peer_id.clone()).or_default().push(tx);
+        }
+
+        let now_ms = self.shared.clock.unix_ms();
+        if let Err(e) = self.send_to(peer_id, ping(now_ms)).await {
+            let mut pw = self.shared.ping_waiters.lock().expect("ping_waiters");
+            if let Some(list) = pw.get_mut(peer_id) {
+                list.retain(|s| !s.is_closed());
+            }
+            return Err(e);
+        }
+
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+            Ok(Ok(rtt_ms)) => Ok(PeerPingReport {
+                ok: true,
+                device_id: peer_id.to_string(),
+                rtt_ms,
+                path,
+                addr,
+            }),
+            Ok(Err(_)) => Err(CoreError::NoConnectedPeer),
+            Err(_) => {
+                let mut pw = self.shared.ping_waiters.lock().expect("ping_waiters");
+                if let Some(list) = pw.get_mut(peer_id) {
+                    list.retain(|s| !s.is_closed());
+                }
+                Err(CoreError::PingTimeout)
+            }
+        }
+    }
+
     pub fn clone_handle(&self) -> Self {
         Self {
             shared: self.shared.clone(),
@@ -1425,6 +1486,7 @@ impl Node {
             sessions.clear();
         }
         self.shared.live.lock().expect("live").clear();
+        self.shared.ping_waiters.lock().expect("ping_waiters").clear();
     }
 
     pub fn forget(&self, device_id: &DeviceId) {
@@ -1432,6 +1494,11 @@ impl Node {
         let _ = store.forget(device_id);
         drop(store);
         self.persist_trust();
+        self.shared
+            .ping_waiters
+            .lock()
+            .expect("ping_waiters")
+            .remove(device_id);
         // A forgotten device must not keep its live session, its capability
         // state, or (if it held input) the remote seat. Dropping the outbound
         // sender closes the channel, which ends the session task and its TCP.
@@ -1757,6 +1824,8 @@ impl Node {
                     input_port: None,
                     screen_port: None,
                     path: incoming,
+                    rtt_ms: None,
+                    last_seen_ms: self.shared.clock.unix_ms(),
                 },
             );
         }
@@ -1849,6 +1918,12 @@ impl Node {
                         match inbound {
                             Ok(ev) => {
                                 live.on_inbound(clock.unix_ms());
+                                {
+                                    let mut live_map = node.shared.live.lock().expect("live");
+                                    if let Some(p) = live_map.get_mut(&peer_id) {
+                                        p.last_seen_ms = clock.unix_ms();
+                                    }
+                                }
                                 if let Err(e) = node.handle_event(&peer_id, ev, &mut sess).await {
                                     warn!(%e, "event");
                                     break;
@@ -1873,6 +1948,11 @@ impl Node {
             if still_mine {
                 node.shared.sessions.lock().await.remove(&peer_id);
                 node.shared.live.lock().expect("live").remove(&peer_id);
+                node.shared
+                    .ping_waiters
+                    .lock()
+                    .expect("ping_waiters")
+                    .remove(&peer_id);
                 *node.shared.input_seat.lock().expect("seat") = None;
                 node.emit(UiEvent::PeerDown {
                     device_id: peer_id.to_string(),
@@ -1891,7 +1971,30 @@ impl Node {
             SessionEvent::Ping(ts) => {
                 sess.send_bounded(pong(ts)).await?;
             }
-            SessionEvent::Pong(_) => {}
+            SessionEvent::Pong(ts) => {
+                let now_ms = self.shared.clock.unix_ms();
+                let rtt = now_ms.saturating_sub(ts);
+                {
+                    let mut live = self.shared.live.lock().expect("live");
+                    if let Some(p) = live.get_mut(peer) {
+                        p.rtt_ms = Some(rtt);
+                        p.last_seen_ms = now_ms;
+                    }
+                }
+                self.emit(UiEvent::PeerLatency {
+                    device_id: peer.to_string(),
+                    rtt_ms: rtt,
+                });
+                let waiters = {
+                    let mut pw = self.shared.ping_waiters.lock().expect("ping_waiters");
+                    pw.remove(peer)
+                };
+                if let Some(senders) = waiters {
+                    for tx in senders {
+                        let _ = tx.send(rtt);
+                    }
+                }
+            }
             SessionEvent::Notify(push) => {
                 let _ = self.ingest_local_push(peer.clone(), push).await;
             }
