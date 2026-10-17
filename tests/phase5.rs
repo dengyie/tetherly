@@ -437,6 +437,18 @@ async fn screen_and_input_lifecycle_and_peer_targeting_via_loopback_api() {
     assert_eq!(v["channel_open"], false);
     assert_eq!(v["seat"], "local");
 
+    // Open screen channel from visitor to host so host enters requested state.
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["state"], "requested");
+    assert_eq!(v["channel_open"], true);
+
     // 3. POST /api/screen/allow and POST /api/screen/revoke on host
     let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
         .await
@@ -451,7 +463,7 @@ async fn screen_and_input_lifecycle_and_peer_targeting_via_loopback_api() {
     assert_eq!(c, 200);
     let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(v["ok"], true);
-    assert_eq!(v["state"], "idle");
+    assert_eq!(v["state"], "requested");
 
     // 4. Reject screen start when targeting an unknown peer
     let bad_payload = serde_json::json!({ "peer": "tdev_nonexistent" });
