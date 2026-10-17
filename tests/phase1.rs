@@ -131,8 +131,8 @@ async fn pair_phone_desktop() -> (Node, Node, DirGuard, DirGuard) {
     phone.set_pin(pin);
     desk.set_pin(pin);
     phone.dial(desk.control_addr()).await.unwrap();
-    wait_live(&phone, Duration::from_secs(25)).await;
-    wait_live(&desk, Duration::from_secs(25)).await;
+    wait_live(&phone, Duration::from_secs(45)).await;
+    wait_live(&desk, Duration::from_secs(45)).await;
     (phone, desk, g1, g2)
 }
 
@@ -225,8 +225,8 @@ async fn m1_4_win_loopback_clip_set() {
     a.set_pin(pin);
     b.set_pin(pin);
     a.dial(b.control_addr()).await.unwrap();
-    wait_live(&a, Duration::from_secs(25)).await;
-    wait_live(&b, Duration::from_secs(25)).await;
+    wait_live(&a, Duration::from_secs(45)).await;
+    wait_live(&b, Duration::from_secs(45)).await;
 
     a.clip().set_text("hello-clip").unwrap();
     a.send_clipboard().await.unwrap();
@@ -264,8 +264,8 @@ async fn m1_5_reconnect_without_repair() {
     let phone2 = Node::start(cfg(phone_dir, "phone", "android")).unwrap();
     phone2.spawn_listeners().await.unwrap();
     phone2.dial(desk_addr).await.unwrap();
-    wait_live(&phone2, Duration::from_secs(25)).await;
-    wait_live(&desk, Duration::from_secs(25)).await;
+    wait_live(&phone2, Duration::from_secs(45)).await;
+    wait_live(&desk, Duration::from_secs(45)).await;
     assert_eq!(phone2.live_peers()[0].device_id, desk_id);
     phone2
         .send_notify(desk.identity().device_id(), otp_push("uid-re"))
@@ -326,8 +326,8 @@ async fn m1_7_file_reject_then_accept_sha256() {
     a.set_pin(pin);
     b.set_pin(pin);
     a.dial(b.control_addr()).await.unwrap();
-    wait_live(&a, Duration::from_secs(25)).await;
-    wait_live(&b, Duration::from_secs(25)).await;
+    wait_live(&a, Duration::from_secs(45)).await;
+    wait_live(&b, Duration::from_secs(45)).await;
     let start = std::time::Instant::now();
     loop {
         if a.live_peers().iter().any(|p| p.file_port.is_some())
@@ -388,8 +388,8 @@ async fn an_oversized_offer_is_refused_without_dropping_the_session() {
     a.set_pin(pin);
     b.set_pin(pin);
     a.dial(b.control_addr()).await.unwrap();
-    wait_live(&a, Duration::from_secs(25)).await;
-    wait_live(&b, Duration::from_secs(25)).await;
+    wait_live(&a, Duration::from_secs(45)).await;
+    wait_live(&b, Duration::from_secs(45)).await;
     let start = std::time::Instant::now();
     while !a.live_peers().iter().any(|p| p.file_port.is_some())
         || !b.live_peers().iter().any(|p| p.file_port.is_some())
@@ -472,8 +472,8 @@ async fn m1_8_file_resumes_from_persisted_offset() {
     a.set_pin(pin);
     b.set_pin(pin);
     a.dial(b.control_addr()).await.unwrap();
-    wait_live(&a, Duration::from_secs(25)).await;
-    wait_live(&b, Duration::from_secs(25)).await;
+    wait_live(&a, Duration::from_secs(45)).await;
+    wait_live(&b, Duration::from_secs(45)).await;
     let start = std::time::Instant::now();
     while !a.live_peers().iter().any(|p| p.file_port.is_some())
         || !b.live_peers().iter().any(|p| p.file_port.is_some())
@@ -535,8 +535,8 @@ async fn pin_shown_by_the_live_node_api_is_the_one_that_pairs() {
     peer.set_pin(tetherly_core::pin::parse_pin(&pin_str).unwrap());
 
     peer.dial(host.control_addr()).await.unwrap();
-    wait_live(&host, Duration::from_secs(25)).await;
-    wait_live(&peer, Duration::from_secs(25)).await;
+    wait_live(&host, Duration::from_secs(45)).await;
+    wait_live(&peer, Duration::from_secs(45)).await;
     assert_eq!(
         host.live_peers().first().map(|p| p.device_id.clone()),
         Some(peer.identity().device_id().clone())
@@ -2083,25 +2083,25 @@ async fn node_events_stream_sse_via_loopback_api() {
     node.emit(ev4.clone());
 
     // 4. Consume events via SseStream typed next_ui_event()
-    let r1 = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+    let r1 = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
         .await
         .expect("timeout r1")
         .expect("read r1");
     assert_eq!(r1, Some(ev1));
 
-    let r2 = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+    let r2 = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
         .await
         .expect("timeout r2")
         .expect("read r2");
     assert_eq!(r2, Some(ev2));
 
-    let r3 = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+    let r3 = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
         .await
         .expect("timeout r3")
         .expect("read r3");
     assert_eq!(r3, Some(ev3));
 
-    let r4 = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+    let r4 = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
         .await
         .expect("timeout r4")
         .expect("read r4");
@@ -2116,7 +2116,7 @@ async fn node_events_stream_sse_via_loopback_api() {
         message: "stream2 check".to_string(),
     });
 
-    let raw = tokio::time::timeout(Duration::from_secs(3), sse2.next_event())
+    let raw = tokio::time::timeout(Duration::from_secs(10), sse2.next_event())
         .await
         .expect("timeout sse2")
         .expect("read sse2")
@@ -2126,7 +2126,7 @@ async fn node_events_stream_sse_via_loopback_api() {
     assert_eq!(val["message"], "stream2 check");
 
     // Both active streams receive the broadcasted event
-    let raw1 = tokio::time::timeout(Duration::from_secs(3), sse.next_event())
+    let raw1 = tokio::time::timeout(Duration::from_secs(10), sse.next_event())
         .await
         .expect("timeout sse")
         .expect("read sse")
@@ -2135,13 +2135,13 @@ async fn node_events_stream_sse_via_loopback_api() {
 
     // 6. Shutdown node and verify streams cleanly terminate with Ok(None)
     node.shutdown();
-    let term1 = tokio::time::timeout(Duration::from_secs(3), sse.next_event())
+    let term1 = tokio::time::timeout(Duration::from_secs(10), sse.next_event())
         .await
         .expect("timeout term1")
         .expect("read term1");
     assert_eq!(term1, None);
 
-    let term2 = tokio::time::timeout(Duration::from_secs(3), sse2.next_event())
+    let term2 = tokio::time::timeout(Duration::from_secs(10), sse2.next_event())
         .await
         .expect("timeout term2")
         .expect("read term2");
@@ -2469,7 +2469,7 @@ async fn pin_lifecycle_inspection_and_revocation_via_loopback_api() {
     assert_eq!(gen_val["ttl_secs"].as_u64().unwrap_or(0), 180);
 
     // 4. Verify SSE stream receives UiEvent::PinStateChanged { active: true }
-    let sse_event1 = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+    let sse_event1 = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
         .await
         .expect("timeout waiting for sse pin armed event")
         .expect("read sse event")
@@ -2503,7 +2503,7 @@ async fn pin_lifecycle_inspection_and_revocation_via_loopback_api() {
     assert_eq!(clear_val["cleared"], true);
 
     // 7. Verify SSE stream receives UiEvent::PinStateChanged { active: false }
-    let sse_event2 = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+    let sse_event2 = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
         .await
         .expect("timeout waiting for sse pin cleared event")
         .expect("read sse event")

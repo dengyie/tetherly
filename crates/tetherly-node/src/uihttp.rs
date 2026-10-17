@@ -209,6 +209,7 @@ pub async fn loopback_get(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8
 }
 
 async fn handle_sse(stream: &mut TcpStream, node: &Node) -> std::io::Result<()> {
+    let mut events = node.subscribe();
     let header = "HTTP/1.1 200 OK\r\n\
                   Content-Type: text/event-stream; charset=utf-8\r\n\
                   Cache-Control: no-cache, no-transform\r\n\
@@ -221,7 +222,6 @@ async fn handle_sse(stream: &mut TcpStream, node: &Node) -> std::io::Result<()> 
     stream.write_all(b": connected\n\n").await?;
     stream.flush().await?;
 
-    let mut events = node.subscribe();
     let mut shutdown = node.shutdown_signal();
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
     // Consume initial tick that fires immediately
@@ -325,6 +325,12 @@ pub async fn loopback_events_connect(port: u16) -> std::io::Result<SseStream> {
     }
     while let Some(header) = lines.next_line().await? {
         if header.trim().is_empty() {
+            break;
+        }
+    }
+    while let Some(line) = lines.next_line().await? {
+        let trimmed = line.trim();
+        if trimmed.starts_with(':') {
             break;
         }
     }
