@@ -2103,14 +2103,14 @@ async fn do_peer_ping(
         let v: serde_json::Value =
             serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
         let rtt = v["rtt_ms"].as_u64().unwrap_or(0);
-        let dev = v["device_id"].as_str().unwrap_or("-");
-        let path = v["path"].as_str().unwrap_or("-");
-        let addr = v["addr"].as_str().unwrap_or("-");
         rtts.push(rtt);
-        last_rep = Some(v);
         if !json {
+            let dev = v["device_id"].as_str().unwrap_or("-");
+            let path = v["path"].as_str().unwrap_or("-");
+            let addr = v["addr"].as_str().unwrap_or("-");
             println!("[{i}/{count}] Ping {dev} ({addr} [{path}]): time={rtt}ms");
         }
+        last_rep = Some(v);
         if i < count {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
