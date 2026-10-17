@@ -651,6 +651,8 @@ async fn ancs_status_inspection_connection_and_allowlist_via_loopback_api() {
     .await
     .expect("post allow rule2");
     assert_eq!(code, 200);
+    let ok_v: serde_json::Value = serde_json::from_slice(&resp).expect("parse ok 2");
+    assert_eq!(ok_v["ok"], true);
 
     // GET /api/ancs should now reflect updated allowlist
     let (code, resp) = tetherly_node::loopback_get(ui_port1, "/api/ancs")
