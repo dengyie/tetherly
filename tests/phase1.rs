@@ -967,6 +967,145 @@ async fn enterprise_file_limits_speed_and_status_observability() {
     peer.shutdown();
 }
 
+/// v1.29 ADR-022: In-flight streaming file transfer can be cancelled via loopback API
+/// (`POST /api/file/cancel`), immediately aborting the transfer task, resetting speed_bps,
+/// setting phase to Failed ("cancelled by user"), without dropping or corrupting the main session.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    let ui_port = host.spawn_ui().await.unwrap();
+
+    // 1. Prepare a test file
+    let (send_dir, _g_send) = temp_dir("cancel-send");
+    let file_path = send_dir.join("cancellable.bin");
+    let total_size = 5 * tetherly_core::FILE_CHUNK + 1024;
+    let file_content: Vec<u8> = vec![0x42; total_size];
+    std::fs::write(&file_path, &file_content).unwrap();
+
+    // 2. Initiate send via loopback API
+    let payload = serde_json::json!({
+        "path": file_path.to_str().unwrap(),
+        "name": "cancellable.bin",
+    });
+    let (send_code, send_body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/send",
+        &serde_json::to_vec(&payload).unwrap(),
+    )
+    .await
+    .expect("send succeeds");
+    assert_eq!(send_code, 200);
+    let send_resp: serde_json::Value = serde_json::from_slice(&send_body).unwrap();
+    let transfer_id = send_resp["transfer_id"].as_str().unwrap();
+
+    // 3. Cancel the transfer via loopback API
+    let cancel_payload = serde_json::json!({
+        "id": transfer_id,
+    });
+    let (cancel_code, cancel_body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/cancel",
+        &serde_json::to_vec(&cancel_payload).unwrap(),
+    )
+    .await
+    .expect("cancel succeeds");
+    assert_eq!(
+        cancel_code,
+        200,
+        "cancel response: {}",
+        String::from_utf8_lossy(&cancel_body)
+    );
+    let cancel_resp: serde_json::Value = serde_json::from_slice(&cancel_body).unwrap();
+    assert_eq!(cancel_resp["ok"], true);
+    assert_eq!(cancel_resp["transfer_id"], transfer_id);
+
+    // 4. Verify host state shows Failed with "cancelled by user"
+    let host_transfers = host.active_transfers();
+    let t = host_transfers
+        .iter()
+        .find(|x| x.transfer_id == transfer_id)
+        .expect("transfer in list");
+    assert_eq!(t.phase, TransferPhase::Failed);
+    assert_eq!(t.error.as_deref(), Some("cancelled by user"));
+    assert_eq!(t.speed_bps, 0);
+
+    // 5. Verify cancel idempotency / error handling: cancelling again returns 400
+    let (cancel_code2, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/cancel",
+        &serde_json::to_vec(&cancel_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        cancel_code2, 400,
+        "cancelling non-active transfer should return 400"
+    );
+
+    // 6. Verify main control session is unaffected: send a notification over the session
+    let notify_payload = serde_json::json!({
+        "title": "Session Health Check",
+        "body": "Control session remains fully operational",
+        "app_id": "com.tetherly.test",
+    });
+    let (notif_code, notif_body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/notify",
+        &serde_json::to_vec(&notify_payload).unwrap(),
+    )
+    .await
+    .expect("notify succeeds");
+    assert_eq!(
+        notif_code,
+        200,
+        "notify response: {}",
+        String::from_utf8_lossy(&notif_body)
+    );
+
+    let start = std::time::Instant::now();
+    loop {
+        if peer
+            .candidates()
+            .iter()
+            .any(|c| c.title.as_deref() == Some("Session Health Check"))
+        {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!("notification after cancelled transfer did not arrive");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // 7. Verify a subsequent file transfer succeeds completely
+    let ok_file = send_dir.join("healthy.bin");
+    let ok_content = b"Subsequent transfer works perfectly!";
+    std::fs::write(&ok_file, ok_content).unwrap();
+    let ok_payload = serde_json::json!({
+        "path": ok_file.to_str().unwrap(),
+        "name": "healthy.bin",
+    });
+    let (ok_code, ok_body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/send",
+        &serde_json::to_vec(&ok_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ok_code, 200);
+    let ok_resp: serde_json::Value = serde_json::from_slice(&ok_body).unwrap();
+    let ok_transfer_id = ok_resp["transfer_id"].as_str().unwrap();
+
+    wait_offered(&peer, Duration::from_secs(5)).await;
+    peer.user_accept_file(ok_transfer_id).await.unwrap();
+
+    let received = wait_inbox(g2.path(), "healthy.bin", Duration::from_secs(10)).await;
+    assert_eq!(received, ok_content);
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

@@ -38,7 +38,7 @@ use tetherly_net::session::{
     HANDSHAKE_TIMEOUT, INPUT_PORT, SCREEN_PORT,
 };
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex as AsyncMutex};
 use tracing::{debug, info, warn};
 
 struct OsRng;
@@ -318,6 +318,7 @@ struct Shared {
     live: Mutex<HashMap<DeviceId, LivePeer>>,
     pending_out: Mutex<HashMap<String, OutboundFile>>,
     active_transfers: Mutex<HashMap<String, ActiveTransfer>>,
+    transfer_cancels: Mutex<HashMap<String, oneshot::Sender<()>>>,
     bound_control: AtomicU16,
     bound_file: AtomicU16,
     bound_input: AtomicU16,
@@ -492,6 +493,7 @@ impl Node {
             live: Mutex::new(HashMap::new()),
             pending_out: Mutex::new(HashMap::new()),
             active_transfers: Mutex::new(HashMap::new()),
+            transfer_cancels: Mutex::new(HashMap::new()),
             bound_control,
             bound_file,
             bound_input,
@@ -1738,9 +1740,15 @@ impl Node {
         use tokio::io::AsyncSeekExt;
         part_file.seek(std::io::SeekFrom::Start(start)).await?;
 
+        let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
+        {
+            let mut cancels = self.shared.transfer_cancels.lock().expect("cancels");
+            cancels.insert(transfer_id.clone(), cancel_tx);
+        }
+
         let node = self.clone_handle();
         let tid = transfer_id.clone();
-        let res = tetherly_net::filechan::recv_chunks_to_sink(
+        let recv_fut = tetherly_net::filechan::recv_chunks_to_sink(
             &mut stream,
             &mut part_file,
             &token,
@@ -1754,8 +1762,20 @@ impl Node {
                 node.update_transfer_progress(&tid, written);
                 Ok(())
             },
-        )
-        .await;
+        );
+
+        let res = tokio::select! {
+            _ = &mut cancel_rx => {
+                self.shared.transfer_cancels.lock().expect("cancels").remove(&transfer_id);
+                self.note_resume(&source, &transfer_id, total, written);
+                self.set_transfer_phase(&transfer_id, TransferPhase::Failed, Some("cancelled by user".into()));
+                return Err(tetherly_net::NetError::File("cancelled by user".into()));
+            }
+            r = recv_fut => {
+                self.shared.transfer_cancels.lock().expect("cancels").remove(&transfer_id);
+                r
+            }
+        };
 
         if let Err(e) = res {
             // Persist a chunk-aligned resume marker (in memory + sidecar) so the
@@ -2156,67 +2176,90 @@ impl Node {
                     updated_ms: now,
                 });
         }
+        let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
+        {
+            let mut cancels = self.shared.transfer_cancels.lock().expect("cancels");
+            cancels.insert(transfer_id.to_string(), cancel_tx);
+        }
         let node = self.clone_handle();
         let tid = transfer_id.to_string();
-        let res = match outbound.source {
-            OutboundSource::Path(p) => match tokio::fs::File::open(&p).await {
-                Ok(mut f) => {
-                    if start > 0 {
-                        use tokio::io::AsyncSeekExt;
-                        if let Err(e) = f.seek(std::io::SeekFrom::Start(start)).await {
-                            warn!(%e, transfer = %transfer_id, "failed to seek in source file");
-                            self.set_transfer_phase(
-                                transfer_id,
-                                TransferPhase::Failed,
-                                Some(e.to_string()),
-                            );
-                            return;
-                        }
-                    }
-                    let dest = SocketAddr::new(addr.ip(), file_port);
-                    match TcpStream::connect(dest).await {
-                        Ok(mut stream) => {
-                            tetherly_net::filechan::send_stream_from_with_progress(
-                                &mut f,
-                                &mut stream,
-                                &token,
-                                transfer_id,
-                                outbound.size,
-                                start,
-                                move |offset, len| {
-                                    node.update_transfer_progress(&tid, offset + len as u64);
-                                    Ok(())
-                                },
-                            )
-                            .await
+        tokio::spawn(async move {
+            let send_fut = async {
+                match outbound.source {
+                    OutboundSource::Path(p) => match tokio::fs::File::open(&p).await {
+                        Ok(mut f) => {
+                            if start > 0 {
+                                use tokio::io::AsyncSeekExt;
+                                if let Err(e) = f.seek(std::io::SeekFrom::Start(start)).await {
+                                    warn!(%e, transfer = %tid, "failed to seek in source file");
+                                    return Err(tetherly_net::NetError::Io(e));
+                                }
+                            }
+                            let dest = SocketAddr::new(addr.ip(), file_port);
+                            match TcpStream::connect(dest).await {
+                                Ok(mut stream) => {
+                                    let node_prog = node.clone_handle();
+                                    let tid_prog = tid.clone();
+                                    tetherly_net::filechan::send_stream_from_with_progress(
+                                        &mut f,
+                                        &mut stream,
+                                        &token,
+                                        &tid,
+                                        outbound.size,
+                                        start,
+                                        move |offset, len| {
+                                            node_prog.update_transfer_progress(
+                                                &tid_prog,
+                                                offset + len as u64,
+                                            );
+                                            Ok(())
+                                        },
+                                    )
+                                    .await
+                                }
+                                Err(e) => Err(tetherly_net::NetError::Io(e)),
+                            }
                         }
                         Err(e) => Err(tetherly_net::NetError::Io(e)),
+                    },
+                    OutboundSource::Bytes(ref b) => {
+                        node.send_file_data(
+                            addr,
+                            file_port,
+                            &token,
+                            &tid,
+                            outbound.size,
+                            start,
+                            b,
+                        )
+                        .await
                     }
                 }
-                Err(e) => Err(tetherly_net::NetError::Io(e)),
-            },
-            OutboundSource::Bytes(ref b) => {
-                self.send_file_data(
-                    addr,
-                    file_port,
-                    &token,
-                    transfer_id,
-                    outbound.size,
-                    start,
-                    b,
-                )
-                .await
+            };
+
+            let res = tokio::select! {
+                _ = &mut cancel_rx => {
+                    info!(transfer = %tid, "outbound transfer cancelled by user");
+                    node.shared.transfer_cancels.lock().expect("cancels").remove(&tid);
+                    node.set_transfer_phase(&tid, TransferPhase::Failed, Some("cancelled by user".into()));
+                    return;
+                }
+                r = send_fut => {
+                    node.shared.transfer_cancels.lock().expect("cancels").remove(&tid);
+                    r
+                }
+            };
+
+            match res {
+                Ok(()) => {
+                    node.set_transfer_phase(&tid, TransferPhase::Completed, None);
+                }
+                Err(ref e) => {
+                    warn!(%e, transfer = %tid, "file data send failed");
+                    node.set_transfer_phase(&tid, TransferPhase::Failed, Some(e.to_string()));
+                }
             }
-        };
-        match res {
-            Ok(()) => {
-                self.set_transfer_phase(transfer_id, TransferPhase::Completed, None);
-            }
-            Err(ref e) => {
-                warn!(%e, transfer = %transfer_id, "file data send failed");
-                self.set_transfer_phase(transfer_id, TransferPhase::Failed, Some(e.to_string()));
-            }
-        }
+        });
     }
 
     /// Send file bytes from `start` (the resume offset) to the end of `data`,
@@ -3059,6 +3102,38 @@ impl Node {
         let mut list: Vec<ActiveTransfer> = transfers.values().cloned().collect();
         list.sort_by_key(|a| std::cmp::Reverse(a.started_ms));
         list
+    }
+
+    /// Cancel an active in-flight transfer (inbound or outbound).
+    pub fn cancel_transfer(&self, transfer_id: &str) -> Result<(), CoreError> {
+        let cancel_tx = {
+            let mut cancels = self.shared.transfer_cancels.lock().expect("cancels");
+            cancels.remove(transfer_id)
+        };
+        self.shared
+            .pending_out
+            .lock()
+            .expect("pending")
+            .remove(transfer_id);
+
+        let mut transfers = self.shared.active_transfers.lock().expect("transfers");
+        let t = transfers
+            .get_mut(transfer_id)
+            .ok_or(CoreError::UnknownTransfer)?;
+        if t.phase != TransferPhase::Transferring && t.phase != TransferPhase::Verifying {
+            return Err(CoreError::File("transfer is not active".into()));
+        }
+        t.phase = TransferPhase::Failed;
+        t.error = Some("cancelled by user".into());
+        t.speed_bps = 0;
+        t.updated_ms = self.shared.clock.unix_ms();
+        drop(transfers);
+
+        if let Some(tx) = cancel_tx {
+            let _ = tx.send(());
+        }
+        info!(transfer = %transfer_id, "transfer cancelled by user");
+        Ok(())
     }
 }
 

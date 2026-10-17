@@ -123,6 +123,14 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Cancel an in-flight file transfer by its transfer ID.
+    Cancel {
+        /// Transfer ID to cancel (e.g. tfl_...).
+        id: String,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -445,6 +453,24 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Cmd::Cancel { id, ui_port } => {
+            let body = serde_json::to_vec(&serde_json::json!({ "id": id }))?;
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/file/cancel", &body)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "cancel failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            println!("cancelled transfer [{id}]");
         }
         Cmd::Status {
             watch,

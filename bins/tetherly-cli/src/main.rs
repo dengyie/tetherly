@@ -51,6 +51,21 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         reconnect: u32,
     },
+    /// Send a user-facing notification to a live peer.
+    Notify {
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        body: String,
+        #[arg(long, default_value = "com.example.sms")]
+        app_id: String,
+        /// `tdev_…` of the peer. Omit only when exactly one peer is live.
+        #[arg(long)]
+        peer: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Send a file to a live peer via the running daemon's loopback UI API.
     Send {
         /// Path to the file to send.
@@ -64,6 +79,14 @@ enum Cmd {
         /// Watch transfer progress until completion.
         #[arg(long)]
         watch: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Cancel an in-flight file transfer by its transfer ID.
+    Cancel {
+        /// Transfer ID to cancel (e.g. tfl_...).
+        id: String,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -228,6 +251,39 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::Notify {
+            title,
+            body,
+            app_id,
+            peer,
+            ui_port,
+        } => {
+            let payload = serde_json::json!({
+                "title": title,
+                "body": body,
+                "app_id": app_id,
+                "peer": peer,
+            });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = loopback_post(ui_port, "/api/notify", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "node refused notify (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let v: serde_json::Value =
+                serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            let peer = v.get("peer").and_then(|p| p.as_str()).unwrap_or("?");
+            println!("notified {peer}");
+        }
         Cmd::Send {
             path,
             name,
@@ -325,6 +381,24 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Cmd::Cancel { id, ui_port } => {
+            let body = serde_json::to_vec(&serde_json::json!({ "id": id }))?;
+            let (code, resp) = loopback_post(ui_port, "/api/file/cancel", &body)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "cancel failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            println!("cancelled transfer [{id}]");
         }
         Cmd::Status {
             watch,

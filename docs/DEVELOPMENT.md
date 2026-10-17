@@ -3,12 +3,38 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.28** |
+| 文档版本 | **1.29** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.28 落地 64 GiB 企业级文件传输上限与全链路速率/CLI/UI 全景可观测性（ADR-021）**——(1) **传输上限拓展（FILE_MAX = 64 GiB）**：基于 v1.26 $O(1)$ 内存流式引擎，彻底解除 512 MiB 内存保护历史束缚，单文件上限扩展至 64 GiB，三处设卡严格断言拒收；(2) **传输速率 EWMA 平滑计算（speed_bps）**：运行时 `ActiveTransfer` 新增速率追踪，在 `update_transfer_progress` 采用 70% 历史 + 30% 瞬态指数加权移动平均消除抖动，终态归零；(3) **控制面回环与 CLI 生产可观测性（tetherly status 与 send --watch）**：`tetherly-node::uihttp` 增加异步 `loopback_get` 客户端，CLI 新增 `status` 子命令（支持 `--watch`/`--interval`/`--json`）与 `send --watch`（终端单行 `\r` 实时进度条、速率与阶段刷新）；(4) **Web UI 速率与 ETA 可视化**：引入 `formatBytes`、`formatSpeed` 与 `formatEta`，卡片动态显示传输速度与剩余预估时间；(5) **CI-First 全绿验证**：集成测试覆盖 64 GiB 边界拒收、活跃速度更新与状态机终态，GitHub Actions CI 5/5 任务全绿。+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.29 落地全双工传输任务取消机制、控制面非阻塞解耦与回环控制全闭环（ADR-022）**——(1) **控制通道非阻塞解耦 (`tokio::spawn`)**：将出站大文件数据流从 45717 控制会话的 `handle_event` 轮询循环中解耦至后台 `tokio::spawn` 异步任务，彻底消除大文件传输引起的控制帧饥饿，保证心跳与即时消息毫秒级吞吐；(2) **全双工原子取消控制原语 (`transfer_cancels`)**：`Shared` 引入 `transfer_cancels: Mutex<HashMap<String, oneshot::Sender<()>>>`，入站与出站传输经 `tokio::select!` 挂载，`cancel_transfer` 触发即刻通过 RAII 熔断 TCP 传输流与文件句柄，将状态跃迁至 `Failed` 并清零 `speed_bps`；(3) **回环 API 与 CLI/UI 联动 (`POST /api/file/cancel`)**：暴露回环取消接口，`tetherly cancel <id>` 与 `tetherly-cli cancel <id>` 命令行直通，并补齐 `tetherly-cli notify`；Web UI 活跃传输卡片增加动态 `[取消]` 操作按钮；(4) **CI-First 全绿验证**：集成测试覆盖流式传输取消、速率清零、幂等校验、后续通知与新文件传输全链路健康度。+ v1.28 落地 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.29 相对 1.28(全双工传输任务取消机制、控制面非阻塞解耦与回环控制全闭环)**
+
+- **动机(超大文件长时间占线风险与控制会话阻塞消除)**:
+  在 v1.28 升级至 64 GiB 传输上限后，超大文件传输在常规网络下可持续数十分钟甚至数小时。若用户误选文件或网络环境突变，系统缺乏主动取消控制能力，用户只能强杀守护进程，导致破坏已建立的设备信任与会话连接；同时，原实现中发送端在 `on_peer_accepted_file` 中直接在 45717 控制会话的 `handle_event` 主循环中同步执行 `send_stream_from_with_progress`，导致发送大文件期间 45717 控制通道无法读取对端心跳、无法转发通知或同步剪贴板，造成控制面被大文件占线饥饿（Head-of-Line Blocking）。
+
+- **架构与协议设计(ADR-022 全双工传输取消与控制面解耦)**:
+  1. **控制通道非阻塞解耦 (`tokio::spawn`)**:
+     - 将文件发送任务从 45717 轮询循环中解耦至独立的后台 `tokio::spawn` 异步任务，使得控制通道的 `recv_event()`、心跳 keepalive 与事件响应完全不受 45718 数据通道传输时长的影响，保持毫秒级响应。
+  2. **精确任务取消控制原语 (`transfer_cancels` 与 `cancel_transfer`)**:
+     - 在节点运行时 `Shared` 注册 `transfer_cancels: Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>`；
+     - 接收端（`accept_file`）与发送端（`on_peer_accepted_file`）分别注册 oneshot 取消信道，在传输循环中通过 `tokio::select!` 监听取消信号；
+     - `Node::cancel_transfer(transfer_id)`：
+       - 原子拔除 `pending_out`（防止并发接受竞态）；
+       - 标记 `phase = TransferPhase::Failed`，设置 `error = "cancelled by user"`，将瞬态 `speed_bps` 复位为 0；
+       - 触发 oneshot 发送端，通过 RAII 即时关闭底层 TCP 传输流并回收文件描述符；
+       - 接收端断开时自动保留断点续传 marker（`.part` 字节对齐）。
+  3. **回环 API 与控制闭环**:
+     - 回环控制端（45716）增加 `POST /api/file/cancel` 路由，仅接受 `{"id": "tfl_..."}` 参数；
+     - 非活跃传输调用返回 400，活跃传输返回 `{"ok": true, "transfer_id": ...}`。
+  4. **CLI 与 Web UI 操作联动**:
+     - `tetherly` 与 `tetherly-cli` 引入 `cancel <id>` 子命令；
+     - `tetherly-cli` 补齐 `notify` 子命令，与守护进程能力完全对齐；
+     - Web UI（`ui/index.html`）在处于 `transferring` 或 `verifying` 阶段的活跃传输卡片右上角增加动态 `[取消]` 按钮，点击即刻调用 `/api/file/cancel`。
+  5. **测试与 CI 全量验证**:
+     - 新增集成测试 `in_flight_streaming_transfer_can_be_cancelled_via_loopback_api`：验证回环取消 API 触发、`speed_bps` 复位、阶段置为 `Failed`、重复取消 400 幂等保护、控制会话持续健康（后续通知秒级送达）以及后续新文件传输 100% 成功。
 
 **1.28 相对 1.27(64 GiB 企业级文件传输上限、EWMA 速率平滑、CLI 状态监控与 Web UI 速率/ETA 全景可观测性)**
 
@@ -1282,5 +1308,35 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - `check (windows-latest)`: fmt, clippy, test（Windows x86_64）耗时 4m 26s 全部通过；
      - `android`: NDK arm64-v8a 原生库编译与 Gradle 打包耗时 1m 57s 全部通过；
      - `deny`: 许可证与漏洞合规审计耗时 1m 1s 全部通过。
+
+## 28. 全双工传输任务取消机制与控制面非阻塞架构 (v1.29 / ADR-022)
+
+1. **动机与设计准则（ADR-022）**：
+   - 超大文件传输必须提供即时的、确定性的双向取消能力，严禁通过强杀进程或中断主网络会话作为替代方案；
+   - 45717 控制通道是节点的心跳中枢，必须与 45718 数据通道彻底物理隔离与异步解耦，禁止任何数据流式操作阻塞会话读循环。
+
+2. **核心机制与实现**：
+   - **非阻塞控制会话循环**：在 `on_peer_accepted_file` 中，通过 `tokio::spawn(async move { ... })` 将出站数据传输解耦为独立异步任务，避免 `send_stream_from_with_progress` 阻塞 45717 会话读循环与心跳检测；
+   - **运行时原子取消映射表 (`transfer_cancels`)**：`Shared` 新增 `transfer_cancels: Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>`。入站（`accept_file`）与出站（`on_peer_accepted_file`）启动时注册 oneshot 通道，数据流通过 `tokio::select!` 挂载；
+   - **`cancel_transfer` 控制原语**：
+     - 从 `pending_out` 移除报价，阻止后续接受竞态；
+     - 校验阶段必须为 `Transferring` 或 `Verifying`，否则返回 `CoreError::File("transfer is not active")`；
+     - 设置 `phase = TransferPhase::Failed`，`error = Some("cancelled by user".into())`，`speed_bps = 0`；
+     - 发送 oneshot 信号，通过 RAII 立即释放底层 TCP 套接字与文件句柄；
+   - **回环 API 与 CLI/UI 联动**：
+     - 回环控制面暴露 `POST /api/file/cancel`（校验 `Host: 127.0.0.1|localhost`）；
+     - `tetherly` 与 `tetherly-cli` 增设 `cancel <id>` 子命令，并为 `tetherly-cli` 补齐 `notify`；
+     - Web UI（`ui/index.html`）在传输进行中呈现红色 `[取消]` 按钮。
+
+3. **测试覆盖与 GitHub CI 全量验证**：
+   - `tests/phase1.rs` 新增端到端集成测试 `in_flight_streaming_transfer_can_be_cancelled_via_loopback_api`：
+     - 启动配对节点并初始化回环 UI 服务；
+     - 发起流式多分块文件传输；
+     - 通过 `POST /api/file/cancel` 取消传输，断言返回 `{"ok": true, "transfer_id": ...}`；
+     - 验证传输状态跃迁为 `Failed`、错误信息为 `"cancelled by user"`、瞬态速率清零；
+     - 验证重复取消返回 400 幂等保护；
+     - 验证 45717 控制通道未受影响，通知可秒级送达对端；
+     - 验证后续全新文件传输可正常完成并校验哈希。
+
 
 

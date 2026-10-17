@@ -308,10 +308,14 @@ function render(s) {
         const rateAndEta = [speedText, etaText].filter(Boolean).join(" · ");
         const progressMeta = formatBytes(t.transferred) + ' / ' + formatBytes(t.total) + (rateAndEta ? ' (' + rateAndEta + ')' : '');
 
+        const cancelBtn = (t.phase === "transferring" || t.phase === "verifying")
+          ? '<button class="bad" type="button" style="padding:2px 8px;font-size:12px;margin-left:8px" data-cancel="' + t.transfer_id + '">取消</button>'
+          : '';
+
         const card = el('<div class="card" style="flex-direction:column;align-items:stretch;gap:4px">' +
           '<div style="display:flex;justify-content:space-between;align-items:center">' +
             '<div><span class="title"></span> ' + dirBadge + '</div>' +
-            '<div>' + phaseBadge + '</div>' +
+            '<div style="display:flex;align-items:center">' + phaseBadge + cancelBtn + '</div>' +
           '</div>' +
           '<div class="meta" style="display:flex;justify-content:space-between">' +
             '<span>' + progressMeta + '</span>' +
@@ -322,6 +326,10 @@ function render(s) {
           '</div>' +
         '</div>');
         card.querySelector(".title").textContent = t.filename;
+        const btn = card.querySelector('button[data-cancel]');
+        if (btn) {
+          btn.onclick = () => api("/api/file/cancel", { id: t.transfer_id });
+        }
         tf.appendChild(card);
       }
     }
