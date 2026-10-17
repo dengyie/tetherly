@@ -996,9 +996,13 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
     .expect("send succeeds");
     assert_eq!(send_code, 200);
     let send_resp: serde_json::Value = serde_json::from_slice(&send_body).unwrap();
-    let transfer_id = send_resp["transfer_id"].as_str().unwrap();
+    let transfer_id = send_resp["transfer_id"].as_str().unwrap().to_string();
 
-    // 3. Cancel the transfer via loopback API
+    // Peer accepts the offer so the transfer is actively in flight
+    wait_offered(&peer, Duration::from_secs(5)).await;
+    peer.user_accept_file(&transfer_id).await.unwrap();
+
+    // 3. Cancel the in-flight transfer via loopback API
     let cancel_payload = serde_json::json!({
         "id": transfer_id,
     });
@@ -1094,10 +1098,20 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
     .unwrap();
     assert_eq!(ok_code, 200);
     let ok_resp: serde_json::Value = serde_json::from_slice(&ok_body).unwrap();
-    let ok_transfer_id = ok_resp["transfer_id"].as_str().unwrap();
+    let ok_transfer_id = ok_resp["transfer_id"].as_str().unwrap().to_string();
 
-    wait_offered(&peer, Duration::from_secs(5)).await;
-    peer.user_accept_file(ok_transfer_id).await.unwrap();
+    let start = std::time::Instant::now();
+    while !peer
+        .offered_files()
+        .iter()
+        .any(|t| t.transfer_id == ok_transfer_id)
+    {
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!("subsequent file offer did not arrive");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    peer.user_accept_file(&ok_transfer_id).await.unwrap();
 
     let received = wait_inbox(g2.path(), "healthy.bin", Duration::from_secs(10)).await;
     assert_eq!(received, ok_content);
