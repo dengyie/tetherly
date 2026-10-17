@@ -1317,7 +1317,7 @@ async fn main() -> Result<()> {
                 }
                 _ => println!("  (no cached routes)"),
             }
-        },
+        }
         Cmd::Net {
             interfaces,
             json,
@@ -1424,7 +1424,7 @@ async fn main() -> Result<()> {
                 }
                 println!("\n(Use --interfaces or -i to inspect all skipped interfaces and classification reasons)");
             }
-        },
+        }
         Cmd::Status {
             watch,
             interval,
