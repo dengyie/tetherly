@@ -1700,29 +1700,38 @@ impl Node {
         }
         let mut written = start;
         let now = self.shared.clock.unix_ms();
-        {
+        let mut cancel_rx = {
+            let mut cancels = self.shared.transfer_cancels.lock().expect("cancels");
             let mut transfers = self.shared.active_transfers.lock().expect("transfers");
-            transfers
-                .entry(transfer_id.clone())
-                .and_modify(|t| {
-                    t.transferred = start;
-                    t.phase = TransferPhase::Transferring;
-                    t.updated_ms = now;
-                })
-                .or_insert_with(|| ActiveTransfer {
-                    transfer_id: transfer_id.clone(),
-                    peer: source.clone(),
-                    direction: TransferDirection::Inbound,
-                    filename: name.clone(),
-                    total,
-                    transferred: start,
-                    speed_bps: 0,
-                    phase: TransferPhase::Transferring,
-                    error: None,
-                    started_ms: now,
-                    updated_ms: now,
-                });
-        }
+            if let Some(t) = transfers.get_mut(&transfer_id) {
+                if t.phase == TransferPhase::Failed {
+                    return Err(tetherly_net::NetError::File("cancelled by user".into()));
+                }
+                t.transferred = start;
+                t.phase = TransferPhase::Transferring;
+                t.updated_ms = now;
+            } else {
+                transfers.insert(
+                    transfer_id.clone(),
+                    ActiveTransfer {
+                        transfer_id: transfer_id.clone(),
+                        peer: source.clone(),
+                        direction: TransferDirection::Inbound,
+                        filename: name.clone(),
+                        total,
+                        transferred: start,
+                        speed_bps: 0,
+                        phase: TransferPhase::Transferring,
+                        error: None,
+                        started_ms: now,
+                        updated_ms: now,
+                    },
+                );
+            }
+            let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+            cancels.insert(transfer_id.clone(), cancel_tx);
+            cancel_rx
+        };
         // Open the .part file for writing chunks at offset `start`.
         let mut part_file = {
             let f = std::fs::OpenOptions::new()
@@ -1739,12 +1748,6 @@ impl Node {
         };
         use tokio::io::AsyncSeekExt;
         part_file.seek(std::io::SeekFrom::Start(start)).await?;
-
-        let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
-        {
-            let mut cancels = self.shared.transfer_cancels.lock().expect("cancels");
-            cancels.insert(transfer_id.clone(), cancel_tx);
-        }
 
         let node = self.clone_handle();
         let tid = transfer_id.clone();
@@ -1768,7 +1771,11 @@ impl Node {
             _ = &mut cancel_rx => {
                 self.shared.transfer_cancels.lock().expect("cancels").remove(&transfer_id);
                 self.note_resume(&source, &transfer_id, total, written);
-                self.set_transfer_phase(&transfer_id, TransferPhase::Failed, Some("cancelled by user".into()));
+                self.set_transfer_phase(
+                    &transfer_id,
+                    TransferPhase::Failed,
+                    Some("cancelled by user".into()),
+                );
                 return Err(tetherly_net::NetError::File("cancelled by user".into()));
             }
             r = recv_fut => {
@@ -1915,9 +1922,7 @@ impl Node {
             );
         }
         // Token is derived from the live session handshake hash.
-        if let Some(sess_tx) = self.shared.sessions.lock().await.get(&source).cloned() {
-            let _ = sess_tx.try_send(decision.accept_frame()?);
-        }
+        self.send_to(&source, decision.accept_frame()?).await?;
         Ok(())
     }
 
@@ -2124,63 +2129,58 @@ impl Node {
 
     async fn on_peer_accepted_file(&self, decision: &tetherly_core::FileDecision) {
         let transfer_id = decision.transfer_id.as_str();
-        let outbound = self
-            .shared
-            .pending_out
-            .lock()
-            .expect("pending")
-            .remove(transfer_id);
-        let Some(outbound) = outbound else {
-            return;
+        let (outbound, cancel_rx) = {
+            let mut cancels = self.shared.transfer_cancels.lock().expect("cancels");
+            let mut pending = self.shared.pending_out.lock().expect("pending");
+            let mut transfers = self.shared.active_transfers.lock().expect("transfers");
+
+            let Some(t) = transfers.get_mut(transfer_id) else {
+                return;
+            };
+            if t.phase == TransferPhase::Failed {
+                // User cancelled before acceptance frame arrived
+                pending.remove(transfer_id);
+                return;
+            }
+            let Some(outbound) = pending.remove(transfer_id) else {
+                return;
+            };
+
+            let start = decision.resume_from.unwrap_or(0);
+            if start > outbound.size {
+                warn!(transfer = %transfer_id, "resume offset beyond local data; aborting");
+                t.phase = TransferPhase::Failed;
+                t.error = Some("invalid resume offset".into());
+                t.speed_bps = 0;
+                t.updated_ms = self.shared.clock.unix_ms();
+                return;
+            }
+
+            let now = self.shared.clock.unix_ms();
+            t.transferred = start;
+            t.phase = TransferPhase::Transferring;
+            t.updated_ms = now;
+
+            let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+            cancels.insert(transfer_id.to_string(), cancel_tx);
+            (outbound, cancel_rx)
         };
         let (addr, file_port, token) = {
             let live = self.shared.live.lock().expect("live");
             let Some(peer) = live.get(&outbound.peer) else {
                 warn!(transfer = %transfer_id, "accepted file but peer gone");
+                self.set_transfer_phase(
+                    transfer_id,
+                    TransferPhase::Failed,
+                    Some("peer gone".into()),
+                );
                 return;
             };
             let token = tetherly_crypto::file_token(&peer.handshake_hash, transfer_id.as_bytes());
             (peer.addr, peer.file_port.unwrap_or(self.file_port()), token)
         };
         let start = decision.resume_from.unwrap_or(0);
-        if start > outbound.size {
-            warn!(transfer = %transfer_id, "resume offset beyond local data; aborting");
-            self.set_transfer_phase(
-                transfer_id,
-                TransferPhase::Failed,
-                Some("invalid resume offset".into()),
-            );
-            return;
-        }
-        let now = self.shared.clock.unix_ms();
-        {
-            let mut transfers = self.shared.active_transfers.lock().expect("transfers");
-            transfers
-                .entry(transfer_id.to_string())
-                .and_modify(|t| {
-                    t.transferred = start;
-                    t.phase = TransferPhase::Transferring;
-                    t.updated_ms = now;
-                })
-                .or_insert_with(|| ActiveTransfer {
-                    transfer_id: transfer_id.to_string(),
-                    peer: outbound.peer.clone(),
-                    direction: TransferDirection::Outbound,
-                    filename: outbound.name.clone(),
-                    total: outbound.size,
-                    transferred: start,
-                    speed_bps: 0,
-                    phase: TransferPhase::Transferring,
-                    error: None,
-                    started_ms: now,
-                    updated_ms: now,
-                });
-        }
-        let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
-        {
-            let mut cancels = self.shared.transfer_cancels.lock().expect("cancels");
-            cancels.insert(transfer_id.to_string(), cancel_tx);
-        }
+        let mut cancel_rx = cancel_rx;
         let node = self.clone_handle();
         let tid = transfer_id.to_string();
         tokio::spawn(async move {
@@ -2233,7 +2233,11 @@ impl Node {
                 _ = &mut cancel_rx => {
                     info!(transfer = %tid, "outbound transfer cancelled by user");
                     node.shared.transfer_cancels.lock().expect("cancels").remove(&tid);
-                    node.set_transfer_phase(&tid, TransferPhase::Failed, Some("cancelled by user".into()));
+                    node.set_transfer_phase(
+                        &tid,
+                        TransferPhase::Failed,
+                        Some("cancelled by user".into()),
+                    );
                     return;
                 }
                 r = send_fut => {
@@ -2248,7 +2252,11 @@ impl Node {
                 }
                 Err(ref e) => {
                     warn!(%e, transfer = %tid, "file data send failed");
-                    node.set_transfer_phase(&tid, TransferPhase::Failed, Some(e.to_string()));
+                    node.set_transfer_phase(
+                        &tid,
+                        TransferPhase::Failed,
+                        Some(e.to_string()),
+                    );
                 }
             }
         });
@@ -3056,6 +3064,9 @@ impl Node {
         let now = self.shared.clock.unix_ms();
         let mut transfers = self.shared.active_transfers.lock().expect("transfers");
         if let Some(t) = transfers.get_mut(transfer_id) {
+            if t.phase == TransferPhase::Failed {
+                return;
+            }
             let delta_bytes = transferred.saturating_sub(t.transferred);
             let delta_ms = now.saturating_sub(t.updated_ms);
             if delta_ms > 0 && delta_bytes > 0 {
@@ -3080,6 +3091,9 @@ impl Node {
         let now = self.shared.clock.unix_ms();
         let mut transfers = self.shared.active_transfers.lock().expect("transfers");
         if let Some(t) = transfers.get_mut(transfer_id) {
+            if t.phase == TransferPhase::Failed && phase != TransferPhase::Failed {
+                return;
+            }
             if phase == TransferPhase::Completed || phase == TransferPhase::Failed {
                 t.speed_bps = 0;
             }
@@ -3100,26 +3114,23 @@ impl Node {
     pub fn cancel_transfer(&self, transfer_id: &str) -> Result<(), CoreError> {
         let cancel_tx = {
             let mut cancels = self.shared.transfer_cancels.lock().expect("cancels");
+            let mut pending = self.shared.pending_out.lock().expect("pending");
+            let mut transfers = self.shared.active_transfers.lock().expect("transfers");
+
+            let t = transfers
+                .get_mut(transfer_id)
+                .ok_or(CoreError::UnknownTransfer)?;
+            if t.phase != TransferPhase::Transferring && t.phase != TransferPhase::Verifying {
+                return Err(CoreError::File("transfer is not active".into()));
+            }
+            t.phase = TransferPhase::Failed;
+            t.error = Some("cancelled by user".into());
+            t.speed_bps = 0;
+            t.updated_ms = self.shared.clock.unix_ms();
+
+            pending.remove(transfer_id);
             cancels.remove(transfer_id)
         };
-        self.shared
-            .pending_out
-            .lock()
-            .expect("pending")
-            .remove(transfer_id);
-
-        let mut transfers = self.shared.active_transfers.lock().expect("transfers");
-        let t = transfers
-            .get_mut(transfer_id)
-            .ok_or(CoreError::UnknownTransfer)?;
-        if t.phase != TransferPhase::Transferring && t.phase != TransferPhase::Verifying {
-            return Err(CoreError::File("transfer is not active".into()));
-        }
-        t.phase = TransferPhase::Failed;
-        t.error = Some("cancelled by user".into());
-        t.speed_bps = 0;
-        t.updated_ms = self.shared.clock.unix_ms();
-        drop(transfers);
 
         if let Some(tx) = cancel_tx {
             let _ = tx.send(());

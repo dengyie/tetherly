@@ -1117,7 +1117,29 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
     }
     peer.user_accept_file(&ok_transfer_id).await.unwrap();
 
-    let received = wait_inbox(g2.path(), "healthy.bin", Duration::from_secs(20)).await;
+    let start = std::time::Instant::now();
+    let received = loop {
+        let path = g2.path().join("inbox").join("healthy.bin");
+        if let Ok(bytes) = std::fs::read(&path) {
+            if !bytes.is_empty() {
+                break bytes;
+            }
+        }
+        if start.elapsed() > Duration::from_secs(20) {
+            let host_t = host
+                .active_transfers()
+                .into_iter()
+                .find(|t| t.transfer_id == ok_transfer_id);
+            let peer_t = peer
+                .active_transfers()
+                .into_iter()
+                .find(|t| t.transfer_id == ok_transfer_id);
+            panic!(
+                "inbox file missing after 20s: host={host_t:?}, peer={peer_t:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     assert_eq!(received, ok_content);
 
     let start = std::time::Instant::now();
