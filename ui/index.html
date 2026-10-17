@@ -107,7 +107,10 @@
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <h2>实时传输状态</h2>
-        <button id="cleartransfers" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--dim);border-radius:4px;cursor:pointer">清除完成记录</button>
+        <div style="display:flex;gap:6px">
+          <button id="refreshtransfers" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--dim);border-radius:4px;cursor:pointer">刷新传输</button>
+          <button id="cleartransfers" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--dim);border-radius:4px;cursor:pointer">清除完成记录</button>
+        </div>
       </div>
       <div id="transferstats" class="hint" style="margin-bottom:8px"></div>
       <div id="transfers"><div class="empty">暂无活跃或近期传输。</div></div>
@@ -297,6 +300,76 @@ function formatEta(remainingBytes, bps) {
   const remSec = sec % 60;
   return "剩余 " + min + "m" + remSec + "s";
 }
+function renderTransfers(list, stats) {
+  const tstat = $("transferstats");
+  if (tstat) {
+    if (stats) {
+      tstat.textContent = "累计统计：发送 " + formatBytes(stats.bytes_sent)
+        + " · 接收 " + formatBytes(stats.bytes_received)
+        + " · 完成 " + (stats.completed_count || 0) + " 笔"
+        + " · 失败 " + (stats.failed_count || 0) + " 笔";
+    } else {
+      tstat.textContent = "";
+    }
+  }
+  const tf = $("transfers");
+  if (!tf) return;
+  tf.innerHTML = "";
+  const items = list || [];
+  if (!items.length) {
+    tf.appendChild(el('<div class="empty">暂无活跃或近期传输。</div>'));
+    return;
+  }
+  for (const t of items) {
+    const pct = t.total > 0 ? Math.min(100, Math.round((t.transferred / t.total) * 100)) : 0;
+    const dirBadge = t.direction === "inbound" ? '<span class="badge inbound">接收</span>' : '<span class="badge outbound">发送</span>';
+    let phaseBadge = '';
+    if (t.phase === "transferring") phaseBadge = '<span class="badge outbound">' + pct + '% 传输中</span>';
+    else if (t.phase === "verifying") phaseBadge = '<span class="badge verifying">校验哈希中</span>';
+    else if (t.phase === "completed") phaseBadge = '<span class="badge completed">完成 100%</span>';
+    else if (t.phase === "failed") phaseBadge = '<span class="badge failed">失败' + (t.error ? (': ' + t.error) : '') + '</span>';
+
+    const speedText = (t.phase === "transferring" && t.speed_bps > 0) ? formatSpeed(t.speed_bps) : "";
+    const remaining = Math.max(0, (t.total || 0) - (t.transferred || 0));
+    const etaText = (t.phase === "transferring" && t.speed_bps > 0) ? formatEta(remaining, t.speed_bps) : "";
+    const rateAndEta = [speedText, etaText].filter(Boolean).join(" · ");
+    const progressMeta = formatBytes(t.transferred) + ' / ' + formatBytes(t.total) + (rateAndEta ? ' (' + rateAndEta + ')' : '');
+
+    const cancelBtn = (t.phase === "transferring" || t.phase === "verifying")
+      ? '<button class="bad" type="button" style="padding:2px 8px;font-size:12px;margin-left:8px" data-cancel="' + t.transfer_id + '">取消</button>'
+      : '';
+
+    const card = el('<div class="card" style="flex-direction:column;align-items:stretch;gap:4px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+        '<div><span class="title"></span> ' + dirBadge + '</div>' +
+        '<div style="display:flex;align-items:center">' + phaseBadge + cancelBtn + '</div>' +
+      '</div>' +
+      '<div class="meta" style="display:flex;justify-content:space-between">' +
+        '<span>' + progressMeta + '</span>' +
+        '<span>' + (t.peer) + '</span>' +
+      '</div>' +
+      '<div class="progress-bar-bg">' +
+        '<div class="progress-bar-fill ' + t.phase + '" style="width:' + pct + '%"></div>' +
+      '</div>' +
+    '</div>');
+    card.querySelector(".title").textContent = t.filename;
+    const btn = card.querySelector('button[data-cancel]');
+    if (btn) {
+      btn.onclick = () => api("/api/file/cancel", { id: t.transfer_id });
+    }
+    tf.appendChild(card);
+  }
+}
+async function refreshTransfers() {
+  try {
+    const rep = await api("/api/file/transfers");
+    if (rep && rep.ok) {
+      renderTransfers(rep.transfers, rep.stats);
+    }
+  } catch (e) {
+    console.error("refreshTransfers error", e);
+  }
+}
 function render(s) {
   $("who").textContent = s.name + " · " + s.platform + " · " + s.device_id;
   const net = $("net");
@@ -393,66 +466,7 @@ function render(s) {
     card.querySelector(".row").appendChild(no);
     f.appendChild(card);
   }
-  const tstat = $("transferstats");
-  if (tstat) {
-    const st = s.transfer_stats;
-    if (st) {
-      tstat.textContent = "累计统计：发送 " + formatBytes(st.bytes_sent)
-        + " · 接收 " + formatBytes(st.bytes_received)
-        + " · 完成 " + (st.completed_count || 0) + " 笔"
-        + " · 失败 " + (st.failed_count || 0) + " 笔";
-    } else {
-      tstat.textContent = "";
-    }
-  }
-  const tf = $("transfers");
-  if (tf) {
-    tf.innerHTML = "";
-    const list = s.transfers || [];
-    if (!list.length) {
-      tf.appendChild(el('<div class="empty">暂无活跃或近期传输。</div>'));
-    } else {
-      for (const t of list) {
-        const pct = t.total > 0 ? Math.min(100, Math.round((t.transferred / t.total) * 100)) : 0;
-        const dirBadge = t.direction === "inbound" ? '<span class="badge inbound">接收</span>' : '<span class="badge outbound">发送</span>';
-        let phaseBadge = '';
-        if (t.phase === "transferring") phaseBadge = '<span class="badge outbound">' + pct + '% 传输中</span>';
-        else if (t.phase === "verifying") phaseBadge = '<span class="badge verifying">校验哈希中</span>';
-        else if (t.phase === "completed") phaseBadge = '<span class="badge completed">完成 100%</span>';
-        else if (t.phase === "failed") phaseBadge = '<span class="badge failed">失败' + (t.error ? (': ' + t.error) : '') + '</span>';
-
-        const speedText = (t.phase === "transferring" && t.speed_bps > 0) ? formatSpeed(t.speed_bps) : "";
-        const remaining = Math.max(0, (t.total || 0) - (t.transferred || 0));
-        const etaText = (t.phase === "transferring" && t.speed_bps > 0) ? formatEta(remaining, t.speed_bps) : "";
-        const rateAndEta = [speedText, etaText].filter(Boolean).join(" · ");
-        const progressMeta = formatBytes(t.transferred) + ' / ' + formatBytes(t.total) + (rateAndEta ? ' (' + rateAndEta + ')' : '');
-
-        const cancelBtn = (t.phase === "transferring" || t.phase === "verifying")
-          ? '<button class="bad" type="button" style="padding:2px 8px;font-size:12px;margin-left:8px" data-cancel="' + t.transfer_id + '">取消</button>'
-          : '';
-
-        const card = el('<div class="card" style="flex-direction:column;align-items:stretch;gap:4px">' +
-          '<div style="display:flex;justify-content:space-between;align-items:center">' +
-            '<div><span class="title"></span> ' + dirBadge + '</div>' +
-            '<div style="display:flex;align-items:center">' + phaseBadge + cancelBtn + '</div>' +
-          '</div>' +
-          '<div class="meta" style="display:flex;justify-content:space-between">' +
-            '<span>' + progressMeta + '</span>' +
-            '<span>' + (t.peer) + '</span>' +
-          '</div>' +
-          '<div class="progress-bar-bg">' +
-            '<div class="progress-bar-fill ' + t.phase + '" style="width:' + pct + '%"></div>' +
-          '</div>' +
-        '</div>');
-        card.querySelector(".title").textContent = t.filename;
-        const btn = card.querySelector('button[data-cancel]');
-        if (btn) {
-          btn.onclick = () => api("/api/file/cancel", { id: t.transfer_id });
-        }
-        tf.appendChild(card);
-      }
-    }
-  }
+  renderTransfers(s.transfers, s.transfer_stats);
   const p = $("peers");
   p.innerHTML = "";
   if (!s.peers.length) p.appendChild(el('<div class="empty">无会话</div>'));
@@ -596,8 +610,13 @@ $("screenstart").onclick = () => api("/api/screen/start", {});
 $("screenstop").onclick = () => api("/api/screen/stop", {});
 $("inputstart").onclick = () => api("/api/input/start", {});
 $("inputstop").onclick = () => api("/api/input/stop", {});
+const refreshTransfersBtn = $("refreshtransfers");
+if (refreshTransfersBtn) refreshTransfersBtn.onclick = () => refreshTransfers();
 const clearBtn = $("cleartransfers");
-if (clearBtn) clearBtn.onclick = () => api("/api/file/clear", {});
+if (clearBtn) clearBtn.onclick = async () => {
+  await api("/api/file/clear", {});
+  refreshTransfers();
+};
 $("sendbtn").onclick = async () => {
   const fileInput = $("sendfile");
   const file = fileInput.files && fileInput.files[0];

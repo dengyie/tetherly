@@ -216,14 +216,14 @@ struct Hubs {
     resume: tetherly_core::ResumeTable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TransferDirection {
     Inbound,
     Outbound,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TransferPhase {
     Transferring,
@@ -232,7 +232,7 @@ pub enum TransferPhase {
     Failed,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ActiveTransfer {
     pub transfer_id: String,
     pub peer: DeviceId,
@@ -245,6 +245,17 @@ pub struct ActiveTransfer {
     pub error: Option<String>,
     pub started_ms: u64,
     pub updated_ms: u64,
+}
+
+/// Comprehensive lightweight report of active and retained file transfers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TransfersReport {
+    pub ok: bool,
+    pub active_count: usize,
+    pub terminal_count: usize,
+    pub total_count: usize,
+    pub transfers: Vec<ActiveTransfer>,
+    pub stats: TransferStats,
 }
 
 /// Maximum number of completed/failed transfer records retained in memory.
@@ -3716,6 +3727,31 @@ impl Node {
         let mut list: Vec<ActiveTransfer> = transfers.values().cloned().collect();
         list.sort_by_key(|a| std::cmp::Reverse(a.started_ms));
         list
+    }
+
+    pub fn transfer_by_id(&self, id: &str) -> Option<ActiveTransfer> {
+        let transfers = self.shared.active_transfers.lock().expect("transfers");
+        transfers.get(id).cloned()
+    }
+
+    pub fn transfers_report(&self) -> TransfersReport {
+        let transfers = self.active_transfers();
+        let stats = self.transfer_stats();
+        let active_count = transfers
+            .iter()
+            .filter(|t| {
+                t.phase == TransferPhase::Transferring || t.phase == TransferPhase::Verifying
+            })
+            .count();
+        let terminal_count = transfers.len().saturating_sub(active_count);
+        TransfersReport {
+            ok: true,
+            active_count,
+            terminal_count,
+            total_count: transfers.len(),
+            transfers,
+            stats,
+        }
     }
 
     pub fn transfer_stats(&self) -> TransferStats {

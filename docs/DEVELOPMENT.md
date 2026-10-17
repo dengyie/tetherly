@@ -3,12 +3,43 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.41** |
+| 文档版本 | **1.42** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）**——(1) **Noise 会话级端到端时延度量引擎**：利用 `TYPE_PING` (0x0001) 与 `TYPE_PONG` (0x0002) 帧时间戳，在不增加协议开销的前提下测量加密隧道单次往返精确微秒/毫秒级时延 (RTT)；(2) **异步等待派发器与按需探测端点 (`POST /api/peers/ping`)**：支持主动向指定对端（或单对端自解析）发起链路探测，内置 oneshot 异步等待与 5 秒超时保护，返回包含 `device_id`、`rtt_ms`、`path` 与 `addr` 的结构化报告 `PeerPingReport`；(3) **LivePeer 链路质量可观测性透视**：在 `LivePeer` 引入 `rtt_ms: Option<u64>` 与 `last_seen_ms: u64`，并在 `GET /api/peers` 与 `GET /api/state` 快照中完整暴露；(4) **实时时延流式广播 (`UiEvent::PeerLatency`)**：每次收到 Pong 响应自动向 SSE 事件总线广播时延更新事件；(5) **CLI 全量同构测速命令 (`tetherly` 与 `tetherly-cli`)**：`peers --ping [--peer <id>] [--count <n>] [--json]` 与 `ping --peer <id> [--count <n>] [--json]`，支持多包探测与最小/平均/最大值统计；(6) **Web UI 实时时延徽标与一键测速**：在 `ui/index.html` 对端卡片增设动态时延状态徽标与「测速」按钮；(7) **端到端集成测试全覆盖**（`tests/phase1.rs` 增设 `active_peer_rtt_probing_and_latency_reporting_via_loopback_api`）。+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）**——(1) **传输可观测性盲区消除与轻量级回环查询端点 (`GET /api/file/transfers` & `GET /api/transfers`)**：彻底解耦大文件传输过程中的全量状态快照依赖，提供高频、轻量级传输检索能力，支持通过 `?id=tfl_...` 进行单任务 $O(1)$ 精准查询（不存在时规范返回 HTTP 404），并支持 `?active=true`、`?terminal=true` 与 `?direction=inbound|outbound` 多维度参数化过滤；(2) **全景传输汇总画像与会话级度量模型 (`TransfersReport`)**：聚合 `active_count`、`terminal_count`、`total_count`、分片任务列表与会话级累计指标 (`TransferStats`：总发送/接收字节数、完成/失败笔数），在历史记录清除后仍完整保留累计吞吐量；(3) **双端全量同构 CLI 传输管理命令 (`tetherly` 与 `tetherly-cli`)**：增设 `transfers [--id <id>] [--active] [--terminal] [--direction <in|out>] [--json] [--ui-port <port>]`，格式化呈现各传输任务进度条、自适应传输速率 (`format_speed`) 与会话吞吐；(4) **Web UI 实时传输面板交互与统计增强**：在 `ui/index.html` 传输卡片增设独立「刷新传输」按键，强化会话累计统计展示，清除历史后自动局部刷新；(5) **端到端集成测试全覆盖**：在 `tests/phase1.rs` 增设 `file_transfers_inspection_and_query_via_loopback_api`，全链路覆盖初始状态、404 未找到、单任务 ID 检索、active/terminal 过滤、direction 过滤、流式传输完成后的累计度量与清理闭环。+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.42 相对 1.41(文件传输通道全景可观测性、轻量级传输查询与命令行同构治理)**
+
+- **动机(大文件传输可观测性盲区、快照轮询性能损耗与专用传输管理能力缺失)**:
+  在 v1.28 至 v1.41 的演进中，Tetherly 支持最高 64 GiB 流式大文件传输并建立了任务取消与会话累计度量机制。然而在生产高并发与长周期大文件传输实践中，暴露出以下架构痛点：
+  1. **状态快照轮询高开销**：此前外部 CLI、无头脚本或 Web UI 若要感知传输实时进度与速度，必须频繁轮询 `GET /api/state`。在有数十个活跃对端或包含复杂路由缓存与 ANCS 白名单时，整机快照的全量 JSON 序列化造成不必要的 CPU 与内存开销；
+  2. **缺少独立精准查询与多维过滤端点**：无法直接根据特定的 `transfer_id` 查询单个任务的精确详情（包含耗时、当前相位、错误信息等），也无法仅检索正在在途传输（`active`）或已终态（`terminal`）的任务；
+  3. **CLI 缺少专属传输治理命令**：此前 CLI 仅有 `send`、`cancel` 与 `clear-transfers`，缺乏直观查看传输列表、进度与速率的 `transfers` 命令；
+  4. **Web 传输交互与统计割裂**：Web 界面缺少轻量级传输独立刷新按键，传输度量与局部刷新机制有待加强。
+
+- **架构与协议设计(ADR-035 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理)**:
+  1. **全景传输汇总数据契约 (`TransfersReport`)**:
+     - 在 `runtime.rs` 与 `lib.rs` 引入 `TransfersReport` DTO：包含 `ok: bool`, `active_count: usize`, `terminal_count: usize`, `total_count: usize`, `transfers: Vec<ActiveTransfer>`, `stats: TransferStats`；
+     - `Node::active_transfers(&self) -> Vec<ActiveTransfer>` 按任务启动时间倒序输出；
+     - `Node::transfer_by_id(&self, id: &str) -> Option<ActiveTransfer>` 针对单任务执行 $O(1)$ 哈希表查找；
+     - `Node::transfers_report(&self) -> TransfersReport` 聚合生成全景视图；
+  2. **轻量级回环查询端点 (`GET /api/file/transfers` & `GET /api/transfers`)**:
+     - 严格绑定 `127.0.0.1` 并强校验 `Host`（非法请求返回 403）；
+     - 双模参数支持：同时支持 URI Query String (`?id=...&active=true...`) 与 POST JSON 请求体；
+     - 单任务精准查询：当提供 `id` 时，命中返回 200 及 `ActiveTransfer`，未找到返回 HTTP 404；
+     - 列表动态过滤：支持 `active=true`（仅保留 `Transferring` 与 `Verifying`）、`terminal=true`（仅保留 `Completed` 与 `Failed`）以及 `direction=inbound|outbound` 过滤；
+  3. **双端同构命令行 (`tetherly` 与 `tetherly-cli`)**:
+     - 增设 `Cmd::Transfers`，支持 `--id <tfl_...>`, `--active`, `--terminal`, `--direction <in|out>`, `--json`, `--ui-port <port>`；
+     - 格式化输出任务传输百分比、已传输量/总量 (`format_bytes`)、实时速率 (`format_speed`) 及累计会话指标；
+  4. **Web UI 局部刷新与全景交互 (`ui/index.html`)**:
+     - 增设「刷新传输」按键，调用轻量级 `/api/file/transfers` 实时渲染；
+     - 清除历史记录后无缝触发轻量级刷新；
+  5. **安全红线铁律（Verbatim Security Red Line）**:
+     - 回环接口仅监听 `127.0.0.1`，严格校验 `Host`；
+     - 正在进行的大文件传输任务分块文件严防误删；
+     - 传输查询接口严禁输出或泄漏任何超出传输控制元数据之外的宿主隐私内容。
 
 **1.41 相对 1.40(对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测)**
 
@@ -2192,6 +2223,45 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - 验证 loopback `POST /api/peers/ping` 指定设备与单设备自动解析；
      - 验证 `GET /api/peers` 与 `GET /api/state` 包含 `rtt_ms` 与 `last_seen_ms`；
      - 验证 SSE 事件流成功接收到 `UiEvent::PeerLatency` 广播事件。
+
+## 41. 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理 (v1.42 / ADR-035)
+
+1. **动机与设计准则（ADR-035）**：
+   - **大文件传输状态轻量解耦**：自 v1.28 起 Tetherly 支持高达 64 GiB 的流式文件传输。此前查看传输任务状态与速率必须轮询 `GET /api/state`，在存在长周期大文件传输时频繁获取完整节点快照产生严重的冗余计算与序列化开销；
+   - **轻量级按需检索与状态过滤**：增设专用回环端点 `GET /api/file/transfers`（及其别名 `GET /api/transfers`），支持通过 `?id=tfl_...` 进行单任务 $O(1)$ 精准查询（不存在时标准返回 404），并支持 `?active=true`、`?terminal=true`、`?direction=inbound|outbound` 进行按需过滤；
+   - **会话级度量透视**：在传输报告中同时返回各任务实时进度与会话级累计指标 (`TransferStats`：`bytes_sent`, `bytes_received`, `completed_count`, `failed_count`)，即使用户清除了已完成的历史传输，总吞吐量依然准确保留；
+   - **双端 CLI 同构**：在 `tetherly` 与 `tetherly-cli` 全量增设 `transfers` 子命令，提供格式化进度条、实时自适应传输速度与会话级统计透视；
+   - **安全红线铁律（Verbatim Security Red Line）**：回环接口仅监听 `127.0.0.1`，严格校验 `Host: 127.0.0.1|localhost`（不匹配返回 403）；在途文件传输（`Transferring` / `Verifying`）受底层状态机强保护，严防误删；接口禁止泄露任何超出传输元数据之外的隐私信息。
+
+2. **核心机制与实现**：
+   - **传输报告模型 (`TransfersReport`)**：
+     - 在 `runtime.rs` 与 `lib.rs` 引入 `TransfersReport` DTO：
+       ```rust
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+       pub struct TransfersReport {
+           pub ok: bool,
+           pub active_count: usize,
+           pub terminal_count: usize,
+           pub total_count: usize,
+           pub transfers: Vec<ActiveTransfer>,
+           pub stats: TransferStats,
+       }
+       ```
+     - 扩展 `Node::transfer_by_id(&self, id: &str) -> Option<ActiveTransfer>` 与 `Node::transfers_report(&self) -> TransfersReport`；
+   - **回环 HTTP 端点 (`GET /api/file/transfers` & `GET /api/transfers`)**：
+     - 统一解析 URL Query 与 POST JSON 参数（支持 `id`, `active`, `terminal`, `direction`）；
+     - `id` 命中返回 200 及 `ActiveTransfer`，未找到返回 HTTP 404；
+     - 列表模式按启动时间倒序聚合并按指定条件过滤，返回 `TransfersReport`；
+   - **双端同构命令行**：
+     - `transfers [--id <id>] [--active] [--terminal] [--direction <in|out>] [--json] [--ui-port <port>]`；
+     - 格式化展示已传输字节数/总大小、百分比进度、自适应传输速率 (`format_speed`) 及累计吞吐；
+   - **Web UI 传输面板增强 (`ui/index.html`)**：
+     - 增设独立「刷新传输」按键，调用轻量级端点获取最新状态；
+     - 展示会话累计统计（总发送、总接收、完成笔数、失败笔数）；
+     - 清除历史完成后自动触发轻量刷新；
+   - **端到端集成测试全覆盖 (`tests/phase1.rs`)**：
+     - `file_transfers_inspection_and_query_via_loopback_api`：验证初始状态、404 未找到、单任务 ID 检索、active/terminal 过滤、direction 过滤、传输完成后的度量累计与清理闭环。
+
 
 
 

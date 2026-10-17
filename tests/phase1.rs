@@ -2280,6 +2280,159 @@ async fn active_peer_rtt_probing_and_latency_reporting_via_loopback_api() {
     peer.shutdown();
 }
 
+/// ADR-035: Lightweight file transfers query, single transfer inspection, cumulative metrics, and history lifecycle.
+#[tokio::test(flavor = "multi_thread")]
+async fn file_transfers_inspection_and_query_via_loopback_api() {
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    let ui_port = host.spawn_ui().await.expect("host UI spawns");
+
+    // 1. Initial transfers report: empty list and zero metrics
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/file/transfers")
+        .await
+        .expect("get transfers");
+    assert_eq!(code, 200);
+    let mut rep: tetherly_node::TransfersReport = serde_json::from_slice(&body).unwrap();
+    assert!(rep.ok);
+    assert_eq!(rep.active_count, 0);
+    assert_eq!(rep.terminal_count, 0);
+    assert_eq!(rep.total_count, 0);
+    assert!(rep.transfers.is_empty());
+    assert_eq!(rep.stats.completed_count, 0);
+    assert_eq!(rep.stats.failed_count, 0);
+
+    // 2. Query non-existent transfer returns 404
+    let (code_404, _) =
+        tetherly_node::loopback_get(ui_port, "/api/file/transfers?id=tfl_nonexistent")
+            .await
+            .expect("get non-existent transfer");
+    assert_eq!(code_404, 404);
+
+    // 3. Create a test file and send it from host to peer
+    let (send_dir, _g_send) = temp_dir("transfers-query-test");
+    let file_path = send_dir.join("query_sample.dat");
+    let total_size = tetherly_core::FILE_CHUNK + 2048;
+    let file_content: Vec<u8> = (0..total_size).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&file_path, &file_content).unwrap();
+
+    let send_payload = serde_json::json!({
+        "path": file_path.to_str().unwrap(),
+        "name": "query_sample.dat",
+    });
+    let (send_code, send_body) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/send",
+        &serde_json::to_vec(&send_payload).unwrap(),
+    )
+    .await
+    .expect("send file post");
+    assert_eq!(send_code, 200);
+    let send_resp: serde_json::Value = serde_json::from_slice(&send_body).unwrap();
+    let transfer_id = send_resp["transfer_id"].as_str().unwrap().to_string();
+
+    // 4. Query single transfer by ID before peer accepts
+    let (code_id, body_id) =
+        tetherly_node::loopback_get(ui_port, &format!("/api/file/transfers?id={transfer_id}"))
+            .await
+            .expect("get single transfer by id");
+    assert_eq!(code_id, 200);
+    let single_tf: tetherly_node::ActiveTransfer = serde_json::from_slice(&body_id).unwrap();
+    assert_eq!(single_tf.transfer_id, transfer_id);
+    assert_eq!(single_tf.filename, "query_sample.dat");
+    assert_eq!(single_tf.total, total_size as u64);
+    assert_eq!(
+        single_tf.direction,
+        tetherly_node::TransferDirection::Outbound
+    );
+
+    // 5. Query with alias endpoint /api/transfers and active filter
+    let (code_alias, body_alias) =
+        tetherly_node::loopback_get(ui_port, "/api/transfers?active=true")
+            .await
+            .expect("get alias transfers active=true");
+    assert_eq!(code_alias, 200);
+    let alias_rep: tetherly_node::TransfersReport = serde_json::from_slice(&body_alias).unwrap();
+    assert_eq!(alias_rep.active_count, 1);
+    assert_eq!(alias_rep.transfers.len(), 1);
+    assert_eq!(alias_rep.transfers[0].transfer_id, transfer_id);
+
+    // 6. Query with terminal filter (should be empty initially)
+    let (code_term, body_term) =
+        tetherly_node::loopback_get(ui_port, "/api/file/transfers?terminal=true")
+            .await
+            .expect("get terminal transfers");
+    assert_eq!(code_term, 200);
+    let term_rep: tetherly_node::TransfersReport = serde_json::from_slice(&body_term).unwrap();
+    assert_eq!(term_rep.transfers.len(), 0);
+
+    // 7. Peer accepts file and completes transmission
+    wait_offered(&peer, Duration::from_secs(10)).await;
+    peer.user_accept_file(&transfer_id).await.unwrap();
+
+    let received = wait_inbox(g2.path(), "query_sample.dat", Duration::from_secs(25)).await;
+    assert_eq!(received.len(), total_size);
+
+    // 8. Re-query /api/file/transfers after completion:
+    //    - active_count should be 0
+    //    - terminal_count should be 1
+    //    - stats.completed_count should be 1
+    //    - stats.bytes_sent should reflect total_size
+    let (code_done, body_done) = tetherly_node::loopback_get(ui_port, "/api/file/transfers")
+        .await
+        .expect("get completed transfers");
+    assert_eq!(code_done, 200);
+    rep = serde_json::from_slice(&body_done).unwrap();
+    assert_eq!(rep.active_count, 0);
+    assert_eq!(rep.terminal_count, 1);
+    assert_eq!(rep.total_count, 1);
+    assert_eq!(
+        rep.transfers[0].phase,
+        tetherly_node::TransferPhase::Completed
+    );
+    assert_eq!(rep.stats.completed_count, 1);
+    assert!(rep.stats.bytes_sent >= total_size as u64);
+
+    // 9. Query with direction filter: direction=inbound should yield 0 for host, direction=outbound yields 1
+    let (code_in, body_in) =
+        tetherly_node::loopback_get(ui_port, "/api/file/transfers?direction=inbound")
+            .await
+            .expect("query direction inbound");
+    assert_eq!(code_in, 200);
+    let in_rep: tetherly_node::TransfersReport = serde_json::from_slice(&body_in).unwrap();
+    assert_eq!(in_rep.transfers.len(), 0);
+
+    let (code_out, body_out) =
+        tetherly_node::loopback_get(ui_port, "/api/file/transfers?direction=outbound")
+            .await
+            .expect("query direction outbound");
+    assert_eq!(code_out, 200);
+    let out_rep: tetherly_node::TransfersReport = serde_json::from_slice(&body_out).unwrap();
+    assert_eq!(out_rep.transfers.len(), 1);
+
+    // 10. POST /api/file/clear to purge completed transfer history
+    let (clear_code, clear_body) =
+        tetherly_node::loopback_post(ui_port, "/api/file/clear", b"{}")
+            .await
+            .expect("clear completed transfers");
+    assert_eq!(clear_code, 200);
+    let clear_val: serde_json::Value = serde_json::from_slice(&clear_body).unwrap();
+    assert_eq!(clear_val["ok"], true);
+    assert_eq!(clear_val["cleared"], 1);
+
+    // 11. Final transfers report check: transfers list empty, but cumulative stats preserved
+    let (code_final, body_final) = tetherly_node::loopback_get(ui_port, "/api/file/transfers")
+        .await
+        .expect("get final transfers");
+    assert_eq!(code_final, 200);
+    let final_rep: tetherly_node::TransfersReport = serde_json::from_slice(&body_final).unwrap();
+    assert_eq!(final_rep.total_count, 0);
+    assert!(final_rep.transfers.is_empty());
+    assert_eq!(final_rep.stats.completed_count, 1);
+    assert!(final_rep.stats.bytes_sent >= total_size as u64);
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

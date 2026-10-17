@@ -485,8 +485,40 @@ struct PeerTargetBody {
     peer: Option<String>,
 }
 
-async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'static str, Vec<u8>) {
-    match (method, path) {
+#[derive(serde::Deserialize, Default)]
+struct TransfersQueryBody {
+    id: Option<String>,
+    active: Option<bool>,
+    terminal: Option<bool>,
+    direction: Option<String>,
+}
+
+fn parse_query_map(q: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for pair in q.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = pair.split_once('=') {
+            map.insert(k.to_string(), v.to_string());
+        } else {
+            map.insert(pair.to_string(), String::new());
+        }
+    }
+    map
+}
+
+async fn route(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    node: &Node,
+) -> (u16, &'static str, Vec<u8>) {
+    let (path_only, query_str) = match path.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (path, None),
+    };
+    match (method, path_only) {
         ("GET", "/") | ("GET", "/index.html") => (200, "text/html", INDEX.as_bytes().to_vec()),
         ("GET", "/api/state") => json_ok(&snapshot(node).await),
         ("POST", "/api/pin") => match node.generate_pin() {
@@ -849,6 +881,92 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             },
             Err(_) => err(400, "bad json"),
         },
+        ("GET", "/api/file/transfers")
+        | ("GET", "/api/transfers")
+        | ("POST", "/api/file/transfers")
+        | ("POST", "/api/transfers") => {
+            let mut q_id: Option<String> = None;
+            let mut q_active: Option<bool> = None;
+            let mut q_terminal: Option<bool> = None;
+            let mut q_direction: Option<String> = None;
+
+            if let Some(q) = query_str {
+                let map = parse_query_map(q);
+                if let Some(id) = map.get("id").or_else(|| map.get("transfer_id")) {
+                    q_id = Some(id.clone());
+                }
+                if let Some(a) = map.get("active") {
+                    q_active = Some(a == "true" || a == "1");
+                }
+                if let Some(t) = map.get("terminal") {
+                    q_terminal = Some(t == "true" || t == "1");
+                }
+                if let Some(d) = map.get("direction") {
+                    q_direction = Some(d.clone());
+                }
+            }
+
+            if method == "POST" && !body.is_empty() {
+                match serde_json::from_slice::<TransfersQueryBody>(body) {
+                    Ok(b) => {
+                        if b.id.is_some() {
+                            q_id = b.id;
+                        }
+                        if b.active.is_some() {
+                            q_active = b.active;
+                        }
+                        if b.terminal.is_some() {
+                            q_terminal = b.terminal;
+                        }
+                        if b.direction.is_some() {
+                            q_direction = b.direction;
+                        }
+                    }
+                    Err(_) => return err(400, "bad json"),
+                }
+            }
+
+            if let Some(id) = q_id.as_deref().filter(|s| !s.is_empty()) {
+                match node.transfer_by_id(id) {
+                    Some(t) => json_ok(&t),
+                    None => err(404, "transfer not found"),
+                }
+            } else {
+                let mut rep = node.transfers_report();
+                if let Some(true) = q_active {
+                    rep.transfers.retain(|t| {
+                        t.phase == crate::runtime::TransferPhase::Transferring
+                            || t.phase == crate::runtime::TransferPhase::Verifying
+                    });
+                } else if let Some(true) = q_terminal {
+                    rep.transfers.retain(|t| {
+                        t.phase == crate::runtime::TransferPhase::Completed
+                            || t.phase == crate::runtime::TransferPhase::Failed
+                    });
+                }
+                if let Some(dir) = q_direction.as_deref() {
+                    let dir_lower = dir.to_ascii_lowercase();
+                    if dir_lower == "in" || dir_lower == "inbound" {
+                        rep.transfers
+                            .retain(|t| t.direction == crate::runtime::TransferDirection::Inbound);
+                    } else if dir_lower == "out" || dir_lower == "outbound" {
+                        rep.transfers
+                            .retain(|t| t.direction == crate::runtime::TransferDirection::Outbound);
+                    }
+                }
+                rep.total_count = rep.transfers.len();
+                rep.active_count = rep
+                    .transfers
+                    .iter()
+                    .filter(|t| {
+                        t.phase == crate::runtime::TransferPhase::Transferring
+                            || t.phase == crate::runtime::TransferPhase::Verifying
+                    })
+                    .count();
+                rep.terminal_count = rep.total_count.saturating_sub(rep.active_count);
+                json_ok(&rep)
+            }
+        }
         ("POST", "/api/file/accept") => match serde_json::from_slice::<IdBody>(body) {
             Ok(d) => match node.user_accept_file(&d.id).await {
                 Ok(()) => json_ok(&serde_json::json!({ "ok": true })),

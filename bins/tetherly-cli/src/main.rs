@@ -91,6 +91,27 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// List active and recent file transfers or query a specific transfer.
+    Transfers {
+        /// Query a specific transfer by its ID.
+        #[arg(long)]
+        id: Option<String>,
+        /// Filter for active in-flight transfers only (transferring or verifying).
+        #[arg(long)]
+        active: bool,
+        /// Filter for completed or failed transfers only.
+        #[arg(long)]
+        terminal: bool,
+        /// Filter by direction ("in" / "out").
+        #[arg(long)]
+        direction: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Clear completed and failed file transfers from history.
     ClearTransfers {
         /// UI API port of the running node (loopback only).
@@ -833,6 +854,16 @@ async fn main() -> Result<()> {
                 );
             }
             println!("cancelled transfer [{id}]");
+        }
+        Cmd::Transfers {
+            id,
+            active,
+            terminal,
+            direction,
+            json,
+            ui_port,
+        } => {
+            do_transfers(ui_port, id, active, terminal, direction, json).await?;
         }
         Cmd::ClearTransfers { ui_port } => {
             let (code, resp) = loopback_post(ui_port, "/api/file/clear", b"{}")
@@ -2138,3 +2169,161 @@ async fn do_peer_ping(
     }
     Ok(())
 }
+
+async fn do_transfers(
+    ui_port: u16,
+    id: Option<String>,
+    active: bool,
+    terminal: bool,
+    direction: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let mut query_params = Vec::new();
+    if let Some(ref target_id) = id {
+        query_params.push(format!("id={target_id}"));
+    }
+    if active {
+        query_params.push("active=true".to_string());
+    }
+    if terminal {
+        query_params.push("terminal=true".to_string());
+    }
+    if let Some(ref dir) = direction {
+        query_params.push(format!("direction={dir}"));
+    }
+
+    let path = if query_params.is_empty() {
+        "/api/file/transfers".to_string()
+    } else {
+        format!("/api/file/transfers?{}", query_params.join("&"))
+    };
+
+    let (code, resp) = loopback_get(ui_port, &path).await.map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
+
+    if code == 404 {
+        if let Some(ref target_id) = id {
+            bail!("transfer not found: {target_id}");
+        } else {
+            bail!("endpoint returned 404: {}", String::from_utf8_lossy(&resp));
+        }
+    }
+    if code != 200 {
+        bail!(
+            "query transfers failed (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+
+    if id.is_some() {
+        let tid = v.get("transfer_id").and_then(|s| s.as_str()).unwrap_or("?");
+        let filename = v.get("filename").and_then(|s| s.as_str()).unwrap_or("?");
+        let dir = v.get("direction").and_then(|s| s.as_str()).unwrap_or("?");
+        let peer = v.get("peer").and_then(|s| s.as_str()).unwrap_or("?");
+        let total = v.get("total").and_then(|s| s.as_u64()).unwrap_or(0);
+        let transferred = v.get("transferred").and_then(|s| s.as_u64()).unwrap_or(0);
+        let speed = v.get("speed_bps").and_then(|s| s.as_u64()).unwrap_or(0);
+        let phase = v.get("phase").and_then(|s| s.as_str()).unwrap_or("?");
+        let started_ms = v.get("started_ms").and_then(|s| s.as_u64()).unwrap_or(0);
+        let error = v.get("error").and_then(|s| s.as_str());
+        let pct = if total > 0 {
+            (transferred as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        println!("Transfer {tid}:");
+        println!("  File:      {filename}");
+        println!("  Direction: {dir}");
+        println!("  Peer:      {peer}");
+        println!("  Phase:     {phase}");
+        println!(
+            "  Progress:  {:>5.1}% ({} / {})",
+            pct,
+            format_bytes(transferred),
+            format_bytes(total)
+        );
+        if speed > 0 {
+            println!("  Speed:     {}", format_speed(speed));
+        }
+        if started_ms > 0 {
+            println!("  Started:   {started_ms} ms");
+        }
+        if let Some(err_msg) = error {
+            println!("  Error:     {err_msg}");
+        }
+        return Ok(());
+    }
+
+    let active_count = v.get("active_count").and_then(|s| s.as_u64()).unwrap_or(0);
+    let terminal_count = v.get("terminal_count").and_then(|s| s.as_u64()).unwrap_or(0);
+    let total_count = v.get("total_count").and_then(|s| s.as_u64()).unwrap_or(0);
+
+    println!(
+        "Transfers: {total_count} total ({active_count} active, {terminal_count} terminal)"
+    );
+
+    if let Some(stats) = v.get("stats") {
+        let sent = stats.get("bytes_sent").and_then(|v| v.as_u64()).unwrap_or(0);
+        let recv = stats.get("bytes_received").and_then(|v| v.as_u64()).unwrap_or(0);
+        let completed = stats.get("completed_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let failed = stats.get("failed_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        println!(
+            "  Cumulative Metrics: sent: {}, received: {}, completed: {}, failed: {}",
+            format_bytes(sent),
+            format_bytes(recv),
+            completed,
+            failed
+        );
+    }
+
+    let transfers = v.get("transfers").and_then(|t| t.as_array());
+    match transfers {
+        Some(list) if !list.is_empty() => {
+            println!("\n  Transfers List:");
+            for t in list {
+                let id = t.get("transfer_id").and_then(|v| v.as_str()).unwrap_or("?");
+                let filename = t.get("filename").and_then(|v| v.as_str()).unwrap_or("?");
+                let transferred = t.get("transferred").and_then(|v| v.as_u64()).unwrap_or(0);
+                let total = t.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                let speed_bps = t.get("speed_bps").and_then(|v| v.as_u64()).unwrap_or(0);
+                let phase = t.get("phase").and_then(|v| v.as_str()).unwrap_or("?");
+                let dir = t.get("direction").and_then(|v| v.as_str()).unwrap_or("?");
+                let pct = if total > 0 {
+                    (transferred as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                };
+                let speed_str = if speed_bps > 0 {
+                    format!("{} ", format_speed(speed_bps))
+                } else {
+                    "".to_string()
+                };
+                println!(
+                    "    - [{dir}] {filename} ({:>5.1}%, {} / {}) {speed_str}[{phase}] ({id})",
+                    pct,
+                    format_bytes(transferred),
+                    format_bytes(total)
+                );
+            }
+        }
+        _ => {
+            println!("  No matching transfers recorded.");
+        }
+    }
+
+    Ok(())
+}
+

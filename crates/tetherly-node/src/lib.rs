@@ -22,7 +22,7 @@ pub use platform::{MemoryInsertor, MemoryOpener, SystemInputSink, SystemOpener};
 pub use runtime::{
     ActiveTransfer, AncsReport, HealthReport, LivePeer, Node, NodeConfig, NodePorts,
     PeerPingReport, StorageCleanReport, StorageReport, TransferDirection, TransferPhase,
-    UserCommand,
+    TransferStats, TransfersReport, UserCommand,
 };
 pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
 
