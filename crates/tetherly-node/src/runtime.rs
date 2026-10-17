@@ -5,7 +5,7 @@ use crate::ancs::AncsInbound;
 use crate::events::{file_offered, peer_up, CandidateViewDto, UiEvent};
 use crate::lan::{bind_many, bind_many_optional, bind_overlay, control_bind_addrs, lan_ips};
 use crate::platform::{insert_foreground, MemoryClip, SystemClip};
-use crate::sidecar::{self, OverlayConfig, OverlayStatus};
+use crate::sidecar::{self, OverlayConfig, OverlaySource, OverlayStatus};
 use crate::store::{load_trust, remember_route, save_trust, RouteTable};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
