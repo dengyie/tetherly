@@ -363,6 +363,37 @@ pub struct NodeConfigReport {
     pub ancs_peripheral: String,
 }
 
+/// Physical addressing route entry with enriched peer status metadata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RouteEntryDto {
+    pub device_id: String,
+    pub addr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub online: bool,
+    pub trusted: bool,
+}
+
+/// Comprehensive report of cached physical addressing routes.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RoutesReport {
+    pub ok: bool,
+    pub count: usize,
+    pub routes: Vec<RouteEntryDto>,
+}
+
+/// Result report from adding or removing a physical addressing route.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RouteMutateReport {
+    pub ok: bool,
+    pub device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addr: Option<String>,
+    pub action: String,
+}
+
 enum OutboundSource {
     Bytes(Vec<u8>),
     Path(std::path::PathBuf),
@@ -1164,6 +1195,126 @@ impl Node {
 
     pub fn routes(&self) -> Vec<crate::store::Route> {
         crate::store::load_routes(&self.shared.cfg.data_dir).routes
+    }
+
+    pub fn routes_report(&self) -> RoutesReport {
+        let routes = crate::store::load_routes(&self.shared.cfg.data_dir).routes;
+        let live = self.live_peers();
+        let trusted = self.trusted();
+
+        let entries = routes
+            .into_iter()
+            .map(|r| {
+                let matched_live = live.iter().find(|l| l.device_id.as_str() == r.device_id);
+                let matched_trusted = trusted.iter().find(|t| t.device_id.as_str() == r.device_id);
+
+                let online = matched_live.is_some();
+                let is_trusted = matched_trusted.map(|t| !t.revoked).unwrap_or(false);
+                let alias = matched_trusted.and_then(|t| {
+                    if t.alias.is_empty() {
+                        None
+                    } else {
+                        Some(t.alias.clone())
+                    }
+                });
+                let name = matched_live
+                    .map(|l| l.name.clone())
+                    .or_else(|| matched_trusted.map(|t| t.name.clone()));
+
+                RouteEntryDto {
+                    device_id: r.device_id,
+                    addr: r.addr,
+                    alias,
+                    name,
+                    online,
+                    trusted: is_trusted,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        RoutesReport {
+            ok: true,
+            count: entries.len(),
+            routes: entries,
+        }
+    }
+
+    pub fn add_route(&self, peer_spec: &str, addr: &str) -> Result<RouteMutateReport, CoreError> {
+        let addr_trimmed = addr.trim();
+        let socket_addr: SocketAddr = addr_trimmed.parse().map_err(|e| {
+            CoreError::InvalidRoute(format!("invalid socket address '{addr_trimmed}': {e}"))
+        })?;
+        if socket_addr.port() == 0 {
+            return Err(CoreError::InvalidRoute("port cannot be 0".to_string()));
+        }
+
+        let peer_trimmed = peer_spec.trim();
+        if peer_trimmed.is_empty() {
+            return Err(CoreError::InvalidRoute(
+                "peer identifier cannot be empty".to_string(),
+            ));
+        }
+        let device_id = self.resolve_peer(peer_trimmed)?;
+        let is_update = crate::store::remember_route(
+            &self.shared.cfg.data_dir,
+            device_id.as_str(),
+            &socket_addr.to_string(),
+        )
+        .map_err(|e| CoreError::File(e.to_string()))?;
+
+        let action = if is_update { "updated" } else { "added" };
+        self.emit(UiEvent::RouteChanged {
+            device_id: device_id.to_string(),
+            addr: socket_addr.to_string(),
+            action: action.to_string(),
+        });
+        Ok(RouteMutateReport {
+            ok: true,
+            device_id: device_id.to_string(),
+            addr: Some(socket_addr.to_string()),
+            action: action.to_string(),
+        })
+    }
+
+    pub fn remove_route(&self, peer_spec: &str) -> Result<RouteMutateReport, CoreError> {
+        let peer_trimmed = peer_spec.trim();
+        if peer_trimmed.is_empty() {
+            return Err(CoreError::InvalidRoute(
+                "peer identifier cannot be empty".to_string(),
+            ));
+        }
+        let target_device_id = match self.resolve_peer(peer_trimmed) {
+            Ok(id) => id.to_string(),
+            Err(_) => {
+                let routes = crate::store::load_routes(&self.shared.cfg.data_dir).routes;
+                if let Some(r) = routes.iter().find(|r| r.device_id == peer_trimmed) {
+                    r.device_id.clone()
+                } else {
+                    return Err(CoreError::PeerNotFound(format!(
+                        "no route matching peer '{peer_trimmed}' found"
+                    )));
+                }
+            }
+        };
+
+        let removed = crate::store::forget_route(&self.shared.cfg.data_dir, &target_device_id)
+            .map_err(|e| CoreError::File(e.to_string()))?;
+        if !removed {
+            return Err(CoreError::PeerNotFound(format!(
+                "no route found for peer '{target_device_id}'"
+            )));
+        }
+        self.emit(UiEvent::RouteChanged {
+            device_id: target_device_id.clone(),
+            addr: String::new(),
+            action: "removed".to_string(),
+        });
+        Ok(RouteMutateReport {
+            ok: true,
+            device_id: target_device_id,
+            addr: None,
+            action: "removed".to_string(),
+        })
     }
 
     pub fn network_report(&self) -> (Vec<crate::lan::IfaceReport>, crate::sidecar::OverlayStatus) {

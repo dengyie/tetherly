@@ -2952,6 +2952,300 @@ async fn node_config_inspection_and_dynamic_flags_via_loopback_api() {
     node.shutdown();
 }
 
+/// ADR-039: Route table governance, physical addressing persistence, and static injection via loopback API.
+#[tokio::test(flavor = "multi_thread")]
+async fn route_table_governance_and_static_injection_via_loopback_api() {
+    let (host, peer, g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Initial routes inspection via GET /api/routes:
+    // Because pair_phone_desktop() established a session, peer's control addr was remembered.
+    let (code_init, body_init) = tetherly_node::loopback_get(host_ui, "/api/routes")
+        .await
+        .expect("initial routes query succeeds");
+    assert_eq!(code_init, 200);
+    let init_rep: tetherly_node::RoutesReport = serde_json::from_slice(&body_init).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.count, 1);
+    assert_eq!(init_rep.routes[0].device_id, peer_id.as_str());
+    assert!(init_rep.routes[0].online);
+    assert!(init_rep.routes[0].trusted);
+
+    // 2. Connect to loopback SSE event stream
+    let mut sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect loopback sse");
+
+    // 3. Inject a new static route for a non-live device via POST /api/routes
+    let static_device_id = "tdev_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let static_addr = "192.168.1.120:45717";
+    let add_payload = serde_json::json!({
+        "peer": static_device_id,
+        "addr": static_addr,
+    });
+    let (code_add, body_add) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/routes",
+        &serde_json::to_vec(&add_payload).unwrap(),
+    )
+    .await
+    .expect("add route post succeeds");
+    assert_eq!(code_add, 200);
+    let add_rep: tetherly_node::RouteMutateReport = serde_json::from_slice(&body_add).unwrap();
+    assert!(add_rep.ok);
+    assert_eq!(add_rep.device_id, static_device_id);
+    assert_eq!(add_rep.addr.as_deref(), Some(static_addr));
+    assert_eq!(add_rep.action, "added");
+
+    // 4. Verify SSE stream receives UiEvent::RouteChanged { device_id, addr, action: "added" }
+    let sse_event = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse route added event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_event {
+        tetherly_node::UiEvent::RouteChanged {
+            device_id,
+            addr,
+            action,
+        } => {
+            assert_eq!(device_id, static_device_id);
+            assert_eq!(addr, static_addr);
+            assert_eq!(action, "added");
+        }
+        other => panic!("expected RouteChanged added, got: {other:?}"),
+    }
+
+    // 5. Verify persistence on disk and via GET /api/routes
+    let disk_routes = tetherly_node::store::load_routes(g1.path());
+    let found_disk = disk_routes
+        .routes
+        .iter()
+        .find(|r| r.device_id == static_device_id);
+    assert!(found_disk.is_some());
+    assert_eq!(found_disk.unwrap().addr, static_addr);
+
+    let (code_list, body_list) = tetherly_node::loopback_get(host_ui, "/api/routes")
+        .await
+        .expect("routes list succeeds");
+    assert_eq!(code_list, 200);
+    let list_rep: tetherly_node::RoutesReport = serde_json::from_slice(&body_list).unwrap();
+    assert_eq!(list_rep.count, 2);
+    let static_entry = list_rep
+        .routes
+        .iter()
+        .find(|r| r.device_id == static_device_id)
+        .expect("found static entry");
+    assert_eq!(static_entry.addr, static_addr);
+    assert!(!static_entry.online);
+    assert!(!static_entry.trusted);
+
+    // 6. Mutate/Update existing route address via PUT /api/routes
+    let updated_addr = "192.168.1.121:45717";
+    let update_payload = serde_json::json!({
+        "peer": static_device_id,
+        "addr": updated_addr,
+    });
+    let (code_up, body_up) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/routes",
+        &serde_json::to_vec(&update_payload).unwrap(),
+    )
+    .await
+    .expect("update route succeeds");
+    assert_eq!(code_up, 200);
+    let up_rep: tetherly_node::RouteMutateReport = serde_json::from_slice(&body_up).unwrap();
+    assert!(up_rep.ok);
+    assert_eq!(up_rep.action, "updated");
+    assert_eq!(up_rep.addr.as_deref(), Some(updated_addr));
+
+    // 7. Verify SSE stream receives UiEvent::RouteChanged { action: "updated" }
+    let sse_event2 = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse route updated event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_event2 {
+        tetherly_node::UiEvent::RouteChanged {
+            device_id,
+            addr,
+            action,
+        } => {
+            assert_eq!(device_id, static_device_id);
+            assert_eq!(addr, updated_addr);
+            assert_eq!(action, "updated");
+        }
+        other => panic!("expected RouteChanged updated, got: {other:?}"),
+    }
+
+    // 8. Smart Peer Resolution: update route using peer's advertised name or alias
+    let smart_addr = "10.144.144.99:45717";
+    let smart_payload = serde_json::json!({
+        "peer": "desk", // advertised name of desk peer in pair_phone_desktop
+        "addr": smart_addr,
+    });
+    let (code_smart, body_smart) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/routes",
+        &serde_json::to_vec(&smart_payload).unwrap(),
+    )
+    .await
+    .expect("smart route update succeeds");
+    assert_eq!(code_smart, 200);
+    let smart_rep: tetherly_node::RouteMutateReport = serde_json::from_slice(&body_smart).unwrap();
+    assert_eq!(smart_rep.device_id, peer_id.as_str());
+    assert_eq!(smart_rep.addr.as_deref(), Some(smart_addr));
+
+    // Consume SSE event for smart route update
+    let sse_smart = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse smart route event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_smart {
+        tetherly_node::UiEvent::RouteChanged {
+            device_id,
+            addr,
+            action,
+        } => {
+            assert_eq!(device_id, peer_id.as_str());
+            assert_eq!(addr, smart_addr);
+            assert_eq!(action, "updated");
+        }
+        other => panic!("expected RouteChanged updated, got: {other:?}"),
+    }
+
+    // 9. Delete route via DELETE /api/routes?peer=... (using loopback_delete)
+    let (code_del1, body_del1) = tetherly_node::loopback_delete(
+        host_ui,
+        &format!("/api/routes?peer={static_device_id}"),
+    )
+    .await
+    .expect("delete route query succeeds");
+    assert_eq!(code_del1, 200);
+    let del1_rep: tetherly_node::RouteMutateReport = serde_json::from_slice(&body_del1).unwrap();
+    assert!(del1_rep.ok);
+    assert_eq!(del1_rep.device_id, static_device_id);
+    assert_eq!(del1_rep.action, "removed");
+    assert!(del1_rep.addr.is_none());
+
+    // Verify SSE receives removal event
+    let sse_event3 = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse route removed event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_event3 {
+        tetherly_node::UiEvent::RouteChanged {
+            device_id,
+            action,
+            ..
+        } => {
+            assert_eq!(device_id, static_device_id);
+            assert_eq!(action, "removed");
+        }
+        other => panic!("expected RouteChanged removed, got: {other:?}"),
+    }
+
+    // 10. Delete route via POST /api/routes/delete with body and smart peer resolution
+    let del2_payload = serde_json::json!({
+        "peer": "desk",
+    });
+    let (code_del2, body_del2) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/routes/delete",
+        &serde_json::to_vec(&del2_payload).unwrap(),
+    )
+    .await
+    .expect("delete via post succeeds");
+    assert_eq!(code_del2, 200);
+    let del2_rep: tetherly_node::RouteMutateReport = serde_json::from_slice(&body_del2).unwrap();
+    assert!(del2_rep.ok);
+    assert_eq!(del2_rep.device_id, peer_id.as_str());
+    assert_eq!(del2_rep.action, "removed");
+
+    // Verify disk table is now completely empty
+    let empty_disk_routes = tetherly_node::store::load_routes(g1.path());
+    assert!(empty_disk_routes.routes.is_empty());
+
+    // 11. Negative and validation test cases:
+    // a. Deleting non-existent route returns 404
+    let (code_404, _) = tetherly_node::loopback_delete(
+        host_ui,
+        &format!("/api/routes?peer={static_device_id}"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_404, 404);
+
+    // b. Invalid socket address returns 400
+    let invalid_addr_payload = serde_json::json!({
+        "peer": static_device_id,
+        "addr": "not_an_ip_port",
+    });
+    let (code_inv, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/routes",
+        &serde_json::to_vec(&invalid_addr_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_inv, 400);
+
+    // c. Port 0 returns 400
+    let zero_port_payload = serde_json::json!({
+        "peer": static_device_id,
+        "addr": "127.0.0.1:0",
+    });
+    let (code_zero, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/routes",
+        &serde_json::to_vec(&zero_port_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_zero, 400);
+
+    // d. Empty peer returns 400
+    let empty_peer_payload = serde_json::json!({
+        "peer": "   ",
+        "addr": "192.168.1.1:45717",
+    });
+    let (code_empty, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/routes",
+        &serde_json::to_vec(&empty_peer_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_empty, 400);
+
+    // e. Unknown peer specification returns 400
+    let unk_peer_payload = serde_json::json!({
+        "peer": "unknown_ghost_peer",
+        "addr": "192.168.1.1:45717",
+    });
+    let (code_unk, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/routes",
+        &serde_json::to_vec(&unk_peer_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_unk, 400);
+
+    // f. Malformed JSON returns 400
+    let (code_bad_json, _) =
+        tetherly_node::loopback_post(host_ui, "/api/routes", b"malformed json")
+            .await
+            .unwrap();
+    assert_eq!(code_bad_json, 400);
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

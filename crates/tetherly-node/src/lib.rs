@@ -21,8 +21,9 @@ pub use platform::{cursor_pos, screen_size, start_input_hooks, HookControl, RawI
 pub use platform::{MemoryInsertor, MemoryOpener, SystemInputSink, SystemOpener};
 pub use runtime::{
     ActiveTransfer, AncsReport, HealthReport, LivePeer, Node, NodeConfig, NodeConfigReport,
-    NodePorts, PeerPingReport, PinReport, StorageCleanReport, StorageReport, TransferDirection,
-    TransferPhase, TransferStats, TransfersReport, UserCommand,
+    NodePorts, PeerPingReport, PinReport, RouteEntryDto, RouteMutateReport, RoutesReport,
+    StorageCleanReport, StorageReport, TransferDirection, TransferPhase, TransferStats,
+    TransfersReport, UserCommand,
 };
 pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
 
@@ -34,4 +35,6 @@ pub use screen::MacSource;
 pub use screen::X11Source;
 pub use sidecar::{parse_overlay_cidrs, OverlayConfig, OverlaySource, OverlayStatus};
 pub use store::default_data_dir;
-pub use uihttp::{loopback_events_connect, loopback_get, loopback_post, SseStream};
+pub use uihttp::{
+    loopback_delete, loopback_events_connect, loopback_get, loopback_post, SseStream,
+};

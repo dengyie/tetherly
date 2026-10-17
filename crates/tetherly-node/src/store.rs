@@ -135,23 +135,31 @@ pub fn save_routes(dir: &Path, table: &RouteTable) -> Result<(), NodeStoreError>
     Ok(())
 }
 
-pub fn remember_route(dir: &Path, device_id: &str, addr: &str) -> Result<(), NodeStoreError> {
+pub fn remember_route(dir: &Path, device_id: &str, addr: &str) -> Result<bool, NodeStoreError> {
     let mut table = load_routes(dir);
-    if let Some(r) = table.routes.iter_mut().find(|r| r.device_id == device_id) {
+    let is_update = if let Some(r) = table.routes.iter_mut().find(|r| r.device_id == device_id) {
         r.addr = addr.to_string();
+        true
     } else {
         table.routes.push(Route {
             device_id: device_id.to_string(),
             addr: addr.to_string(),
         });
-    }
-    save_routes(dir, &table)
+        false
+    };
+    save_routes(dir, &table)?;
+    Ok(is_update)
 }
 
-pub fn forget_route(dir: &Path, device_id: &str) -> Result<(), NodeStoreError> {
+pub fn forget_route(dir: &Path, device_id: &str) -> Result<bool, NodeStoreError> {
     let mut table = load_routes(dir);
+    let initial_len = table.routes.len();
     table.routes.retain(|r| r.device_id != device_id);
-    save_routes(dir, &table)
+    let removed = table.routes.len() < initial_len;
+    if removed {
+        save_routes(dir, &table)?;
+    }
+    Ok(removed)
 }
 
 #[derive(Debug, thiserror::Error)]

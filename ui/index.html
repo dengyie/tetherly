@@ -311,6 +311,15 @@
       <h3 style="font-size:13px;color:var(--text-dim);margin:14px 0 6px 0">已受信任设备（全景）</h3>
       <div id="trusted"><div class="empty">无已配对设备</div></div>
     </section>
+    <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">物理寻址路由与静态注入</h2>
+        <button id="addroutebtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">+ 注入路由</button>
+      </div>
+      <div class="hint">持久化物理 IP:Port 寻址与跨网直连重连。支持智能别名解析与后台断线自动重试。</div>
+      <div id="routes-table" style="margin-top:8px"><div class="empty">无物理寻址路由</div></div>
+      <div id="routemsg" class="hint" style="margin-top:6px"></div>
+    </section>
   </div>
 </main>
 <script>
@@ -950,6 +959,74 @@ if (toggleRecBtn) {
     }
   };
 }
+async function updateRoutes() {
+  try {
+    const res = await api("/api/routes");
+    if (!res || !res.ok) return;
+    const container = $("routes-table");
+    if (!container) return;
+    container.innerHTML = "";
+    const list = res.routes || [];
+    if (!list.length) {
+      container.appendChild(el('<div class="empty">暂无缓存或静态物理路由</div>'));
+      return;
+    }
+    for (const r of list) {
+      const aliasBadge = r.alias ? ' <span style="color:var(--ok);font-size:12px">(' + r.alias + ')</span>' : '';
+      const nameStr = r.name ? ' · ' + r.name : '';
+      const onlineBadge = r.online ? '<span class="badge completed">在线</span>' : '<span class="badge offline">离线</span>';
+      const card = el('<div class="card"><div style="flex:1"><div class="title">' + onlineBadge + '<span> ' + r.device_id + aliasBadge + nameStr + '</span></div><div class="meta" style="font-family:ui-monospace, Consolas, monospace;margin-top:2px">物理地址: ' + r.addr + '</div></div><div class="row"><button class="bad ghost del-route-btn" type="button" style="padding:2px 8px;font-size:12px">删除</button></div></div>');
+      const delBtn = card.querySelector(".del-route-btn");
+      if (delBtn) {
+        delBtn.onclick = async () => {
+          if (!confirm("确定删除对端 " + (r.alias || r.device_id) + " 的物理路由 (" + r.addr + ") 吗？")) return;
+          const msg = $("routemsg");
+          if (msg) msg.textContent = "正在删除路由…";
+          try {
+            const resp = await fetch("/api/routes?peer=" + encodeURIComponent(r.device_id), { method: "DELETE" });
+            const data = await resp.json();
+            if (data && data.ok) {
+              if (msg) msg.textContent = "路由已成功移除: " + r.device_id;
+              updateRoutes();
+            } else {
+              if (msg) msg.textContent = "删除失败: " + (data && data.error ? data.error : "未知错误");
+            }
+          } catch (err) {
+            if (msg) msg.textContent = "请求异常: " + err;
+          }
+        };
+      }
+      container.appendChild(card);
+    }
+  } catch (e) {}
+}
+const addRouteBtn = $("addroutebtn");
+if (addRouteBtn) {
+  addRouteBtn.onclick = async () => {
+    const peer = prompt("输入对端设备 ID (tdev_...)、已分配别名或友好广播名:");
+    if (!peer || !peer.trim()) return;
+    const addr = prompt("输入物理套接字地址 (IP:Port，例如 192.168.1.50:45717):");
+    if (!addr || !addr.trim()) return;
+    const msg = $("routemsg");
+    if (msg) msg.textContent = "正在注入静态物理路由…";
+    try {
+      const resp = await fetch("/api/routes", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ peer: peer.trim(), addr: addr.trim() })
+      });
+      const data = await resp.json();
+      if (data && data.ok) {
+        if (msg) msg.textContent = "路由注入成功 (" + data.action + "): " + data.device_id + " -> " + data.addr;
+        updateRoutes();
+      } else {
+        if (msg) msg.textContent = "注入失败: " + (data && data.error ? data.error : "未知错误");
+      }
+    } catch (err) {
+      if (msg) msg.textContent = "请求异常: " + err;
+    }
+  };
+}
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
   refreshPin();
@@ -985,6 +1062,10 @@ function setupEventSource() {
             desc = "配置更新: " + ev.name + " (广播:" + (ev.advertise ? "开" : "关") + ", 重连:" + (ev.reconnect ? "开" : "关") + ")";
             updateConfig();
           }
+          else if (ev.kind === "route_changed") {
+            desc = "路由变更: " + ev.device_id + (ev.addr ? (" (" + ev.addr + ")") : "") + " [" + ev.action + "]";
+            updateRoutes();
+          }
           $("ev-last").textContent = "[" + t + "] " + desc;
         }
       } catch (err) {
@@ -1011,6 +1092,8 @@ setupEventSource();
 setInterval(tick, 2000);
 updateConfig();
 setInterval(updateConfig, 3000);
+updateRoutes();
+setInterval(updateRoutes, 3000);
 updateStorage();
 setInterval(updateStorage, 3000);
 updateHealth();

@@ -246,6 +246,11 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Manage physical addressing routes and static peer injection.
+    Route {
+        #[command(subcommand)]
+        action: RouteCmd,
+    },
     /// Diagnose network interfaces and EasyTier overlay sidecar.
     Net {
         /// Show full interface classification details (including skipped interfaces and reasons).
@@ -498,6 +503,47 @@ enum StorageCmd {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum RouteCmd {
+    /// List cached physical addressing routes.
+    List {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Add or update a static physical route for a peer.
+    Add {
+        /// Peer device ID (tdev_...), alias, or friendly name.
+        #[arg(long, short)]
+        peer: String,
+        /// Physical socket address (e.g. 192.168.1.50:45717).
+        #[arg(long, short)]
+        addr: String,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Remove a physical route for a peer.
+    #[command(alias = "rm", alias = "del")]
+    Remove {
+        /// Peer device ID (tdev_...), alias, or friendly name.
+        #[arg(long, short)]
+        peer: String,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
 fn now_ms() -> u64 {
     SystemClock.unix_ms()
 }
@@ -551,6 +597,28 @@ async fn loopback_get(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8>)> 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = TcpStream::connect(addr).await?;
     let head = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    stream.write_all(head.as_bytes()).await?;
+    stream.flush().await?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let text = String::from_utf8_lossy(&buf);
+    let code = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let payload = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .map(|b| b.as_bytes().to_vec())
+        .unwrap_or_default();
+    Ok((code, payload))
+}
+
+async fn loopback_delete(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect(addr).await?;
+    let head = format!("DELETE {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
     stream.write_all(head.as_bytes()).await?;
     stream.flush().await?;
     let mut buf = Vec::new();
@@ -1611,38 +1679,77 @@ async fn main() -> Result<()> {
             println!("Updated alias for {device_id} -> \"{new_alias}\"");
         }
         Cmd::Routes { json, ui_port } => {
-            let (code, resp) = loopback_get(ui_port, "/api/routes").await.map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                         start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
-            if code != 200 {
-                bail!(
-                    "node returned HTTP {code}: {}",
-                    String::from_utf8_lossy(&resp)
-                );
-            }
-            if json {
-                println!("{}", String::from_utf8_lossy(&resp));
-                return Ok(());
-            }
-            let v: serde_json::Value =
-                serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
-            let routes_arr = v["routes"].as_array();
-            let count = v["count"].as_u64().unwrap_or(0);
-            println!("Cached Physical Routes ({count}):");
-            match routes_arr {
-                Some(arr) if !arr.is_empty() => {
-                    for r in arr {
-                        let dev = r["device_id"].as_str().unwrap_or("-");
-                        let addr = r["addr"].as_str().unwrap_or("-");
-                        println!("  * {dev} -> {addr}");
-                    }
-                }
-                _ => println!("  (no cached routes)"),
-            }
+            print_routes_list(ui_port, json).await?;
         }
+        Cmd::Route { action } => match action {
+            RouteCmd::List { json, ui_port } => {
+                print_routes_list(ui_port, json).await?;
+            }
+            RouteCmd::Add {
+                peer,
+                addr,
+                json,
+                ui_port,
+            } => {
+                let payload = serde_json::json!({
+                    "peer": peer,
+                    "addr": addr,
+                });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) = loopback_post(ui_port, "/api/routes", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "route add failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                    return Ok(());
+                }
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let action = v.get("action").and_then(|s| s.as_str()).unwrap_or("updated");
+                let device_id = v.get("device_id").and_then(|s| s.as_str()).unwrap_or(&peer);
+                let addr_res = v.get("addr").and_then(|s| s.as_str()).unwrap_or(&addr);
+                println!("Route {action}: {device_id} -> {addr_res}");
+            }
+            RouteCmd::Remove {
+                peer,
+                json,
+                ui_port,
+            } => {
+                let path = format!("/api/routes?peer={}", peer.trim());
+                let (code, resp) = loopback_delete(ui_port, &path).await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    bail!(
+                        "route remove failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                    return Ok(());
+                }
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let action = v.get("action").and_then(|s| s.as_str()).unwrap_or("removed");
+                let device_id = v.get("device_id").and_then(|s| s.as_str()).unwrap_or(&peer);
+                println!("Route {action}: {device_id}");
+            }
+        },
         Cmd::Net {
             interfaces,
             json,
@@ -2593,5 +2700,50 @@ async fn do_transfers(
         }
     }
 
+    Ok(())
+}
+
+async fn print_routes_list(ui_port: u16, json: bool) -> Result<()> {
+    let (code, resp) = loopback_get(ui_port, "/api/routes").await.map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
+    if code != 200 {
+        bail!(
+            "node returned HTTP {code}: {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&resp));
+        return Ok(());
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+    let routes_arr = v["routes"].as_array();
+    let count = v["count"].as_u64().unwrap_or(0);
+    println!("Cached Physical Routes ({count}):");
+    match routes_arr {
+        Some(arr) if !arr.is_empty() => {
+            for r in arr {
+                let dev = r["device_id"].as_str().unwrap_or("-");
+                let addr = r["addr"].as_str().unwrap_or("-");
+                let alias_str = r
+                    .get("alias")
+                    .and_then(|a| a.as_str())
+                    .map(|a| format!(" (alias: \"{a}\")"))
+                    .unwrap_or_default();
+                let online_str = if r["online"].as_bool().unwrap_or(false) {
+                    "[online]"
+                } else {
+                    "[offline]"
+                };
+                println!("  * {dev}{alias_str} -> {addr} {online_str}");
+            }
+        }
+        _ => println!("  (no cached routes)"),
+    }
     Ok(())
 }

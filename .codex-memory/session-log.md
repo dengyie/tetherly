@@ -1,5 +1,26 @@
 # Session log
 
+## 2026-10-17 (43) - Route table governance, physical addressing persistence, and static injection via loopback API (v1.46 / ADR-039)
+- Task: 实现物理寻址路由表全景透视、静态路由注入与断线自动重连治理，打通跨子网与无广播多物理网段连接壁垒。
+- **背景与缺陷根因**:
+  在 v1.18 至 v1.45 的演进中，Tetherly 建立了基于 mDNS 组播广播、Noise 握手及自动重连机制的点对点安全网格。然而在实际多宿主物理网络（跨物理子网、隔离 VLAN、禁止组播的公共 Wi-Fi、或云主机/NAT 穿越场景）中，暴露出以下显著缺陷：
+  1. 物理寻址路由黑盒与可观测性断层：`routes.json` 物理地址映射此前仅通过 `GET /api/routes` 暴露裸字符串对，外部无法探知该物理地址对应的对端是否在线、是否已被信任、友好别名为何；
+  2. 静态路由注入与动态修改能力缺失：跨子网或路由变更时，无 API/命令行向运行中节点注入对端物理地址，必须杀进程手工改文件；
+  3. 缺少智能对端解析联动：指定对端添加路由时无法使用友好别名；
+  4. 双端 CLI 缺乏路由管理命令群（缺少 add/del）；
+  5. Web UI 缺乏物理路由卡片与实时事件感知。
+- **架构设计与落地 (ADR-039)**:
+  1. `RouteEntryDto`, `RoutesReport`, `RouteMutateReport` (`crates/tetherly-node/src/runtime.rs`, `lib.rs`): 结构化报告模型，包含 `device_id`, `addr`, `alias`, `name`, `online`, `trusted`，绝不泄露敏感凭据。
+  2. 存储层原语升级 (`crates/tetherly-node/src/store.rs`): `remember_route` 与 `forget_route` 返回布尔指示状态（`added` vs `updated`, `removed` vs `not_found`）。
+  3. 智能解析与运行时原语 (`crates/tetherly-node/src/runtime.rs`): `Node::routes_report(&self)`, `Node::add_route(&self, peer_spec, addr)`, `Node::remove_route(&self, peer_spec)`，无缝支持友好别名并校验套接字与非零端口，向事件总线派发 `UiEvent::RouteChanged`。
+  4. 回环 HTTP API (`crates/tetherly-node/src/uihttp.rs`): `GET /api/routes` 返回全景报告；`POST /api/routes` (及 `PUT`) 静态注入与热更新；`DELETE /api/routes` (及 `POST /api/routes/delete`, `POST /api/routes/remove`) 支持 Query 参数或 JSON 请求体删除。
+  5. CLI 双端全同构 (`crates/tetherly-node/src/bin/tetherly.rs` 与 `bins/tetherly-cli/src/main.rs`): 新增 `Cmd::Route { action: RouteCmd }`，支持 `route list`, `route add --peer <peer> --addr <addr>`, `route del/remove --peer <peer>` 及 `--json` 格式化输出。
+  6. Web UI 物理路由治理面板 (`ui/index.html`): 增设「物理寻址路由与静态注入」卡片，集成动态列表展示、弹窗交互注入、一键删除确认与 SSE `route_changed` 事件实时刷新。
+  7. 端到端集成测试覆盖 (`tests/phase1.rs`): 增设 `route_table_governance_and_static_injection_via_loopback_api` 完备验证治理全链路。
+- **发布与文档同步**:
+  - SSOT `docs/DEVELOPMENT.md` 升至 v1.46，确立 ADR-039。
+  - Obsidian 知识库 `tetherly 开发文档.md` 与路由表 `AI-DOC-ROUTER.md` 同步更新。
+
 ## 2026-10-17 (23) - O(1) memory chunked streaming file transfer and incremental SHA-256 (v1.26)
 - Task: 突破整文件内存驻留限制，实现 $O(1)$ 内存常数界的 64 KiB 分块流式收发管线与增量 SHA-256。
 - **背景与缺陷根因**:

@@ -59,6 +59,11 @@ pub enum UiEvent {
         advertise: bool,
         reconnect: bool,
     },
+    RouteChanged {
+        device_id: String,
+        addr: String,
+        action: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

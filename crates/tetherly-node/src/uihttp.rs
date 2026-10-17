@@ -208,6 +208,30 @@ pub async fn loopback_get(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8
     Ok((code, payload))
 }
 
+/// DELETE a path from a node's loopback UI API and return the HTTP status with
+/// the response body.
+pub async fn loopback_delete(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect(addr).await?;
+    let head = format!("DELETE {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    stream.write_all(head.as_bytes()).await?;
+    stream.flush().await?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let text = String::from_utf8_lossy(&buf);
+    let code = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let payload = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .map(|b| b.as_bytes().to_vec())
+        .unwrap_or_default();
+    Ok((code, payload))
+}
+
 async fn handle_sse(stream: &mut TcpStream, node: &Node) -> std::io::Result<()> {
     let mut events = node.subscribe();
     let header = "HTTP/1.1 200 OK\r\n\
@@ -521,6 +545,16 @@ struct ConfigUpdateBody {
     reconnect: Option<bool>,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct RouteAddBody {
+    #[serde(default)]
+    peer: Option<String>,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    addr: String,
+}
+
 fn parse_query_map(q: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for pair in q.split('&') {
@@ -726,22 +760,54 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 "trusted": trusted_dtos,
             }))
         }
-        ("GET", "/api/routes") => {
-            let routes = node.routes();
-            let dtos: Vec<serde_json::Value> = routes
-                .into_iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "device_id": r.device_id,
-                        "addr": r.addr,
-                    })
-                })
-                .collect();
-            json_ok(&serde_json::json!({
-                "ok": true,
-                "count": dtos.len(),
-                "routes": dtos,
-            }))
+        ("GET", "/api/routes") => json_ok(&node.routes_report()),
+        ("POST", "/api/routes") | ("PUT", "/api/routes") => {
+            match serde_json::from_slice::<RouteAddBody>(body) {
+                Ok(d) => {
+                    let peer = d.peer.or(d.device_id).unwrap_or_default();
+                    if peer.trim().is_empty() {
+                        return err(400, "peer or device_id must be specified");
+                    }
+                    if d.addr.trim().is_empty() {
+                        return err(400, "addr must be specified");
+                    }
+                    match node.add_route(&peer, &d.addr) {
+                        Ok(rep) => json_ok(&rep),
+                        Err(e) => err(400, &e.to_string()),
+                    }
+                }
+                Err(_) => err(400, "bad json, expected { peer: string, addr: string }"),
+            }
+        }
+        ("DELETE", "/api/routes")
+        | ("POST", "/api/routes/remove")
+        | ("POST", "/api/routes/delete") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let peer_from_query = qmap.get("peer").or_else(|| qmap.get("device_id")).cloned();
+            let peer = if let Some(p) = peer_from_query {
+                p
+            } else if !body.is_empty() {
+                #[derive(serde::Deserialize, Default)]
+                struct RouteDelBody {
+                    #[serde(default)]
+                    peer: Option<String>,
+                    #[serde(default)]
+                    device_id: Option<String>,
+                }
+                match serde_json::from_slice::<RouteDelBody>(body) {
+                    Ok(d) => d.peer.or(d.device_id).unwrap_or_default(),
+                    Err(_) => return err(400, "bad json, expected { peer: string }"),
+                }
+            } else {
+                String::new()
+            };
+            if peer.trim().is_empty() {
+                return err(400, "peer or device_id must be specified via query or body");
+            }
+            match node.remove_route(&peer) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
         }
         ("GET", "/api/net") => {
             let (ifaces, ov) = node.network_report();

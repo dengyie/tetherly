@@ -3,12 +3,87 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.45** |
+| 文档版本 | **1.46** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）**——(1) **安全非泄露配置透视模型 (`NodeConfigReport`)**：打破此前节点配置黑盒与快照轮询高开销，对外暴露设备 ID、广播名、操作系统、存储路径、回环模式、端口分配与特性使能标记，绝不泄漏私钥与敏感对称凭据；(2) **动态运行时状态与热重载治理**：在 `Node` 与 `Shared` 中引入 `node_name` 互斥保护与 `advertise`、`reconnect` 原子开关，支持无需重启守护进程即可动态重命名本机、优雅启闭 mDNS 广播发现任务，以及挂起/唤醒后台受信任对端重连轮询；(3) **轻量级回环控制面端点 (`GET /api/config`, `POST /api/config`, `PUT /api/config`)**：实现配置直查与局部/联合热更新端点，提供严格参数校验（1..=64 字节、禁止控制字符）与原子写回；(4) **CLI 双端全同构 (`tetherly config` 与 `tetherly-cli config`)**：支持无参输出整洁格式化配置视图、`--name` 重命名本机、`--advertise <bool>` 切换广播以及 `--reconnect <bool>` 控制自动重连；(5) **Web UI 动态配置面板与 SSE 实时同步**：新增「节点配置与运行特性」卡片，提供名称即时编辑与特性一键启闭，接入 `UiEvent::ConfigChanged` 驱动界面实时同步；(6) **端到端集成测试全绿覆盖**：在 `tests/phase1.rs` 增设 `node_config_inspection_and_dynamic_flags_via_loopback_api` 完备验证治理全流程。+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）**——(1) **物理寻址路由透视模型 (`RouteEntryDto`, `RoutesReport`)**：对齐物理 IP:Port 寻址与对端元数据，聚合在线/受信任状态、广播名与友好别名，消灭此前单纯字符串键值对的不透明性；(2) **静态路由双向注入与原子落盘原语 (`remember_route`, `forget_route`)**：实现返回布尔指示状态（added vs updated，removed vs not_found）的安全写盘，彻底解决跨子网与无广播环境下对端寻址丢失难题；(3) **智能对端解析赋能 (`Node::add_route`, `Node::remove_route`)**：全面支持直接设备 ID、友好别名、广播名及模糊子串定位目标对端，严格校验物理套接字地址合法性与非零端口；(4) **轻量级回环控制面端点 (`POST /api/routes`, `DELETE /api/routes`, `POST /api/routes/delete`)**：支持标准 RESTful 与灵活查询参数/JSON 体删除，结合 `UiEvent::RouteChanged` SSE 事件总线实时派发；(5) **CLI 双端全同构升级 (`tetherly route` 与 `tetherly-cli route`)**：提供 `list`、`add` 与 `del`/`remove` 子命令群，无缝支持友好别名与机器可读 JSON 输出；(6) **Web UI 物理路由卡片与实时交互闭环**：增设物理寻址路由与静态注入面板，提供动态卡片列表、交互式弹框注入与一键删除确认；(7) **端到端集成测试全绿覆盖**：在 `tests/phase1.rs` 增设 `route_table_governance_and_static_injection_via_loopback_api` 完备验证治理全链路。+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.46 相对 1.45(物理寻址路由表全景透视、静态路由注入与断线自动重连治理)**
+
+- **动机(物理寻址路由黑盒、静态路由注入缺失、跨子网/NAT穿越重连盲区、CLI 与 Web 端同构断层)**:
+  在 v1.18 至 v1.45 的演进中，Tetherly 建立了基于 mDNS 组播广播、Noise 握手及自动重连机制的点对点安全网格。然而在实际多宿主物理网络（跨物理子网、隔离 VLAN、禁止组播的公共 Wi-Fi、或云主机/NAT 穿越场景）中，暴露出以下显著缺陷：
+  1. **物理寻址路由黑盒与可观测性断层**：节点虽在后台维护 `routes.json` 物理地址映射，但此前 `GET /api/routes` 仅粗糙暴露无元数据的裸字符串对，外部无法探知该物理地址对应的对端是否在线、是否已被信任、友好别名为何，调用方难以评估路由的有效性与实时健康度；
+  2. **静态路由注入与动态修改能力缺失**：当两台设备处于不同子网（无法收到 mDNS 广播），若未预先配置或路由因 DHCP 变化失效，用户没有任何 API 或命令行途径向正在运行的守护进程注入对端 IP:Port 物理路由；此前必须杀掉守护进程手动编辑 JSON 文件，严重破坏运维连续性；
+  3. **缺少智能对端解析联动**：用户希望指定对端名称或别名添加路由时，此前只能费力拷贝 21 位的 Base32 加密 ID；
+  4. **CLI 双端缺少路由管理命令群**：此前仅有只读的 `routes` 命令，缺乏 `add` 与 `del` 子命令；
+  5. **Web UI 缺乏路由治理与实时事件感知**：Web 界面完全缺失物理路由卡片，路由变更时无法通过 SSE 实时更新。
+
+- **架构与协议设计(ADR-039 物理寻址路由表全景透视、静态路由注入与断线自动重连治理)**:
+  1. **物理路由透视模型与报告 DTO (`RouteEntryDto`, `RoutesReport`, `RouteMutateReport`)**:
+     - 在 `runtime.rs` 与 `lib.rs` 引入结构化模型：
+       ```rust
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+       pub struct RouteEntryDto {
+           pub device_id: String,
+           pub addr: String,
+           pub alias: Option<String>,
+           pub name: Option<String>,
+           pub online: bool,
+           pub trusted: bool,
+       }
+
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+       pub struct RoutesReport {
+           pub ok: bool,
+           pub count: usize,
+           pub routes: Vec<RouteEntryDto>,
+       }
+
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+       pub struct RouteMutateReport {
+           pub ok: bool,
+           pub device_id: String,
+           pub addr: Option<String>,
+           pub action: String, // "added", "updated", "removed"
+       }
+       ```
+     - 严格守卫安全红线：绝不输出私钥、对称传输密钥或配对 PIN。
+  2. **存储层路由变更高阶原语 (`store.rs`)**:
+     - `remember_route(dir, device_id, addr) -> Result<bool, NodeStoreError>`：原子读写 `routes.json`，存在则更新并返回 `true`，不存在则新增并返回 `false`；
+     - `forget_route(dir, device_id) -> Result<bool, NodeStoreError>`：原子从 `routes.json` 剔除指定对端并返回是否实际移除了条目；
+  3. **智能对端解析赋能与路由变更运行时原语 (`Node`)**:
+     - `Node::routes_report(&self) -> RoutesReport`：聚合 `routes.json` 与 `live_peers`、`trusted` 列表，为每条路由注入实时在线状态与别名信息；
+     - `Node::add_route(&self, peer_spec: &str, addr: &str) -> Result<RouteMutateReport, CoreError>`：通过 `resolve_peer` 智能解析 `peer_spec`，严格校验 `SocketAddr` 合法性（禁止端口 0），持久化至 `routes.json` 并派发 `UiEvent::RouteChanged { action: "added"|"updated" }`；
+     - `Node::remove_route(&self, peer_spec: &str) -> Result<RouteMutateReport, CoreError>`：智能解析后从 `routes.json` 移除条目，派发 `UiEvent::RouteChanged { action: "removed" }`；
+  4. **轻量级回环控制面端点 (`POST /api/routes`, `DELETE /api/routes`)**:
+     - `GET /api/routes`：低开销返回全景 `RoutesReport`；
+     - `POST /api/routes` 与 `PUT /api/routes`：支持 `{ peer, addr }` 或 `{ device_id, addr }` 静态路由注入与热修改；
+     - `DELETE /api/routes`、`POST /api/routes/delete` 与 `POST /api/routes/remove`：支持 `?peer=...` Query 参数或 JSON 请求体快速安全删除；
+     - 错误路径处理：非法套接字返回 400，端口 0 返回 400，未匹配或歧义对端返回 400/404，非合法 JSON 返回 400；
+     - 安全红线：严格绑定 `127.0.0.1` 环回接口并校验 `Host: 127.0.0.1|localhost`。
+  5. **CLI 双端全同构升级 (`tetherly route` 与 `tetherly-cli route`)**:
+     - 新增 `Cmd::Route { action: RouteCmd }`，支持 `RouteCmd::List`, `RouteCmd::Add { peer, addr }`, `RouteCmd::Del { peer }` / `Remove`；
+     - 保持向后兼容：`tetherly routes` 与 `tetherly-cli routes` 映射为 `route list`；
+     - 支持 `--json` 格式化机器可读输出；
+  6. **Web UI 物理路由治理面板与 SSE 实时同步 (`ui/index.html`)**:
+     - 新增「物理寻址路由与静态注入」卡片；
+     - 实时展示物理 IP:Port、对端 ID、别名与在线状态徽标；
+     - 提供「+ 注入路由」交互式弹窗，支持对端别名/ID 与套接字输入；
+     - 每条路由项提供「删除」确认按钮；
+     - 监听 SSE `route_changed` 事件，零延迟刷新多端视图；
+  7. **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**:
+     - 增设 `route_table_governance_and_static_injection_via_loopback_api`：
+       1. 验证 `GET /api/routes` 初始状态（会话对端自动缓存）；
+       2. 验证 `POST /api/routes` 静态注入与 `UiEvent::RouteChanged { action: "added" }` SSE 捕获；
+       3. 验证落盘持久化与全景查询数据正确性；
+       4. 验证 `PUT /api/routes` 地址变更与 `action: "updated"` SSE 捕获；
+       5. 验证基于对端友好广播名/别名的智能解析注入与更新；
+       6. 验证 `DELETE /api/routes?peer=...` 查询参数删除与 SSE 广播；
+       7. 验证 `POST /api/routes/delete` 请求体智能别名删除与磁盘文件清空；
+       8. 验证删除不存在路由返回 404，非法 IP/端口 0/空别名/歧义解析返回 400 防御；
+       9. 优雅停机。
 
 **1.45 相对 1.44(节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理)**
 

@@ -98,6 +98,8 @@ pub enum CoreError {
     PeerNotFound(String),
     #[error("invalid config: {0}")]
     InvalidConfig(String),
+    #[error("invalid route: {0}")]
+    InvalidRoute(String),
 }
 
 impl From<serde_json::Error> for CoreError {
