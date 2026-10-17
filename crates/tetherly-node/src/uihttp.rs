@@ -31,18 +31,29 @@ pub async fn bind_and_spawn(node: Node, port: u16) -> std::io::Result<u16> {
 }
 
 async fn accept_loop(listener: TcpListener, node: Node) -> std::io::Result<()> {
+    let mut stop = node.shutdown_signal();
     loop {
-        let (stream, peer) = listener.accept().await?;
-        if !peer.ip().is_loopback() {
-            continue;
-        }
-        let node = node.clone_handle();
-        tokio::spawn(async move {
-            if let Err(e) = handle(stream, node).await {
-                warn!(%e, "ui request");
+        tokio::select! {
+            _ = stop.changed() => {
+                if *stop.borrow() {
+                    break;
+                }
             }
-        });
+            res = listener.accept() => {
+                let (stream, peer) = res?;
+                if !peer.ip().is_loopback() {
+                    continue;
+                }
+                let node = node.clone_handle();
+                tokio::spawn(async move {
+                    if let Err(e) = handle(stream, node).await {
+                        warn!(%e, "ui request");
+                    }
+                });
+            }
+        }
     }
+    Ok(())
 }
 
 async fn handle(mut stream: TcpStream, node: Node) -> std::io::Result<()> {
@@ -833,6 +844,22 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             };
             let rep = node.clean_storage(orphaned_only);
             json_ok(&rep)
+        }
+        ("GET", "/api/health") => {
+            let rep = node.health_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/daemon/shutdown") | ("POST", "/api/daemon/stop") => {
+            let n = node.clone_handle();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                n.shutdown();
+            });
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "status": "shutting_down",
+                "message": "node shutdown initiated"
+            }))
         }
         // Remote screen: consent is local and explicit. `allow` is the only
         // gate into streaming; nothing a peer sends can flip it.

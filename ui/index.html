@@ -162,6 +162,36 @@
       </div>
       <div id="cleanmsg" class="hint" style="margin-top:6px"></div>
     </section>
+    <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>守护进程与系统健康</h2>
+        <button id="shutdownbtn" class="bad ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">优雅停止守护进程</button>
+      </div>
+      <div class="hint">实时监测节点生命周期、进程 PID、运行时长与回环往返延迟。</div>
+      <div id="healthstatus" style="margin-top:8px;font-size:12px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">健康状态：</span>
+          <span id="ht-status"><span class="badge completed">健康 (Healthy)</span></span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">运行版本 / PID：</span>
+          <span id="ht-ver-pid" style="font-family:ui-monospace, Consolas, monospace">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">运行时长 (Uptime)：</span>
+          <span id="ht-uptime">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">端口绑定 (Mesh/UI)：</span>
+          <span id="ht-ports" style="font-family:ui-monospace, Consolas, monospace">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">回环探测 RTT：</span>
+          <span id="ht-rtt">-</span>
+        </div>
+      </div>
+      <div id="shutdownmsg" class="hint" style="margin-top:6px"></div>
+    </section>
   </div>
   <div>
     <section>
@@ -643,6 +673,55 @@ if (cleanBtn) {
     }
   };
 }
+function formatUptime(secs) {
+  if (secs == null || isNaN(secs)) return "-";
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  if (d > 0) return d + "天 " + h + "小时 " + m + "分 " + s + "秒";
+  if (h > 0) return h + "小时 " + m + "分 " + s + "秒";
+  if (m > 0) return m + "分 " + s + "秒";
+  return s + "秒";
+}
+async function updateHealth() {
+  const t0 = performance.now();
+  try {
+    const h = await api("/api/health");
+    const rtt = (performance.now() - t0).toFixed(2);
+    if (!h || !h.ok) {
+      if ($("ht-status")) $("ht-status").innerHTML = '<span class="badge offline">异常</span>';
+      return;
+    }
+    if ($("ht-status")) $("ht-status").innerHTML = '<span class="badge completed">健康 (' + h.status + ')</span>';
+    if ($("ht-ver-pid")) $("ht-ver-pid").textContent = "v" + h.version + " (PID " + h.pid + ")";
+    if ($("ht-uptime")) $("ht-uptime").textContent = formatUptime(h.uptime_secs) + " (" + h.uptime_secs + "s)";
+    if ($("ht-ports") && h.ports) {
+      $("ht-ports").textContent = "Mesh:" + h.ports.control + " / UI:" + h.ports.ui + " / File:" + h.ports.file;
+    }
+    if ($("ht-rtt")) $("ht-rtt").textContent = rtt + " ms";
+  } catch (e) {
+    if ($("ht-status")) $("ht-status").innerHTML = '<span class="badge offline">未连接 (已离线)</span>';
+  }
+}
+const shutdownBtn = $("shutdownbtn");
+if (shutdownBtn) {
+  shutdownBtn.onclick = async () => {
+    if (confirm("确认优雅停止 Tetherly 守护进程？停止后回环接口将断开连接。")) {
+      const msg = $("shutdownmsg");
+      if (msg) msg.textContent = "正在向节点发送优雅停止信号…";
+      try {
+        await api("/api/daemon/shutdown", {});
+        if (msg) msg.textContent = "节点已接受停止信号，正在退出进程。";
+        setTimeout(() => {
+          if ($("ht-status")) $("ht-status").innerHTML = '<span class="badge offline">已停止</span>';
+        }, 300);
+      } catch (e) {
+        if (msg) msg.textContent = "请求异常: " + e;
+      }
+    }
+  };
+}
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
 }
@@ -650,6 +729,8 @@ tick();
 setInterval(tick, 700);
 updateStorage();
 setInterval(updateStorage, 3000);
+updateHealth();
+setInterval(updateHealth, 2000);
 </script>
 </body>
 </html>

@@ -233,6 +233,27 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Check health, uptime, and bound ports of the running node daemon.
+    Health {
+        /// Output raw JSON health report instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Fast ping to verify node daemon responsiveness and measure loopback RTT.
+    Ping {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Gracefully stop the running node daemon.
+    Stop {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1598,9 +1619,125 @@ async fn main() -> Result<()> {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
-        },
+        }
+        Cmd::Health { json, ui_port } => {
+            let t0 = std::time::Instant::now();
+            let (code, resp) = loopback_get(ui_port, "/api/health").await.map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+            let rtt = t0.elapsed();
+            if code != 200 {
+                bail!(
+                    "node health check failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+            } else {
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let status = v["status"].as_str().unwrap_or("unknown");
+                let version = v["version"].as_str().unwrap_or("?");
+                let device_id = v["device_id"].as_str().unwrap_or("?");
+                let name = v["name"].as_str().unwrap_or("?");
+                let platform = v["platform"].as_str().unwrap_or("?");
+                let pid = v["pid"].as_u64().unwrap_or(0);
+                let uptime_secs = v["uptime_secs"].as_u64().unwrap_or(0);
+                let live_peers = v["live_peers"].as_u64().unwrap_or(0);
+                let trusted_peers = v["trusted_peers"].as_u64().unwrap_or(0);
+                let ports = &v["ports"];
+                let control_port = ports["control"].as_u64().unwrap_or(0);
+                let file_port = ports["file"].as_u64().unwrap_or(0);
+                let input_port = ports["input"].as_u64().unwrap_or(0);
+                let screen_port = ports["screen"].as_u64().unwrap_or(0);
+                let ui_port = ports["ui"].as_u64().unwrap_or(0);
+
+                println!("Node Health Status: {status} (200 OK)");
+                println!("  Version:          {version}");
+                println!("  Device ID:        {device_id}");
+                println!("  Node Name:        {name} ({platform})");
+                println!("  PID:              {pid}");
+                println!(
+                    "  Uptime:           {} ({uptime_secs}s)",
+                    format_uptime(uptime_secs)
+                );
+                println!("  Bound Ports:");
+                println!("    Control (Mesh): {control_port}");
+                println!("    File Transfer:  {file_port}");
+                println!("    Input (Remote): {input_port}");
+                println!("    Screen (Video): {screen_port}");
+                println!("    UI (Loopback):  {ui_port}");
+                println!("  Live Peers:       {live_peers}");
+                println!("  Trusted Peers:    {trusted_peers}");
+                println!("  Loopback Latency: {:.2}ms", rtt.as_secs_f64() * 1000.0);
+            }
+        }
+        Cmd::Ping { ui_port } => {
+            let t0 = std::time::Instant::now();
+            let (code, resp) = loopback_get(ui_port, "/api/health").await.map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+            let rtt = t0.elapsed();
+            if code != 200 {
+                bail!(
+                    "node ping failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let v: serde_json::Value = serde_json::from_slice(&resp)
+                .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+            let status = v["status"].as_str().unwrap_or("unknown");
+            let version = v["version"].as_str().unwrap_or("?");
+            let pid = v["pid"].as_u64().unwrap_or(0);
+            let uptime_secs = v["uptime_secs"].as_u64().unwrap_or(0);
+            println!(
+                "pong: node {status}, rtt: {:.2}ms, uptime: {} (pid: {pid}, v{version})",
+                rtt.as_secs_f64() * 1000.0,
+                format_uptime(uptime_secs)
+            );
+        }
+        Cmd::Stop { ui_port } => {
+            let (code, resp) = loopback_post(ui_port, "/api/daemon/shutdown", b"")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "node shutdown failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            println!("Node daemon shutdown initiated (HTTP 200).");
+        }
     }
     Ok(())
+}
+
+fn format_uptime(secs: u64) -> String {
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let minutes = (secs % 3600) / 60;
+    let s = secs % 60;
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m {s}s")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m {s}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {s}s")
+    } else {
+        format!("{s}s")
+    }
 }
 
 fn print_status_summary(v: &serde_json::Value) {

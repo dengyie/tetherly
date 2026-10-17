@@ -273,6 +273,27 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Check health, uptime, and bound ports of the running node daemon.
+    Health {
+        /// Output raw JSON health report instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Fast ping to verify node daemon responsiveness and measure loopback RTT.
+    Ping {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Gracefully stop the running node daemon.
+    Stop {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1680,9 +1701,111 @@ async fn main() -> Result<()> {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
-        },
+        }
+        Cmd::Health { json, ui_port } => {
+            let t0 = std::time::Instant::now();
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/health")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            let rtt = t0.elapsed();
+            if code != 200 {
+                anyhow::bail!(
+                    "node health check failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+            } else {
+                let rep: tetherly_node::HealthReport = serde_json::from_slice(&resp)?;
+                println!("Node Health Status: {} (200 OK)", rep.status);
+                println!("  Version:          {}", rep.version);
+                println!("  Device ID:        {}", rep.device_id);
+                println!("  Node Name:        {} ({})", rep.name, rep.platform);
+                println!("  PID:              {}", rep.pid);
+                println!(
+                    "  Uptime:           {} ({}s)",
+                    format_uptime(rep.uptime_secs),
+                    rep.uptime_secs
+                );
+                println!("  Bound Ports:");
+                println!("    Control (Mesh): {}", rep.ports.control);
+                println!("    File Transfer:  {}", rep.ports.file);
+                println!("    Input (Remote): {}", rep.ports.input);
+                println!("    Screen (Video): {}", rep.ports.screen);
+                println!("    UI (Loopback):  {}", rep.ports.ui);
+                println!("  Live Peers:       {}", rep.live_peers);
+                println!("  Trusted Peers:    {}", rep.trusted_peers);
+                println!("  Loopback Latency: {:.2}ms", rtt.as_secs_f64() * 1000.0);
+            }
+        }
+        Cmd::Ping { ui_port } => {
+            let t0 = std::time::Instant::now();
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/health")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            let rtt = t0.elapsed();
+            if code != 200 {
+                anyhow::bail!(
+                    "node ping failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: tetherly_node::HealthReport = serde_json::from_slice(&resp)?;
+            println!(
+                "pong: node {}, rtt: {:.2}ms, uptime: {} (pid: {}, v{})",
+                rep.status,
+                rtt.as_secs_f64() * 1000.0,
+                format_uptime(rep.uptime_secs),
+                rep.pid,
+                rep.version
+            );
+        }
+        Cmd::Stop { ui_port } => {
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/daemon/shutdown", b"")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "node shutdown failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            println!("Node daemon shutdown initiated (HTTP 200).");
+        }
     }
     Ok(())
+}
+
+fn format_uptime(secs: u64) -> String {
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let minutes = (secs % 3600) / 60;
+    let s = secs % 60;
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m {s}s")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m {s}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {s}s")
+    } else {
+        format!("{s}s")
+    }
 }
 
 fn print_status_summary(v: &serde_json::Value) {

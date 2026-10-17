@@ -3,12 +3,60 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.38** |
+| 文档版本 | **1.39** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）**——(1) **轻量级存储可观测性回环 API (`GET /api/storage`)**：单遍扫描 `data_dir` 与 `inbox` 目录，无缝透视数据目录实际路径、收件箱完整接收文件数与容量、传输临时分块（`.part`）数量与占用、孤儿分块（`orphaned`）数量与容量以及核心身份与路由元数据存储开销；(2) **安全孤儿分块垃圾回收 API (`POST /api/storage/clean`)**：建立强隔离机制，绝对保护正在传输（`Transferring`/`Verifying`）的活跃分块，按需安全清除未匹配的孤儿 `.part` 与失去匹配的 `.resume.json` 侧车，或在用户显式指定时清空非在途的全部历史分块并注销内存断点续传表；(3) **CLI 全量同构命令群 (`tetherly storage` 与 `tetherly-cli storage`)**：增设 `storage status [--json]` 与 `storage clean [--all]`，支持自适应单位容量排版与机器可读 JSON 输出；(4) **Web UI 补全**：在 `ui/index.html` 增设「存储与数据目录」面板，提供容量结构多维透视与一键清理孤儿分块交互；(5) **端到端集成测试全覆盖**（`tests/phase1.rs` 增设 `storage_inspection_and_partial_cleanup_via_loopback_api`）。+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）**——(1) **极低开销健康探针回环端点 (`GET /api/health`)**：彻底解耦高频监控与全量 `GET /api/state` 快照，纳秒级返回节点健康状态、版本、设备 ID、节点名称、操作系统平台、进程 PID、运行时长（`uptime_secs`）、五维服务端口绑定（`control`, `file`, `input`, `screen`, `ui`）以及活跃/信任对端数量；(2) **守护进程优雅停止控制面 (`POST /api/daemon/shutdown` / `POST /api/daemon/stop`)**：重构 `Node::run(&self)` 与各服务接收监听循环（`node_accept_loop`、`accept_loop`），在异步返回 HTTP 200 确认后优雅触发 `Node::shutdown()`，所有网络与 UI 监听循环安全终止并使 `run()` 干净返回 `Ok(())`；(3) **CLI 全量同构命令群 (`tetherly health|ping|stop` 与 `tetherly-cli health|ping|stop`)**：增设 `health [--json]`、`ping [--count <n>] [--timeout-ms <ms>]`（客户端精确测量往返 RTT 时延）与 `stop`（优雅停止守护进程）；(4) **Web UI 补全**：在 `ui/index.html` 增设「守护进程与系统健康」面板，展示存活性、PID、格式化运行时长、往返延迟测速器与优雅停止确认交互；(5) **端到端集成测试全覆盖**（`tests/phase1.rs` 增设 `node_health_probe_ping_and_graceful_shutdown_via_loopback_api`）。+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.39 相对 1.38(节点健康检查探针、轻量级守护进程可观测性与优雅停止机制)**
+
+- **动机(高频探针与全量状态解耦、进程级核心可观测性与受控平滑退出机制)**:
+  在 v1.0 至 v1.38 的演进中，节点控制面功能已涵盖配对、路由、传输、通知、剪贴板、键鼠、屏幕、网卡与存储等众多领域。然而在实际系统集成、高可用部署与守护进程管理中暴露出以下痛点：
+  1. **高频探活与沉重全量状态耦合**：外部系统（如 systemd、Docker、K8s 探针或无头监控脚本）此前只能请求 `GET /api/state` 检查节点存活性。该接口必须锁定并序列化全量活动传输、设备列表、候选队列与路由信息，随着系统运行与负载升高，开销剧增，极不适应 1s~2s 级别的健康巡检；
+  2. **守护进程指标黑盒**：系统缺少对进程 PID、系统持续运行时间（Uptime）、操作系统平台与各核心网络端口（control 45717, file 45718, input 45719, screen 45720, ui 45716）绑定状态的单一零开销透视源；
+  3. **缺乏受控平滑的优雅停止机制**：节点在 `Node::run(&self)` 中此前依赖 `std::future::pending()` 无限阻塞，终止进程只能依赖外部硬性 `SIGTERM` / `SIGKILL`，容易造成正在写入的连接或临时缓冲异常中断；
+  4. **缺乏开箱即用的轻量 CLI ping/health/stop 工具**：无头终端缺少轻量级延迟检测与守护进程管理命令。
+
+- **架构与协议设计(ADR-032 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制)**:
+  1. **轻量级健康探针端点 (`GET /api/health`)**:
+     - 严格遵循 127.0.0.1 绑核与 Host 头校验；
+     - 响应结构：
+       ```json
+       {
+         "ok": true,
+         "status": "healthy",
+         "version": "1.39.0",
+         "device_id": "c0ffee...",
+         "name": "desktop-node",
+         "platform": "macos",
+         "pid": 12345,
+         "uptime_secs": 3600,
+         "ports": {
+           "control": 45717,
+           "file": 45718,
+           "input": 45719,
+           "screen": 45720,
+           "ui": 45716
+         },
+         "live_peers": 2,
+         "trusted_peers": 3
+       }
+       ```
+  2. **优雅停止控制面 (`POST /api/daemon/shutdown` 与 `POST /api/daemon/stop`)**:
+     - 异步处理请求：先向客户端发送 HTTP 200 `{"ok": true, "status": "shutting_down", "message": "node shutdown initiated"}`，延时 50ms 触发 `node.shutdown()`；
+     - `Node::shutdown()` 广播 `watch::Sender<bool>`；
+     - `Node::run(&self)` 接收到通知后退出等待循环，返回 `Ok(())`；
+     - `uihttp::accept_loop` 与所有 `node_accept_loop` 接收到停止信号后终止监听。
+  3. **CLI 全量同构命令群 (`health`, `ping`, `stop`)**:
+     - `health [--json] [--ui-port <port>]`：格式化输出节点运行状态或 JSON；
+     - `ping [--count <n>] [--timeout-ms <ms>] [--ui-port <port>]`：连续向回环健康端点发送请求并测算 RTT 往返时延；
+     - `stop [--ui-port <port>]`：触发受控优雅停止。
+  4. **Web UI 补全 (`ui/index.html`)**:
+     - 增设「守护进程与系统健康」卡片，集成存活状态、PID、运行时长、端口绑定、实时 RTT 测速与受控优雅停止。
+  5. **端到端集成测试 (`tests/phase1.rs`)**:
+     - 增设 `node_health_probe_ping_and_graceful_shutdown_via_loopback_api`。
 
 **1.38 相对 1.37(节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收)**
 
@@ -1909,5 +1957,92 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - 验证通过 `POST /api/ancs/allow` 动态追加白名单规则，`GET /api/ancs` 立即反映更新；
      - 验证挂载 `MemoryAncsTransport` 后，`GET /api/ancs` 正确呈现 `attached: true`，调用 `POST /api/ancs/connect` 成功触发订阅并返回 `ready` 状态；
      - 验证非法请求参数（空 JSON、缺少参数）被严格拒绝并返回 400。
+
+## 37. 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收 (v1.38 / ADR-031)
+
+1. **动机与设计准则（ADR-031）**：
+   - 打破长周期运维下节点数据目录（`data_dir`）与接收收件箱（`inbox`）的存储状态黑盒；
+   - 彻底治理大文件传输在网络抖动、进程中断或任务取消后残留的孤儿分块文件（`.{transfer_id}.part`）与侧车（`.resume.json`）；
+   - 严格维护安全红线：正在在途传输（`Transferring` / `Verifying`）的活跃分块绝对隔离保护，严禁被清理删除；
+   - 提供全平台对齐的 CLI 诊断与清理命令 `tetherly storage` 与 `tetherly-cli storage`，支持 `status [--json]` 与 `clean [--all]`；
+   - 严格遵循 127.0.0.1 绑核、Host 头校验与轻量回环客户端架构。
+
+2. **核心机制与实现**：
+   - **轻量级存储可观测性回环 API (`GET /api/storage`)**：
+     - 单遍高效扫描 `data_dir` 与 `inbox` 目录；
+     - 返回结构体 `StorageReport`：包含 `ok`、`data_dir`、`inbox_dir`、`inbox_total_bytes`、`inbox_file_count`、`partial_bytes`、`partial_count`、`orphaned_partial_count`、`orphaned_partial_bytes` 以及 `meta_bytes`；
+   - **安全孤儿分块垃圾回收 API (`POST /api/storage/clean`)**：
+     - 接收可选 JSON 参数 `{"orphaned_only": bool}`（缺省为 `true`）；
+     - 返回结构体 `StorageCleanReport`：包含 `ok`、`freed_bytes`、`deleted_files_count` 与 `cleared_resume_entries`；
+     - 活跃传输任务白名单强隔离保护；
+   - **CLI 终端同构命令群 (`tetherly` 与 `tetherly-cli`)**：
+     - `storage status [--json] [--ui-port <port>]`：格式化容量单位（B / KiB / MiB / GiB）友好展示或机器可读 JSON；
+     - `storage clean [--all] [--ui-port <port>]`：安全触发垃圾回收并打印释放容量；
+   - **Web UI 补全 (`ui/index.html`)**：
+     - 增设「存储与数据目录」面板，动态监控收件箱容量与分块占用，支持一键安全清理孤儿文件。
+
+3. **测试覆盖与 GitHub CI 验证**：
+   - 在 `tests/phase1.rs` 增设 `storage_inspection_and_partial_cleanup_via_loopback_api`：
+     - 验证空目录初始化指标；
+     - 验证接收文件与孤儿分块混合场景下的精确区分统计；
+     - 验证调用 `POST /api/storage/clean` 仅精准清理孤儿文件，正常接收文件毫发无损；
+     - 验证全部历史未决分块清理与断点续传表注销逻辑。
+
+## 38. 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制 (v1.39 / ADR-032)
+
+1. **动机与设计准则（ADR-032）**：
+   - 彻底解耦高频监控探活与开销巨大的全量 `GET /api/state` 状态快照；
+   - 提供纳秒级、零额外内存分配的健康检查端点 `GET /api/health`，适应容器存活/就绪探针与前端实时心跳；
+   - 统一暴露守护进程关键指标：进程 PID、持续运行时长（uptime）、操作系统平台以及五维服务端口（control 45717, file 45718, input 45719, screen 45720, ui 45716）的动态实际绑定值；
+   - 彻底解决节点守护进程退出依赖外部硬杀（`kill -9`）的问题，重构 `Node::run(&self)` 与所有监听接收循环，提供受控的平滑优雅停止端点 `POST /api/daemon/shutdown` / `POST /api/daemon/stop`；
+   - 提供双端同构的轻量级 CLI 工具（`tetherly` 与 `tetherly-cli`）命令群：`health`、`ping`（精确统计往返 RTT 时延）与 `stop`（优雅停止守护进程）；
+   - 严格维护安全红线：127.0.0.1 绑核、Host 头校验与命令行轻量回环客户端原则。
+
+2. **核心机制与实现**：
+   - **极低开销健康探针回环端点 (`GET /api/health`)**：
+     - 结构体 `HealthReport` 与 `NodePorts`：
+       ```json
+       {
+         "ok": true,
+         "status": "healthy",
+         "version": "1.39.0",
+         "device_id": "c0ffee...",
+         "name": "desktop-node",
+         "platform": "macos",
+         "pid": 12345,
+         "uptime_secs": 3600,
+         "ports": {
+           "control": 45717,
+           "file": 45718,
+           "input": 45719,
+           "screen": 45720,
+           "ui": 45716
+         },
+         "live_peers": 2,
+         "trusted_peers": 3
+       }
+       ```
+     - 节点启动时在 `Shared` 中记录单调时钟 `started_at: Instant`，纳秒级获取 `uptime_secs`；
+   - **优雅停止与监听循环协同解耦**：
+     - 重构 `Node::run(&self)`：由原先挂起的 `std::future::pending()` 改为异步等待 `watch::Receiver<bool>` 关闭信号；
+     - 增设 `POST /api/daemon/shutdown` 与 `POST /api/daemon/stop` 回环端点：在后台延迟 50ms 异步触发 `node.shutdown()`，优先返回 HTTP 200 确认；
+     - `uihttp::accept_loop` 监听 `node.shutdown_signal()`，在触发时退出循环并释放端口；
+     - `node_accept_loop` 同样订阅关闭信号，安全跳出 accept 循环，使 `Node::run` 平滑结束并返回 `Ok(())`；
+   - **CLI 终端同构命令群 (`tetherly` 与 `tetherly-cli`)**：
+     - `health [--json] [--ui-port <port>]`：结构化表格呈现各项健康度量或标准 JSON 管道输出；
+     - `ping [--count <n>] [--timeout-ms <ms>] [--ui-port <port>]`：客户端高精时钟测算单次及平均 loopback RTT 时延；
+     - `stop [--ui-port <port>]`：向运行中的节点发起受控优雅停机；
+   - **Web UI 补全 (`ui/index.html`)**：
+     - 在 Web UI 中增设「守护进程与系统健康」卡片，显示健康徽标、PID、天/时/分/秒运行时长、端口绑定映射、实时 RTT 往返时延度量与受控优雅停机交互按钮。
+
+3. **测试覆盖与 GitHub CI 验证**：
+   - 在 `tests/phase1.rs` 增设 `node_health_probe_ping_and_graceful_shutdown_via_loopback_api`：
+     - 验证直接 Rust 调用 `node.health_report()` 指标准确无误；
+     - 验证并发启动 `node.run()` 背景任务并成功进入监听与等待态；
+     - 验证通过 loopback HTTP `GET /api/health` 成功获取探针指标且往返 RTT 时延在微秒/亚毫秒级（CI 环境宽限内）；
+     - 验证向 `POST /api/daemon/shutdown` 发送停机请求收到 HTTP 200 `shutting_down` 应答；
+     - 验证 `node.run()` 顺畅解挂并在 3 秒内干净返回 `Ok(())`；
+     - 验证 UI 端口 listener 已彻底退出，后续连接被拒绝。
+
 
 

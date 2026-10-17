@@ -281,6 +281,32 @@ pub struct StorageCleanReport {
     pub cleared_resume_entries: usize,
 }
 
+/// Port assignments bound by the running node.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct NodePorts {
+    pub control: u16,
+    pub file: u16,
+    pub input: u16,
+    pub screen: u16,
+    pub ui: u16,
+}
+
+/// Lightweight health report for liveness probes, monitoring, and diagnostics.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct HealthReport {
+    pub ok: bool,
+    pub status: String,
+    pub version: String,
+    pub device_id: String,
+    pub name: String,
+    pub platform: String,
+    pub pid: u32,
+    pub uptime_secs: u64,
+    pub ports: NodePorts,
+    pub live_peers: usize,
+    pub trusted_peers: usize,
+}
+
 enum OutboundSource {
     Bytes(Vec<u8>),
     Path(std::path::PathBuf),
@@ -410,6 +436,7 @@ struct Shared {
     ancs_source: DeviceId,
     /// Apps allowed to show "open". Empty until config/UI supplies rules.
     allowlist: Mutex<OpenAllowlist>,
+    started_at: std::time::Instant,
 }
 
 pub struct Node {
@@ -583,6 +610,7 @@ impl Node {
             ancs: Mutex::new(ancs),
             ancs_source,
             allowlist: Mutex::new(OpenAllowlist::default()),
+            started_at: std::time::Instant::now(),
         });
         Ok(Self { shared })
     }
@@ -891,6 +919,35 @@ impl Node {
             retry_at_ms,
             allowlist,
         }
+    }
+
+    /// Lightweight health report for liveness probes, monitoring, and diagnostics.
+    pub fn health_report(&self) -> HealthReport {
+        let ports = NodePorts {
+            control: self.control_port(),
+            file: self.file_port(),
+            input: self.input_port(),
+            screen: self.screen_port(),
+            ui: self.ui_port(),
+        };
+        HealthReport {
+            ok: true,
+            status: "healthy".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            device_id: self.shared.identity.device_id().to_string(),
+            name: self.shared.cfg.name.clone(),
+            platform: self.platform().to_string(),
+            pid: std::process::id(),
+            uptime_secs: self.shared.started_at.elapsed().as_secs(),
+            ports,
+            live_peers: self.live_peers().len(),
+            trusted_peers: self.trusted().len(),
+        }
+    }
+
+    /// Subscribe to the shutdown signal.
+    pub fn shutdown_signal(&self) -> watch::Receiver<bool> {
+        self.shared.shutdown.subscribe()
     }
 
     /// Inspect local storage, inbox files, in-flight/orphaned partial transfers and metadata.
@@ -1265,7 +1322,16 @@ impl Node {
             device_id = %self.shared.identity.device_id(),
             "node running"
         );
-        std::future::pending::<()>().await;
+        let mut stop = self.shared.shutdown.subscribe();
+        while !*stop.borrow() {
+            if stop.changed().await.is_err() {
+                break;
+            }
+        }
+        info!(
+            device_id = %self.shared.identity.device_id(),
+            "node shutdown complete"
+        );
         Ok(())
     }
 

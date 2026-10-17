@@ -1963,6 +1963,80 @@ async fn storage_inspection_and_partial_cleanup_via_loopback_api() {
     node.shutdown();
 }
 
+/// ADR-032: Node health probe, latency ping, and graceful shutdown via loopback HTTP API.
+#[tokio::test(flavor = "multi_thread")]
+async fn node_health_probe_ping_and_graceful_shutdown_via_loopback_api() {
+    let (data_dir, _guard) = temp_dir("health-test");
+    let node = Node::start(cfg(data_dir.clone(), "health-node", "macos")).unwrap();
+    let ui_port = node.spawn_ui().await.unwrap();
+    assert_ne!(ui_port, 0, "test node must serve loopback UI");
+
+    // 1. Direct Rust API inspection
+    let direct_report = node.health_report();
+    assert!(direct_report.ok);
+    assert_eq!(direct_report.status, "healthy");
+    assert_eq!(direct_report.name, "health-node");
+    assert_eq!(direct_report.platform, "macos");
+    assert_eq!(direct_report.pid, std::process::id());
+    assert_eq!(direct_report.live_peers, 0);
+    assert_eq!(direct_report.trusted_peers, 0);
+    assert_eq!(direct_report.ports.ui, ui_port);
+
+    // 2. Spawn node.run() in background task to verify graceful termination
+    let run_node = node.clone_handle();
+    let run_handle = tokio::spawn(async move { run_node.run().await });
+
+    // Yield to let run() spawn its listener loops and subscribe to shutdown
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 3. HTTP probe: GET /api/health with RTT measurement
+    let start_t = std::time::Instant::now();
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/health")
+        .await
+        .expect("health probe get");
+    let rtt = start_t.elapsed();
+    assert_eq!(code, 200);
+    assert!(
+        rtt < Duration::from_millis(500),
+        "health probe RTT too high: {rtt:?}"
+    );
+
+    let rep: tetherly_node::HealthReport =
+        serde_json::from_slice(&body).expect("valid health report json");
+    assert!(rep.ok);
+    assert_eq!(rep.status, "healthy");
+    assert_eq!(rep.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(rep.name, "health-node");
+    assert_eq!(rep.platform, "macos");
+    assert_eq!(rep.pid, std::process::id());
+    assert_eq!(rep.ports.ui, ui_port);
+    assert_ne!(rep.ports.control, 0);
+
+    // 4. Request graceful shutdown via POST /api/daemon/shutdown
+    let (code, body) = tetherly_node::loopback_post(ui_port, "/api/daemon/shutdown", b"{}")
+        .await
+        .expect("shutdown post");
+    assert_eq!(code, 200);
+    let val: serde_json::Value = serde_json::from_slice(&body).expect("shutdown resp json");
+    assert_eq!(val["ok"], true);
+    assert_eq!(val["status"], "shutting_down");
+
+    // 5. Verify that node.run() cleanly unwinds and exits with Ok(())
+    let run_res = tokio::time::timeout(Duration::from_secs(3), run_handle)
+        .await
+        .expect("node run should shutdown within 3s")
+        .expect("join handle ok");
+    assert!(run_res.is_ok(), "node.run() should exit with Ok(())");
+
+    // 6. Verify that UI listener is stopped
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let post_shutdown = tetherly_node::loopback_get(ui_port, "/api/health").await;
+    assert!(
+        post_shutdown.is_err(),
+        "ui server should no longer accept connections"
+    );
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
