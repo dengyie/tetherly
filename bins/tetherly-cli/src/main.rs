@@ -988,14 +988,12 @@ async fn main() -> Result<()> {
                 println!("Screen streaming stopped.");
             }
             ScreenCmd::Status { json, ui_port } => {
-                let (code, resp) = loopback_get(ui_port, "/api/screen")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                let (code, resp) = loopback_get(ui_port, "/api/screen").await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                              start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                    )
+                })?;
                 if code != 200 {
                     bail!(
                         "screen status query failed (HTTP {code}): {}",
@@ -1080,14 +1078,12 @@ async fn main() -> Result<()> {
                 println!("Input channel disconnected. Cursor seat: {seat}");
             }
             InputCmd::Status { json, ui_port } => {
-                let (code, resp) = loopback_get(ui_port, "/api/input")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                let (code, resp) = loopback_get(ui_port, "/api/input").await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                              start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                    )
+                })?;
                 if code != 200 {
                     bail!(
                         "input status query failed (HTTP {code}): {}",

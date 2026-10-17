@@ -1047,15 +1047,14 @@ async fn main() -> Result<()> {
                 println!("Screen streaming started.");
             }
             ScreenCmd::Stop { ui_port } => {
-                let (code, resp) =
-                    tetherly_node::loopback_post(ui_port, "/api/screen/stop", b"{}")
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/screen/stop", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                              start one with `tetherly --data-dir <dir> run` first"
-                            )
-                        })?;
+                        )
+                    })?;
                 if code != 200 {
                     anyhow::bail!(
                         "screen stop failed (HTTP {code}): {}",
@@ -1138,15 +1137,14 @@ async fn main() -> Result<()> {
                 println!("Input channel connected. Cursor seat: {seat}");
             }
             InputCmd::Stop { ui_port } => {
-                let (code, resp) =
-                    tetherly_node::loopback_post(ui_port, "/api/input/stop", b"{}")
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/input/stop", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                              start one with `tetherly --data-dir <dir> run` first"
-                            )
-                        })?;
+                        )
+                    })?;
                 if code != 200 {
                     anyhow::bail!(
                         "input stop failed (HTTP {code}): {}",
