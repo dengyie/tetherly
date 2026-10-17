@@ -2978,7 +2978,7 @@ async fn route_table_governance_and_static_injection_via_loopback_api() {
         .expect("connect loopback sse");
 
     // 3. Inject a new static route for a non-live device via POST /api/routes
-    let static_device_id = "tdev_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let static_device_id = "tdev_aaaaaaaaaaaaaaaa";
     let static_addr = "192.168.1.120:45717";
     let add_payload = serde_json::json!({
         "peer": static_device_id,
