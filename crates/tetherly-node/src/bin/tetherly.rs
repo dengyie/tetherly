@@ -585,15 +585,19 @@ async fn main() -> Result<()> {
                         String::from_utf8_lossy(&resp)
                     );
                 }
-                let v: serde_json::Value =
-                    serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
                 let sent_peers = v.get("sent_peers").and_then(|c| c.as_u64()).unwrap_or(0);
                 let bytes = v.get("bytes").and_then(|c| c.as_u64()).unwrap_or(0);
                 let hash = v.get("hash").and_then(|h| h.as_str()).unwrap_or("");
                 let short_hash = if hash.len() >= 12 { &hash[..12] } else { hash };
                 println!("synced clipboard ({bytes} bytes, sha256:{short_hash}...) to {sent_peers} peer(s)");
             }
-            ClipCmd::Send { text, peer, ui_port } => {
+            ClipCmd::Send {
+                text,
+                peer,
+                ui_port,
+            } => {
                 let content = match text {
                     Some(t) => t,
                     None => {
@@ -622,8 +626,8 @@ async fn main() -> Result<()> {
                         String::from_utf8_lossy(&resp)
                     );
                 }
-                let v: serde_json::Value =
-                    serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
                 let sent_peers = v.get("sent_peers").and_then(|c| c.as_u64()).unwrap_or(0);
                 let bytes = v.get("bytes").and_then(|c| c.as_u64()).unwrap_or(0);
                 let hash = v.get("hash").and_then(|h| h.as_str()).unwrap_or("");
@@ -631,29 +635,27 @@ async fn main() -> Result<()> {
                 println!("sent {bytes} bytes to {sent_peers} peer(s) (sha256:{short_hash}...)");
             }
             ClipCmd::Get { ui_port } => {
-                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/clip")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                             start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/clip").await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
                 if code != 200 {
                     anyhow::bail!(
                         "clipboard get failed (HTTP {code}): {}",
                         String::from_utf8_lossy(&resp)
                     );
                 }
-                let v: serde_json::Value =
-                    serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
                 if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
                     print!("{text}");
                 } else {
                     eprintln!("(clipboard is empty)");
                 }
             }
-        }
+        },
         Cmd::Status {
             watch,
             interval,

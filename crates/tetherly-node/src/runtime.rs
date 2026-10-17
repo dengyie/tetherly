@@ -22,13 +22,12 @@ use tetherly_core::ports::{Clip, Clock, Rng, SystemClock};
 use tetherly_core::session::LockoutTable;
 use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
-    ancs_actions, ancs_source_id, path_kind, AncsEvent, AncsIngress,
-    AncsState, AncsTransport, ClipApply, ClipHub, ConnectOutcome, ControlMsg, CoreError,
-    CursorSeat, DeviceId, FileHub, IngestOutcome, InputClient, InputEvent, InputServer, InputSink,
-    MemoryScreenSink, MemorySink, MemoryTrustStore, NotifyHub, OpenAllowlist, PathKind, ReplyView,
-    ScreenAssembler, ScreenCodec, ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink,
-    ScreenSource, ScreenState, ScreenStats, TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS,
-    OVERLAY_PROBE_MS,
+    ancs_actions, ancs_source_id, path_kind, AncsEvent, AncsIngress, AncsState, AncsTransport,
+    ClipApply, ClipHub, ConnectOutcome, ControlMsg, CoreError, CursorSeat, DeviceId, FileHub,
+    IngestOutcome, InputClient, InputEvent, InputServer, InputSink, MemoryScreenSink, MemorySink,
+    MemoryTrustStore, NotifyHub, OpenAllowlist, PathKind, ReplyView, ScreenAssembler, ScreenCodec,
+    ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats,
+    TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -2094,11 +2093,7 @@ impl Node {
                 }
                 Ok(vec![target.clone()])
             }
-            None => Ok(self
-                .live_peers()
-                .into_iter()
-                .map(|p| p.device_id)
-                .collect()),
+            None => Ok(self.live_peers().into_iter().map(|p| p.device_id).collect()),
         }
     }
 

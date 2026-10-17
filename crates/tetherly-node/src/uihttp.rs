@@ -435,7 +435,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                     Err(e) => err(400, &e.to_string()),
                 }
             }
-        },
+        }
         // Deliver a notify.push on the live Noise session. Only this process
         // holds the session, so a second binary cannot do it. One live peer is
         // implied; more than one needs an explicit `peer`. The body is delivered
