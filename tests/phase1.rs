@@ -2125,6 +2125,14 @@ async fn node_events_stream_sse_via_loopback_api() {
     assert_eq!(val["kind"], "status");
     assert_eq!(val["message"], "stream2 check");
 
+    // Both active streams receive the broadcasted event
+    let raw1 = tokio::time::timeout(Duration::from_secs(3), sse.next_event())
+        .await
+        .expect("timeout sse")
+        .expect("read sse")
+        .expect("some raw event on sse1");
+    assert_eq!(raw1, raw);
+
     // 6. Shutdown node and verify streams cleanly terminate with Ok(None)
     node.shutdown();
     let term1 = tokio::time::timeout(Duration::from_secs(3), sse.next_event())
