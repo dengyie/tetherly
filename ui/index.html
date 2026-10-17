@@ -486,9 +486,19 @@ function render(s) {
       rttBadge = '<span class="badge ' + cls + '" style="margin-left:6px">' + x.rtt_ms + ' ms</span>';
     }
     const pathBadge = '<span class="badge ' + (x.path === 'overlay' ? 'outbound' : 'completed') + '" style="margin-left:6px">' + (x.path || 'lan').toUpperCase() + '</span>';
-    const card = el('<div class="card"><div style="flex:1"><div class="title"><span></span>' + pathBadge + rttBadge + '</div><div class="meta"></div></div><div class="row"><button class="ghost ping-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">测速</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
-    card.querySelector(".title span").textContent = x.name;
+    const card = el('<div class="card"><div style="flex:1"><div class="title"><span></span>' + pathBadge + rttBadge + '</div><div class="meta"></div></div><div class="row"><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost ping-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">测速</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
+    const displayName = (x.alias && x.alias !== x.name) ? (x.name + ' ("' + x.alias + '")') : x.name;
+    card.querySelector(".title span").textContent = displayName;
     card.querySelector(".meta").textContent = x.platform + " · " + (x.path || "lan") + " · " + x.device_id;
+    const aliasBtn = card.querySelector(".alias-btn");
+    aliasBtn.onclick = async () => {
+      const current = x.alias || x.name;
+      const newAlias = prompt("修改对端别名 (1-64 字符):", current);
+      if (newAlias && newAlias.trim()) {
+        await api("/api/peers/alias", { peer: x.device_id, alias: newAlias.trim() });
+        tick();
+      }
+    };
     const pingBtn = card.querySelector(".ping-btn");
     pingBtn.onclick = async () => {
       pingBtn.disabled = true;
@@ -519,7 +529,7 @@ function render(s) {
     if (sp) {
       const opt = document.createElement("option");
       opt.value = x.device_id;
-      opt.textContent = x.name + " (" + x.device_id + ")";
+      opt.textContent = displayName + " (" + x.device_id + ")";
       if (opt.value === prevPeer) opt.selected = true;
       sp.appendChild(opt);
     }
@@ -535,14 +545,22 @@ function render(s) {
         const badge = t.online
           ? '<span class="badge completed" style="margin-right:6px">在线</span>'
           : '<span class="badge offline" style="margin-right:6px">离线</span>';
-        const card = el('<div class="card"><div style="flex:1"><div class="title">' + badge + '<span></span></div><div class="meta"></div></div><div class="row"><button class="bad ghost" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
+        const card = el('<div class="card"><div style="flex:1"><div class="title">' + badge + '<span></span></div><div class="meta"></div></div><div class="row"><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
         card.querySelector(".title span").textContent = t.alias || t.device_id;
         card.querySelector(".meta").textContent = t.device_id;
-        const unpairBtn = card.querySelector("button");
+        const aliasBtn = card.querySelector(".alias-btn");
+        aliasBtn.onclick = async () => {
+          const newAlias = prompt("修改受信任设备别名 (1-64 字符):", t.alias || "");
+          if (newAlias && newAlias.trim()) {
+            await api("/api/peers/alias", { peer: t.device_id, alias: newAlias.trim() });
+            tick();
+          }
+        };
+        const unpairBtn = card.querySelector(".unpair-btn");
         unpairBtn.onclick = async () => {
           if (confirm("确认解除与设备 " + (t.alias || t.device_id) + " (" + t.device_id + ") 的配对？")) {
             await api("/api/peers/unpair", { device_id: t.device_id });
-            poll();
+            tick();
           }
         };
         tr.appendChild(card);
@@ -834,6 +852,7 @@ function setupEventSource() {
           else if (ev.kind === "pairing_needed") desc = "待配对: " + ev.device_id;
           else if (ev.kind === "peer_latency") desc = "时延度量: " + ev.device_id + " (" + ev.rtt_ms + "ms)";
           else if (ev.kind === "pin_state_changed") desc = "PIN 状态: " + (ev.active ? "已武装" : "已撤销/过期");
+          else if (ev.kind === "peer_alias_changed") desc = "别名更新: " + ev.device_id + " -> \"" + ev.alias + "\"";
           $("ev-last").textContent = "[" + t + "] " + desc;
         }
       } catch (err) {

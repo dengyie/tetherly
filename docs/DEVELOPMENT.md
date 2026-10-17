@@ -3,12 +3,45 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.43** |
+| 文档版本 | **1.44** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）**——(1) **PIN 码安全生命周期控制与轻量级回环查询端点 (`GET /api/pin` & `POST /api/pin/clear`)**：消灭 PIN 码状态黑盒，暴露当前是否存在武装中 PIN、格式化数字、剩余倒计时（`expires_in_secs`）与 TTL 配置；支持通过 `POST /api/pin/clear`（及 `DELETE /api/pin`）在 180 秒超时前主动撤销作废 PIN，实现安全状态即时废黜与幂等返回；(2) **全景 PIN 报告模型 (`PinReport`) 与安全事件流**：引入结构化 DTO，并在 `UiEvent` 增设 `PinStateChanged { active: bool }`，严格遵循安全红线铁律（事件载荷绝对禁止泄露任何 PIN 纯文本明文字符）；(3) **双端 CLI 同构升级 (`tetherly` 与 `tetherly-cli`)**：全面统一 `pin`（`--status`, `--clear`, `--json`, `--ui-port`）与 `dial`（`--addr`, `--pin`, `--ui-port`）命令，废黜 `tetherly-cli` 遗留的 Phase 0 临时进程与单端拨号，实现双二进制全同构回环通信；(4) **Web UI 实时交互与状态还原 (`ui/index.html`)**：配对卡片增设「撤销 PIN」按钮、实时有效倒计时徽标，页面刷新时自动调用 `/api/pin` 还原武装状态，并联动 SSE `pin_state_changed` 事件实现无感响应；(5) **端到端集成测试全覆盖**：在 `tests/phase1.rs` 增设 `pin_lifecycle_inspection_and_revocation_via_loopback_api`，全流程覆盖初始未武装状态、POST 生成与 SSE 广播、GET 实时查询与倒计时校验、POST 清除与 SSE 广播、清除后非活跃确认与幂等二次清除。+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）**——(1) **打破受信任对端别名静态冻结**：彻底解决此前 `TrustedPeer.alias` 永久绑定初次配对时的 `hello.name` 无法变更问题；在 `TrustStore` 接口及 `store.rs` 增设 `update_alias(&mut self, id: &DeviceId, alias: &str) -> Result<bool, CoreError>`，支持对端别名原子变更并持久化至 `trusted.json`；(2) **智能对端解析体系 (`Node::resolve_peer`)**：支持用户与客户端在所有对端目标 API 及 CLI 命令中使用友好别名、广播主机名或部分 ID（三级自适应智能解析：精确 DeviceId -> 别名/名称大小写不敏感全词匹配 -> 别名/名称/ID 包含匹配），杜绝记忆 21 位加密 ID 负担；(3) **轻量级回环控制面端点 (`POST /api/peers/alias`)**：实现对端别名动态修改接口，严格校验长度（1..=64 字节）与禁止控制字符；并在 `POST /api/peers/ping`、`unpair`、`file/send`、`notify`、`clip/sync`、`screen/start`、`input/start` 全域接入智能解析；(4) **CLI 双端全同构 (`tetherly alias` 与 `tetherly-cli alias`)**：提供原生修改别名命令，并在 `peers` 列表显式呈现用户别名；(5) **Web UI 交互闭环与安全 SSE 流**：在已配对与在线对端卡片提供「别名」即时修改弹框，广播 `UiEvent::PeerAliasChanged { device_id, alias }` 驱动界面实时重绘；(6) **端到端集成测试全绿覆盖**：在 `tests/phase1.rs` 增设 `peer_alias_governance_and_smart_resolution_via_loopback_api` 完备验证治理链路。+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.44 相对 1.43(对端设备别名治理、友好命名持久化与对端标识智能解析)**
+
+- **动机(对端别名静态冻结、加密 DeviceId 输入摩擦高与多端识别割裂)**:
+  在 v1.18 至 v1.43 的演进中，Tetherly 建立了基于 Noise 握手与 Ed25519 的点对点安全网格拓扑。然而随着多设备生态（多台笔记本、工作站、手机、云机）日常交互的深化，暴露出以下严重的控制面与用户体验缺陷：
+  1. **受信任别名静态冻结**：初次配对成功后，`TrustedPeer.alias` 被一次性赋予握手帧中的 `hello.name`，之后没有任何途径修改。若对端系统改名、或者主机名默认为枯燥的系统型号（如 `DESKTOP-8K39LF2`、`localhost`），本地用户只能永久面对无意义的标识；
+  2. **加密 `DeviceId` 交互摩擦巨大**：此前所有对端定向操作（CLI 的 `--peer`、API 的 `peer` 参数，包括 `send`、`ping`、`notify`、`clip`、`screen start`、`input start`、`unpair`）均强制要求输入完整的 21 字符 Base32 编码加密标识（如 `tdev_u2z4x6m8...`）。用户在终端或脚本中几乎无法盲敲，必须反复运行 `tetherly peers` 复制粘贴；
+  3. **缺少别名原子持久化与变更通知**：此前 `TrustStore` 特征仅提供 `get`, `put`, `forget`, `remove`，缺乏就地更新别名的机制；即便重新 `put` 也无法向活跃会话通知别名变更，UI 无法动态响应。
+
+- **架构与协议设计(ADR-037 对端设备别名治理、友好命名持久化与对端标识智能解析)**:
+  1. **TrustStore 别名原子变更与文件持久化**:
+     - 在 `tetherly-core` 的 `TrustStore` trait 及 `MemoryTrustStore` 增设 `update_alias(&mut self, id: &DeviceId, alias: &str) -> Result<bool, CoreError>`；
+     - 在 `tetherly-node::store` 的 `save_trust` 与 `load_trust` 保障原子写盘（`trusted.json`），增设单测验证别名更新落盘生命周期；
+  2. **智能对端解析系统 (`Node::resolve_peer`)**:
+     - 引入自适应三级解析流水线：
+       1. 优先尝试直接反序列化为加密 `DeviceId`（以 `tdev_` 开头且 Base32 合法）；
+       2. 尝试受信任对端 `alias` 或在线对端广播名 `name` 的全量精确匹配（大小写不敏感）；
+       3. 尝试在 `alias`、`name` 或 `device_id` 字符串中的不区分大小写包含/前缀匹配；
+     - 歧义与冲突严格防御：若未找到匹配项返回 `CoreError::PeerNotFound("no peer matching '...' found")`；若多个设备命中则返回 `CoreError::PeerNotFound("multiple peers match '...': id1, id2")`，杜绝误操作；
+  3. **轻量级回环控制面端点 (`POST /api/peers/alias`)**:
+     - 路由接入 `POST /api/peers/alias` 与 `PUT /api/peers/alias`；
+     - 别名校验安全防御：非空（1..=64 字节），严禁包含控制字符；
+     - 成功更新后自动持久化并向事件总线广播 `UiEvent::PeerAliasChanged`；
+     - 全域端点赋能：将 `node.resolve_peer()` 贯穿 `POST /api/peers/unpair`, `POST /api/peers/ping`, `POST /api/file/send`, `POST /api/notify`, `POST /api/clip/sync`, `POST /api/screen/start`, `POST /api/input/start`；
+  4. **CLI 双端全同构升级 (`tetherly` 与 `tetherly-cli`)**:
+     - 增设 `alias <peer> <alias>` 命令，支持根据设备 ID 或当前名字修改友好别名；
+     - `peers` 命令升级：在线列表智能显式呈现 `name (alias: "...")`，受信任列表呈现别名与在线状态；
+     - 所有子命令的 `--peer` 选项全面无缝支持友好别名和模糊匹配；
+  5. **Web UI 交互闭环与安全 SSE 事件流**:
+     - `ui/index.html` 在活动会话与受信任设备卡片增设「别名」按钮，点击弹出原生轻量提示框完成快速修改；
+     - 监听 SSE 事件 `peer_alias_changed`，安全红线保障：载荷仅包含 `device_id` 与合规 `alias`，严禁敏感数据泄露；
+  6. **端到端集成测试覆盖 (`tests/phase1.rs`)**:
+     - 增设 `peer_alias_governance_and_smart_resolution_via_loopback_api` 完备验证别名查询、更新、持久化、SSE 广播、智能解析跨端调用与解绑。
 
 **1.43 相对 1.42(配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构)**
 

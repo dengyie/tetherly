@@ -66,6 +66,7 @@ pub trait TrustStore: Send + Sync {
     fn put(&mut self, peer: TrustedPeer) -> Result<(), CoreError>;
     fn forget(&mut self, id: &DeviceId) -> Result<(), CoreError>;
     fn remove(&mut self, id: &DeviceId) -> Result<(), CoreError>;
+    fn update_alias(&mut self, id: &DeviceId, alias: &str) -> Result<bool, CoreError>;
 }
 
 #[derive(Debug, Default)]
@@ -107,6 +108,15 @@ impl TrustStore for MemoryTrustStore {
     fn remove(&mut self, id: &DeviceId) -> Result<(), CoreError> {
         self.peers.remove(id);
         Ok(())
+    }
+
+    fn update_alias(&mut self, id: &DeviceId, alias: &str) -> Result<bool, CoreError> {
+        if let Some(p) = self.peers.get_mut(id) {
+            p.alias = alias.to_string();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 

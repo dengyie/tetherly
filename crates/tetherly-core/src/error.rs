@@ -92,6 +92,10 @@ pub enum CoreError {
     NoConnectedPeer,
     #[error("peer ping timed out")]
     PingTimeout,
+    #[error("invalid alias: {0}")]
+    InvalidAlias(String),
+    #[error("peer not found: {0}")]
+    PeerNotFound(String),
 }
 
 impl From<serde_json::Error> for CoreError {

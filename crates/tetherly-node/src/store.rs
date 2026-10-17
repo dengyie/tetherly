@@ -208,6 +208,34 @@ mod tests {
     }
 
     #[test]
+    fn trust_update_alias_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("tetherly-tr-alias-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+        let mut store = MemoryTrustStore::default();
+        let id = tetherly_core::DeviceId::from_id_pk(&[3u8; 32]);
+        store
+            .put(TrustedPeer {
+                device_id: id.clone(),
+                id_pk: [3u8; 32],
+                n_pk: [4u8; 32],
+                alias: "initial_name".into(),
+                paired_at: 1,
+                revoked: false,
+            })
+            .unwrap();
+        save_trust(&dir, &store).unwrap();
+
+        assert!(store.update_alias(&id, "My Laptop").unwrap());
+        save_trust(&dir, &store).unwrap();
+
+        let loaded = load_trust(&dir).unwrap();
+        let peer = loaded.get(&id).expect("peer present");
+        assert_eq!(peer.alias, "My Laptop");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn route_remember_and_forget_roundtrip() {
         let dir = std::env::temp_dir().join(format!("tetherly-route-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);

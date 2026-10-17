@@ -50,6 +50,10 @@ pub enum UiEvent {
     PinStateChanged {
         active: bool,
     },
+    PeerAliasChanged {
+        device_id: String,
+        alias: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -818,6 +818,108 @@ impl Node {
         self.shared.trust.lock().expect("trust").all()
     }
 
+    /// Update the local friendly alias for a trusted peer device.
+    /// Validates length and characters, persists to trusted.json, and emits `UiEvent::PeerAliasChanged`.
+    pub fn set_peer_alias(&self, device_id: &DeviceId, alias: &str) -> Result<bool, CoreError> {
+        let trimmed = alias.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::InvalidAlias("alias cannot be empty".to_string()));
+        }
+        if trimmed.len() > 64 {
+            return Err(CoreError::InvalidAlias(
+                "alias exceeds maximum length of 64 bytes".to_string(),
+            ));
+        }
+        if trimmed.chars().any(|c| c.is_control()) {
+            return Err(CoreError::InvalidAlias(
+                "alias contains disallowed control characters".to_string(),
+            ));
+        }
+
+        let updated = {
+            let mut store = self.shared.trust.lock().expect("trust");
+            store.update_alias(device_id, trimmed)?
+        };
+
+        if updated {
+            self.persist_trust();
+            self.emit(UiEvent::PeerAliasChanged {
+                device_id: device_id.to_string(),
+                alias: trimmed.to_string(),
+            });
+        }
+
+        Ok(updated)
+    }
+
+    /// Resolve a user-supplied peer query string (device_id, alias, or peer name)
+    /// into a concrete DeviceId.
+    pub fn resolve_peer(&self, query: &str) -> Result<DeviceId, CoreError> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Err(CoreError::PeerNotFound("empty query".to_string()));
+        }
+
+        // 1. Direct exact DeviceId parse
+        if let Ok(id) = DeviceId::parse(q) {
+            return Ok(id);
+        }
+
+        let live = self.live_peers();
+        let trusted = self.trusted();
+        let q_lower = q.to_lowercase();
+        let mut matches = Vec::new();
+
+        // 2. Exact match on alias or name (case-insensitive)
+        for t in &trusted {
+            if t.alias.to_lowercase() == q_lower && !matches.contains(&t.device_id) {
+                matches.push(t.device_id.clone());
+            }
+        }
+        for l in &live {
+            if l.name.to_lowercase() == q_lower && !matches.contains(&l.device_id) {
+                matches.push(l.device_id.clone());
+            }
+        }
+
+        // 3. Substring / prefix match if no exact match
+        if matches.is_empty() {
+            for t in &trusted {
+                if (t.alias.to_lowercase().contains(&q_lower)
+                    || t.device_id.as_str().to_lowercase().contains(&q_lower))
+                    && !matches.contains(&t.device_id)
+                {
+                    matches.push(t.device_id.clone());
+                }
+            }
+            for l in &live {
+                if (l.name.to_lowercase().contains(&q_lower)
+                    || l.device_id.as_str().to_lowercase().contains(&q_lower))
+                    && !matches.contains(&l.device_id)
+                {
+                    matches.push(l.device_id.clone());
+                }
+            }
+        }
+
+        match matches.len() {
+            1 => Ok(matches.remove(0)),
+            0 => Err(CoreError::PeerNotFound(format!(
+                "no peer matching '{q}' found"
+            ))),
+            _ => {
+                let candidate_list = matches
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(CoreError::PeerNotFound(format!(
+                    "multiple peers match '{q}': {candidate_list}"
+                )))
+            }
+        }
+    }
+
     pub fn routes(&self) -> Vec<crate::store::Route> {
         crate::store::load_routes(&self.shared.cfg.data_dir).routes
     }

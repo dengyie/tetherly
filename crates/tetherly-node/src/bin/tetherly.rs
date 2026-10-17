@@ -266,6 +266,16 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Set or update the friendly alias for a trusted peer device.
+    Alias {
+        /// Target peer (device_id like tdev_... or existing name/alias).
+        peer: String,
+        /// New friendly alias to assign.
+        alias: String,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// List cached physical addressing routes.
     Routes {
         /// Output raw JSON instead of formatted text.
@@ -1492,6 +1502,13 @@ async fn main() -> Result<()> {
                     for p in arr {
                         let dev = p["device_id"].as_str().unwrap_or("-");
                         let name = p["name"].as_str().unwrap_or("-");
+                        let alias = p["alias"].as_str();
+                        let display_name = match alias {
+                            Some(a) if !a.is_empty() && a != name => {
+                                format!("{name} (alias: \"{a}\")")
+                            }
+                            _ => name.to_string(),
+                        };
                         let platform = p["platform"].as_str().unwrap_or("-");
                         let addr = p["addr"].as_str().unwrap_or("-");
                         let path = p["path"].as_str().unwrap_or("-");
@@ -1500,7 +1517,7 @@ async fn main() -> Result<()> {
                             None => "n/a".to_string(),
                         };
                         println!(
-                            "  * {name} ({platform}) · {addr} [{path}] · rtt: {rtt_str} · {dev}"
+                            "  * {display_name} ({platform}) · {addr} [{path}] · rtt: {rtt_str} · {dev}"
                         );
                     }
                 }
@@ -1523,6 +1540,36 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Cmd::Alias {
+            peer,
+            alias,
+            ui_port,
+        } => {
+            let payload = serde_json::json!({
+                "peer": peer,
+                "alias": alias,
+            });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/alias", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "failed to set peer alias (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let v: serde_json::Value = serde_json::from_slice(&resp)
+                .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+            let device_id = v.get("device_id").and_then(|s| s.as_str()).unwrap_or(&peer);
+            let new_alias = v.get("alias").and_then(|s| s.as_str()).unwrap_or(&alias);
+            println!("Updated alias for {device_id} -> \"{new_alias}\"");
         }
         Cmd::Routes { json, ui_port } => {
             let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/routes")

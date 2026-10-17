@@ -2538,6 +2538,224 @@ async fn pin_lifecycle_inspection_and_revocation_via_loopback_api() {
     node.shutdown();
 }
 
+/// ADR-037: Peer alias governance, friendly name persistence, and smart peer resolution across loopback APIs.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_alias_governance_and_smart_resolution_via_loopback_api() {
+    let (host, peer, g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Initial peers inspection: peer has initial alias (advertised name "laptop")
+    let (code_init, body_init) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .expect("initial peers query succeeds");
+    assert_eq!(code_init, 200);
+    let init_v: serde_json::Value = serde_json::from_slice(&body_init).unwrap();
+    assert_eq!(init_v["live_count"], 1);
+    assert_eq!(init_v["trusted_count"], 1);
+    let init_trusted = &init_v["trusted"][0];
+    assert_eq!(init_trusted["device_id"], peer_id.as_str());
+    assert_eq!(init_trusted["alias"], "laptop");
+
+    // 2. Connect to host loopback SSE stream to verify real-time UiEvent::PeerAliasChanged
+    let mut sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect loopback sse");
+
+    // 3. Update peer alias via POST /api/peers/alias using cryptographic device ID
+    let new_alias = "MacBook Workstation";
+    let alias_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "alias": new_alias,
+    });
+    let (code_set, body_set) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/alias",
+        &serde_json::to_vec(&alias_payload).unwrap(),
+    )
+    .await
+    .expect("set alias post succeeds");
+    assert_eq!(code_set, 200);
+    let set_v: serde_json::Value = serde_json::from_slice(&body_set).unwrap();
+    assert_eq!(set_v["ok"], true);
+    assert_eq!(set_v["device_id"], peer_id.as_str());
+    assert_eq!(set_v["alias"], new_alias);
+
+    // 4. Verify SSE stream receives UiEvent::PeerAliasChanged { device_id, alias }
+    let sse_event = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse alias event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_event {
+        tetherly_node::UiEvent::PeerAliasChanged { device_id, alias } => {
+            assert_eq!(device_id, peer_id.as_str());
+            assert_eq!(alias, new_alias);
+        }
+        other => panic!("expected PeerAliasChanged, got: {other:?}"),
+    }
+
+    // 5. Verify alias persistence in runtime memory and on disk (trusted.json)
+    let trusted_now = host.trusted();
+    assert_eq!(trusted_now.len(), 1);
+    assert_eq!(trusted_now[0].alias, new_alias);
+
+    let loaded_store = tetherly_node::store::load_trust(g1.path()).unwrap();
+    let reloaded_peer = loaded_store.get(&peer_id).expect("peer present on disk");
+    assert_eq!(reloaded_peer.alias, new_alias);
+
+    // 6. Verify GET /api/peers exposes updated alias in both live and trusted views
+    let (code_p, body_p) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .unwrap();
+    assert_eq!(code_p, 200);
+    let pv: serde_json::Value = serde_json::from_slice(&body_p).unwrap();
+    assert_eq!(pv["live"][0]["alias"], new_alias);
+    assert_eq!(pv["trusted"][0]["alias"], new_alias);
+
+    // 7. Smart Peer Resolution: ping using exact friendly alias
+    let ping_alias_payload = serde_json::json!({
+        "peer": "MacBook Workstation",
+    });
+    let (code_ping, body_ping) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/ping",
+        &serde_json::to_vec(&ping_alias_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_ping, 200);
+    let ping_rep: tetherly_node::PeerPingReport = serde_json::from_slice(&body_ping).unwrap();
+    assert_eq!(ping_rep.device_id, peer_id.as_str());
+
+    // 8. Smart Peer Resolution: ping using substring / case-insensitive match
+    let ping_sub_payload = serde_json::json!({
+        "peer": "workstation",
+    });
+    let (code_sub, body_sub) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/ping",
+        &serde_json::to_vec(&ping_sub_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_sub, 200);
+    let sub_rep: tetherly_node::PeerPingReport = serde_json::from_slice(&body_sub).unwrap();
+    assert_eq!(sub_rep.device_id, peer_id.as_str());
+
+    // 9. Smart Peer Resolution: targeted clipboard sync by alias
+    let clip_payload = serde_json::json!({
+        "text": "sync to workstation alias",
+        "peer": "MacBook Workstation",
+    });
+    let (code_clip, body_clip) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/clip/sync",
+        &serde_json::to_vec(&clip_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_clip, 200);
+    let clip_v: serde_json::Value = serde_json::from_slice(&body_clip).unwrap();
+    assert_eq!(clip_v["ok"], true);
+    assert_eq!(clip_v["sent_peers"], 1);
+
+    // 10. Smart Peer Resolution: update alias by referring to existing alias
+    let alias2_payload = serde_json::json!({
+        "peer": "workstation",
+        "alias": "Studio Desktop",
+    });
+    let (code_set2, body_set2) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/alias",
+        &serde_json::to_vec(&alias2_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_set2, 200);
+    let set2_v: serde_json::Value = serde_json::from_slice(&body_set2).unwrap();
+    assert_eq!(set2_v["alias"], "Studio Desktop");
+    assert_eq!(host.trusted()[0].alias, "Studio Desktop");
+
+    // 11. Validation and negative error paths
+    // a. Empty alias returns 400
+    let empty_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "alias": "   ",
+    });
+    let (code_empty, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/alias",
+        &serde_json::to_vec(&empty_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_empty, 400);
+
+    // b. Oversized alias (>64 bytes) returns 400
+    let oversized_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "alias": "x".repeat(65),
+    });
+    let (code_over, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/alias",
+        &serde_json::to_vec(&oversized_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_over, 400);
+
+    // c. Control characters in alias return 400
+    let ctrl_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "alias": "bad\nalias",
+    });
+    let (code_ctrl, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/alias",
+        &serde_json::to_vec(&ctrl_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_ctrl, 400);
+
+    // d. Non-existent peer query returns 404
+    let ghost_payload = serde_json::json!({
+        "peer": "non_existent_peer_device",
+        "alias": "Ghost Alias",
+    });
+    let (code_ghost, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/alias",
+        &serde_json::to_vec(&ghost_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_ghost, 404);
+
+    // 12. Unpair using alias via smart peer resolution
+    let unpair_payload = serde_json::json!({
+        "device_id": "Studio Desktop",
+    });
+    let (code_unpair, body_unpair) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/unpair",
+        &serde_json::to_vec(&unpair_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_unpair, 200);
+    let unpair_v: serde_json::Value = serde_json::from_slice(&body_unpair).unwrap();
+    assert_eq!(unpair_v["ok"], true);
+    assert_eq!(unpair_v["device_id"], peer_id.as_str());
+    assert_eq!(unpair_v["unpaired"], true);
+    assert!(host.trusted().is_empty());
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

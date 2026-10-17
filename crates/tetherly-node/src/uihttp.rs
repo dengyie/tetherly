@@ -387,6 +387,8 @@ struct ScreenSnap {
 struct PeerView {
     device_id: String,
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alias: Option<String>,
     platform: String,
     path: String,
     rtt_ms: Option<u64>,
@@ -499,6 +501,16 @@ struct TransfersQueryBody {
     direction: Option<String>,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct PeerAliasBody {
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    peer: Option<String>,
+    #[serde(default)]
+    alias: String,
+}
+
 fn parse_query_map(q: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for pair in q.split('&') {
@@ -558,7 +570,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             Err(_) => err(400, "bad json"),
         },
         ("POST", "/api/peers/unpair") => match serde_json::from_slice::<UnpairBody>(body) {
-            Ok(d) => match tetherly_core::DeviceId::parse(&d.device_id) {
+            Ok(d) => match node.resolve_peer(&d.device_id) {
                 Ok(id) => {
                     let removed = node.unpair(&id).await;
                     json_ok(&serde_json::json!({
@@ -567,10 +579,34 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                         "unpaired": removed
                     }))
                 }
-                Err(_) => err(400, "invalid device_id"),
+                Err(e) => err(400, &e.to_string()),
             },
             Err(_) => err(400, "bad json"),
         },
+        ("POST", "/api/peers/alias") | ("PUT", "/api/peers/alias") => {
+            match serde_json::from_slice::<PeerAliasBody>(body) {
+                Ok(d) => {
+                    let target_query = d.device_id.or(d.peer).unwrap_or_default();
+                    if target_query.trim().is_empty() {
+                        return err(400, "missing device_id or peer query");
+                    }
+                    let id = match node.resolve_peer(&target_query) {
+                        Ok(id) => id,
+                        Err(e) => return err(400, &e.to_string()),
+                    };
+                    match node.set_peer_alias(&id, &d.alias) {
+                        Ok(true) => json_ok(&serde_json::json!({
+                            "ok": true,
+                            "device_id": id.as_str(),
+                            "alias": d.alias.trim()
+                        })),
+                        Ok(false) => err(404, "peer not found in trust store"),
+                        Err(e) => err(400, &e.to_string()),
+                    }
+                }
+                Err(_) => err(400, "bad json"),
+            }
+        }
         ("POST", "/api/peers/ping") => {
             let d: PeerTargetBody = if body.is_empty() {
                 PeerTargetBody::default()
@@ -583,7 +619,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             let mut peers = node.live_peers();
             peers.sort_by_key(|p| p.device_id.to_string());
             let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
-                Some(raw) => match tetherly_core::DeviceId::parse(raw) {
+                Some(raw) => match node.resolve_peer(raw) {
                     Ok(id) => {
                         if peers.iter().any(|p| p.device_id == id) {
                             id
@@ -591,7 +627,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                             return err(400, "peer is not connected");
                         }
                     }
-                    Err(_) => return err(400, "bad peer id"),
+                    Err(e) => return err(400, &e.to_string()),
                 },
                 None => match peers.len() {
                     0 => return err(400, "no connected peer"),
@@ -609,6 +645,10 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             let trusted = node.trusted();
             let live_ids: std::collections::HashSet<tetherly_core::DeviceId> =
                 live.iter().map(|p| p.device_id.clone()).collect();
+            let trusted_map: std::collections::HashMap<tetherly_core::DeviceId, String> = trusted
+                .iter()
+                .map(|tp| (tp.device_id.clone(), tp.alias.clone()))
+                .collect();
 
             let live_dtos: Vec<serde_json::Value> = live
                 .into_iter()
@@ -617,9 +657,11 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                         tetherly_core::PathKind::Lan => "lan",
                         tetherly_core::PathKind::Overlay => "overlay",
                     };
+                    let alias_opt = trusted_map.get(&p.device_id).cloned();
                     serde_json::json!({
                         "device_id": p.device_id.to_string(),
                         "name": p.name,
+                        "alias": alias_opt,
                         "platform": p.platform,
                         "addr": p.addr.to_string(),
                         "path": path_str,
@@ -722,7 +764,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             let mut peers = node.live_peers();
             peers.sort_by_key(|p| p.device_id.to_string());
             let target_peer = match d.peer.as_deref().filter(|s| !s.is_empty()) {
-                Some(raw) => match tetherly_core::DeviceId::parse(raw) {
+                Some(raw) => match node.resolve_peer(raw) {
                     Ok(id) => {
                         if peers.iter().any(|p| p.device_id == id) {
                             Some(id)
@@ -730,7 +772,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                             return err(400, "peer is not connected");
                         }
                     }
-                    Err(_) => return err(400, "bad peer id"),
+                    Err(e) => return err(400, &e.to_string()),
                 },
                 None => None,
             };
@@ -781,7 +823,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 let mut peers = node.live_peers();
                 peers.sort_by_key(|p| p.device_id.to_string());
                 let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
-                    Some(raw) => match tetherly_core::DeviceId::parse(raw) {
+                    Some(raw) => match node.resolve_peer(raw) {
                         Ok(id) => {
                             if peers.iter().any(|p| p.device_id == id) {
                                 id
@@ -789,7 +831,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                                 return err(400, "peer is not connected");
                             }
                         }
-                        Err(_) => return err(400, "bad peer id"),
+                        Err(e) => return err(400, &e.to_string()),
                     },
                     None => match peers.len() {
                         0 => return err(400, "no connected peer"),
@@ -1011,7 +1053,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 let mut peers = node.live_peers();
                 peers.sort_by_key(|p| p.device_id.to_string());
                 let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
-                    Some(raw) => match tetherly_core::DeviceId::parse(raw) {
+                    Some(raw) => match node.resolve_peer(raw) {
                         Ok(id) => {
                             if peers.iter().any(|p| p.device_id == id) {
                                 id
@@ -1019,7 +1061,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                                 return err(400, "peer is not connected");
                             }
                         }
-                        Err(_) => return err(400, "bad peer id"),
+                        Err(e) => return err(400, &e.to_string()),
                     },
                     None => match peers.len() {
                         0 => return err(400, "no connected peer"),
@@ -1201,7 +1243,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 None
             };
             let open = match target_opt.as_deref().filter(|s| !s.is_empty()) {
-                Some(raw) => match tetherly_core::DeviceId::parse(raw) {
+                Some(raw) => match node.resolve_peer(raw) {
                     Ok(id) => {
                         let peers = node.live_peers();
                         if peers.iter().any(|p| p.device_id == id) {
@@ -1214,7 +1256,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                             Err("peer is not connected".to_string())
                         }
                     }
-                    Err(_) => Err("bad peer id".to_string()),
+                    Err(e) => Err(e.to_string()),
                 },
                 None => {
                     if node.screen_channel_open().await {
@@ -1266,7 +1308,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 None
             };
             let open = match target_opt.as_deref().filter(|s| !s.is_empty()) {
-                Some(raw) => match tetherly_core::DeviceId::parse(raw) {
+                Some(raw) => match node.resolve_peer(raw) {
                     Ok(id) => {
                         let peers = node.live_peers();
                         if peers.iter().any(|p| p.device_id == id) {
@@ -1279,7 +1321,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                             Err("peer is not connected".to_string())
                         }
                     }
-                    Err(_) => Err("bad peer id".to_string()),
+                    Err(e) => Err(e.to_string()),
                 },
                 None => {
                     if node.input_channel_open().await {
@@ -1327,8 +1369,12 @@ async fn snapshot(node: &Node) -> Snapshot {
     let live = node.live_peers();
     let live_ids: std::collections::HashSet<tetherly_core::DeviceId> =
         live.iter().map(|p| p.device_id.clone()).collect();
-    let trusted: Vec<TrustedPeerView> = node
-        .trusted()
+    let trusted_raw = node.trusted();
+    let trusted_map: std::collections::HashMap<tetherly_core::DeviceId, String> = trusted_raw
+        .iter()
+        .map(|tp| (tp.device_id.clone(), tp.alias.clone()))
+        .collect();
+    let trusted: Vec<TrustedPeerView> = trusted_raw
         .into_iter()
         .map(|tp| {
             let online = live_ids.contains(&tp.device_id);
@@ -1365,16 +1411,20 @@ async fn snapshot(node: &Node) -> Snapshot {
             .collect(),
         peers: live
             .into_iter()
-            .map(|p| PeerView {
-                device_id: p.device_id.to_string(),
-                name: p.name,
-                platform: p.platform,
-                path: match p.path {
-                    tetherly_core::PathKind::Lan => "lan".into(),
-                    tetherly_core::PathKind::Overlay => "overlay".into(),
-                },
-                rtt_ms: p.rtt_ms,
-                last_seen_ms: p.last_seen_ms,
+            .map(|p| {
+                let alias = trusted_map.get(&p.device_id).cloned();
+                PeerView {
+                    device_id: p.device_id.to_string(),
+                    name: p.name,
+                    alias,
+                    platform: p.platform,
+                    path: match p.path {
+                        tetherly_core::PathKind::Lan => "lan".into(),
+                        tetherly_core::PathKind::Overlay => "overlay".into(),
+                    },
+                    rtt_ms: p.rtt_ms,
+                    last_seen_ms: p.last_seen_ms,
+                }
             })
             .collect(),
         trusted,
