@@ -29,8 +29,21 @@ struct Cli {
 enum Cmd {
     /// Print a new identity device_id (ephemeral; not persisted in Phase 0 CLI).
     Identity,
-    /// Display an 8-digit PIN grouped as `2517 0394`.
-    Pin,
+    /// Show, inspect or clear the 8-digit pairing PIN on the *running* node.
+    Pin {
+        /// Query the current PIN status and remaining TTL without generating a new one
+        #[arg(long)]
+        status: bool,
+        /// Revoke and clear any currently armed PIN
+        #[arg(long)]
+        clear: bool,
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Listen on 127.0.0.1:port, pair with the given PIN, then answer one ping.
     Listen {
         #[arg(long, default_value_t = CONTROL_PORT)]
@@ -40,16 +53,15 @@ enum Cmd {
         #[arg(long, default_value = "host")]
         name: String,
     },
-    /// Dial 127.0.0.1:port, pair, ping, print pong timestamp.
+    /// Ask the *running* node to dial a peer and pair or resume.
     Dial {
         #[arg(long)]
-        port: u16,
+        addr: SocketAddr,
         #[arg(long)]
-        pin: String,
-        #[arg(long, default_value = "peer")]
-        name: String,
-        #[arg(long, default_value_t = 1)]
-        reconnect: u32,
+        pin: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
     },
     /// Send a user-facing notification to a live peer.
     Notify {
@@ -659,9 +671,104 @@ async fn main() -> Result<()> {
             let id = Identity::generate().context("identity")?;
             println!("{}", id.device_id());
         }
-        Cmd::Pin => {
-            let pin = generate_pin(&OsRng)?;
-            println!("{}", format_pin(&pin));
+        Cmd::Pin {
+            status,
+            clear,
+            json,
+            ui_port,
+        } => {
+            if clear {
+                let (code, resp) = loopback_post(ui_port, "/api/pin/clear", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "node refused PIN clear request (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    let cleared = v.get("cleared").and_then(|c| c.as_bool()).unwrap_or(false);
+                    if cleared {
+                        println!("armed PIN successfully revoked and cleared.");
+                    } else {
+                        println!("no active PIN was armed.");
+                    }
+                }
+            } else if status {
+                let (code, resp) = loopback_get(ui_port, "/api/pin")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "node refused PIN status request (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    let active = v.get("active").and_then(|a| a.as_bool()).unwrap_or(false);
+                    if active {
+                        let pin = v.get("pin").and_then(|p| p.as_str()).unwrap_or("???? ????");
+                        let expires = v
+                            .get("expires_in_secs")
+                            .and_then(|e| e.as_u64())
+                            .unwrap_or(0);
+                        let ttl = v.get("ttl_secs").and_then(|t| t.as_u64()).unwrap_or(180);
+                        println!("Active PIN: {pin} (valid for {expires}s / {ttl}s TTL)");
+                    } else {
+                        println!("No active PIN armed.");
+                    }
+                }
+            } else {
+                let (code, resp) = loopback_post(ui_port, "/api/pin", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "node refused PIN request (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    let pin = v
+                        .get("pin")
+                        .and_then(|p| p.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("node returned no pin"))?;
+                    let expires = v
+                        .get("expires_in_secs")
+                        .and_then(|e| e.as_u64())
+                        .unwrap_or(180);
+                    println!("{pin}");
+                    println!("不要把数字发给任何人,只在你自己的另一台设备上输入。(有效时间: {expires} 秒)");
+                }
+            }
         }
         Cmd::Listen { port, pin, name } => {
             let pin = parse_pin(&pin)?;
@@ -674,37 +781,24 @@ async fn main() -> Result<()> {
             info!(peer = %sess.peer_id, "paired; waiting for ping");
             serve_pong_once(&mut sess).await?;
         }
-        Cmd::Dial {
-            port,
-            pin,
-            name,
-            reconnect,
-        } => {
-            let pin = parse_pin(&pin)?;
-            let identity = Identity::generate()?;
-            let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
-            let mut attempt = 0u32;
-            loop {
-                match TcpStream::connect(addr).await {
-                    Ok(stream) => {
-                        let cfg = cfg(identity, &name, pin);
-                        let mut sess = dial_session(stream, addr, &cfg).await?;
-                        let ts = now_ms();
-                        let echoed = sess.ping_pong(ts).await?;
-                        println!("pong {echoed}");
-                        break;
-                    }
-                    Err(e) => {
-                        attempt += 1;
-                        if attempt > reconnect {
-                            bail!("dial failed: {e}");
-                        }
-                        let delay = backoff_delay(attempt - 1);
-                        error!(%e, attempt, "connect failed; backoff");
-                        tokio::time::sleep(delay.min(Duration::from_secs(5))).await;
-                    }
-                }
+        Cmd::Dial { addr, pin, ui_port } => {
+            let payload = serde_json::json!({ "addr": addr.to_string(), "pin": pin });
+            let body = serde_json::to_vec(&payload)?;
+            let (code, resp) = loopback_post(ui_port, "/api/dial", &body)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "node refused dial request (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
             }
+            println!("dial dispatched to {addr}");
         }
         Cmd::Notify {
             title,

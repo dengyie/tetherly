@@ -47,6 +47,9 @@ pub enum UiEvent {
         device_id: String,
         rtt_ms: u64,
     },
+    PinStateChanged {
+        active: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -63,6 +63,15 @@ enum Cmd {
     /// already-running node (its loopback UI API) to arm one. Starting a second
     /// node here would print a code no listener could ever accept.
     Pin {
+        /// Query the current PIN status and remaining TTL without generating a new one
+        #[arg(long)]
+        status: bool,
+        /// Revoke and clear any currently armed PIN
+        #[arg(long)]
+        clear: bool,
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -526,31 +535,104 @@ async fn main() -> Result<()> {
             let node = Node::start(cfg)?;
             println!("{}", node.identity().device_id());
         }
-        Cmd::Pin { ui_port } => {
-            // Arm the PIN in the live node via its loopback API: the code is
-            // only usable by the process that generated it.
-            let (code, body) = tetherly_node::loopback_post(ui_port, "/api/pin", b"{}")
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                         start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
-            if code != 200 {
-                anyhow::bail!(
-                    "node refused PIN request (HTTP {code}): {}",
-                    String::from_utf8_lossy(&body)
-                );
+        Cmd::Pin {
+            status,
+            clear,
+            json,
+            ui_port,
+        } => {
+            if clear {
+                let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/pin/clear", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "node refused PIN clear request (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    let cleared = v.get("cleared").and_then(|c| c.as_bool()).unwrap_or(false);
+                    if cleared {
+                        println!("armed PIN successfully revoked and cleared.");
+                    } else {
+                        println!("no active PIN was armed.");
+                    }
+                }
+            } else if status {
+                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/pin")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "node refused PIN status request (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    let active = v.get("active").and_then(|a| a.as_bool()).unwrap_or(false);
+                    if active {
+                        let pin = v.get("pin").and_then(|p| p.as_str()).unwrap_or("???? ????");
+                        let expires = v
+                            .get("expires_in_secs")
+                            .and_then(|e| e.as_u64())
+                            .unwrap_or(0);
+                        let ttl = v.get("ttl_secs").and_then(|t| t.as_u64()).unwrap_or(180);
+                        println!("Active PIN: {pin} (valid for {expires}s / {ttl}s TTL)");
+                    } else {
+                        println!("No active PIN armed.");
+                    }
+                }
+            } else {
+                let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/pin", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "node refused PIN request (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    let pin = v
+                        .get("pin")
+                        .and_then(|p| p.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("node returned no pin"))?;
+                    let expires = v
+                        .get("expires_in_secs")
+                        .and_then(|e| e.as_u64())
+                        .unwrap_or(180);
+                    println!("{pin}");
+                    println!("不要把数字发给任何人,只在你自己的另一台设备上输入。(有效时间: {expires} 秒)");
+                }
             }
-            let v: serde_json::Value =
-                serde_json::from_slice(&body).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
-            let pin = v
-                .get("pin")
-                .and_then(|p| p.as_str())
-                .ok_or_else(|| anyhow::anyhow!("node returned no pin"))?;
-            println!("{pin}");
-            println!("不要把数字发给任何人,只在你自己的另一台设备上输入。");
         }
         Cmd::Run {
             port,

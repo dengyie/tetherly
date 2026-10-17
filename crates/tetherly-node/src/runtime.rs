@@ -207,6 +207,17 @@ pub struct PeerPingReport {
     pub addr: String,
 }
 
+/// Status report for the node's currently armed pairing PIN and its lifecycle.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PinReport {
+    pub ok: bool,
+    pub active: bool,
+    pub pin: Option<String>,
+    pub expires_in_secs: u64,
+    pub ttl_secs: u64,
+    pub created_at_ms: u64,
+}
+
 struct Hubs {
     notify: NotifyHub,
     clip: ClipHub,
@@ -683,11 +694,19 @@ impl Node {
         let pin = generate_pin(&OsRng)?;
         let now = self.shared.clock.unix_ms();
         *self.shared.pin.lock().expect("pin") = Some((pin, now));
+        let _ = self
+            .shared
+            .events
+            .send(UiEvent::PinStateChanged { active: true });
         Ok(format_pin(&pin))
     }
 
     pub fn set_pin(&self, digits: [u8; 8]) {
         *self.shared.pin.lock().expect("pin") = Some((digits, self.shared.clock.unix_ms()));
+        let _ = self
+            .shared
+            .events
+            .send(UiEvent::PinStateChanged { active: true });
     }
 
     pub fn pin_if_fresh(&self) -> Option<String> {
@@ -698,6 +717,65 @@ impl Node {
             return None;
         }
         Some(format_pin(pin))
+    }
+
+    pub fn pin_report(&self) -> PinReport {
+        let ttl_secs = PIN_TTL.as_secs();
+        let ttl_ms = PIN_TTL.as_millis() as u64;
+        let guard = self.shared.pin.lock().expect("pin");
+        match guard.as_ref() {
+            Some((digits, created)) => {
+                let age = self.shared.clock.unix_ms().saturating_sub(*created);
+                if age <= ttl_ms {
+                    let rem_ms = ttl_ms.saturating_sub(age);
+                    let rem_secs = rem_ms / 1000;
+                    PinReport {
+                        ok: true,
+                        active: true,
+                        pin: Some(format_pin(digits)),
+                        expires_in_secs: rem_secs,
+                        ttl_secs,
+                        created_at_ms: *created,
+                    }
+                } else {
+                    PinReport {
+                        ok: true,
+                        active: false,
+                        pin: None,
+                        expires_in_secs: 0,
+                        ttl_secs,
+                        created_at_ms: *created,
+                    }
+                }
+            }
+            None => PinReport {
+                ok: true,
+                active: false,
+                pin: None,
+                expires_in_secs: 0,
+                ttl_secs,
+                created_at_ms: 0,
+            },
+        }
+    }
+
+    pub fn clear_pin(&self) -> bool {
+        let mut guard = self.shared.pin.lock().expect("pin");
+        let was_active = if let Some((_, created)) = guard.as_ref() {
+            let age = self.shared.clock.unix_ms().saturating_sub(*created);
+            age <= PIN_TTL.as_millis() as u64
+        } else {
+            false
+        };
+        *guard = None;
+        drop(guard);
+        if was_active {
+            let _ = self
+                .shared
+                .events
+                .send(UiEvent::PinStateChanged { active: false });
+        }
+        was_active
     }
 
     pub fn name(&self) -> &str {

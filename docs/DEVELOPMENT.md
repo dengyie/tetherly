@@ -3,12 +3,42 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.42** |
+| 文档版本 | **1.43** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）**——(1) **传输可观测性盲区消除与轻量级回环查询端点 (`GET /api/file/transfers` & `GET /api/transfers`)**：彻底解耦大文件传输过程中的全量状态快照依赖，提供高频、轻量级传输检索能力，支持通过 `?id=tfl_...` 进行单任务 $O(1)$ 精准查询（不存在时规范返回 HTTP 404），并支持 `?active=true`、`?terminal=true` 与 `?direction=inbound|outbound` 多维度参数化过滤；(2) **全景传输汇总画像与会话级度量模型 (`TransfersReport`)**：聚合 `active_count`、`terminal_count`、`total_count`、分片任务列表与会话级累计指标 (`TransferStats`：总发送/接收字节数、完成/失败笔数），在历史记录清除后仍完整保留累计吞吐量；(3) **双端全量同构 CLI 传输管理命令 (`tetherly` 与 `tetherly-cli`)**：增设 `transfers [--id <id>] [--active] [--terminal] [--direction <in|out>] [--json] [--ui-port <port>]`，格式化呈现各传输任务进度条、自适应传输速率 (`format_speed`) 与会话吞吐；(4) **Web UI 实时传输面板交互与统计增强**：在 `ui/index.html` 传输卡片增设独立「刷新传输」按键，强化会话累计统计展示，清除历史后自动局部刷新；(5) **端到端集成测试全覆盖**：在 `tests/phase1.rs` 增设 `file_transfers_inspection_and_query_via_loopback_api`，全链路覆盖初始状态、404 未找到、单任务 ID 检索、active/terminal 过滤、direction 过滤、流式传输完成后的累计度量与清理闭环。+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）**——(1) **PIN 码安全生命周期控制与轻量级回环查询端点 (`GET /api/pin` & `POST /api/pin/clear`)**：消灭 PIN 码状态黑盒，暴露当前是否存在武装中 PIN、格式化数字、剩余倒计时（`expires_in_secs`）与 TTL 配置；支持通过 `POST /api/pin/clear`（及 `DELETE /api/pin`）在 180 秒超时前主动撤销作废 PIN，实现安全状态即时废黜与幂等返回；(2) **全景 PIN 报告模型 (`PinReport`) 与安全事件流**：引入结构化 DTO，并在 `UiEvent` 增设 `PinStateChanged { active: bool }`，严格遵循安全红线铁律（事件载荷绝对禁止泄露任何 PIN 纯文本明文字符）；(3) **双端 CLI 同构升级 (`tetherly` 与 `tetherly-cli`)**：全面统一 `pin`（`--status`, `--clear`, `--json`, `--ui-port`）与 `dial`（`--addr`, `--pin`, `--ui-port`）命令，废黜 `tetherly-cli` 遗留的 Phase 0 临时进程与单端拨号，实现双二进制全同构回环通信；(4) **Web UI 实时交互与状态还原 (`ui/index.html`)**：配对卡片增设「撤销 PIN」按钮、实时有效倒计时徽标，页面刷新时自动调用 `/api/pin` 还原武装状态，并联动 SSE `pin_state_changed` 事件实现无感响应；(5) **端到端集成测试全覆盖**：在 `tests/phase1.rs` 增设 `pin_lifecycle_inspection_and_revocation_via_loopback_api`，全流程覆盖初始未武装状态、POST 生成与 SSE 广播、GET 实时查询与倒计时校验、POST 清除与 SSE 广播、清除后非活跃确认与幂等二次清除。+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.43 相对 1.42(配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构)**
+
+- **动机(PIN 码生命周期黑盒、无法主动撤销、CLI 双端异构与 Web 状态断层)**:
+  在 v1.18 至 v1.42 的演进中，Tetherly 建立了基于 SPAKE2 与 8 位数字 PIN 的安全初次配对流程，并在 `tetherly` 二进制中提供了向正在运行的守护进程请求生成 PIN 的功能。然而在实际使用与多端同构治理中，暴露出以下缺陷：
+  1. **PIN 码状态单向黑盒**：此前只有 `POST /api/pin` 单向生成或通过 `POST /api/dial` 注入 PIN，缺乏 `GET /api/pin` 查询端点。调用方与 Web UI 无法获取当前是否存在活跃 PIN 以及剩余有效期倒计时；
+  2. **缺少主动撤销机制**：PIN 具有 180 秒（`PIN_TTL`）超时机制。若用户误触生成 PIN 或中途取消配对，此前无法通过任何 API 主动撤销武装状态，必须被动等待超时，存在安全暴露时间窗口；
+  3. **独立 CLI (`tetherly-cli`) 拨号配对异构与失效**：`bins/tetherly-cli` 中的 `Cmd::Pin` 仅在本地生成 throwaway 随机数，从未通知守护进程；其 `Cmd::Dial` 则直接启动 Phase 0 临时进程直连，与正在运行的守护进程完全脱节；
+  4. **Web UI 状态恢复缺失**：网页刷新后 PIN 显示框立即重置为 `•••• ••••`，用户无法查验刚生成的 PIN 是否依然处于有效期内。
+
+- **架构与协议设计(ADR-036 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构)**:
+  1. **PIN 报告模型 (`PinReport`)**:
+     - 在 `runtime.rs` 与 `lib.rs` 引入 `PinReport` DTO：包含 `ok: bool`, `active: bool`, `pin: Option<String>`, `expires_in_secs: u64`, `ttl_secs: u64`, `created_at_ms: u64`；
+     - `Node::pin_report(&self) -> PinReport`：检查 `self.shared.pin`，计算当前与生成时刻的时间差 `age`，在 `PIN_TTL` 内返回格式化数字与剩余秒数，超时或无 PIN 返回 `active: false`；
+     - `Node::clear_pin(&self) -> bool`：原子清除 `Shared.pin`，若此前处于活跃状态则广播 `UiEvent::PinStateChanged { active: false }` 并返回 `true`；
+     - `Node::generate_pin(&self)`：生成后广播 `UiEvent::PinStateChanged { active: true }`；
+  2. **轻量级回环控制端点 (`GET /api/pin` 与 `POST /api/pin/clear`)**:
+     - `GET /api/pin`：无快照序列化开销，直接返回 `PinReport`；
+     - `POST /api/pin/clear` 与 `DELETE /api/pin`：主动撤销并清除武装 PIN，返回 `{"ok": true, "cleared": bool}`；
+     - `POST /api/pin`：增强返回体，包含 `expires_in_secs` 与 `ttl_secs`；
+  3. **双端 CLI 全量同构 (`tetherly` 与 `tetherly-cli`)**:
+     - `pin` 子命令扩充 `--status`（查询当前 PIN 状态与剩余时间）、`--clear`（主动撤销 armed PIN）、`--json`（机器可读输出）与 `--ui-port`；
+     - `dial` 子命令统一改造为回环客户端，将目标地址与可选对端 PIN 统一递送至运行中的主守护进程；
+  4. **Web UI 体验升级 (`ui/index.html`)**:
+     - 增设「撤销 PIN」按钮与动态有效倒计时展示；
+     - 页面载入和定时轮询时通过 `GET /api/pin` 自动恢复当前有效 PIN；
+     - 接入 SSE `pin_state_changed` 事件，感知 PIN 武装与撤销状态；
+  5. **安全红线铁律（Verbatim Security Red Line）**:
+     - `UiEvent` 与对外日志绝对禁止包含任何明文 PIN 数字或敏感认证信息（`PinStateChanged` 仅携带 `active: bool`）；
+     - 回环 API 严格绑定 `127.0.0.1` 并强校验 `Host: 127.0.0.1|localhost`（不匹配返回 403）。
 
 **1.42 相对 1.41(文件传输通道全景可观测性、轻量级传输查询与命令行同构治理)**
 
@@ -2261,6 +2291,50 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - 清除历史完成后自动触发轻量刷新；
    - **端到端集成测试全覆盖 (`tests/phase1.rs`)**：
      - `file_transfers_inspection_and_query_via_loopback_api`：验证初始状态、404 未找到、单任务 ID 检索、active/terminal 过滤、direction 过滤、传输完成后的度量累计与清理闭环。
+
+## 42. 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构 (v1.43 / ADR-036)
+
+1. **动机与设计准则（ADR-036）**：
+   - **PIN 码生命周期盲区消除**：自 v1.18 起 Tetherly 引入基于 SPAKE2 的 8 位数字 PIN 配对机制，但此前仅提供单向生成端点 `POST /api/pin`，缺乏轻量级查询端点 `GET /api/pin`。客户端与 Web UI 无法探知当前是否存在活跃 PIN、已武装 PIN 的格式化数字与剩余倒计时秒数（TTL 倒计时）；
+   - **主动安全撤销机制**：PIN 具有 180 秒（`PIN_TTL`）超时窗口。在此前架构中，一旦武装 PIN 无法中途撤销，若发生误触或对端取消配对，节点将在此时间窗内持续暴露潜在的配对接收状态。v1.43 引入 `Node::clear_pin()` 与 `POST /api/pin/clear`（及 `DELETE /api/pin`）端点，支持在超时前即时作废 PIN，实现安全状态的主动废黜与幂等返回；
+   - **双端 CLI 同构治理**：消除独立二进制 `bins/tetherly-cli` 与守护进程 `crates/tetherly-node` 二进制 `tetherly` 之间的异构缺陷。废黜 `tetherly-cli` 遗留的 Phase 0 临时进程随机数生成与临时 TCP 拨号，将其全面升级为与主守护进程通信的回环客户端；
+   - **Web UI 状态恢复与实时感知**：页面刷新时自动调用 `GET /api/pin` 还原武装状态与倒计时，增设一键「撤销 PIN」交互，并接入 SSE `pin_state_changed` 事件实现无感响应；
+   - **安全红线铁律（Verbatim Security Red Line）**：
+     - 「公开 issue / 日志禁止贴短信正文、一次性码、配对码、剪贴板」；
+     - 「信任库只在 Noise transport 成功后写」；
+     - 「Loopback UI 45716 仅绑定 127.0.0.1，校验 Host: 127.0.0.1|localhost (403 on mismatch); 严禁绑定 0.0.0.0 / ::」；
+     - **`UiEvent` 严禁携带短信正文、一次性码、配对码、剪贴板纯文本**，因此 `UiEvent::PinStateChanged` 仅携带 `active: bool`，绝对禁止在事件总线与广播载荷中出现 PIN 数字。
+
+2. **核心机制与实现**：
+   - **PIN 状态报告模型 (`PinReport`)**：
+     - 在 `runtime.rs` 与 `lib.rs` 引入 `PinReport` DTO：
+       ```rust
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+       pub struct PinReport {
+           pub ok: bool,
+           pub active: bool,
+           pub pin: Option<String>,
+           pub expires_in_secs: u64,
+           pub ttl_secs: u64,
+           pub created_at_ms: u64,
+       }
+       ```
+     - 扩展 `Node::pin_report(&self) -> PinReport` 与 `Node::clear_pin(&self) -> bool`；
+     - 在生成与设置 PIN 时广播 `UiEvent::PinStateChanged { active: true }`，在清除 PIN 时广播 `UiEvent::PinStateChanged { active: false }`；
+   - **回环 HTTP 控制面端点**：
+     - `GET /api/pin`：直接返回当前 PIN 的 `PinReport`；
+     - `POST /api/pin/clear` 与 `DELETE /api/pin`：原子清除武装状态，返回 `{"ok": true, "cleared": bool}`；
+     - `POST /api/pin`：生成并返回新 PIN 的同时，携带 `expires_in_secs` 与 `ttl_secs`；
+   - **双端同构命令行**：
+     - `pin [--status] [--clear] [--json] [--ui-port <port>]`：支持查询当前 PIN 状态、主动撤销武装 PIN、结构化 JSON 输出与向后兼容生成；
+     - `dial --addr <ip:port> [--pin <pin>] [--ui-port <port>]`：统一向本地运行的守护进程递送配对拨号请求；
+   - **Web UI 配对面板增强 (`ui/index.html`)**：
+     - 新增 `#clrpin` 按键与 `#pin-ttl` 倒计时徽标；
+     - 页面加载自动调用 `refreshPin()` 还原状态；
+     - SSE 监听 `pin_state_changed` 自动同步最新 PIN 状态；
+   - **端到端集成测试全覆盖 (`tests/phase1.rs`)**：
+     - `pin_lifecycle_inspection_and_revocation_via_loopback_api`：验证初始非活跃状态、POST 生成与 SSE 广播、GET 查询与 TTL 校验、POST 清除与 SSE 广播、清除后非活跃确认以及幂等二次清除。
+
 
 
 

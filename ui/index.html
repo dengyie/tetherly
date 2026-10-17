@@ -210,9 +210,13 @@
       <div class="hint">② 与其他设备配对：先在本机显示 PIN，再到对端输入。</div>
       <div class="row">
         <button id="mkpin" type="button">显示 8 位 PIN</button>
+        <button id="clrpin" class="ghost bad" type="button" style="display:none">撤销 PIN</button>
       </div>
-      <div class="pin" id="pin">•••• ••••</div>
-      <div class="hint">不要把数字发给任何人，只在你自己的另一台设备上输入。3 分钟有效。</div>
+      <div style="display:flex;align-items:baseline;gap:10px">
+        <div class="pin" id="pin">•••• ••••</div>
+        <span id="pin-ttl" class="hint" style="color:var(--ok)"></span>
+      </div>
+      <div class="hint">不要把数字发给任何人，只在你自己的另一台设备上输入。3 分钟（180 秒）有效。</div>
       <div class="row" style="margin-top:12px">
         <input id="addr" placeholder="127.0.0.1:45717"/>
       </div>
@@ -586,9 +590,35 @@ function render(s) {
       + " · 光标:" + (s.input_seat === "remote" ? "对端" : "本机");
   }
 }
+async function refreshPin() {
+  try {
+    const r = await fetch("/api/pin").then(res => res.json());
+    if (r && r.active && r.pin) {
+      $("pin").textContent = r.pin;
+      $("clrpin").style.display = "inline-block";
+      $("pin-ttl").textContent = "（有效剩余 " + r.expires_in_secs + " 秒）";
+    } else {
+      $("pin").textContent = "•••• ••••";
+      $("clrpin").style.display = "none";
+      $("pin-ttl").textContent = "";
+    }
+  } catch (e) {}
+}
 $("mkpin").onclick = async () => {
   const r = await api("/api/pin", {});
-  if (r.pin) $("pin").textContent = r.pin;
+  if (r && r.pin) {
+    $("pin").textContent = r.pin;
+    $("clrpin").style.display = "inline-block";
+    if (r.expires_in_secs) {
+      $("pin-ttl").textContent = "（有效剩余 " + r.expires_in_secs + " 秒）";
+    }
+  }
+};
+$("clrpin").onclick = async () => {
+  await api("/api/pin/clear", {});
+  $("pin").textContent = "•••• ••••";
+  $("clrpin").style.display = "none";
+  $("pin-ttl").textContent = "";
 };
 $("dial").onclick = () => api("/api/dial", { addr: $("addr").value, pin: $("peerpin").value || null });
 $("ancsgo").onclick = async () => {
@@ -776,6 +806,7 @@ if (shutdownBtn) {
 }
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
+  refreshPin();
 }
 let eventSource = null;
 let sseReconnectTimer = null;
@@ -802,6 +833,7 @@ function setupEventSource() {
           else if (ev.kind === "file_done") desc = "文件完成: " + ev.transfer_id;
           else if (ev.kind === "pairing_needed") desc = "待配对: " + ev.device_id;
           else if (ev.kind === "peer_latency") desc = "时延度量: " + ev.device_id + " (" + ev.rtt_ms + "ms)";
+          else if (ev.kind === "pin_state_changed") desc = "PIN 状态: " + (ev.active ? "已武装" : "已撤销/过期");
           $("ev-last").textContent = "[" + t + "] " + desc;
         }
       } catch (err) {

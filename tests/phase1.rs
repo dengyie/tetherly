@@ -2432,6 +2432,112 @@ async fn file_transfers_inspection_and_query_via_loopback_api() {
     peer.shutdown();
 }
 
+/// ADR-036: Pairing control plane, PIN security lifecycle, query inspection, and explicit revocation.
+#[tokio::test(flavor = "multi_thread")]
+async fn pin_lifecycle_inspection_and_revocation_via_loopback_api() {
+    let (data_dir, _guard) = temp_dir("pin-lifecycle-test");
+    let node = Node::start(cfg(data_dir, "pin-node", "macos")).unwrap();
+    let ui_port = node.spawn_ui().await.expect("spawn UI succeeds");
+
+    // 1. Initial PIN inspection: inactive, no digits, 0 remaining seconds
+    let (code_init, body_init) = tetherly_node::loopback_get(ui_port, "/api/pin")
+        .await
+        .expect("initial pin query succeeds");
+    assert_eq!(code_init, 200);
+    let init_rep: tetherly_node::PinReport = serde_json::from_slice(&body_init).unwrap();
+    assert!(init_rep.ok);
+    assert!(!init_rep.active);
+    assert!(init_rep.pin.is_none());
+    assert_eq!(init_rep.expires_in_secs, 0);
+    assert_eq!(init_rep.ttl_secs, 180);
+
+    // 2. Connect to loopback SSE event stream
+    let mut sse = tetherly_node::loopback_events_connect(ui_port)
+        .await
+        .expect("connect loopback sse");
+
+    // 3. Arm a new PIN via POST /api/pin
+    let (gen_code, gen_body) = tetherly_node::loopback_post(ui_port, "/api/pin", b"{}")
+        .await
+        .expect("generate pin succeeds");
+    assert_eq!(gen_code, 200);
+    let gen_val: serde_json::Value = serde_json::from_slice(&gen_body).unwrap();
+    assert_eq!(gen_val["ok"], true);
+    let pin_str = gen_val["pin"].as_str().expect("pin string");
+    assert_eq!(pin_str.len(), 9); // e.g. "2517 0394"
+    assert!(gen_val["expires_in_secs"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(gen_val["ttl_secs"].as_u64().unwrap_or(0), 180);
+
+    // 4. Verify SSE stream receives UiEvent::PinStateChanged { active: true }
+    let sse_event1 = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse pin armed event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_event1 {
+        tetherly_node::UiEvent::PinStateChanged { active } => {
+            assert!(active);
+        }
+        other => panic!("expected PinStateChanged active=true, got: {other:?}"),
+    }
+
+    // 5. Query /api/pin after generation: active, matching pin, valid TTL
+    let (code_act, body_act) = tetherly_node::loopback_get(ui_port, "/api/pin")
+        .await
+        .expect("active pin query succeeds");
+    assert_eq!(code_act, 200);
+    let act_rep: tetherly_node::PinReport = serde_json::from_slice(&body_act).unwrap();
+    assert!(act_rep.ok);
+    assert!(act_rep.active);
+    assert_eq!(act_rep.pin.as_deref(), Some(pin_str));
+    assert!(act_rep.expires_in_secs > 0);
+    assert_eq!(act_rep.ttl_secs, 180);
+
+    // 6. Explicitly revoke and clear PIN via POST /api/pin/clear
+    let (clear_code, clear_body) = tetherly_node::loopback_post(ui_port, "/api/pin/clear", b"{}")
+        .await
+        .expect("clear pin succeeds");
+    assert_eq!(clear_code, 200);
+    let clear_val: serde_json::Value = serde_json::from_slice(&clear_body).unwrap();
+    assert_eq!(clear_val["ok"], true);
+    assert_eq!(clear_val["cleared"], true);
+
+    // 7. Verify SSE stream receives UiEvent::PinStateChanged { active: false }
+    let sse_event2 = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse pin cleared event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_event2 {
+        tetherly_node::UiEvent::PinStateChanged { active } => {
+            assert!(!active);
+        }
+        other => panic!("expected PinStateChanged active=false, got: {other:?}"),
+    }
+
+    // 8. Query /api/pin after revocation: inactive, no digits, 0 remaining seconds
+    let (code_cleared, body_cleared) = tetherly_node::loopback_get(ui_port, "/api/pin")
+        .await
+        .expect("cleared pin query succeeds");
+    assert_eq!(code_cleared, 200);
+    let cleared_rep: tetherly_node::PinReport = serde_json::from_slice(&body_cleared).unwrap();
+    assert!(cleared_rep.ok);
+    assert!(!cleared_rep.active);
+    assert!(cleared_rep.pin.is_none());
+    assert_eq!(cleared_rep.expires_in_secs, 0);
+
+    // 9. Idempotent clear: calling clear again returns cleared: false
+    let (c2_code, c2_body) = tetherly_node::loopback_post(ui_port, "/api/pin/clear", b"{}")
+        .await
+        .expect("second clear succeeds");
+    assert_eq!(c2_code, 200);
+    let c2_val: serde_json::Value = serde_json::from_slice(&c2_body).unwrap();
+    assert_eq!(c2_val["ok"], true);
+    assert_eq!(c2_val["cleared"], false);
+
+    node.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

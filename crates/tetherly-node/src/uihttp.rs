@@ -516,9 +516,22 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
     match (method, path_only) {
         ("GET", "/") | ("GET", "/index.html") => (200, "text/html", INDEX.as_bytes().to_vec()),
         ("GET", "/api/state") => json_ok(&snapshot(node).await),
+        ("GET", "/api/pin") => json_ok(&node.pin_report()),
         ("POST", "/api/pin") => match node.generate_pin() {
-            Ok(pin) => json_ok(&serde_json::json!({ "pin": pin })),
+            Ok(pin) => {
+                let rep = node.pin_report();
+                json_ok(&serde_json::json!({
+                    "ok": true,
+                    "pin": pin,
+                    "expires_in_secs": rep.expires_in_secs,
+                    "ttl_secs": rep.ttl_secs
+                }))
+            }
             Err(e) => err(400, &e.to_string()),
+        },
+        ("POST", "/api/pin/clear") | ("DELETE", "/api/pin") => {
+            let cleared = node.clear_pin();
+            json_ok(&serde_json::json!({ "ok": true, "cleared": cleared }))
         },
         ("POST", "/api/dial") => match serde_json::from_slice::<DialBody>(body) {
             Ok(d) => {
