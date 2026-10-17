@@ -3,12 +3,61 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.35** |
+| 文档版本 | **1.36** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.35 对端拓扑全景可观测性、物理路由缓存透视、轻量级对端与网络检索及命令行同构（ADR-028）**——(1) **轻量级对端与路由回环 API (`GET /api/peers`、`GET /api/routes`)**：增设无全量快照序列化开销的高性能轻量查询接口，不仅返回当前活跃的 TCP 会话对端 (`live`)，更全景透视持久化受信任设备库 (`trusted`，包含离线对端设备 ID、别名、配对时间戳与在线状态)，以及底层物理寻址路由缓存 (`routes`)；(2) **全景受信任资产与在线/离线态可视化**：彻底消除离线受信任设备“隐形”黑盒，支持在 Web UI 与命令行中直观审视全量信任资产并一键离线解绑；(3) **CLI 双端命令全量同构**：`tetherly` 与 `tetherly-cli` 增设 `peers [--json] [--trusted]` 与 `routes [--json]` 子命令群，提供表格化美化输出与结构化 JSON 管道输出；(4) **Web UI 补全**：在 `ui/index.html` 增设「受信任设备（全景）」分组，配备在线/离线状态指示徽标；(5) **端到端集成测试全覆盖**（`tests/phase1.rs` 增设 `peers_and_routes_inspection_via_loopback_api` 完整覆盖在线对端检索、受信任全景穿透、路由缓存映射与离线/解绑联动闭环）。+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）**——(1) **轻量级网络与侧车回环 API (`GET /api/net`)**：提供无全量快照序列化负担的高性能接口，透视本机全部物理网卡/虚拟接口分类（`IfaceReport`，明示监听状态与跳过原因）及 EasyTier 侧车深层拓扑（`present`、`source`、`local_ips`、`peers` 虚拟 IP 清单）；(2) **CLI 诊断命令全量同构**：`tetherly` 与 `tetherly-cli` 增设 `net [--interfaces] [--json]` 子命令群，表格化展现网卡判定（监听 vs 跳过理由）与 EasyTier 侧车状态；(3) **Web UI 补全**：在网络区域集成网卡分类诊断表格与 EasyTier 拓扑展开视图；(4) **端到端集成测试全覆盖**（`tests/phase2.rs` 增设 `network_interface_classification_and_sidecar_inspection_via_loopback_api`）。+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.36 相对 1.35(网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环)**
+
+- **动机(网络分类黑盒、EasyTier 侧车穿透诊断缺失与轻量级网络 API 空白)**:
+  在 v1.0 至 v1.35 架构中，系统通过 `tetherly_core::bind::classify`（ADR-024/ADR-018）对本机网络接口进行严格物理分类并给出跳过判定（如 LoopbackAlias、LinkLocal、CGNAT Overlay 等），并通过 `sidecar.rs` 探测外部自建的 EasyTier 虚拟组网。但在现场诊断与无头运维中存在明显痛点：
+  1. **缺少轻量级网络诊断接口**：此前仅能通过 `GET /api/state` 的全量快照拉取 `lan: Vec<IfaceReport>`，伴随大量无关字段（候选通知、屏幕统计、活跃传输等），外部诊断探针与监控无法以毫秒级进行轻量网卡轮询；
+  2. **EasyTier 侧车虚拟 IP 拓扑黑盒**：此前 `Snapshot` 仅粗略包含 `overlay_present`、`overlay_source` 与 `overlay_peers`（数量），而 EasyTier 本机虚拟 IP（`local_ips`）与已探测到的虚拟对端（`peers`）被隐藏在内存中，运维人员无法得知当前分配到的虚拟 IP 是什么，也无法定位虚拟直连目标；
+  3. **CLI 缺乏网络与接口诊断工具**：`tetherly` 与 `tetherly-cli` 均无网络诊断子命令，在纯终端环境下无法直接列出物理网卡监听与跳过原因，亦无法确认 EasyTier 侧车连通性；
+  4. **Web UI 网卡跳过原因不可见**：此前 UI 仅展示一行“仅局域网”或“探测 EasyTier 侧车…”，用户无法在界面上直观查看哪些网卡被识别并监听、哪些因何种原因（如 `127.0.0.53` 属于系统别名，`100.64.0.0/10` 属于 CGNAT）被安全跳过。
+
+- **架构与协议设计(ADR-029 网卡物理分类透视与侧车穿透诊断)**:
+  1. **回环 HTTP API 扩充 (`GET /api/net`)**:
+     - 严格遵循 127.0.0.1 绑核与 Host 头校验；
+     - 返回结构：
+       ```json
+       {
+         "ok": true,
+         "interfaces": [
+           {
+             "iface": "en0",
+             "ip": "192.168.1.100",
+             "listen": true,
+             "reason": null
+           },
+           {
+             "iface": "lo0",
+             "ip": "127.0.0.1",
+             "listen": true,
+             "reason": null
+           }
+         ],
+         "overlay": {
+           "enabled": true,
+           "present": false,
+           "source": "Absent",
+           "local_ips": [],
+           "peer_count": 0,
+           "peers": []
+         }
+       }
+       ```
+  2. **节点运行时状态暴露 (`Node::network_report`)**:
+     - 返回 `(Vec<IfaceReport>, OverlayStatus)`，由 `lan::interface_report()` 与 `sidecar::discover()` 聚合产生；
+  3. **CLI 命令行全量同构 (`tetherly` 与 `tetherly-cli`)**:
+     - `net [--interfaces] [--json] [--ui-port <port>]`：默认打印 EasyTier 侧车状态概览与监听中的局域网地址；指定 `--interfaces` 时完整打印包含跳过网卡及其理由的格式化诊断表格；支持 `--json` 输出结构化数据；
+  4. **Web UI 补全 (`ui/index.html`)**:
+     - 在网络配置卡片增加网卡分类诊断详情表格与 EasyTier 拓扑展开视图；
+  5. **端到端集成测试全覆盖**:
+     - 在 `tests/phase2.rs` 增设 `network_interface_classification_and_sidecar_inspection_via_loopback_api`。
 
 **1.35 相对 1.34(对端拓扑全景可观测性、物理路由缓存透视、轻量级对端与网络检索及命令行同构)**
 
@@ -1717,3 +1766,35 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - 验证配对后 `GET /api/routes` 包含该设备的物理路由条目；
      - 验证对端节点下线后，受信任对端状态准确跃迁为 `online: false`；
      - 验证执行 `POST /api/peers/unpair` 后，`trusted` 与 `routes` 同步抹除。
+
+## 35. 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环 (v1.36 / ADR-029)
+
+1. **动机与设计准则（ADR-029）**：
+   - 彻底打破网络接口物理分类与 EasyTier 侧车深层拓扑的黑盒；
+   - 摆脱必须请求全量快照 `GET /api/state` 才能知晓网卡状态的高开销弊端，提供轻量级专用回环接口 `GET /api/net`；
+   - 将 EasyTier 侧车发现的虚拟 IP (`local_ips`) 与对端 (`peers`) 完整透视给运维与用户；
+   - 提供全平台对齐的 CLI 诊断工具 `tetherly net` 与 `tetherly-cli net`，支持 `--interfaces` 详细跳过原因展现与 `--json` 格式化管道输出；
+   - 严格维护 ADR-006（EasyTier 仅为外部侧车，严禁链接进 `Cargo.toml`）与 ADR-010/ADR-013（回环 127.0.0.1 绑核、Host 头校验与命令行轻量客户端模式）。
+
+2. **核心机制与实现**：
+   - **轻量级网络与侧车透视回环 API (`GET /api/net`)**：
+     - 返回当前全部物理与虚拟网卡的分类报告列表 (`interfaces: Vec<IfaceReport>`)，包含接口名、IP、是否监听及跳过判定理由（`None` 表示监听，否则给出诸如 `LoopbackAlias`、`LinkLocal`、`Tailscale / NetBird CGNAT overlay` 等分类理由）；
+     - 返回 EasyTier 侧车的深度拓扑模型 (`overlay`)：包含是否启用 (`enabled`)、是否就绪 (`present`)、来源 (`source`：`Absent`、`Ifaces`、`Rpc`、`Cli`、`Manual`)、本机虚拟 IP 清单 (`local_ips`) 及对端虚拟 IP 清单 (`peers`)；
+   - **节点运行时扩展 (`Node::network_report`)**：
+     - 提供 `network_report(&self) -> (Vec<IfaceReport>, OverlayStatus)` 方法，聚合 `lan::interface_report()` 与当前节点的 `overlay_status()`；
+   - **CLI 终端诊断命令群（`tetherly` 与 `tetherly-cli` 全量同构）**：
+     - `net [--interfaces] [--json] [--ui-port <port>]`：
+       - 默认模式：打印 EasyTier 侧车状态概览（就绪态、来源、本机虚拟 IP、对端虚拟 IP 统计）及当前活跃监听的局域网 IP 清单；
+       - `--interfaces` 模式：进一步展开格式化网卡分类判定表格，明确打印所有网络接口的监听 (`[LISTEN]`) 或跳过 (`[SKIP]`) 状态及其理由；
+       - `--json` 模式：以纯 JSON 形式输出底层透视数据，方便外部监控集成；
+   - **Web UI 补全 (`ui/index.html`)**：
+     - 在 `#net` 区块中渲染 EasyTier 侧车深度拓扑与接口分类诊断表格，提供直观的色彩徽章指示（绿色 `[监听]` / 灰色 `[跳过]`）。
+
+3. **测试覆盖与 GitHub CI 验证**：
+   - 在 `tests/phase2.rs` 增设 `network_interface_classification_and_sidecar_inspection_via_loopback_api`：
+     - 验证 `GET /api/net` 成功返回 200 OK 且响应字段合法；
+     - 验证本地回环 `127.0.0.1` 恒定被纳入并处于 `listen: true` 状态且 `reason: null`；
+     - 验证包含各网络接口的判定逻辑；
+     - 验证在默认局域网模式下 `overlay.present` 正确反映侧车就绪态；
+     - 验证注入附加虚拟对端 (`extra_peers`) 后 `overlay.present` 与来源准确转换为 `Manual` 且对端 IP 准确体现在响应清单中。
+

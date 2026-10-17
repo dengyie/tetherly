@@ -639,6 +639,14 @@ impl Node {
         crate::store::load_routes(&self.shared.cfg.data_dir).routes
     }
 
+    pub fn network_report(&self) -> (Vec<crate::lan::IfaceReport>, crate::sidecar::OverlayStatus) {
+        (crate::lan::interface_report(), self.overlay_status())
+    }
+
+    pub fn overlay_enabled(&self) -> bool {
+        self.shared.cfg.overlay.enabled
+    }
+
     pub fn emit(&self, ev: UiEvent) {
         let _ = self.shared.events.send(ev);
     }

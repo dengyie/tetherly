@@ -141,6 +141,14 @@ pub async fn discover(cfg: &OverlayConfig) -> OverlayStatus {
     if present && source == OverlaySource::Absent && !cfg.extra_peers.is_empty() {
         source = OverlaySource::Manual;
     }
+    for ep in &cfg.extra_peers {
+        if let SocketAddr::V4(v4) = ep {
+            let ip = *v4.ip();
+            if !local_ips.contains(&ip) {
+                peers.insert(ip);
+            }
+        }
+    }
     OverlayStatus {
         present,
         local_ips,

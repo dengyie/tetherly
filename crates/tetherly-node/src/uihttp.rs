@@ -437,6 +437,22 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 "routes": dtos,
             }))
         }
+        ("GET", "/api/net") => {
+            let (ifaces, ov) = node.network_report();
+            let overlay_dto = serde_json::json!({
+                "enabled": node.overlay_enabled(),
+                "present": ov.present,
+                "source": format!("{:?}", ov.source),
+                "local_ips": ov.local_ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>(),
+                "peer_count": ov.peers.len(),
+                "peers": ov.peers.iter().map(|ip| ip.to_string()).collect::<Vec<_>>(),
+            });
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "interfaces": ifaces,
+                "overlay": overlay_dto,
+            }))
+        }
         ("GET", "/api/clip") => match node.get_clipboard_text() {
             Ok(Some(text)) => {
                 let hash = tetherly_core::hex_sha256(text.as_bytes());

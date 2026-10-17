@@ -236,6 +236,18 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Diagnose network interfaces and EasyTier overlay sidecar.
+    Net {
+        /// Show full interface classification details (including skipped interfaces and reasons).
+        #[arg(long, short)]
+        interfaces: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -1305,7 +1317,114 @@ async fn main() -> Result<()> {
                 }
                 _ => println!("  (no cached routes)"),
             }
-        }
+        },
+        Cmd::Net {
+            interfaces,
+            json,
+            ui_port,
+        } => {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/net")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "node returned HTTP {code}: {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+                return Ok(());
+            }
+            let v: serde_json::Value =
+                serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+
+            let ov = &v["overlay"];
+            let ov_enabled = ov["enabled"].as_bool().unwrap_or(false);
+            let ov_present = ov["present"].as_bool().unwrap_or(false);
+            let ov_source = ov["source"].as_str().unwrap_or("Absent");
+            let local_ips = ov["local_ips"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let peer_count = ov["peer_count"].as_u64().unwrap_or(0);
+            let peers = ov["peers"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+
+            println!("EasyTier Overlay Sidecar:");
+            println!("  Enabled:    {ov_enabled}");
+            println!("  Present:    {ov_present} ({ov_source})");
+            println!(
+                "  Local IPs:  {}",
+                if local_ips.is_empty() {
+                    "(none)"
+                } else {
+                    &local_ips
+                }
+            );
+            if peer_count == 0 {
+                println!("  Mesh Peers: 0");
+            } else {
+                println!("  Mesh Peers: {peer_count} ({peers})");
+            }
+
+            let ifaces_arr = v["interfaces"].as_array();
+            if interfaces {
+                println!("\nInterface Classification Details:");
+                match ifaces_arr {
+                    Some(arr) if !arr.is_empty() => {
+                        for iface in arr {
+                            let name = iface["iface"].as_str().unwrap_or("-");
+                            let ip = iface["ip"].as_str().unwrap_or("-");
+                            let listen = iface["listen"].as_bool().unwrap_or(false);
+                            let reason = iface["reason"].as_str();
+                            if listen {
+                                println!("  * [LISTEN] {name}: {ip}");
+                            } else {
+                                let r_str = reason.map(|r| format!(" ({r})")).unwrap_or_default();
+                                println!("  * [SKIP]   {name}: {ip}{r_str}");
+                            }
+                        }
+                    }
+                    _ => println!("  (no interfaces reported)"),
+                }
+            } else {
+                println!("\nActive Listening Interfaces:");
+                let mut listen_count = 0;
+                if let Some(arr) = ifaces_arr {
+                    for iface in arr {
+                        let listen = iface["listen"].as_bool().unwrap_or(false);
+                        if listen {
+                            let name = iface["iface"].as_str().unwrap_or("-");
+                            let ip = iface["ip"].as_str().unwrap_or("-");
+                            println!("  * {name}: {ip}");
+                            listen_count += 1;
+                        }
+                    }
+                }
+                if listen_count == 0 {
+                    println!("  (no listening interfaces)");
+                }
+                println!("\n(Use --interfaces or -i to inspect all skipped interfaces and classification reasons)");
+            }
+        },
         Cmd::Status {
             watch,
             interval,

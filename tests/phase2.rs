@@ -268,3 +268,78 @@ async fn m2_2_keep_lan_when_overlay_scan_repeats() {
     b.shutdown();
     drop((ga, gb));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn network_interface_classification_and_sidecar_inspection_via_loopback_api() {
+    // 1. Inspect default node with overlay disabled
+    let (d1, g1) = temp_dir("net1");
+    let n1 = Node::start(cfg(d1, "desk-net", overlay_off())).expect("start node 1");
+    let ui1 = n1.spawn_ui().await.expect("spawn ui 1");
+
+    let (code1, resp1) = tetherly_node::loopback_get(ui1, "/api/net")
+        .await
+        .expect("get /api/net on node 1");
+    assert_eq!(code1, 200);
+    let v1: serde_json::Value = serde_json::from_slice(&resp1).expect("valid json 1");
+    assert_eq!(v1["ok"], true);
+
+    let ifaces = v1["interfaces"].as_array().expect("interfaces array");
+    assert!(!ifaces.is_empty());
+    let lo = ifaces
+        .iter()
+        .find(|i| i["ip"] == "127.0.0.1")
+        .expect("127.0.0.1 interface present");
+    assert_eq!(lo["listen"], true);
+    assert!(lo["reason"].is_null());
+
+    for iface in ifaces {
+        assert!(iface["iface"].is_string());
+        assert!(iface["ip"].is_string());
+        let listen = iface["listen"].as_bool().expect("listen bool");
+        if !listen {
+            assert!(
+                iface["reason"].is_string(),
+                "skipped interface must provide classification reason"
+            );
+        }
+    }
+
+    assert_eq!(v1["overlay"]["enabled"], false);
+    assert_eq!(v1["overlay"]["present"], false);
+    assert_eq!(v1["overlay"]["source"], "Absent");
+    assert_eq!(v1["overlay"]["peer_count"], 0);
+    assert!(v1["overlay"]["local_ips"].as_array().unwrap().is_empty());
+    assert!(v1["overlay"]["peers"].as_array().unwrap().is_empty());
+
+    n1.shutdown();
+    drop(g1);
+
+    // 2. Inspect node with enabled overlay and manual extra peers
+    let (d2, g2) = temp_dir("net2");
+    let mut ov_cfg = overlay_absent();
+    ov_cfg.extra_peers = vec![
+        "10.144.144.88:45717".parse().unwrap(),
+        "10.144.144.99:45717".parse().unwrap(),
+    ];
+    let n2 = Node::start(cfg(d2, "desk-ov", ov_cfg)).expect("start node 2");
+    let ui2 = n2.spawn_ui().await.expect("spawn ui 2");
+
+    let (code2, resp2) = tetherly_node::loopback_get(ui2, "/api/net")
+        .await
+        .expect("get /api/net on node 2");
+    assert_eq!(code2, 200);
+    let v2: serde_json::Value = serde_json::from_slice(&resp2).expect("valid json 2");
+    assert_eq!(v2["ok"], true);
+    assert_eq!(v2["overlay"]["enabled"], true);
+    assert_eq!(v2["overlay"]["present"], true);
+    assert_eq!(v2["overlay"]["source"], "Manual");
+    assert_eq!(v2["overlay"]["peer_count"], 2);
+
+    let peers = v2["overlay"]["peers"].as_array().expect("peers array");
+    assert_eq!(peers.len(), 2);
+    assert!(peers.iter().any(|p| p == "10.144.144.88"));
+    assert!(peers.iter().any(|p| p == "10.144.144.99"));
+
+    n2.shutdown();
+    drop(g2);
+}

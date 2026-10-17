@@ -185,8 +185,9 @@
       <div class="hint">连接后把本机鼠标移到屏幕右缘即可控制对端;断开或对端离线时键盘鼠标立即回到本机。仅 Windows 真机注入可用。</div>
     </section>
     <section style="margin-top:16px">
-      <h2>网络</h2>
+      <h2>网络与接口诊断</h2>
       <div id="net" class="hint">探测 EasyTier 侧车…</div>
+      <div id="ifaces" style="margin-top:8px"></div>
     </section>
     <section style="margin-top:16px">
       <h2>对端与受信任设备</h2>
@@ -234,6 +235,23 @@ function render(s) {
     net.textContent = s.lan_only
       ? "仅局域网（未检测到 EasyTier 侧车，不影响 LAN）"
       : ("虚网在线 · " + (s.overlay_source || "") + " · peers " + (s.overlay_peers || 0));
+  }
+  const ifacesEl = $("ifaces");
+  if (ifacesEl && s.lan) {
+    ifacesEl.innerHTML = "";
+    const list = s.lan || [];
+    if (list.length) {
+      const container = el('<div style="font-size:12px;display:flex;flex-direction:column;gap:4px"></div>');
+      for (const row of list) {
+        const badge = row.listen
+          ? '<span class="badge completed" style="margin-right:6px">监听</span>'
+          : '<span class="badge offline" style="margin-right:6px">跳过</span>';
+        const reason = row.reason ? (' <span style="color:var(--text-dim)">(' + row.reason + ')</span>') : '';
+        const item = el('<div style="display:flex;align-items:center;background:rgba(255,255,255,0.02);padding:4px 8px;border-radius:4px"><div>' + badge + '<code style="font-size:12px">' + row.ip + '</code>' + reason + '</div><div style="margin-left:auto;color:var(--text-dim)">' + row.iface + '</div></div>');
+        container.appendChild(item);
+      }
+      ifacesEl.appendChild(container);
+    }
   }
   const c = $("cands");
   c.innerHTML = "";
