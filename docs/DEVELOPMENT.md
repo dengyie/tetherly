@@ -3,12 +3,47 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.39** |
+| 文档版本 | **1.40** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）**——(1) **极低开销健康探针回环端点 (`GET /api/health`)**：彻底解耦高频监控与全量 `GET /api/state` 快照，纳秒级返回节点健康状态、版本、设备 ID、节点名称、操作系统平台、进程 PID、运行时长（`uptime_secs`）、五维服务端口绑定（`control`, `file`, `input`, `screen`, `ui`）以及活跃/信任对端数量；(2) **守护进程优雅停止控制面 (`POST /api/daemon/shutdown` / `POST /api/daemon/stop`)**：重构 `Node::run(&self)` 与各服务接收监听循环（`node_accept_loop`、`accept_loop`），在异步返回 HTTP 200 确认后优雅触发 `Node::shutdown()`，所有网络与 UI 监听循环安全终止并使 `run()` 干净返回 `Ok(())`；(3) **CLI 全量同构命令群 (`tetherly health|ping|stop` 与 `tetherly-cli health|ping|stop`)**：增设 `health [--json]`、`ping [--count <n>] [--timeout-ms <ms>]`（客户端精确测量往返 RTT 时延）与 `stop`（优雅停止守护进程）；(4) **Web UI 补全**：在 `ui/index.html` 增设「守护进程与系统健康」面板，展示存活性、PID、格式化运行时长、往返延迟测速器与优雅停止确认交互；(5) **端到端集成测试全覆盖**（`tests/phase1.rs` 增设 `node_health_probe_ping_and_graceful_shutdown_via_loopback_api`）。+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）**——(1) **W3C 标准 Server-Sent Events 流式推送端点 (`GET /api/events` 与 `GET /api/events/stream`)**：彻底替代高频定时轮询 `/api/state`（由 700ms 降至 2000ms+），将内部 `UiEvent` 广播总线通过 HTTP 流式长连接实时推送至客户端，内置 15s 心跳保活与受控平滑断连机制；(2) **CLI 全量同构事件监听命令群 (`tetherly events` 与 `tetherly-cli events`)**：增设 `events [--count <n>] [--timeout-secs <s>] [--json]` 命令，支持实时终端高亮显示与 JSON 管道流处理；(3) **Web UI 实时响应化**：在 `ui/index.html` 接入 `EventSource`，实现节点事件实时驱动页面刷新，增设实时事件流指示器与最近事件跑马灯；(4) **严格遵守安全红线**：`UiEvent` 始终严禁携带短信正文、OTP 验证码、配对码与剪贴板纯文本；(5) **端到端集成测试全覆盖**（`tests/phase1.rs` 增设 `node_events_stream_sse_via_loopback_api`）。+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.40 相对 1.39(节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环)**
+
+- **动机(高频轮询开销治理、微秒级事件响应性与无头事件流水线需求)**:
+  在 v1.0 至 v1.39 的演进中，节点各核心子系统（对端上线/离线、文件传输到达与完成、通知候选与回复、配对请求与网络状态）均会在节点内部事件总线派发 `UiEvent`。然而由于此前回环接口仅提供请求-响应模型，客户端只能通过高频（700ms 间隔）轮询 `GET /api/state` 获取状态变化。这导致：
+  1. **高频轮询的资源浪费与延迟瓶颈**：全量快照包含对端拓扑、路由、剪贴板、多通道传输与状态，即使无事件发生也反复序列化与解析；且最多存在 700ms 的感知延迟；
+  2. **无头自动化流水线无法高效等待特定事件**：外部脚本或 CI 测试需要一种类似于 `tail -f` 的命令行工具来实时捕获节点事件；
+  3. **标准 SSE 协议缺失**：浏览器原生具备极度高效的 `EventSource`，基于 HTTP/1.1 纯文本流，相比复杂的 WebSocket 更加轻量，与现有轻量 HTTP 回环架构天然契合。
+
+- **架构与协议设计(ADR-033 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环)**:
+  1. **标准 Server-Sent Events 端点 (`GET /api/events` 与 `GET /api/events/stream`)**:
+     - 严格遵循 127.0.0.1 绑核与 Host 头校验；
+     - 响应头：
+       ```http
+       HTTP/1.1 200 OK\r\n
+       Content-Type: text/event-stream; charset=utf-8\r\n
+       Cache-Control: no-cache, no-transform\r\n
+       Connection: keep-alive\r\n
+       Access-Control-Allow-Origin: *\r\n\r\n
+       ```
+     - 初始连接握手发送 `: connected\n\n`；
+     - 每 15s 发送一次 `: ping\n\n` 保持连接活性；
+     - 每次事件推送：`data: <UiEvent JSON>\n\n`；
+     - 节点停止时：收到 `node.shutdown_signal()` 信号平滑跳出并关闭 TCP 连接。
+  2. **双端 CLI 同构事件流监听命令 (`tetherly events` 与 `tetherly-cli events`)**:
+     - `events [--count <n>] [--timeout-secs <s>] [--json] [--ui-port <port>]`；
+     - 支持最大接收事件数截断退出与总超时退出；
+     - 支持标准格式化终端高亮打印与 raw JSON 管道流输出。
+  3. **Web UI 事件响应化改造 (`ui/index.html`)**:
+     - 创建 `EventSource("/api/events")`，自动重连；
+     - 事件到达时即时触发 `tick()` 刷新界面，背景兜底轮询由 700ms 降至 2000ms+；
+     - 增设 SSE 状态徽标与最近事件跑马灯。
+  4. **严格数据脱敏安全红线**:
+     - `UiEvent` 严格禁止携带短信正文、OTP 验证码、配对码与剪贴板文本；
+     - 仅包含状态变化、传输 ID、设备 ID、对端名称等系统级元数据。
 
 **1.39 相对 1.38(节点健康检查探针、轻量级守护进程可观测性与优雅停止机制)**
 
@@ -2043,6 +2078,47 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - 验证向 `POST /api/daemon/shutdown` 发送停机请求收到 HTTP 200 `shutting_down` 应答；
      - 验证 `node.run()` 顺畅解挂并在 3 秒内干净返回 `Ok(())`；
      - 验证 UI 端口 listener 已彻底退出，后续连接被拒绝。
+
+## 39. 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环 (v1.40 / ADR-033)
+
+1. **动机与设计准则（ADR-033）**：
+   - **高频轮询开销治理**：淘汰原先依靠每 700ms 轮询全量快照 `GET /api/state` 带来的 CPU、网络与内存开销；
+   - **微秒级事件响应性**：将内部 `broadcast::Sender<UiEvent>` 事件总线通过 W3C 标准 Server-Sent Events (SSE) 直推到客户端；
+   - **双端 CLI 同构支持**：`tetherly events` 与 `tetherly-cli events` 提供类似 `tail -f` 的命令行事件实时监听器；
+   - **安全红线铁律（Verbatim Security Red Line）**：`UiEvent` 严格禁止携带短信正文、OTP 验证码、配对码与剪贴板纯文本；所有回环长连接严格限制 `127.0.0.1` 绑核与 `Host` 头校验。
+
+2. **核心机制与实现**：
+   - **标准 Server-Sent Events 端点 (`GET /api/events` 与 `GET /api/events/stream`)**：
+     - 在 `uihttp.rs` 请求解析管线中对 `GET /api/events` / `GET /api/events/stream` 进行流式分发；
+     - 响应标准 HTTP 200 text/event-stream 响应头并立即 flush；
+     - 发送初始握手注释行 `: connected\n\n`；
+     - 在 `tokio::select!` 中并发监听：
+       - `events.recv()`：序列化 `UiEvent` 为 JSON，以 `data: <json>\n\n` 格式推送；
+       - `node.shutdown_signal()`：节点触发关闭信号时安全跳出循环，干净终止长连接；
+       - `ping_interval`（15 秒）：推送 `: ping\n\n` 注释帧，防止中间防火墙或系统超时断流；
+     - 其他非 GET 请求调用该端点严格返回 405 Method Not Allowed。
+   - **客户端辅助结构与轻量回环连接器**：
+     - 在 `tetherly-node` 中提供 `SseStream` 结构体，封装 `Lines<BufReader<TcpStream>>`，自动过滤注释与空行，提供 `next_event()`（原始字符串）与 `next_ui_event()`（类型化 `UiEvent`）；
+     - 提供 `loopback_events_connect(port)` 异步连接助手；
+     - 在解耦的 `tetherly-cli` 中内建完全自包含的 `loopback_events_connect` 与 `SseStream`，无需链入 `tetherly-node`。
+   - **双端 CLI 同构事件流命令 (`tetherly events` 与 `tetherly-cli events`)**：
+     - 支持 `--count <n>`：收集满 N 个事件后自动退出；
+     - 支持 `--timeout-secs <s>`：指定秒数未收到后续事件或总时长达到后优雅退出；
+     - 支持 `--json`：逐行输出原始 JSON，便于 jq 过滤或自动化管道处理；
+     - 默认模式：终端结构化美化打印，带有类别标签（`[peer_up]`、`[file_offered]`、`[status]` 等）。
+   - **Web UI 实时交互联动 (`ui/index.html`)**：
+     - 接入浏览器原生 `EventSource("/api/events")`，断开自动指数退避重连；
+     - 事件到达时即时触发 `tick()` 刷新界面，将原先 700ms 背景高频轮询降为 2000ms+ 安全底噪轮询；
+     - 在系统健康面板增加「实时事件流 (SSE)」连接状态徽标与「最近节点事件」跑马灯。
+
+3. **测试覆盖与 GitHub CI 验证**：
+   - 在 `tests/phase1.rs` 增设 `node_events_stream_sse_via_loopback_api`：
+     - 验证非法 HTTP 动作（如 `POST /api/events`）被严格阻断并返回 405 Method Not Allowed；
+     - 验证通过 `loopback_events_connect` 建立流式连接；
+     - 验证节点派发 `Status`、`PeerUp`、`FileOffered`、`FileDone` 事件按序被流式接收且反序列化数据完全匹配；
+     - 验证多并发客户端连接与原始 JSON `next_event()` 解析；
+     - 验证当守护进程调用 `node.shutdown()` 时，所有活跃 SSE 流优雅终止并返回 `Ok(None)`。
+
 
 
 

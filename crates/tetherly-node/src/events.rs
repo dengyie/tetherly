@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! UI-facing events. Bodies, OTP digits, and clipboard text never appear here.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tetherly_core::{CandidateView, DeviceId, IncomingTransfer, ReplyView};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UiEvent {
     Candidate {
@@ -45,7 +45,7 @@ pub enum UiEvent {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CandidateViewDto {
     pub id: String,
     pub source: String,
@@ -78,7 +78,7 @@ impl From<CandidateView> for CandidateViewDto {
 
 /// A queued `notify.reply`, shown so the user knows a reply is waiting. The
 /// text is not carried here (see `ReplyView`), matching the no-content rule.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplyViewDto {
     pub id: String,
     pub source: String,
@@ -97,7 +97,7 @@ impl From<ReplyView> for ReplyViewDto {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileView {
     pub name: String,
     pub size: u64,

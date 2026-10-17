@@ -5,7 +5,7 @@
 use crate::runtime::Node;
 use serde::Serialize;
 use std::net::SocketAddr;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 
@@ -103,6 +103,14 @@ async fn handle(mut stream: TcpStream, node: Node) -> std::io::Result<()> {
         write_http(&mut stream, 403, "text/plain", b"loopback only").await?;
         return Ok(());
     }
+    if method == "GET"
+        && (path == "/api/events"
+            || path == "/api/events/stream"
+            || path.starts_with("/api/events?")
+            || path.starts_with("/api/events/stream?"))
+    {
+        return handle_sse(&mut stream, &node).await;
+    }
     if content_len > MAX_BODY {
         write_http(&mut stream, 413, "text/plain", b"too large").await?;
         return Ok(());
@@ -198,6 +206,130 @@ pub async fn loopback_get(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8
         .map(|b| b.as_bytes().to_vec())
         .unwrap_or_default();
     Ok((code, payload))
+}
+
+async fn handle_sse(stream: &mut TcpStream, node: &Node) -> std::io::Result<()> {
+    let header = "HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream; charset=utf-8\r\n\
+                  Cache-Control: no-cache, no-transform\r\n\
+                  Connection: keep-alive\r\n\
+                  Access-Control-Allow-Origin: *\r\n\r\n";
+    stream.write_all(header.as_bytes()).await?;
+    stream.flush().await?;
+
+    // Initial greeting comment so client knows stream is established
+    stream.write_all(b": connected\n\n").await?;
+    stream.flush().await?;
+
+    let mut events = node.subscribe();
+    let mut shutdown = node.shutdown_signal();
+    let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    // Consume initial tick that fires immediately
+    ping_interval.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    break;
+                }
+            }
+            res = events.recv() => {
+                match res {
+                    Ok(ev) => {
+                        if let Ok(json) = serde_json::to_string(&ev) {
+                            let payload = format!("data: {json}\n\n");
+                            if stream.write_all(payload.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            if stream.flush().await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        let payload = format!(": lagged {n}\n\n");
+                        if stream.write_all(payload.as_bytes()).await.is_err() {
+                            break;
+                        }
+                        if stream.flush().await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+            _ = ping_interval.tick() => {
+                if stream.write_all(b": ping\n\n").await.is_err() {
+                    break;
+                }
+                if stream.flush().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An active Server-Sent Events stream connected to a loopback UI endpoint.
+pub struct SseStream {
+    lines: Lines<BufReader<TcpStream>>,
+}
+
+impl SseStream {
+    /// Read the next event data string from the stream.
+    /// Comments (lines starting with ':') and blank separator lines are skipped.
+    /// Returns `Ok(Some(data))` when a `data: ...` event arrives,
+    /// `Ok(None)` when the stream is closed, or `Err` on I/O error.
+    pub async fn next_event(&mut self) -> std::io::Result<Option<String>> {
+        while let Some(line) = self.lines.next_line().await? {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with(':') {
+                continue;
+            }
+            if let Some(payload) = trimmed.strip_prefix("data:") {
+                return Ok(Some(payload.trim().to_string()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Read the next typed `UiEvent` from the stream.
+    pub async fn next_ui_event(&mut self) -> std::io::Result<Option<crate::events::UiEvent>> {
+        while let Some(raw) = self.next_event().await? {
+            if let Ok(ev) = serde_json::from_str::<crate::events::UiEvent>(&raw) {
+                return Ok(Some(ev));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Connect to a node's loopback UI API and initiate an SSE stream on `/api/events`.
+pub async fn loopback_events_connect(port: u16) -> std::io::Result<SseStream> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect(addr).await?;
+    let req = "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n\r\n";
+    stream.write_all(req.as_bytes()).await?;
+    stream.flush().await?;
+
+    let mut lines = BufReader::new(stream).lines();
+    let status_line = lines.next_line().await?.unwrap_or_default();
+    if !status_line.contains("200") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("SSE HTTP handshake failed: {status_line}"),
+        ));
+    }
+    while let Some(header) = lines.next_line().await? {
+        if header.trim().is_empty() {
+            break;
+        }
+    }
+    Ok(SseStream { lines })
 }
 
 #[derive(Serialize)]
@@ -1009,6 +1141,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             Ok(()) => json_ok(&serde_json::json!({ "ok": true, "seat": node.input_seat_str() })),
             Err(e) => err(400, &e.to_string()),
         },
+        (_, "/api/events" | "/api/events/stream") => err(405, "method not allowed"),
         _ => (404, "text/plain", b"not found".to_vec()),
     }
 }

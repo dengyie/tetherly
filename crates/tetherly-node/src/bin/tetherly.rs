@@ -294,6 +294,21 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Stream real-time node events via loopback Server-Sent Events (SSE).
+    Events {
+        /// Maximum number of events to receive before exiting (0 for unlimited).
+        #[arg(long, default_value_t = 0)]
+        count: usize,
+        /// Timeout in seconds to wait for events (0 for no timeout).
+        #[arg(long, default_value_t = 0)]
+        timeout_secs: u64,
+        /// Output raw JSON per event line instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1787,9 +1802,127 @@ async fn main() -> Result<()> {
                 );
             }
             println!("Node daemon shutdown initiated (HTTP 200).");
-        }
+        },
+        Cmd::Events {
+            count,
+            timeout_secs,
+            json,
+            ui_port,
+        } => {
+            let mut sse = tetherly_node::loopback_events_connect(ui_port)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if !json {
+                println!("Listening for real-time node events on 127.0.0.1:{ui_port}...");
+            }
+            let deadline = if timeout_secs > 0 {
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs))
+            } else {
+                None
+            };
+            let mut received = 0usize;
+            loop {
+                let next_res = if let Some(dl) = deadline {
+                    let now = std::time::Instant::now();
+                    if now >= dl {
+                        break;
+                    }
+                    match tokio::time::timeout(dl - now, sse.next_event()).await {
+                        Ok(res) => res,
+                        Err(_) => break,
+                    }
+                } else {
+                    sse.next_event().await
+                };
+
+                match next_res {
+                    Ok(Some(raw)) => {
+                        received += 1;
+                        if json {
+                            println!("{raw}");
+                        } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            print_event(&val);
+                        } else {
+                            println!("{raw}");
+                        }
+                        if count > 0 && received >= count {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        anyhow::bail!("event stream error: {e}");
+                    }
+                }
+            }
+        },
     }
     Ok(())
+}
+
+fn print_event(v: &serde_json::Value) {
+    let kind = v["kind"].as_str().unwrap_or("unknown");
+    match kind {
+        "status" => {
+            let msg = v["message"].as_str().unwrap_or("");
+            println!("[status] {msg}");
+        }
+        "peer_up" => {
+            let dev = v["device_id"].as_str().unwrap_or("?");
+            let name = v["name"].as_str().unwrap_or("?");
+            let platform = v["platform"].as_str().unwrap_or("?");
+            println!("[peer_up] {name} ({dev}) [{platform}]");
+        }
+        "peer_down" => {
+            let dev = v["device_id"].as_str().unwrap_or("?");
+            println!("[peer_down] {dev}");
+        }
+        "file_offered" => {
+            let tid = v["transfer_id"].as_str().unwrap_or("?");
+            let src = v["source"].as_str().unwrap_or("?");
+            let files_count = v["files"].as_array().map(|a| a.len()).unwrap_or(0);
+            println!("[file_offered] transfer={tid} from={src} ({files_count} files)");
+        }
+        "file_done" => {
+            let tid = v["transfer_id"].as_str().unwrap_or("?");
+            println!("[file_done] transfer={tid}");
+        }
+        "pairing_needed" => {
+            let dev = v["device_id"].as_str().unwrap_or("?");
+            let fp = v["fp"].as_str().unwrap_or("?");
+            println!("[pairing_needed] peer={dev} fp={fp}");
+        }
+        "candidate" => {
+            let c = &v["candidate"];
+            let id = c["id"].as_str().unwrap_or("?");
+            let app = c["app_name"].as_str().unwrap_or(c["app_id"].as_str().unwrap_or("?"));
+            let title = c["title"].as_str().unwrap_or("");
+            println!("[candidate] id={id} app={app} title={title}");
+        }
+        "candidate_expired" => {
+            let id = v["id"].as_str().unwrap_or("?");
+            println!("[candidate_expired] id={id}");
+        }
+        "reply_received" => {
+            let r = &v["reply"];
+            let id = r["id"].as_str().unwrap_or("?");
+            let app = r["app_id"].as_str().unwrap_or("?");
+            println!("[reply_received] id={id} app={app}");
+        }
+        "overlay" => {
+            let present = v["present"].as_bool().unwrap_or(false);
+            let lan_only = v["lan_only"].as_bool().unwrap_or(false);
+            println!("[overlay] present={present} lan_only={lan_only}");
+        }
+        other => {
+            println!("[{other}] {v}");
+        }
+    }
 }
 
 fn format_uptime(secs: u64) -> String {

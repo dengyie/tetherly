@@ -33,4 +33,4 @@ pub use screen::MacSource;
 pub use screen::X11Source;
 pub use sidecar::{parse_overlay_cidrs, OverlayConfig, OverlaySource, OverlayStatus};
 pub use store::default_data_dir;
-pub use uihttp::{loopback_get, loopback_post};
+pub use uihttp::{loopback_events_connect, loopback_get, loopback_post, SseStream};

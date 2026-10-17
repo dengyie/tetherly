@@ -2037,6 +2037,109 @@ async fn node_health_probe_ping_and_graceful_shutdown_via_loopback_api() {
     );
 }
 
+/// ADR-033: Node real-time event streaming via loopback Server-Sent Events (SSE).
+#[tokio::test(flavor = "multi_thread")]
+async fn node_events_stream_sse_via_loopback_api() {
+    let (data_dir, _guard) = temp_dir("sse-test");
+    let node = Node::start(cfg(data_dir.clone(), "sse-node", "macos")).unwrap();
+    let ui_port = node.spawn_ui().await.unwrap();
+    assert_ne!(ui_port, 0, "test node must serve loopback UI");
+
+    // 1. Verify invalid HTTP method on /api/events returns 405 Method Not Allowed
+    let (post_code, _) = tetherly_node::loopback_post(ui_port, "/api/events", b"{}")
+        .await
+        .expect("post events");
+    assert_eq!(post_code, 405);
+
+    // 2. Connect SSE event stream over loopback HTTP
+    let mut sse = tetherly_node::loopback_events_connect(ui_port)
+        .await
+        .expect("connect loopback sse");
+
+    // 3. Emit sample UiEvents from node event bus
+    let ev1 = tetherly_node::UiEvent::Status {
+        message: "node ready".to_string(),
+    };
+    let ev2 = tetherly_node::UiEvent::PeerUp {
+        device_id: "tdev_peer_abc".to_string(),
+        name: "remote-laptop".to_string(),
+        platform: "macos".to_string(),
+    };
+    let ev3 = tetherly_node::UiEvent::FileOffered {
+        transfer_id: "tfl_12345".to_string(),
+        source: "tdev_peer_abc".to_string(),
+        files: vec![tetherly_node::events::FileView {
+            name: "test_report.pdf".to_string(),
+            size: 4096,
+        }],
+    };
+    let ev4 = tetherly_node::UiEvent::FileDone {
+        transfer_id: "tfl_12345".to_string(),
+    };
+
+    node.emit(ev1.clone());
+    node.emit(ev2.clone());
+    node.emit(ev3.clone());
+    node.emit(ev4.clone());
+
+    // 4. Consume events via SseStream typed next_ui_event()
+    let r1 = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+        .await
+        .expect("timeout r1")
+        .expect("read r1");
+    assert_eq!(r1, Some(ev1));
+
+    let r2 = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+        .await
+        .expect("timeout r2")
+        .expect("read r2");
+    assert_eq!(r2, Some(ev2));
+
+    let r3 = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+        .await
+        .expect("timeout r3")
+        .expect("read r3");
+    assert_eq!(r3, Some(ev3));
+
+    let r4 = tokio::time::timeout(Duration::from_secs(3), sse.next_ui_event())
+        .await
+        .expect("timeout r4")
+        .expect("read r4");
+    assert_eq!(r4, Some(ev4));
+
+    // 5. Connect a second stream to test raw JSON next_event() and shutdown termination
+    let mut sse2 = tetherly_node::loopback_events_connect(ui_port)
+        .await
+        .expect("connect second sse");
+
+    node.emit(tetherly_node::UiEvent::Status {
+        message: "stream2 check".to_string(),
+    });
+
+    let raw = tokio::time::timeout(Duration::from_secs(3), sse2.next_event())
+        .await
+        .expect("timeout sse2")
+        .expect("read sse2")
+        .expect("some raw event");
+    let val: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+    assert_eq!(val["kind"], "status");
+    assert_eq!(val["message"], "stream2 check");
+
+    // 6. Shutdown node and verify streams cleanly terminate with Ok(None)
+    node.shutdown();
+    let term1 = tokio::time::timeout(Duration::from_secs(3), sse.next_event())
+        .await
+        .expect("timeout term1")
+        .expect("read term1");
+    assert_eq!(term1, None);
+
+    let term2 = tokio::time::timeout(Duration::from_secs(3), sse2.next_event())
+        .await
+        .expect("timeout term2")
+        .expect("read term2");
+    assert_eq!(term2, None);
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

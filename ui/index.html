@@ -189,6 +189,14 @@
           <span style="color:var(--muted)">回环探测 RTT：</span>
           <span id="ht-rtt">-</span>
         </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">实时事件流 (SSE)：</span>
+          <span id="ev-status"><span class="badge offline">连接中…</span></span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">最近节点事件：</span>
+          <span id="ev-last" style="font-family:ui-monospace, Consolas, monospace;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">-</span>
+        </div>
       </div>
       <div id="shutdownmsg" class="hint" style="margin-top:6px"></div>
     </section>
@@ -725,8 +733,54 @@ if (shutdownBtn) {
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
 }
+let eventSource = null;
+let sseReconnectTimer = null;
+function setupEventSource() {
+  if (eventSource) {
+    try { eventSource.close(); } catch (e) {}
+  }
+  try {
+    const es = new EventSource("/api/events");
+    eventSource = es;
+    es.onopen = () => {
+      if ($("ev-status")) $("ev-status").innerHTML = '<span class="badge completed">SSE 已连接</span>';
+    };
+    es.onmessage = (e) => {
+      try {
+        const ev = JSON.parse(e.data);
+        if ($("ev-last")) {
+          const t = new Date().toLocaleTimeString();
+          let desc = ev.kind;
+          if (ev.kind === "status") desc = "状态: " + ev.message;
+          else if (ev.kind === "peer_up") desc = "节点上线: " + (ev.name || ev.device_id);
+          else if (ev.kind === "peer_down") desc = "节点离线: " + ev.device_id;
+          else if (ev.kind === "file_offered") desc = "文件到达: " + ev.transfer_id;
+          else if (ev.kind === "file_done") desc = "文件完成: " + ev.transfer_id;
+          else if (ev.kind === "pairing_needed") desc = "待配对: " + ev.device_id;
+          $("ev-last").textContent = "[" + t + "] " + desc;
+        }
+      } catch (err) {
+        if ($("ev-last")) $("ev-last").textContent = e.data;
+      }
+      tick();
+    };
+    es.onerror = () => {
+      if ($("ev-status")) $("ev-status").innerHTML = '<span class="badge offline">重连中…</span>';
+      es.close();
+      if (!sseReconnectTimer) {
+        sseReconnectTimer = setTimeout(() => {
+          sseReconnectTimer = null;
+          setupEventSource();
+        }, 3000);
+      }
+    };
+  } catch (e) {
+    if ($("ev-status")) $("ev-status").innerHTML = '<span class="badge offline">不可用</span>';
+  }
+}
 tick();
-setInterval(tick, 700);
+setupEventSource();
+setInterval(tick, 2000);
 updateStorage();
 setInterval(updateStorage, 3000);
 updateHealth();
