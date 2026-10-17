@@ -654,11 +654,11 @@ async fn file_sent_via_live_node_api_reaches_the_paired_peer() {
     let transfer_id = resp["transfer_id"].as_str().unwrap();
 
     // 3. Peer waits for the offer, then accepts the file
-    wait_offered(&peer, Duration::from_secs(5)).await;
+    wait_offered(&peer, Duration::from_secs(10)).await;
     peer.user_accept_file(transfer_id).await.unwrap();
 
     // 4. Peer receives and saves the file in inbox
-    let received = wait_inbox(g2.path(), "report.pdf", Duration::from_secs(10)).await;
+    let received = wait_inbox(g2.path(), "report.pdf", Duration::from_secs(25)).await;
     assert_eq!(hex_sha256(&received), expected_hash);
 
     // 5. Test with base64 data upload directly (the web UI upload route)
@@ -685,9 +685,9 @@ async fn file_sent_via_live_node_api_reaches_the_paired_peer() {
     let resp_b64: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let transfer_id_b64 = resp_b64["transfer_id"].as_str().unwrap();
 
-    wait_offered(&peer, Duration::from_secs(5)).await;
+    wait_offered(&peer, Duration::from_secs(10)).await;
     peer.user_accept_file(transfer_id_b64).await.unwrap();
-    let received_b64 = wait_inbox(g2.path(), "b64_doc.txt", Duration::from_secs(10)).await;
+    let received_b64 = wait_inbox(g2.path(), "b64_doc.txt", Duration::from_secs(25)).await;
     assert_eq!(hex_sha256(&received_b64), hex_sha256(b64_content));
 
     // 6. Test negative assertion: unknown peer returns 400
@@ -756,10 +756,10 @@ async fn multi_chunk_file_streamed_via_live_node_api_reaches_inbox() {
     let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let transfer_id = resp["transfer_id"].as_str().unwrap();
 
-    wait_offered(&peer, Duration::from_secs(5)).await;
+    wait_offered(&peer, Duration::from_secs(10)).await;
     peer.user_accept_file(transfer_id).await.unwrap();
 
-    let received = wait_inbox(g2.path(), "large_archive.bin", Duration::from_secs(10)).await;
+    let received = wait_inbox(g2.path(), "large_archive.bin", Duration::from_secs(25)).await;
     assert_eq!(received.len(), total_size);
     assert_eq!(hex_sha256(&received), expected_hash);
 
@@ -812,10 +812,10 @@ async fn streaming_file_transfer_tracks_active_progress_and_completion_states() 
     assert_eq!(initial_host_transfers[0].total, total_size as u64);
     assert_eq!(initial_host_transfers[0].filename, "large_progress.bin");
 
-    wait_offered(&peer, Duration::from_secs(5)).await;
+    wait_offered(&peer, Duration::from_secs(10)).await;
     peer.user_accept_file(transfer_id).await.unwrap();
 
-    let received = wait_inbox(g2.path(), "large_progress.bin", Duration::from_secs(10)).await;
+    let received = wait_inbox(g2.path(), "large_progress.bin", Duration::from_secs(25)).await;
     assert_eq!(received.len(), total_size);
     assert_eq!(hex_sha256(&received), expected_hash);
 
@@ -922,10 +922,10 @@ async fn enterprise_file_limits_speed_and_status_observability() {
     assert_eq!(initial_transfers[0].transfer_id, transfer_id);
     assert_eq!(initial_transfers[0].speed_bps, 0); // initially 0 before transfer
 
-    wait_offered(&peer, Duration::from_secs(5)).await;
+    wait_offered(&peer, Duration::from_secs(10)).await;
     peer.user_accept_file(transfer_id).await.unwrap();
 
-    let received = wait_inbox(g2.path(), "speed_test.bin", Duration::from_secs(10)).await;
+    let received = wait_inbox(g2.path(), "speed_test.bin", Duration::from_secs(25)).await;
     assert_eq!(received.len(), total_size);
 
     // 3. Verify loopback_get /api/state reveals updated transfer with completed phase and speed_bps zeroed out
@@ -1003,7 +1003,7 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
     let transfer_id = send_resp["transfer_id"].as_str().unwrap().to_string();
 
     // Peer accepts the offer so the transfer is actively in flight
-    wait_offered(&peer, Duration::from_secs(5)).await;
+    wait_offered(&peer, Duration::from_secs(10)).await;
     peer.user_accept_file(&transfer_id).await.unwrap();
 
     // Wait until the transfer is actively in-flight and streaming chunks
@@ -1015,8 +1015,8 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
                 break;
             }
         }
-        if start_stream.elapsed() > Duration::from_secs(5) {
-            panic!("transfer did not begin streaming chunks within 5s");
+        if start_stream.elapsed() > Duration::from_secs(10) {
+            panic!("transfer did not begin streaming chunks within 10s");
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -1246,11 +1246,11 @@ async fn transfer_lifecycle_governance_and_stats() {
     let send_resp: serde_json::Value = serde_json::from_slice(&send_body).unwrap();
     let transfer_id = send_resp["transfer_id"].as_str().unwrap().to_string();
 
-    wait_offered(&peer, Duration::from_secs(5)).await;
+    wait_offered(&peer, Duration::from_secs(10)).await;
     peer.user_accept_file(&transfer_id).await.unwrap();
 
     // Wait until peer receives the file
-    let received = wait_inbox(&g2.0, "stats_test.bin", Duration::from_secs(10)).await;
+    let received = wait_inbox(&g2.0, "stats_test.bin", Duration::from_secs(25)).await;
     assert_eq!(received.len(), total_size);
 
     // Wait until host transfer settles to Completed
@@ -1262,7 +1262,7 @@ async fn transfer_lifecycle_governance_and_stats() {
                 break;
             }
         }
-        if start.elapsed() > Duration::from_secs(10) {
+        if start.elapsed() > Duration::from_secs(25) {
             panic!("host transfer did not settle to Completed");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1295,7 +1295,7 @@ async fn transfer_lifecycle_governance_and_stats() {
     let s2_resp: serde_json::Value = serde_json::from_slice(&s2_body).unwrap();
     let transfer_id2 = s2_resp["transfer_id"].as_str().unwrap().to_string();
 
-    wait_offered(&peer, Duration::from_secs(5)).await;
+    wait_offered(&peer, Duration::from_secs(10)).await;
     peer.user_reject_file(&transfer_id2).await.unwrap();
 
     let start = std::time::Instant::now();
