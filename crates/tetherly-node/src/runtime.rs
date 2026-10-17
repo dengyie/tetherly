@@ -1129,7 +1129,13 @@ impl Node {
         self.persist_trust();
         let _ = crate::store::forget_route(&self.shared.cfg.data_dir, device_id.as_str());
 
-        let had_session = self.shared.sessions.lock().await.remove(device_id).is_some();
+        let had_session = self
+            .shared
+            .sessions
+            .lock()
+            .await
+            .remove(device_id)
+            .is_some();
         let had_live = self
             .shared
             .live
