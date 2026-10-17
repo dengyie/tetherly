@@ -1596,9 +1596,8 @@ async fn notify_candidate_lifecycle_and_quick_reply_via_loopback_api() {
     peer.send_notify(&host_id, push).await.unwrap();
 
     // 3. Wait until host receives the candidate
-    let mut cand_id = String::new();
     let start = std::time::Instant::now();
-    loop {
+    let cand_id = loop {
         let (c, b) = tetherly_node::loopback_get(host_ui, "/api/notify/candidates")
             .await
             .unwrap();
@@ -1609,14 +1608,13 @@ async fn notify_candidate_lifecycle_and_quick_reply_via_loopback_api() {
             let cand = &list[0];
             assert_eq!(cand["app_id"], "com.example.bank");
             assert_eq!(cand["has_otp"], true);
-            cand_id = cand["id"].as_str().unwrap().to_string();
-            break;
+            break cand["id"].as_str().unwrap().to_string();
         }
         if start.elapsed() > Duration::from_secs(10) {
             panic!("host did not ingest candidate within 10s");
         }
         tokio::time::sleep(Duration::from_millis(30)).await;
-    }
+    };
 
     // 4. Retrieve OTP directly via POST /api/otp/get
     let get_otp_payload = serde_json::json!({ "id": cand_id });
@@ -1663,9 +1661,8 @@ async fn notify_candidate_lifecycle_and_quick_reply_via_loopback_api() {
     assert_eq!(reply_resp["ok"], true);
 
     // 7. Wait until peer ingests the reply in its replies queue
-    let mut reply_id = String::new();
     let start = std::time::Instant::now();
-    loop {
+    let reply_id = loop {
         let (rc, rb) = tetherly_node::loopback_get(peer_ui, "/api/notify/replies")
             .await
             .unwrap();
@@ -1676,14 +1673,13 @@ async fn notify_candidate_lifecycle_and_quick_reply_via_loopback_api() {
             let r = &replies[0];
             assert_eq!(r["app_id"], "com.example.bank");
             assert_eq!(r["uid"], "test-sms-1001");
-            reply_id = r["id"].as_str().unwrap().to_string();
-            break;
+            break r["id"].as_str().unwrap().to_string();
         }
         if start.elapsed() > Duration::from_secs(10) {
             panic!("peer did not receive reply within 10s");
         }
         tokio::time::sleep(Duration::from_millis(30)).await;
-    }
+    };
 
     // 8. Peer takes the reply via POST /api/reply/take
     let take_payload = serde_json::json!({ "id": reply_id });
