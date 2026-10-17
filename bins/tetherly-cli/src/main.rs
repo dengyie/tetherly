@@ -5,18 +5,16 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use tetherly_core::pin::{format_pin, generate_pin, parse_pin};
-use tetherly_core::ports::Rng;
-use tetherly_core::session::{backoff_delay, LockoutTable};
+use tetherly_core::pin::parse_pin;
+use tetherly_core::session::LockoutTable;
 use tetherly_core::{Clock, CoreError, SystemClock, TcpLimiter};
 use tetherly_crypto::Identity;
 use tetherly_net::session::{
-    accept_session, dial_session, serve_pong_once, SessionConfig, CONTROL_PORT, HANDSHAKE_TIMEOUT,
+    accept_session, serve_pong_once, SessionConfig, CONTROL_PORT, HANDSHAKE_TIMEOUT,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(name = "tetherly-cli", about = "Tetherly Phase 0 pairing and ping")]
@@ -470,14 +468,6 @@ enum StorageCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
-}
-
-struct OsRng;
-
-impl Rng for OsRng {
-    fn fill_bytes(&self, dest: &mut [u8]) -> Result<(), CoreError> {
-        getrandom::getrandom(dest).map_err(|_| CoreError::Rng)
-    }
 }
 
 fn now_ms() -> u64 {
