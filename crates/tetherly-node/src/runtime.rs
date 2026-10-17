@@ -1023,7 +1023,8 @@ impl Node {
                             freed_bytes += file_len;
                             deleted_files_count += 1;
                         }
-                        if hubs.resume.remove(transfer_id).is_some() {
+                        if hubs.resume.get(transfer_id).is_some() {
+                            hubs.resume.remove(transfer_id);
                             cleared_resume_entries += 1;
                         }
                         let sidecar = inbox_dir.join(format!(".{transfer_id}.resume.json"));
@@ -1046,7 +1047,8 @@ impl Node {
                     }
                     let matching_part = inbox_dir.join(format!(".{transfer_id}.part"));
                     if !matching_part.exists() {
-                        if hubs.resume.remove(transfer_id).is_some() {
+                        if hubs.resume.get(transfer_id).is_some() {
+                            hubs.resume.remove(transfer_id);
                             cleared_resume_entries += 1;
                         }
                         if std::fs::remove_file(&path).is_ok() {
