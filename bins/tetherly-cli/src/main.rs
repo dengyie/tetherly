@@ -1126,7 +1126,7 @@ async fn main() -> Result<()> {
                     println!("  Cursor Seat:  {seat}");
                 }
             }
-        }
+        },
         Cmd::Peers {
             trusted,
             json,

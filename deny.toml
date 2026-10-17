@@ -4,7 +4,13 @@ exclude-dev = false
 
 [advisories]
 yanked = "deny"
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0370/0371/0372: zvariant/zbus_names/zvariant_derive merged into zbus 6.0.
+    # Transitive dependencies through secret-service v4.0.0; no security vulnerability.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
+]
 
 [licenses]
 allow = [

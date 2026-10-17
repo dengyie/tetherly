@@ -1807,7 +1807,9 @@ async fn peers_and_routes_inspection_via_loopback_api() {
     assert_eq!(scode, 200);
     let sv: serde_json::Value = serde_json::from_slice(&sbody).unwrap();
     let snap_trusted = sv["trusted"].as_array().expect("trusted in snapshot");
-    assert!(snap_trusted.iter().any(|t| t["device_id"] == peer_id.as_str() && t["online"] == true));
+    assert!(snap_trusted
+        .iter()
+        .any(|t| t["device_id"] == peer_id.as_str() && t["online"] == true));
 
     // 4. Simulate peer going offline
     peer.shutdown();
