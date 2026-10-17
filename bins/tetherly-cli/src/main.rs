@@ -642,17 +642,14 @@ async fn main() -> Result<()> {
             }
         },
         Cmd::Candidates { json, ui_port } => {
-            let (code, resp) = loopback_get(
-                ui_port,
-                "/api/notify/candidates",
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = loopback_get(ui_port, "/api/notify/candidates")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+                    )
+                })?;
             if code != 200 {
                 bail!(
                     "candidates query failed (HTTP {code}): {}",
@@ -677,22 +674,13 @@ async fn main() -> Result<()> {
                             .unwrap_or(0);
                         for item in items {
                             let id = item.get("id").and_then(|s| s.as_str()).unwrap_or("-");
-                            let app = item
-                                .get("app_id")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("-");
+                            let app = item.get("app_id").and_then(|s| s.as_str()).unwrap_or("-");
                             let has_otp = item
                                 .get("has_otp")
                                 .and_then(|b| b.as_bool())
                                 .unwrap_or(false);
-                            let exp = item
-                                .get("expires_ms")
-                                .and_then(|n| n.as_u64())
-                                .unwrap_or(0);
-                            let title = item
-                                .get("title")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("");
+                            let exp = item.get("expires_ms").and_then(|n| n.as_u64()).unwrap_or(0);
+                            let title = item.get("title").and_then(|s| s.as_str()).unwrap_or("");
                             let rem_sec = exp.saturating_sub(now_ms) / 1000;
                             println!(
                                 "{:<32} {:<24} {:<6} {:<10} {}",
@@ -712,18 +700,15 @@ async fn main() -> Result<()> {
             let payload = serde_json::json!({ "id": id });
             let bytes = serde_json::to_vec(&payload)?;
             if copy {
-                let (c_code, c_resp) = loopback_post(
-                    ui_port,
-                    "/api/copy",
-                    &bytes,
-                )
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                let (c_code, c_resp) =
+                    loopback_post(ui_port, "/api/copy", &bytes)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                          start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                            )
+                        })?;
                 if c_code != 200 {
                     bail!(
                         "copy OTP failed (HTTP {c_code}): {}",
@@ -731,18 +716,14 @@ async fn main() -> Result<()> {
                     );
                 }
             }
-            let (code, resp) = loopback_post(
-                ui_port,
-                "/api/otp/get",
-                &bytes,
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = loopback_post(ui_port, "/api/otp/get", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+                    )
+                })?;
             if code != 200 {
                 bail!(
                     "get OTP failed (HTTP {code}): {}",
@@ -763,18 +744,14 @@ async fn main() -> Result<()> {
         Cmd::Dismiss { id, ui_port } => {
             let payload = serde_json::json!({ "id": id });
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = loopback_post(
-                ui_port,
-                "/api/dismiss",
-                &bytes,
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = loopback_post(ui_port, "/api/dismiss", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+                    )
+                })?;
             if code != 200 {
                 bail!(
                     "dismiss failed (HTTP {code}): {}",
@@ -786,18 +763,14 @@ async fn main() -> Result<()> {
         Cmd::Reply { id, text, ui_port } => {
             let payload = serde_json::json!({ "id": id, "text": text });
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = loopback_post(
-                ui_port,
-                "/api/reply",
-                &bytes,
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = loopback_post(ui_port, "/api/reply", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+                    )
+                })?;
             if code != 200 {
                 bail!(
                     "reply failed (HTTP {code}): {}",
@@ -807,17 +780,14 @@ async fn main() -> Result<()> {
             println!("reply sent for candidate {id}");
         }
         Cmd::Replies { json, ui_port } => {
-            let (code, resp) = loopback_get(
-                ui_port,
-                "/api/notify/replies",
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = loopback_get(ui_port, "/api/notify/replies")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+                    )
+                })?;
             if code != 200 {
                 bail!(
                     "replies query failed (HTTP {code}): {}",
@@ -835,10 +805,7 @@ async fn main() -> Result<()> {
                         println!("{:<32} {:<24} {}", "ID", "APP", "UID");
                         for item in items {
                             let id = item.get("id").and_then(|s| s.as_str()).unwrap_or("-");
-                            let app = item
-                                .get("app_id")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("-");
+                            let app = item.get("app_id").and_then(|s| s.as_str()).unwrap_or("-");
                             let uid = item.get("uid").and_then(|s| s.as_str()).unwrap_or("-");
                             println!("{:<32} {:<24} {}", id, app, uid);
                         }
@@ -850,18 +817,14 @@ async fn main() -> Result<()> {
         Cmd::TakeReply { id, ui_port } => {
             let payload = serde_json::json!({ "id": id });
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = loopback_post(
-                ui_port,
-                "/api/reply/take",
-                &bytes,
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = loopback_post(ui_port, "/api/reply/take", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+                    )
+                })?;
             if code != 200 {
                 bail!(
                     "take reply failed (HTTP {code}): {}",

@@ -1575,12 +1575,9 @@ async fn notify_candidate_lifecycle_and_quick_reply_via_loopback_api() {
     let _peer_id = peer.identity().device_id().clone();
 
     // 1. Initial candidates on host should be empty
-    let (code, body) = tetherly_node::loopback_get(
-        host_ui,
-        "/api/notify/candidates",
-    )
-    .await
-    .unwrap();
+    let (code, body) = tetherly_node::loopback_get(host_ui, "/api/notify/candidates")
+        .await
+        .unwrap();
     assert_eq!(code, 200);
     let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(resp["ok"], true);
@@ -1602,12 +1599,9 @@ async fn notify_candidate_lifecycle_and_quick_reply_via_loopback_api() {
     let mut cand_id = String::new();
     let start = std::time::Instant::now();
     loop {
-        let (c, b) = tetherly_node::loopback_get(
-            host_ui,
-            "/api/notify/candidates",
-        )
-        .await
-        .unwrap();
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/notify/candidates")
+            .await
+            .unwrap();
         assert_eq!(c, 200);
         let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
         let list = v["candidates"].as_array().unwrap();
@@ -1672,12 +1666,9 @@ async fn notify_candidate_lifecycle_and_quick_reply_via_loopback_api() {
     let mut reply_id = String::new();
     let start = std::time::Instant::now();
     loop {
-        let (rc, rb) = tetherly_node::loopback_get(
-            peer_ui,
-            "/api/notify/replies",
-        )
-        .await
-        .unwrap();
+        let (rc, rb) = tetherly_node::loopback_get(peer_ui, "/api/notify/replies")
+            .await
+            .unwrap();
         assert_eq!(rc, 200);
         let rv: serde_json::Value = serde_json::from_slice(&rb).unwrap();
         let replies = rv["replies"].as_array().unwrap();
@@ -1731,12 +1722,9 @@ async fn notify_candidate_lifecycle_and_quick_reply_via_loopback_api() {
     assert_eq!(dismiss_code, 200);
 
     // Candidates list is now empty
-    let (c_after, b_after) = tetherly_node::loopback_get(
-        host_ui,
-        "/api/notify/candidates",
-    )
-    .await
-    .unwrap();
+    let (c_after, b_after) = tetherly_node::loopback_get(host_ui, "/api/notify/candidates")
+        .await
+        .unwrap();
     assert_eq!(c_after, 200);
     let v_after: serde_json::Value = serde_json::from_slice(&b_after).unwrap();
     assert!(v_after["candidates"].as_array().unwrap().is_empty());
