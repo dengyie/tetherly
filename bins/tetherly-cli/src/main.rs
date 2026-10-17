@@ -529,10 +529,9 @@ async fn loopback_events_connect(port: u16) -> std::io::Result<SseStream> {
     let mut lines = tokio::io::BufReader::new(stream).lines();
     let status_line = lines.next_line().await?.unwrap_or_default();
     if !status_line.contains("200") {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("SSE HTTP handshake failed: {status_line}"),
-        ));
+        return Err(std::io::Error::other(format!(
+            "SSE HTTP handshake failed: {status_line}"
+        )));
     }
     while let Some(header) = lines.next_line().await? {
         if header.trim().is_empty() {
