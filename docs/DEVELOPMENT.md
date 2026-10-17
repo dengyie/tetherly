@@ -2157,6 +2157,43 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - 验证多并发客户端连接与原始 JSON `next_event()` 解析；
      - 验证当守护进程调用 `node.shutdown()` 时，所有活跃 SSE 流优雅终止并返回 `Ok(None)`。
 
+## 40. 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测 (v1.41 / ADR-034)
+
+1. **动机与设计准则（ADR-034）**：
+   - **链路质量黑盒消除**：在之前的实现中，底层 `TYPE_PING` (0x0001) 与 `TYPE_PONG` (0x0002) 帧已在控制会话维持长连接，但接收对端 Pong 时直接在 `SessionEvent::Pong(_) => {}` 丢弃了时间戳，导致系统无法感知对端网络质量与物理时延波动；
+   - **零协议额外开销**：复用现存的 8 字节大端毫秒时间戳载荷，无需引入任何新的协议帧或握手开销即可精确度量毫秒级往返时延 (RTT)；
+   - **加密通道隔离**：所有 Ping/Pong 报文完全在 Noise IK 加密隧道内部传输，外层观察者绝对无法获取任何明文时间戳或网络指标；
+   - **异步解耦按需探测**：通过 `oneshot::Sender<u64>` 等待派发向量队列，支持本地管理端非阻塞发起链路上行探测并安全等待响应，设置 5 秒超时保护；
+   - **安全红线铁律（Verbatim Security Red Line）**：回环探测接口严格绑定 `127.0.0.1`，强校验 `Host` 请求头（非法请求返回 403）；时延事件广播与报告绝对禁止携带任何用户隐私或敏感内容。
+
+2. **核心机制与实现**：
+   - **会话级 RTT 度量与 LivePeer 扩展**：
+     - `LivePeer` 结构体引入 `rtt_ms: Option<u64>` 与 `last_seen_ms: u64`；
+     - 处理 `SessionEvent::Pong(ts)` 时，计算 `now_ms.saturating_sub(ts)`，原子更新 `live` 状态，触发 `UiEvent::PeerLatency` 广播，并唤醒 `ping_waiters` 队列；
+     - `LivePeer::last_seen_ms` 随任意合法入站帧实时刷新；
+   - **回环 HTTP 探测端点 (`POST /api/peers/ping`)**：
+     - 支持请求体指定 `{"peer": "tdev_..."}`；当请求体为空或单对端连接时自动解析目标；多对端且未指定时返回明确 400 提示；
+     - 返回结构化 `PeerPingReport` (`ok`, `device_id`, `rtt_ms`, `path`, `addr`)；
+     - 在 `GET /api/peers` 与 `GET /api/state` 中完整输出 `rtt_ms` 与 `last_seen_ms`；
+   - **实时事件流式广播 (`UiEvent::PeerLatency`)**：
+     - 每次测量得到有效 RTT 时，自动向 SSE 事件总线广播 `UiEvent::PeerLatency { device_id, rtt_ms }`，驱动 Web UI 亚毫秒级更新；
+   - **双端 CLI 同构测速命令 (`tetherly` 与 `tetherly-cli`)**：
+     - `peers --ping [--peer <id>] [--count <n>] [--json]`：对端列表结合测速；
+     - `ping --peer <id> [--count <n>] [--json]`：对端通道测速（省略 `--peer` 则测 local daemon loopback 响应）；
+     - 支持 `--count <n>` 多包探测并统计 min/avg/max 时延；
+   - **Web UI 实时时延徽标与交互测速 (`ui/index.html`)**：
+     - 对端卡片增设动态时延徽标（绿色 <50ms、蓝色 50~150ms、黄色 >150ms、灰色未测）；
+     - 增设一键「测速」按钮，点击发起 `POST /api/peers/ping` 并提供实时交互反馈。
+
+3. **测试覆盖与 GitHub CI 验证**：
+   - 在 `tests/phase1.rs` 增设 `active_peer_rtt_probing_and_latency_reporting_via_loopback_api`：
+     - 验证直接 Rust 调用 `node.ping_peer(&peer_id)` 成功返回报告且 RTT 符合局域网预期；
+     - 验证非法/未连接设备 ID 准确拒绝并返回 `NoConnectedPeer`；
+     - 验证 loopback `POST /api/peers/ping` 指定设备与单设备自动解析；
+     - 验证 `GET /api/peers` 与 `GET /api/state` 包含 `rtt_ms` 与 `last_seen_ms`；
+     - 验证 SSE 事件流成功接收到 `UiEvent::PeerLatency` 广播事件。
+
+
 
 
 
