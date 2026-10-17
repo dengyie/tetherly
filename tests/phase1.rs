@@ -2758,6 +2758,203 @@ async fn peer_alias_governance_and_smart_resolution_via_loopback_api() {
     peer.shutdown();
 }
 
+/// ADR-038: Node configuration observability, dynamic runtime flags, and loopback configuration governance.
+#[tokio::test(flavor = "multi_thread")]
+async fn node_config_inspection_and_dynamic_flags_via_loopback_api() {
+    let (data_dir, _guard) = temp_dir("config-node-test");
+    let node = Node::start(cfg(data_dir, "config-host", "macos")).unwrap();
+    let ui_port = node.spawn_ui().await.expect("spawn UI succeeds");
+
+    // 1. Initial config inspection via GET /api/config
+    let (code_init, body_init) = tetherly_node::loopback_get(ui_port, "/api/config")
+        .await
+        .expect("initial config query succeeds");
+    assert_eq!(code_init, 200);
+    let init_rep: tetherly_node::NodeConfigReport = serde_json::from_slice(&body_init).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.device_id, node.identity().device_id().as_str());
+    assert_eq!(init_rep.name, "config-host");
+    assert_eq!(init_rep.platform, "macos");
+    assert!(!init_rep.advertise);
+    assert!(!init_rep.reconnect);
+    assert!(init_rep.loopback_only);
+    assert!(init_rep.memory_clip);
+    assert!(!init_rep.overlay_enabled);
+    assert!(!init_rep.ancs_attached);
+    assert_eq!(init_rep.ui_port, ui_port);
+
+    // 2. Connect to loopback SSE event stream
+    let mut sse = tetherly_node::loopback_events_connect(ui_port)
+        .await
+        .expect("connect loopback sse");
+
+    // 3. Update node friendly name dynamically via POST /api/config
+    let rename_payload = serde_json::json!({
+        "name": "workstation-pro",
+    });
+    let (code_ren, body_ren) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/config",
+        &serde_json::to_vec(&rename_payload).unwrap(),
+    )
+    .await
+    .expect("rename post succeeds");
+    assert_eq!(code_ren, 200);
+    let ren_rep: tetherly_node::NodeConfigReport = serde_json::from_slice(&body_ren).unwrap();
+    assert_eq!(ren_rep.name, "workstation-pro");
+    assert_eq!(node.name(), "workstation-pro");
+
+    // 4. Verify SSE stream receives UiEvent::ConfigChanged
+    let sse_event = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse config event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_event {
+        tetherly_node::UiEvent::ConfigChanged {
+            name,
+            advertise,
+            reconnect,
+        } => {
+            assert_eq!(name, "workstation-pro");
+            assert!(!advertise);
+            assert!(!reconnect);
+        }
+        other => panic!("expected ConfigChanged, got: {other:?}"),
+    }
+
+    // 5. Verify GET /api/health reflects dynamically updated name
+    let (code_hlth, body_hlth) = tetherly_node::loopback_get(ui_port, "/api/health")
+        .await
+        .expect("health query succeeds");
+    assert_eq!(code_hlth, 200);
+    let hlth_rep: tetherly_node::HealthReport = serde_json::from_slice(&body_hlth).unwrap();
+    assert_eq!(hlth_rep.name, "workstation-pro");
+
+    // 6. Update dynamic flags (advertise & reconnect) via PUT /api/config
+    let flags_payload = serde_json::json!({
+        "advertise": true,
+        "reconnect": true,
+    });
+    let (code_flags, body_flags) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/config",
+        &serde_json::to_vec(&flags_payload).unwrap(),
+    )
+    .await
+    .expect("flags update succeeds");
+    assert_eq!(code_flags, 200);
+    let flags_rep: tetherly_node::NodeConfigReport = serde_json::from_slice(&body_flags).unwrap();
+    assert!(flags_rep.advertise);
+    assert!(flags_rep.reconnect);
+    assert_eq!(flags_rep.name, "workstation-pro");
+    assert!(node.is_advertise_enabled());
+    assert!(node.is_reconnect_enabled());
+
+    // 7. Verify SSE stream receives updated flags
+    let sse_event2 = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse flags event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_event2 {
+        tetherly_node::UiEvent::ConfigChanged {
+            name,
+            advertise,
+            reconnect,
+        } => {
+            assert_eq!(name, "workstation-pro");
+            assert!(advertise);
+            assert!(reconnect);
+        }
+        other => panic!("expected ConfigChanged, got: {other:?}"),
+    }
+
+    // 8. Partial update (toggle reconnect off only)
+    let rec_payload = serde_json::json!({
+        "reconnect": false,
+    });
+    let (code_rec, body_rec) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/config",
+        &serde_json::to_vec(&rec_payload).unwrap(),
+    )
+    .await
+    .expect("reconnect update succeeds");
+    assert_eq!(code_rec, 200);
+    let rec_rep: tetherly_node::NodeConfigReport = serde_json::from_slice(&body_rec).unwrap();
+    assert!(!rec_rep.reconnect);
+    assert!(rec_rep.advertise);
+    assert_eq!(rec_rep.name, "workstation-pro");
+    assert!(!node.is_reconnect_enabled());
+    assert!(node.is_advertise_enabled());
+
+    // 9. Negative error paths and validation:
+    // a. Empty body / no fields to update returns 400
+    let empty_payload = serde_json::json!({});
+    let (code_empty, body_empty) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/config",
+        &serde_json::to_vec(&empty_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_empty, 400);
+    assert!(String::from_utf8_lossy(&body_empty).contains("no configuration fields to update"));
+
+    // b. Empty name returns 400
+    let empty_name_payload = serde_json::json!({
+        "name": "   ",
+    });
+    let (code_empty_name, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/config",
+        &serde_json::to_vec(&empty_name_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_empty_name, 400);
+
+    // c. Oversized name (>64 bytes) returns 400
+    let over_name_payload = serde_json::json!({
+        "name": "a".repeat(65),
+    });
+    let (code_over, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/config",
+        &serde_json::to_vec(&over_name_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_over, 400);
+
+    // d. Control characters in name return 400
+    let ctrl_name_payload = serde_json::json!({
+        "name": "bad\nname",
+    });
+    let (code_ctrl, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/config",
+        &serde_json::to_vec(&ctrl_name_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_ctrl, 400);
+
+    // e. Malformed JSON returns 400
+    let (code_bad_json, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/config",
+        b"this is not json",
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_bad_json, 400);
+
+    // 10. Clean shutdown
+    node.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

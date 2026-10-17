@@ -20,9 +20,9 @@ pub use events::{CandidateViewDto, UiEvent};
 pub use platform::{cursor_pos, screen_size, start_input_hooks, HookControl, RawInput};
 pub use platform::{MemoryInsertor, MemoryOpener, SystemInputSink, SystemOpener};
 pub use runtime::{
-    ActiveTransfer, AncsReport, HealthReport, LivePeer, Node, NodeConfig, NodePorts,
-    PeerPingReport, PinReport, StorageCleanReport, StorageReport, TransferDirection, TransferPhase,
-    TransferStats, TransfersReport, UserCommand,
+    ActiveTransfer, AncsReport, HealthReport, LivePeer, Node, NodeConfig, NodeConfigReport,
+    NodePorts, PeerPingReport, PinReport, StorageCleanReport, StorageReport, TransferDirection,
+    TransferPhase, TransferStats, TransfersReport, UserCommand,
 };
 pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
 

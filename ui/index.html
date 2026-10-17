@@ -203,6 +203,46 @@
       </div>
       <div id="shutdownmsg" class="hint" style="margin-top:6px"></div>
     </section>
+    <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>节点配置与运行特性</h2>
+        <button id="editnamebtn" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--text);border-radius:4px;cursor:pointer">修改名称</button>
+      </div>
+      <div class="hint">查看与热重载节点运行配置、广播可见性与受信任设备自动重连开关。</div>
+      <div id="configstatus" style="margin-top:8px;font-size:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="color:var(--muted)">节点名称：</span>
+          <span id="cfg-name" style="font-weight:600">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="color:var(--muted)">mDNS 局域网广播：</span>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span id="cfg-adv-badge"><span class="badge completed">已开启</span></span>
+            <button id="toggleadvbtn" class="ghost" type="button" style="padding:1px 6px;font-size:11px">切换</button>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="color:var(--muted)">自动重连受信任对端：</span>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span id="cfg-rec-badge"><span class="badge completed">已开启</span></span>
+            <button id="togglerecbtn" class="ghost" type="button" style="padding:1px 6px;font-size:11px">切换</button>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">网络回环限制：</span>
+          <span id="cfg-loopback" style="font-family:ui-monospace, Consolas, monospace">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">EasyTier 侧车：</span>
+          <span id="cfg-overlay">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">服务端口配置：</span>
+          <span id="cfg-ports" style="font-family:ui-monospace, Consolas, monospace">-</span>
+        </div>
+      </div>
+      <div id="configmsg" class="hint" style="margin-top:6px"></div>
+    </section>
   </div>
   <div>
     <section>
@@ -822,6 +862,94 @@ if (shutdownBtn) {
     }
   };
 }
+let currentConfig = null;
+async function updateConfig() {
+  try {
+    const c = await api("/api/config");
+    if (!c || !c.ok) return;
+    currentConfig = c;
+    if ($("cfg-name")) $("cfg-name").textContent = c.name + " (" + c.platform + ")";
+    if ($("cfg-adv-badge")) {
+      $("cfg-adv-badge").innerHTML = c.advertise
+        ? '<span class="badge completed">已开启</span>'
+        : '<span class="badge offline">已关闭</span>';
+    }
+    if ($("cfg-rec-badge")) {
+      $("cfg-rec-badge").innerHTML = c.reconnect
+        ? '<span class="badge completed">已开启</span>'
+        : '<span class="badge offline">已关闭</span>';
+    }
+    if ($("cfg-loopback")) {
+      $("cfg-loopback").textContent = c.loopback_only ? "127.0.0.1 独占 (测试模式)" : "LAN + 回环";
+    }
+    if ($("cfg-overlay")) {
+      $("cfg-overlay").innerHTML = c.overlay_enabled
+        ? '<span class="badge completed">已启用</span>'
+        : '<span class="badge offline">未开启</span>';
+    }
+    if ($("cfg-ports")) {
+      $("cfg-ports").textContent = "Ctrl:" + c.control_port + " / File:" + c.file_port + " / UI:" + c.ui_port;
+    }
+  } catch (e) {}
+}
+const editNameBtn = $("editnamebtn");
+if (editNameBtn) {
+  editNameBtn.onclick = async () => {
+    const cur = (currentConfig && currentConfig.name) ? currentConfig.name : "";
+    const newName = prompt("修改节点广播名称 (1-64 字符):", cur);
+    if (newName && newName.trim()) {
+      const msg = $("configmsg");
+      if (msg) msg.textContent = "正在更新节点名称…";
+      try {
+        const r = await api("/api/config", { name: newName.trim() });
+        if (r && r.ok) {
+          if (msg) msg.textContent = "节点名称已更新为: " + r.name;
+          updateConfig();
+        } else {
+          if (msg) msg.textContent = "更新失败: " + (r && r.error ? r.error : "未知错误");
+        }
+      } catch (err) {
+        if (msg) msg.textContent = "请求异常: " + err;
+      }
+    }
+  };
+}
+const toggleAdvBtn = $("toggleadvbtn");
+if (toggleAdvBtn) {
+  toggleAdvBtn.onclick = async () => {
+    if (!currentConfig) return;
+    const target = !currentConfig.advertise;
+    const msg = $("configmsg");
+    if (msg) msg.textContent = "正在切换 mDNS 广播状态…";
+    try {
+      const r = await api("/api/config", { advertise: target });
+      if (r && r.ok) {
+        if (msg) msg.textContent = "mDNS 广播已切换为: " + (r.advertise ? "开启" : "关闭");
+        updateConfig();
+      }
+    } catch (err) {
+      if (msg) msg.textContent = "切换失败: " + err;
+    }
+  };
+}
+const toggleRecBtn = $("togglerecbtn");
+if (toggleRecBtn) {
+  toggleRecBtn.onclick = async () => {
+    if (!currentConfig) return;
+    const target = !currentConfig.reconnect;
+    const msg = $("configmsg");
+    if (msg) msg.textContent = "正在切换自动重连状态…";
+    try {
+      const r = await api("/api/config", { reconnect: target });
+      if (r && r.ok) {
+        if (msg) msg.textContent = "自动重连已切换为: " + (r.reconnect ? "开启" : "关闭");
+        updateConfig();
+      }
+    } catch (err) {
+      if (msg) msg.textContent = "切换失败: " + err;
+    }
+  };
+}
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
   refreshPin();
@@ -853,6 +981,10 @@ function setupEventSource() {
           else if (ev.kind === "peer_latency") desc = "时延度量: " + ev.device_id + " (" + ev.rtt_ms + "ms)";
           else if (ev.kind === "pin_state_changed") desc = "PIN 状态: " + (ev.active ? "已武装" : "已撤销/过期");
           else if (ev.kind === "peer_alias_changed") desc = "别名更新: " + ev.device_id + " -> \"" + ev.alias + "\"";
+          else if (ev.kind === "config_changed") {
+            desc = "配置更新: " + ev.name + " (广播:" + (ev.advertise ? "开" : "关") + ", 重连:" + (ev.reconnect ? "开" : "关") + ")";
+            updateConfig();
+          }
           $("ev-last").textContent = "[" + t + "] " + desc;
         }
       } catch (err) {
@@ -877,6 +1009,8 @@ function setupEventSource() {
 tick();
 setupEventSource();
 setInterval(tick, 2000);
+updateConfig();
+setInterval(updateConfig, 3000);
 updateStorage();
 setInterval(updateStorage, 3000);
 updateHealth();

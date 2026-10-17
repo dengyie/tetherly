@@ -54,6 +54,11 @@ pub enum UiEvent {
         device_id: String,
         alias: String,
     },
+    ConfigChanged {
+        name: String,
+        advertise: bool,
+        reconnect: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

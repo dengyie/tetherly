@@ -96,6 +96,8 @@ pub enum CoreError {
     InvalidAlias(String),
     #[error("peer not found: {0}")]
     PeerNotFound(String),
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
 }
 
 impl From<serde_json::Error> for CoreError {

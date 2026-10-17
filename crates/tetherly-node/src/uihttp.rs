@@ -511,6 +511,16 @@ struct PeerAliasBody {
     alias: String,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct ConfigUpdateBody {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    advertise: Option<bool>,
+    #[serde(default)]
+    reconnect: Option<bool>,
+}
+
 fn parse_query_map(q: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for pair in q.split('&') {
@@ -534,6 +544,21 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
     match (method, path_only) {
         ("GET", "/") | ("GET", "/index.html") => (200, "text/html", INDEX.as_bytes().to_vec()),
         ("GET", "/api/state") => json_ok(&snapshot(node).await),
+        ("GET", "/api/config") => json_ok(&node.config_report()),
+        ("POST", "/api/config") | ("PUT", "/api/config") => {
+            match serde_json::from_slice::<ConfigUpdateBody>(body) {
+                Ok(d) => {
+                    if d.name.is_none() && d.advertise.is_none() && d.reconnect.is_none() {
+                        return err(400, "no configuration fields to update");
+                    }
+                    match node.update_config(d.name.as_deref(), d.advertise, d.reconnect) {
+                        Ok(report) => json_ok(&report),
+                        Err(e) => err(400, &e.to_string()),
+                    }
+                }
+                Err(_) => err(400, "bad json"),
+            }
+        }
         ("GET", "/api/pin") => json_ok(&node.pin_report()),
         ("POST", "/api/pin") => match node.generate_pin() {
             Ok(pin) => {

@@ -292,6 +292,24 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or dynamically update the node's running configuration.
+    Config {
+        /// Update node friendly broadcast name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Enable or disable mDNS LAN discovery broadcast.
+        #[arg(long)]
+        advertise: Option<bool>,
+        /// Enable or disable automatic background reconnection to trusted peers.
+        #[arg(long)]
+        reconnect: Option<bool>,
+        /// Output in JSON format.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Fast ping to verify node daemon responsiveness or probe a connected peer's Noise session RTT.
     Ping {
         /// Optional peer ID to probe (e.g. tdev_...). When omitted, probes the local daemon loopback.
@@ -1983,6 +2001,112 @@ async fn main() -> Result<()> {
                 println!("  Live Peers:       {live_peers}");
                 println!("  Trusted Peers:    {trusted_peers}");
                 println!("  Loopback Latency: {:.2}ms", rtt.as_secs_f64() * 1000.0);
+            }
+        }
+        Cmd::Config {
+            name,
+            advertise,
+            reconnect,
+            json,
+            ui_port,
+        } => {
+            let has_updates = name.is_some() || advertise.is_some() || reconnect.is_some();
+            let (code, resp) = if has_updates {
+                let body = serde_json::json!({
+                    "name": name,
+                    "advertise": advertise,
+                    "reconnect": reconnect,
+                });
+                let bytes = serde_json::to_vec(&body)?;
+                loopback_post(ui_port, "/api/config", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?
+            } else {
+                loopback_get(ui_port, "/api/config")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?
+            };
+            if code != 200 {
+                bail!(
+                    "node config query/update failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+            } else {
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                if has_updates {
+                    println!("Tetherly Node Configuration (Updated):");
+                } else {
+                    println!("Tetherly Node Configuration:");
+                }
+                let device_id = v["device_id"].as_str().unwrap_or("?");
+                let name = v["name"].as_str().unwrap_or("?");
+                let platform = v["platform"].as_str().unwrap_or("?");
+                let data_dir = v["data_dir"].as_str().unwrap_or("?");
+                let loopback_only = v["loopback_only"].as_bool().unwrap_or(false);
+                let advertise = v["advertise"].as_bool().unwrap_or(false);
+                let reconnect = v["reconnect"].as_bool().unwrap_or(false);
+                let memory_clip = v["memory_clip"].as_bool().unwrap_or(false);
+                let overlay_enabled = v["overlay_enabled"].as_bool().unwrap_or(false);
+                let ancs_attached = v["ancs_attached"].as_bool().unwrap_or(false);
+                let ancs_peripheral = v["ancs_peripheral"].as_str().unwrap_or("-");
+                let control_port = v["control_port"].as_u64().unwrap_or(0);
+                let file_port = v["file_port"].as_u64().unwrap_or(0);
+                let input_port = v["input_port"].as_u64().unwrap_or(0);
+                let screen_port = v["screen_port"].as_u64().unwrap_or(0);
+                let ui_port_num = v["ui_port"].as_u64().unwrap_or(0);
+
+                println!("  Device ID:        {device_id}");
+                println!("  Node Name:        {name} ({platform})");
+                println!("  Data Directory:   {data_dir}");
+                println!(
+                    "  Loopback Only:    {}",
+                    if loopback_only {
+                        "true (127.0.0.1 only)"
+                    } else {
+                        "false (LAN + Loopback)"
+                    }
+                );
+                println!(
+                    "  mDNS Advertise:   {}",
+                    if advertise { "enabled" } else { "disabled" }
+                );
+                println!(
+                    "  Auto Reconnect:   {}",
+                    if reconnect { "enabled" } else { "disabled" }
+                );
+                println!("  Memory Clip:      {memory_clip}");
+                println!(
+                    "  Overlay Sidecar:  {}",
+                    if overlay_enabled { "enabled" } else { "disabled" }
+                );
+                println!(
+                    "  ANCS Service:     {}",
+                    if ancs_attached {
+                        format!("attached ({ancs_peripheral})")
+                    } else {
+                        format!("detached ({ancs_peripheral})")
+                    }
+                );
+                println!("  Bound Ports:");
+                println!("    Control (Mesh): {control_port}");
+                println!("    File Transfer:  {file_port}");
+                println!("    Input (Remote): {input_port}");
+                println!("    Screen (Video): {screen_port}");
+                println!("    UI (Loopback):  {ui_port_num}");
             }
         }
         Cmd::Ping {

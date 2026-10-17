@@ -10,7 +10,7 @@ use crate::store::{load_trust, remember_route, save_trust, RouteTable};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tetherly_core::frame::{
@@ -341,6 +341,28 @@ pub struct HealthReport {
     pub trusted_peers: usize,
 }
 
+/// Comprehensive report of node static and dynamic configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct NodeConfigReport {
+    pub ok: bool,
+    pub device_id: String,
+    pub name: String,
+    pub platform: String,
+    pub data_dir: String,
+    pub loopback_only: bool,
+    pub advertise: bool,
+    pub reconnect: bool,
+    pub memory_clip: bool,
+    pub ui_port: u16,
+    pub control_port: u16,
+    pub file_port: u16,
+    pub input_port: u16,
+    pub screen_port: u16,
+    pub overlay_enabled: bool,
+    pub ancs_attached: bool,
+    pub ancs_peripheral: String,
+}
+
 enum OutboundSource {
     Bytes(Vec<u8>),
     Path(std::path::PathBuf),
@@ -472,6 +494,10 @@ struct Shared {
     /// Apps allowed to show "open". Empty until config/UI supplies rules.
     allowlist: Mutex<OpenAllowlist>,
     started_at: std::time::Instant,
+    node_name: Mutex<String>,
+    advertise: AtomicBool,
+    reconnect: AtomicBool,
+    advertise_stop: Mutex<Option<watch::Sender<bool>>>,
 }
 
 pub struct Node {
@@ -599,6 +625,9 @@ impl Node {
         } else {
             OverlayStatus::lan_only()
         };
+        let node_name = Mutex::new(cfg.name.clone());
+        let advertise = AtomicBool::new(cfg.advertise);
+        let reconnect = AtomicBool::new(cfg.reconnect);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -647,6 +676,10 @@ impl Node {
             ancs_source,
             allowlist: Mutex::new(OpenAllowlist::default()),
             started_at: std::time::Instant::now(),
+            node_name,
+            advertise,
+            reconnect,
+            advertise_stop: Mutex::new(None),
         });
         Ok(Self { shared })
     }
@@ -667,7 +700,7 @@ impl Node {
         let pin = *self.shared.pin.lock().expect("pin");
         SessionConfig {
             identity: self.shared.identity.clone(),
-            name: self.shared.cfg.name.clone(),
+            name: self.name(),
             platform: self.shared.cfg.platform.clone(),
             trust: self.shared.trust.clone(),
             lockout: self.shared.lockout.clone(),
@@ -778,12 +811,167 @@ impl Node {
         was_active
     }
 
-    pub fn name(&self) -> &str {
-        &self.shared.cfg.name
+    pub fn name(&self) -> String {
+        self.shared.node_name.lock().expect("node_name").clone()
     }
 
     pub fn platform(&self) -> &str {
         &self.shared.cfg.platform
+    }
+
+    pub fn is_advertise_enabled(&self) -> bool {
+        self.shared.advertise.load(Ordering::SeqCst)
+    }
+
+    pub fn set_advertise_enabled(&self, enabled: bool) -> bool {
+        let prev = self.shared.advertise.swap(enabled, Ordering::SeqCst);
+        if prev != enabled {
+            if enabled {
+                self.advertise_mdns();
+            } else if let Some(tx) = self.shared.advertise_stop.lock().expect("advertise_stop").take() {
+                let _ = tx.send(true);
+            }
+            self.emit_config_changed();
+        }
+        enabled
+    }
+
+    pub fn is_reconnect_enabled(&self) -> bool {
+        self.shared.reconnect.load(Ordering::SeqCst)
+    }
+
+    pub fn set_reconnect_enabled(&self, enabled: bool) -> bool {
+        let prev = self.shared.reconnect.swap(enabled, Ordering::SeqCst);
+        if prev != enabled {
+            self.emit_config_changed();
+        }
+        enabled
+    }
+
+    pub fn set_node_name(&self, name: &str) -> Result<String, CoreError> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::InvalidConfig("node name cannot be empty".to_string()));
+        }
+        if trimmed.len() > 64 {
+            return Err(CoreError::InvalidConfig(
+                "node name exceeds maximum length of 64 bytes".to_string(),
+            ));
+        }
+        if trimmed.chars().any(|c| c.is_control()) {
+            return Err(CoreError::InvalidConfig(
+                "node name contains disallowed control characters".to_string(),
+            ));
+        }
+        {
+            let mut n = self.shared.node_name.lock().expect("node_name");
+            *n = trimmed.to_string();
+        }
+        if self.is_advertise_enabled() {
+            if let Some(tx) = self.shared.advertise_stop.lock().expect("advertise_stop").take() {
+                let _ = tx.send(true);
+            }
+            self.advertise_mdns();
+        }
+        self.emit_config_changed();
+        Ok(trimmed.to_string())
+    }
+
+    pub fn update_config(
+        &self,
+        name: Option<&str>,
+        advertise: Option<bool>,
+        reconnect: Option<bool>,
+    ) -> Result<NodeConfigReport, CoreError> {
+        if let Some(n) = name {
+            let trimmed = n.trim();
+            if trimmed.is_empty() {
+                return Err(CoreError::InvalidConfig("node name cannot be empty".to_string()));
+            }
+            if trimmed.len() > 64 {
+                return Err(CoreError::InvalidConfig(
+                    "node name exceeds maximum length of 64 bytes".to_string(),
+                ));
+            }
+            if trimmed.chars().any(|c| c.is_control()) {
+                return Err(CoreError::InvalidConfig(
+                    "node name contains disallowed control characters".to_string(),
+                ));
+            }
+            *self.shared.node_name.lock().expect("node_name") = trimmed.to_string();
+        }
+        if let Some(adv) = advertise {
+            let prev = self.shared.advertise.swap(adv, Ordering::SeqCst);
+            if prev != adv {
+                if adv {
+                    self.advertise_mdns();
+                } else if let Some(tx) = self.shared.advertise_stop.lock().expect("advertise_stop").take() {
+                    let _ = tx.send(true);
+                }
+            } else if adv && name.is_some() {
+                if let Some(tx) = self.shared.advertise_stop.lock().expect("advertise_stop").take() {
+                    let _ = tx.send(true);
+                }
+                self.advertise_mdns();
+            }
+        } else if name.is_some() && self.is_advertise_enabled() {
+            if let Some(tx) = self.shared.advertise_stop.lock().expect("advertise_stop").take() {
+                let _ = tx.send(true);
+            }
+            self.advertise_mdns();
+        }
+        if let Some(rec) = reconnect {
+            self.shared.reconnect.store(rec, Ordering::SeqCst);
+        }
+        self.emit_config_changed();
+        Ok(self.config_report())
+    }
+
+    pub fn config_report(&self) -> NodeConfigReport {
+        let bound_ctrl = self.shared.bound_control.load(Ordering::SeqCst);
+        let bound_file = self.shared.bound_file.load(Ordering::SeqCst);
+        let bound_input = self.shared.bound_input.load(Ordering::SeqCst);
+        let bound_screen = self.shared.bound_screen.load(Ordering::SeqCst);
+        let bound_ui = self.shared.bound_ui.load(Ordering::SeqCst);
+
+        let ctrl_port = if bound_ctrl != 0 { bound_ctrl } else { self.shared.cfg.control_port };
+        let file_port = if bound_file != 0 { bound_file } else { self.shared.cfg.file_port };
+        let input_port = if bound_input != 0 { bound_input } else { self.shared.cfg.input_port };
+        let screen_port = if bound_screen != 0 { bound_screen } else { self.shared.cfg.screen_port };
+        let ui_port = if bound_ui != 0 { bound_ui } else { self.shared.cfg.ui_port };
+
+        let ancs_attached = self.shared.ancs.lock().expect("ancs").is_some();
+
+        NodeConfigReport {
+            ok: true,
+            device_id: self.shared.identity.device_id().to_string(),
+            name: self.name(),
+            platform: self.platform().to_string(),
+            data_dir: self.shared.cfg.data_dir.display().to_string(),
+            loopback_only: self.shared.cfg.loopback_only,
+            advertise: self.is_advertise_enabled(),
+            reconnect: self.is_reconnect_enabled(),
+            memory_clip: self.shared.cfg.memory_clip,
+            ui_port,
+            control_port: ctrl_port,
+            file_port,
+            input_port,
+            screen_port,
+            overlay_enabled: self.shared.cfg.overlay.enabled,
+            ancs_attached,
+            ancs_peripheral: self.shared.cfg.ancs_peripheral.clone(),
+        }
+    }
+
+    fn emit_config_changed(&self) {
+        let name = self.name();
+        let advertise = self.is_advertise_enabled();
+        let reconnect = self.is_reconnect_enabled();
+        self.emit(UiEvent::ConfigChanged {
+            name,
+            advertise,
+            reconnect,
+        });
     }
 
     pub fn candidates(&self) -> Vec<CandidateViewDto> {
@@ -1140,7 +1328,7 @@ impl Node {
             status: "healthy".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             device_id: self.shared.identity.device_id().to_string(),
-            name: self.shared.cfg.name.clone(),
+            name: self.name(),
             platform: self.platform().to_string(),
             pid: std::process::id(),
             uptime_secs: self.shared.started_at.elapsed().as_secs(),
@@ -1638,15 +1826,13 @@ impl Node {
         // only path is a CGNAT overlay (Tailscale/NetBird) can see why nothing
         // was discovered instead of guessing.
         crate::lan::log_skipped_interfaces();
-        if self.shared.cfg.advertise {
+        if self.is_advertise_enabled() {
             self.advertise_mdns();
         }
         if self.shared.cfg.overlay.enabled {
             self.spawn_overlay();
         }
-        if self.shared.cfg.reconnect {
-            self.spawn_reconnect();
-        }
+        self.spawn_reconnect();
 
         for l in listeners {
             node_accept_loop(self.clone_handle(), l, "control", |node, s, a| async move {
@@ -1673,6 +1859,9 @@ impl Node {
 
     pub fn shutdown(&self) {
         let _ = self.shared.shutdown.send(true);
+        if let Some(tx) = self.shared.advertise_stop.lock().expect("advertise_stop").take() {
+            let _ = tx.send(true);
+        }
         if let Ok(mut sessions) = self.shared.sessions.try_lock() {
             sessions.clear();
         }
@@ -1875,10 +2064,12 @@ impl Node {
     fn advertise_mdns(&self) {
         let id = self.shared.identity.device_id().clone();
         let fp = DeviceId::fingerprint12(self.shared.identity.id_pk());
-        let name = self.shared.cfg.name.clone();
+        let name = self.name();
         let port = self.shared.cfg.control_port;
         let addrs = lan_ips();
         let mut stop = self.shared.shutdown.subscribe();
+        let (adv_tx, mut adv_rx) = watch::channel(false);
+        *self.shared.advertise_stop.lock().expect("advertise_stop") = Some(adv_tx);
         tokio::task::spawn_blocking(move || {
             let d = match tetherly_net::mdns::daemon() {
                 Ok(d) => d,
@@ -1904,11 +2095,20 @@ impl Node {
             };
             handle.block_on(async {
                 loop {
-                    if *stop.borrow() {
+                    if *stop.borrow() || *adv_rx.borrow() {
                         break;
                     }
-                    if stop.changed().await.is_err() {
-                        break;
+                    tokio::select! {
+                        _ = stop.changed() => {
+                            if *stop.borrow() {
+                                break;
+                            }
+                        }
+                        _ = adv_rx.changed() => {
+                            if *adv_rx.borrow() {
+                                break;
+                            }
+                        }
                     }
                 }
             });
@@ -1923,6 +2123,17 @@ impl Node {
             loop {
                 if *stop.borrow() {
                     break;
+                }
+                if !node.is_reconnect_enabled() {
+                    tokio::select! {
+                        _ = stop.changed() => {
+                            if *stop.borrow() {
+                                break;
+                            }
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                    }
+                    continue;
                 }
                 let trusted = node.trusted();
                 let live = node.live_peers();

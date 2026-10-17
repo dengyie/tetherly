@@ -331,6 +331,24 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or dynamically update the node's running configuration.
+    Config {
+        /// Update node friendly broadcast name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Enable or disable mDNS LAN discovery broadcast.
+        #[arg(long)]
+        advertise: Option<bool>,
+        /// Enable or disable automatic background reconnection to trusted peers.
+        #[arg(long)]
+        reconnect: Option<bool>,
+        /// Output in JSON format.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Fast ping to verify node daemon responsiveness or probe a connected peer's Noise session RTT.
     Ping {
         /// Optional peer ID to probe (e.g. tdev_...). When omitted, probes the local daemon loopback.
@@ -1947,6 +1965,105 @@ async fn main() -> Result<()> {
                 println!("  Live Peers:       {}", rep.live_peers);
                 println!("  Trusted Peers:    {}", rep.trusted_peers);
                 println!("  Loopback Latency: {:.2}ms", rtt.as_secs_f64() * 1000.0);
+            }
+        }
+        Cmd::Config {
+            name,
+            advertise,
+            reconnect,
+            json,
+            ui_port,
+        } => {
+            let has_updates = name.is_some() || advertise.is_some() || reconnect.is_some();
+            let (code, resp) = if has_updates {
+                let body = serde_json::json!({
+                    "name": name,
+                    "advertise": advertise,
+                    "reconnect": reconnect,
+                });
+                tetherly_node::loopback_post(ui_port, "/api/config", &body.to_string())
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?
+            } else {
+                tetherly_node::loopback_get(ui_port, "/api/config")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?
+            };
+            if code != 200 {
+                anyhow::bail!(
+                    "node config query/update failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+            } else {
+                let rep: tetherly_node::NodeConfigReport = serde_json::from_slice(&resp)?;
+                if has_updates {
+                    println!("Tetherly Node Configuration (Updated):");
+                } else {
+                    println!("Tetherly Node Configuration:");
+                }
+                println!("  Device ID:        {}", rep.device_id);
+                println!("  Node Name:        {} ({})", rep.name, rep.platform);
+                println!("  Data Directory:   {}", rep.data_dir);
+                println!(
+                    "  Loopback Only:    {}",
+                    if rep.loopback_only {
+                        "true (127.0.0.1 only)"
+                    } else {
+                        "false (LAN + Loopback)"
+                    }
+                );
+                println!(
+                    "  mDNS Advertise:   {}",
+                    if rep.advertise {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                );
+                println!(
+                    "  Auto Reconnect:   {}",
+                    if rep.reconnect {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                );
+                println!("  Memory Clip:      {}", rep.memory_clip);
+                println!(
+                    "  Overlay Sidecar:  {}",
+                    if rep.overlay_enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                );
+                println!(
+                    "  ANCS Service:     {}",
+                    if rep.ancs_attached {
+                        format!("attached ({})", rep.ancs_peripheral)
+                    } else {
+                        format!("detached ({})", rep.ancs_peripheral)
+                    }
+                );
+                println!("  Bound Ports:");
+                println!("    Control (Mesh): {}", rep.control_port);
+                println!("    File Transfer:  {}", rep.file_port);
+                println!("    Input (Remote): {}", rep.input_port);
+                println!("    Screen (Video): {}", rep.screen_port);
+                println!("    UI (Loopback):  {}", rep.ui_port);
             }
         }
         Cmd::Ping {

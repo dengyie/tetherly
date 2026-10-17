@@ -3,12 +3,80 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.44** |
+| 文档版本 | **1.45** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）**——(1) **打破受信任对端别名静态冻结**：彻底解决此前 `TrustedPeer.alias` 永久绑定初次配对时的 `hello.name` 无法变更问题；在 `TrustStore` 接口及 `store.rs` 增设 `update_alias(&mut self, id: &DeviceId, alias: &str) -> Result<bool, CoreError>`，支持对端别名原子变更并持久化至 `trusted.json`；(2) **智能对端解析体系 (`Node::resolve_peer`)**：支持用户与客户端在所有对端目标 API 及 CLI 命令中使用友好别名、广播主机名或部分 ID（三级自适应智能解析：精确 DeviceId -> 别名/名称大小写不敏感全词匹配 -> 别名/名称/ID 包含匹配），杜绝记忆 21 位加密 ID 负担；(3) **轻量级回环控制面端点 (`POST /api/peers/alias`)**：实现对端别名动态修改接口，严格校验长度（1..=64 字节）与禁止控制字符；并在 `POST /api/peers/ping`、`unpair`、`file/send`、`notify`、`clip/sync`、`screen/start`、`input/start` 全域接入智能解析；(4) **CLI 双端全同构 (`tetherly alias` 与 `tetherly-cli alias`)**：提供原生修改别名命令，并在 `peers` 列表显式呈现用户别名；(5) **Web UI 交互闭环与安全 SSE 流**：在已配对与在线对端卡片提供「别名」即时修改弹框，广播 `UiEvent::PeerAliasChanged { device_id, alias }` 驱动界面实时重绘；(6) **端到端集成测试全绿覆盖**：在 `tests/phase1.rs` 增设 `peer_alias_governance_and_smart_resolution_via_loopback_api` 完备验证治理链路。+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）**——(1) **安全非泄露配置透视模型 (`NodeConfigReport`)**：打破此前节点配置黑盒与快照轮询高开销，对外暴露设备 ID、广播名、操作系统、存储路径、回环模式、端口分配与特性使能标记，绝不泄漏私钥与敏感对称凭据；(2) **动态运行时状态与热重载治理**：在 `Node` 与 `Shared` 中引入 `node_name` 互斥保护与 `advertise`、`reconnect` 原子开关，支持无需重启守护进程即可动态重命名本机、优雅启闭 mDNS 广播发现任务，以及挂起/唤醒后台受信任对端重连轮询；(3) **轻量级回环控制面端点 (`GET /api/config`, `POST /api/config`, `PUT /api/config`)**：实现配置直查与局部/联合热更新端点，提供严格参数校验（1..=64 字节、禁止控制字符）与原子写回；(4) **CLI 双端全同构 (`tetherly config` 与 `tetherly-cli config`)**：支持无参输出整洁格式化配置视图、`--name` 重命名本机、`--advertise <bool>` 切换广播以及 `--reconnect <bool>` 控制自动重连；(5) **Web UI 动态配置面板与 SSE 实时同步**：新增「节点配置与运行特性」卡片，提供名称即时编辑与特性一键启闭，接入 `UiEvent::ConfigChanged` 驱动界面实时同步；(6) **端到端集成测试全绿覆盖**：在 `tests/phase1.rs` 增设 `node_config_inspection_and_dynamic_flags_via_loopback_api` 完备验证治理全流程。+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.45 相对 1.44(节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理)**
+
+- **动机(节点配置黑盒、运行时特性静态冻结、动态重命名缺失与运维管控盲区)**:
+  在 v1.18 至 v1.44 的演进中，Tetherly 完善了点对点通信、配对认证、文件传输及对端别名解析等控制面与数据面能力。然而在长期运行守护进程及多宿主、混合网络环境运维中，暴露出以下显著缺陷：
+  1. **节点运行配置黑盒与快照轮询开销**：此前外部 CLI、监控脚本或 Web UI 若要探知当前节点的基础运行参数（如当前广播名称、底层平台、存储数据目录、回环限制状态、端口矩阵与扩展模块挂载状态），唯一途径是拉取并全量反序列化庞大的整机快照 `GET /api/state`。在包含大量拓扑对端与路由缓存时，造成不必要的 CPU 与内存开销；
+  2. **运行时特性静态冻结（热重载缺失）**：节点启动后，节点广播名 `name`、mDNS 广播发现 `advertise` 开关、以及后台自动重连对端 `reconnect` 循环处于静态冻结状态；若用户进入移动/受限计费网络希望暂停重连循环，或在公共 Wi-Fi 下临时隐身本机（停止 mDNS 广播以规避网络探测与节能），或在不同工作空间切换广播显示名，此前必须杀掉守护进程修改配置文件并重启，直接导致所有正在进行的传输会话与活动链路强行中断；
+  3. **CLI 缺乏配置检视与控制子命令**：双端命令行（`tetherly` 与 `tetherly-cli`）缺乏对节点自身配置的一键快速查询与热修改机制；
+  4. **Web UI 缺乏配置治理交互与实时事件同步**：Web 界面没有暴露节点基础配置，无法就地修改本机名称或切换广播/重连策略。
+
+- **架构与协议设计(ADR-038 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理)**:
+  1. **节点配置安全透视模型 (`NodeConfigReport`)**:
+     - 在 `runtime.rs` 与 `lib.rs` 引入 `NodeConfigReport` DTO：
+       ```rust
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+       pub struct NodeConfigReport {
+           pub ok: bool,
+           pub device_id: String,
+           pub name: String,
+           pub platform: String,
+           pub data_dir: String,
+           pub loopback_only: bool,
+           pub advertise: bool,
+           pub reconnect: bool,
+           pub memory_clip: bool,
+           pub ui_port: u16,
+           pub control_port: u16,
+           pub file_port: u16,
+           pub input_port: u16,
+           pub screen_port: u16,
+           pub overlay_enabled: bool,
+           pub ancs_attached: bool,
+           pub ancs_peripheral: String,
+       }
+       ```
+     - 严格守卫安全红线：绝不输出私钥、对称传输密钥或配对 PIN 等敏感凭据。
+  2. **原子动态运行时状态与热重载治理 (`Node` / `Shared`)**:
+     - `node_name: Mutex<String>`：启动时由 `config.name` 初始化，动态修改严格校验非空（1..=64 字节）且无控制字符；
+     - `advertise: AtomicBool` 与 `reconnect: AtomicBool`：提供无锁原子读取与即时切换；
+     - `advertise_stop: Mutex<Option<watch::Sender<bool>>>`：mDNS 广播任务接入取消信号通道，在动态开启/关闭或改名时平滑停止或重新拉起广播循环；
+     - `spawn_reconnect`：后台重连循环每轮轮询 `node.is_reconnect_enabled()`，关闭时挂起等待，开启时即时唤醒恢复重连尝试；
+     - 每次变更触发 `Node::emit_config_changed`，广播 `UiEvent::ConfigChanged { name, advertise, reconnect }`。
+  3. **轻量级回环控制面端点 (`GET /api/config`, `POST /api/config`, `PUT /api/config`)**:
+     - `GET /api/config`：极低开销返回 `NodeConfigReport`；
+     - `POST /api/config` 与 `PUT /api/config`：接收 `ConfigUpdateBody { name, advertise, reconnect }`，支持单字段或多字段联合更新；
+     - 错误路径处理：空请求体返回 400（"no configuration fields to update"），非法名称返回 400，非合法 JSON 返回 400；
+     - 安全红线：严格绑定 `127.0.0.1` 环回接口并校验 `Host: 127.0.0.1|localhost`。
+  4. **CLI 双端全同构 (`tetherly config` 与 `tetherly-cli config`)**:
+     - 新增 `Cmd::Config { name, advertise, reconnect, json, ui_port }`；
+     - 无参数时输出整洁的节点运行全景配置卡片（设备 ID、名称、平台、数据目录、网络发现状态、端口列表等）；
+     - 支持 `--name <NAME>` 动态重命名本机；
+     - 支持 `--advertise <true|false>` 动态启闭 mDNS 广播；
+     - 支持 `--reconnect <true|false>` 动态启闭后台重连；
+     - 支持 `--json` 输出机器可读格式。
+  5. **Web UI 动态配置面板与 SSE 实时同步 (`ui/index.html`)**:
+     - 新增「节点配置与运行特性」卡片；
+     - 展示节点设备 ID、当前名称、平台、数据目录及端口列表；
+     - 提供「改名」按钮触发即时提示框，提供广播开关与自动重连开关；
+     - 监听 SSE `config_changed` 事件，零延迟刷新多端视图。
+  6. **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**:
+     - 增设 `node_config_inspection_and_dynamic_flags_via_loopback_api`：
+       1. 验证 `GET /api/config` 初始状态字段完备性；
+       2. 验证 `POST /api/config` 动态改名与 `UiEvent::ConfigChanged` SSE 事件捕获；
+       3. 验证 `GET /api/health` 同步反映新名称；
+       4. 验证 `PUT /api/config` 动态特性开关开启与 SSE 事件通知；
+       5. 验证单字段局部更新（`reconnect: false`）；
+       6. 验证空载荷、空名称、超长名称、控制字符及非法 JSON 的 400 校验防御；
+       7. 优雅关闭节点。
 
 **1.44 相对 1.43(对端设备别名治理、友好命名持久化与对端标识智能解析)**
 
