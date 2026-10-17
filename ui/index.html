@@ -77,6 +77,11 @@
   .badge.completed { background: rgba(62, 207, 142, 0.2); color: var(--ok); }
   .badge.failed { background: rgba(232, 93, 93, 0.2); color: var(--bad); }
   .badge.offline { background: rgba(150, 150, 150, 0.15); color: #888; }
+  .chip {
+    display: inline-flex; align-items: center; background: #131a22; border: 1px solid var(--line);
+    border-radius: 4px; padding: 2px 6px; font-size: 11px; margin-right: 4px; margin-bottom: 4px;
+    font-family: ui-monospace, Consolas, monospace; color: var(--text);
+  }
   @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -150,17 +155,17 @@
       </div>
     </section>
     <section style="margin-top:16px">
-      <h2>iPhone 通知（ANCS）</h2>
-      <div class="hint">① 先在系统蓝牙设置里把 iPhone 连到本机（ANCS），再点下面。这一步与配对是两件事。</div>
-      <div id="ancs" class="hint">状态：读取中…</div>
-      <div class="row" style="margin-top:12px">
-        <button id="ancsgo" type="button">系统蓝牙已连上 → 启动 ANCS</button>
+      <h2>iPhone 通知（ANCS 苹果通知服务）</h2>
+      <div class="hint">① 先在系统蓝牙设置里把 iPhone 连到本机（ANCS），再点连接。这一步与配对是两件事。</div>
+      <div id="ancs" class="hint" style="margin-top:8px">状态：读取中…</div>
+      <div class="row" style="margin-top:10px">
+        <button id="ancsgo" type="button">系统蓝牙已连上 → 启动 / 重连 ANCS</button>
       </div>
-      <div class="hint" style="margin-top:12px">允许「打开」的应用（只接受本地 scheme，例如 weixin://）：</div>
-      <div id="openapps" class="hint">（空）</div>
+      <div class="hint" style="margin-top:12px; margin-bottom:6px">已生效跳转白名单（允许桌面通知提供「打开」操作）：</div>
+      <div id="openapps" style="display:flex; flex-wrap:wrap; margin-bottom:8px">（空）</div>
       <div class="row">
-        <input id="openapp" placeholder="com.tencent.xin"/>
-        <input id="openurl" placeholder="weixin://"/>
+        <input id="openapp" placeholder="App ID（如 com.tencent.xin）"/>
+        <input id="openurl" placeholder="URL 模板（可选，如 weixin://）"/>
         <button id="openadd" type="button">加入白名单</button>
       </div>
     </section>
@@ -439,15 +444,33 @@ function render(s) {
   }
   const a = $("ancs");
   if (a) {
-    a.textContent = s.ancs_state === "off"
-      ? "状态：本机未接入蓝牙（ANCS 传输未挂载）"
-      : ("状态：" + s.ancs_state);
+    let badgeHtml = "";
+    if (s.ancs_state === "off") {
+      badgeHtml = '<span class="badge offline">未挂载传输栈</span> <span class="meta">本机未接入蓝牙</span>';
+    } else if (s.ancs_state === "ready") {
+      badgeHtml = '<span class="badge completed">已就绪 (Ready)</span> <span class="meta">正常接收 iPhone 通知</span>';
+    } else if (s.ancs_state === "idle") {
+      badgeHtml = '<span class="badge verifying">空闲 (Idle)</span> <span class="meta">等待握手连接</span>';
+    } else {
+      badgeHtml = '<span class="badge verifying">' + s.ancs_state + '</span>';
+    }
+    a.innerHTML = badgeHtml;
   }
   const oa = $("openapps");
   if (oa) {
-    oa.textContent = (s.open_apps && s.open_apps.length) ? s.open_apps.join("、") : "（空）";
+    oa.innerHTML = "";
+    if (s.open_apps && s.open_apps.length) {
+      for (const id of s.open_apps) {
+        const chip = document.createElement("span");
+        chip.className = "chip";
+        chip.textContent = id;
+        oa.appendChild(chip);
+      }
+    } else {
+      oa.innerHTML = '<span class="hint">（空）</span>';
+    }
   }
-const sc = $("screen");
+  const sc = $("screen");
   if (sc) {
     const st = s.screen || {};
     sc.textContent = "状态:" + (st.state || "idle")
@@ -465,8 +488,19 @@ $("mkpin").onclick = async () => {
   if (r.pin) $("pin").textContent = r.pin;
 };
 $("dial").onclick = () => api("/api/dial", { addr: $("addr").value, pin: $("peerpin").value || null });
-$("ancsgo").onclick = () => api("/api/ancs/connect", {});
-$("openadd").onclick = () => api("/api/ancs/allow", { app_id: $("openapp").value, url: $("openurl").value });
+$("ancsgo").onclick = async () => {
+  await api("/api/ancs/connect", {});
+  poll();
+};
+$("openadd").onclick = async () => {
+  const app_id = $("openapp").value.trim();
+  const url = $("openurl").value.trim() || undefined;
+  if (!app_id) return;
+  await api("/api/ancs/allow", { app_id, url });
+  $("openapp").value = "";
+  $("openurl").value = "";
+  poll();
+};
 $("screenallow").onclick = () => api("/api/screen/allow", {});
 $("screenrevoke").onclick = () => api("/api/screen/revoke", {});
 $("screenstart").onclick = () => api("/api/screen/start", {});

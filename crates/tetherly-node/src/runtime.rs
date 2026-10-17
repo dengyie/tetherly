@@ -247,6 +247,16 @@ pub struct TransferStats {
     pub failed_count: u64,
 }
 
+/// Lightweight status report for the ANCS (Apple Notification Center Service) ingress.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AncsReport {
+    pub ok: bool,
+    pub attached: bool,
+    pub state: String,
+    pub retry_at_ms: Option<u64>,
+    pub allowlist: Vec<String>,
+}
+
 enum OutboundSource {
     Bytes(Vec<u8>),
     Path(std::path::PathBuf),
@@ -828,6 +838,35 @@ impl Node {
             .expect("ancs")
             .as_ref()
             .map(|i| i.state())
+    }
+
+    pub fn ancs_report(&self) -> AncsReport {
+        let (attached, state, retry_at_ms) = {
+            let guard = self.shared.ancs.lock().expect("ancs");
+            match guard.as_ref() {
+                None => (false, "off".to_string(), None),
+                Some(ing) => match ing.state() {
+                    tetherly_core::AncsState::Idle => (true, "idle".to_string(), None),
+                    tetherly_core::AncsState::Ready => (true, "ready".to_string(), None),
+                    tetherly_core::AncsState::Backoff { retry_at_ms } => {
+                        (true, "backoff".to_string(), Some(retry_at_ms))
+                    }
+                },
+            }
+        };
+        let allowlist = self
+            .open_allowlist()
+            .rules()
+            .iter()
+            .map(|r| r.app_id.clone())
+            .collect();
+        AncsReport {
+            ok: true,
+            attached,
+            state,
+            retry_at_ms,
+            allowlist,
+        }
     }
 
     /// Bring the ANCS link up: Data Source first, then Notification Source.

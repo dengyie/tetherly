@@ -3,12 +3,44 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.36** |
+| 文档版本 | **1.37** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）**——(1) **轻量级网络与侧车回环 API (`GET /api/net`)**：提供无全量快照序列化负担的高性能接口，透视本机全部物理网卡/虚拟接口分类（`IfaceReport`，明示监听状态与跳过原因）及 EasyTier 侧车深层拓扑（`present`、`source`、`local_ips`、`peers` 虚拟 IP 清单）；(2) **CLI 诊断命令全量同构**：`tetherly` 与 `tetherly-cli` 增设 `net [--interfaces] [--json]` 子命令群，表格化展现网卡判定（监听 vs 跳过理由）与 EasyTier 侧车状态；(3) **Web UI 补全**：在网络区域集成网卡分类诊断表格与 EasyTier 拓扑展开视图；(4) **端到端集成测试全覆盖**（`tests/phase2.rs` 增设 `network_interface_classification_and_sidecar_inspection_via_loopback_api`）。+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）**——(1) **轻量级 ANCS 回环 API (`GET /api/ancs`)**：提供无全量快照序列化负担的高性能接口，透视蓝牙底层传输栈连接状态（`attached: bool`）、入站 Ingress 状态（`state: String` 如 `off`/`idle`/`subscribing`/`ready`/`backoff`）、重连退避倒计时（`retry_at_ms: Option<u64>`）及白名单规则清单（`allowlist: Vec<String>`）；(2) **白名单规则治理与全闭环控制**：在原有 `POST /api/ancs/connect` 与 `POST /api/ancs/allow` 基础上，支持在 `GET /api/ancs` 中直接获取已加载白名单规则；(3) **CLI 全量同构命令群 (`tetherly ancs` 与 `tetherly-cli ancs`)**：增设 `ancs status [--json]`、`ancs connect`、`ancs allow <app_id> [--url <template>]`；(4) **Web UI 补全**：在 `ui/index.html` 增设「ANCS 苹果通知服务」管理面板（传输栈状态指示、主动重连、白名单 App 标签展示与规则追加）；(5) **端到端集成测试全覆盖**（`tests/phase4.rs` 增设 `ancs_status_inspection_connection_and_allowlist_via_loopback_api`）。+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.37 相对 1.36(ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构)**
+
+- **动机(ANCS 状态黑盒、缺乏轻量级诊断 API 与 CLI 控制子命令空白)**:
+  在 Phase 4（v1.23）落地 Windows WinRT BLE GATT 驱动后，电脑端已支持通过蓝牙低功耗接入 iPhone 的 Apple Notification Center Service (ANCS)。然而，在无头运维、脚本自动化与日常桌面交互中仍存在关键断层：
+  1. **缺少轻量级专用状态接口**：此前仅能通过全量快照 `GET /api/state` 获取 `ancs_state: String`（如 `"off"` 或状态名）以及 `open_apps: Vec<String>`。每次查询都要承受遍历全量信任库、活跃传输、网卡分类与屏幕帧统计的性能惩罚，且丢失了传输栈底层连接态（`attached: bool`）与退避重试倒计时（`retry_at_ms: Option<u64>`）；
+  2. **CLI 缺乏 ANCS 控制与治理子命令**：`tetherly` 与 `tetherly-cli` 均无 `ancs` 子命令群。运维人员在终端无法查看当前 ANCS 连接状态，无法通过命令行触发与 iPhone 的重连订阅握手，也无法动态向安全白名单（`OpenAllowlist`）注入允许跳转的 App 规则；
+  3. **Web UI 白名单管理不完整**：Web UI 缺乏统一的 ANCS 状态视图与白名单规则追加交互，用户无法直观查阅已授权的桌面外部应用跳转规则。
+
+- **架构与协议设计(ADR-030 ANCS 苹果通知服务深层可观测性与规则治理)**:
+  1. **回环 HTTP API 扩充 (`GET /api/ancs`)**:
+     - 严格遵循 127.0.0.1 绑核与 Host 头校验；
+     - 返回结构：
+       ```json
+       {
+         "ok": true,
+         "attached": true,
+         "state": "ready",
+         "retry_at_ms": null,
+         "allowlist": ["com.apple.MobileSMS", "com.tencent.xin"]
+       }
+       ```
+  2. **节点运行时扩展 (`Node::ancs_report`)**:
+     - 聚合底层传输栈是否存在 (`attached`)、当前 Ingress 状态名 (`state`)、退避重试时间戳 (`retry_at_ms`) 与当前生效的应用白名单 (`allowlist`)；
+  3. **CLI 命令行全量同构 (`tetherly` 与 `tetherly-cli`)**:
+     - `ancs status [--json] [--ui-port <port>]`：展示 ANCS 传输栈、状态、重试时间与允许跳转的 App 清单；
+     - `ancs connect [--ui-port <port>]`：向已连接的 iPhone 发起 ANCS 订阅通道握手；
+     - `ancs allow <app_id> [--url <template>] [--ui-port <port>]`：动态向白名单注入允许跳转的应用规则；
+  4. **Web UI 补全 (`ui/index.html`)**:
+     - 在 Web UI 中增设「ANCS 苹果通知服务」卡片，提供状态指示徽标、重连控制按钮、白名单规则展现与输入添加表单；
+  5. **端到端集成测试全覆盖**:
+     - 在 `tests/phase4.rs` 增设 `ancs_status_inspection_connection_and_allowlist_via_loopback_api`，全面验证无 transport 时返回 `off`、动态追加白名单实时生效、mock transport 触发握手与状态跃迁，以及 400 校验防御。
 
 **1.36 相对 1.35(网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环)**
 
@@ -1797,4 +1829,39 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - 验证包含各网络接口的判定逻辑；
      - 验证在默认局域网模式下 `overlay.present` 正确反映侧车就绪态；
      - 验证注入附加虚拟对端 (`extra_peers`) 后 `overlay.present` 与来源准确转换为 `Manual` 且对端 IP 准确体现在响应清单中。
+
+## 36. ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构 (v1.37 / ADR-030)
+
+1. **动机与设计准则（ADR-030）**：
+   - 彻底打破 ANCS 苹果通知服务在终端环境与监控探针下的状态黑盒；
+   - 摆脱必须请求全量快照 `GET /api/state` 才能知晓 ANCS 状态的高开销弊端，提供轻量级专用回环接口 `GET /api/ancs`；
+   - 完善 ANCS Ingress 的全生命周期控制：支持查询连接态、重试倒计时、触发重连握手 (`connect`) 与动态追加应用跳转规则 (`allow`)；
+   - 提供全平台对齐的 CLI 诊断与治理工具 `tetherly ancs` 与 `tetherly-cli ancs`，支持 `status [--json]`、`connect` 与 `allow <app_id> [--url <template>]`；
+   - 严格维护 ADR-004（ANCS 是 Ingress，不是 Transport，禁止把 BLE 当 RPC）、ADR-010/ADR-013（回环 127.0.0.1 绑核、Host 头校验与轻量客户端模式）与安全红线（载荷 URL 绝不自动执行，跳转必须经过 OpenAllowlist 白名单精确匹配）。
+
+2. **核心机制与实现**：
+   - **轻量级 ANCS 状态回环 API (`GET /api/ancs`)**：
+     - 返回模型包含：
+       - `ok: bool`：操作成功标识；
+       - `attached: bool`：当前节点是否挂载了硬件 BLE 传输栈实例；
+       - `state: String`：当前 Ingress 状态（如 `off`、`idle`、`subscribing`、`ready`、`backoff`）；
+       - `retry_at_ms: Option<u64>`：处于 `backoff` 状态时的计划重试时间戳（毫秒）；
+       - `allowlist: Vec<String>`：已加载的允许通过 `POST /api/open` 打开的 App ID 列表；
+   - **节点运行时扩展 (`Node::ancs_report`)**：
+     - 统一聚合底层传输栈存活性、`AncsIngress` 状态、退避时钟与 `OpenAllowlist` 规则；
+   - **CLI 终端诊断与治理命令群（`tetherly` 与 `tetherly-cli` 全量同构）**：
+     - `ancs status [--json] [--ui-port <port>]`：表格化呈现 ANCS 传输栈挂载状态、Ingress 状态、退避重连时钟以及生效白名单清单；
+     - `ancs connect [--ui-port <port>]`：调用 `POST /api/ancs/connect` 主动触发对端 iPhone 的 ANCS 特征值订阅；
+     - `ancs allow <app_id> [--url <template>] [--ui-port <port>]`：调用 `POST /api/ancs/allow` 追加白名单规则；
+   - **Web UI 补全 (`ui/index.html`)**：
+     - 在 Web UI 中增加「ANCS 苹果通知服务」管理面板，显示传输栈状态徽标与重试倒计时，集成一键「连接/重连」按钮与白名单规则添加表单。
+
+3. **测试覆盖与 GitHub CI 验证**：
+   - 在 `tests/phase4.rs` 增设 `ancs_status_inspection_connection_and_allowlist_via_loopback_api`：
+     - 验证默认无 transport 时 `GET /api/ancs` 正确返回 `attached: false`、`state: "off"`；
+     - 验证在默认状态下调用 `POST /api/ancs/connect` 返回 400（"no ANCS transport attached"）；
+     - 验证通过 `POST /api/ancs/allow` 动态追加白名单规则，`GET /api/ancs` 立即反映更新；
+     - 验证挂载 `MemoryAncsTransport` 后，`GET /api/ancs` 正确呈现 `attached: true`，调用 `POST /api/ancs/connect` 成功触发订阅并返回 `ready` 状态；
+     - 验证非法请求参数（空 JSON、缺少参数）被严格拒绝并返回 400。
+
 

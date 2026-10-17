@@ -575,3 +575,143 @@ async fn m4_5_the_transport_pump_subscribes_in_order_and_feeds_the_ingress() {
     feed.send(AncsInbound::Disconnected).expect("feed");
     wait_for(|| matches!(node.ancs_state(), Some(AncsState::Backoff { .. }))).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ancs_status_inspection_connection_and_allowlist_via_loopback_api() {
+    // 1. Node without ANCS transport (no transport attached)
+    let (node1, _clock1, _guard1) = start("ancs-ui1", None);
+    let ui_port1 = node1.spawn_ui().await.expect("spawn ui 1");
+
+    // GET /api/ancs should report ok=true, attached=false, state="off", retry_at_ms=None
+    let (code, resp) = tetherly_node::loopback_get(ui_port1, "/api/ancs")
+        .await
+        .expect("get /api/ancs");
+    assert_eq!(code, 200);
+    let report: tetherly_node::AncsReport =
+        serde_json::from_slice(&resp).expect("parse AncsReport");
+    assert!(report.ok);
+    assert!(!report.attached);
+    assert_eq!(report.state, "off");
+    assert_eq!(report.retry_at_ms, None);
+    assert!(report.allowlist.is_empty());
+
+    // POST /api/ancs/connect without transport should fail with HTTP 400
+    let (code, err_resp) = tetherly_node::loopback_post(ui_port1, "/api/ancs/connect", b"{}")
+        .await
+        .expect("post connect");
+    assert_eq!(code, 400);
+    let err_v: serde_json::Value = serde_json::from_slice(&err_resp).expect("parse err");
+    assert_eq!(err_v["error"], "no ANCS transport attached");
+
+    // POST /api/ancs/allow with invalid json should fail with HTTP 400
+    let (code, _) = tetherly_node::loopback_post(ui_port1, "/api/ancs/allow", b"{}")
+        .await
+        .expect("post allow invalid");
+    assert_eq!(code, 400);
+
+    // POST /api/ancs/allow with disallowed scheme should fail with HTTP 400
+    let evil_payload = serde_json::json!({
+        "app_id": "com.evil",
+        "url": "https://evil.example"
+    });
+    let (code, _) = tetherly_node::loopback_post(
+        ui_port1,
+        "/api/ancs/allow",
+        &serde_json::to_vec(&evil_payload).unwrap(),
+    )
+    .await
+    .expect("post allow evil");
+    assert_eq!(code, 400);
+
+    // POST /api/ancs/allow with explicit url
+    let rule1 = serde_json::json!({
+        "app_id": "com.tencent.xin",
+        "url": "weixin://"
+    });
+    let (code, resp) = tetherly_node::loopback_post(
+        ui_port1,
+        "/api/ancs/allow",
+        &serde_json::to_vec(&rule1).unwrap(),
+    )
+    .await
+    .expect("post allow rule1");
+    assert_eq!(code, 200);
+    let ok_v: serde_json::Value = serde_json::from_slice(&resp).expect("parse ok");
+    assert_eq!(ok_v["ok"], true);
+
+    // POST /api/ancs/allow with default url fallback
+    let rule2 = serde_json::json!({
+        "app_id": "com.eg.android.AlipayGphone"
+    });
+    let (code, resp) = tetherly_node::loopback_post(
+        ui_port1,
+        "/api/ancs/allow",
+        &serde_json::to_vec(&rule2).unwrap(),
+    )
+    .await
+    .expect("post allow rule2");
+    assert_eq!(code, 200);
+
+    // GET /api/ancs should now reflect updated allowlist
+    let (code, resp) = tetherly_node::loopback_get(ui_port1, "/api/ancs")
+        .await
+        .expect("get /api/ancs after allow");
+    assert_eq!(code, 200);
+    let report: tetherly_node::AncsReport =
+        serde_json::from_slice(&resp).expect("parse AncsReport");
+    assert_eq!(report.allowlist.len(), 2);
+    assert!(report.allowlist.contains(&"com.tencent.xin".to_string()));
+    assert!(report.allowlist.contains(&"com.eg.android.AlipayGphone".to_string()));
+
+    node1.shutdown();
+
+    // 2. Node with MemoryAncsTransport
+    let transport = Arc::new(MemoryAncsTransport::default());
+    let (node2, _clock2, _guard2) = start("ancs-ui2", Some(transport.clone()));
+    let ui_port2 = node2.spawn_ui().await.expect("spawn ui 2");
+
+    // Initial state with transport attached but before connect -> attached=true, state="idle"
+    let (code, resp) = tetherly_node::loopback_get(ui_port2, "/api/ancs")
+        .await
+        .expect("get /api/ancs");
+    assert_eq!(code, 200);
+    let report: tetherly_node::AncsReport =
+        serde_json::from_slice(&resp).expect("parse AncsReport");
+    assert!(report.ok);
+    assert!(report.attached);
+    assert_eq!(report.state, "idle");
+    assert_eq!(report.retry_at_ms, None);
+
+    // Trigger connect via POST /api/ancs/connect
+    let (code, resp) = tetherly_node::loopback_post(ui_port2, "/api/ancs/connect", b"{}")
+        .await
+        .expect("post connect on node 2");
+    assert_eq!(code, 200);
+    let v: serde_json::Value = serde_json::from_slice(&resp).expect("parse connect resp");
+    assert_eq!(v["state"], "ready");
+
+    // GET /api/ancs after connect -> state="ready"
+    let (code, resp) = tetherly_node::loopback_get(ui_port2, "/api/ancs")
+        .await
+        .expect("get /api/ancs after connect");
+    assert_eq!(code, 200);
+    let report: tetherly_node::AncsReport =
+        serde_json::from_slice(&resp).expect("parse AncsReport");
+    assert!(report.attached);
+    assert_eq!(report.state, "ready");
+    assert_eq!(report.retry_at_ms, None);
+
+    // Trigger disconnect to transition Ingress into Backoff
+    let retry_at = node2.ancs_disconnected().expect("attached transport");
+    let (code, resp) = tetherly_node::loopback_get(ui_port2, "/api/ancs")
+        .await
+        .expect("get /api/ancs after disconnect");
+    assert_eq!(code, 200);
+    let report: tetherly_node::AncsReport =
+        serde_json::from_slice(&resp).expect("parse AncsReport");
+    assert!(report.attached);
+    assert_eq!(report.state, "backoff");
+    assert_eq!(report.retry_at_ms, Some(retry_at));
+
+    node2.shutdown();
+}

@@ -208,6 +208,11 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Manage Apple Notification Center Service (status, connect, allow).
+    Ancs {
+        #[command(subcommand)]
+        action: AncsCmd,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -317,6 +322,36 @@ enum InputCmd {
         /// Output raw JSON instead of formatted text.
         #[arg(long)]
         json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AncsCmd {
+    /// Show ANCS ingress status, connection state, and active open allowlist.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Trigger connection or re-subscription to iPhone ANCS GATT characteristics.
+    Connect {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Add an application ID and optional URL template to the notification open allowlist.
+    Allow {
+        /// Target application bundle ID (e.g. com.tencent.xin).
+        app_id: String,
+        /// Optional URL scheme or template (e.g. weixin://).
+        #[arg(long)]
+        url: Option<String>,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -1338,6 +1373,94 @@ async fn main() -> Result<()> {
                 println!("\n(Use --interfaces or -i to inspect all skipped interfaces and classification reasons)");
             }
         }
+        Cmd::Ancs { action } => match action {
+            AncsCmd::Status { json, ui_port } => {
+                let (code, resp) = loopback_get(ui_port, "/api/ancs").await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "ANCS status query failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    let attached = v.get("attached").and_then(|b| b.as_bool()).unwrap_or(false);
+                    let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let retry = v.get("retry_at_ms").and_then(|n| n.as_u64());
+                    let allowlist = v.get("allowlist").and_then(|a| a.as_array());
+
+                    println!("Apple Notification Center Service (ANCS):");
+                    println!("  Transport Attached: {attached}");
+                    println!("  Ingress State:      {state}");
+                    match retry {
+                        Some(ms) => println!("  Retry Backoff At:   {ms} ms"),
+                        None => println!("  Retry Backoff At:   none"),
+                    }
+                    println!("  Open Allowlist:");
+                    match allowlist {
+                        Some(arr) if !arr.is_empty() => {
+                            for item in arr {
+                                if let Some(app) = item.as_str() {
+                                    println!("    * {app}");
+                                }
+                            }
+                        }
+                        _ => println!("    (no applications in allowlist)"),
+                    }
+                }
+            }
+            AncsCmd::Connect { ui_port } => {
+                let (code, resp) = loopback_post(ui_port, "/api/ancs/connect", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "ANCS connect failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                println!("ANCS connection triggered successfully.");
+            }
+            AncsCmd::Allow {
+                app_id,
+                url,
+                ui_port,
+            } => {
+                let payload = match url {
+                    Some(u) => serde_json::json!({ "app_id": app_id, "url": u }),
+                    None => serde_json::json!({ "app_id": app_id }),
+                };
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) = loopback_post(ui_port, "/api/ancs/allow", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "ANCS allow rule failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                println!("Allowed open action for '{app_id}'.");
+            }
+        },
         Cmd::Status {
             watch,
             interval,

@@ -307,7 +307,12 @@ struct ReplyBody {
 #[derive(serde::Deserialize)]
 struct OpenRuleBody {
     app_id: String,
+    #[serde(default = "default_open_url")]
     url: String,
+}
+
+fn default_open_url() -> String {
+    "tetherly://open".to_string()
 }
 
 #[derive(serde::Deserialize)]
@@ -781,6 +786,10 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             }
             Err(_) => err(400, "bad json"),
         },
+        ("GET", "/api/ancs") => {
+            let rep = node.ancs_report();
+            json_ok(&rep)
+        }
         // Step 1 of the phone wizard: the user connected the iPhone in the OS
         // Bluetooth settings, so we only have to subscribe to ANCS here.
         ("POST", "/api/ancs/connect") => match node.ancs_connect() {
