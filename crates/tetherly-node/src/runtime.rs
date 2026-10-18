@@ -1355,7 +1355,7 @@ impl Node {
 
     pub fn is_trusted(&self, id: &DeviceId) -> bool {
         let store = self.shared.trust.lock().expect("trust");
-        store.peers.get(id).map_or(false, |p| !p.revoked)
+        store.peers.get(id).is_some_and(|p| !p.revoked)
     }
 
     /// Update the local friendly alias for a trusted peer device.
