@@ -571,6 +571,24 @@ struct PeerDisconnectBody {
 }
 
 #[derive(serde::Deserialize, Default)]
+struct PeerBlockBody {
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    peer: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct PeerUnblockBody {
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    peer: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
 struct TransfersQueryBody {
     id: Option<String>,
     active: Option<bool>,
@@ -753,6 +771,71 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 return err(400, "peer identifier required (peer or device_id)");
             }
             match node.disconnect_peer(target_query.trim()).await {
+                Ok(rep) => json_ok(&rep),
+                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
+                    err(404, &format!("peer not found: {e}"))
+                }
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/peers/blocked") | ("GET", "/api/blocked") => {
+            json_ok(&node.blocked_peers_report())
+        }
+        ("POST", "/api/peers/block") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<PeerBlockBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<PeerBlockBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected { peer: string, reason?: string }"),
+                }
+            };
+            let target_query = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone().or_else(|| b.device_id.clone()))
+                .or_else(|| qmap.get("peer").cloned())
+                .or_else(|| qmap.get("device_id").cloned())
+                .unwrap_or_default();
+            let reason = parsed_body
+                .as_ref()
+                .and_then(|b| b.reason.clone())
+                .or_else(|| qmap.get("reason").cloned());
+
+            if target_query.trim().is_empty() {
+                return err(400, "peer identifier required");
+            }
+            match node.block_peer(target_query.trim(), reason.as_deref()).await {
+                Ok(rep) => json_ok(&rep),
+                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
+                    err(404, &format!("peer not found: {e}"))
+                }
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/peers/unblock")
+        | ("DELETE", "/api/peers/block")
+        | ("DELETE", "/api/peers/blocked") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<PeerUnblockBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<PeerUnblockBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected { peer: string }"),
+                }
+            };
+            let target_query = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone().or_else(|| b.device_id.clone()))
+                .or_else(|| qmap.get("peer").cloned())
+                .or_else(|| qmap.get("device_id").cloned())
+                .unwrap_or_default();
+
+            if target_query.trim().is_empty() {
+                return err(400, "peer identifier required");
+            }
+            match node.unblock_peer(target_query.trim()).await {
                 Ok(rep) => json_ok(&rep),
                 Err(tetherly_core::CoreError::PeerNotFound(e)) => {
                     err(404, &format!("peer not found: {e}"))

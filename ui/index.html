@@ -377,6 +377,15 @@
       <div class="hint">当前节点对外通告的核心功能特性与动态边界治理。支持运行时即时启闭并全量广播更新对端。</div>
       <div id="local-caps-box" style="margin-top:8px"><div class="hint">读取节点能力中…</div></div>
     </section>
+    <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">访问控制与黑名单治理</h2>
+        <button id="addblockbtn" class="ghost bad" type="button" style="padding:2px 8px;font-size:12px">+ 屏蔽设备</button>
+      </div>
+      <div class="hint">对恶意连接或不受信设备进行黑名单拦截与自动断连防御。被屏蔽设备无法拨入、连接或完成握手。</div>
+      <div id="blocked-peers-box" style="margin-top:8px"><div class="empty">无黑名单设备</div></div>
+      <div id="blockmsg" class="hint" style="margin-top:6px"></div>
+    </section>
   </div>
 </main>
 <script>
@@ -605,7 +614,7 @@ function render(s) {
         return '<span class="badge" style="background:var(--card-bg);border:1px solid var(--border);color:var(--text);font-size:11px;margin-right:3px">[' + label + ']</span>';
       }).join('') + '</span>';
     }
-    const card = el('<div class="card"><div style="flex:1"><div class="title"><span></span>' + pathBadge + rttBadge + capsBadges + '</div><div class="meta"></div></div><div class="row"><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost ping-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">测速</button><button class="ghost disconnect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">断开</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
+    const card = el('<div class="card"><div style="flex:1"><div class="title"><span></span>' + pathBadge + rttBadge + capsBadges + '</div><div class="meta"></div></div><div class="row"><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost ping-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">测速</button><button class="ghost disconnect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">断开</button><button class="bad ghost block-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">屏蔽</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
     const displayName = (x.alias && x.alias !== x.name) ? (x.name + ' ("' + x.alias + '")') : x.name;
     card.querySelector(".title span").textContent = displayName;
     card.querySelector(".meta").textContent = x.platform + " · " + (x.path || "lan") + " · " + x.device_id;
@@ -648,6 +657,15 @@ function render(s) {
       }
       tick();
     };
+    const blockBtn = card.querySelector(".block-btn");
+    blockBtn.onclick = async () => {
+      const reason = prompt("确定将对端 " + displayName + " 列入黑名单并立即终止会话吗？\n输入屏蔽原因（可选）：");
+      if (reason !== null) {
+        await api("/api/peers/block", { peer: x.device_id, reason: reason.trim() || undefined });
+        updateBlocked();
+        tick();
+      }
+    };
     const unpairBtn = card.querySelector(".unpair-btn");
     unpairBtn.onclick = async () => {
       if (confirm("确认解除与设备 " + x.name + " (" + x.device_id + ") 的配对？")) {
@@ -676,8 +694,8 @@ function render(s) {
           ? '<span class="badge completed" style="margin-right:6px">在线</span>'
           : '<span class="badge offline" style="margin-right:6px">离线</span>';
         const actionBtns = t.online
-          ? '<button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost disconnect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">断开</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button>'
-          : '<button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost connect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">连接</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button>';
+          ? '<button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost disconnect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">断开</button><button class="bad ghost block-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">屏蔽</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button>'
+          : '<button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost connect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">连接</button><button class="bad ghost block-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">屏蔽</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button>';
         const card = el('<div class="card"><div style="flex:1"><div class="title">' + badge + '<span></span></div><div class="meta"></div></div><div class="row">' + actionBtns + '</div></div>');
         card.querySelector(".title span").textContent = t.alias || t.device_id;
         card.querySelector(".meta").textContent = t.device_id;
@@ -689,6 +707,17 @@ function render(s) {
             tick();
           }
         };
+        const blockBtn = card.querySelector(".block-btn");
+        if (blockBtn) {
+          blockBtn.onclick = async () => {
+            const reason = prompt("确定将受信任设备 " + (t.alias || t.device_id) + " 列入黑名单吗？\n输入屏蔽原因（可选）：");
+            if (reason !== null) {
+              await api("/api/peers/block", { peer: t.device_id, reason: reason.trim() || undefined });
+              updateBlocked();
+              tick();
+            }
+          };
+        }
         const connectBtn = card.querySelector(".connect-btn");
         if (connectBtn) {
           connectBtn.onclick = async () => {
@@ -1245,6 +1274,64 @@ const refreshCapsBtn = $("refreshcapsbtn");
 if (refreshCapsBtn) {
   refreshCapsBtn.onclick = loadCaps;
 }
+async function updateBlocked() {
+  const box = $("blocked-peers-box");
+  if (!box) return;
+  try {
+    const rep = await api("/api/peers/blocked");
+    if (!rep || !rep.ok) return;
+    box.innerHTML = "";
+    const list = rep.peers || [];
+    if (!list.length) {
+      box.appendChild(el('<div class="empty">无黑名单设备</div>'));
+      return;
+    }
+    for (const p of list) {
+      const reasonBadge = p.reason ? ' <span style="color:var(--bad);font-size:12px">(' + p.reason + ')</span>' : '';
+      const card = el('<div class="card"><div style="flex:1"><div class="title"><span class="badge failed" style="margin-right:6px">已屏蔽</span><span style="font-family:ui-monospace, Consolas, monospace">' + p.device_id + '</span>' + reasonBadge + '</div><div class="meta" style="margin-top:2px">封禁时间: ' + new Date(p.blocked_at).toLocaleString() + '</div></div><div class="row"><button class="ghost unblock-btn" type="button" style="padding:2px 8px;font-size:12px">解除屏蔽</button></div></div>');
+      const unblockBtn = card.querySelector(".unblock-btn");
+      unblockBtn.onclick = async () => {
+        unblockBtn.disabled = true;
+        unblockBtn.textContent = "解封中…";
+        try {
+          await api("/api/peers/unblock", { peer: p.device_id });
+          updateBlocked();
+          tick();
+        } catch (e) {
+          alert("解除屏蔽失败: " + e.message);
+          unblockBtn.disabled = false;
+          unblockBtn.textContent = "解除屏蔽";
+        }
+      };
+      box.appendChild(card);
+    }
+  } catch (e) {
+    box.innerHTML = '<div class="empty">读取黑名单失败</div>';
+  }
+}
+const addBlockBtn = $("addblockbtn");
+if (addBlockBtn) {
+  addBlockBtn.onclick = async () => {
+    const peer = prompt("输入要屏蔽的对端设备 ID (tdev_...) 或别名/名称:");
+    if (!peer || !peer.trim()) return;
+    const reason = prompt("输入屏蔽原因（可选）：");
+    const msg = $("blockmsg");
+    if (msg) msg.textContent = "正在屏蔽对端设备…";
+    try {
+      const rep = await api("/api/peers/block", { peer: peer.trim(), reason: reason ? reason.trim() : undefined });
+      if (rep && rep.ok) {
+        const activeStr = rep.disconnected_active ? " (活动连接已强制掐断)" : "";
+        if (msg) msg.textContent = "已成功屏蔽设备: " + rep.device_id + activeStr;
+        updateBlocked();
+        tick();
+      } else {
+        if (msg) msg.textContent = "屏蔽失败: " + (rep && rep.error ? rep.error : "未知错误");
+      }
+    } catch (err) {
+      if (msg) msg.textContent = "请求异常: " + err;
+    }
+  };
+}
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
   refreshPin();
@@ -1288,10 +1375,18 @@ function setupEventSource() {
             desc = "遥测指标已重置";
             updateTraffic();
           }
-          else if (ev.kind === "peer_caps_changed") {
-            desc = "能力特性更新: " + ev.device_id + " [" + (ev.features || []).join(", ") + "]";
-            loadCaps();
-          }
+	          else if (ev.kind === "peer_caps_changed") {
+	            desc = "能力特性更新: " + ev.device_id + " [" + (ev.features || []).join(", ") + "]";
+	            loadCaps();
+	          }
+	          else if (ev.kind === "peer_blocked") {
+	            desc = "对端已屏蔽: " + ev.device_id + (ev.reason ? (" (原因: " + ev.reason + ")") : "");
+	            updateBlocked();
+	          }
+	          else if (ev.kind === "peer_unblocked") {
+	            desc = "对端已解除屏蔽: " + ev.device_id;
+	            updateBlocked();
+	          }
           $("ev-last").textContent = "[" + t + "] " + desc;
         }
       } catch (err) {
@@ -1328,6 +1423,8 @@ updateHealth();
 setInterval(updateHealth, 2000);
 updateTraffic();
 setInterval(updateTraffic, 2000);
+updateBlocked();
+setInterval(updateBlocked, 3000);
 </script>
 </body>
 </html>

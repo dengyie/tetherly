@@ -3,12 +3,63 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.49** |
+| 文档版本 | **1.50** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）**——(1) **对端会话生命周期模型解耦与 DTO 抽象 (`PeerConnectReport`, `PeerDisconnectReport`)**：打破配对解绑 (unpair) 抹除信任与普通网络断连的混淆，提供结构化会话连接与断开报告，保留受信任关系与持久化路由；(2) **节点运行时主动连接与优雅断开控制原语 (`Node::connect_peer`, `Node::disconnect_peer`)**：支持基于设备 ID、友好别名或广播名智能解析，实现按需主动发起直连（无缝支持从 `routes.json` 自动解析物理地址或传入显式套接字地址），以及按需安全断开活动 TCP 会话信道、驱逐 live 状态、复位输入焦点并派发 `UiEvent::PeerDown`；(3) **轻量级回环控制面端点 (`POST /api/peers/connect`, `POST /api/peers/disconnect`)**：提供毫秒级响应并严格守卫 127.0.0.1+Host 校验红线，支持 JSON 体与 Query 参数多维解析；(4) **CLI 双端全同构升级 (`tetherly connect/disconnect`, `tetherly-cli connect/disconnect`)**：支持 `--peer`, `--addr`, `--json`, `--ui-port`，彻底消除必须等待后台 30 秒重连定时器的死板缺陷；(5) **Web UI 会话治理按键与交互闭环 (`ui/index.html`)**：在在线设备卡片增设「断开」按键，在离线受信任卡片增设「连接」按键，联动 SSE `peer_up`/`peer_down` 实现无感局部刷新；(6) **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**：增设 `peer_active_connect_and_disconnect_lifecycle_via_loopback_api` 完备验证治理全流程。+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）**——(1) **错误语义与异常边界扩展 (`CoreError::PeerBlocked`)**：在核心层明确对端封禁拒绝原因，形成不可篡改的接入阻断信号；(2) **黑名单持久化存储与原子化状态同步 (`store.rs`, `Shared.blocked`)**：实现 `blocked.json` 的原子化持久化与跨平台文件权限控制（Unix 0600），包含 `BlockedPeer`（`device_id`, `reason`, `blocked_at`）与 `BlockedTable`，提供 `load_blocked`, `save_blocked`, `add_blocked_peer`, `remove_blocked_peer`, `is_peer_blocked` 原语，运行时由 `Shared.blocked: Mutex<BlockedTable>` 内存同步；(3) **握手与拨号全链路动态访问控制守卫 (`runtime.rs`)**：在主动拨号（`connect_peer` 与后台 `spawn_reconnect`）与被动接入（`accept_one` 接收端）的 Noise 握手认证后第一时间执行黑名单校验，命中立即拒绝并返回 `PeerBlocked`，严禁写入信任库、严禁缓存路由、严禁挂载会话；(4) **活动会话秒级主动掐断与资源清理 (`Node::block_peer`)**：屏蔽正在通信的对端时，瞬间断开活动 TCP 信道、驱逐 `LivePeer`、复位输入焦点（`input_seat`）、向事件总线广播 `UiEvent::PeerDown` 与 `UiEvent::PeerBlocked`；(5) **轻量级回环控制面端点 (`uihttp.rs`)**：新增 `GET /api/peers/blocked`、`POST /api/peers/block`、`POST /api/peers/unblock`（支持 DELETE 兼容），严格绑定 127.0.0.1 并强校验 Host 标头；(6) **CLI 双端全同构升级 (`tetherly block/unblock/blocked`, `tetherly-cli block/unblock/blocked`)**：支持 `--peer`, `--reason`, `--json`, `--ui-port`，同步输出 `[peer_blocked]` 与 `[peer_unblocked]` 格式化事件；(7) **Web UI 访问控制面板与按键闭环 (`ui/index.html`)**：增设「访问控制与黑名单治理」独立卡片与一键屏蔽/解除屏蔽按键，联动 SSE 动态局部重绘；(8) **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**：增设 `peer_blacklist_and_access_control_governance_via_loopback_api` 完备验证黑名单拦截、断连、入站拒绝、幂等性、解封与重新连通全流程。+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.50 相对 1.49(对端黑名单访问控制、恶意连接防御与动态接入鉴权治理)**
+
+- **动机(仅有受信任白名单、恶意连接与端口扫描无防御、缺乏持久化黑名单拦截、断联后无法阻止重拨)**:
+  在 Tetherly v1.49 实现了对端连接会话全域治理与主动按需直连后，网络拓扑具备了高度灵活的受信任会话控制能力。但在跨网段多设备互联与开放局域网/虚网组网中，暴露出**仅有受信任白名单、缺乏黑名单防御与动态接入鉴权治理**的严重安全防护短板：
+  1. **缺少对端黑名单拒绝与拦截机制**：此前系统仅有基于 `trusted.json` 的白名单信任判定；一旦某台设备发生异常、行为不受信、存在端口恶意探测或受到中间人骚扰，用户即使通过 `unpair` 解绑设备，对方依然可以不断发起 Noise 握手和 PIN 码配对探测，对节点控制通道造成 socket 资源耗尽与日志泛洪；
+  2. **缺乏黑名单持久化存储与原子落盘**：节点缺乏独立的 `blocked.json` 黑名单持久化机制，无法记录被封禁的设备 ID（`device_id`）、封禁原因（`reason`）与时间戳（`blocked_at`），进程重启后防御状态完全丢失；
+  3. **握手与拨号链路缺乏黑名单鉴权门禁**：
+     - 在被动接收端（`accept_one`）：完成 Noise transport 握手提取对方真实认证身份后，缺少黑名单前置检查，无法在挂载会话前主动扼杀连接；
+     - 在主动发起端（`dial` 与 `connect_peer`）：若对端已被拉黑，依然会尝试发起 TCP 连接并消耗网络带宽；后台自动重连定时器（`spawn_reconnect`）也会死循环尝试向被拉黑设备重连；
+  4. **缺乏屏蔽正在通信设备的主动断连与清理机制**：拉黑某个当前在线的对端时，必须同步掐断活动 TCP 信道、清理会话映射、驱逐 `live` 列表、重置光标焦点，并向事件总线广播 `UiEvent::PeerDown`；
+  5. **缺少轻量级回环控制面端点**：外部管理面板与桌面前端缺少 `GET /api/peers/blocked`、`POST /api/peers/block` 与 `POST /api/peers/unblock` 接口；
+  6. **CLI 双端与 Web UI 缺失黑名单控制能力**：双端命令行缺少 `block`、`unblock` 与 `blocked` 子命令，Web UI 无法直观查看黑名单设备列表与一键拉黑/解封。
+
+- **架构与协议设计(ADR-043 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理)**:
+  1. **错误语义与异常边界扩展 (`crates/tetherly-core/src/error.rs`)**:
+     - 增设 `CoreError::PeerBlocked(String)` 变体，将黑名单拦截与鉴权失败明确暴露为结构化错误，避免与一般网络 IO 超时或密钥错误混淆；
+  2. **黑名单持久化存储与原子落盘 (`crates/tetherly-node/src/store.rs`)**:
+     - 定义结构体 `BlockedPeer { device_id, reason, blocked_at }` 与 `BlockedTable { peers }`；
+     - 常量 `BLOCKED_FILE = "blocked.json"`；
+     - 提供 `load_blocked`, `save_blocked`, `add_blocked_peer`, `remove_blocked_peer`, `is_peer_blocked` 原语；采用原子写入（写入临时文件后 `fs::rename`）并设置 POSIX 权限（`0600`）；
+  3. **节点运行时动态黑名单同步与接入鉴权门禁 (`crates/tetherly-node/src/runtime.rs`)**:
+     - 在 `Shared` 结构体增设 `blocked: Mutex<BlockedTable>` 内存缓存；
+     - 定义 DTO 报告：`PeerBlockReport`, `PeerUnblockReport`, `BlockedPeersReport`；
+     - `Node::is_blocked(&self, device_id: &str) -> bool`：快速查询内存黑名单；
+     - `Node::block_peer(&self, query: &str, reason: Option<&str>) -> Result<PeerBlockReport, CoreError>`：
+       - 支持设备 ID、别名或名称的智能解析（`resolve_peer`）；
+       - 禁止屏蔽本机自身设备 ID（防误操作防御）；
+       - 更新内存与持久化 `blocked.json`；
+       - 若对端当前处于在线会话，瞬间从 `Shared.sessions` 移除关闭 TCP 信道、从 `Shared.live` 驱逐、复位 `input_seat`、并派发 `UiEvent::PeerDown`；
+       - 派发 `UiEvent::PeerBlocked { device_id, reason }`；
+     - `Node::unblock_peer(&self, query: &str) -> Result<PeerUnblockReport, CoreError>`：
+       - 移除黑名单记录并原子落盘，派发 `UiEvent::PeerUnblocked { device_id }`；
+     - 在主动端 `connect_peer`、`dial` 与后台 `spawn_reconnect` 处守卫：若 `is_blocked`，直接跳过并拒绝连接；
+     - 在被动接收端 `accept_one` 完成 Noise 握手提取已认证对端 ID 后守卫：若 `is_blocked`，立即返回 `CoreError::PeerBlocked`，严禁写入信任库、严禁更新路由缓存、严禁附加在线会话；
+  4. **轻量级回环控制面端点 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/peers/blocked`：返回 `BlockedPeersReport`；
+     - `POST /api/peers/block`：接收 `PeerBlockBody { peer, reason }`，执行拉黑并返回 `PeerBlockReport`；
+     - `POST /api/peers/unblock` 与 `DELETE /api/peers/block` / `DELETE /api/peers/blocked`：支持多维解封调用，返回 `PeerUnblockReport`；
+     - 严格守卫安全红线：严格绑定 `127.0.0.1`，强校验 `Host: 127.0.0.1|localhost`；
+  5. **CLI 双端全同构升级 (`crates/tetherly-node/src/bin/tetherly.rs`, `bins/tetherly-cli/src/main.rs`)**:
+     - `block`: `--peer <PEER> [--reason <REASON>] [--json] [--ui-port <PORT>]`；
+     - `unblock`: `--peer <PEER> [--json] [--ui-port <PORT>]`；
+     - `blocked`: `[--json] [--ui-port <PORT>]`；
+     - 在 `print_event` 格式化呈现 `[peer_blocked]` 与 `[peer_unblocked]` 事件；
+  6. **Web UI 访问控制面板与按键闭环 (`ui/index.html`)**:
+     - 在在线对端卡片与受信任设备卡片均增设「屏蔽」交互按键，弹出确认与原因输入框；
+     - 独立增设「访问控制与黑名单治理」卡片，全景展示当前被拉黑设备 ID、原因与时间，并提供「+ 屏蔽设备」与「解除屏蔽」操作；
+     - 接入 SSE 实时响应 `peer_blocked` 与 `peer_unblocked` 事件局部刷新视图；
+  7. **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**:
+     - 增设 `peer_blacklist_and_access_control_governance_via_loopback_api`：完备验证配对连通、拉黑对端、活动 TCP 会话瞬间掐断与 SSE `PeerDown`/`PeerBlocked` 派发、`blocked.json` 持久化、主动外拨拦截、被动入站握手拒绝、拉黑幂等性、解除拉黑与会话重新连通全流程。
 
 **1.49 相对 1.48(对端连接会话全域治理、主动按需直连与优雅断开控制闭环)**
 

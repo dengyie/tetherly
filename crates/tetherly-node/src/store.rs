@@ -12,6 +12,7 @@ use tracing::info;
 pub const IDENTITY_FILE: &str = "identity.bin";
 pub const TRUST_FILE: &str = "trusted.json";
 pub const ROUTES_FILE: &str = "routes.json";
+pub const BLOCKED_FILE: &str = "blocked.json";
 
 pub fn default_data_dir() -> PathBuf {
     if let Ok(p) = std::env::var("TETHERLY_DATA_DIR") {
@@ -160,6 +161,70 @@ pub fn forget_route(dir: &Path, device_id: &str) -> Result<bool, NodeStoreError>
         save_routes(dir, &table)?;
     }
     Ok(removed)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BlockedPeer {
+    pub device_id: String,
+    pub reason: Option<String>,
+    pub blocked_at: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+pub struct BlockedTable {
+    pub peers: Vec<BlockedPeer>,
+}
+
+pub fn load_blocked(dir: &Path) -> BlockedTable {
+    let path = dir.join(BLOCKED_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_blocked(dir: &Path, table: &BlockedTable) -> Result<(), NodeStoreError> {
+    atomic_write(&dir.join(BLOCKED_FILE), &serde_json::to_vec_pretty(table)?)?;
+    Ok(())
+}
+
+pub fn add_blocked_peer(
+    dir: &Path,
+    device_id: &str,
+    reason: Option<&str>,
+    now_ms: u64,
+) -> Result<bool, NodeStoreError> {
+    let mut table = load_blocked(dir);
+    let is_update = if let Some(p) = table.peers.iter_mut().find(|p| p.device_id == device_id) {
+        p.reason = reason.map(ToString::to_string);
+        p.blocked_at = now_ms;
+        true
+    } else {
+        table.peers.push(BlockedPeer {
+            device_id: device_id.to_string(),
+            reason: reason.map(ToString::to_string),
+            blocked_at: now_ms,
+        });
+        false
+    };
+    save_blocked(dir, &table)?;
+    Ok(is_update)
+}
+
+pub fn remove_blocked_peer(dir: &Path, device_id: &str) -> Result<bool, NodeStoreError> {
+    let mut table = load_blocked(dir);
+    let initial_len = table.peers.len();
+    table.peers.retain(|p| p.device_id != device_id);
+    let removed = table.peers.len() < initial_len;
+    if removed {
+        save_blocked(dir, &table)?;
+    }
+    Ok(removed)
+}
+
+pub fn is_peer_blocked(dir: &Path, device_id: &str) -> bool {
+    let table = load_blocked(dir);
+    table.peers.iter().any(|p| p.device_id == device_id)
 }
 
 #[derive(Debug, thiserror::Error)]

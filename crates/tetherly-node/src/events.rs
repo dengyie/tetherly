@@ -72,6 +72,13 @@ pub enum UiEvent {
         caps: Vec<String>,
         features: Vec<String>,
     },
+    PeerBlocked {
+        device_id: String,
+        reason: Option<String>,
+    },
+    PeerUnblocked {
+        device_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

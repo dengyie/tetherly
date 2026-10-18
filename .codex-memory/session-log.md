@@ -1,5 +1,53 @@
 # Session log
 
+## 2026-10-17 (47) - Peer blacklist, connection defense, and dynamic admission access control governance (v1.50 / ADR-043)
+- Task: 实现对端黑名单访问控制、恶意连接防御与动态接入鉴权治理，建立黑名单持久化拦截、主动会话秒级掐断与双端回环控制闭环。
+- **背景与缺陷根因**:
+  在 Tetherly v1.49 实现了对端连接会话全域治理与主动按需直连后，网络拓扑具备了高度灵活的受信任会话控制能力。但在跨网段多设备互联与开放局域网/虚网组网中，暴露出仅有受信任白名单、缺乏黑名单防御与动态接入鉴权治理的严重安全防护短板：
+  1. 缺少对端黑名单拒绝与拦截机制：此前系统仅有基于 `trusted.json` 的白名单信任判定；一旦某台设备发生异常、行为不受信、存在端口恶意探测或受到中间人骚扰，用户即使通过 `unpair` 解绑设备，对方依然可以不断发起 Noise 握手和 PIN 码配对探测，对节点控制通道造成 socket 资源耗尽与日志泛洪；
+  2. 缺乏黑名单持久化存储与原子落盘：节点缺乏独立的 `blocked.json` 黑名单持久化机制，无法记录被封禁的设备 ID（`device_id`）、封禁原因（`reason`）与时间戳（`blocked_at`），进程重启后防御状态完全丢失；
+  3. 握手与拨号链路缺乏黑名单鉴权门禁：
+     - 在被动接收端（`accept_one`）：完成 Noise transport 握手提取对方真实认证身份后，缺少黑名单前置检查，无法在挂载会话前主动扼杀连接；
+     - 在主动发起端（`dial` 与 `connect_peer`）：若对端已被拉黑，依然会尝试发起 TCP 连接并消耗网络带宽；后台自动重连定时器（`spawn_reconnect`）也会死循环尝试向被拉黑设备重连；
+  4. 缺乏屏蔽正在通信设备的主动断连与清理机制：拉黑某个当前在线的对端时，必须同步掐断活动 TCP 信道、清理会话映射、驱逐 `live` 列表、重置光标焦点，并向事件总线广播 `UiEvent::PeerDown`；
+  5. 缺少轻量级回环控制面端点：外部管理面板与桌面前端缺少 `GET /api/peers/blocked`、`POST /api/peers/block` 与 `POST /api/peers/unblock` 接口；
+  6. CLI 双端与 Web UI 缺失黑名单控制能力：双端命令行缺少 `block`、`unblock` 与 `blocked` 子命令，Web UI 无法直观查看黑名单设备列表与一键拉黑/解封。
+- **架构设计与落地 (ADR-043)**:
+  1. 错误语义与异常边界扩展 (`crates/tetherly-core/src/error.rs`):
+     - 增设 `CoreError::PeerBlocked(String)` 变体，将黑名单拦截与鉴权失败明确暴露为结构化错误，避免与一般网络 IO 超时或密钥错误混淆；
+  2. 黑名单持久化存储与原子落盘 (`crates/tetherly-node/src/store.rs`):
+     - 定义结构体 `BlockedPeer { device_id, reason, blocked_at }` 与 `BlockedTable { peers }`；
+     - 常量 `BLOCKED_FILE = "blocked.json"`；
+     - 提供 `load_blocked`, `save_blocked`, `add_blocked_peer`, `remove_blocked_peer`, `is_peer_blocked` 原语；采用原子写入（写入临时文件后 `fs::rename`）并设置 POSIX 权限（`0600`）；
+  3. 节点运行时动态黑名单同步与接入鉴权门禁 (`crates/tetherly-node/src/runtime.rs`):
+     - 在 `Shared` 结构体增设 `blocked: Mutex<BlockedTable>` 内存缓存；
+     - 定义 DTO 报告：`PeerBlockReport`, `PeerUnblockReport`, `BlockedPeersReport`；
+     - `Node::block_peer(&self, query: &str, reason: Option<&str>) -> Result<PeerBlockReport, CoreError>`：支持设备 ID、友好别名或广播名智能解析（严禁拉黑本机）；写入 `blocked.json`；若对端正在通信，瞬间弹出并丢弃 `Shared.sessions` 发送端切断活动 TCP 信道、驱逐 `Shared.live`、复位输入焦点（`input_seat`），并向事件总线派发 `UiEvent::PeerDown` 与 `UiEvent::PeerBlocked`；
+     - `Node::unblock_peer(&self, query: &str) -> Result<PeerUnblockReport, CoreError>`：从黑名单解封并落盘，派发 `UiEvent::PeerUnblocked`；
+     - `Node::blocked_peers_report(&self) -> BlockedPeersReport`：列出所有封禁设备；
+     - 被动接入门禁：在 `accept_one` 完成 Noise 握手认证提取身份后，立即检查 `Shared.blocked`，若命中直接返回 `CoreError::PeerBlocked`，严禁写入信任库、严禁缓存路由、严禁挂载会话；
+     - 主动拨号守卫：`Node::connect_peer` 与后台 `spawn_reconnect` 在检查或拨号前核验黑名单，被拉黑对端立即拒绝或跳过；
+  4. 轻量级回环 HTTP 控制面端点 (`crates/tetherly-node/src/uihttp.rs`):
+     - `GET /api/peers/blocked`：查询黑名单设备列表；
+     - `POST /api/peers/block`：支持 JSON 体 `{"peer": "...", "reason": "..."}` 与 Query 参数 `?peer=...&reason=...`（支持 DELETE 兼容）；
+     - `POST /api/peers/unblock`：支持 JSON 体 `{"peer": "..."}` 与 Query 参数 `?peer=...`（支持 `DELETE /api/peers/block` 兼容）；
+     - 严格守卫安全红线：仅绑定 `127.0.0.1`，强校验 `Host: 127.0.0.1|localhost`；
+  5. CLI 双端全同构升级 (`crates/tetherly-node/src/bin/tetherly.rs` 与 `bins/tetherly-cli/src/main.rs`):
+     - `block`: `--peer <PEER> [--reason <REASON>] [--json] [--ui-port <PORT>]`；
+     - `unblock`: `--peer <PEER> [--json] [--ui-port <PORT>]`；
+     - `blocked`: `[--json] [--ui-port <PORT>]`；
+     - 终端 SSE 事件输出同步覆盖 `[peer_blocked]` 与 `[peer_unblocked]`；
+  6. Web UI 访问控制面板与按键闭环 (`ui/index.html`):
+     - 增设「访问控制与黑名单治理」独立卡片与一键屏蔽弹框交互；
+     - 在线设备卡片与受信任设备卡片均增设「屏蔽」按键；
+     - 黑名单设备列表呈现设备 ID、别名、屏蔽原因与时间，并提供「解除屏蔽」按键；
+     - 接入 SSE `peer_blocked` 与 `peer_unblocked` 驱动界面实时局部重绘；
+  7. 端到端集成测试全绿覆盖 (`tests/phase1.rs`):
+     - 增设 `peer_blacklist_and_access_control_governance_via_loopback_api`：覆盖初始状态查询、屏蔽对端、活动 TCP 会话秒级掐断、SSE `PeerDown` 与 `PeerBlocked` 广播、`blocked.json` 持久化核验、主动拨号被拒 (400 / PeerBlocked)、被动接入 Noise 握手后即时阻断、解除屏蔽、解封后重新直连建立、以及禁止拉黑本机等边界防御全流程。
+- **发布与文档同步**:
+  - SSOT `docs/DEVELOPMENT.md` 升至 v1.50，确立 ADR-043。
+  - Obsidian 知识库 `tetherly 开发文档.md` 与路由表 `AI-DOC-ROUTER.md` 同步更新。
+
 ## 2026-10-17 (46) - Peer connection session governance, on-demand direct connect and graceful disconnect (v1.49 / ADR-042)
 - Task: 实现对端连接会话全域治理、主动按需直连与优雅断开控制闭环，彻底解耦会话状态与配对信任关系。
 - **背景与缺陷根因**:

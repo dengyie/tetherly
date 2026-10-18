@@ -420,6 +420,42 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Block a peer device from connecting or pairing.
+    Block {
+        /// Target peer (device_id like tdev_... or friendly alias/name).
+        #[arg(long)]
+        peer: String,
+        /// Optional reason for blocking.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Unblock a previously blocked peer device.
+    Unblock {
+        /// Target peer (device_id like tdev_... or friendly alias/name).
+        #[arg(long)]
+        peer: String,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// List all currently blocked peer devices.
+    Blocked {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -819,6 +855,18 @@ fn print_event(v: &serde_json::Value) {
                 })
                 .unwrap_or_default();
             println!("[peer_caps_changed] peer={dev} features=[{feats}]");
+        }
+        "peer_blocked" => {
+            let dev = v["device_id"].as_str().unwrap_or("?");
+            let reason = v["reason"]
+                .as_str()
+                .map(|r| format!(" reason=\"{r}\""))
+                .unwrap_or_default();
+            println!("[peer_blocked] peer={dev}{reason}");
+        }
+        "peer_unblocked" => {
+            let dev = v["device_id"].as_str().unwrap_or("?");
+            println!("[peer_unblocked] peer={dev}");
         }
         other => {
             println!("[{other}] {v}");
@@ -2547,6 +2595,132 @@ async fn main() -> Result<()> {
                     println!("peer {device_id} ({name}) is already disconnected");
                 } else {
                     println!("successfully disconnected session with {device_id} ({name})");
+                }
+            }
+        }
+        Cmd::Block {
+            peer,
+            reason,
+            json,
+            ui_port,
+        } => {
+            let payload = serde_json::json!({
+                "peer": peer,
+                "reason": reason,
+            });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = loopback_post(ui_port, "/api/peers/block", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "node refused block (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let device_id = v["device_id"].as_str().unwrap_or("?");
+                let name = v["alias"]
+                    .as_str()
+                    .or_else(|| v["name"].as_str())
+                    .unwrap_or("peer");
+                let reason_str = v["reason"]
+                    .as_str()
+                    .map(|r| format!(" (reason: \"{r}\")"))
+                    .unwrap_or_default();
+                let already = v["already_blocked"].as_bool().unwrap_or(false);
+                if already {
+                    println!("peer {device_id} ({name}) is already blocked{reason_str}");
+                } else {
+                    let active_str = if v["disconnected_active"].as_bool().unwrap_or(false) {
+                        " (active session terminated)"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "successfully blocked peer {device_id} ({name}){reason_str}{active_str}"
+                    );
+                }
+            }
+        }
+        Cmd::Unblock {
+            peer,
+            json,
+            ui_port,
+        } => {
+            let payload = serde_json::json!({ "peer": peer });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = loopback_post(ui_port, "/api/peers/unblock", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "node refused unblock (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let device_id = v["device_id"].as_str().unwrap_or("?");
+                let was_blocked = v["was_blocked"].as_bool().unwrap_or(false);
+                if was_blocked {
+                    println!("successfully unblocked peer {device_id}");
+                } else {
+                    println!("peer {device_id} was not in the blocklist");
+                }
+            }
+        }
+        Cmd::Blocked { json, ui_port } => {
+            let (code, resp) = loopback_get(ui_port, "/api/peers/blocked")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "node refused blocked query (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let peers = v["peers"].as_array();
+                let count = peers.map(|p| p.len()).unwrap_or(0);
+                if count == 0 {
+                    println!("no peers currently blocked");
+                } else {
+                    println!("blocked peers ({count}):");
+                    for p in peers.unwrap() {
+                        let dev = p["device_id"].as_str().unwrap_or("?");
+                        let reason = p["reason"]
+                            .as_str()
+                            .map(|r| format!(" · reason: \"{r}\""))
+                            .unwrap_or_default();
+                        println!("  - {dev}{reason}");
+                    }
                 }
             }
         }

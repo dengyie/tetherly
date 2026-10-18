@@ -278,6 +278,36 @@ pub struct PeerDisconnectReport {
     pub already_disconnected: bool,
 }
 
+/// Report returned when blocking a peer device.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PeerBlockReport {
+    pub ok: bool,
+    pub device_id: String,
+    pub name: Option<String>,
+    pub alias: Option<String>,
+    pub reason: Option<String>,
+    pub blocked: bool,
+    pub already_blocked: bool,
+    pub disconnected_active: bool,
+}
+
+/// Report returned when unblocking a peer device.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PeerUnblockReport {
+    pub ok: bool,
+    pub device_id: String,
+    pub unblocked: bool,
+    pub was_blocked: bool,
+}
+
+/// Summary report of all blocked peer devices.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BlockedPeersReport {
+    pub ok: bool,
+    pub count: usize,
+    pub peers: Vec<crate::store::BlockedPeer>,
+}
+
 struct Hubs {
     notify: NotifyHub,
     clip: ClipHub,
@@ -591,6 +621,7 @@ struct Shared {
     advertise_stop: Mutex<Option<watch::Sender<bool>>>,
     telemetry: Arc<TrafficTelemetry>,
     local_caps: Mutex<std::collections::HashSet<String>>,
+    blocked: Mutex<crate::store::BlockedTable>,
 }
 
 pub struct Node {
@@ -783,6 +814,7 @@ impl Node {
                 s.insert("screen".to_string());
                 s
             }),
+            blocked: Mutex::new(crate::store::load_blocked(&cfg.data_dir)),
         });
         Ok(Self { shared })
     }
@@ -2425,6 +2457,10 @@ impl Node {
             None
         };
 
+        if self.is_blocked(target_id.as_str()) {
+            return Err(CoreError::PeerBlocked(target_id.to_string()));
+        }
+
         let trusted = self.trusted();
         let matched = trusted.iter().find(|t| t.device_id == target_id);
         let alias = matched.and_then(|t| {
@@ -2552,6 +2588,187 @@ impl Node {
                 already_disconnected: true,
             })
         }
+    }
+
+    /// Check if a peer device ID is currently in the local blocklist.
+    pub fn is_blocked(&self, device_id: &str) -> bool {
+        let blocked = self.shared.blocked.lock().expect("blocked");
+        blocked.peers.iter().any(|p| p.device_id == device_id)
+    }
+
+    /// Return a summary report of all currently blocked peers.
+    pub fn blocked_peers_report(&self) -> BlockedPeersReport {
+        let blocked = self.shared.blocked.lock().expect("blocked");
+        BlockedPeersReport {
+            ok: true,
+            count: blocked.peers.len(),
+            peers: blocked.peers.clone(),
+        }
+    }
+
+    /// Block a peer device by device ID, friendly alias, or broadcast name.
+    ///
+    /// Persists the block entry into `blocked.json`, and if the peer has an active
+    /// connection, forcibly terminates it, evicts from live state, resets input seat,
+    /// and emits `UiEvent::PeerDown`. Finally emits `UiEvent::PeerBlocked`.
+    pub async fn block_peer(
+        &self,
+        query: &str,
+        reason: Option<&str>,
+    ) -> Result<PeerBlockReport, CoreError> {
+        let trimmed_query = query.trim();
+        if trimmed_query.is_empty() {
+            return Err(CoreError::PeerNotFound("empty peer identifier".to_string()));
+        }
+        let target_id = match self.resolve_peer(trimmed_query) {
+            Ok(id) => id,
+            Err(e) => {
+                if let Ok(id) = DeviceId::parse(trimmed_query) {
+                    id
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+
+        let sanitized_reason = if let Some(r) = reason {
+            let r_trimmed = r.trim();
+            if r_trimmed.is_empty() {
+                None
+            } else {
+                if r_trimmed.len() > 128 {
+                    return Err(CoreError::InvalidPayload(
+                        "reason exceeds maximum length of 128 bytes".to_string(),
+                    ));
+                }
+                if r_trimmed.chars().any(|c| c.is_control()) {
+                    return Err(CoreError::InvalidPayload(
+                        "reason cannot contain control characters".to_string(),
+                    ));
+                }
+                Some(r_trimmed.to_string())
+            }
+        } else {
+            None
+        };
+
+        let now_ms = self.shared.clock.unix_ms();
+        let already_blocked = {
+            let mut blocked = self.shared.blocked.lock().expect("blocked");
+            let is_already = blocked.peers.iter().any(|p| p.device_id == target_id.as_str());
+            if let Some(existing) = blocked
+                .peers
+                .iter_mut()
+                .find(|p| p.device_id == target_id.as_str())
+            {
+                existing.reason = sanitized_reason.clone();
+                existing.blocked_at = now_ms;
+            } else {
+                blocked.peers.push(crate::store::BlockedPeer {
+                    device_id: target_id.to_string(),
+                    reason: sanitized_reason.clone(),
+                    blocked_at: now_ms,
+                });
+            }
+            let _ = crate::store::save_blocked(&self.shared.cfg.data_dir, &blocked);
+            is_already
+        };
+
+        let disconnected_active = {
+            let mut sessions = self.shared.sessions.lock().await;
+            let had_session = sessions.remove(&target_id).is_some();
+            let had_live = {
+                let mut live = self.shared.live.lock().expect("live");
+                live.remove(&target_id).is_some()
+            };
+            if had_session || had_live {
+                {
+                    let mut seat = self.shared.input_seat.lock().expect("input_seat");
+                    if let Some(cur) = &*seat {
+                        if cur.device_id == target_id {
+                            *seat = None;
+                        }
+                    }
+                }
+                self.emit(UiEvent::PeerDown {
+                    device_id: target_id.to_string(),
+                });
+                true
+            } else {
+                false
+            }
+        };
+
+        let trusted = self.trusted();
+        let matched = trusted.iter().find(|t| t.device_id == target_id);
+        let alias = matched.and_then(|t| {
+            if t.alias.is_empty() {
+                None
+            } else {
+                Some(t.alias.clone())
+            }
+        });
+        let name = alias.clone();
+
+        self.emit(UiEvent::PeerBlocked {
+            device_id: target_id.to_string(),
+            reason: sanitized_reason.clone(),
+        });
+
+        Ok(PeerBlockReport {
+            ok: true,
+            device_id: target_id.to_string(),
+            name,
+            alias,
+            reason: sanitized_reason,
+            blocked: true,
+            already_blocked,
+            disconnected_active,
+        })
+    }
+
+    /// Unblock a previously blocked peer device.
+    ///
+    /// Removes the peer from `blocked.json` and emits `UiEvent::PeerUnblocked`.
+    pub async fn unblock_peer(&self, query: &str) -> Result<PeerUnblockReport, CoreError> {
+        let trimmed_query = query.trim();
+        if trimmed_query.is_empty() {
+            return Err(CoreError::PeerNotFound("empty peer identifier".to_string()));
+        }
+        let target_id = match self.resolve_peer(trimmed_query) {
+            Ok(id) => id,
+            Err(e) => {
+                if let Ok(id) = DeviceId::parse(trimmed_query) {
+                    id
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+
+        let was_blocked = {
+            let mut blocked = self.shared.blocked.lock().expect("blocked");
+            let initial_len = blocked.peers.len();
+            blocked.peers.retain(|p| p.device_id != target_id.as_str());
+            let removed = blocked.peers.len() < initial_len;
+            if removed {
+                let _ = crate::store::save_blocked(&self.shared.cfg.data_dir, &blocked);
+            }
+            removed
+        };
+
+        if was_blocked {
+            self.emit(UiEvent::PeerUnblocked {
+                device_id: target_id.to_string(),
+            });
+        }
+
+        Ok(PeerUnblockReport {
+            ok: true,
+            device_id: target_id.to_string(),
+            unblocked: was_blocked,
+            was_blocked,
+        })
     }
 
     fn already_live_on_ip(&self, addr: SocketAddr) -> bool {
@@ -2746,7 +2963,7 @@ impl Node {
                 let live = node.live_peers();
                 let routes = crate::store::load_routes(&node.shared.cfg.data_dir);
                 for peer in trusted {
-                    if peer.revoked {
+                    if peer.revoked || node.is_blocked(peer.device_id.as_str()) {
                         continue;
                     }
                     if live.iter().any(|l| l.device_id == peer.device_id) {
@@ -2787,6 +3004,10 @@ impl Node {
                 return Err(e);
             }
         };
+        if self.is_blocked(sess.peer_id.as_str()) {
+            warn!(peer = %sess.peer_id, "outbound dial aborted: peer is blocked");
+            return Err(CoreError::PeerBlocked(sess.peer_id.to_string()).into());
+        }
         self.persist_trust();
         let _ = remember_route(
             &self.shared.cfg.data_dir,
@@ -2810,6 +3031,11 @@ impl Node {
                 return Err(e);
             }
         };
+        if self.is_blocked(sess.peer_id.as_str()) {
+            warn!(peer = %sess.peer_id, "incoming session rejected: peer is blocked");
+            self.shared.telemetry.record_handshake_failed();
+            return Err(CoreError::PeerBlocked(sess.peer_id.to_string()).into());
+        }
         self.persist_trust();
         let _ = remember_route(
             &self.shared.cfg.data_dir,

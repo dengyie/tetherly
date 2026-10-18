@@ -21,11 +21,11 @@ pub use events::{CandidateViewDto, UiEvent};
 pub use platform::{cursor_pos, screen_size, start_input_hooks, HookControl, RawInput};
 pub use platform::{MemoryInsertor, MemoryOpener, SystemInputSink, SystemOpener};
 pub use runtime::{
-    extract_features, ActiveTransfer, AncsReport, HealthReport, LivePeer, LocalCapsReport, Node,
-    NodeConfig, NodeConfigReport, NodePorts, PeerCapsDto, PeerConnectReport, PeerDisconnectReport,
-    PeerPingReport, PeersCapsReport, PinReport, RouteEntryDto, RouteMutateReport, RoutesReport,
-    StorageCleanReport, StorageReport, TransferDirection, TransferPhase, TransferStats,
-    TransfersReport, UserCommand,
+    extract_features, ActiveTransfer, AncsReport, BlockedPeersReport, HealthReport, LivePeer,
+    LocalCapsReport, Node, NodeConfig, NodeConfigReport, NodePorts, PeerBlockReport, PeerCapsDto,
+    PeerConnectReport, PeerDisconnectReport, PeerPingReport, PeerUnblockReport, PeersCapsReport,
+    PinReport, RouteEntryDto, RouteMutateReport, RoutesReport, StorageCleanReport, StorageReport,
+    TransferDirection, TransferPhase, TransferStats, TransfersReport, UserCommand,
 };
 pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
 pub use telemetry::{ChannelTrafficDto, ProtocolMessagesDto, TrafficReport, TrafficTelemetry};
@@ -37,7 +37,7 @@ pub use screen::MacSource;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use screen::X11Source;
 pub use sidecar::{parse_overlay_cidrs, OverlayConfig, OverlaySource, OverlayStatus};
-pub use store::default_data_dir;
+pub use store::{default_data_dir, BlockedPeer, BlockedTable};
 pub use uihttp::{
     loopback_delete, loopback_events_connect, loopback_get, loopback_post, loopback_put, SseStream,
 };

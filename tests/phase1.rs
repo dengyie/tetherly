@@ -3854,6 +3854,244 @@ async fn peer_active_connect_and_disconnect_lifecycle_via_loopback_api() {
     peer.shutdown();
 }
 
+/// ADR-043: Peer blacklist & access control governance via loopback API.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_blacklist_and_access_control_governance_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let peer_id = peer.identity().device_id().clone();
+    let host_id = host.identity().device_id().clone();
+    let peer_addr = peer.control_addr();
+    let host_addr = host.control_addr();
+
+    // 1. Connect to SSE event stream on host
+    let mut sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("SSE connects");
+
+    // 2. Query initial blacklist: must be empty
+    let (code_b0, body_b0) = tetherly_node::loopback_get(host_ui, "/api/peers/blocked")
+        .await
+        .unwrap();
+    assert_eq!(code_b0, 200);
+    let b0: tetherly_node::BlockedPeersReport = serde_json::from_slice(&body_b0).unwrap();
+    assert!(b0.ok);
+    assert_eq!(b0.count, 0);
+    assert!(b0.peers.is_empty());
+
+    // Verify initial live peer status: peer is connected
+    let (code_live0, body_live0) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .unwrap();
+    assert_eq!(code_live0, 200);
+    let live_val0: serde_json::Value = serde_json::from_slice(&body_live0).unwrap();
+    let live_arr0 = live_val0["live"].as_array().unwrap();
+    assert!(live_arr0.iter().any(|p| p["device_id"] == peer_id.as_str()));
+
+    // 3. Block peer:
+    let block_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "reason": "malicious port scanning",
+    });
+    let (code_blk, body_blk) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/block",
+        &serde_json::to_vec(&block_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_blk, 200);
+    let blk_rep: tetherly_node::PeerBlockReport = serde_json::from_slice(&body_blk).unwrap();
+    assert!(blk_rep.ok);
+    assert!(blk_rep.blocked);
+    assert!(!blk_rep.already_blocked);
+    assert!(blk_rep.disconnected_active);
+    assert_eq!(blk_rep.device_id, peer_id.as_str());
+    assert_eq!(blk_rep.reason.as_deref(), Some("malicious port scanning"));
+
+    // 4. Verify live connection on host is instantly terminated
+    let (code_live1, body_live1) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .unwrap();
+    assert_eq!(code_live1, 200);
+    let live_val1: serde_json::Value = serde_json::from_slice(&body_live1).unwrap();
+    let live_arr1 = live_val1["live"].as_array().unwrap();
+    assert!(!live_arr1.iter().any(|p| p["device_id"] == peer_id.as_str()));
+
+    // 5. Verify SSE received peer_blocked and peer_down
+    let mut saw_peer_blocked = false;
+    let mut saw_peer_down = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(ev)) = sse.next_event(Duration::from_millis(200)).await {
+            if ev["kind"] == "peer_blocked" && ev["device_id"] == peer_id.as_str() {
+                saw_peer_blocked = true;
+            }
+            if ev["kind"] == "peer_down" && ev["device_id"] == peer_id.as_str() {
+                saw_peer_down = true;
+            }
+            if saw_peer_blocked && saw_peer_down {
+                break;
+            }
+        }
+    }
+    assert!(saw_peer_blocked, "must emit peer_blocked event");
+    assert!(saw_peer_down, "must emit peer_down event on active session teardown");
+
+    // 6. Verify persistence in blocked.json
+    let blocked_file = host.data_dir().join(tetherly_node::BLOCKED_FILE);
+    assert!(blocked_file.exists());
+    let file_content = std::fs::read_to_string(&blocked_file).unwrap();
+    assert!(file_content.contains(peer_id.as_str()));
+    assert!(file_content.contains("malicious port scanning"));
+
+    // 7. Verify outbound dialing is blocked on host
+    let dial_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "addr": peer_addr.to_string(),
+    });
+    let (code_out, body_out) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/connect",
+        &serde_json::to_vec(&dial_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_out, 400);
+    let out_err = String::from_utf8_lossy(&body_out);
+    assert!(out_err.contains("blocked"), "error message must indicate peer is blocked: {out_err}");
+
+    // 8. Verify inbound connection from blocked peer is rejected post-handshake
+    let inbound_dial = serde_json::json!({
+        "peer": host_id.as_str(),
+        "addr": host_addr.to_string(),
+    });
+    let _ = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/peers/connect",
+        &serde_json::to_vec(&inbound_dial).unwrap(),
+    )
+    .await;
+
+    // Small delay to let any attempted handshake land and be rejected by host
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Verify host still has NO live peer with peer_id
+    let (_, body_live2) = tetherly_node::loopback_get(host_ui, "/api/peers").await.unwrap();
+    let live_val2: serde_json::Value = serde_json::from_slice(&body_live2).unwrap();
+    let live_arr2 = live_val2["live"].as_array().unwrap();
+    assert!(!live_arr2.iter().any(|p| p["device_id"] == peer_id.as_str()));
+
+    // 9. Test idempotency of blocking
+    let (code_blk2, body_blk2) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/block",
+        &serde_json::to_vec(&block_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_blk2, 200);
+    let blk_rep2: tetherly_node::PeerBlockReport = serde_json::from_slice(&body_blk2).unwrap();
+    assert!(blk_rep2.ok);
+    assert!(blk_rep2.already_blocked);
+    assert!(!blk_rep2.disconnected_active);
+
+    // 10. Test unblocking
+    let unblock_payload = serde_json::json!({ "peer": peer_id.as_str() });
+    let (code_unblk, body_unblk) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/unblock",
+        &serde_json::to_vec(&unblock_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_unblk, 200);
+    let unblk_rep: tetherly_node::PeerUnblockReport = serde_json::from_slice(&body_unblk).unwrap();
+    assert!(unblk_rep.ok);
+    assert!(unblk_rep.unblocked);
+    assert!(unblk_rep.was_blocked);
+    assert_eq!(unblk_rep.device_id, peer_id.as_str());
+
+    // Verify SSE emitted peer_unblocked
+    let mut saw_peer_unblocked = false;
+    let deadline_unblk = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline_unblk {
+        if let Ok(Some(ev)) = sse.next_event(Duration::from_millis(200)).await {
+            if ev["kind"] == "peer_unblocked" && ev["device_id"] == peer_id.as_str() {
+                saw_peer_unblocked = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_peer_unblocked, "must emit peer_unblocked event");
+
+    // GET /api/peers/blocked is empty again
+    let (_, body_b_after) = tetherly_node::loopback_get(host_ui, "/api/peers/blocked")
+        .await
+        .unwrap();
+    let b_after: tetherly_node::BlockedPeersReport = serde_json::from_slice(&body_b_after).unwrap();
+    assert_eq!(b_after.count, 0);
+
+    // Unblocking again returns unblocked: false, was_blocked: false
+    let (_, body_unblk2) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/unblock",
+        &serde_json::to_vec(&unblock_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    let unblk_rep2: tetherly_node::PeerUnblockReport = serde_json::from_slice(&body_unblk2).unwrap();
+    assert!(!unblk_rep2.unblocked);
+    assert!(!unblk_rep2.was_blocked);
+
+    // 11. Verify connection restoration after unblocking
+    let (code_rec, body_rec) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/connect",
+        &serde_json::to_vec(&dial_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_rec, 200);
+    let rec_rep: tetherly_node::PeerConnectReport = serde_json::from_slice(&body_rec).unwrap();
+    assert!(rec_rep.ok);
+    assert!(rec_rep.connected);
+
+    let (_, body_live3) = tetherly_node::loopback_get(host_ui, "/api/peers").await.unwrap();
+    let live_val3: serde_json::Value = serde_json::from_slice(&body_live3).unwrap();
+    let live_arr3 = live_val3["live"].as_array().unwrap();
+    assert!(live_arr3.iter().any(|p| p["device_id"] == peer_id.as_str()));
+
+    // 12. Negative tests & security boundaries:
+    // a. Blocking local device ID returns 400
+    let block_self = serde_json::json!({ "peer": host_id.as_str() });
+    let (code_self, body_self) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/block",
+        &serde_json::to_vec(&block_self).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_self, 400);
+    assert!(String::from_utf8_lossy(&body_self).contains("cannot block local device"));
+
+    // b. Empty peer query returns 400
+    let empty_payload = serde_json::json!({});
+    let (code_emp, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/block",
+        &serde_json::to_vec(&empty_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_emp, 400);
+
+    // 13. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
