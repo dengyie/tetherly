@@ -4336,7 +4336,9 @@ impl Node {
 
     /// Configures the auto-accept policy for trusted peers and emits `UiEvent::FileAutoAcceptChanged`.
     pub fn set_auto_accept(&self, enabled: bool) -> AutoAcceptReport {
-        self.shared.auto_accept_trusted.store(enabled, Ordering::Relaxed);
+        self.shared
+            .auto_accept_trusted
+            .store(enabled, Ordering::Relaxed);
         self.emit(UiEvent::FileAutoAcceptChanged { enabled });
         self.auto_accept_status()
     }

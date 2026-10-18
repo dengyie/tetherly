@@ -4658,8 +4658,7 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
         .await
         .unwrap();
     assert_eq!(code_init, 200);
-    let init_offers: tetherly_node::FileOffersReport =
-        serde_json::from_slice(&body_init).unwrap();
+    let init_offers: tetherly_node::FileOffersReport = serde_json::from_slice(&body_init).unwrap();
     assert!(init_offers.ok);
     assert_eq!(init_offers.count, 0);
     assert!(init_offers.offers.is_empty());
@@ -4714,25 +4713,20 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     assert_eq!(rep_offers1.offers[0].source, peer_id);
 
     // Test query by specific ID
-    let (code_by_id, body_by_id) = tetherly_node::loopback_get(
-        host_ui,
-        &format!("/api/file/offers?id={transfer_id1}"),
-    )
-    .await
-    .unwrap();
+    let (code_by_id, body_by_id) =
+        tetherly_node::loopback_get(host_ui, &format!("/api/file/offers?id={transfer_id1}"))
+            .await
+            .unwrap();
     assert_eq!(code_by_id, 200);
-    let single_offer: tetherly_node::FileOfferDto =
-        serde_json::from_slice(&body_by_id).unwrap();
+    let single_offer: tetherly_node::FileOfferDto = serde_json::from_slice(&body_by_id).unwrap();
     assert_eq!(single_offer.transfer_id, transfer_id1);
     assert_eq!(single_offer.filename, "offer_doc1.txt");
 
     // Test query by peer filter
-    let (_, body_peer_filter) = tetherly_node::loopback_get(
-        host_ui,
-        &format!("/api/file/offers?peer={peer_id}"),
-    )
-    .await
-    .unwrap();
+    let (_, body_peer_filter) =
+        tetherly_node::loopback_get(host_ui, &format!("/api/file/offers?peer={peer_id}"))
+            .await
+            .unwrap();
     let peer_offers: tetherly_node::FileOffersReport =
         serde_json::from_slice(&body_peer_filter).unwrap();
     assert_eq!(peer_offers.count, 1);
@@ -4747,10 +4741,9 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     assert_eq!(empty_filter_rep.count, 0);
 
     // 404 for unknown transfer ID
-    let (code_404, _) =
-        tetherly_node::loopback_get(host_ui, "/api/file/offers?id=tfl_nonexistent")
-            .await
-            .unwrap();
+    let (code_404, _) = tetherly_node::loopback_get(host_ui, "/api/file/offers?id=tfl_nonexistent")
+        .await
+        .unwrap();
     assert_eq!(code_404, 404);
 
     // 4. Reject the offer on Host via POST /api/file/reject
@@ -4763,8 +4756,7 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     .await
     .unwrap();
     assert_eq!(code_rej, 200);
-    let rej_rep: tetherly_node::FileDecisionReport =
-        serde_json::from_slice(&body_rej).unwrap();
+    let rej_rep: tetherly_node::FileDecisionReport = serde_json::from_slice(&body_rej).unwrap();
     assert!(rej_rep.ok);
     assert!(!rej_rep.accepted);
     assert_eq!(rej_rep.transfer_id, transfer_id1);
@@ -4845,8 +4837,7 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
         let (_, b_chk) = tetherly_node::loopback_get(host_ui, "/api/file/offers")
             .await
             .unwrap();
-        let rep_chk: tetherly_node::FileOffersReport =
-            serde_json::from_slice(&b_chk).unwrap();
+        let rep_chk: tetherly_node::FileOffersReport = serde_json::from_slice(&b_chk).unwrap();
         if rep_chk.count == 2 {
             break;
         }
@@ -4913,7 +4904,10 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
             }
         }
     }
-    assert!(auto_ev_found, "host did not emit FileAutoAcceptChanged event");
+    assert!(
+        auto_ev_found,
+        "host did not emit FileAutoAcceptChanged event"
+    );
 
     // Peer sends a file while auto-accept is enabled on host
     let auto_file_path = send_dir.join("auto_file.dat");
@@ -4934,7 +4928,8 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     .await
     .unwrap();
     assert_eq!(c_auto_send, 200);
-    let auto_tid = serde_json::from_slice::<serde_json::Value>(&b_auto_send).unwrap()["transfer_id"]
+    let auto_tid = serde_json::from_slice::<serde_json::Value>(&b_auto_send).unwrap()
+        ["transfer_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -4948,8 +4943,7 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     let (_, body_auto_st) = tetherly_node::loopback_get(host_ui, "/api/file/auto-accept")
         .await
         .unwrap();
-    let auto_st: tetherly_node::AutoAcceptReport =
-        serde_json::from_slice(&body_auto_st).unwrap();
+    let auto_st: tetherly_node::AutoAcceptReport = serde_json::from_slice(&body_auto_st).unwrap();
     assert!(auto_st.enabled);
     assert_eq!(auto_st.auto_accepted_count, 1);
 
@@ -4967,13 +4961,9 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
 
     // 8. Error boundaries and Security Red Lines
     // a. Accept with empty body (no ID, no all) returns 400 Bad Request
-    let (c_bad_acc, _) = tetherly_node::loopback_post(
-        host_ui,
-        "/api/file/accept",
-        b"{}",
-    )
-    .await
-    .unwrap();
+    let (c_bad_acc, _) = tetherly_node::loopback_post(host_ui, "/api/file/accept", b"{}")
+        .await
+        .unwrap();
     assert_eq!(c_bad_acc, 400);
 
     // b. Reject with unknown transfer ID returns 404 Not Found
@@ -4987,13 +4977,9 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     assert_eq!(c_bad_rej, 404);
 
     // c. Malformed JSON returns 400
-    let (c_mal, _) = tetherly_node::loopback_post(
-        host_ui,
-        "/api/file/accept",
-        b"{ bad json",
-    )
-    .await
-    .unwrap();
+    let (c_mal, _) = tetherly_node::loopback_post(host_ui, "/api/file/accept", b"{ bad json")
+        .await
+        .unwrap();
     assert_eq!(c_mal, 400);
 
     // 9. Clean shutdown

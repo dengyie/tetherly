@@ -3885,8 +3885,14 @@ async fn do_file_offers(
         println!("File Offer {tid}:");
         println!("  File:        {filename}");
         println!("  Source:      {source}");
-        println!("  Total Bytes: {total_bytes} ({})", format_bytes(total_bytes));
-        println!("  Resume From: {resume_from} ({})", format_bytes(resume_from));
+        println!(
+            "  Total Bytes: {total_bytes} ({})",
+            format_bytes(total_bytes)
+        );
+        println!(
+            "  Resume From: {resume_from} ({})",
+            format_bytes(resume_from)
+        );
         println!("  Offered At:  {ts}ms");
         return Ok(());
     }
@@ -3959,8 +3965,14 @@ async fn do_file_accept(
         return Ok(());
     }
     if all {
-        let count = v.get("accepted_count").and_then(|c| c.as_u64()).unwrap_or(0);
-        let total = v.get("total_evaluated").and_then(|c| c.as_u64()).unwrap_or(0);
+        let count = v
+            .get("accepted_count")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0);
+        let total = v
+            .get("total_evaluated")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0);
         println!("Accepted {count} of {total} pending file offer(s)");
         if let Some(decisions) = v.get("decisions").and_then(|d| d.as_array()) {
             for d in decisions {
@@ -4024,8 +4036,14 @@ async fn do_file_reject(
         return Ok(());
     }
     if all {
-        let count = v.get("rejected_count").and_then(|c| c.as_u64()).unwrap_or(0);
-        let total = v.get("total_evaluated").and_then(|c| c.as_u64()).unwrap_or(0);
+        let count = v
+            .get("rejected_count")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0);
+        let total = v
+            .get("total_evaluated")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0);
         println!("Rejected {count} of {total} pending file offer(s)");
         if let Some(decisions) = v.get("decisions").and_then(|d| d.as_array()) {
             for d in decisions {
@@ -4044,12 +4062,7 @@ async fn do_file_reject(
     Ok(())
 }
 
-async fn do_file_auto_accept(
-    ui_port: u16,
-    enable: bool,
-    disable: bool,
-    json: bool,
-) -> Result<()> {
+async fn do_file_auto_accept(ui_port: u16, enable: bool, disable: bool, json: bool) -> Result<()> {
     if enable && disable {
         bail!("cannot specify both --enable and --disable");
     }

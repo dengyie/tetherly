@@ -1514,19 +1514,11 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             let target_peer = parsed_body
                 .as_ref()
                 .and_then(|b| b.peer.clone())
-                .or_else(|| {
-                    qmap.get("peer")
-                        .or_else(|| qmap.get("device_id"))
-                        .cloned()
-                });
+                .or_else(|| qmap.get("peer").or_else(|| qmap.get("device_id")).cloned());
             let target_id = parsed_body
                 .as_ref()
                 .and_then(|b| b.id.clone())
-                .or_else(|| {
-                    qmap.get("id")
-                        .or_else(|| qmap.get("transfer_id"))
-                        .cloned()
-                });
+                .or_else(|| qmap.get("id").or_else(|| qmap.get("transfer_id")).cloned());
 
             if is_all || (target_id.is_none() && target_peer.is_some()) {
                 match node.batch_accept_files(target_peer.as_deref()).await {
@@ -1565,19 +1557,11 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             let target_peer = parsed_body
                 .as_ref()
                 .and_then(|b| b.peer.clone())
-                .or_else(|| {
-                    qmap.get("peer")
-                        .or_else(|| qmap.get("device_id"))
-                        .cloned()
-                });
+                .or_else(|| qmap.get("peer").or_else(|| qmap.get("device_id")).cloned());
             let target_id = parsed_body
                 .as_ref()
                 .and_then(|b| b.id.clone())
-                .or_else(|| {
-                    qmap.get("id")
-                        .or_else(|| qmap.get("transfer_id"))
-                        .cloned()
-                });
+                .or_else(|| qmap.get("id").or_else(|| qmap.get("transfer_id")).cloned());
 
             if is_all || (target_id.is_none() && target_peer.is_some()) {
                 match node.batch_reject_files(target_peer.as_deref()).await {
