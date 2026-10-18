@@ -4188,7 +4188,9 @@ impl Node {
             .into_iter()
             .map(|e| ClipMetaEntryDto {
                 seq: e.seq,
-                source: e.source.map_or_else(|| "local".to_string(), |s| s.to_string()),
+                source: e
+                    .source
+                    .map_or_else(|| "local".to_string(), |s| s.to_string()),
                 direction: match e.direction {
                     ClipDirection::Inbound => "inbound".to_string(),
                     ClipDirection::Outbound => "outbound".to_string(),

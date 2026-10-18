@@ -1194,15 +1194,14 @@ async fn main() -> Result<()> {
         }
         Cmd::Clip { action } => match action {
             ClipCmd::Status { json, ui_port } => {
-                let (code, resp) =
-                    tetherly_node::loopback_get(ui_port, "/api/clip/status")
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                                 start one with `tetherly --data-dir <dir> run` first"
-                            )
-                        })?;
+                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/clip/status")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
                 if code != 200 {
                     anyhow::bail!(
                         "clipboard status query failed (HTTP {code}): {}",
@@ -1241,14 +1240,15 @@ async fn main() -> Result<()> {
                 } else {
                     "/api/clip/history".to_string()
                 };
-                let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                let (code, resp) =
+                    tetherly_node::loopback_get(ui_port, &path)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                              start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                            )
+                        })?;
                 if code != 200 {
                     anyhow::bail!(
                         "clipboard history query failed (HTTP {code}): {}",
@@ -1273,11 +1273,7 @@ async fn main() -> Result<()> {
                                 let src = item["source"].as_str().unwrap_or("-");
                                 let bytes = item["bytes"].as_u64().unwrap_or(0);
                                 let hash = item["hash"].as_str().unwrap_or("-");
-                                let short_hash = if hash.len() >= 12 {
-                                    &hash[..12]
-                                } else {
-                                    hash
-                                };
+                                let short_hash = if hash.len() >= 12 { &hash[..12] } else { hash };
                                 let ts = item["timestamp_ms"].as_u64().unwrap_or(0);
                                 println!(
                                     "{:<6} {:<10} {:<34} {:<8} {:<16} {}ms",
@@ -1290,15 +1286,14 @@ async fn main() -> Result<()> {
                 }
             }
             ClipCmd::Clear { json, ui_port } => {
-                let (code, resp) =
-                    tetherly_node::loopback_post(ui_port, "/api/clip/clear", b"{}")
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                                 start one with `tetherly --data-dir <dir> run` first"
-                            )
-                        })?;
+                let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/clip/clear", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
                 if code != 200 {
                     anyhow::bail!(
                         "clipboard clear failed (HTTP {code}): {}",
@@ -1311,9 +1306,7 @@ async fn main() -> Result<()> {
                     let v: serde_json::Value = serde_json::from_slice(&resp)
                         .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
                     let cleared = v["cleared_history_count"].as_u64().unwrap_or(0);
-                    println!(
-                        "clipboard cleared successfully (evicted {cleared} history entries)"
-                    );
+                    println!("clipboard cleared successfully (evicted {cleared} history entries)");
                 }
             }
             ClipCmd::Sync { peer, ui_port } => {

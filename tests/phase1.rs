@@ -4485,10 +4485,7 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
         peer_inbound_found,
         "peer did not emit inbound ClipboardSynced event"
     );
-    assert_eq!(
-        peer.clip().get_text().unwrap().as_deref(),
-        Some(test_msg1)
-    );
+    assert_eq!(peer.clip().get_text().unwrap().as_deref(), Some(test_msg1));
 
     // 3. Inspect Host status and history
     let (code_st2, body_st2) = tetherly_node::loopback_get(host_ui, "/api/clip/status")
@@ -4549,10 +4546,7 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
         host_inbound_found,
         "host did not emit inbound ClipboardSynced event"
     );
-    assert_eq!(
-        host.clip().get_text().unwrap().as_deref(),
-        Some(test_msg2)
-    );
+    assert_eq!(host.clip().get_text().unwrap().as_deref(), Some(test_msg2));
 
     // Host status should now reflect both outbound and inbound counts
     let (_, body_st3) = tetherly_node::loopback_get(host_ui, "/api/clip/status")
@@ -4591,13 +4585,11 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
     assert_eq!(hist_bounded.entries[31].seq, 40);
 
     // 6. Test Clear & Purge via POST /api/clip/clear
-    let (code_clear, body_clear) =
-        tetherly_node::loopback_post(host_ui, "/api/clip/clear", b"{}")
-            .await
-            .unwrap();
+    let (code_clear, body_clear) = tetherly_node::loopback_post(host_ui, "/api/clip/clear", b"{}")
+        .await
+        .unwrap();
     assert_eq!(code_clear, 200);
-    let clear_rep: tetherly_node::ClipClearReport =
-        serde_json::from_slice(&body_clear).unwrap();
+    let clear_rep: tetherly_node::ClipClearReport = serde_json::from_slice(&body_clear).unwrap();
     assert!(clear_rep.ok);
     assert_eq!(clear_rep.cleared_history_count, 32);
     assert!(clear_rep.timestamp_ms > 0);
@@ -4614,10 +4606,7 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
             }
         }
     }
-    assert!(
-        cleared_ev_found,
-        "host did not emit ClipboardCleared event"
-    );
+    assert!(cleared_ev_found, "host did not emit ClipboardCleared event");
 
     // Status and History are fully cleared
     let (_, body_st_cleared) = tetherly_node::loopback_get(host_ui, "/api/clip/status")
