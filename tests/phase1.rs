@@ -4576,9 +4576,9 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
         serde_json::from_slice(&body_bounded).unwrap();
     assert_eq!(hist_bounded.total, tetherly_core::MAX_CLIP_HISTORY);
     assert_eq!(hist_bounded.entries.len(), 32);
-    // Oldest surviving seq is 40 - 32 + 1 = 9
-    assert_eq!(hist_bounded.entries[0].seq, 9);
-    assert_eq!(hist_bounded.entries[31].seq, 40);
+    // history() returns newest-first: index 0 is newest (40), index 31 is oldest surviving (40 - 32 + 1 = 9)
+    assert_eq!(hist_bounded.entries[0].seq, 40);
+    assert_eq!(hist_bounded.entries[31].seq, 9);
 
     // 6. Test Clear & Purge via POST /api/clip/clear
     let (code_clear, body_clear) = tetherly_node::loopback_post(host_ui, "/api/clip/clear", b"{}")
