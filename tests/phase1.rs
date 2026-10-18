@@ -3857,7 +3857,7 @@ async fn peer_active_connect_and_disconnect_lifecycle_via_loopback_api() {
 /// ADR-043: Peer blacklist & access control governance via loopback API.
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_blacklist_and_access_control_governance_via_loopback_api() {
-    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let (host, peer, g1, _g2) = pair_phone_desktop().await;
     let host_ui = host.spawn_ui().await.expect("host UI spawns");
     let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
     let peer_id = peer.identity().device_id().clone();
@@ -3924,15 +3924,19 @@ async fn peer_blacklist_and_access_control_governance_via_loopback_api() {
     let mut saw_peer_down = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline {
-        if let Ok(Some(ev)) = sse.next_event(Duration::from_millis(200)).await {
-            if ev["kind"] == "peer_blocked" && ev["device_id"] == peer_id.as_str() {
-                saw_peer_blocked = true;
-            }
-            if ev["kind"] == "peer_down" && ev["device_id"] == peer_id.as_str() {
-                saw_peer_down = true;
-            }
-            if saw_peer_blocked && saw_peer_down {
-                break;
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), sse.next_event()).await
+        {
+            if let Ok(ev) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if ev["kind"] == "peer_blocked" && ev["device_id"] == peer_id.as_str() {
+                    saw_peer_blocked = true;
+                }
+                if ev["kind"] == "peer_down" && ev["device_id"] == peer_id.as_str() {
+                    saw_peer_down = true;
+                }
+                if saw_peer_blocked && saw_peer_down {
+                    break;
+                }
             }
         }
     }
@@ -3943,7 +3947,7 @@ async fn peer_blacklist_and_access_control_governance_via_loopback_api() {
     );
 
     // 6. Verify persistence in blocked.json
-    let blocked_file = host.data_dir().join(tetherly_node::BLOCKED_FILE);
+    let blocked_file = g1.path().join(tetherly_node::BLOCKED_FILE);
     assert!(blocked_file.exists());
     let file_content = std::fs::read_to_string(&blocked_file).unwrap();
     assert!(file_content.contains(peer_id.as_str()));
@@ -4025,10 +4029,14 @@ async fn peer_blacklist_and_access_control_governance_via_loopback_api() {
     let mut saw_peer_unblocked = false;
     let deadline_unblk = tokio::time::Instant::now() + Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline_unblk {
-        if let Ok(Some(ev)) = sse.next_event(Duration::from_millis(200)).await {
-            if ev["kind"] == "peer_unblocked" && ev["device_id"] == peer_id.as_str() {
-                saw_peer_unblocked = true;
-                break;
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), sse.next_event()).await
+        {
+            if let Ok(ev) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if ev["kind"] == "peer_unblocked" && ev["device_id"] == peer_id.as_str() {
+                    saw_peer_unblocked = true;
+                    break;
+                }
             }
         }
     }

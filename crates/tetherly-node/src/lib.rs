@@ -37,7 +37,7 @@ pub use screen::MacSource;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use screen::X11Source;
 pub use sidecar::{parse_overlay_cidrs, OverlayConfig, OverlaySource, OverlayStatus};
-pub use store::{default_data_dir, BlockedPeer, BlockedTable};
+pub use store::{default_data_dir, BlockedPeer, BlockedTable, BLOCKED_FILE};
 pub use uihttp::{
     loopback_delete, loopback_events_connect, loopback_get, loopback_post, loopback_put, SseStream,
 };
