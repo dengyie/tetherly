@@ -4040,19 +4040,23 @@ impl Node {
             .join(format!(".{}.resume.json", transfer_id))
     }
 
-    pub async fn user_accept_file(&self, transfer_id: &str) -> Result<(), CoreError> {
-        let decision = {
+    /// Accepts an incoming file transfer, records the active transfer, dispatches
+    /// the accept frame to the peer, and returns a structured decision report.
+    pub async fn user_accept_file_reported(
+        &self,
+        transfer_id: &str,
+    ) -> Result<FileDecisionReport, CoreError> {
+        let (decision, source, name, total, resume_from) = {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.files
-                .accept(transfer_id, self.shared.clock.unix_ms())?
-        };
-        let (source, name, total, resume_from) = {
-            let hubs = self.shared.hubs.lock().expect("hubs");
+            let decision = hubs
+                .files
+                .accept(transfer_id, self.shared.clock.unix_ms())?;
             let t = hubs
                 .files
                 .get(transfer_id)
                 .ok_or(CoreError::UnknownTransfer)?;
             (
+                decision,
                 t.source.clone(),
                 t.files
                     .first()
@@ -4071,7 +4075,7 @@ impl Node {
                     transfer_id: transfer_id.to_string(),
                     peer: source.clone(),
                     direction: TransferDirection::Inbound,
-                    filename: name,
+                    filename: name.clone(),
                     total,
                     transferred: resume_from,
                     speed_bps: 0,
@@ -4084,7 +4088,21 @@ impl Node {
         }
         // Token is derived from the live session handshake hash.
         self.send_to(&source, decision.accept_frame()?).await?;
-        Ok(())
+        Ok(FileDecisionReport {
+            ok: true,
+            accepted: true,
+            action: "accepted".to_string(),
+            transfer_id: transfer_id.to_string(),
+            peer: source.to_string(),
+            filename: name,
+            total_bytes: total,
+            resume_from,
+            timestamp_ms: now,
+        })
+    }
+
+    pub async fn user_accept_file(&self, transfer_id: &str) -> Result<(), CoreError> {
+        self.user_accept_file_reported(transfer_id).await.map(|_| ())
     }
 
     pub fn file_token_for(&self, peer: &DeviceId, transfer_id: &str) -> Option<[u8; 32]> {
@@ -4097,88 +4115,40 @@ impl Node {
         self.shared.clip.clone()
     }
 
-    pub async fn user_reject_file(&self, transfer_id: &str) -> Result<(), CoreError> {
-        let decision = {
+    /// Rejects an incoming file transfer, emits a rejection event, dispatches
+    /// the reject frame to the peer, and returns a structured decision report.
+    pub async fn user_reject_file_reported(
+        &self,
+        transfer_id: &str,
+    ) -> Result<FileDecisionReport, CoreError> {
+        let (decision, source, name, total, resume_from) = {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.files.reject(transfer_id)?
+            let t = hubs
+                .files
+                .get(transfer_id)
+                .ok_or(CoreError::UnknownTransfer)?;
+            let source = t.source.clone();
+            let name = t
+                .files
+                .first()
+                .map(|f| f.name.clone())
+                .unwrap_or_else(|| "file.bin".into());
+            let total = t.files.iter().map(|f| f.size).sum::<u64>();
+            let resume_from = t.resume_from.unwrap_or(0);
+            let decision = hubs.files.reject(transfer_id)?;
+            (decision, source, name, total, resume_from)
         };
         self.set_transfer_phase(
             transfer_id,
             TransferPhase::Failed,
             Some("rejected locally".into()),
         );
-        let source = {
-            let hubs = self.shared.hubs.lock().expect("hubs");
-            hubs.files
-                .get(transfer_id)
-                .map(|t| t.source.clone())
-                .ok_or(CoreError::UnknownTransfer)?
-        };
         self.emit(UiEvent::FileRejected {
             transfer_id: transfer_id.to_string(),
             source: source.to_string(),
             reason: Some("rejected locally".into()),
         });
-        self.send_to(&source, decision.reject_frame()?).await
-    }
-
-    /// Accepts an incoming file transfer and returns a structured decision report.
-    pub async fn user_accept_file_reported(
-        &self,
-        transfer_id: &str,
-    ) -> Result<FileDecisionReport, CoreError> {
-        let (source, name, total, resume_from) = {
-            let hubs = self.shared.hubs.lock().expect("hubs");
-            let t = hubs
-                .files
-                .get(transfer_id)
-                .ok_or(CoreError::UnknownTransfer)?;
-            (
-                t.source.clone(),
-                t.files
-                    .first()
-                    .map(|f| f.name.clone())
-                    .unwrap_or_else(|| "file.bin".into()),
-                t.files.iter().map(|f| f.size).sum::<u64>(),
-                t.resume_from.unwrap_or(0),
-            )
-        };
-        self.user_accept_file(transfer_id).await?;
-        Ok(FileDecisionReport {
-            ok: true,
-            accepted: true,
-            action: "accepted".to_string(),
-            transfer_id: transfer_id.to_string(),
-            peer: source.to_string(),
-            filename: name,
-            total_bytes: total,
-            resume_from,
-            timestamp_ms: self.shared.clock.unix_ms(),
-        })
-    }
-
-    /// Rejects an incoming file transfer and returns a structured decision report.
-    pub async fn user_reject_file_reported(
-        &self,
-        transfer_id: &str,
-    ) -> Result<FileDecisionReport, CoreError> {
-        let (source, name, total, resume_from) = {
-            let hubs = self.shared.hubs.lock().expect("hubs");
-            let t = hubs
-                .files
-                .get(transfer_id)
-                .ok_or(CoreError::UnknownTransfer)?;
-            (
-                t.source.clone(),
-                t.files
-                    .first()
-                    .map(|f| f.name.clone())
-                    .unwrap_or_else(|| "file.bin".into()),
-                t.files.iter().map(|f| f.size).sum::<u64>(),
-                t.resume_from.unwrap_or(0),
-            )
-        };
-        self.user_reject_file(transfer_id).await?;
+        self.send_to(&source, decision.reject_frame()?).await?;
         Ok(FileDecisionReport {
             ok: true,
             accepted: false,
@@ -4190,6 +4160,10 @@ impl Node {
             resume_from,
             timestamp_ms: self.shared.clock.unix_ms(),
         })
+    }
+
+    pub async fn user_reject_file(&self, transfer_id: &str) -> Result<(), CoreError> {
+        self.user_reject_file_reported(transfer_id).await.map(|_| ())
     }
 
     /// Batch accepts pending incoming file offers, optionally filtered by peer.
@@ -4347,21 +4321,22 @@ impl Node {
                 }
             }
             let peer_alias = trusted_map.get(&t.source).cloned().flatten();
-            let (name, size, sha256) = t
+            let total_bytes: u64 = t.files.iter().map(|f| f.size).sum();
+            let (name, sha256) = t
                 .files
                 .first()
-                .map(|f| (f.name.clone(), f.size, f.sha256.clone()))
+                .map(|f| (f.name.clone(), f.sha256.clone()))
                 .unwrap_or_default();
             filtered.push(FileOfferDto {
                 transfer_id: t.transfer_id,
                 filename: name,
-                total_bytes: size,
+                total_bytes,
                 resume_from: t.resume_from.unwrap_or(0),
                 source: t.source.to_string(),
                 peer: t.source.to_string(),
                 peer_alias,
                 peer_name: None,
-                size,
+                size: total_bytes,
                 sha256,
                 timestamp_ms: t.offered_ms,
                 offered_ms: t.offered_ms,

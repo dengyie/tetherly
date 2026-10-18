@@ -5100,6 +5100,61 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
         .unwrap();
     assert_eq!(c_mal, 400);
 
+    // d. Multi-file offer cumulative total_bytes verification & decision reporting
+    let multi_offer_id = "tr_multifile_test";
+    let multi_offer = FileOffer {
+        transfer_id: multi_offer_id.into(),
+        files: vec![
+            FileMeta {
+                name: "part1.bin".into(),
+                size: 1500,
+                sha256: "1".repeat(64),
+            },
+            FileMeta {
+                name: "part2.bin".into(),
+                size: 2500,
+                sha256: "2".repeat(64),
+            },
+        ],
+    };
+    peer.send_to(&host_id, multi_offer.to_frame().unwrap())
+        .await
+        .unwrap();
+
+    let start_multi = std::time::Instant::now();
+    loop {
+        let (code_multi, body_multi) = tetherly_node::loopback_get(
+            host_ui,
+            &format!("/api/file/offers?id={multi_offer_id}"),
+        )
+        .await
+        .unwrap();
+        if code_multi == 200 {
+            let multi_dto: tetherly_node::FileOfferDto =
+                serde_json::from_slice(&body_multi).unwrap();
+            assert_eq!(multi_dto.transfer_id, multi_offer_id);
+            assert_eq!(multi_dto.filename, "part1.bin");
+            assert_eq!(multi_dto.total_bytes, 4000);
+            assert_eq!(multi_dto.size, 4000);
+            break;
+        }
+        if start_multi.elapsed() > Duration::from_secs(5) {
+            panic!("timed out waiting for multi-file offer on host");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Reject via user_reject_file_reported and verify decision report fields
+    let rej_rep = host
+        .user_reject_file_reported(multi_offer_id)
+        .await
+        .unwrap();
+    assert!(!rej_rep.accepted);
+    assert_eq!(rej_rep.transfer_id, multi_offer_id);
+    assert_eq!(rej_rep.total_bytes, 4000);
+    assert_eq!(rej_rep.filename, "part1.bin");
+    assert_eq!(rej_rep.peer, peer_str);
+
     // 9. Clean shutdown
     host.shutdown();
     peer.shutdown();
