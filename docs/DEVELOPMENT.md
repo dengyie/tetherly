@@ -84,6 +84,15 @@
        7. 验证 `POST /api/routes/delete` 请求体智能别名删除与磁盘文件清空；
        8. 验证删除不存在路由返回 404，非法 IP/端口 0/空别名/歧义解析返回 400 防御；
        9. 优雅停机。
+- **验证与全量测试全绿**：
+  - 本地代码质量与静态规范严格遵循 `cargo fmt --check` 与 `clippy --workspace --all-targets -- -D warnings`；
+  - GitHub Actions CI 跨平台 5 平台矩阵全绿（Run ID: `39081141144`）：
+    - `android` (arm64-v8a NDK): ✓ in 1m41s
+    - `deny` (advisories, bans, licenses, sources): ✓ in 1m7s
+    - `check (macos-latest)`: ✓ in 2m10s
+    - `check (ubuntu-latest)`: ✓ in 3m32s
+    - `check (windows-latest)`: ✓ in 5m1s
+  - 核心安全红线守卫：绝不输出私钥、对称会话密钥或配对 PIN 等敏感数据；Loopback 45716 仅绑定 127.0.0.1 且严格校验 Host；零 LGPL 链接；`UiEvent` 严禁携带明文敏感内容。
 
 **1.45 相对 1.44(节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理)**
 
