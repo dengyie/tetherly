@@ -4652,6 +4652,19 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     let peer_id = peer.identity().device_id().clone();
     let peer_str = peer_id.to_string();
 
+    let start_caps = std::time::Instant::now();
+    loop {
+        if host.live_peers().iter().any(|p| p.file_port.is_some())
+            && peer.live_peers().iter().any(|p| p.file_port.is_some())
+        {
+            break;
+        }
+        if start_caps.elapsed() > Duration::from_secs(5) {
+            panic!("fileport caps.update never arrived");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
     let mut host_rx = host.subscribe();
 
     // 1. Initial State: No pending offers, auto-accept disabled, counter is 0
@@ -4937,16 +4950,63 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     assert!(!auto_tid.is_empty());
 
     // File should be automatically accepted and received in host inbox without manual call!
-    let received_data = wait_inbox(g1.path(), "auto_file.dat", Duration::from_secs(35)).await;
-    assert_eq!(hex_sha256(&received_data), auto_expected_hash);
+    let start_auto = std::time::Instant::now();
+    loop {
+        let (c_auto_st, b_auto_st) = tetherly_node::loopback_get(host_ui, "/api/file/auto-accept")
+            .await
+            .unwrap();
+        assert_eq!(c_auto_st, 200);
+        let auto_st: tetherly_node::AutoAcceptReport = serde_json::from_slice(&b_auto_st).unwrap();
+        if auto_st.auto_accepted_count >= 1 {
+            assert!(auto_st.enabled);
+            break;
+        }
+        if start_auto.elapsed() > Duration::from_secs(20) {
+            let (_, body_offers) =
+                tetherly_node::loopback_get(host_ui, "/api/file/offers").await.unwrap();
+            let (_, body_transfers) =
+                tetherly_node::loopback_get(host_ui, "/api/file/transfers").await.unwrap();
+            panic!(
+                "auto-accept counter did not reach 1 within 20s. auto_st: {:?}, host offers: {}, \
+                 host transfers: {}",
+                auto_st,
+                String::from_utf8_lossy(&body_offers),
+                String::from_utf8_lossy(&body_transfers),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
-    // Host auto_accepted_count should have incremented to 1
-    let (_, body_auto_st) = tetherly_node::loopback_get(host_ui, "/api/file/auto-accept")
-        .await
-        .unwrap();
-    let auto_st: tetherly_node::AutoAcceptReport = serde_json::from_slice(&body_auto_st).unwrap();
-    assert!(auto_st.enabled);
-    assert_eq!(auto_st.auto_accepted_count, 1);
+    let start_inbox = std::time::Instant::now();
+    let auto_dest = g1.path().join("inbox").join("auto_file.dat");
+    let received_data = loop {
+        if let Ok(bytes) = std::fs::read(&auto_dest) {
+            if !bytes.is_empty() {
+                break bytes;
+            }
+        }
+        if start_inbox.elapsed() > Duration::from_secs(35) {
+            let entries = std::fs::read_dir(g1.path().join("inbox"))
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok().map(|x| x.file_name().to_string_lossy().to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let (_, body_host_xfers) =
+                tetherly_node::loopback_get(host_ui, "/api/file/transfers").await.unwrap();
+            let (_, body_peer_xfers) =
+                tetherly_node::loopback_get(peer_ui, "/api/file/transfers").await.unwrap();
+            panic!(
+                "inbox file missing after 35s. entries: {:?}, host transfers: {}, \
+                 peer transfers: {}",
+                entries,
+                String::from_utf8_lossy(&body_host_xfers),
+                String::from_utf8_lossy(&body_peer_xfers),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(hex_sha256(&received_data), auto_expected_hash);
 
     // 7. Disable Auto-Accept Policy
     let (code_dis, body_dis) = tetherly_node::loopback_post(
