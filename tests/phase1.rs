@@ -4372,7 +4372,7 @@ async fn notification_bidirectional_dismissal_and_lifecycle_governance_via_loopb
 async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
     let (host, peer, _g1, _g2) = pair_phone_desktop().await;
     let host_ui = host.spawn_ui().await.unwrap();
-    let peer_ui = peer.spawn_ui().await.unwrap();
+    let _peer_ui = peer.spawn_ui().await.unwrap();
     let host_id = host.identity().device_id().clone();
     let peer_id = peer.identity().device_id().clone();
 
@@ -4428,25 +4428,23 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
     let start = std::time::Instant::now();
     let mut host_outbound_found = false;
     while start.elapsed() < Duration::from_secs(5) {
-        if let Ok(ev) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await {
-            if let Ok(tetherly_node::UiEvent::ClipboardSynced {
-                seq,
-                source,
-                direction,
-                bytes,
-                hash,
-                sent_peers,
-                ..
-            }) = ev
-            {
-                if direction == "outbound" && hash == clip1_hash {
-                    assert_eq!(seq, 1);
-                    assert_eq!(source, "local");
-                    assert_eq!(bytes, test_msg1.len());
-                    assert_eq!(sent_peers, 1);
-                    host_outbound_found = true;
-                    break;
-                }
+        if let Ok(Ok(tetherly_node::UiEvent::ClipboardSynced {
+            seq,
+            source,
+            direction,
+            bytes,
+            hash,
+            sent_peers,
+            ..
+        })) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await
+        {
+            if direction == "outbound" && hash == clip1_hash {
+                assert_eq!(seq, 1);
+                assert_eq!(source, "local");
+                assert_eq!(bytes, test_msg1.len());
+                assert_eq!(sent_peers, 1);
+                host_outbound_found = true;
+                break;
             }
         }
     }
@@ -4459,25 +4457,23 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
     let start = std::time::Instant::now();
     let mut peer_inbound_found = false;
     while start.elapsed() < Duration::from_secs(5) {
-        if let Ok(ev) = tokio::time::timeout(Duration::from_millis(500), peer_rx.recv()).await {
-            if let Ok(tetherly_node::UiEvent::ClipboardSynced {
-                seq,
-                source,
-                direction,
-                bytes,
-                hash,
-                sent_peers,
-                ..
-            }) = ev
-            {
-                if direction == "inbound" && hash == clip1_hash {
-                    assert_eq!(seq, 1);
-                    assert_eq!(source, host_id.to_string());
-                    assert_eq!(bytes, test_msg1.len());
-                    assert_eq!(sent_peers, 0);
-                    peer_inbound_found = true;
-                    break;
-                }
+        if let Ok(Ok(tetherly_node::UiEvent::ClipboardSynced {
+            seq,
+            source,
+            direction,
+            bytes,
+            hash,
+            sent_peers,
+            ..
+        })) = tokio::time::timeout(Duration::from_millis(500), peer_rx.recv()).await
+        {
+            if direction == "inbound" && hash == clip1_hash {
+                assert_eq!(seq, 1);
+                assert_eq!(source, host_id.to_string());
+                assert_eq!(bytes, test_msg1.len());
+                assert_eq!(sent_peers, 0);
+                peer_inbound_found = true;
+                break;
             }
         }
     }
@@ -4524,23 +4520,21 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
     let start = std::time::Instant::now();
     let mut host_inbound_found = false;
     while start.elapsed() < Duration::from_secs(5) {
-        if let Ok(ev) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await {
-            if let Ok(tetherly_node::UiEvent::ClipboardSynced {
-                seq,
-                source,
-                direction,
-                bytes,
-                hash,
-                ..
-            }) = ev
-            {
-                if direction == "inbound" && hash == clip2_hash {
-                    assert_eq!(seq, 2);
-                    assert_eq!(source, peer_id.to_string());
-                    assert_eq!(bytes, test_msg2.len());
-                    host_inbound_found = true;
-                    break;
-                }
+        if let Ok(Ok(tetherly_node::UiEvent::ClipboardSynced {
+            seq,
+            source,
+            direction,
+            bytes,
+            hash,
+            ..
+        })) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await
+        {
+            if direction == "inbound" && hash == clip2_hash {
+                assert_eq!(seq, 2);
+                assert_eq!(source, peer_id.to_string());
+                assert_eq!(bytes, test_msg2.len());
+                host_inbound_found = true;
+                break;
             }
         }
     }
@@ -4600,12 +4594,12 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
     let start = std::time::Instant::now();
     let mut cleared_ev_found = false;
     while start.elapsed() < Duration::from_secs(5) {
-        if let Ok(ev) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await {
-            if let Ok(tetherly_node::UiEvent::ClipboardCleared { timestamp_ms }) = ev {
-                assert_eq!(timestamp_ms, clear_rep.timestamp_ms);
-                cleared_ev_found = true;
-                break;
-            }
+        if let Ok(Ok(tetherly_node::UiEvent::ClipboardCleared { timestamp_ms })) =
+            tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await
+        {
+            assert_eq!(timestamp_ms, clear_rep.timestamp_ms);
+            cleared_ev_found = true;
+            break;
         }
     }
     assert!(cleared_ev_found, "host did not emit ClipboardCleared event");
@@ -4616,7 +4610,7 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
         .unwrap();
     let st_cleared: tetherly_node::ClipStatusReport =
         serde_json::from_slice(&body_st_cleared).unwrap();
-    assert_eq!(st_cleared.has_text, false);
+    assert!(!st_cleared.has_text);
     assert_eq!(st_cleared.bytes, 0);
     assert_eq!(st_cleared.hash, None);
     assert_eq!(st_cleared.history_count, 0);
