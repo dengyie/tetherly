@@ -4962,10 +4962,12 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
             break;
         }
         if start_auto.elapsed() > Duration::from_secs(20) {
-            let (_, body_offers) =
-                tetherly_node::loopback_get(host_ui, "/api/file/offers").await.unwrap();
-            let (_, body_transfers) =
-                tetherly_node::loopback_get(host_ui, "/api/file/transfers").await.unwrap();
+            let (_, body_offers) = tetherly_node::loopback_get(host_ui, "/api/file/offers")
+                .await
+                .unwrap();
+            let (_, body_transfers) = tetherly_node::loopback_get(host_ui, "/api/file/transfers")
+                .await
+                .unwrap();
             panic!(
                 "auto-accept counter did not reach 1 within 20s. auto_st: {:?}, host offers: {}, \
                  host transfers: {}",
@@ -4992,10 +4994,12 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let (_, body_host_xfers) =
-                tetherly_node::loopback_get(host_ui, "/api/file/transfers").await.unwrap();
-            let (_, body_peer_xfers) =
-                tetherly_node::loopback_get(peer_ui, "/api/file/transfers").await.unwrap();
+            let (_, body_host_xfers) = tetherly_node::loopback_get(host_ui, "/api/file/transfers")
+                .await
+                .unwrap();
+            let (_, body_peer_xfers) = tetherly_node::loopback_get(peer_ui, "/api/file/transfers")
+                .await
+                .unwrap();
             panic!(
                 "inbox file missing after 35s. entries: {:?}, host transfers: {}, \
                  peer transfers: {}",
