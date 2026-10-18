@@ -504,6 +504,14 @@ struct IdBody {
     id: String,
 }
 
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct NotifyDismissBody {
+    id: Option<String>,
+    peer: Option<String>,
+    app_id: Option<String>,
+    all: Option<bool>,
+}
+
 #[derive(serde::Deserialize)]
 struct UnpairBody {
     device_id: String,
@@ -1209,11 +1217,20 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             Err(_) => err(400, "bad json"),
         },
         ("GET", "/api/notify/candidates") => {
-            let list = node.candidates();
-            json_ok(&serde_json::json!({
-                "ok": true,
-                "candidates": list,
-            }))
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let peer = qmap.get("peer").map(String::as_str);
+            let app_id = qmap.get("app_id").map(String::as_str);
+            let has_otp = qmap
+                .get("has_otp")
+                .and_then(|v| v.parse::<bool>().ok());
+
+            match node.candidates_filtered(peer, app_id, has_otp) {
+                Ok(list) => json_ok(&serde_json::json!({
+                    "ok": true,
+                    "candidates": list,
+                })),
+                Err(e) => err(400, &e.to_string()),
+            }
         }
         ("GET", "/api/notify/replies") => {
             let replies: Vec<crate::events::ReplyViewDto> = node
@@ -1252,12 +1269,69 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             Err(_) => err(400, "bad json"),
         },
         ("POST", "/api/dismiss") => match serde_json::from_slice::<IdBody>(body) {
-            Ok(d) => {
-                let _ = node.dismiss_candidate(&d.id);
-                json_ok(&serde_json::json!({ "ok": true }))
-            }
-            Err(_) => err(400, "bad json"),
+            Ok(d) => match node.dismiss_candidate_sync(&d.id).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            },
+            Err(_) => err(400, "bad json, expected { id: string }"),
         },
+        ("POST", "/api/notify/dismiss") | ("DELETE", "/api/notify/candidates") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<NotifyDismissBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<NotifyDismissBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => {
+                        return err(
+                            400,
+                            "bad json, expected { id?: string, peer?: string, app_id?: string, all?: bool }",
+                        )
+                    }
+                }
+            };
+
+            let id = parsed_body
+                .as_ref()
+                .and_then(|b| b.id.clone())
+                .or_else(|| qmap.get("id").cloned());
+            let peer = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone())
+                .or_else(|| qmap.get("peer").cloned());
+            let app_id = parsed_body
+                .as_ref()
+                .and_then(|b| b.app_id.clone())
+                .or_else(|| qmap.get("app_id").cloned());
+            let all = parsed_body
+                .as_ref()
+                .and_then(|b| b.all)
+                .or_else(|| qmap.get("all").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(false);
+
+            if all || peer.is_some() || app_id.is_some() {
+                let filter = crate::DismissFilter {
+                    id,
+                    peer,
+                    app_id,
+                    all: Some(all),
+                };
+                match node.dismiss_candidates(&filter).await {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(400, &e.to_string()),
+                }
+            } else if let Some(target_id) = id.filter(|s| !s.trim().is_empty()) {
+                match node.dismiss_candidate_sync(&target_id).await {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(400, &e.to_string()),
+                }
+            } else {
+                err(
+                    400,
+                    "dismiss target required: provide id, peer, app_id, or all: true",
+                )
+            }
+        }
         ("POST", "/api/open") => match serde_json::from_slice::<IdBody>(body) {
             Ok(d) => match node.open_candidate(&d.id, &crate::platform::SystemOpener) {
                 Ok(url) => json_ok(&serde_json::json!({ "ok": true, "url": url })),

@@ -182,6 +182,15 @@ enum Cmd {
     },
     /// List active notification candidates.
     Candidates {
+        /// Filter candidates by source peer ID or alias.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Filter candidates by application ID.
+        #[arg(long)]
+        app_id: Option<String>,
+        /// Filter candidates by presence of OTP.
+        #[arg(long)]
+        has_otp: Option<bool>,
         /// Output raw JSON instead of table.
         #[arg(long)]
         json: bool,
@@ -200,10 +209,22 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
-    /// Dismiss an active notification candidate.
+    /// Dismiss active notification candidate(s) by ID, or batch dismiss by peer, app, or all.
     Dismiss {
-        /// Candidate ID (e.g. ntc_...).
-        id: String,
+        /// Candidate ID (e.g. ntc_...). Optional if --all, --peer, or --app-id is specified.
+        id: Option<String>,
+        /// Filter by source peer (device ID or alias) to dismiss candidates from.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Filter by app ID (e.g. com.tencent.mm) to dismiss candidates from.
+        #[arg(long)]
+        app_id: Option<String>,
+        /// Dismiss all active notification candidates.
+        #[arg(long)]
+        all: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -1234,8 +1255,28 @@ async fn main() -> Result<()> {
                 }
             }
         },
-        Cmd::Candidates { json, ui_port } => {
-            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/notify/candidates")
+        Cmd::Candidates {
+            peer,
+            app_id,
+            has_otp,
+            json,
+            ui_port,
+        } => {
+            let mut path = "/api/notify/candidates".to_string();
+            let mut query = Vec::new();
+            if let Some(ref p) = peer {
+                query.push(format!("peer={p}"));
+            }
+            if let Some(ref a) = app_id {
+                query.push(format!("app_id={a}"));
+            }
+            if let Some(h) = has_otp {
+                query.push(format!("has_otp={h}"));
+            }
+            if !query.is_empty() {
+                path = format!("{path}?{}", query.join("&"));
+            }
+            let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -1333,10 +1374,27 @@ async fn main() -> Result<()> {
                 eprintln!("(copied to system clipboard)");
             }
         }
-        Cmd::Dismiss { id, ui_port } => {
-            let payload = serde_json::json!({ "id": id });
+        Cmd::Dismiss {
+            id,
+            peer,
+            app_id,
+            all,
+            json,
+            ui_port,
+        } => {
+            if id.is_none() && peer.is_none() && app_id.is_none() && !all {
+                anyhow::bail!(
+                    "dismiss target required: specify candidate ID, or use --all, --peer <peer>, or --app-id <app>"
+                );
+            }
+            let payload = serde_json::json!({
+                "id": id,
+                "peer": peer,
+                "app_id": app_id,
+                "all": if all { Some(true) } else { None },
+            });
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/dismiss", &bytes)
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/notify/dismiss", &bytes)
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -1350,7 +1408,27 @@ async fn main() -> Result<()> {
                     String::from_utf8_lossy(&resp)
                 );
             }
-            println!("dismissed candidate {id}");
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+            } else if let Ok(batch) = serde_json::from_slice::<serde_json::Value>(&resp) {
+                if let Some(count) = batch.get("count").and_then(|c| c.as_u64()) {
+                    let synced = batch
+                        .get("notified_remote_count")
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or(0);
+                    println!("dismissed {count} candidate(s) (remote peer synced: {synced})");
+                } else if let Some(cand_id) = batch.get("id").and_then(|c| c.as_str()) {
+                    let remote = batch
+                        .get("notified_remote")
+                        .and_then(|c| c.as_bool())
+                        .unwrap_or(false);
+                    println!("dismissed candidate {cand_id} (remote synced: {remote})");
+                } else {
+                    println!("dismissed successfully");
+                }
+            } else {
+                println!("dismissed successfully");
+            }
         }
         Cmd::Reply { id, text, ui_port } => {
             let payload = serde_json::json!({ "id": id, "text": text });
@@ -3032,6 +3110,12 @@ fn print_event(v: &serde_json::Value) {
         "candidate_expired" => {
             let id = v["id"].as_str().unwrap_or("?");
             println!("[candidate_expired] id={id}");
+        }
+        "candidate_dismissed" => {
+            let id = v["id"].as_str().unwrap_or("?");
+            let source = v["source"].as_str().unwrap_or("?");
+            let app = v["app_id"].as_str().unwrap_or("?");
+            println!("[candidate_dismissed] id={id} peer={source} app={app}");
         }
         "reply_received" => {
             let r = &v["reply"];

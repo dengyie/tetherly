@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::time::UNIX_EPOCH;
 
 /// In-memory OTP candidate. Debug redacts the code and body.
+#[derive(Clone)]
 pub struct Candidate {
     pub id: String,
     pub source: DeviceId,
@@ -236,6 +237,39 @@ impl NotifyHub {
         self.candidates.remove(id).is_some()
     }
 
+    /// Remove and return the candidate by id, preserving origin metadata
+    /// for cross-device wire synchronization.
+    pub fn take_candidate(&mut self, id: &str) -> Option<Candidate> {
+        self.candidates.remove(id)
+    }
+
+    /// Remove all candidates matching a given source peer and return them.
+    pub fn dismiss_by_source(&mut self, source: &DeviceId) -> Vec<Candidate> {
+        let ids: Vec<String> = self
+            .candidates
+            .iter()
+            .filter(|(_, c)| c.source == *source)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.into_iter().filter_map(|id| self.candidates.remove(&id)).collect()
+    }
+
+    /// Remove all candidates matching a given app ID and return them.
+    pub fn dismiss_by_app(&mut self, app_id: &str) -> Vec<Candidate> {
+        let ids: Vec<String> = self
+            .candidates
+            .iter()
+            .filter(|(_, c)| c.app_id == app_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.into_iter().filter_map(|id| self.candidates.remove(&id)).collect()
+    }
+
+    /// Clear all candidates in the hub and return them.
+    pub fn clear_candidates(&mut self) -> Vec<Candidate> {
+        self.candidates.drain().map(|(_, v)| v).collect()
+    }
+
     /// Drop every candidate for one phone notification. Used when the phone
     /// reports the notification was removed (ANCS `Removed`).
     pub fn dismiss_uid(&mut self, source: &DeviceId, uid: &str) -> Vec<String> {
@@ -252,17 +286,19 @@ impl NotifyHub {
     }
 
     pub fn dismiss_wire(&mut self, source: &DeviceId, d: &NotifyDismiss) -> bool {
+        !self.dismiss_wire_candidates(source, d).is_empty()
+    }
+
+    /// Dismiss candidates matching wire notification dismiss frame and return
+    /// the removed candidates for event broadcasting.
+    pub fn dismiss_wire_candidates(&mut self, source: &DeviceId, d: &NotifyDismiss) -> Vec<Candidate> {
         let ids: Vec<String> = self
             .candidates
             .iter()
             .filter(|(_, c)| c.source == *source && c.uid == d.uid && c.app_id == d.app_id)
             .map(|(id, _)| id.clone())
             .collect();
-        let mut any = false;
-        for id in ids {
-            any |= self.candidates.remove(&id).is_some();
-        }
-        any
+        ids.into_iter().filter_map(|id| self.candidates.remove(&id)).collect()
     }
 
     pub fn evict_expired(&mut self, clock: &dyn Clock) -> Vec<String> {

@@ -4111,6 +4111,278 @@ async fn peer_blacklist_and_access_control_governance_via_loopback_api() {
     peer.shutdown();
 }
 
+/// Tests end-to-end notification lifecycle governance, multi-dimensional candidate
+/// query filtering, bidirectional dismissal synchronization across active Noise sessions,
+/// batch purging, loopback RESTful endpoints, and UiEvent::CandidateDismissed broadcasting.
+#[tokio::test(flavor = "multi_thread")]
+async fn notification_bidirectional_dismissal_and_lifecycle_governance_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let _peer_ui = peer.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    let mut host_rx = host.subscribe();
+
+    // 1. Initial state: host has no active notification candidates
+    let (code, body) = tetherly_node::loopback_get(host_ui, "/api/notify/candidates")
+        .await
+        .unwrap();
+    assert_eq!(code, 200);
+    let init_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(init_resp["ok"], true);
+    assert!(init_resp["candidates"].as_array().unwrap().is_empty());
+
+    // 2. Peer sends 3 notifications to Host:
+    //    Notification 1: WeChat message (no OTP)
+    //    Notification 2: WeChat second message (no OTP)
+    //    Notification 3: Bank SMS (with OTP)
+    let p1 = tetherly_core::NotifyPush {
+        uid: "wx-101".into(),
+        app_id: "com.tencent.mm".into(),
+        app_name: "WeChat".into(),
+        title: "张三".into(),
+        body: "收到请回复".into(),
+        ts: 1_700_000_001,
+        actions: vec!["dismiss".into()],
+    };
+    peer.send_notify(&host_id, p1).await.unwrap();
+
+    let p2 = tetherly_core::NotifyPush {
+        uid: "wx-102".into(),
+        app_id: "com.tencent.mm".into(),
+        app_name: "WeChat".into(),
+        title: "李四".into(),
+        body: "今晚开会".into(),
+        ts: 1_700_000_002,
+        actions: vec!["dismiss".into()],
+    };
+    peer.send_notify(&host_id, p2).await.unwrap();
+
+    let p3 = tetherly_core::NotifyPush {
+        uid: "bank-201".into(),
+        app_id: "com.example.bank".into(),
+        app_name: "BankApp".into(),
+        title: "安全验证".into(),
+        body: "【某银行】验证码 654321，切勿泄露给他人。".into(),
+        ts: 1_700_000_003,
+        actions: vec!["copy".into(), "dismiss".into()],
+    };
+    peer.send_notify(&host_id, p3).await.unwrap();
+
+    // 3. Wait until Host receives all 3 candidates
+    let start = std::time::Instant::now();
+    let (c1_id, c2_id, c3_id) = loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/notify/candidates")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        let list = v["candidates"].as_array().unwrap();
+        if list.len() >= 3 {
+            let id1 = list
+                .iter()
+                .find(|x| x["uid"] == "wx-101")
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let id2 = list
+                .iter()
+                .find(|x| x["uid"] == "wx-102")
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let id3 = list
+                .iter()
+                .find(|x| x["uid"] == "bank-201")
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            break (id1, id2, id3);
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("host did not ingest 3 candidates in time");
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    };
+
+    // 4. Test multi-dimensional candidate filtering:
+    // a. Filter by app_id=com.tencent.mm (should return 2)
+    let (code_mm, body_mm) = tetherly_node::loopback_get(
+        host_ui,
+        "/api/notify/candidates?app_id=com.tencent.mm",
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_mm, 200);
+    let val_mm: serde_json::Value = serde_json::from_slice(&body_mm).unwrap();
+    assert_eq!(val_mm["candidates"].as_array().unwrap().len(), 2);
+
+    // b. Filter by has_otp=true (should return 1)
+    let (code_otp, body_otp) =
+        tetherly_node::loopback_get(host_ui, "/api/notify/candidates?has_otp=true")
+            .await
+            .unwrap();
+    assert_eq!(code_otp, 200);
+    let val_otp: serde_json::Value = serde_json::from_slice(&body_otp).unwrap();
+    assert_eq!(val_otp["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(val_otp["candidates"][0]["app_id"], "com.example.bank");
+
+    // c. Filter by peer
+    let (code_peer, body_peer) = tetherly_node::loopback_get(
+        host_ui,
+        &format!("/api/notify/candidates?peer={}", peer_id.as_str()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_peer, 200);
+    let val_peer: serde_json::Value = serde_json::from_slice(&body_peer).unwrap();
+    assert_eq!(val_peer["candidates"].as_array().unwrap().len(), 3);
+
+    // 5. Test single dismissal via POST /api/notify/dismiss with wire synchronization:
+    // Host dismisses c1 (wx-101).
+    let dismiss_c1 = serde_json::json!({ "id": c1_id });
+    let (code_dis, body_dis) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/notify/dismiss",
+        &serde_json::to_vec(&dismiss_c1).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_dis, 200);
+    let rep_dis: tetherly_node::CandidateDismissReport =
+        serde_json::from_slice(&body_dis).unwrap();
+    assert!(rep_dis.ok);
+    assert_eq!(rep_dis.id, c1_id);
+    assert_eq!(rep_dis.app_id, "com.tencent.mm");
+    assert_eq!(rep_dis.uid, "wx-101");
+    assert!(rep_dis.notified_remote); // Wire NotifyDismiss frame was sent to connected peer
+
+    // Host emits UiEvent::CandidateDismissed
+    let mut saw_c1_dismissed = false;
+    let ev_start = std::time::Instant::now();
+    while ev_start.elapsed() < Duration::from_secs(5) {
+        if let Ok(Ok(tetherly_node::UiEvent::CandidateDismissed {
+            id,
+            app_id,
+            uid,
+            ..
+        })) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await
+        {
+            if id == c1_id && app_id == "com.tencent.mm" && uid == "wx-101" {
+                saw_c1_dismissed = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_c1_dismissed,
+        "host must emit CandidateDismissed event for c1"
+    );
+
+    // 6. Test reverse wire dismissal:
+    // Peer (phone) sends a NotifyDismiss frame over Noise tunnel for c2 (wx-102).
+    let wire_dismiss = tetherly_core::frame::NotifyDismiss {
+        uid: "wx-102".into(),
+        app_id: "com.tencent.mm".into(),
+    }
+    .to_frame()
+    .unwrap();
+    peer.send_to(&host_id, wire_dismiss).await.unwrap();
+
+    // Host receives wire frame, dismisses candidate from NotifyHub, and emits UiEvent::CandidateDismissed
+    let mut saw_c2_dismissed = false;
+    let ev2_start = std::time::Instant::now();
+    while ev2_start.elapsed() < Duration::from_secs(5) {
+        if let Ok(Ok(tetherly_node::UiEvent::CandidateDismissed {
+            id,
+            app_id,
+            uid,
+            ..
+        })) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await
+        {
+            if id == c2_id && app_id == "com.tencent.mm" && uid == "wx-102" {
+                saw_c2_dismissed = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_c2_dismissed,
+        "host must emit CandidateDismissed event on receiving wire dismiss from peer"
+    );
+
+    // After dismissing c1 and c2, only c3 remains on host
+    let (_, body_rem) = tetherly_node::loopback_get(host_ui, "/api/notify/candidates")
+        .await
+        .unwrap();
+    let val_rem: serde_json::Value = serde_json::from_slice(&body_rem).unwrap();
+    let rem_list = val_rem["candidates"].as_array().unwrap();
+    assert_eq!(rem_list.len(), 1);
+    assert_eq!(rem_list[0]["id"], c3_id.as_str());
+
+    // 7. Test batch dismissal via DELETE /api/notify/candidates?all=true
+    let (code_del, body_del) =
+        tetherly_node::loopback_delete(host_ui, "/api/notify/candidates?all=true")
+            .await
+            .unwrap();
+    assert_eq!(code_del, 200);
+    let batch_rep: tetherly_node::BatchDismissReport =
+        serde_json::from_slice(&body_del).unwrap();
+    assert!(batch_rep.ok);
+    assert_eq!(batch_rep.count, 1);
+    assert_eq!(batch_rep.ids, vec![c3_id.clone()]);
+    assert_eq!(batch_rep.notified_remote_count, 1);
+
+    // Candidates list is now completely empty
+    let (_, body_empty) = tetherly_node::loopback_get(host_ui, "/api/notify/candidates")
+        .await
+        .unwrap();
+    let val_empty: serde_json::Value = serde_json::from_slice(&body_empty).unwrap();
+    assert!(val_empty["candidates"].as_array().unwrap().is_empty());
+
+    // 8. Test negative boundaries & idempotency:
+    // a. Dismissing unknown candidate ID returns 400
+    let bad_dismiss = serde_json::json!({ "id": "ntc_nonexistent_9999" });
+    let (code_bad, body_bad) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/notify/dismiss",
+        &serde_json::to_vec(&bad_dismiss).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_bad, 400);
+    assert!(String::from_utf8_lossy(&body_bad).contains("unknown candidate"));
+
+    // b. Empty dismiss payload returns 400
+    let empty_payload = serde_json::json!({});
+    let (code_emp, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/notify/dismiss",
+        &serde_json::to_vec(&empty_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_emp, 400);
+
+    // c. Legacy POST /api/dismiss also works with unknown ID returning 400
+    let (code_leg, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/dismiss",
+        &serde_json::to_vec(&bad_dismiss).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_leg, 400);
+
+    // 9. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

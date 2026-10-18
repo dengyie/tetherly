@@ -3,12 +3,71 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.50** |
-| 日期 | 2026-10-17 |
-| 状态 | **v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）**——(1) **错误语义与异常边界扩展 (`CoreError::PeerBlocked`)**：在核心层明确对端封禁拒绝原因，形成不可篡改的接入阻断信号；(2) **黑名单持久化存储与原子化状态同步 (`store.rs`, `Shared.blocked`)**：实现 `blocked.json` 的原子化持久化与跨平台文件权限控制（Unix 0600），包含 `BlockedPeer`（`device_id`, `reason`, `blocked_at`）与 `BlockedTable`，提供 `load_blocked`, `save_blocked`, `add_blocked_peer`, `remove_blocked_peer`, `is_peer_blocked` 原语，运行时由 `Shared.blocked: Mutex<BlockedTable>` 内存同步；(3) **握手与拨号全链路动态访问控制守卫 (`runtime.rs`)**：在主动拨号（`connect_peer` 与后台 `spawn_reconnect`）与被动接入（`accept_one` 接收端）的 Noise 握手认证后第一时间执行黑名单校验，命中立即拒绝并返回 `PeerBlocked`，严禁写入信任库、严禁缓存路由、严禁挂载会话；(4) **活动会话秒级主动掐断与资源清理 (`Node::block_peer`)**：屏蔽正在通信的对端时，瞬间断开活动 TCP 信道、驱逐 `LivePeer`、复位输入焦点（`input_seat`）、向事件总线广播 `UiEvent::PeerDown` 与 `UiEvent::PeerBlocked`；(5) **轻量级回环控制面端点 (`uihttp.rs`)**：新增 `GET /api/peers/blocked`、`POST /api/peers/block`、`POST /api/peers/unblock`（支持 DELETE 兼容），严格绑定 127.0.0.1 并强校验 Host 标头；(6) **CLI 双端全同构升级 (`tetherly block/unblock/blocked`, `tetherly-cli block/unblock/blocked`)**：支持 `--peer`, `--reason`, `--json`, `--ui-port`，同步输出 `[peer_blocked]` 与 `[peer_unblocked]` 格式化事件；(7) **Web UI 访问控制面板与按键闭环 (`ui/index.html`)**：增设「访问控制与黑名单治理」独立卡片与一键屏蔽/解除屏蔽按键，联动 SSE 动态局部重绘；(8) **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**：增设 `peer_blacklist_and_access_control_governance_via_loopback_api` 完备验证黑名单拦截、断连、入站拒绝、幂等性、解封与重新连通全流程。+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 文档版本 | **1.51** |
+| 日期 | 2026-10-18 |
+| 状态 | **v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）**——(1) **通知提取与消除原语强化 (`tetherly-core/src/notify.rs`)**：`take_candidate` 提取并保留元数据，新增 `dismiss_by_source`、`dismiss_by_app`、`clear_candidates` 批量消除原语，强化 `dismiss_wire_candidates` 返回被逐出候选以闭环事件广播；(2) **事件总线扩展与安全红线守卫 (`events.rs`, `runtime.rs`, `lib.rs`)**：新增 `UiEvent::CandidateDismissed { id, source, app_id, uid }`（严禁包含短信正文/OTP明文），定义 `CandidateDismissReport`、`BatchDismissReport` 与 `DismissFilter`；(3) **运行时跨端双向同步与多维批量消除 (`runtime.rs`)**：`Node::dismiss_candidate_sync` 发送 `InnerFrame::NotifyDismiss` 至活动会话并派发事件；`Node::dismiss_candidates` 支持按对端/应用/全量批量同步；`SessionEvent::Dismiss` 与 `AncsEvent::Removed` 闭环派发 `UiEvent::CandidateDismissed`；`Node::candidates_filtered` 支持 peer/app_id/has_otp 过滤；(4) **轻量级回环控制面端点升级 (`uihttp.rs`)**：`GET /api/notify/candidates` 增强 Query 过滤，`POST /api/dismiss` 升级支持网络同步并返回报告，新增标准 RESTful `POST /api/notify/dismiss` 与 `DELETE /api/notify/candidates`；(5) **CLI 双端全同构升级 (`tetherly` 与 `tetherly-cli`)**：`dismiss` 命令群支持 `[id]`、`--peer`、`--app-id`、`--all`、`--json`，`candidates` 支持过滤，`events` 监听器高亮 `[candidate_dismissed]`；(6) **Web UI 实时交互与一键清空 (`ui/index.html`)**：监听 `candidate_dismissed` SSE 事件，单通知忽略乐观置灰，增设「清空通知」一键消除按钮；(7) **端到端集成测试全覆盖 (`tests/phase1.rs`)**：增设 `notification_bidirectional_dismissal_and_lifecycle_governance_via_loopback_api` 完备验证。+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.51 相对 1.50(通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环)**
+
+- **动机(通知单向消除断层、跨端消除不同步、移动端常驻通知悬挂、缺乏多维批量消除治理与历史可观测性)**:
+  在 Tetherly v1.50 建立了完整的对端黑名单与接入鉴权体系后，网络层安全边界已高度健壮。但在应用层**跨设备通知流协同（Notification Lifecycle & Ingress）**中，暴露出**通知单向消除断层、跨端双向同步缺失与批量治理空白**：
+  1. **跨端通知消除断层与双向同步缺失**：
+     - 当桌面端用户或 Loopback 客户端消除通知候选时（`Node::dismiss_candidate` / `POST /api/dismiss`），此前仅在本地 `hubs.notify` 内存表中移除了 `Candidate`，从未通过活动 Noise 隧道向源对端（如 Android 手机）发送 `TYPE_NOTIFY_DISMISS` 协议帧（`NotifyDismiss { app_id, uid }`）。导致手机端状态栏中的通知依然挂载，无法达成真正的「桌面已读/清除，手机同步消除」；
+     - 反向链路同样存在断层：当手机端主动消除通知并在 Noise 会话接收到 `SessionEvent::Dismiss(d)` 时，桌面节点虽然调用了 `hubs.notify.dismiss_wire(peer, &d)`，但并未向本地事件总线派发 `UiEvent::CandidateDismissed`，导致 Web UI、终端监听器与外部 Loopback 订阅者对消除事件毫无感知，界面依然残留已消除通知；
+  2. **缺乏多维批量消除与筛选治理原语**：
+     - 现存接口仅支持按单一 `id`（`candidate_id`）逐个消除，缺少面向生产环境的批量治理能力：按对端设备过滤并全量消除（`dismiss_by_source` / `peer`）、按应用包名/标识批量消除（`dismiss_by_app` / `app_id`）、一键清空全量待处理通知（`clear_candidates` / `all`）；缺少轻量级结构化 DTO 报告（`CandidateDismissReport` 与 `BatchDismissReport`）；
+  3. **回环端点与 CLI 缺乏规范化 RESTful 治理接口**：
+     - 现有回环路由仅有非标 `POST /api/dismiss`，缺失规范的 RESTful 路由（`POST /api/notify/dismiss` 与 `DELETE /api/notify/candidates`）；`GET /api/notify/candidates` 缺乏按 `peer`、`app_id`、`has_otp` 的维度过滤；CLI 客户端缺乏高级过滤与批量消除命令群（`--all`, `--peer`, `--app-id`）；
+  4. **事件总线扩展与 Web UI 实时动态联动**：
+     - 增设 `UiEvent::CandidateDismissed { id, source, app_id, uid }`；Web UI 通知列表支持消除某条通知时实时从 DOM 剔除，同时监听 SSE `candidate_dismissed` 事件实现多标签页无缝局部重绘，并增设「清空通知」一键消除按钮；
+  5. **安全红线铁律（Verbatim Security Red Line）**：
+     - 「公开 issue / 日志禁止贴短信正文、一次性码、配对码、剪贴板」；
+     - 「信任库只在 Noise transport 成功后写」；
+     - 「Loopback UI 45716 仅绑定 127.0.0.1，校验 Host: 127.0.0.1|localhost (403 on mismatch); 严禁绑定 0.0.0.0 / ::」；
+     - **`UiEvent` 严禁携带短信正文、一次性码、配对码、剪贴板纯文本**，`CandidateDismissed` 事件严禁携带任何通知正文或 OTP 验证码内容，仅允许携带结构化元数据标识符（`id`, `source`, `app_id`, `uid`）。
+
+- **架构与协议设计(ADR-044 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环)**:
+  1. **核心通知模型扩展 (`crates/tetherly-core/src/notify.rs`)**:
+     - `Candidate` 结构体派生 `Clone`；
+     - `take_candidate(&mut self, id: &str) -> Option<Candidate>`：原子提取并返回候选结构体，完整保留 `source` (DeviceId)、`app_id` 与 `uid` 元数据供网络层定向广播；
+     - `dismiss_by_source(&mut self, source: &DeviceId) -> Vec<Candidate>`：批量提取并移除指定对端源的所有候选；
+     - `dismiss_by_app(&mut self, app_id: &str) -> Vec<Candidate>`：批量提取并移除指定应用标识的所有候选；
+     - `clear_candidates(&mut self) -> Vec<Candidate>`：清空并返回全部候选；
+     - `dismiss_wire_candidates(&mut self, source: &DeviceId, d: &NotifyDismiss) -> Vec<Candidate>`：按对端与 wire 载荷定位移除，并返回逐出的候选列表以驱动事件总线；
+  2. **事件总线与结构化 DTO 抽象 (`crates/tetherly-node/src/events.rs`, `runtime.rs`, `lib.rs`)**:
+     - `UiEvent::CandidateDismissed { id, source, app_id, uid }`：闭环消除事件派发，严格不包含正文与 OTP；
+     - `CandidateDismissReport { ok, id, source, app_id, uid, notified_remote }`；
+     - `BatchDismissReport { ok, count, ids, notified_remote_count }`；
+     - `DismissFilter { id, peer, app_id, all }`；
+  3. **运行时跨端双向同步与批量消除控制原语 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `Node::dismiss_candidate_sync(&self, id: &str) -> Result<CandidateDismissReport, CoreError>`：
+       - 原子提取候选并获取元数据；
+       - 向对应对端会话投递 `NotifyDismiss { app_id, uid }` 帧；
+       - 向本地事件总线派发 `UiEvent::CandidateDismissed`；
+     - `Node::dismiss_candidates(&self, filter: &DismissFilter) -> Result<BatchDismissReport, CoreError>`：
+       - 支持按 `all`、`peer`、`app_id` 或 `id` 批量提取匹配候选；
+       - 分别向对应的源设备活动会话投递 `NotifyDismiss` 帧；
+       - 逐个派发 `UiEvent::CandidateDismissed`，聚合统计消除总数与远端同步计数；
+     - `SessionEvent::Dismiss(d)` 处理分支闭环：调用 `dismiss_wire_candidates` 并向本地派发 `UiEvent::CandidateDismissed`；
+     - `AncsEvent::Removed` 分支闭环：派发 `UiEvent::CandidateDismissed`；
+     - `Node::candidates_filtered(&self, peer, app_id, has_otp)`：多维条件过滤查询；
+  4. **轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/notify/candidates`：支持 Query 参数 `peer`, `app_id`, `has_otp`；
+     - `POST /api/dismiss`：升级内部调用 `dismiss_candidate_sync` 并返回 `CandidateDismissReport`；
+     - `POST /api/notify/dismiss` 与 `DELETE /api/notify/candidates`：统一规范端点，自动兼容单 ID 与批量（`peer`/`app_id`/`all`）消除；
+  5. **CLI 双端全同构升级 (`tetherly` 与 `tetherly-cli`)**:
+     - `dismiss` 命令群支持 `[id]`、`--peer <peer>`、`--app-id <app>`、`--all`、`--json`、`--ui-port <port>`；
+     - `candidates` 命令群支持 `--peer <peer>`、`--app-id <app>`、`--has-otp <bool>`、`--json`、`--ui-port <port>`；
+     - `events` 监听器高亮格式化输出 `[candidate_dismissed]`；
+  6. **Web UI 实时交互与按键闭环 (`ui/index.html`)**:
+     - 监听 `candidate_dismissed` SSE 事件，动态局部重绘；
+     - 候选卡片「忽略」按钮乐观置灰并调用 `/api/notify/dismiss`；
+     - 增设「清空通知」按键，一键触发全量清空；
+  7. **端到端集成测试全覆盖 (`tests/phase1.rs`)**:
+     - `notification_bidirectional_dismissal_and_lifecycle_governance_via_loopback_api` 完备验证。
 
 **1.50 相对 1.49(对端黑名单访问控制、恶意连接防御与动态接入鉴权治理)**
 

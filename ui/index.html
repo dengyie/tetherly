@@ -93,7 +93,10 @@
 <main>
   <div>
     <section>
-      <h2>验证码候选</h2>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>验证码候选</h2>
+        <button id="clearcands" type="button" style="display:none;padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--dim);border-radius:4px;cursor:pointer">清空通知</button>
+      </div>
       <div id="cands"><div class="empty">等待通知。码不会出现在日志里。</div></div>
     </section>
     <section style="margin-top:16px">
@@ -516,6 +519,14 @@ function render(s) {
   }
   const c = $("cands");
   c.innerHTML = "";
+  const clearCandsBtn = $("clearcands");
+  if (clearCandsBtn) {
+    clearCandsBtn.style.display = s.candidates.length ? "inline-block" : "none";
+    clearCandsBtn.onclick = async () => {
+      await api("/api/notify/dismiss", { all: true });
+      tick();
+    };
+  }
   if (!s.candidates.length) c.appendChild(el('<div class="empty">等待通知。码不会出现在日志里。</div>'));
   for (const x of s.candidates) {
     const card = el('<div class="card"><div><div class="title"></div><div class="meta"></div></div><div class="row"></div></div>');
@@ -530,7 +541,11 @@ function render(s) {
       actions.appendChild(copy); actions.appendChild(ins);
     }
     const dis = el('<button class="ghost" type="button">忽略</button>');
-    dis.onclick = () => api("/api/dismiss", { id: x.id });
+    dis.onclick = async () => {
+      card.style.opacity = "0.5";
+      await api("/api/notify/dismiss", { id: x.id });
+      tick();
+    };
     actions.appendChild(dis);
     if ((x.actions || []).includes("open")) {
       const op = el('<button type="button">打开</button>');
@@ -1383,10 +1398,13 @@ function setupEventSource() {
 	            desc = "对端已屏蔽: " + ev.device_id + (ev.reason ? (" (原因: " + ev.reason + ")") : "");
 	            updateBlocked();
 	          }
-	          else if (ev.kind === "peer_unblocked") {
-	            desc = "对端已解除屏蔽: " + ev.device_id;
-	            updateBlocked();
-	          }
+		          else if (ev.kind === "peer_unblocked") {
+		            desc = "对端已解除屏蔽: " + ev.device_id;
+		            updateBlocked();
+		          }
+		          else if (ev.kind === "candidate_dismissed") {
+		            desc = "通知已消除: " + ev.id + (ev.app_id ? (" (" + ev.app_id + ")") : "");
+		          }
           $("ev-last").textContent = "[" + t + "] " + desc;
         }
       } catch (err) {

@@ -13,6 +13,12 @@ pub enum UiEvent {
     CandidateExpired {
         id: String,
     },
+    CandidateDismissed {
+        id: String,
+        source: String,
+        app_id: String,
+        uid: String,
+    },
     ReplyReceived {
         reply: ReplyViewDto,
     },

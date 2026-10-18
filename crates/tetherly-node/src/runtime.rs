@@ -308,6 +308,35 @@ pub struct BlockedPeersReport {
     pub peers: Vec<crate::store::BlockedPeer>,
 }
 
+/// Report returned when dismissing a single notification candidate.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CandidateDismissReport {
+    pub ok: bool,
+    pub id: String,
+    pub source: String,
+    pub app_id: String,
+    pub uid: String,
+    pub notified_remote: bool,
+}
+
+/// Report returned when performing batch dismissal of notification candidates.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BatchDismissReport {
+    pub ok: bool,
+    pub count: usize,
+    pub ids: Vec<String>,
+    pub notified_remote_count: usize,
+}
+
+/// Filter options for candidate dismissal operations.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct DismissFilter {
+    pub id: Option<String>,
+    pub peer: Option<String>,
+    pub app_id: Option<String>,
+    pub all: Option<bool>,
+}
+
 struct Hubs {
     notify: NotifyHub,
     clip: ClipHub,
@@ -624,6 +653,7 @@ struct Shared {
     blocked: Mutex<crate::store::BlockedTable>,
 }
 
+#[derive(Clone)]
 pub struct Node {
     shared: Arc<Shared>,
 }
@@ -1182,6 +1212,27 @@ impl Node {
             .collect()
     }
 
+    /// Return all active candidates filtered by optional peer, app_id, or has_otp.
+    pub fn candidates_filtered(
+        &self,
+        peer: Option<&str>,
+        app_id: Option<&str>,
+        has_otp: Option<bool>,
+    ) -> Result<Vec<CandidateViewDto>, CoreError> {
+        let mut list = self.candidates();
+        if let Some(peer_str) = peer.filter(|s| !s.trim().is_empty()) {
+            let target_id = self.resolve_peer(peer_str)?;
+            list.retain(|c| c.source == target_id.as_str());
+        }
+        if let Some(app) = app_id.filter(|s| !s.trim().is_empty()) {
+            list.retain(|c| c.app_id == app.trim());
+        }
+        if let Some(need_otp) = has_otp {
+            list.retain(|c| c.has_otp == need_otp);
+        }
+        Ok(list)
+    }
+
     pub fn live_peers(&self) -> Vec<LivePeer> {
         self.shared
             .live
@@ -1648,7 +1699,129 @@ impl Node {
     }
 
     pub fn dismiss_candidate(&self, id: &str) -> bool {
-        self.shared.hubs.lock().expect("hubs").notify.dismiss(id)
+        let removed = {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.notify.take_candidate(id)
+        };
+        if let Some(c) = removed {
+            self.emit(UiEvent::CandidateDismissed {
+                id: c.id.clone(),
+                source: c.source.to_string(),
+                app_id: c.app_id.clone(),
+                uid: c.uid.clone(),
+            });
+            if let Ok(frame) = (tetherly_core::frame::NotifyDismiss {
+                uid: c.uid,
+                app_id: c.app_id,
+            })
+            .to_frame()
+            {
+                let this = self.clone();
+                let source = c.source;
+                tokio::spawn(async move {
+                    let _ = this.send_to(&source, frame).await;
+                });
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Dismiss a single candidate, synchronously awaiting remote wire notification.
+    pub async fn dismiss_candidate_sync(
+        &self,
+        id: &str,
+    ) -> Result<CandidateDismissReport, CoreError> {
+        let removed = {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.notify.take_candidate(id)
+        };
+        let c = match removed {
+            Some(c) => c,
+            None => return Err(CoreError::UnknownCandidate),
+        };
+
+        let frame = tetherly_core::frame::NotifyDismiss {
+            uid: c.uid.clone(),
+            app_id: c.app_id.clone(),
+        }
+        .to_frame()?;
+        let notified_remote = self.send_to(&c.source, frame).await.is_ok();
+
+        self.emit(UiEvent::CandidateDismissed {
+            id: c.id.clone(),
+            source: c.source.to_string(),
+            app_id: c.app_id.clone(),
+            uid: c.uid.clone(),
+        });
+
+        Ok(CandidateDismissReport {
+            ok: true,
+            id: c.id,
+            source: c.source.to_string(),
+            app_id: c.app_id,
+            uid: c.uid,
+            notified_remote,
+        })
+    }
+
+    /// Perform multi-criteria batch dismissal of candidates, forwarding NotifyDismiss
+    /// to all affected connected peer sessions.
+    pub async fn dismiss_candidates(
+        &self,
+        filter: &DismissFilter,
+    ) -> Result<BatchDismissReport, CoreError> {
+        let removed_candidates = if filter.all.unwrap_or(false) {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.notify.clear_candidates()
+        } else if let Some(peer_str) = filter.peer.as_deref().filter(|s| !s.trim().is_empty()) {
+            let peer_id = self.resolve_peer(peer_str)?;
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.notify.dismiss_by_source(&peer_id)
+        } else if let Some(app_id) = filter.app_id.as_deref().filter(|s| !s.trim().is_empty()) {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.notify.dismiss_by_app(app_id.trim())
+        } else if let Some(id) = filter.id.as_deref().filter(|s| !s.trim().is_empty()) {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.notify.take_candidate(id.trim()).into_iter().collect()
+        } else {
+            return Err(CoreError::InvalidPayload(
+                "at least one filter (id, peer, app_id, all) is required".to_string(),
+            ));
+        };
+
+        let count = removed_candidates.len();
+        let mut ids = Vec::with_capacity(count);
+        let mut notified_remote_count = 0;
+
+        for c in removed_candidates {
+            ids.push(c.id.clone());
+            self.emit(UiEvent::CandidateDismissed {
+                id: c.id.clone(),
+                source: c.source.to_string(),
+                app_id: c.app_id.clone(),
+                uid: c.uid.clone(),
+            });
+
+            if let Ok(frame) = (tetherly_core::frame::NotifyDismiss {
+                uid: c.uid,
+                app_id: c.app_id,
+            })
+            .to_frame()
+            {
+                if self.send_to(&c.source, frame).await.is_ok() {
+                    notified_remote_count += 1;
+                }
+            }
+        }
+
+        Ok(BatchDismissReport {
+            ok: true,
+            count,
+            ids,
+            notified_remote_count,
+        })
     }
 
     /// Retrieve the OTP code associated with a candidate directly without
@@ -2075,7 +2248,12 @@ impl Node {
                     hubs.notify.dismiss_uid(&source, &uid.to_string())
                 };
                 for id in ids {
-                    let _ = self.shared.events.send(UiEvent::CandidateExpired { id });
+                    self.emit(UiEvent::CandidateDismissed {
+                        id,
+                        source: source.to_string(),
+                        app_id: String::new(),
+                        uid: uid.to_string(),
+                    });
                 }
             }
         }
@@ -3299,8 +3477,18 @@ impl Node {
                 let _ = self.ingest_local_push(peer.clone(), push).await;
             }
             SessionEvent::Dismiss(d) => {
-                let mut hubs = self.shared.hubs.lock().expect("hubs");
-                hubs.notify.dismiss_wire(peer, &d);
+                let dismissed = {
+                    let mut hubs = self.shared.hubs.lock().expect("hubs");
+                    hubs.notify.dismiss_wire_candidates(peer, &d)
+                };
+                for c in dismissed {
+                    self.emit(UiEvent::CandidateDismissed {
+                        id: c.id,
+                        source: c.source.to_string(),
+                        app_id: c.app_id,
+                        uid: c.uid,
+                    });
+                }
             }
             SessionEvent::Reply(reply) => {
                 let text_len = reply.text.len();
