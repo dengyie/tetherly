@@ -752,6 +752,7 @@ impl Node {
         let node_name = Mutex::new(cfg.name.clone());
         let advertise = AtomicBool::new(cfg.advertise);
         let reconnect = AtomicBool::new(cfg.reconnect);
+        let initial_blocked = crate::store::load_blocked(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -814,7 +815,7 @@ impl Node {
                 s.insert("screen".to_string());
                 s
             }),
-            blocked: Mutex::new(crate::store::load_blocked(&cfg.data_dir)),
+            blocked: Mutex::new(initial_blocked),
         });
         Ok(Self { shared })
     }
@@ -2685,13 +2686,8 @@ impl Node {
                 live.remove(&target_id).is_some()
             };
             if had_session || had_live {
-                {
-                    let mut seat = self.shared.input_seat.lock().expect("input_seat");
-                    if let Some(cur) = &*seat {
-                        if cur.device_id == target_id {
-                            *seat = None;
-                        }
-                    }
+                if *self.shared.input_seat.lock().expect("seat") == Some(CursorSeat::Remote) {
+                    *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
                 }
                 self.emit(UiEvent::PeerDown {
                     device_id: target_id.to_string(),
