@@ -2411,6 +2411,20 @@ impl Node {
         direct_addr: Option<&str>,
     ) -> Result<PeerConnectReport, CoreError> {
         let target_id = self.resolve_peer(query)?;
+        let parsed_direct: Option<SocketAddr> = if let Some(raw_addr) = direct_addr {
+            let parsed: SocketAddr = raw_addr.trim().parse().map_err(|e| {
+                CoreError::InvalidRoute(format!("invalid socket address '{raw_addr}': {e}"))
+            })?;
+            if parsed.port() == 0 {
+                return Err(CoreError::InvalidRoute(
+                    "socket port must be non-zero".to_string(),
+                ));
+            }
+            Some(parsed)
+        } else {
+            None
+        };
+
         let trusted = self.trusted();
         let matched = trusted.iter().find(|t| t.device_id == target_id);
         let alias = matched.and_then(|t| {
@@ -2437,15 +2451,7 @@ impl Node {
             }
         }
 
-        let addr = if let Some(raw_addr) = direct_addr {
-            let parsed: SocketAddr = raw_addr.trim().parse().map_err(|e| {
-                CoreError::InvalidRoute(format!("invalid socket address '{raw_addr}': {e}"))
-            })?;
-            if parsed.port() == 0 {
-                return Err(CoreError::InvalidRoute(
-                    "socket port must be non-zero".to_string(),
-                ));
-            }
+        let addr = if let Some(parsed) = parsed_direct {
             let _ = crate::store::remember_route(
                 &self.shared.cfg.data_dir,
                 target_id.as_str(),
