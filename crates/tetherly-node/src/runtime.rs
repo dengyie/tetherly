@@ -2632,6 +2632,12 @@ impl Node {
             }
         };
 
+        if target_id == *self.shared.identity.device_id() {
+            return Err(CoreError::InvalidPayload(
+                "cannot block local device".to_string(),
+            ));
+        }
+
         let sanitized_reason = if let Some(r) = reason {
             let r_trimmed = r.trim();
             if r_trimmed.is_empty() {
@@ -2744,6 +2750,12 @@ impl Node {
                 }
             }
         };
+
+        if target_id == *self.shared.identity.device_id() {
+            return Err(CoreError::InvalidPayload(
+                "cannot unblock local device".to_string(),
+            ));
+        }
 
         let was_blocked = {
             let mut blocked = self.shared.blocked.lock().expect("blocked");
