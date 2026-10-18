@@ -52,6 +52,8 @@
      - SSE 监听器对接 `file_rejected` 与 `file_auto_accept_changed`，动态局部重绘；
   7. 端到端集成测试全覆盖 (`tests/phase1.rs`):
      - 增设 `file_offer_lifecycle_and_terminal_governance_via_loopback_api`：完备验证初始态、提议到达与透视、单项拒绝及事件广播、批量拒绝与报告、受信任对端自动接收生效及收件箱 SHA-256 完整性校验、错误边界（400/404）与优雅停机，确立 ADR-046，SSOT 升至 v1.53。
+  8. 网络层取消安全与多路复用健壮性强化 (`crates/tetherly-net/src/codec.rs`, `session.rs`):
+     - 设计并实现状态化 `TaggedReader` 环形缓冲状态机，彻底消除 Tokio `select!` 竞态丢弃分支时丢失 header/body 字节导致的帧解包失步；`ActiveSession` 全量集成 `TaggedReader`，并在 `tests/phase1.rs` 增设对端拒绝状态观察同步，GitHub Actions CI 5 平台矩阵 100% 全绿通过。
 
 ## 2026-10-18 (49) - Clipboard lifecycle governance, metadata telemetry auditing, and history observability closed-loop (v1.52 / ADR-045)
 - Task: 实现跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环，消除剪贴板事件流黑盒与明文泄漏风险，建立纯元数据受控环形缓冲区、主动安全清空复位与双端 CLI/Web UI 全同构控制面。

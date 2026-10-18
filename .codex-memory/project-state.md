@@ -283,7 +283,6 @@
 - `snow` 0.9 has no `rekey()`; sessions **rebuild a fresh IK handshake in band** when the transport hits 2^16 msgs or 3600s (initiator-driven, cancellation-safe; `RekeyRequired` is retired).
 - Screen `seq` must stay session-monotonic; `on_peer_gone` resets it and a reconnect must not replay old frames.
 - Phase 4's Windows BLE transport now exists (v1.23), but its **runtime** behaviour against a physical iPhone is unverified, and macOS (CoreBluetooth) / Linux (BlueZ) GATT stacks are still unimplemented (`open()` honestly `Ok(None)`).
-- No production file-**send** path exists (v1.24 finding): `offer_and_send_bytes` is called only from `tests/phase1.rs`; there is no `/api/file/send` route and no CLI subcommand, so the file feature is receive-only end-to-end. And the v1 path is whole-file resident in memory on both ends, which is why `FILE_MAX` (512 MiB) is a memory bound — real streaming (write-as-you-go + incremental sha256, chunked/mmap send) is the follow-up that would let it rise.
 - AGPL/GPL screen-capture crates are banned by deny.toml; only permissive impls (windows, core-graphics, x11rb) are eligible.
 
 ## Active Blockers
@@ -294,32 +293,37 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
-- v1.24: two boundary fixes land — (1) `FILE_MAX` (512 MiB) stops being a dead constant: it is the
-  **memory** bound of the whole-file-resident v1 path and is now enforced at three points (offer
-  validation in `FileHub::offer_resumable`, the 45718 channel via `recv_chunks_after_header`'s `max_size`
-  plus `accept_file`'s guard, and the sender entry `offer_and_send_bytes`), and a refused offer no longer
-  tears the session down (the `SessionEvent::FileOffer` arm logs and continues). (2) Interface
-  classification becomes a single source of truth: `tetherly_core::bind::BindClass` + `classify` give each
-  local address a class and a human-readable `reason()`, adding `LoopbackAlias` (a `127/8` alias other than
-  `127.0.0.1`, e.g. systemd-resolved's `127.0.0.53`) and `CgnatOverlay` (RFC 6598 `100.64.0.0/10` — the
-  Tailscale/NetBird fabric, neither RFC1918 nor link-local, so v1 skips it silently unless the user passes
-  `--overlay-cidr`); `lan::interface_report()` exposes it read-only, `Snapshot.lan` surfaces it in the UI,
-  and `log_skipped_interfaces()` prints one line per skipped address at startup. **290 tests green**
-  locally (285 → +5); fmt / clippy `-D warnings` / `cargo deny` clean; `Cargo.lock` unchanged.
-  Two adjacent gaps found and reported (not fixed): there is **no production file-send path**
-  (`offer_and_send_bytes` is test-only — the receiver is fully wired, the sender is not), and the
-  whole-file-in-memory design means true streaming is the follow-up that would let `FILE_MAX` rise.
-  Next work is the Manual-required real-machine items (see Active Blockers).
+- **v1.53 (ADR-046)**: 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环已落地：
+  1. 解耦重量级全节点快照 `GET /api/state`，新增专用的轻量级 `GET /api/file/offers`，支持按 `transfer_id` 的 $O(1)$ 精准透视与按 `peer` 的轻量过滤；
+  2. 提议决策动作零明文结构化报告：定义 `FileOfferDto`、`FileOffersReport`、`FileDecisionReport`、`FileBatchDecisionReport` 与 `AutoAcceptReport`；
+  3. 批量提议治理原语：支持面向单端或全域对端的一键接收（`--all`）与一键拒绝（`--all`）；
+  4. 受信任对端自动接收无人值守策略（`auto_accept_trusted`）：在 `Shared` 状态维护原子开关与 `auto_accepted_count` 计数器，严格受限于 Noise 握手认证受信状态（`is_trusted(peer)`）；
+  5. 事件总线生命周期补完：新增 `UiEvent::FileRejected` 与 `UiEvent::FileAutoAcceptChanged`；
+  6. 轻量级回环控制面端点升级：`GET /api/file/offers`、`POST /api/file/accept`、`POST /api/file/reject`、`GET/POST /api/file/auto-accept`（严格校验 127.0.0.1 回环绑定与 Host 403）；
+  7. CLI 双端全同构升级：`offers`、`accept`、`reject`、`auto-accept` 子命令，并在 `events` 监听器中高亮展示；
+  8. Web UI 提议治理卡片与自动接收开关；
+  9. 网络层取消安全与多路复用健壮性强化：设计实现状态化 `TaggedReader` 环形缓冲状态机，消除 Tokio `select!` 竞态丢弃分支时的 partial-read 网络帧解包失步，在 `tests/phase1.rs` 增设步骤 4/5 对端拒绝观测同步，5 平台 CI 100% 全绿。
 
-## Next Milestone
-- Phase 6 (single-item): Android controlled device, WinFsp mount, file persistent resume,
-  Linux ANCS experience, embedded EasyTier FFI. (`notify.reply` closed v1.11; removed from backlog.)
+## Current Branch
+- `main` @ `https://github.com/dengyie/tetherly`
+
+## Last Verified
+- GitHub Actions CI Run `39159576824`（commit `15d16a8`）全部 5 个平台矩阵任务 100% 全绿通过：
+  - `deny` (45s): PASSED
+  - `android` (1m51s): PASSED
+  - `check (windows-latest)` (4m52s): PASSED
+  - `check (macos-latest)` (2m39s): PASSED
+  - `check (ubuntu-latest)` (3m43s): PASSED
+- `cargo fmt --all --check` & `cargo clippy --all-targets -- -D warnings` 全部干净通过。
+- `cargo deny check`（advisories, bans, licenses, sources）全部通过。
+- 300+ 单元测试与端到端集成测试全绿。
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.24)
-- `crates/tetherly-{core,crypto,net,node,android}` + `crates/tetherly-core/src/{ancs,screen}.rs`
-  + `crates/tetherly-node/src/{screen.rs,ancs.rs,ancs/win_gatt.rs}` + `crates/tetherly-android/src/{store,client,jni}.rs`
-- `crates/tetherly-core/tests/{decoders,fuzz_decoders,state_machines}.rs`, `crates/tetherly-net/tests/decoders.rs`
-- `bins/tetherly-cli`, `tests/{loopback,phase1,phase2,phase3,phase4,phase5}.rs`, `ui/`, `android/`
+- `docs/DEVELOPMENT.md` (SSOT v1.53)
+- `crates/tetherly-{core,crypto,net,node,android}`
+- `bins/tetherly-cli`, `crates/tetherly-node/src/bin/tetherly.rs`
+- `crates/tetherly-net/src/codec.rs` (`TaggedReader`), `crates/tetherly-net/src/session.rs`
+- `crates/tetherly-node/src/{runtime.rs,uihttp.rs,events.rs}`
+- `ui/index.html`, `tests/phase1.rs`
 - GitHub: `dengyie/tetherly`
 - Vault: `Note/Project/tetherly/tetherly 开发文档.md`

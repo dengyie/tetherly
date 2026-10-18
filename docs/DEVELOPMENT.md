@@ -70,6 +70,10 @@
        - 验证开启受信对端自动接收策略、自动静默入站接收与计数器递增；
        - 验证关闭自动接收策略及非法请求边界校验；
        - 验证优雅停机。
+  8. **网络层取消安全与多路复用健壮性强化 (`crates/tetherly-net/src/codec.rs`, `session.rs`)**:
+     - 引入状态化 `TaggedReader` 环形缓冲状态机，彻底消除 Tokio `select!` 竞态丢弃分支时由栈内局部变量丢失导致的网络帧解包失步（partial-read frame desynchronization）；
+     - `ActiveSession` 会话层全量接入 `TaggedReader`，确保高并发文件提议与拒绝交错时 TCP 帧边界零丢失；
+     - 在 `tests/phase1.rs` 中增加了步骤 4 与步骤 5 对端拒绝观测同步，5 平台 CI 矩阵 100% 验证通过。
 
 **1.52 相对 1.51(跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环)**
 
