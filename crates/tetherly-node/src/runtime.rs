@@ -2655,7 +2655,10 @@ impl Node {
         let now_ms = self.shared.clock.unix_ms();
         let already_blocked = {
             let mut blocked = self.shared.blocked.lock().expect("blocked");
-            let is_already = blocked.peers.iter().any(|p| p.device_id == target_id.as_str());
+            let is_already = blocked
+                .peers
+                .iter()
+                .any(|p| p.device_id == target_id.as_str());
             if let Some(existing) = blocked
                 .peers
                 .iter_mut()

@@ -3937,7 +3937,10 @@ async fn peer_blacklist_and_access_control_governance_via_loopback_api() {
         }
     }
     assert!(saw_peer_blocked, "must emit peer_blocked event");
-    assert!(saw_peer_down, "must emit peer_down event on active session teardown");
+    assert!(
+        saw_peer_down,
+        "must emit peer_down event on active session teardown"
+    );
 
     // 6. Verify persistence in blocked.json
     let blocked_file = host.data_dir().join(tetherly_node::BLOCKED_FILE);
@@ -3960,7 +3963,10 @@ async fn peer_blacklist_and_access_control_governance_via_loopback_api() {
     .unwrap();
     assert_eq!(code_out, 400);
     let out_err = String::from_utf8_lossy(&body_out);
-    assert!(out_err.contains("blocked"), "error message must indicate peer is blocked: {out_err}");
+    assert!(
+        out_err.contains("blocked"),
+        "error message must indicate peer is blocked: {out_err}"
+    );
 
     // 8. Verify inbound connection from blocked peer is rejected post-handshake
     let inbound_dial = serde_json::json!({
@@ -3978,7 +3984,9 @@ async fn peer_blacklist_and_access_control_governance_via_loopback_api() {
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     // Verify host still has NO live peer with peer_id
-    let (_, body_live2) = tetherly_node::loopback_get(host_ui, "/api/peers").await.unwrap();
+    let (_, body_live2) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .unwrap();
     let live_val2: serde_json::Value = serde_json::from_slice(&body_live2).unwrap();
     let live_arr2 = live_val2["live"].as_array().unwrap();
     assert!(!live_arr2.iter().any(|p| p["device_id"] == peer_id.as_str()));
@@ -4041,7 +4049,8 @@ async fn peer_blacklist_and_access_control_governance_via_loopback_api() {
     )
     .await
     .unwrap();
-    let unblk_rep2: tetherly_node::PeerUnblockReport = serde_json::from_slice(&body_unblk2).unwrap();
+    let unblk_rep2: tetherly_node::PeerUnblockReport =
+        serde_json::from_slice(&body_unblk2).unwrap();
     assert!(!unblk_rep2.unblocked);
     assert!(!unblk_rep2.was_blocked);
 
@@ -4058,7 +4067,9 @@ async fn peer_blacklist_and_access_control_governance_via_loopback_api() {
     assert!(rec_rep.ok);
     assert!(rec_rep.connected);
 
-    let (_, body_live3) = tetherly_node::loopback_get(host_ui, "/api/peers").await.unwrap();
+    let (_, body_live3) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .unwrap();
     let live_val3: serde_json::Value = serde_json::from_slice(&body_live3).unwrap();
     let live_arr3 = live_val3["live"].as_array().unwrap();
     assert!(live_arr3.iter().any(|p| p["device_id"] == peer_id.as_str()));

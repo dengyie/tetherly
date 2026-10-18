@@ -2507,15 +2507,14 @@ async fn main() -> Result<()> {
                 "reason": reason,
             });
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) =
-                tetherly_node::loopback_post(ui_port, "/api/peers/block", &bytes)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                             start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/block", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
             if code != 200 {
                 anyhow::bail!(
                     "node refused block (HTTP {code}): {}",
@@ -2558,15 +2557,14 @@ async fn main() -> Result<()> {
         } => {
             let payload = serde_json::json!({ "peer": peer });
             let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) =
-                tetherly_node::loopback_post(ui_port, "/api/peers/unblock", &bytes)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                             start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+            let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/peers/unblock", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
             if code != 200 {
                 anyhow::bail!(
                     "node refused unblock (HTTP {code}): {}",
@@ -2586,15 +2584,14 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Blocked { json, ui_port } => {
-            let (code, resp) =
-                tetherly_node::loopback_get(ui_port, "/api/peers/blocked")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                             start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/peers/blocked")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
             if code != 200 {
                 anyhow::bail!(
                     "node refused blocked query (HTTP {code}): {}",

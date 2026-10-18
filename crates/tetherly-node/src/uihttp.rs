@@ -788,7 +788,9 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             } else {
                 match serde_json::from_slice::<PeerBlockBody>(body) {
                     Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected { peer: string, reason?: string }"),
+                    Err(_) => {
+                        return err(400, "bad json, expected { peer: string, reason?: string }")
+                    }
                 }
             };
             let target_query = parsed_body
@@ -805,7 +807,10 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             if target_query.trim().is_empty() {
                 return err(400, "peer identifier required");
             }
-            match node.block_peer(target_query.trim(), reason.as_deref()).await {
+            match node
+                .block_peer(target_query.trim(), reason.as_deref())
+                .await
+            {
                 Ok(rep) => json_ok(&rep),
                 Err(tetherly_core::CoreError::PeerNotFound(e)) => {
                     err(404, &format!("peer not found: {e}"))
