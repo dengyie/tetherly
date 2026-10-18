@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::codec::{
-    read_len_prefixed, read_tagged, write_len_prefixed, write_tagged, TaggedReader, TAG_DATA,
-    TAG_REKEY,
+    read_len_prefixed, write_len_prefixed, write_tagged, TaggedReader, TAG_DATA, TAG_REKEY,
 };
 use crate::error::NetError;
 use std::collections::VecDeque;
