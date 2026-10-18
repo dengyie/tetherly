@@ -4645,7 +4645,7 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
 /// Batch Decision Control, Auto-Accept Trusted Peers Policy, and Loopback RESTful Closed-Loop.
 #[tokio::test(flavor = "multi_thread")]
 async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
-    let (host, peer, g1, _g2) = pair_phone_desktop().await;
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
     let host_ui = host.spawn_ui().await.unwrap();
     let peer_ui = peer.spawn_ui().await.unwrap();
     let host_id = host.identity().device_id().clone();
@@ -4891,10 +4891,11 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
         serde_json::from_slice(&b_after_batch).unwrap();
     assert_eq!(after_batch.count, 0);
 
-    // 6. Test Auto-Accept Policy for Trusted Peers
+    // 6. Test Auto-Accept Policy for Trusted Peers on Peer node
+    let mut peer_rx = peer.subscribe();
     let auto_enable_payload = serde_json::json!({ "enabled": true });
     let (code_en, body_en) = tetherly_node::loopback_post(
-        host_ui,
+        peer_ui,
         "/api/file/auto-accept",
         &serde_json::to_vec(&auto_enable_payload).unwrap(),
     )
@@ -4905,12 +4906,12 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     assert!(en_rep.ok);
     assert!(en_rep.enabled);
 
-    // Verify UiEvent::FileAutoAcceptChanged emission
+    // Verify UiEvent::FileAutoAcceptChanged emission on peer
     let start = std::time::Instant::now();
     let mut auto_ev_found = false;
     while start.elapsed() < Duration::from_secs(5) {
         if let Ok(Ok(tetherly_node::UiEvent::FileAutoAcceptChanged { enabled })) =
-            tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await
+            tokio::time::timeout(Duration::from_millis(500), peer_rx.recv()).await
         {
             if enabled {
                 auto_ev_found = true;
@@ -4920,22 +4921,22 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     }
     assert!(
         auto_ev_found,
-        "host did not emit FileAutoAcceptChanged event"
+        "peer did not emit FileAutoAcceptChanged event"
     );
 
-    // Peer sends a file while auto-accept is enabled on host
+    // Host sends a file while auto-accept is enabled on peer
     let auto_file_path = send_dir.join("auto_file.dat");
     let auto_data = b"Autonomous File Transfer Protocol Verification Data Payload v1.53";
     std::fs::write(&auto_file_path, auto_data).unwrap();
     let auto_expected_hash = hex_sha256(auto_data);
 
     let (c_auto_send, b_auto_send) = tetherly_node::loopback_post(
-        peer_ui,
+        host_ui,
         "/api/file/send",
         &serde_json::to_vec(&serde_json::json!({
             "path": auto_file_path.to_str().unwrap(),
             "name": "auto_file.dat",
-            "peer": host_id,
+            "peer": peer_id,
         }))
         .unwrap(),
     )
@@ -4949,10 +4950,10 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
         .to_string();
     assert!(!auto_tid.is_empty());
 
-    // File should be automatically accepted and received in host inbox without manual call!
+    // File should be automatically accepted and received in peer inbox without manual call!
     let start_auto = std::time::Instant::now();
     loop {
-        let (c_auto_st, b_auto_st) = tetherly_node::loopback_get(host_ui, "/api/file/auto-accept")
+        let (c_auto_st, b_auto_st) = tetherly_node::loopback_get(peer_ui, "/api/file/auto-accept")
             .await
             .unwrap();
         assert_eq!(c_auto_st, 200);
@@ -4962,15 +4963,15 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
             break;
         }
         if start_auto.elapsed() > Duration::from_secs(20) {
-            let (_, body_offers) = tetherly_node::loopback_get(host_ui, "/api/file/offers")
+            let (_, body_offers) = tetherly_node::loopback_get(peer_ui, "/api/file/offers")
                 .await
                 .unwrap();
-            let (_, body_transfers) = tetherly_node::loopback_get(host_ui, "/api/file/transfers")
+            let (_, body_transfers) = tetherly_node::loopback_get(peer_ui, "/api/file/transfers")
                 .await
                 .unwrap();
             panic!(
-                "auto-accept counter did not reach 1 within 20s. auto_st: {:?}, host offers: {}, \
-                 host transfers: {}",
+                "auto-accept counter did not reach 1 within 20s. auto_st: {:?}, peer offers: {}, \
+                 peer transfers: {}",
                 auto_st,
                 String::from_utf8_lossy(&body_offers),
                 String::from_utf8_lossy(&body_transfers),
@@ -4980,7 +4981,7 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     }
 
     let start_inbox = std::time::Instant::now();
-    let auto_dest = g1.path().join("inbox").join("auto_file.dat");
+    let auto_dest = g2.path().join("inbox").join("auto_file.dat");
     let received_data = loop {
         if let Ok(bytes) = std::fs::read(&auto_dest) {
             if !bytes.is_empty() {
@@ -4988,7 +4989,7 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
             }
         }
         if start_inbox.elapsed() > Duration::from_secs(35) {
-            let entries = std::fs::read_dir(g1.path().join("inbox"))
+            let entries = std::fs::read_dir(g2.path().join("inbox"))
                 .map(|rd| {
                     rd.filter_map(|e| e.ok().map(|x| x.file_name().to_string_lossy().to_string()))
                         .collect::<Vec<_>>()
@@ -5014,7 +5015,7 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
 
     // 7. Disable Auto-Accept Policy
     let (code_dis, body_dis) = tetherly_node::loopback_post(
-        host_ui,
+        peer_ui,
         "/api/file/auto-accept",
         &serde_json::to_vec(&serde_json::json!({ "enabled": false })).unwrap(),
     )
