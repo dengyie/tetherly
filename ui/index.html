@@ -386,8 +386,12 @@
       <div class="hint">连接后把本机鼠标移到屏幕右缘即可控制对端;断开或对端离线时键盘鼠标立即回到本机。仅 Windows 真机注入可用。</div>
     </section>
     <section style="margin-top:16px">
-      <h2>网络与接口诊断</h2>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>网络与接口诊断</h2>
+        <button id="netrefreshbtn" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--text);border-radius:4px;cursor:pointer">探测刷新</button>
+      </div>
       <div id="net" class="hint">探测 EasyTier 侧车…</div>
+      <div id="netrefreshmsg" class="hint" style="margin-top:4px"></div>
       <div id="ifaces" style="margin-top:8px"></div>
     </section>
     <section style="margin-top:16px">
@@ -1560,6 +1564,59 @@ async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
   refreshPin();
 }
+async function updateNetworkStatus() {
+  try {
+    const res = await fetch("/api/net");
+    if (!res.ok) return;
+    const data = await res.json();
+    const net = $("net");
+    if (net && data.overlay) {
+      net.textContent = !data.overlay.present
+        ? "仅局域网（未检测到 EasyTier 侧车，不影响 LAN）"
+        : ("虚网在线 · " + (data.overlay.source || "") + " · peers " + (data.overlay.peer_count || 0) + (data.overlay.local_ips && data.overlay.local_ips.length ? (" · " + data.overlay.local_ips.join(", ")) : ""));
+    }
+    const ifacesEl = $("ifaces");
+    const ifaces = data.interfaces || [];
+    if (ifacesEl && ifaces.length) {
+      ifacesEl.innerHTML = "";
+      const container = el('<div style="font-size:12px;display:flex;flex-direction:column;gap:4px"></div>');
+      for (const row of ifaces) {
+        const badge = row.listen
+          ? '<span class="badge completed" style="margin-right:6px">监听</span>'
+          : '<span class="badge offline" style="margin-right:6px">跳过</span>';
+        const reasonStr = row.reason ? (' <span style="color:var(--text-dim)">(' + row.reason + ')</span>') : '';
+        const item = el('<div style="display:flex;align-items:center;justify-content:space-between;padding:2px 0">' +
+          '<span>' + badge + '<span style="font-family:ui-monospace, Consolas, monospace">' + row.iface + '</span>' + reasonStr + '</span>' +
+          '<span style="font-family:ui-monospace, Consolas, monospace;color:var(--text)">' + row.ip + '</span>' +
+          '</div>');
+        container.appendChild(item);
+      }
+      ifacesEl.appendChild(container);
+    }
+  } catch (e) {
+    console.error("updateNetworkStatus error", e);
+  }
+}
+const netRefreshBtn = $("netrefreshbtn");
+if (netRefreshBtn) {
+  netRefreshBtn.onclick = async () => {
+    const msg = $("netrefreshmsg");
+    if (msg) msg.textContent = "正在重探网络接口与 EasyTier 侧车…";
+    try {
+      const res = await fetch("/api/net/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        if (msg) msg.textContent = "重探完成：扫描 " + data.ifaces_scanned + " 网卡（监听 " + data.ifaces_listening + "），侧车 " + (data.overlay_present ? ("在线 (" + data.overlay_source + ")") : "离线");
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 4000);
+        updateNetworkStatus();
+      } else {
+        if (msg) msg.textContent = "重探失败：" + (data.error || "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求错误: " + e.message;
+    }
+  };
+}
 let eventSource = null;
 let sseReconnectTimer = null;
 function setupEventSource() {
@@ -1637,14 +1694,22 @@ function setupEventSource() {
 				            desc = "剪贴板已清空";
 				            updateClipboard();
 				          }
-				          else if (ev.kind === "screen_state_changed") {
-				            desc = "屏幕状态: " + ev.state + " (授权:" + (ev.allowed ? "是" : "否") + ")" + (ev.peer ? (" · 对端:" + ev.peer) : "");
-				            updateScreenStatus();
-				          }
-				          else if (ev.kind === "input_seat_changed") {
-				            desc = "键鼠共享: 光标" + (ev.seat === "remote" ? "移至对端" : "返回本机") + (ev.channel_open ? " (通道开启)" : " (通道关闭)") + (ev.peer ? (" · 对端:" + ev.peer) : "");
-				            updateInputStatus();
-				          }
+					          else if (ev.kind === "screen_state_changed") {
+					            desc = "屏幕状态: " + ev.state + " (授权:" + (ev.allowed ? "是" : "否") + ")" + (ev.peer ? (" · 对端:" + ev.peer) : "");
+					            updateScreenStatus();
+					          }
+					          else if (ev.kind === "input_seat_changed") {
+					            desc = "键鼠共享: 光标" + (ev.seat === "remote" ? "移至对端" : "返回本机") + (ev.channel_open ? " (通道开启)" : " (通道关闭)") + (ev.peer ? (" · 对端:" + ev.peer) : "");
+					            updateInputStatus();
+					          }
+					          else if (ev.kind === "network_refreshed") {
+					            desc = "网络已重探: 扫描 " + ev.iface_count + " 网卡 (监听 " + ev.listen_count + ")" + (ev.overlay_present ? (" · 侧车: " + (ev.overlay_source || "在网")) : "");
+					            updateNetworkStatus();
+					          }
+					          else if (ev.kind === "overlay_state_changed") {
+					            desc = "EasyTier 侧车变更: " + (ev.present ? "在线" : "离线") + " (" + (ev.source || "") + ") · peers " + (ev.peer_count || 0);
+					            updateNetworkStatus();
+					          }
 	          $("ev-last").textContent = "[" + t + "] " + desc;
 	        }
 	      } catch (err) {

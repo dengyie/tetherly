@@ -667,6 +667,50 @@ pub struct InputControlReport {
     pub timestamp_ms: u64,
 }
 
+/// One local network interface classification report DTO.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct IfaceReportDto {
+    pub iface: String,
+    pub ip: String,
+    pub listen: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Status report for EasyTier overlay network sidecar.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct OverlayStatusReport {
+    pub enabled: bool,
+    pub present: bool,
+    pub source: String,
+    pub local_ips: Vec<String>,
+    pub peer_count: usize,
+    pub peers: Vec<String>,
+}
+
+/// Comprehensive network interfaces and overlay status report.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct NetworkReport {
+    pub ok: bool,
+    #[serde(alias = "ifaces")]
+    pub interfaces: Vec<IfaceReportDto>,
+    pub overlay: OverlayStatusReport,
+}
+
+/// Action report returned when triggering a dynamic network refresh and overlay probe.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct NetworkRefreshReport {
+    pub ok: bool,
+    pub action: String,
+    pub ifaces_scanned: usize,
+    pub ifaces_listening: usize,
+    pub overlay_present: bool,
+    pub overlay_source: String,
+    pub overlay_local_ips: Vec<String>,
+    pub overlay_peers_count: usize,
+    pub timestamp_ms: u64,
+}
+
 enum OutboundSource {
     Bytes(Vec<u8>),
     Path(std::path::PathBuf),
@@ -1814,6 +1858,85 @@ impl Node {
 
     pub fn network_report(&self) -> (Vec<crate::lan::IfaceReport>, crate::sidecar::OverlayStatus) {
         (crate::lan::interface_report(), self.overlay_status())
+    }
+
+    pub fn network_report_dto(&self) -> NetworkReport {
+        let (ifaces, ov) = self.network_report();
+        let iface_dtos = ifaces
+            .into_iter()
+            .map(|i| IfaceReportDto {
+                iface: i.iface,
+                ip: i.ip.to_string(),
+                listen: i.listen,
+                reason: i.reason.map(|r| r.to_string()),
+            })
+            .collect();
+        let overlay_dto = OverlayStatusReport {
+            enabled: self.overlay_enabled(),
+            present: ov.present,
+            source: format!("{:?}", ov.source),
+            local_ips: ov.local_ips.iter().map(|ip| ip.to_string()).collect(),
+            peer_count: ov.peers.len(),
+            peers: ov.peers.iter().map(|ip| ip.to_string()).collect(),
+        };
+        NetworkReport {
+            ok: true,
+            interfaces: iface_dtos,
+            overlay: overlay_dto,
+        }
+    }
+
+    pub async fn refresh_network(&self) -> NetworkRefreshReport {
+        let ifaces = crate::lan::interface_report();
+        let ifaces_scanned = ifaces.len();
+        let ifaces_listening = ifaces.iter().filter(|i| i.listen).count();
+
+        let ov = if self.overlay_enabled() {
+            crate::sidecar::discover(&self.shared.cfg.overlay).await
+        } else {
+            crate::sidecar::OverlayStatus::lan_only()
+        };
+
+        let prev_ov = {
+            let mut lock = self.shared.overlay.lock().expect("overlay");
+            let old = lock.clone();
+            *lock = ov.clone();
+            old
+        };
+
+        let overlay_source_str = format!("{:?}", ov.source);
+        self.emit(UiEvent::NetworkRefreshed {
+            iface_count: ifaces_scanned,
+            listen_count: ifaces_listening,
+            overlay_present: ov.present,
+            overlay_source: Some(overlay_source_str.clone()),
+        });
+
+        if prev_ov != ov {
+            self.emit(UiEvent::OverlayStateChanged {
+                present: ov.present,
+                source: overlay_source_str.clone(),
+                local_ips: ov.local_ips.iter().map(|ip| ip.to_string()).collect(),
+                peer_count: ov.peers.len(),
+            });
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        NetworkRefreshReport {
+            ok: true,
+            action: "refreshed".into(),
+            ifaces_scanned,
+            ifaces_listening,
+            overlay_present: ov.present,
+            overlay_source: overlay_source_str,
+            overlay_local_ips: ov.local_ips.iter().map(|ip| ip.to_string()).collect(),
+            overlay_peers_count: ov.peers.len(),
+            timestamp_ms: now_ms,
+        }
     }
 
     pub fn overlay_enabled(&self) -> bool {
@@ -3243,6 +3366,12 @@ impl Node {
                 self.emit(UiEvent::Overlay {
                     present,
                     lan_only: !present,
+                });
+                self.emit(UiEvent::OverlayStateChanged {
+                    present,
+                    source: format!("{:?}", st.source),
+                    local_ips: st.local_ips.iter().map(|ip| ip.to_string()).collect(),
+                    peer_count: st.peers.len(),
                 });
                 if !present {
                     info!("overlay down; LAN only");

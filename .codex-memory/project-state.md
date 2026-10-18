@@ -293,6 +293,13 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
+- **v1.55 (ADR-048)**: 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环已落地：
+  1. **事件总线扩展与安全红线守卫 (`events.rs`)**：新增 `UiEvent::NetworkRefreshed` 与 `UiEvent::OverlayStateChanged`，严格遵守 Zero-Plaintext 铁律，不泄露私网敏感信息，仅携带分类网卡统计、监听计数、侧车状态及对端数量；
+  2. **结构化 DTO 抽象与运行时控制原语 (`runtime.rs`, `lib.rs`)**：定义并导出 `IfaceReportDto`、`OverlayStatusReport`、`NetworkReport`、`NetworkRefreshReport`，实现 `Node::network_report_dto` 与 `Node::refresh_network`，在运行时主动执行物理网卡重新枚举与 EasyTier 侧车连接探测，在侧车状态演进或主动重探时全生命周期广播 `UiEvent`；后台 `overlay_scan_loop` 同步在侧车状态演进时派发 `UiEvent::OverlayStateChanged`；
+  3. **轻量级回环控制面端点升级 (`uihttp.rs`)**：重构 `GET /api/net` 返回强类型 `NetworkReport`，新增 `POST /api/net/refresh` 与 `POST /api/net/probe` 返回强类型 `NetworkRefreshReport`，严格 127.0.0.1 回环绑定与 Host 403 校验；
+  4. **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**：`net` 子命令增设 `--refresh` (`-r`) 参数，支持主动重探与 `--json` 管道输出，SSE `events` 监听器高亮 `[network_refreshed]` 与 `[overlay_state_changed]`；
+  5. **Web UI 实时动态刷新与状态徽标 (`ui/index.html`)**：在「网络与接口诊断」面板新增「探测刷新」按钮与即时反馈，在 SSE 分发循环中挂载网络探测与侧车状态变更监听，实现局部解耦渲染；
+  6. **端到端集成测试全覆盖 (`tests/phase2.rs`)**：新增 `dynamic_network_rescan_and_overlay_events_via_loopback_api` 完备验证。
 - **v1.54 (ADR-047)**: 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环已落地：
   1. **事件总线扩展与安全红线守卫 (`events.rs`)**：新增 `UiEvent::ScreenStateChanged` 与 `UiEvent::InputSeatChanged`，严格遵守 Zero-Plaintext 铁律，不携带像素缓冲区、按键扫描码或光标敏感轨迹；
   2. **结构化 DTO 抽象与运行时控制原语 (`runtime.rs`, `lib.rs`)**：定义并导出 `ScreenStatusReport`、`ScreenControlReport`、`InputStatusReport`、`InputControlReport`，在 `Shared` 中维护 `screen_peer` 与 `input_peer` 互斥追踪，新增 `screen_status_report`、`screen_allow_reported`、`screen_revoke_reported`、`screen_start_reported`、`screen_stop_reported`、`input_status_report`、`input_start_reported`、`input_stop_reported`；
@@ -331,11 +338,11 @@
 - 300+ 单元测试与端到端集成测试全绿。
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.54)
+- `docs/DEVELOPMENT.md` (SSOT v1.55)
 - `crates/tetherly-{core,crypto,net,node,android}`
 - `bins/tetherly-cli`, `crates/tetherly-node/src/bin/tetherly.rs`
 - `crates/tetherly-net/src/codec.rs` (`TaggedReader`), `crates/tetherly-net/src/session.rs`
-- `crates/tetherly-node/src/{runtime.rs,uihttp.rs,events.rs}`
-- `ui/index.html`, `tests/phase1.rs`, `tests/phase5.rs`
+- `crates/tetherly-node/src/{runtime.rs,uihttp.rs,events.rs,lan.rs,sidecar.rs}`
+- `ui/index.html`, `tests/phase1.rs`, `tests/phase2.rs`, `tests/phase5.rs`
 - GitHub: `dengyie/tetherly`
 - Vault: `Note/Project/tetherly/tetherly 开发文档.md`

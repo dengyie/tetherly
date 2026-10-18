@@ -118,6 +118,19 @@ pub enum UiEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         peer: Option<String>,
     },
+    NetworkRefreshed {
+        iface_count: usize,
+        listen_count: usize,
+        overlay_present: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        overlay_source: Option<String>,
+    },
+    OverlayStateChanged {
+        present: bool,
+        source: String,
+        local_ips: Vec<String>,
+        peer_count: usize,
+    },
 }
 
 impl UiEvent {
@@ -135,6 +148,24 @@ impl UiEvent {
         peer: Option<String>,
     ) -> Self {
         input_seat_changed(seat, channel_open, peer)
+    }
+
+    pub fn network_refreshed(
+        iface_count: usize,
+        listen_count: usize,
+        overlay_present: bool,
+        overlay_source: Option<String>,
+    ) -> Self {
+        network_refreshed(iface_count, listen_count, overlay_present, overlay_source)
+    }
+
+    pub fn overlay_state_changed(
+        present: bool,
+        source: impl Into<String>,
+        local_ips: Vec<String>,
+        peer_count: usize,
+    ) -> Self {
+        overlay_state_changed(present, source, local_ips, peer_count)
     }
 }
 
@@ -240,5 +271,33 @@ pub fn input_seat_changed(
         seat: seat.into(),
         channel_open,
         peer,
+    }
+}
+
+pub fn network_refreshed(
+    iface_count: usize,
+    listen_count: usize,
+    overlay_present: bool,
+    overlay_source: Option<String>,
+) -> UiEvent {
+    UiEvent::NetworkRefreshed {
+        iface_count,
+        listen_count,
+        overlay_present,
+        overlay_source,
+    }
+}
+
+pub fn overlay_state_changed(
+    present: bool,
+    source: impl Into<String>,
+    local_ips: Vec<String>,
+    peer_count: usize,
+) -> UiEvent {
+    UiEvent::OverlayStateChanged {
+        present,
+        source: source.into(),
+        local_ips,
+        peer_count,
     }
 }

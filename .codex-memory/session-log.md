@@ -1,5 +1,39 @@
 # Session log
 
+## 2026-10-19 (52) - Network topology telemetry, dynamic NIC rescan governance, EasyTier sidecar observability & event bus synchronization (v1.55 / ADR-048)
+- Task: 实现网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环，消除网络与虚拟网卡通道的事件盲区，提供强类型 DTO 报告、动态重探控制原语、双端 CLI 结构化排版及 Web UI 局部即时渲染。
+- **背景与缺陷根因**:
+  在 Tetherly 陆续完成远程屏幕与键鼠治理 (v1.54 / ADR-047)、文件提议治理 (v1.53 / ADR-046)、剪贴板审计 (v1.52 / ADR-045)、通知双向同步 (v1.51 / ADR-044) 后，底层网络接口拓扑与 EasyTier 侧车穿透可观测性暴露出一系列治理痛点：
+  1. 事件总线静默脱节（Event Blackout on Network & Overlay Changes）：当宿主机经历网卡热插拔、WiFi/以太网热切换、VPN 拨号建立/断开，或者 EasyTier 侧车守护进程完成启动、穿透建立、节点发现或异常离线时，底层从不向节点事件总线广播任何 `UiEvent`，导致 Web UI 与 CLI 事件监听器失明，必须依赖高开销的主动轮询；
+  2. 网卡物理分类静态锁定与动态重探能力缺失（Dynamic Rescan Primitive Missing）：节点启动时虽然基于 `lan.rs` 进行了网卡分类，但缺乏在不重启节点的前提下主动触发「即时全量网卡重探与 EasyTier 侧车再连接」的控制原语；
+  3. 控制面缺乏结构化强类型 DTO 抽象（Missing Strongly-Typed DTOs）：`/api/net` 接口此前返回内联构造的松散 JSON，缺乏类型严谨的 `NetworkReport`、`IfaceReportDto`、`OverlayStatusReport` 与 `NetworkRefreshReport` 统一结构定义，未在 `lib.rs` 对外导出，导致 CLI 与外部集成客户端无法获得严格的类型校验保证；
+  4. 终端全同构控制与局部渲染闭环缺失：CLI 缺乏 `net --refresh` 显式重探管道；Web UI 缺乏网络重探控制按钮与解耦全局轮询的局部即时渲染支持。
+- **架构设计与落地 (ADR-048)**:
+  1. 事件总线扩展与安全红线守卫 (`crates/tetherly-node/src/events.rs`):
+     - 新增结构化变体 `UiEvent::NetworkRefreshed { iface_count: usize, listen_count: usize, overlay_present: bool, overlay_source: Option<String> }`；
+     - 新增结构化变体 `UiEvent::OverlayStateChanged { present: bool, source: String, local_ips: Vec<String>, peer_count: usize }`；
+     - 严格遵守 Zero-Plaintext 铁律，不泄露私网敏感信息，仅传递网卡分类统计、监听计数、侧车状态及对端节点数量；
+     - 提供 `network_refreshed` 与 `overlay_state_changed` 构造辅助函数及关联方法；
+  2. 结构化 DTO 抽象与运行时控制原语 (`crates/tetherly-node/src/runtime.rs`, `lib.rs`):
+     - 定义并导出 `IfaceReportDto`、`OverlayStatusReport`、`NetworkReport`、`NetworkRefreshReport`；
+     - 实现核心控制原语 `node.network_report_dto() -> NetworkReport` 与 `node.refresh_network().await -> NetworkRefreshReport`；
+     - 运行时主动执行物理网卡重新枚举与 EasyTier 侧车连接探测，更新 `Shared.overlay`，并在发生状态突变时广播 `UiEvent::OverlayStateChanged`，在刷新完成时广播 `UiEvent::NetworkRefreshed`；
+     - 后台 `overlay_scan_loop` 同步在侧车状态演进时派发 `UiEvent::OverlayStateChanged`；
+  3. 轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`):
+     - 重构 `GET /api/net` 返回强类型 `NetworkReport`；
+     - 新增 `POST /api/net/refresh` 及别名 `POST /api/net/probe`，触发主动重探并返回强类型 `NetworkRefreshReport`；
+     - 严格遵循 `127.0.0.1` 回环绑定与 `Host` 头守卫，拦截非回环请求并返回 HTTP 403 Forbidden (`loopback only`)；
+  4. CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`):
+     - `tetherly net` 与 `tetherly-cli net` 增设 `--refresh` (`-r`) 参数，支持主动触发网卡分类与 EasyTier 侧车重探；
+     - 保持与现存输出及 `--json` 管道的完美后向兼容性，清晰打印分类网卡、监听状态、跳过原因、EasyTier 侧车状态、虚拟 IP 与 Peers；
+     - SSE `events` 监听器新增对 `[network_refreshed]` 与 `[overlay_state_changed]` 的格式化着色打印；
+  5. Web UI 实时动态刷新与状态徽标 (`ui/index.html`):
+     - 在「网络与接口诊断」面板新增「探测刷新」(`netrefreshbtn`) 按钮与异步操作状态反馈；
+     - 实现 `updateNetworkStatus()` 轻量级局部渲染，解耦全局状态轮询；
+     - 在 SSE 事件流中捕获 `network_refreshed` 与 `overlay_state_changed` 事件，驱动网络与侧车卡片毫秒级自动就绪刷新；
+  6. 端到端集成测试全覆盖 (`tests/phase2.rs`):
+     - 增设 `dynamic_network_rescan_and_overlay_events_via_loopback_api`：完备验证初始透视、非回环 Host 403 守卫拦截、POST 动态探测重探、SSE 事件捕获与关联解析、Rust API 直接调用与节点优雅停机，确立 ADR-048，SSOT 升至 v1.55。
+
 ## 2026-10-19 (51) - Remote screen & shared input streaming lifecycle governance, real-time telemetry observability & event bus integration (v1.54 / ADR-047)
 - Task: 实现远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环，消除屏幕与键鼠通道的事件静默脱节与状态盲区，提供强类型 DTO 报告、活动对端追踪、双端 CLI 结构化排版及 Web UI 局部即时渲染。
 - **背景与缺陷根因**:

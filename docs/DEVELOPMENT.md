@@ -3,12 +3,61 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.54** |
+| 文档版本 | **1.55** |
 | 日期 | 2026-10-19 |
-| 状态 | **v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）**——(1) **事件总线扩展与安全红线守卫 (`events.rs`)**：新增 `UiEvent::ScreenStateChanged` 与 `UiEvent::InputSeatChanged`，严格遵守 Zero-Plaintext 铁律，不携带像素缓冲区、按键扫描码或光标敏感轨迹，仅传递状态标识、Seat 席位与对端 ID；(2) **结构化 DTO 抽象与运行时控制原语 (`runtime.rs`, `lib.rs`)**：定义并导出 `ScreenStatusReport`、`ScreenControlReport`、`InputStatusReport`、`InputControlReport`，在 `Shared` 中维护 `screen_peer` 与 `input_peer` 互斥追踪，新增 `screen_status_report`、`screen_allow_reported`、`screen_revoke_reported`、`screen_start_reported`、`screen_stop_reported`、`input_status_report`、`input_start_reported`、`input_stop_reported`；(3) **轻量级回环控制面端点升级 (`uihttp.rs`)**：重构 `/api/screen` 与 `/api/input` 响应，完全由强类型 DTO 驱动，严格 127.0.0.1 回环绑定与 Host 403 校验；(4) **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**：`screen status` 与 `input status` 支持高亮排版与 `--json` 原生管道输出，SSE `events` 监听器高亮 `[screen_state_changed]` 与 `[input_seat_changed]`；(5) **Web UI 实时动态刷新与状态徽标 (`ui/index.html`)**：在 SSE 分发循环中挂载屏幕与键鼠状态变更监听，动态展示活动对端与遥测统计；(6) **端到端集成测试全覆盖 (`tests/phase5.rs`)**：新增 `screen_and_input_lifecycle_governance_and_events_via_loopback_api` 完备验证。+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）**——(1) **事件总线扩展与安全红线守卫 (`events.rs`)**：新增 `UiEvent::NetworkRefreshed` 与 `UiEvent::OverlayStateChanged`，严格遵守 Zero-Plaintext 铁律，不泄露任何私网拓扑明文或设备隐私，仅携带分类网卡计数、监听状态、侧车在线标识、来源类型与对端数量；(2) **结构化 DTO 抽象与运行时控制原语 (`runtime.rs`, `lib.rs`)**：定义并导出 `IfaceReportDto`、`OverlayStatusReport`、`NetworkReport`、`NetworkRefreshReport`，实现 `Node::network_report_dto` 与 `Node::refresh_network`，在运行时主动执行物理网卡重新枚举与 EasyTier 侧车连接探测，在侧车状态演进或主动重探时全生命周期广播 `UiEvent`；(3) **轻量级回环控制面端点升级 (`uihttp.rs`)**：重构 `GET /api/net` 返回强类型 `NetworkReport`，新增 `POST /api/net/refresh` 与 `POST /api/net/probe` 返回强类型 `NetworkRefreshReport`，严格 127.0.0.1 回环绑定与 Host 403 校验；(4) **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**：`net` 子命令增设 `--refresh` (`-r`) 参数，支持主动重探与 `--json` 管道输出，SSE `events` 监听器高亮 `[network_refreshed]` 与 `[overlay_state_changed]`；(5) **Web UI 实时动态刷新与状态徽标 (`ui/index.html`)**：在「网络与接口诊断」面板新增「探测刷新」按钮与即时反馈，在 SSE 分发循环中挂载网络探测与侧车状态变更监听，实现局部解耦渲染；(6) **端到端集成测试全覆盖 (`tests/phase2.rs`)**：新增 `dynamic_network_rescan_and_overlay_events_via_loopback_api` 完备验证。+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.55 相对 1.54(网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环)**
+
+- **动机(网络拓扑事件盲区、网卡热插拔动态探测缺失、EasyTier 侧车状态突变脱节与控制面缺乏强类型 DTO)**:
+  在 Tetherly 陆续完成远程屏幕与键鼠治理 (v1.54 / ADR-047)、文件提议治理 (v1.53 / ADR-046)、剪贴板审计 (v1.52 / ADR-045)、通知双向同步 (v1.51 / ADR-044) 后，底层**网络接口拓扑与 EasyTier 侧车穿透可观测性**暴露出一系列治理痛点：
+  1. **事件总线静默脱节（Event Blackout on Network & Overlay Changes）**：
+     - 当宿主机经历网卡热插拔、WiFi/以太网热切换、VPN 拨号建立/断开，或者 EasyTier 侧车守护进程完成启动、穿透建立、节点发现或异常离线时，底层从不向节点事件总线广播任何 `UiEvent`。导致 Web UI（SSE `EventSource`）和 CLI 事件监听器（`tetherly events`）完全处于失明状态，必须依赖高开销的主动轮询；
+  2. **网卡物理分类静态锁定与动态重探能力缺失（Dynamic Rescan Primitive Missing）**：
+     - 节点启动时虽然基于 `lan.rs` 进行了网卡分类，但缺乏在不重启节点的前提下主动触发「即时全量网卡重探与 EasyTier 侧车再连接」的控制原语；
+  3. **控制面缺乏结构化强类型 DTO 抽象（Missing Strongly-Typed DTOs）**：
+     - `/api/net` 接口此前返回内联构造的松散 JSON，缺乏类型严谨的 `NetworkReport`、`IfaceReportDto`、`OverlayStatusReport` 与 `NetworkRefreshReport` 统一结构定义，未在 `lib.rs` 对外导出，导致 CLI 与外部集成客户端无法获得严格的类型校验保证；
+  4. **终端全同构控制与局部渲染闭环缺失**：
+     - CLI 缺乏 `net --refresh` 显式重探管道；Web UI 缺乏网络重探控制按钮与解耦全局轮询的局部即时渲染支持。
+
+- **架构与协议设计(ADR-048 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环)**:
+  1. **事件总线扩展与安全红线守卫 (`crates/tetherly-node/src/events.rs`)**:
+     - 新增结构化变体 `UiEvent::NetworkRefreshed { iface_count: usize, listen_count: usize, overlay_present: bool, overlay_source: Option<String> }`；
+     - 新增结构化变体 `UiEvent::OverlayStateChanged { present: bool, source: String, local_ips: Vec<String>, peer_count: usize }`；
+     - **严格遵守安全红线铁律（Zero-Plaintext Invariant）**：事件载荷绝对禁止泄露私网敏感信息，仅传递网卡分类统计、监听计数、侧车状态及对端节点数量；
+     - 提供 `network_refreshed` 与 `overlay_state_changed` 构造辅助函数及关联方法。
+  2. **结构化 DTO 抽象与运行时控制原语 (`crates/tetherly-node/src/runtime.rs`, `lib.rs`)**:
+     - `IfaceReportDto`：封装 `iface`、`ip`、`listen` 与 `reason`；
+     - `OverlayStatusReport`：封装 `enabled`、`present`、`source`、`local_ips`、`peer_count` 与 `peers`；
+     - `NetworkReport`：封装 `ok`、`interfaces` (兼容 `ifaces`) 与 `overlay: OverlayStatusReport`；
+     - `NetworkRefreshReport`：封装 `ok`、`action: "refreshed"`、`ifaces_scanned`、`ifaces_listening`、`overlay_present`、`overlay_source`、`overlay_local_ips`、`overlay_peers_count` 与 `timestamp_ms`；
+     - 新增核心控制原语 `node.network_report_dto() -> NetworkReport` 与 `node.refresh_network().await -> NetworkRefreshReport`；
+     - 运行时主动执行物理网卡重新枚举与 EasyTier 侧车连接探测，更新 `Shared.overlay`，并在发生状态突变时广播 `UiEvent::OverlayStateChanged`，在刷新完成时广播 `UiEvent::NetworkRefreshed`；
+     - 后台 `overlay_scan_loop` 同步在侧车状态演进时派发 `UiEvent::OverlayStateChanged`。
+  3. **轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/net` 重构为返回强类型 `NetworkReport`；
+     - 新增 `POST /api/net/refresh` 及别名 `POST /api/net/probe`，触发主动重探并返回强类型 `NetworkRefreshReport`；
+     - 严格遵循 `127.0.0.1` 回环绑定与 `Host` 头守卫，拦截非回环请求并返回 HTTP 403 Forbidden (`loopback only`)。
+  4. **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - `tetherly net` 与 `tetherly-cli net` 增设 `--refresh` (`-r`) 参数，支持主动触发网卡分类与 EasyTier 侧车重探；
+     - 保持与现存输出及 `--json` 管道的完美后向兼容性，清晰打印分类网卡、监听状态、跳过原因、EasyTier 侧车状态、虚拟 IP 与 Peers；
+     - SSE `events` 监听器新增对 `[network_refreshed]` 与 `[overlay_state_changed]` 的格式化着色打印。
+  5. **Web UI 实时动态刷新与状态徽标 (`ui/index.html`)**:
+     - 在「网络与接口诊断」面板新增「探测刷新」(`netrefreshbtn`) 按钮与异步操作状态反馈；
+     - 实现 `updateNetworkStatus()` 轻量级局部渲染，解耦全局状态轮询；
+     - 在 SSE 事件流中捕获 `network_refreshed` 与 `overlay_state_changed` 事件，驱动网络与侧车卡片毫秒级自动就绪刷新。
+  6. **端到端集成测试全覆盖 (`tests/phase2.rs`)**:
+     - 增设 `dynamic_network_rescan_and_overlay_events_via_loopback_api`：
+       - 验证双端网卡分类与初始 EasyTier 虚拟网卡状态；
+       - 验证 SSE `/api/events` 流式监听就绪；
+       - 验证 `GET /api/net` 强类型 `NetworkReport` 反序列化与 loopback 监听判定；
+       - 验证非回环 Host 请求（`Host: evil.attacker.com`）被强制掐断拦截并返回 403 Forbidden；
+       - 验证调用 `POST /api/net/refresh` 与 `POST /api/net/probe` 触发主动重探并捕获 `UiEvent::NetworkRefreshed`；
+       - 验证直接调用 Rust API `node.refresh_network().await` 正确性与事件派发闭环；
+       - 验证节点优雅停机。
 
 **1.54 相对 1.53(远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环)**
 

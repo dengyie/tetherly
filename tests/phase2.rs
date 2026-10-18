@@ -6,7 +6,10 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 use tetherly_core::{NotifyPush, PathKind};
-use tetherly_node::{Node, NodeConfig, OverlayConfig, OverlaySource};
+use tetherly_node::{
+    loopback_events_connect, loopback_get, loopback_post, NetworkRefreshReport, NetworkReport,
+    Node, NodeConfig, OverlayConfig, OverlaySource, UiEvent,
+};
 
 const OTP_BODY: &str = "【测试】验证码：524681，您正在登录";
 
@@ -345,4 +348,151 @@ async fn network_interface_classification_and_sidecar_inspection_via_loopback_ap
 
     n2.shutdown();
     drop(g2);
+}
+
+// --------------------------------------------------------------------------
+// M2.4 — Dynamic network rescan, typed reports, and SSE event synchronization.
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_network_rescan_and_overlay_events_via_loopback_api() {
+    let (d, _guard) = temp_dir("rescan-e2e");
+    let mut ov_cfg = overlay_absent();
+    ov_cfg.extra_peers = vec!["10.144.144.55:45717".parse().unwrap()];
+
+    let node = Node::start(cfg(d, "desk-rescan", ov_cfg)).expect("start node");
+    node.spawn_listeners().await.expect("spawn listeners");
+    let ui_port = node.spawn_ui().await.expect("spawn ui");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 1. Establish SSE event stream
+    let mut sse = loopback_events_connect(ui_port).await.expect("connect sse");
+
+    // 2. Query initial GET /api/net and deserialize strongly-typed NetworkReport
+    let (code, resp) = loopback_get(ui_port, "/api/net")
+        .await
+        .expect("get /api/net");
+    assert_eq!(code, 200);
+    let net_rep: NetworkReport = serde_json::from_slice(&resp).expect("valid NetworkReport DTO");
+    assert!(net_rep.ok);
+    assert!(!net_rep.interfaces.is_empty());
+    let lo = net_rep
+        .interfaces
+        .iter()
+        .find(|i| i.ip == "127.0.0.1")
+        .expect("loopback present");
+    assert!(lo.listen);
+    assert!(net_rep.overlay.enabled);
+    assert!(net_rep.overlay.present);
+    assert_eq!(net_rep.overlay.source, "Manual");
+    assert_eq!(net_rep.overlay.peer_count, 1);
+    assert_eq!(net_rep.overlay.peers, vec!["10.144.144.55"]);
+
+    // 3. Verify security invariant: reject external Host header with HTTP 403 Forbidden
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut raw_stream =
+            tokio::net::TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], ui_port)))
+                .await
+                .expect("raw connect");
+        let raw_req =
+            "POST /api/net/refresh HTTP/1.1\r\nHost: evil.attacker.com\r\nContent-Length: 2\r\n\r\n{}";
+        raw_stream
+            .write_all(raw_req.as_bytes())
+            .await
+            .expect("write raw");
+        let mut buf = vec![0u8; 1024];
+        let n = raw_stream.read(&mut buf).await.expect("read raw");
+        let resp_str = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            resp_str.contains("403 Forbidden") && resp_str.contains("loopback only"),
+            "non-loopback host must be rejected with 403: {resp_str}"
+        );
+    }
+
+    // 4. Trigger on-demand dynamic rescan via POST /api/net/refresh
+    let (code_ref, resp_ref) = loopback_post(ui_port, "/api/net/refresh", b"{}")
+        .await
+        .expect("post /api/net/refresh");
+    assert_eq!(code_ref, 200);
+    let refresh_rep: NetworkRefreshReport =
+        serde_json::from_slice(&resp_ref).expect("valid NetworkRefreshReport DTO");
+    assert!(refresh_rep.ok);
+    assert_eq!(refresh_rep.action, "refreshed");
+    assert!(refresh_rep.ifaces_scanned >= 1);
+    assert!(refresh_rep.ifaces_listening >= 1);
+    assert!(refresh_rep.overlay_present);
+    assert_eq!(refresh_rep.overlay_source, "Manual");
+    assert_eq!(refresh_rep.overlay_peers_count, 1);
+    assert_eq!(refresh_rep.overlay_local_ips, Vec::<String>::new());
+    assert!(refresh_rep.timestamp_ms > 0);
+
+    // 5. Verify SSE stream receives UiEvent::NetworkRefreshed
+    let ev1 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("sse timeout")
+        .expect("read sse")
+        .expect("some event");
+    match ev1 {
+        UiEvent::NetworkRefreshed {
+            iface_count,
+            listen_count,
+            overlay_present,
+            overlay_source,
+        } => {
+            assert!(iface_count >= 1);
+            assert!(listen_count >= 1);
+            assert!(overlay_present);
+            assert_eq!(overlay_source.as_deref(), Some("Manual"));
+        }
+        other => panic!("expected NetworkRefreshed event, got: {other:?}"),
+    }
+
+    // 6. Test alias POST /api/net/probe returns same typed report and dispatches event
+    let (code_probe, resp_probe) = loopback_post(ui_port, "/api/net/probe", b"{}")
+        .await
+        .expect("post /api/net/probe");
+    assert_eq!(code_probe, 200);
+    let probe_rep: NetworkRefreshReport =
+        serde_json::from_slice(&resp_probe).expect("valid probe NetworkRefreshReport DTO");
+    assert!(probe_rep.ok);
+    assert_eq!(probe_rep.action, "refreshed");
+
+    let ev2 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("sse timeout 2")
+        .expect("read sse 2")
+        .expect("some event 2");
+    match ev2 {
+        UiEvent::NetworkRefreshed {
+            iface_count,
+            listen_count,
+            overlay_present,
+            overlay_source,
+        } => {
+            assert!(iface_count >= 1);
+            assert!(listen_count >= 1);
+            assert!(overlay_present);
+            assert_eq!(overlay_source.as_deref(), Some("Manual"));
+        }
+        other => panic!("expected NetworkRefreshed event from probe, got: {other:?}"),
+    }
+
+    // 7. Verify direct Rust Node API invocation: node.refresh_network()
+    let direct_rep = node.refresh_network().await;
+    assert!(direct_rep.ok);
+    assert_eq!(direct_rep.action, "refreshed");
+    assert!(direct_rep.ifaces_scanned >= 1);
+    assert!(direct_rep.ifaces_listening >= 1);
+
+    let ev3 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("sse timeout 3")
+        .expect("read sse 3")
+        .expect("some event 3");
+    match ev3 {
+        UiEvent::NetworkRefreshed { .. } => {}
+        other => panic!("expected NetworkRefreshed event from direct call, got: {other:?}"),
+    }
+
+    node.shutdown();
 }

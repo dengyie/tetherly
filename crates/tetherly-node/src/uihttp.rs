@@ -1079,21 +1079,10 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 Err(e) => err(400, &e.to_string()),
             }
         }
-        ("GET", "/api/net") => {
-            let (ifaces, ov) = node.network_report();
-            let overlay_dto = serde_json::json!({
-                "enabled": node.overlay_enabled(),
-                "present": ov.present,
-                "source": format!("{:?}", ov.source),
-                "local_ips": ov.local_ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>(),
-                "peer_count": ov.peers.len(),
-                "peers": ov.peers.iter().map(|ip| ip.to_string()).collect::<Vec<_>>(),
-            });
-            json_ok(&serde_json::json!({
-                "ok": true,
-                "interfaces": ifaces,
-                "overlay": overlay_dto,
-            }))
+        ("GET", "/api/net") => json_ok(&node.network_report_dto()),
+        ("POST", "/api/net/refresh") | ("POST", "/api/net/probe") => {
+            let rep = node.refresh_network().await;
+            json_ok(&rep)
         }
         ("GET", "/api/metrics") | ("GET", "/api/traffic") => json_ok(&node.traffic_report()),
         ("POST", "/api/metrics/reset") | ("POST", "/api/traffic/reset") => {

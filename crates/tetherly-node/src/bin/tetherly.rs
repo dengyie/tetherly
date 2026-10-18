@@ -377,6 +377,9 @@ enum Cmd {
     },
     /// Diagnose network interfaces and EasyTier overlay sidecar.
     Net {
+        /// Actively trigger dynamic rescan of network interfaces and EasyTier sidecar probe.
+        #[arg(long, short)]
+        refresh: bool,
         /// Show full interface classification details (including skipped interfaces and reasons).
         #[arg(long, short)]
         interfaces: bool,
@@ -2204,10 +2207,51 @@ async fn main() -> Result<()> {
             }
         },
         Cmd::Net {
+            refresh,
             interfaces,
             json,
             ui_port,
         } => {
+            if refresh {
+                let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/net/refresh", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "node returned HTTP {code}: {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                    return Ok(());
+                }
+                let rep: tetherly_node::NetworkRefreshReport = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                println!("Network & Overlay Rescanned:");
+                println!(
+                    "  Interfaces Scanned: {} ({} active listening)",
+                    rep.ifaces_scanned, rep.ifaces_listening
+                );
+                println!(
+                    "  EasyTier Sidecar:   {} ({})",
+                    rep.overlay_present, rep.overlay_source
+                );
+                let local_str = if rep.overlay_local_ips.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    rep.overlay_local_ips.join(", ")
+                };
+                println!("  Overlay Local IPs:  {local_str}");
+                println!("  Overlay Mesh Peers: {}", rep.overlay_peers_count);
+                return Ok(());
+            }
+
             let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/net")
                 .await
                 .map_err(|e| {
@@ -2226,82 +2270,59 @@ async fn main() -> Result<()> {
                 println!("{}", String::from_utf8_lossy(&resp));
                 return Ok(());
             }
-            let v: serde_json::Value =
+            let rep: tetherly_node::NetworkReport =
                 serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
 
-            let ov = &v["overlay"];
-            let ov_enabled = ov["enabled"].as_bool().unwrap_or(false);
-            let ov_present = ov["present"].as_bool().unwrap_or(false);
-            let ov_source = ov["source"].as_str().unwrap_or("Absent");
-            let local_ips = ov["local_ips"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            let peer_count = ov["peer_count"].as_u64().unwrap_or(0);
-            let peers = ov["peers"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
+            let ov = &rep.overlay;
+            let ov_enabled = ov.enabled;
+            let ov_present = ov.present;
+            let ov_source = &ov.source;
+            let local_ips = if ov.local_ips.is_empty() {
+                "(none)".to_string()
+            } else {
+                ov.local_ips.join(", ")
+            };
+            let peer_count = ov.peer_count;
+            let peers = ov.peers.join(", ");
 
             println!("EasyTier Overlay Sidecar:");
             println!("  Enabled:    {ov_enabled}");
             println!("  Present:    {ov_present} ({ov_source})");
-            println!(
-                "  Local IPs:  {}",
-                if local_ips.is_empty() {
-                    "(none)"
-                } else {
-                    &local_ips
-                }
-            );
+            println!("  Local IPs:  {local_ips}");
             if peer_count == 0 {
                 println!("  Mesh Peers: 0");
             } else {
                 println!("  Mesh Peers: {peer_count} ({peers})");
             }
 
-            let ifaces_arr = v["interfaces"].as_array();
+            let ifaces_arr = &rep.interfaces;
             if interfaces {
                 println!("\nInterface Classification Details:");
-                match ifaces_arr {
-                    Some(arr) if !arr.is_empty() => {
-                        for iface in arr {
-                            let name = iface["iface"].as_str().unwrap_or("-");
-                            let ip = iface["ip"].as_str().unwrap_or("-");
-                            let listen = iface["listen"].as_bool().unwrap_or(false);
-                            let reason = iface["reason"].as_str();
-                            if listen {
-                                println!("  * [LISTEN] {name}: {ip}");
-                            } else {
-                                let r_str = reason.map(|r| format!(" ({r})")).unwrap_or_default();
-                                println!("  * [SKIP]   {name}: {ip}{r_str}");
-                            }
+                if ifaces_arr.is_empty() {
+                    println!("  (no interfaces reported)");
+                } else {
+                    for iface in ifaces_arr {
+                        let name = &iface.iface;
+                        let ip = &iface.ip;
+                        if iface.listen {
+                            println!("  * [LISTEN] {name}: {ip}");
+                        } else {
+                            let r_str = iface
+                                .reason
+                                .as_deref()
+                                .map(|r| format!(" ({r})"))
+                                .unwrap_or_default();
+                            println!("  * [SKIP]   {name}: {ip}{r_str}");
                         }
                     }
-                    _ => println!("  (no interfaces reported)"),
                 }
             } else {
                 println!("\nActive Listening Interfaces:");
                 let mut listen_count = 0;
-                if let Some(arr) = ifaces_arr {
-                    for iface in arr {
-                        let listen = iface["listen"].as_bool().unwrap_or(false);
-                        if listen {
-                            let name = iface["iface"].as_str().unwrap_or("-");
-                            let ip = iface["ip"].as_str().unwrap_or("-");
-                            println!("  * {name}: {ip}");
-                            listen_count += 1;
-                        }
+                for iface in ifaces_arr {
+                    if iface.listen {
+                        println!("  * {}: {}", iface.iface, iface.ip);
+                        listen_count += 1;
                     }
                 }
                 if listen_count == 0 {
@@ -3514,6 +3535,32 @@ fn print_event(v: &serde_json::Value) {
                 .map(|p| format!(" peer={p}"))
                 .unwrap_or_default();
             println!("[input_seat_changed] seat={seat} channel_open={open}{peer}");
+        }
+        "network_refreshed" => {
+            let iface_count = v["iface_count"].as_u64().unwrap_or(0);
+            let listen_count = v["listen_count"].as_u64().unwrap_or(0);
+            let overlay_present = v["overlay_present"].as_bool().unwrap_or(false);
+            let overlay_source = v["overlay_source"].as_str().unwrap_or("Absent");
+            println!(
+                "[network_refreshed] scanned={iface_count} listening={listen_count} overlay={overlay_present} ({overlay_source})"
+            );
+        }
+        "overlay_state_changed" => {
+            let present = v["present"].as_bool().unwrap_or(false);
+            let source = v["source"].as_str().unwrap_or("Absent");
+            let peer_count = v["peer_count"].as_u64().unwrap_or(0);
+            let local_ips = v["local_ips"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            println!(
+                "[overlay_state_changed] present={present} source={source} peers={peer_count} local_ips=[{local_ips}]"
+            );
         }
         other => {
             println!("[{other}] {v}");
