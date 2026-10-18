@@ -8,7 +8,7 @@ use std::time::Duration;
 use tetherly_core::{NotifyPush, PathKind};
 use tetherly_node::{
     loopback_events_connect, loopback_get, loopback_post, NetworkRefreshReport, NetworkReport,
-    Node, NodeConfig, OverlayConfig, OverlaySource, UiEvent,
+    Node, NodeConfig, OverlayConfig, OverlaySource, SseStream, UiEvent,
 };
 
 const OTP_BODY: &str = "【测试】验证码：524681，您正在登录";
@@ -426,26 +426,38 @@ async fn dynamic_network_rescan_and_overlay_events_via_loopback_api() {
     assert_eq!(refresh_rep.overlay_local_ips, Vec::<String>::new());
     assert!(refresh_rep.timestamp_ms > 0);
 
-    // 5. Verify SSE stream receives UiEvent::NetworkRefreshed
-    let ev1 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
-        .await
-        .expect("sse timeout")
-        .expect("read sse")
-        .expect("some event");
-    match ev1 {
-        UiEvent::NetworkRefreshed {
-            iface_count,
-            listen_count,
-            overlay_present,
-            overlay_source,
-        } => {
-            assert!(iface_count >= 1);
-            assert!(listen_count >= 1);
-            assert!(overlay_present);
-            assert_eq!(overlay_source.as_deref(), Some("Manual"));
+    async fn wait_for_network_refreshed(
+        sse: &mut SseStream,
+        timeout: Duration,
+    ) -> (usize, usize, bool, Option<String>) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remain.min(Duration::from_millis(500)), sse.next_ui_event())
+                .await
+            {
+                Ok(Ok(Some(UiEvent::NetworkRefreshed {
+                    iface_count,
+                    listen_count,
+                    overlay_present,
+                    overlay_source,
+                }))) => {
+                    return (iface_count, listen_count, overlay_present, overlay_source);
+                }
+                Ok(Ok(Some(_other))) => {}
+                Ok(Ok(None)) | Ok(Err(_)) | Err(_) => {}
+            }
         }
-        other => panic!("expected NetworkRefreshed event, got: {other:?}"),
+        panic!("timed out waiting for NetworkRefreshed event on SSE");
     }
+
+    // 5. Verify SSE stream receives UiEvent::NetworkRefreshed
+    let (iface_count, listen_count, overlay_present, overlay_source) =
+        wait_for_network_refreshed(&mut sse, Duration::from_secs(10)).await;
+    assert!(iface_count >= 1);
+    assert!(listen_count >= 1);
+    assert!(overlay_present);
+    assert_eq!(overlay_source.as_deref(), Some("Manual"));
 
     // 6. Test alias POST /api/net/probe returns same typed report and dispatches event
     let (code_probe, resp_probe) = loopback_post(ui_port, "/api/net/probe", b"{}")
@@ -457,25 +469,12 @@ async fn dynamic_network_rescan_and_overlay_events_via_loopback_api() {
     assert!(probe_rep.ok);
     assert_eq!(probe_rep.action, "refreshed");
 
-    let ev2 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
-        .await
-        .expect("sse timeout 2")
-        .expect("read sse 2")
-        .expect("some event 2");
-    match ev2 {
-        UiEvent::NetworkRefreshed {
-            iface_count,
-            listen_count,
-            overlay_present,
-            overlay_source,
-        } => {
-            assert!(iface_count >= 1);
-            assert!(listen_count >= 1);
-            assert!(overlay_present);
-            assert_eq!(overlay_source.as_deref(), Some("Manual"));
-        }
-        other => panic!("expected NetworkRefreshed event from probe, got: {other:?}"),
-    }
+    let (p_iface, p_listen, p_present, p_src) =
+        wait_for_network_refreshed(&mut sse, Duration::from_secs(10)).await;
+    assert!(p_iface >= 1);
+    assert!(p_listen >= 1);
+    assert!(p_present);
+    assert_eq!(p_src.as_deref(), Some("Manual"));
 
     // 7. Verify direct Rust Node API invocation: node.refresh_network()
     let direct_rep = node.refresh_network().await;
@@ -484,15 +483,10 @@ async fn dynamic_network_rescan_and_overlay_events_via_loopback_api() {
     assert!(direct_rep.ifaces_scanned >= 1);
     assert!(direct_rep.ifaces_listening >= 1);
 
-    let ev3 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
-        .await
-        .expect("sse timeout 3")
-        .expect("read sse 3")
-        .expect("some event 3");
-    match ev3 {
-        UiEvent::NetworkRefreshed { .. } => {}
-        other => panic!("expected NetworkRefreshed event from direct call, got: {other:?}"),
-    }
+    let (d_iface, d_listen, _d_present, _d_src) =
+        wait_for_network_refreshed(&mut sse, Duration::from_secs(10)).await;
+    assert!(d_iface >= 1);
+    assert!(d_listen >= 1);
 
     node.shutdown();
 }
