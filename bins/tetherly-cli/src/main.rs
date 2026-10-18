@@ -1363,14 +1363,12 @@ async fn main() -> Result<()> {
             if !query.is_empty() {
                 path = format!("{path}?{}", query.join("&"));
             }
-            let (code, resp) = loopback_get(ui_port, &path)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+            let (code, resp) = loopback_get(ui_port, &path).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                    )
-                })?;
+                )
+            })?;
             if code != 200 {
                 bail!(
                     "candidates query failed (HTTP {code}): {}",

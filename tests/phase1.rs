@@ -4180,24 +4180,15 @@ async fn notification_bidirectional_dismissal_and_lifecycle_governance_via_loopb
         let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
         let list = v["candidates"].as_array().unwrap();
         if list.len() >= 3 {
-            let id1 = list
-                .iter()
-                .find(|x| x["uid"] == "wx-101")
-                .unwrap()["id"]
+            let id1 = list.iter().find(|x| x["uid"] == "wx-101").unwrap()["id"]
                 .as_str()
                 .unwrap()
                 .to_string();
-            let id2 = list
-                .iter()
-                .find(|x| x["uid"] == "wx-102")
-                .unwrap()["id"]
+            let id2 = list.iter().find(|x| x["uid"] == "wx-102").unwrap()["id"]
                 .as_str()
                 .unwrap()
                 .to_string();
-            let id3 = list
-                .iter()
-                .find(|x| x["uid"] == "bank-201")
-                .unwrap()["id"]
+            let id3 = list.iter().find(|x| x["uid"] == "bank-201").unwrap()["id"]
                 .as_str()
                 .unwrap()
                 .to_string();
@@ -4211,12 +4202,10 @@ async fn notification_bidirectional_dismissal_and_lifecycle_governance_via_loopb
 
     // 4. Test multi-dimensional candidate filtering:
     // a. Filter by app_id=com.tencent.mm (should return 2)
-    let (code_mm, body_mm) = tetherly_node::loopback_get(
-        host_ui,
-        "/api/notify/candidates?app_id=com.tencent.mm",
-    )
-    .await
-    .unwrap();
+    let (code_mm, body_mm) =
+        tetherly_node::loopback_get(host_ui, "/api/notify/candidates?app_id=com.tencent.mm")
+            .await
+            .unwrap();
     assert_eq!(code_mm, 200);
     let val_mm: serde_json::Value = serde_json::from_slice(&body_mm).unwrap();
     assert_eq!(val_mm["candidates"].as_array().unwrap().len(), 2);
@@ -4253,8 +4242,7 @@ async fn notification_bidirectional_dismissal_and_lifecycle_governance_via_loopb
     .await
     .unwrap();
     assert_eq!(code_dis, 200);
-    let rep_dis: tetherly_node::CandidateDismissReport =
-        serde_json::from_slice(&body_dis).unwrap();
+    let rep_dis: tetherly_node::CandidateDismissReport = serde_json::from_slice(&body_dis).unwrap();
     assert!(rep_dis.ok);
     assert_eq!(rep_dis.id, c1_id);
     assert_eq!(rep_dis.app_id, "com.tencent.mm");
@@ -4266,10 +4254,7 @@ async fn notification_bidirectional_dismissal_and_lifecycle_governance_via_loopb
     let ev_start = std::time::Instant::now();
     while ev_start.elapsed() < Duration::from_secs(5) {
         if let Ok(Ok(tetherly_node::UiEvent::CandidateDismissed {
-            id,
-            app_id,
-            uid,
-            ..
+            id, app_id, uid, ..
         })) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await
         {
             if id == c1_id && app_id == "com.tencent.mm" && uid == "wx-101" {
@@ -4298,10 +4283,7 @@ async fn notification_bidirectional_dismissal_and_lifecycle_governance_via_loopb
     let ev2_start = std::time::Instant::now();
     while ev2_start.elapsed() < Duration::from_secs(5) {
         if let Ok(Ok(tetherly_node::UiEvent::CandidateDismissed {
-            id,
-            app_id,
-            uid,
-            ..
+            id, app_id, uid, ..
         })) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await
         {
             if id == c2_id && app_id == "com.tencent.mm" && uid == "wx-102" {
@@ -4330,8 +4312,7 @@ async fn notification_bidirectional_dismissal_and_lifecycle_governance_via_loopb
             .await
             .unwrap();
     assert_eq!(code_del, 200);
-    let batch_rep: tetherly_node::BatchDismissReport =
-        serde_json::from_slice(&body_del).unwrap();
+    let batch_rep: tetherly_node::BatchDismissReport = serde_json::from_slice(&body_del).unwrap();
     assert!(batch_rep.ok);
     assert_eq!(batch_rep.count, 1);
     assert_eq!(batch_rep.ids, vec![c3_id.clone()]);

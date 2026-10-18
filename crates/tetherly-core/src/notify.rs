@@ -251,7 +251,9 @@ impl NotifyHub {
             .filter(|(_, c)| c.source == *source)
             .map(|(id, _)| id.clone())
             .collect();
-        ids.into_iter().filter_map(|id| self.candidates.remove(&id)).collect()
+        ids.into_iter()
+            .filter_map(|id| self.candidates.remove(&id))
+            .collect()
     }
 
     /// Remove all candidates matching a given app ID and return them.
@@ -262,7 +264,9 @@ impl NotifyHub {
             .filter(|(_, c)| c.app_id == app_id)
             .map(|(id, _)| id.clone())
             .collect();
-        ids.into_iter().filter_map(|id| self.candidates.remove(&id)).collect()
+        ids.into_iter()
+            .filter_map(|id| self.candidates.remove(&id))
+            .collect()
     }
 
     /// Clear all candidates in the hub and return them.
@@ -291,14 +295,20 @@ impl NotifyHub {
 
     /// Dismiss candidates matching wire notification dismiss frame and return
     /// the removed candidates for event broadcasting.
-    pub fn dismiss_wire_candidates(&mut self, source: &DeviceId, d: &NotifyDismiss) -> Vec<Candidate> {
+    pub fn dismiss_wire_candidates(
+        &mut self,
+        source: &DeviceId,
+        d: &NotifyDismiss,
+    ) -> Vec<Candidate> {
         let ids: Vec<String> = self
             .candidates
             .iter()
             .filter(|(_, c)| c.source == *source && c.uid == d.uid && c.app_id == d.app_id)
             .map(|(id, _)| id.clone())
             .collect();
-        ids.into_iter().filter_map(|id| self.candidates.remove(&id)).collect()
+        ids.into_iter()
+            .filter_map(|id| self.candidates.remove(&id))
+            .collect()
     }
 
     pub fn evict_expired(&mut self, clock: &dyn Clock) -> Vec<String> {

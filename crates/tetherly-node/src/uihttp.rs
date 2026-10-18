@@ -1220,9 +1220,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             let qmap = query_str.map(parse_query_map).unwrap_or_default();
             let peer = qmap.get("peer").map(String::as_str);
             let app_id = qmap.get("app_id").map(String::as_str);
-            let has_otp = qmap
-                .get("has_otp")
-                .and_then(|v| v.parse::<bool>().ok());
+            let has_otp = qmap.get("has_otp").and_then(|v| v.parse::<bool>().ok());
 
             match node.candidates_filtered(peer, app_id, has_otp) {
                 Ok(list) => json_ok(&serde_json::json!({
