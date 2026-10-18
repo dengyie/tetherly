@@ -4650,6 +4650,7 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     let peer_ui = peer.spawn_ui().await.unwrap();
     let host_id = host.identity().device_id().clone();
     let peer_id = peer.identity().device_id().clone();
+    let peer_str = peer_id.to_string();
 
     let mut host_rx = host.subscribe();
 
@@ -4710,7 +4711,7 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     assert_eq!(rep_offers1.offers[0].filename, "offer_doc1.txt");
     assert_eq!(rep_offers1.offers[0].total_bytes, file1_data.len() as u64);
     assert_eq!(rep_offers1.offers[0].resume_from, 0);
-    assert_eq!(rep_offers1.offers[0].source, peer_id);
+    assert_eq!(rep_offers1.offers[0].source, peer_str);
 
     // Test query by specific ID
     let (code_by_id, body_by_id) =
@@ -4761,7 +4762,7 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     assert!(!rej_rep.accepted);
     assert_eq!(rej_rep.transfer_id, transfer_id1);
     assert_eq!(rej_rep.filename, "offer_doc1.txt");
-    assert_eq!(rej_rep.peer, peer_id);
+    assert_eq!(rej_rep.peer, peer_str);
 
     // Verify host receives UiEvent::FileRejected
     let start = std::time::Instant::now();
@@ -4773,7 +4774,7 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
             ..
         })) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await
         {
-            if transfer_id == transfer_id1 && source == peer_id {
+            if transfer_id == transfer_id1 && source == peer_str {
                 file_rej_found = true;
                 break;
             }
