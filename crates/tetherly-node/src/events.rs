@@ -64,6 +64,9 @@ pub enum UiEvent {
         addr: String,
         action: String,
     },
+    MetricsReset {
+        timestamp_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

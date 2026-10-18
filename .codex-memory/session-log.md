@@ -1,5 +1,25 @@
 # Session log
 
+## 2026-10-17 (44) - Unified network traffic & protocol telemetry observability and runtime resets (v1.47 / ADR-040)
+- Task: 实现全协议网络流量透视、多通道遥测度量与运行时可观测性闭环，打通四大 TCP 通道与核心协议帧的可观测性盲区。
+- **背景与缺陷根因**:
+  在完成 v1.46 物理寻址路由表全景透视与静态注入后，Tetherly 已经具备了跨子网、NAT 穿越与点对点安全网格的稳固网络拓扑。然而在四维多通道（控制 45717、文件 45718、键鼠 45719、屏幕 45720）长效运行过程中，存在全局网络流量与协议消息遥测的重大可观测性盲区：
+  1. 全局网络流量黑盒：除了大文件传输模块具备会话级 `TransferStats` 外，对整机的出入站网络吞吐（总 TX/RX 字节数、数据帧包数）缺乏统一度量与聚合；
+  2. 四维多通道带宽分布不可知：控制 (45717)、文件 (45718)、输入 (45719)、屏幕 (45720) 各自消耗了多少带宽缺乏细分度量，无法定位网络拥堵或高频传输瓶颈；
+  3. 协议消息遥测计数缺失：Ping/Pong 探活、Notification 通知、Clipboard 剪贴板、FileOffer 文件报价等核心协议帧缺乏全局调用计数，会话建连数与握手失败率处于黑盒状态；
+  4. 缺少轻量级遥测回环查询与基准重置端点：外部监控探针无法一键获取全维度网络指标快照，也无法在基准性能测试中原子清零历史数据；
+  5. 双端命令行与 Web UI 缺乏遥测面板：`tetherly` 与 `tetherly-cli` 缺失 `metrics`/`traffic` 命令群，Web 前端缺少流量透视卡片。
+- **架构设计与落地 (ADR-040)**:
+  1. `TrafficTelemetry`, `ChannelTrafficDto`, `ProtocolMessagesDto`, `TrafficReport` (`crates/tetherly-node/src/telemetry.rs`, `lib.rs`): 基于 `AtomicU64` 与 `Ordering::Relaxed` 构建高性能无锁度量引擎，以零锁争用与 $O(1)$ 时间复杂度在网络传输热路径上原子累加四通道字节与数据帧数，记录 Ping/Pong、Notification、Clipboard、FileOffer 消息计数与会话生命周期指标（`sessions_established`, `sessions_closed`, `handshakes_failed`）。
+  2. 全通道 I/O 链路埋点集成 (`crates/tetherly-node/src/runtime.rs`): 控制通道帧收发与协议帧类型原子累加；文件通道流式/内存传输字节累计；键鼠事件与屏幕压缩帧收发字节与帧数累计；会话建立、断开与握手失败状态准确跟踪。
+  3. 轻量级回环 HTTP 控制面端点 (`crates/tetherly-node/src/uihttp.rs`): `GET /api/metrics` 与 `GET /api/traffic` 返回结构化 `TrafficReport`；`POST /api/metrics/reset` 与 `POST /api/traffic/reset` 原子清零所有计数器，向事件总线广播 `UiEvent::MetricsReset`；严格守卫安全红线（仅绑定 127.0.0.1，校验 Host，数据纯数字无敏感载荷）。
+  4. CLI 双端全同构升级 (`crates/tetherly-node/src/bin/tetherly.rs` 与 `bins/tetherly-cli/src/main.rs`): 新增 `Cmd::Metrics` 与 `Cmd::Traffic`，支持 `--reset`, `--json`, `--ui-port`；终端表格自适应格式化输出 B/KiB/MiB/GiB，绘制四通道带宽分布柱状占比。
+  5. Web UI 实时遥测仪表盘 (`ui/index.html`): 增设「网络流量与全协议遥测」面板，集成总出入站吞吐徽标、四通道带宽分布进度指示、协议核心消息统计芯片、一键重置按键与 SSE `metrics_reset` 实时局部刷新。
+  6. 端到端集成测试全覆盖 (`tests/phase1.rs`): 增设 `traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api` 完备验证初态查询、控制帧交互递增、流式文件传输度量、POST 重置及 SSE 事件响应与清零全流程。
+- **发布与文档同步**:
+  - SSOT `docs/DEVELOPMENT.md` 升至 v1.47，确立 ADR-040。
+  - Obsidian 知识库 `tetherly 开发文档.md` 与路由表 `AI-DOC-ROUTER.md` 同步更新。
+
 ## 2026-10-17 (43) - Route table governance, physical addressing persistence, and static injection via loopback API (v1.46 / ADR-039)
 - Task: 实现物理寻址路由表全景透视、静态路由注入与断线自动重连治理，打通跨子网与无广播多物理网段连接壁垒。
 - **背景与缺陷根因**:

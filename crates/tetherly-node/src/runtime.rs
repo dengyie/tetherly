@@ -7,6 +7,7 @@ use crate::lan::{bind_many, bind_many_optional, bind_overlay, control_bind_addrs
 use crate::platform::{insert_foreground, MemoryClip, SystemClip};
 use crate::sidecar::{self, OverlayConfig, OverlaySource, OverlayStatus};
 use crate::store::{load_trust, remember_route, save_trust, RouteTable};
+use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -529,6 +530,7 @@ struct Shared {
     advertise: AtomicBool,
     reconnect: AtomicBool,
     advertise_stop: Mutex<Option<watch::Sender<bool>>>,
+    telemetry: Arc<TrafficTelemetry>,
 }
 
 pub struct Node {
@@ -711,6 +713,7 @@ impl Node {
             advertise,
             reconnect,
             advertise_stop: Mutex::new(None),
+            telemetry: Arc::new(TrafficTelemetry::new()),
         });
         Ok(Self { shared })
     }
@@ -1313,6 +1316,18 @@ impl Node {
             addr: None,
             action: "removed".to_string(),
         })
+    }
+
+    pub fn traffic_report(&self) -> TrafficReport {
+        let uptime = self.shared.started_at.elapsed().as_secs();
+        self.shared.telemetry.snapshot(uptime)
+    }
+
+    pub fn reset_traffic_metrics(&self) {
+        self.shared.telemetry.reset();
+        self.emit(UiEvent::MetricsReset {
+            timestamp_ms: self.shared.clock.unix_ms(),
+        });
     }
 
     pub fn network_report(&self) -> (Vec<crate::lan::IfaceReport>, crate::sidecar::OverlayStatus) {
@@ -2382,7 +2397,13 @@ impl Node {
         }
         let stream = TcpStream::connect(addr).await?;
         let cfg = self.session_config();
-        let sess = dial_session(stream, addr, &cfg).await?;
+        let sess = match dial_session(stream, addr, &cfg).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.shared.telemetry.record_handshake_failed();
+                return Err(e);
+            }
+        };
         self.persist_trust();
         let _ = remember_route(
             &self.shared.cfg.data_dir,
@@ -2399,7 +2420,13 @@ impl Node {
         addr: SocketAddr,
     ) -> Result<(), tetherly_net::NetError> {
         let cfg = self.session_config();
-        let sess = accept_session(stream, addr, &cfg).await?;
+        let sess = match accept_session(stream, addr, &cfg).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.shared.telemetry.record_handshake_failed();
+                return Err(e);
+            }
+        };
         self.persist_trust();
         let _ = remember_route(
             &self.shared.cfg.data_dir,
@@ -2505,6 +2532,7 @@ impl Node {
                 }
             }
         });
+        self.shared.telemetry.record_session_established();
         tokio::spawn(async move {
             let mut live = Liveness::new(clock.unix_ms());
             loop {
@@ -2521,10 +2549,13 @@ impl Node {
                                     warn!(peer = %peer_id, "session liveness lost");
                                     break;
                                 }
+                                let frame_len = (frame.payload.len() + 12) as u64;
+                                let frame_ty = frame.ty;
                                 if let Err(e) = sess.send_bounded(frame).await {
                                     warn!(%e, "send");
                                     break;
                                 }
+                                node.shared.telemetry.record_control_tx(frame_len, frame_ty);
                             }
                             None => break,
                         }
@@ -2552,6 +2583,7 @@ impl Node {
                     }
                 }
             }
+            node.shared.telemetry.record_session_closed();
             let still_mine = node
                 .shared
                 .live
@@ -2582,9 +2614,41 @@ impl Node {
         ev: SessionEvent,
         sess: &mut ActiveSession,
     ) -> Result<(), tetherly_net::NetError> {
+        let (ev_bytes, ev_ty) = match &ev {
+            SessionEvent::Ping(_) => (20u64, tetherly_core::frame::TYPE_PING),
+            SessionEvent::Pong(_) => (20u64, tetherly_core::frame::TYPE_PONG),
+            SessionEvent::Notify(p) => (
+                (p.app_id.len() + p.title.len() + p.body.len() + 32) as u64,
+                tetherly_core::frame::TYPE_NOTIFY_PUSH,
+            ),
+            SessionEvent::Dismiss(_) => (24u64, tetherly_core::frame::TYPE_NOTIFY_DISMISS),
+            SessionEvent::Reply(r) => (
+                (r.app_id.len() + r.text.len() + 32) as u64,
+                tetherly_core::frame::TYPE_NOTIFY_REPLY,
+            ),
+            SessionEvent::Clip(c) => (
+                (c.text.len() + 32) as u64,
+                tetherly_core::frame::TYPE_CLIP_SET,
+            ),
+            SessionEvent::FileOffer(f) => (
+                (f.name.len() + 64) as u64,
+                tetherly_core::frame::TYPE_FILE_OFFER,
+            ),
+            SessionEvent::FileAccept(_) => (32u64, tetherly_core::frame::TYPE_FILE_ACCEPT),
+            SessionEvent::FileReject(_) => (32u64, tetherly_core::frame::TYPE_FILE_REJECT),
+            SessionEvent::FileDone(_) => (32u64, tetherly_core::frame::TYPE_FILE_DONE),
+            SessionEvent::Caps(_) => (32u64, tetherly_core::frame::TYPE_CAPS_UPDATE),
+            SessionEvent::Unknown(ty) => (32u64, *ty),
+        };
+        self.shared.telemetry.record_control_rx(ev_bytes, ev_ty);
         match ev {
             SessionEvent::Ping(ts) => {
-                sess.send_bounded(pong(ts)).await?;
+                let p = pong(ts);
+                let p_len = (p.payload.len() + 12) as u64;
+                sess.send_bounded(p).await?;
+                self.shared
+                    .telemetry
+                    .record_control_tx(p_len, tetherly_core::frame::TYPE_PONG);
             }
             SessionEvent::Pong(ts) => {
                 let now_ms = self.shared.clock.unix_ms();
@@ -2890,6 +2954,7 @@ impl Node {
             |chan_offset, chunk_len| {
                 written = chan_offset + chunk_len as u64;
                 node.update_transfer_progress(&tid, written);
+                node.shared.telemetry.record_file_rx(chunk_len as u64);
                 Ok(())
             },
         );
@@ -3392,6 +3457,7 @@ impl Node {
                                                 &tid_prog,
                                                 offset + len as u64,
                                             );
+                                            node_prog.shared.telemetry.record_file_tx(len as u64);
                                             Ok(())
                                         },
                                     )
@@ -3464,6 +3530,9 @@ impl Node {
         .await;
         if res.is_ok() {
             self.update_transfer_progress(transfer_id, total);
+            self.shared
+                .telemetry
+                .record_file_tx(total.saturating_sub(start));
         }
         res
     }
@@ -3542,7 +3611,13 @@ impl Node {
         let stream = TcpStream::connect(addr).await?;
         let mut cfg = self.session_config_inner(true);
         cfg.pin = None;
-        let sess = dial_session(stream, addr, &cfg).await?;
+        let sess = match dial_session(stream, addr, &cfg).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.shared.telemetry.record_handshake_failed();
+                return Err(e);
+            }
+        };
         self.attach_input_server(sess).await;
         Ok(())
     }
@@ -3583,7 +3658,13 @@ impl Node {
         let mut cfg = self.session_config_inner(true);
         cfg.pin = None;
         cfg.screen_only = true;
-        let sess = dial_session(stream, addr, &cfg).await?;
+        let sess = match dial_session(stream, addr, &cfg).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.shared.telemetry.record_handshake_failed();
+                return Err(e);
+            }
+        };
         self.attach_screen_client(sess).await;
         Ok(())
     }
@@ -3747,7 +3828,13 @@ impl Node {
     ) -> Result<(), tetherly_net::NetError> {
         let mut cfg = self.session_config_inner(true);
         cfg.pin = None;
-        let sess = accept_session(stream, addr, &cfg).await?;
+        let sess = match accept_session(stream, addr, &cfg).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.shared.telemetry.record_handshake_failed();
+                return Err(e);
+            }
+        };
         self.attach_input_client(sess).await;
         Ok(())
     }
@@ -3762,7 +3849,13 @@ impl Node {
         let mut cfg = self.session_config_inner(true);
         cfg.pin = None;
         cfg.screen_only = true;
-        let sess = accept_session(stream, addr, &cfg).await?;
+        let sess = match accept_session(stream, addr, &cfg).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.shared.telemetry.record_handshake_failed();
+                return Err(e);
+            }
+        };
         self.attach_screen_server(sess).await;
         Ok(())
     }
@@ -3783,10 +3876,12 @@ impl Node {
                     outbound = rx.recv() => {
                         match outbound {
                             Some(frame) => {
+                                let f_len = (frame.payload.len() + 12) as u64;
                                 if sess.send_bounded(frame).await.is_err() {
                                     tracing::warn!("input server: peer send failed; closing");
                                     break;
                                 }
+                                node.shared.telemetry.record_input_tx(f_len);
                             }
                             None => break,
                         }
@@ -3794,6 +3889,8 @@ impl Node {
                     inbound = sess.recv_inner() => {
                         match inbound {
                             Ok(frame) => {
+                                let f_len = (frame.payload.len() + 12) as u64;
+                                node.shared.telemetry.record_input_rx(f_len);
                                 if let Ok(ev) = InputEvent::from_frame(&frame) {
                                     if matches!(ev.kind, tetherly_core::InputKind::Leave) {
                                         node.shared.input_engine.lock().expect("engine").on_remote_leave();
@@ -3839,12 +3936,16 @@ impl Node {
                     inbound = sess.recv_inner() => {
                         match inbound {
                             Ok(frame) => {
+                                let f_len = (frame.payload.len() + 12) as u64;
+                                node.shared.telemetry.record_input_rx(f_len);
                                 if let Ok(ev) = InputEvent::from_frame(&frame) {
                                     if let Ok(Some(leave)) = client.apply(ev) {
-                                        let _ = sess.send_bounded(match leave.to_frame() {
-                                            Ok(f) => f,
-                                            Err(_) => continue,
-                                        }).await;
+                                        if let Ok(f) = leave.to_frame() {
+                                            let l_len = (f.payload.len() + 12) as u64;
+                                            if sess.send_bounded(f).await.is_ok() {
+                                                node.shared.telemetry.record_input_tx(l_len);
+                                            }
+                                        }
                                     }
                                     *node.shared.input_sink.lock().expect("sink") = client.sink().clone();
                                     if let Some(sink) = &real {
@@ -3928,9 +4029,11 @@ impl Node {
                     outbound = rx.recv() => {
                         match outbound {
                             Some(frame) => {
+                                let f_len = (frame.payload.len() + 12) as u64;
                                 if sess.send_bounded(frame).await.is_err() {
                                     break;
                                 }
+                                node.shared.telemetry.record_screen_tx(f_len);
                             }
                             None => break,
                         }
@@ -3938,6 +4041,8 @@ impl Node {
                     inbound = sess.recv_inner() => {
                         match inbound {
                             Ok(frame) => {
+                                let f_len = (frame.payload.len() + 12) as u64;
+                                node.shared.telemetry.record_screen_rx(f_len);
                                 if let Ok(msg) = ControlMsg::from_frame(&frame) {
                                     let reply = node
                                         .shared
@@ -3947,7 +4052,10 @@ impl Node {
                                         .on_control(msg);
                                     if let Ok(Some(reply)) = reply {
                                         if let Ok(f) = reply.to_frame() {
-                                            let _ = sess.send_bounded(f).await;
+                                            let r_len = (f.payload.len() + 12) as u64;
+                                            if sess.send_bounded(f).await.is_ok() {
+                                                node.shared.telemetry.record_screen_tx(r_len);
+                                            }
                                         }
                                     }
                                 }
@@ -3989,9 +4097,11 @@ impl Node {
                             Some(msg) => {
                                 match msg.to_frame() {
                                     Ok(f) => {
+                                        let f_len = (f.payload.len() + 12) as u64;
                                         if sess.send_bounded(f).await.is_err() {
                                             break;
                                         }
+                                        node.shared.telemetry.record_screen_tx(f_len);
                                     }
                                     Err(_) => continue,
                                 }
@@ -4002,6 +4112,8 @@ impl Node {
                     inbound = sess.recv_inner() => {
                         match inbound {
                             Ok(frame) => {
+                                let f_len = (frame.payload.len() + 12) as u64;
+                                node.shared.telemetry.record_screen_rx(f_len);
                                 match assembler.push(&frame) {
                                     Ok(Some(sf)) => {
                                         // Decompress if the sender zstd-compressed
@@ -4043,7 +4155,10 @@ impl Node {
                                                         .present(&present_frame);
                                                     let ack = ControlMsg::Ack { seq };
                                                     if let Ok(f) = ack.to_frame() {
-                                                        let _ = sess.send_bounded(f).await;
+                                                        let a_len = (f.payload.len() + 12) as u64;
+                                                        if sess.send_bounded(f).await.is_ok() {
+                                                            node.shared.telemetry.record_screen_tx(a_len);
+                                                        }
                                                     }
                                                 }
                                             }

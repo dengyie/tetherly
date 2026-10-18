@@ -12,6 +12,7 @@ pub mod runtime;
 pub mod screen;
 pub mod sidecar;
 pub mod store;
+pub mod telemetry;
 pub mod uihttp;
 
 pub use events::{CandidateViewDto, UiEvent};
@@ -26,6 +27,7 @@ pub use runtime::{
     TransfersReport, UserCommand,
 };
 pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
+pub use telemetry::{ChannelTrafficDto, ProtocolMessagesDto, TrafficReport, TrafficTelemetry};
 
 #[cfg(windows)]
 pub use screen::DxgiSource;

@@ -351,6 +351,30 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect unified network traffic, multi-channel bandwidth, and protocol telemetry.
+    Metrics {
+        /// Reset all traffic and protocol telemetry counters to zero
+        #[arg(long)]
+        reset: bool,
+        /// Output raw JSON format instead of human-readable tables
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Alias for `metrics`: query multi-channel network traffic and protocol counters.
+    Traffic {
+        /// Reset all traffic and protocol telemetry counters to zero
+        #[arg(long)]
+        reset: bool,
+        /// Output raw JSON format instead of human-readable tables
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -733,6 +757,10 @@ fn print_event(v: &serde_json::Value) {
             let present = v["present"].as_bool().unwrap_or(false);
             let lan_only = v["lan_only"].as_bool().unwrap_or(false);
             println!("[overlay] present={present} lan_only={lan_only}");
+        }
+        "metrics_reset" => {
+            let ts = v["timestamp_ms"].as_u64().unwrap_or(0);
+            println!("[metrics_reset] timestamp_ms={ts}");
         }
         other => {
             println!("[{other}] {v}");
@@ -2352,7 +2380,167 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::Metrics {
+            reset,
+            json,
+            ui_port,
+        }
+        | Cmd::Traffic {
+            reset,
+            json,
+            ui_port,
+        } => {
+            handle_traffic_cmd(reset, json, ui_port).await?;
+        }
     }
+    Ok(())
+}
+
+async fn handle_traffic_cmd(reset: bool, json: bool, ui_port: u16) -> Result<()> {
+    if reset {
+        let (code, resp) = loopback_post(ui_port, "/api/metrics/reset", b"{}")
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+        if code != 200 {
+            bail!(
+                "traffic telemetry reset failed (HTTP {code}): {}",
+                String::from_utf8_lossy(&resp)
+            );
+        }
+        if json {
+            println!("{}", String::from_utf8_lossy(&resp));
+        } else {
+            println!("Traffic and protocol telemetry counters successfully reset to zero.");
+        }
+        return Ok(());
+    }
+
+    let (code, resp) = loopback_get(ui_port, "/api/metrics").await.map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
+    if code != 200 {
+        bail!(
+            "traffic telemetry query failed (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&resp));
+        return Ok(());
+    }
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+    let uptime_secs = v["uptime_secs"].as_u64().unwrap_or(0);
+    let total_tx_bytes = v["total_tx_bytes"].as_u64().unwrap_or(0);
+    let total_rx_bytes = v["total_rx_bytes"].as_u64().unwrap_or(0);
+    let total_tx_frames = v["total_tx_frames"].as_u64().unwrap_or(0);
+    let total_rx_frames = v["total_rx_frames"].as_u64().unwrap_or(0);
+
+    let ctrl = &v["control"];
+    let file = &v["file"];
+    let input = &v["input"];
+    let screen = &v["screen"];
+    let msgs = &v["messages"];
+
+    println!(
+        "Network Traffic & Protocol Telemetry (Uptime: {})",
+        format_uptime(uptime_secs)
+    );
+    println!("  Total Throughput:");
+    println!(
+        "    Outbound (TX): {:<14} ({} frames)",
+        format_bytes(total_tx_bytes),
+        total_tx_frames
+    );
+    println!(
+        "    Inbound  (RX): {:<14} ({} frames)",
+        format_bytes(total_rx_bytes),
+        total_rx_frames
+    );
+
+    println!("\n  Multi-Channel Bandwidth Distribution:");
+    println!(
+        "    {:<18} {:<16} {:<16} {:<12} {:<12}",
+        "Channel", "TX Bytes", "RX Bytes", "TX Frames", "RX Frames"
+    );
+    println!("    {}", "-".repeat(74));
+    println!(
+        "    {:<18} {:<16} {:<16} {:<12} {:<12}",
+        "Control (45717)",
+        format_bytes(ctrl["tx_bytes"].as_u64().unwrap_or(0)),
+        format_bytes(ctrl["rx_bytes"].as_u64().unwrap_or(0)),
+        ctrl["tx_frames"].as_u64().unwrap_or(0),
+        ctrl["rx_frames"].as_u64().unwrap_or(0)
+    );
+    println!(
+        "    {:<18} {:<16} {:<16} {:<12} {:<12}",
+        "File (45718)",
+        format_bytes(file["tx_bytes"].as_u64().unwrap_or(0)),
+        format_bytes(file["rx_bytes"].as_u64().unwrap_or(0)),
+        "-",
+        "-"
+    );
+    println!(
+        "    {:<18} {:<16} {:<16} {:<12} {:<12}",
+        "Input (45719)",
+        format_bytes(input["tx_bytes"].as_u64().unwrap_or(0)),
+        format_bytes(input["rx_bytes"].as_u64().unwrap_or(0)),
+        input["tx_frames"].as_u64().unwrap_or(0),
+        input["rx_frames"].as_u64().unwrap_or(0)
+    );
+    println!(
+        "    {:<18} {:<16} {:<16} {:<12} {:<12}",
+        "Screen (45720)",
+        format_bytes(screen["tx_bytes"].as_u64().unwrap_or(0)),
+        format_bytes(screen["rx_bytes"].as_u64().unwrap_or(0)),
+        screen["tx_frames"].as_u64().unwrap_or(0),
+        screen["rx_frames"].as_u64().unwrap_or(0)
+    );
+
+    println!("\n  Protocol Message Telemetry:");
+    println!(
+        "    Ping Probes:        Sent {:<8} Recv {}",
+        msgs["pings_sent"].as_u64().unwrap_or(0),
+        msgs["pings_recv"].as_u64().unwrap_or(0)
+    );
+    println!(
+        "    Pong Replies:       Sent {:<8} Recv {}",
+        msgs["pongs_sent"].as_u64().unwrap_or(0),
+        msgs["pongs_recv"].as_u64().unwrap_or(0)
+    );
+    println!(
+        "    Notifications:      Sent {:<8} Recv {}",
+        msgs["notifies_sent"].as_u64().unwrap_or(0),
+        msgs["notifies_recv"].as_u64().unwrap_or(0)
+    );
+    println!(
+        "    Clipboard Sync:     Sent {:<8} Recv {}",
+        msgs["clips_sent"].as_u64().unwrap_or(0),
+        msgs["clips_recv"].as_u64().unwrap_or(0)
+    );
+    println!(
+        "    File Offers:        Sent {:<8} Recv {}",
+        msgs["file_offers_sent"].as_u64().unwrap_or(0),
+        msgs["file_offers_recv"].as_u64().unwrap_or(0)
+    );
+
+    let established = v["sessions_established"].as_u64().unwrap_or(0);
+    let closed = v["sessions_closed"].as_u64().unwrap_or(0);
+    let handshakes_failed = v["handshakes_failed"].as_u64().unwrap_or(0);
+    println!("\n  Session Lifecycle:");
+    println!("    Sessions Established: {established}");
+    println!("    Sessions Closed:      {closed}");
+    println!("    Handshakes Failed:    {handshakes_failed}");
+
     Ok(())
 }
 

@@ -3240,6 +3240,167 @@ async fn route_table_governance_and_static_injection_via_loopback_api() {
     peer.shutdown();
 }
 
+/// ADR-040: Unified network traffic & protocol telemetry observability and runtime resets.
+#[tokio::test(flavor = "multi_thread")]
+async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Initial status check via GET /api/metrics and GET /api/traffic
+    let (code_m, body_m) = tetherly_node::loopback_get(host_ui, "/api/metrics")
+        .await
+        .expect("metrics query succeeds");
+    assert_eq!(code_m, 200);
+    let rep: tetherly_node::TrafficReport = serde_json::from_slice(&body_m).unwrap();
+    assert!(rep.ok);
+    // Baseline: sessions were established during pair_phone_desktop()
+    assert!(rep.sessions_established >= 1);
+    assert_eq!(rep.handshakes_failed, 0);
+
+    // Verify GET /api/traffic returns isomorphic response
+    let (code_t, body_t) = tetherly_node::loopback_get(host_ui, "/api/traffic")
+        .await
+        .expect("traffic query succeeds");
+    assert_eq!(code_t, 200);
+    let rep_t: tetherly_node::TrafficReport = serde_json::from_slice(&body_t).unwrap();
+    assert_eq!(rep.total_tx_bytes, rep_t.total_tx_bytes);
+
+    // 2. Connect to SSE event stream
+    let mut sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect loopback sse");
+
+    // 3. Ping round-trip to generate control traffic and ping/pong protocol messages
+    let rtt = host
+        .ping_peer(&peer_id, Duration::from_secs(5))
+        .await
+        .expect("ping succeeds");
+    assert!(rtt.as_millis() <= 5000);
+
+    // Also trigger notify message
+    let notify_payload = serde_json::json!({
+        "app_name": "Slack",
+        "title": "Ping",
+        "body": "Test",
+    });
+    let (code_n, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/notify",
+        &serde_json::to_vec(&notify_payload).unwrap(),
+    )
+    .await
+    .expect("post notify succeeds");
+    assert_eq!(code_n, 200);
+
+    // Give a brief moment for async send
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Check that control telemetry reflects ping/pong & notify
+    let (code_m2, body_m2) = tetherly_node::loopback_get(host_ui, "/api/metrics")
+        .await
+        .expect("metrics query 2 succeeds");
+    assert_eq!(code_m2, 200);
+    let rep2: tetherly_node::TrafficReport = serde_json::from_slice(&body_m2).unwrap();
+    assert!(rep2.messages.pings_sent >= 1);
+    assert!(rep2.messages.notifies_sent >= 1);
+    assert!(rep2.control.tx_bytes > 0);
+    assert!(rep2.control.tx_frames > 0);
+    assert!(rep2.total_tx_bytes >= rep2.control.tx_bytes);
+
+    // 4. File transfer interaction: send a streaming file and check file telemetry
+    let payload = b"Hello telemetry data block from integration test!";
+    let (send_dir, _g_send) = temp_dir("telemetry-send");
+    let file_path = send_dir.join("telemetry_src.dat");
+    std::fs::write(&file_path, payload).unwrap();
+
+    let send_payload = serde_json::json!({
+        "path": file_path.to_str().unwrap(),
+        "name": "telemetry_src.dat",
+        "peer": peer_id.as_str(),
+    });
+    let (code_f, body_f) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/send",
+        &serde_json::to_vec(&send_payload).unwrap(),
+    )
+    .await
+    .expect("send file post succeeds");
+    assert_eq!(code_f, 200);
+    let f_resp: serde_json::Value = serde_json::from_slice(&body_f).unwrap();
+    let transfer_id = f_resp["transfer_id"].as_str().unwrap();
+
+    // Wait for file arrival on peer and accept
+    wait_offered(&peer, Duration::from_secs(5)).await;
+    peer.user_accept_file(transfer_id).await.unwrap();
+
+    let received = wait_inbox(g2.path(), "telemetry_src.dat", Duration::from_secs(10)).await;
+    assert_eq!(received, payload);
+
+    // Check that file telemetry recorded TX
+    let (code_m3, body_m3) = tetherly_node::loopback_get(host_ui, "/api/metrics")
+        .await
+        .expect("metrics query 3 succeeds");
+    assert_eq!(code_m3, 200);
+    let rep3: tetherly_node::TrafficReport = serde_json::from_slice(&body_m3).unwrap();
+    assert!(rep3.file.tx_bytes >= payload.len() as u64);
+    assert!(rep3.messages.file_offers_sent >= 1);
+
+    // 5. Reset metrics via POST /api/metrics/reset
+    let (code_rst, body_rst) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/metrics/reset",
+        b"{}",
+    )
+    .await
+    .expect("reset metrics succeeds");
+    assert_eq!(code_rst, 200);
+    let rst_json: serde_json::Value = serde_json::from_slice(&body_rst).unwrap();
+    assert_eq!(rst_json["ok"], true);
+    assert_eq!(rst_json["reset"], true);
+
+    // 6. Verify SSE event stream receives UiEvent::MetricsReset
+    let sse_event = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse metrics reset event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_event {
+        tetherly_node::UiEvent::MetricsReset => {}
+        other => panic!("expected MetricsReset, got: {other:?}"),
+    }
+
+    // 7. Verify metrics reset took effect via GET /api/metrics
+    let (code_m4, body_m4) = tetherly_node::loopback_get(host_ui, "/api/metrics")
+        .await
+        .expect("metrics query 4 succeeds");
+    assert_eq!(code_m4, 200);
+    let rep4: tetherly_node::TrafficReport = serde_json::from_slice(&body_m4).unwrap();
+    assert_eq!(rep4.total_tx_bytes, 0);
+    assert_eq!(rep4.total_rx_bytes, 0);
+    assert_eq!(rep4.control.tx_bytes, 0);
+    assert_eq!(rep4.file.tx_bytes, 0);
+    assert_eq!(rep4.messages.pings_sent, 0);
+    assert_eq!(rep4.messages.notifies_sent, 0);
+    assert_eq!(rep4.messages.file_offers_sent, 0);
+    assert_eq!(rep4.sessions_established, 0);
+
+    // Also test POST /api/traffic/reset endpoint
+    let (code_rst2, body_rst2) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/traffic/reset",
+        b"",
+    )
+    .await
+    .expect("reset traffic succeeds");
+    assert_eq!(code_rst2, 200);
+    let rst_json2: serde_json::Value = serde_json::from_slice(&body_rst2).unwrap();
+    assert_eq!(rst_json2["ok"], true);
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

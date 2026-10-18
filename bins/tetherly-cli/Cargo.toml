@@ -11,6 +11,10 @@ publish = false
 name = "tetherly-cli"
 path = "src/main.rs"
 
+[[bin]]
+name = "tetherly"
+path = "src/main.rs"
+
 [dependencies]
 tetherly-core.workspace = true
 tetherly-crypto.workspace = true

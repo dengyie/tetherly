@@ -3,12 +3,49 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.46** |
+| 文档版本 | **1.47** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）**——(1) **物理寻址路由透视模型 (`RouteEntryDto`, `RoutesReport`)**：对齐物理 IP:Port 寻址与对端元数据，聚合在线/受信任状态、广播名与友好别名，消灭此前单纯字符串键值对的不透明性；(2) **静态路由双向注入与原子落盘原语 (`remember_route`, `forget_route`)**：实现返回布尔指示状态（added vs updated，removed vs not_found）的安全写盘，彻底解决跨子网与无广播环境下对端寻址丢失难题；(3) **智能对端解析赋能 (`Node::add_route`, `Node::remove_route`)**：全面支持直接设备 ID、友好别名、广播名及模糊子串定位目标对端，严格校验物理套接字地址合法性与非零端口；(4) **轻量级回环控制面端点 (`POST /api/routes`, `DELETE /api/routes`, `POST /api/routes/delete`)**：支持标准 RESTful 与灵活查询参数/JSON 体删除，结合 `UiEvent::RouteChanged` SSE 事件总线实时派发；(5) **CLI 双端全同构升级 (`tetherly route` 与 `tetherly-cli route`)**：提供 `list`、`add` 与 `del`/`remove` 子命令群，无缝支持友好别名与机器可读 JSON 输出；(6) **Web UI 物理路由卡片与实时交互闭环**：增设物理寻址路由与静态注入面板，提供动态卡片列表、交互式弹框注入与一键删除确认；(7) **端到端集成测试全绿覆盖**：在 `tests/phase1.rs` 增设 `route_table_governance_and_static_injection_via_loopback_api` 完备验证治理全链路。+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）**——(1) **无锁原子遥测引擎 (`TrafficTelemetry`)**：基于 `AtomicU64` 变量与 `Ordering::Relaxed` 构建高性能无锁度量引擎，以零锁竞争和 $O(1)$ 时间复杂度在网络高速传输热路径上原子累加控制 (45717)、文件 (45718)、输入 (45719)、屏幕 (45720) 四大 TCP 通道的出入站字节与数据帧数；(2) **端到端核心协议消息与会话生命周期遥测**：覆盖 Ping 探活、Pong 响应、Notification 通知推送、Clipboard 剪贴板同步、FileOffer 文件提议等协议消息出入站计数，以及建连成功数、正常拆除数与握手失败数全景指标；(3) **轻量级回环控制面端点 (`GET /api/metrics`, `GET /api/traffic`, `POST /api/metrics/reset`, `POST /api/traffic/reset`)**：统一提供全维度网络流量与协议消息快照，支持按需一键原子重置基准并联动 `UiEvent::MetricsReset` 事件广播；(4) **CLI 双端全同构升级 (`tetherly metrics` / `traffic`)**：支持自适应单位表格展示（B/KiB/MiB/GiB）、四通道带宽分布柱状占比、`--json` 与 `--reset`；(5) **Web UI 实时遥测仪表盘与交互闭环 (`ui/index.html`)**：增设全协议网络流量卡片，展示总出入站吞吐、四通道带宽分布条、核心协议消息计数徽标与一键重置按键；(6) **端到端测试闭环 (`tests/phase1.rs`)**：增设 `traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api` 严谨验证全链路度量与重置逻辑。+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.47 相对 1.46(全协议网络流量透视、多通道遥测度量与运行时可观测性闭环)**
+
+- **动机(全局流量黑盒、四通道带宽盲区、协议帧遥测缺失、回环控制与运维看板断层)**:
+  在 Tetherly v1.46 实现了静态路由注入与断线重连治理后，节点具备了强大的物理拓扑穿透能力。然而在长期生产运行中，系统面临着**全局网络流量与协议消息遥测的重大可观测性盲区**：
+  1. **全局网络流量黑盒**：除了文件通道内部的会话级 `TransferStats` 外，守护进程缺乏对整机网络出入站总吞吐（TX/RX 字节数、数据帧包数）的统一度量与聚合；
+  2. **四维多通道带宽分布不可知**：控制 (45717)、文件 (45718)、输入 (45719)、屏幕 (45720) 各自消耗了多少网络带宽完全缺乏细分度量，无法定位由于大文件传输或屏幕高频推流导致的网络拥堵瓶颈；
+  3. **协议消息遥测计数缺失**：Ping/Pong 探活、Notification 通知、Clipboard 剪贴板、FileOffer 文件报价等核心协议帧缺乏全局调用计数，会话建连数与握手失败率处于黑盒状态；
+  4. **缺少轻量级遥测回环查询与基准重置端点**：外部监控或自动化运维脚本无法一键获取全局网络指标，也无法在基准性能测试中原子清零历史数据；
+  5. **双端命令行与 Web UI 缺乏遥测面板**：`tetherly` 与 `tetherly-cli` 缺失 `metrics`/`traffic` 命令，Web 前端缺少流量透视卡片。
+
+- **架构与协议设计(ADR-040 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环)**:
+  1. **无锁原子遥测引擎与数据传输模型 (`TrafficTelemetry`, `ChannelTrafficDto`, `ProtocolMessagesDto`, `TrafficReport`)**:
+     - 在 `telemetry.rs` 与 `lib.rs` 引入无锁原子结构体 `TrafficTelemetry`：
+       - 基于 `AtomicU64` 与 `Ordering::Relaxed`，以 $O(1)$ 极低开销在各通道数据传输热路径上原子累加计数；
+       - `ChannelTrafficDto`：聚合 `tx_bytes`, `rx_bytes`, `tx_frames`, `rx_frames`；
+       - `ProtocolMessagesDto`：记录 `pings_sent/recv`, `pongs_sent/recv`, `notifies_sent/recv`, `clips_sent/recv`, `file_offers_sent/recv`；
+       - `TrafficReport`：包含 `ok`, `uptime_secs`, `total_tx_bytes`, `total_rx_bytes`, `total_tx_frames`, `total_rx_frames`, 四通道明细、协议消息明细及会话统计（`sessions_established`, `sessions_closed`, `handshakes_failed`）；
+     - 提供原子 `snapshot(uptime_secs)` 与 `reset()` 原语；
+  2. **全通道 I/O 链路埋点集成 (`runtime.rs`)**:
+     - 控制通道 (45717)：在 `attach` 的发送与接收循环中记录出入站帧字节与协议类型；
+     - 文件通道 (45718)：在流式分块传输与内存分块发送/接收中记录出入站字节；
+     - 键鼠通道 (45719)：在输入事件帧收发循环中原子累加字节与帧数；
+     - 屏幕通道 (45720)：在屏幕压缩帧推流与接收循环中原子累加字节与帧数；
+     - 会话生命周期：在会话建立成功、连接关闭及握手失败处精准递增对应计数器；
+  3. **轻量级回环控制面端点 (`uihttp.rs`)**:
+     - `GET /api/metrics` 与 `GET /api/traffic`：毫秒级响应 `TrafficReport` 快照；
+     - `POST /api/metrics/reset` 与 `POST /api/traffic/reset`：调用 `node.reset_traffic_metrics()` 并向事件总线广播 `UiEvent::MetricsReset`；
+     - 严格受限于安全红线：仅绑定 `127.0.0.1`，严格校验 `Host: 127.0.0.1|localhost`（不匹配返回 403）；数据仅包含纯数字度量，绝不泄露敏感载荷；
+  4. **CLI 双端全同构命令 (`tetherly metrics` / `traffic`, `tetherly-cli metrics` / `traffic`)**:
+     - 支持 `--reset`、`--json` 与 `--ui-port`；
+     - 格式化终端输出：自动换算 B/KiB/MiB/GiB，绘制四通道带宽分布柱状占比，清晰呈现协议消息与会话健康度；
+  5. **Web UI 遥测仪表盘与交互闭环 (`ui/index.html`)**:
+     - 增设「网络流量与全协议遥测」面板，集成出入站吞吐徽标、四通道带宽分布进度指示与协议核心消息芯片；
+     - 提供一键重置按键与 SSE `metrics_reset` 实时局部刷新；
+  6. **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**:
+     - 增设 `traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api`：完整断言初态查询、控制帧交互流量递增、文件流式传输度量、POST 重置及 SSE 事件响应与清零验证。
 
 **1.46 相对 1.45(物理寻址路由表全景透视、静态路由注入与断线自动重连治理)**
 
@@ -2519,6 +2556,113 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - SSE 监听 `pin_state_changed` 自动同步最新 PIN 状态；
    - **端到端集成测试全覆盖 (`tests/phase1.rs`)**：
      - `pin_lifecycle_inspection_and_revocation_via_loopback_api`：验证初始非活跃状态、POST 生成与 SSE 广播、GET 查询与 TTL 校验、POST 清除与 SSE 广播、清除后非活跃确认以及幂等二次清除。
+
+## 43. 对端设备别名治理、友好命名持久化与对端标识智能解析 (v1.44 / ADR-037)
+
+1. **动机与设计准则（ADR-037）**：
+   - **Base32 身份标识认知负担与别名缺失**：Tetherly 底层采用 21 位加密哈希 ID（`DeviceId`），但在交互界面和命令行中使用机器随机字符体验较差；
+   - **持久化别名存储模型与冲突消解**：在节点配置目录维护 `aliases.json`，支持别名原子写盘与双向映射；
+   - **智能对端解析赋能 (`Node::resolve_peer`)**：全面支持直接设备 ID、用户分配别名、mDNS 广播名及前缀/子串模糊匹配；
+   - **回环控制端点与双端 CLI 全同构**：`POST /api/peers/alias` 与 `DELETE /api/peers/alias` 端点，结合 `tetherly alias` / `tetherly-cli alias` 命令群；
+   - **Web UI 别名卡片与端到端测试闭环**：对端卡片内嵌别名展示与就地编辑弹窗，`tests/phase1.rs` 增设 `peer_alias_governance_and_smart_resolution_via_loopback_api`。
+
+## 44. 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理 (v1.45 / ADR-038)
+
+1. **动机与设计准则（ADR-038）**：
+   - **静态配置黑盒与重启割裂消除**：节点广播可见性、断线自动重连等核心特性此前仅在启动时加载，无法在运行时动态切换；
+   - **轻量级配置透视与热更新模型 (`ConfigReport`, `ConfigUpdateDto`)**：实现 `Node::update_config` 与安全校验；
+   - **回环 HTTP 控制面端点 (`GET /api/config`, `POST /api/config`)**：支持零停机热修改节点友好名称、局域网 mDNS 广播可见性与自动重连开关；
+   - **双端同构命令行 (`tetherly config` / `tetherly-cli config`)**：支持配置查看与 `--name`、`--advertise`、`--reconnect` 动态修改；
+   - **Web UI 配置面板与测试闭环**：增设配置状态卡片与实时热切换开关，`tests/phase1.rs` 增设 `node_config_inspection_and_dynamic_flags_via_loopback_api`。
+
+## 45. 物理寻址路由表全景透视、静态路由注入与断线自动重连治理 (v1.46 / ADR-039)
+
+1. **动机与设计准则（ADR-039）**：
+   - **物理寻址路由透视模型 (`RouteEntryDto`, `RoutesReport`)**：对齐物理 IP:Port 寻址与对端元数据，聚合在线/受信任状态、广播名与友好别名；
+   - **静态路由双向注入与原子落盘原语 (`remember_route`, `forget_route`)**：实现返回布尔指示状态（added vs updated，removed vs not_found）的安全写盘，彻底解决跨子网与无广播环境下对端寻址丢失难题；
+   - **智能对端解析赋能 (`Node::add_route`, `Node::remove_route`)**：全面支持直接设备 ID、友好别名、广播名及模糊子串定位目标对端，严格校验物理套接字地址合法性与非零端口；
+   - **轻量级回环控制面端点 (`POST /api/routes`, `DELETE /api/routes`, `POST /api/routes/delete`)**：支持标准 RESTful 与灵活查询参数/JSON 体删除，结合 `UiEvent::RouteChanged` SSE 事件总线实时派发；
+   - **CLI 双端全同构升级 (`tetherly route` 与 `tetherly-cli route`)**：提供 `list`、`add` 与 `del`/`remove` 子命令群，无缝支持友好别名与机器可读 JSON 输出；
+   - **Web UI 物理路由卡片与实时交互闭环**：增设物理寻址路由与静态注入面板，提供动态卡片列表、交互式弹框注入与一键删除确认；
+   - **端到端集成测试全绿覆盖**：在 `tests/phase1.rs` 增设 `route_table_governance_and_static_injection_via_loopback_api` 完备验证治理全链路。
+
+## 46. 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环 (v1.47 / ADR-040)
+
+1. **动机与设计准则（ADR-040）**：
+   - **全局网络流量黑盒**：除了文件通道内部的会话级 `TransferStats` 外，守护进程缺乏对整机网络出入站总吞吐（TX/RX 字节数、数据帧包数）的统一度量与聚合；
+   - **四维多通道带宽分布不可知**：控制 (45717)、文件 (45718)、输入 (45719)、屏幕 (45720) 各自消耗了多少网络带宽完全缺乏细分度量，无法定位由于大文件传输或屏幕高频推流导致的网络拥堵瓶颈；
+   - **协议消息遥测计数缺失**：Ping/Pong 探活、Notification 通知、Clipboard 剪贴板、FileOffer 文件报价等核心协议帧缺乏全局调用计数，会话建连数与握手失败率处于黑盒状态；
+   - **缺少轻量级遥测回环查询与基准重置端点**：外部监控或自动化运维脚本无法一键获取全局网络指标，也无法在基准性能测试中原子清零历史数据；
+   - **双端命令行与 Web UI 缺乏遥测面板**：`tetherly` 与 `tetherly-cli` 缺失 `metrics`/`traffic` 命令，Web 前端缺少流量透视卡片；
+   - **安全红线铁律（Verbatim Security Red Line）**：
+     - 「公开 issue / 日志禁止贴短信正文、一次性码、配对码、剪贴板」；
+     - 「信任库只在 Noise transport 成功后写」；
+     - 「Loopback UI 45716 仅绑定 127.0.0.1，校验 Host: 127.0.0.1|localhost (403 on mismatch); 严禁绑定 0.0.0.0 / ::」；
+     - **`UiEvent` 严禁携带短信正文、一次性码、配对码、剪贴板纯文本**，遥测数据必须仅包含纯数字统计，严禁包含任何载荷或用户数据。
+
+2. **核心机制与实现**：
+   - **无锁原子遥测引擎 (`TrafficTelemetry`)**：
+     - 在 `crates/tetherly-node/src/telemetry.rs` 与 `lib.rs` 引入高性能度量模型：
+       ```rust
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+       pub struct ChannelTrafficDto {
+           pub tx_bytes: u64,
+           pub rx_bytes: u64,
+           pub tx_frames: u64,
+           pub rx_frames: u64,
+       }
+
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+       pub struct ProtocolMessagesDto {
+           pub pings_sent: u64,
+           pub pings_recv: u64,
+           pub pongs_sent: u64,
+           pub pongs_recv: u64,
+           pub notifies_sent: u64,
+           pub notifies_recv: u64,
+           pub clips_sent: u64,
+           pub clips_recv: u64,
+           pub file_offers_sent: u64,
+           pub file_offers_recv: u64,
+       }
+
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+       pub struct TrafficReport {
+           pub ok: bool,
+           pub uptime_secs: u64,
+           pub total_tx_bytes: u64,
+           pub total_rx_bytes: u64,
+           pub total_tx_frames: u64,
+           pub total_rx_frames: u64,
+           pub control: ChannelTrafficDto,
+           pub file: ChannelTrafficDto,
+           pub input: ChannelTrafficDto,
+           pub screen: ChannelTrafficDto,
+           pub messages: ProtocolMessagesDto,
+           pub sessions_established: u64,
+           pub sessions_closed: u64,
+           pub handshakes_failed: u64,
+       }
+       ```
+     - 采用 `AtomicU64` 与 `Ordering::Relaxed`，以 $O(1)$ 时间复杂度在网络数据收发热路径上累加出入站字节与帧数，杜绝锁争用；
+     - 提供原子 `snapshot(uptime_secs)` 与 `reset()` 原语；
+   - **全通道 I/O 链路埋点集成 (`runtime.rs`)**：
+     - 控制通道 (45717)：出入站帧收发与协议帧类型原子累加；
+     - 文件通道 (45718)：流式传输与内存分块发送/接收出入站字节累计；
+     - 键鼠通道 (45719)：输入事件帧收发出入站字节与帧数累计；
+     - 屏幕通道 (45720)：屏幕推流与接收字节与帧数累计；
+     - 会话生命周期：`sessions_established`, `sessions_closed`, `handshakes_failed` 状态跟踪；
+   - **轻量级回环控制面端点 (`uihttp.rs`)**：
+     - `GET /api/metrics` 与 `GET /api/traffic`：毫秒级响应 `TrafficReport`；
+     - `POST /api/metrics/reset` 与 `POST /api/traffic/reset`：原子清零各通道与协议度量，广播 `UiEvent::MetricsReset`；
+   - **CLI 双端全同构命令 (`tetherly metrics` / `traffic`, `tetherly-cli metrics` / `traffic`)**：
+     - 支持 `--reset`、`--json` 与 `--ui-port`；
+     - 格式化终端输出：自动换算 B/KiB/MiB/GiB，绘制四通道带宽分布柱状占比，清晰呈现协议消息与会话健康度；
+   - **Web UI 遥测仪表盘与交互闭环 (`ui/index.html`)**：
+     - 增设「网络流量与全协议遥测」面板，集成出入站吞吐徽标、四通道带宽分布进度指示与协议核心消息芯片；
+     - 提供一键重置按键与 SSE `metrics_reset` 实时局部刷新；
+   - **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**：
+     - `traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api`：完整断言初态查询、控制帧交互流量递增、文件流式传输度量、POST 重置及 SSE 事件响应与清零验证。
 
 
 

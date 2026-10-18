@@ -205,6 +205,55 @@
     </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>网络流量与全协议遥测</h2>
+        <button id="resetmetricsbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">重置度量</button>
+      </div>
+      <div class="hint">实时聚合控制、文件、键鼠、屏幕四大 TCP 通道出入站吞吐与核心协议帧计数。</div>
+      <div id="trafficstatus" style="margin-top:8px;font-size:12px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">总出站吞吐 (TX)：</span>
+          <span id="tf-tx" style="font-weight:600">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+          <span style="color:var(--muted)">总入站吞吐 (RX)：</span>
+          <span id="tf-rx" style="font-weight:600">-</span>
+        </div>
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin:8px 0 4px">四通道流量分布 (TX / RX)</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
+          <div style="background:#131a22;border:1px solid var(--line);border-radius:6px;padding:6px 8px">
+            <div style="color:var(--accent);font-weight:600;margin-bottom:2px">控制 (45717)</div>
+            <div id="tf-ch-ctrl" style="font-size:11px;font-family:ui-monospace, Consolas, monospace">-</div>
+          </div>
+          <div style="background:#131a22;border:1px solid var(--line);border-radius:6px;padding:6px 8px">
+            <div style="color:var(--ok);font-weight:600;margin-bottom:2px">文件 (45718)</div>
+            <div id="tf-ch-file" style="font-size:11px;font-family:ui-monospace, Consolas, monospace">-</div>
+          </div>
+          <div style="background:#131a22;border:1px solid var(--line);border-radius:6px;padding:6px 8px">
+            <div style="color:var(--warn);font-weight:600;margin-bottom:2px">键鼠 (45719)</div>
+            <div id="tf-ch-input" style="font-size:11px;font-family:ui-monospace, Consolas, monospace">-</div>
+          </div>
+          <div style="background:#131a22;border:1px solid var(--line);border-radius:6px;padding:6px 8px">
+            <div style="color:#b37feb;font-weight:600;margin-bottom:2px">屏幕 (45720)</div>
+            <div id="tf-ch-screen" style="font-size:11px;font-family:ui-monospace, Consolas, monospace">-</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin:8px 0 4px">核心协议帧计数</div>
+        <div id="tf-msgs" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px">
+          <span class="chip" id="tf-msg-ping">探活: -</span>
+          <span class="chip" id="tf-msg-pong">应答: -</span>
+          <span class="chip" id="tf-msg-notify">通知: -</span>
+          <span class="chip" id="tf-msg-clip">剪贴板: -</span>
+          <span class="chip" id="tf-msg-file">文件提议: -</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:6px;padding-top:4px;border-top:1px dashed var(--line);font-size:11px;color:var(--muted)">
+          <span>已建连/已关闭会话: <b id="tf-sess" style="color:var(--text)">0 / 0</b></span>
+          <span>握手失败: <b id="tf-fail" style="color:var(--bad)">0</b></span>
+        </div>
+      </div>
+      <div id="trafficmsg" class="hint" style="margin-top:6px"></div>
+    </section>
+    <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
         <h2>节点配置与运行特性</h2>
         <button id="editnamebtn" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--text);border-radius:4px;cursor:pointer">修改名称</button>
       </div>
@@ -1000,6 +1049,54 @@ async function updateRoutes() {
     }
   } catch (e) {}
 }
+async function updateTraffic() {
+  try {
+    const t = await api("/api/metrics");
+    if (!t || !t.ok) return;
+    if ($("tf-tx")) $("tf-tx").textContent = formatBytes(t.total_tx_bytes) + " (" + t.total_tx_frames + " 帧)";
+    if ($("tf-rx")) $("tf-rx").textContent = formatBytes(t.total_rx_bytes) + " (" + t.total_rx_frames + " 帧)";
+    if ($("tf-ch-ctrl") && t.control) {
+      $("tf-ch-ctrl").textContent = "TX " + formatBytes(t.control.tx_bytes) + " / RX " + formatBytes(t.control.rx_bytes);
+    }
+    if ($("tf-ch-file") && t.file) {
+      $("tf-ch-file").textContent = "TX " + formatBytes(t.file.tx_bytes) + " / RX " + formatBytes(t.file.rx_bytes);
+    }
+    if ($("tf-ch-input") && t.input) {
+      $("tf-ch-input").textContent = "TX " + formatBytes(t.input.tx_bytes) + " / RX " + formatBytes(t.input.rx_bytes);
+    }
+    if ($("tf-ch-screen") && t.screen) {
+      $("tf-ch-screen").textContent = "TX " + formatBytes(t.screen.tx_bytes) + " / RX " + formatBytes(t.screen.rx_bytes);
+    }
+    if (t.messages) {
+      if ($("tf-msg-ping")) $("tf-msg-ping").textContent = "探活: " + t.messages.pings_sent + "发 / " + t.messages.pings_recv + "收";
+      if ($("tf-msg-pong")) $("tf-msg-pong").textContent = "应答: " + t.messages.pongs_sent + "发 / " + t.messages.pongs_recv + "收";
+      if ($("tf-msg-notify")) $("tf-msg-notify").textContent = "通知: " + t.messages.notifies_sent + "发 / " + t.messages.notifies_recv + "收";
+      if ($("tf-msg-clip")) $("tf-msg-clip").textContent = "剪贴板: " + t.messages.clips_sent + "发 / " + t.messages.clips_recv + "收";
+      if ($("tf-msg-file")) $("tf-msg-file").textContent = "文件提议: " + t.messages.file_offers_sent + "发 / " + t.messages.file_offers_recv + "收";
+    }
+    if ($("tf-sess")) $("tf-sess").textContent = t.sessions_established + " / " + t.sessions_closed;
+    if ($("tf-fail")) $("tf-fail").textContent = t.handshakes_failed;
+  } catch (e) {}
+}
+const resetMetricsBtn = $("resetmetricsbtn");
+if (resetMetricsBtn) {
+  resetMetricsBtn.onclick = async () => {
+    if (!confirm("确认重置全局网络流量与协议消息遥测计数器？")) return;
+    const msg = $("trafficmsg");
+    if (msg) msg.textContent = "正在重置网络遥测指标…";
+    try {
+      const r = await api("/api/metrics/reset", {});
+      if (r && r.ok) {
+        if (msg) msg.textContent = "遥测指标已成功重置为零。";
+        updateTraffic();
+      } else {
+        if (msg) msg.textContent = "重置失败";
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e;
+    }
+  };
+}
 const addRouteBtn = $("addroutebtn");
 if (addRouteBtn) {
   addRouteBtn.onclick = async () => {
@@ -1066,6 +1163,10 @@ function setupEventSource() {
             desc = "路由变更: " + ev.device_id + (ev.addr ? (" (" + ev.addr + ")") : "") + " [" + ev.action + "]";
             updateRoutes();
           }
+          else if (ev.kind === "metrics_reset") {
+            desc = "遥测指标已重置";
+            updateTraffic();
+          }
           $("ev-last").textContent = "[" + t + "] " + desc;
         }
       } catch (err) {
@@ -1098,6 +1199,8 @@ updateStorage();
 setInterval(updateStorage, 3000);
 updateHealth();
 setInterval(updateHealth, 2000);
+updateTraffic();
+setInterval(updateTraffic, 2000);
 </script>
 </body>
 </html>

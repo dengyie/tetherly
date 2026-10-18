@@ -393,6 +393,8 @@ struct Snapshot {
     /// Every local address and why it is or is not in the LAN listen set. Lets
     /// the UI explain "nothing found" without the user reading logs.
     lan: Vec<crate::lan::IfaceReport>,
+    /// Aggregate network traffic and protocol telemetry report.
+    traffic: crate::telemetry::TrafficReport,
 }
 
 #[derive(Serialize)]
@@ -824,6 +826,17 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 "ok": true,
                 "interfaces": ifaces,
                 "overlay": overlay_dto,
+            }))
+        }
+        ("GET", "/api/metrics") | ("GET", "/api/traffic") => {
+            json_ok(&node.traffic_report())
+        }
+        ("POST", "/api/metrics/reset") | ("POST", "/api/traffic/reset") => {
+            node.reset_traffic_metrics();
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "reset": true,
+                "timestamp_ms": node_clock_ms()
             }))
         }
         ("GET", "/api/clip") => match node.get_clipboard_text() {
@@ -1553,6 +1566,7 @@ async fn snapshot(node: &Node) -> Snapshot {
         input_channel: node.input_channel_open().await,
         input_seat: node.input_seat_str().to_string(),
         lan: crate::lan::interface_report(),
+        traffic: node.traffic_report(),
     }
 }
 
