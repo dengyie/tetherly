@@ -184,6 +184,34 @@ pub async fn loopback_post(port: u16, path: &str, body: &[u8]) -> std::io::Resul
     Ok((code, payload))
 }
 
+/// PUT a JSON payload to a node's loopback UI API and return the HTTP status
+/// with the response body.
+pub async fn loopback_put(port: u16, path: &str, body: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect(addr).await?;
+    let head = format!(
+        "PUT {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let text = String::from_utf8_lossy(&buf);
+    let code = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let payload = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .map(|b| b.as_bytes().to_vec())
+        .unwrap_or_default();
+    Ok((code, payload))
+}
+
 /// GET a path from a node's loopback UI API and return the HTTP status with
 /// the response body.
 pub async fn loopback_get(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
@@ -417,6 +445,11 @@ struct PeerView {
     alias: Option<String>,
     platform: String,
     path: String,
+    caps: Vec<String>,
+    features: Vec<String>,
+    file_port: Option<u16>,
+    input_port: Option<u16>,
+    screen_port: Option<u16>,
     rtt_ms: Option<u64>,
     last_seen_ms: u64,
 }
@@ -722,6 +755,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                         tetherly_core::PathKind::Overlay => "overlay",
                     };
                     let alias_opt = trusted_map.get(&p.device_id).cloned();
+                    let features = crate::runtime::extract_features(&p.caps);
                     serde_json::json!({
                         "device_id": p.device_id.to_string(),
                         "name": p.name,
@@ -732,6 +766,8 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                         "file_port": p.file_port,
                         "input_port": p.input_port,
                         "screen_port": p.screen_port,
+                        "caps": p.caps,
+                        "features": features,
                         "online": true,
                         "rtt_ms": p.rtt_ms,
                         "last_seen_ms": p.last_seen_ms,
@@ -761,6 +797,37 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 "live": live_dtos,
                 "trusted": trusted_dtos,
             }))
+        }
+        ("GET", "/api/caps") => json_ok(&node.local_caps_report()),
+        ("POST", "/api/caps") | ("PUT", "/api/caps") => {
+            #[derive(serde::Deserialize, Default)]
+            struct CapsUpdateBody {
+                #[serde(default)]
+                enable: Vec<String>,
+                #[serde(default)]
+                disable: Vec<String>,
+            }
+            match serde_json::from_slice::<CapsUpdateBody>(body) {
+                Ok(b) => match node.update_local_caps(&b.enable, &b.disable).await {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(400, &e.to_string()),
+                },
+                Err(_) => err(
+                    400,
+                    "bad json, expected { enable?: string[], disable?: string[] }",
+                ),
+            }
+        }
+        ("GET", "/api/peers/caps") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let target_peer = qmap
+                .get("peer")
+                .or_else(|| qmap.get("device_id"))
+                .map(|s| s.as_str());
+            match node.peers_caps_report(target_peer) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
         }
         ("GET", "/api/routes") => json_ok(&node.routes_report()),
         ("POST", "/api/routes") | ("PUT", "/api/routes") => {
@@ -1519,6 +1586,7 @@ async fn snapshot(node: &Node) -> Snapshot {
             .into_iter()
             .map(|p| {
                 let alias = trusted_map.get(&p.device_id).cloned();
+                let features = crate::runtime::extract_features(&p.caps);
                 PeerView {
                     device_id: p.device_id.to_string(),
                     name: p.name,
@@ -1528,6 +1596,11 @@ async fn snapshot(node: &Node) -> Snapshot {
                         tetherly_core::PathKind::Lan => "lan".into(),
                         tetherly_core::PathKind::Overlay => "overlay".into(),
                     },
+                    caps: p.caps.clone(),
+                    features,
+                    file_port: p.file_port,
+                    input_port: p.input_port,
+                    screen_port: p.screen_port,
                     rtt_ms: p.rtt_ms,
                     last_seen_ms: p.last_seen_ms,
                 }

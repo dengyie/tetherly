@@ -193,9 +193,45 @@ pub struct LivePeer {
     pub input_port: Option<u16>,
     /// Advertised via caps.update `screenport=`. None until the peer tells us.
     pub screen_port: Option<u16>,
+    /// Advertised capability tokens from the peer.
+    pub caps: Vec<String>,
     pub path: PathKind,
     pub rtt_ms: Option<u64>,
     pub last_seen_ms: u64,
+}
+
+/// Report returned by local capabilities introspection.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct LocalCapsReport {
+    pub ok: bool,
+    pub device_id: String,
+    pub caps: Vec<String>,
+    pub features: Vec<String>,
+    pub file_port: u16,
+    pub input_port: u16,
+    pub screen_port: u16,
+}
+
+/// Capability profile for a connected peer.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PeerCapsDto {
+    pub device_id: String,
+    pub name: String,
+    pub alias: Option<String>,
+    pub caps: Vec<String>,
+    pub features: Vec<String>,
+    pub file_port: Option<u16>,
+    pub input_port: Option<u16>,
+    pub screen_port: Option<u16>,
+    pub online: bool,
+}
+
+/// Report summarizing capabilities of peers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PeersCapsReport {
+    pub ok: bool,
+    pub count: usize,
+    pub peers: Vec<PeerCapsDto>,
 }
 
 /// Report returned by an on-demand peer ping probe over the Noise session.
@@ -531,6 +567,7 @@ struct Shared {
     reconnect: AtomicBool,
     advertise_stop: Mutex<Option<watch::Sender<bool>>>,
     telemetry: Arc<TrafficTelemetry>,
+    local_caps: Mutex<std::collections::HashSet<String>>,
 }
 
 pub struct Node {
@@ -714,6 +751,15 @@ impl Node {
             reconnect,
             advertise_stop: Mutex::new(None),
             telemetry: Arc::new(TrafficTelemetry::new()),
+            local_caps: Mutex::new({
+                let mut s = std::collections::HashSet::new();
+                s.insert("notify".to_string());
+                s.insert("clip".to_string());
+                s.insert("file".to_string());
+                s.insert("input".to_string());
+                s.insert("screen".to_string());
+                s
+            }),
         });
         Ok(Self { shared })
     }
@@ -1328,6 +1374,162 @@ impl Node {
         self.emit(UiEvent::MetricsReset {
             timestamp_ms: self.shared.clock.unix_ms(),
         });
+    }
+
+    /// Introspect local capabilities and dynamic feature configuration.
+    pub fn local_caps_report(&self) -> LocalCapsReport {
+        let (caps, features) = {
+            let local = self.shared.local_caps.lock().expect("local_caps");
+            let mut feats: Vec<String> = local.iter().cloned().collect();
+            feats.sort();
+            let mut all_caps = feats.clone();
+            all_caps.push(format!("fileport={}", self.file_port()));
+            all_caps.push(format!("inputport={}", self.input_port()));
+            all_caps.push(format!("screenport={}", self.screen_port()));
+            (all_caps, feats)
+        };
+        LocalCapsReport {
+            ok: true,
+            device_id: self.shared.identity.device_id().to_string(),
+            caps,
+            features,
+            file_port: self.file_port(),
+            input_port: self.input_port(),
+            screen_port: self.screen_port(),
+        }
+    }
+
+    /// Broadcast the current local capabilities and port markers to all active sessions.
+    pub async fn broadcast_caps(&self) {
+        let rep = self.local_caps_report();
+        let frame = match (CapsUpdate {
+            caps: rep.caps.clone(),
+        })
+        .to_frame()
+        {
+            Ok(f) => f,
+            Err(e) => {
+                warn!(%e, "failed to serialize CapsUpdate frame");
+                return;
+            }
+        };
+        let sessions = self.shared.sessions.lock().await;
+        for (peer, tx) in sessions.iter() {
+            if let Err(e) = tx.try_send(frame.clone()) {
+                debug!(%peer, %e, "failed to push CapsUpdate to session");
+            }
+        }
+        self.emit(UiEvent::PeerCapsChanged {
+            device_id: self.shared.identity.device_id().to_string(),
+            caps: rep.caps,
+            features: rep.features,
+        });
+    }
+
+    /// Dynamically enable or disable local capabilities and broadcast to all connected peers.
+    pub async fn update_local_caps(
+        &self,
+        enable: &[String],
+        disable: &[String],
+    ) -> Result<LocalCapsReport, CoreError> {
+        for cap in enable.iter().chain(disable.iter()) {
+            validate_cap_name(cap)?;
+        }
+        {
+            let mut local = self.shared.local_caps.lock().expect("local_caps");
+            for cap in enable {
+                local.insert(cap.trim().to_string());
+            }
+            for cap in disable {
+                local.remove(cap.trim());
+            }
+        }
+        self.broadcast_caps().await;
+        Ok(self.local_caps_report())
+    }
+
+    /// Introspect capabilities of peers. If target_peer is provided, resolves and returns
+    /// that peer; otherwise returns all live peers.
+    pub fn peers_caps_report(
+        &self,
+        target_peer: Option<&str>,
+    ) -> Result<PeersCapsReport, CoreError> {
+        let live_map = self.shared.live.lock().expect("live");
+        let trusted = self.trusted();
+        let mut reports = Vec::new();
+
+        if let Some(query) = target_peer {
+            let target_id = self.resolve_peer(query)?;
+            if let Some(lp) = live_map.get(&target_id) {
+                let alias = trusted.iter().find(|t| t.device_id == target_id).and_then(|t| {
+                    if t.alias.is_empty() {
+                        None
+                    } else {
+                        Some(t.alias.clone())
+                    }
+                });
+                reports.push(PeerCapsDto {
+                    device_id: target_id.to_string(),
+                    name: lp.name.clone(),
+                    alias,
+                    caps: lp.caps.clone(),
+                    features: extract_features(&lp.caps),
+                    file_port: lp.file_port,
+                    input_port: lp.input_port,
+                    screen_port: lp.screen_port,
+                    online: true,
+                });
+            } else {
+                let matched_trusted = trusted.iter().find(|t| t.device_id == target_id);
+                let alias = matched_trusted.and_then(|t| {
+                    if t.alias.is_empty() {
+                        None
+                    } else {
+                        Some(t.alias.clone())
+                    }
+                });
+                let name = alias.clone().unwrap_or_else(|| "offline".to_string());
+                reports.push(PeerCapsDto {
+                    device_id: target_id.to_string(),
+                    name,
+                    alias,
+                    caps: Vec::new(),
+                    features: Vec::new(),
+                    file_port: None,
+                    input_port: None,
+                    screen_port: None,
+                    online: false,
+                });
+            }
+        } else {
+            for (id, lp) in live_map.iter() {
+                let alias = trusted.iter().find(|t| t.device_id == *id).and_then(|t| {
+                    if t.alias.is_empty() {
+                        None
+                    } else {
+                        Some(t.alias.clone())
+                    }
+                });
+                reports.push(PeerCapsDto {
+                    device_id: id.to_string(),
+                    name: lp.name.clone(),
+                    alias,
+                    caps: lp.caps.clone(),
+                    features: extract_features(&lp.caps),
+                    file_port: lp.file_port,
+                    input_port: lp.input_port,
+                    screen_port: lp.screen_port,
+                    online: true,
+                });
+            }
+        }
+
+        reports.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+        Ok(PeersCapsReport {
+            ok: true,
+            count: reports.len(),
+            peers: reports,
+        })
     }
 
     pub fn network_report(&self) -> (Vec<crate::lan::IfaceReport>, crate::sidecar::OverlayStatus) {
@@ -2465,6 +2667,7 @@ impl Node {
                     file_port: None,
                     input_port: None,
                     screen_port: None,
+                    caps: Vec::new(),
                     path: incoming,
                     rtt_ms: None,
                     last_seen_ms: self.shared.clock.unix_ms(),
@@ -2487,17 +2690,17 @@ impl Node {
         let file_port = self.file_port();
         let input_port = self.input_port();
         let screen_port = self.screen_port();
+        let mut initial_caps: Vec<String> = {
+            let local = self.shared.local_caps.lock().expect("local_caps");
+            let mut list: Vec<String> = local.iter().cloned().collect();
+            list.sort();
+            list
+        };
+        initial_caps.push(format!("fileport={file_port}"));
+        initial_caps.push(format!("inputport={input_port}"));
+        initial_caps.push(format!("screenport={screen_port}"));
         let caps = CapsUpdate {
-            caps: vec![
-                "notify".into(),
-                "clip".into(),
-                "file".into(),
-                "input".into(),
-                "screen".into(),
-                format!("fileport={file_port}"),
-                format!("inputport={input_port}"),
-                format!("screenport={screen_port}"),
-            ],
+            caps: initial_caps,
         };
         if let Ok(frame) = caps.to_frame() {
             let _ = tx.try_send(frame);
@@ -2786,7 +2989,8 @@ impl Node {
                 let file_port = parse_file_port(&update.caps);
                 let input_port = parse_input_port(&update.caps);
                 let screen_port = parse_screen_port(&update.caps);
-                if file_port.is_some() || input_port.is_some() || screen_port.is_some() {
+                let features = extract_features(&update.caps);
+                {
                     if let Some(live) = self.shared.live.lock().expect("live").get_mut(peer) {
                         if let Some(port) = file_port {
                             live.file_port = Some(port);
@@ -2797,8 +3001,14 @@ impl Node {
                         if let Some(port) = screen_port {
                             live.screen_port = Some(port);
                         }
+                        live.caps = update.caps.clone();
                     }
                 }
+                self.emit(UiEvent::PeerCapsChanged {
+                    device_id: peer.to_string(),
+                    caps: update.caps,
+                    features,
+                });
             }
             SessionEvent::Unknown(_) => {}
         }
@@ -4644,6 +4854,36 @@ fn parse_port_cap(caps: &[String], prefix: &str) -> Option<u16> {
             .and_then(|s| s.parse::<u16>().ok())
             .filter(|p| *p != 0)
     })
+}
+
+/// Extract pure feature capability tokens from a capability list, filtering out port assignments.
+pub fn extract_features(caps: &[String]) -> Vec<String> {
+    let mut feats: Vec<String> = caps
+        .iter()
+        .filter(|c| !c.contains('='))
+        .cloned()
+        .collect();
+    feats.sort();
+    feats.dedup();
+    feats
+}
+
+fn validate_cap_name(cap: &str) -> Result<(), CoreError> {
+    let trimmed = cap.trim();
+    if trimmed.is_empty() || trimmed.len() > 32 {
+        return Err(CoreError::InvalidPayload(
+            "capability token must be between 1 and 32 characters".into(),
+        ));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(CoreError::InvalidPayload(
+            "capability token contains invalid characters (allowed: [a-zA-Z0-9_-])".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

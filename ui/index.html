@@ -369,6 +369,14 @@
       <div id="routes-table" style="margin-top:8px"><div class="empty">无物理寻址路由</div></div>
       <div id="routemsg" class="hint" style="margin-top:6px"></div>
     </section>
+    <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">节点能力与特性边界</h2>
+        <button id="refreshcapsbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新能力</button>
+      </div>
+      <div class="hint">当前节点对外通告的核心功能特性与动态边界治理。支持运行时即时启闭并全量广播更新对端。</div>
+      <div id="local-caps-box" style="margin-top:8px"><div class="hint">读取节点能力中…</div></div>
+    </section>
   </div>
 </main>
 <script>
@@ -584,7 +592,20 @@ function render(s) {
       rttBadge = '<span class="badge ' + cls + '" style="margin-left:6px">' + x.rtt_ms + ' ms</span>';
     }
     const pathBadge = '<span class="badge ' + (x.path === 'overlay' ? 'outbound' : 'completed') + '" style="margin-left:6px">' + (x.path || 'lan').toUpperCase() + '</span>';
-    const card = el('<div class="card"><div style="flex:1"><div class="title"><span></span>' + pathBadge + rttBadge + '</div><div class="meta"></div></div><div class="row"><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost ping-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">测速</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
+    let capsBadges = '';
+    const feats = x.features || [];
+    if (feats.length > 0) {
+      capsBadges = '<span style="margin-left:6px">' + feats.map(f => {
+        let label = f;
+        if (f === 'notify') label = '通知';
+        else if (f === 'clip') label = '剪贴板';
+        else if (f === 'file') label = '文件';
+        else if (f === 'input') label = '输入';
+        else if (f === 'screen') label = '屏幕';
+        return '<span class="badge" style="background:var(--card-bg);border:1px solid var(--border);color:var(--text);font-size:11px;margin-right:3px">[' + label + ']</span>';
+      }).join('') + '</span>';
+    }
+    const card = el('<div class="card"><div style="flex:1"><div class="title"><span></span>' + pathBadge + rttBadge + capsBadges + '</div><div class="meta"></div></div><div class="row"><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost ping-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">测速</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
     const displayName = (x.alias && x.alias !== x.name) ? (x.name + ' ("' + x.alias + '")') : x.name;
     card.querySelector(".title span").textContent = displayName;
     card.querySelector(".meta").textContent = x.platform + " · " + (x.path || "lan") + " · " + x.device_id;
@@ -1124,6 +1145,61 @@ if (addRouteBtn) {
     }
   };
 }
+async function loadCaps() {
+  const box = $("local-caps-box");
+  if (!box) return;
+  try {
+    const rep = await api("/api/caps");
+    if (!rep || !rep.ok) return;
+    const knownFeatures = [
+      { key: "notify", label: "通知同步", desc: "双向转发与快捷回复" },
+      { key: "clip", label: "剪贴板共享", desc: "跨端自动同步与直推" },
+      { key: "file", label: "文件传输", desc: "断点续传与极速直连" },
+      { key: "input", label: "键鼠控制", desc: "低延迟远程光标注入" },
+      { key: "screen", label: "远程屏幕", desc: "低时延无损流式呈现" },
+    ];
+    const currentFeats = new Set(rep.features || []);
+    let html = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px">';
+    for (const f of knownFeatures) {
+      const active = currentFeats.has(f.key);
+      const activeCls = active ? 'completed' : 'offline';
+      html += '<div class="card" style="padding:8px 12px;margin:0;flex:1;min-width:180px;display:flex;align-items:center;justify-content:space-between">' +
+        '<div><div style="font-weight:600;font-size:13px">' + f.label + ' <span class="badge ' + activeCls + '">' + (active ? '已启用' : '已禁用') + '</span></div>' +
+        '<div class="hint" style="font-size:11px;margin-top:2px">' + f.desc + '</div></div>' +
+        '<button class="ghost cap-toggle-btn" data-cap="' + f.key + '" data-active="' + active + '" type="button" style="padding:2px 8px;font-size:12px">' + (active ? '关闭' : '开启') + '</button>' +
+        '</div>';
+    }
+    html += '</div>';
+    html += '<div class="hint" style="font-size:12px">通告端口: 文件 ' + rep.file_port + ' · 输入 ' + rep.input_port + ' · 屏幕 ' + rep.screen_port + '</div>';
+    box.innerHTML = html;
+
+    box.querySelectorAll(".cap-toggle-btn").forEach(btn => {
+      btn.onclick = async () => {
+        btn.disabled = true;
+        const cap = btn.getAttribute("data-cap");
+        const active = btn.getAttribute("data-active") === "true";
+        try {
+          if (active) {
+            await api("/api/caps", { disable: [cap] });
+          } else {
+            await api("/api/caps", { enable: [cap] });
+          }
+          await loadCaps();
+          tick();
+        } catch (e) {
+          console.error(e);
+          btn.disabled = false;
+        }
+      };
+    });
+  } catch (e) {
+    box.innerHTML = '<div class="empty">能力读取失败</div>';
+  }
+}
+const refreshCapsBtn = $("refreshcapsbtn");
+if (refreshCapsBtn) {
+  refreshCapsBtn.onclick = loadCaps;
+}
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
   refreshPin();
@@ -1167,6 +1243,10 @@ function setupEventSource() {
             desc = "遥测指标已重置";
             updateTraffic();
           }
+          else if (ev.kind === "peer_caps_changed") {
+            desc = "能力特性更新: " + ev.device_id + " [" + (ev.features || []).join(", ") + "]";
+            loadCaps();
+          }
           $("ev-last").textContent = "[" + t + "] " + desc;
         }
       } catch (err) {
@@ -1191,6 +1271,8 @@ function setupEventSource() {
 tick();
 setupEventSource();
 setInterval(tick, 2000);
+loadCaps();
+setInterval(loadCaps, 3000);
 updateConfig();
 setInterval(updateConfig, 3000);
 updateRoutes();

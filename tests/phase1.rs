@@ -3400,6 +3400,224 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
     peer.shutdown();
 }
 
+/// ADR-041: Peer capabilities introspection, multi-dimensional feature negotiation, and dynamic capability governance.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_capabilities_negotiation_and_introspection_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_id = peer.identity().device_id().clone();
+    let host_id = host.identity().device_id().clone();
+
+    // 1. Initial local capabilities inspection via GET /api/caps
+    let (code_local, body_local) = tetherly_node::loopback_get(host_ui, "/api/caps")
+        .await
+        .expect("local caps query succeeds");
+    assert_eq!(code_local, 200);
+    let local_rep: tetherly_node::LocalCapsReport = serde_json::from_slice(&body_local).unwrap();
+    assert!(local_rep.ok);
+    assert_eq!(local_rep.device_id, host_id.as_str());
+    for feat in ["notify", "clip", "file", "input", "screen"] {
+        assert!(
+            local_rep.features.contains(&feat.to_string()),
+            "missing feature: {feat}"
+        );
+    }
+    assert!(local_rep.caps.iter().any(|c| c.starts_with("fileport=")));
+    assert!(local_rep.caps.iter().any(|c| c.starts_with("inputport=")));
+    assert!(local_rep.caps.iter().any(|c| c.starts_with("screenport=")));
+
+    // 2. Connect to host loopback SSE stream to verify UiEvent::PeerCapsChanged
+    let mut sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect loopback sse");
+
+    // 3. Inspect peer capabilities via GET /api/peers/caps
+    let (code_peers_caps, body_peers_caps) = tetherly_node::loopback_get(host_ui, "/api/peers/caps")
+        .await
+        .expect("peers caps query succeeds");
+    assert_eq!(code_peers_caps, 200);
+    let peers_rep: tetherly_node::PeersCapsReport = serde_json::from_slice(&body_peers_caps).unwrap();
+    assert!(peers_rep.ok);
+    assert_eq!(peers_rep.count, 1);
+    let peer_caps = &peers_rep.peers[0];
+    assert_eq!(peer_caps.device_id, peer_id.as_str());
+    assert!(peer_caps.online);
+    for feat in ["notify", "clip", "file", "input", "screen"] {
+        assert!(
+            peer_caps.features.contains(&feat.to_string()),
+            "peer missing feature: {feat}"
+        );
+    }
+    assert!(peer_caps.file_port.is_some());
+    assert!(peer_caps.input_port.is_some());
+    assert!(peer_caps.screen_port.is_some());
+
+    // 4. Smart Peer Resolution on /api/peers/caps:
+    // a. Query by exact device ID
+    let (code_p1, body_p1) = tetherly_node::loopback_get(host_ui, &format!("/api/peers/caps?peer={peer_id}"))
+        .await
+        .expect("query peer caps by id succeeds");
+    assert_eq!(code_p1, 200);
+    let p1_rep: tetherly_node::PeersCapsReport = serde_json::from_slice(&body_p1).unwrap();
+    assert_eq!(p1_rep.count, 1);
+    assert_eq!(p1_rep.peers[0].device_id, peer_id.as_str());
+
+    // b. Query by friendly name / alias ("desk")
+    let (code_p2, body_p2) = tetherly_node::loopback_get(host_ui, "/api/peers/caps?peer=desk")
+        .await
+        .expect("query peer caps by name succeeds");
+    assert_eq!(code_p2, 200);
+    let p2_rep: tetherly_node::PeersCapsReport = serde_json::from_slice(&body_p2).unwrap();
+    assert_eq!(p2_rep.count, 1);
+    assert_eq!(p2_rep.peers[0].device_id, peer_id.as_str());
+
+    // c. Query by non-existent peer returns 404
+    let (code_p404, _) = tetherly_node::loopback_get(host_ui, "/api/peers/caps?peer=ghost_device")
+        .await
+        .expect("query ghost peer returns 404");
+    assert_eq!(code_p404, 404);
+
+    // 5. Verify GET /api/peers exposes caps & features on live peers
+    let (code_peers, body_peers) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .expect("get peers succeeds");
+    assert_eq!(code_peers, 200);
+    let peers_val: serde_json::Value = serde_json::from_slice(&body_peers).unwrap();
+    let live_peer_val = &peers_val["live"][0];
+    assert!(live_peer_val["caps"].is_array());
+    assert!(live_peer_val["features"].is_array());
+    let feats_arr: Vec<String> = serde_json::from_value(live_peer_val["features"].clone()).unwrap();
+    assert!(feats_arr.contains(&"notify".to_string()));
+    assert!(feats_arr.contains(&"screen".to_string()));
+
+    // 6. Dynamic Local Capability Governance: disable "screen" and "input"
+    let disable_payload = serde_json::json!({
+        "disable": ["screen", "input"]
+    });
+    let (code_dis, body_dis) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/caps",
+        &serde_json::to_vec(&disable_payload).unwrap(),
+    )
+    .await
+    .expect("disable caps post succeeds");
+    assert_eq!(code_dis, 200);
+    let dis_rep: tetherly_node::LocalCapsReport = serde_json::from_slice(&body_dis).unwrap();
+    assert!(dis_rep.ok);
+    assert!(!dis_rep.features.contains(&"screen".to_string()));
+    assert!(!dis_rep.features.contains(&"input".to_string()));
+    assert!(dis_rep.features.contains(&"notify".to_string()));
+    assert!(dis_rep.features.contains(&"clip".to_string()));
+    assert!(dis_rep.features.contains(&"file".to_string()));
+
+    // 7. Verify host SSE receives UiEvent::PeerCapsChanged
+    let mut found_caps_change = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), sse.next_ui_event()).await {
+            Ok(Ok(Some(tetherly_node::UiEvent::PeerCapsChanged {
+                device_id,
+                caps: _,
+                features,
+            }))) => {
+                if device_id == host_id.as_str() {
+                    assert!(!features.contains(&"screen".to_string()));
+                    assert!(!features.contains(&"input".to_string()));
+                    found_caps_change = true;
+                    break;
+                }
+            }
+            Ok(Ok(Some(_other))) => {}
+            Ok(Ok(None)) => break,
+            Ok(Err(_)) => break,
+            Err(_) => {}
+        }
+    }
+    assert!(
+        found_caps_change,
+        "expected to receive UiEvent::PeerCapsChanged on SSE"
+    );
+
+    // 8. Dynamic Local Capability Governance: re-enable "screen" via PUT /api/caps
+    let enable_payload = serde_json::json!({
+        "enable": ["screen"]
+    });
+    let (code_en, body_en) = tetherly_node::loopback_put(
+        host_ui,
+        "/api/caps",
+        &serde_json::to_vec(&enable_payload).unwrap(),
+    )
+    .await
+    .expect("enable caps put succeeds");
+    assert_eq!(code_en, 200);
+    let en_rep: tetherly_node::LocalCapsReport = serde_json::from_slice(&body_en).unwrap();
+    assert!(en_rep.ok);
+    assert!(en_rep.features.contains(&"screen".to_string()));
+    assert!(!en_rep.features.contains(&"input".to_string()));
+
+    // 9. Negative and validation test cases:
+    // a. Empty body / no caps specified returns 400
+    let empty_payload = serde_json::json!({});
+    let (code_empty, body_empty) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/caps",
+        &serde_json::to_vec(&empty_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_empty, 400);
+    assert!(String::from_utf8_lossy(&body_empty).contains("no capability changes specified"));
+
+    // b. Invalid characters in capability token returns 400
+    let invalid_token_payload = serde_json::json!({
+        "enable": ["bad cap!"]
+    });
+    let (code_inv, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/caps",
+        &serde_json::to_vec(&invalid_token_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_inv, 400);
+
+    // c. Token containing '=' returns 400
+    let eq_token_payload = serde_json::json!({
+        "enable": ["screenport=9999"]
+    });
+    let (code_eq, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/caps",
+        &serde_json::to_vec(&eq_token_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_eq, 400);
+
+    // d. Oversized token (>32 bytes) returns 400
+    let over_token_payload = serde_json::json!({
+        "enable": ["a".repeat(33)]
+    });
+    let (code_over, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/caps",
+        &serde_json::to_vec(&over_token_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_over, 400);
+
+    // e. Malformed JSON returns 400
+    let (code_bad_json, _) = tetherly_node::loopback_post(host_ui, "/api/caps", b"not a json")
+        .await
+        .unwrap();
+    assert_eq!(code_bad_json, 400);
+
+    // 10. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

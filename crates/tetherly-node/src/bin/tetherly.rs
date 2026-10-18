@@ -390,6 +390,48 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Introspect local and peer capabilities, or dynamically update enabled features.
+    Caps {
+        /// Target peer (tdev_... or alias) to introspect capability profile
+        #[arg(long)]
+        peer: Option<String>,
+        /// Enable a feature capability (e.g. notify, clip, file, input, screen)
+        #[arg(long)]
+        enable: Option<String>,
+        /// Disable a feature capability (e.g. notify, clip, file, input, screen)
+        #[arg(long)]
+        disable: Option<String>,
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Inspect unified network traffic, multi-channel bandwidth, and protocol telemetry.
+    Metrics {
+        /// Reset all traffic and protocol telemetry counters to zero
+        #[arg(long)]
+        reset: bool,
+        /// Output raw JSON format instead of human-readable tables
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Alias for `metrics`: query multi-channel network traffic and protocol counters.
+    Traffic {
+        /// Reset all traffic and protocol telemetry counters to zero
+        #[arg(long)]
+        reset: bool,
+        /// Output raw JSON format instead of human-readable tables
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1580,8 +1622,16 @@ async fn main() -> Result<()> {
                             Some(rtt) => format!("{rtt}ms"),
                             None => "n/a".to_string(),
                         };
+                        let feats_str = match p["features"].as_array() {
+                            Some(farr) if !farr.is_empty() => {
+                                let fstrs: Vec<&str> =
+                                    farr.iter().filter_map(|x| x.as_str()).collect();
+                                format!(" · caps: [{}]", fstrs.join(", "))
+                            }
+                            _ => String::new(),
+                        };
                         println!(
-                            "  * {display_name} ({platform}) · {addr} [{path}] · rtt: {rtt_str} · {dev}"
+                            "  * {display_name} ({platform}) · {addr} [{path}] · rtt: {rtt_str}{feats_str} · {dev}"
                         );
                     }
                 }
@@ -2273,6 +2323,391 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::Metrics {
+            reset,
+            json,
+            ui_port,
+        }
+        | Cmd::Traffic {
+            reset,
+            json,
+            ui_port,
+        } => {
+            handle_traffic_cmd(reset, json, ui_port).await?;
+        }
+        Cmd::Caps {
+            peer,
+            enable,
+            disable,
+            json,
+            ui_port,
+        } => {
+            handle_caps_cmd(peer, enable, disable, json, ui_port).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_traffic_cmd(reset: bool, json: bool, ui_port: u16) -> anyhow::Result<()> {
+    if reset {
+        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/metrics/reset", b"{}")
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+        if code != 200 {
+            anyhow::bail!(
+                "traffic telemetry reset failed (HTTP {code}): {}",
+                String::from_utf8_lossy(&resp)
+            );
+        }
+        if json {
+            println!("{}", String::from_utf8_lossy(&resp));
+        } else {
+            println!("Traffic and protocol telemetry counters successfully reset to zero.");
+        }
+        return Ok(());
+    }
+
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/metrics")
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        anyhow::bail!(
+            "traffic telemetry query failed (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&resp));
+        return Ok(());
+    }
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+    let uptime_secs = v["uptime_secs"].as_u64().unwrap_or(0);
+    let total_tx_bytes = v["total_tx_bytes"].as_u64().unwrap_or(0);
+    let total_rx_bytes = v["total_rx_bytes"].as_u64().unwrap_or(0);
+    let total_tx_frames = v["total_tx_frames"].as_u64().unwrap_or(0);
+    let total_rx_frames = v["total_rx_frames"].as_u64().unwrap_or(0);
+
+    let ctrl = &v["control"];
+    let file = &v["file"];
+    let input = &v["input"];
+    let screen = &v["screen"];
+    let msgs = &v["messages"];
+
+    println!(
+        "Network Traffic & Protocol Telemetry (Uptime: {})",
+        format_uptime(uptime_secs)
+    );
+    println!("  Total Throughput:");
+    println!(
+        "    Outbound (TX): {:<14} ({} frames)",
+        format_bytes(total_tx_bytes),
+        total_tx_frames
+    );
+    println!(
+        "    Inbound  (RX): {:<14} ({} frames)",
+        format_bytes(total_rx_bytes),
+        total_rx_frames
+    );
+
+    println!("\n  Multi-Channel Bandwidth Distribution:");
+    println!(
+        "    {:<18} {:<16} {:<16} {:<12} {:<12}",
+        "Channel", "TX Bytes", "RX Bytes", "TX Frames", "RX Frames"
+    );
+    println!("    {}", "-".repeat(76));
+    for (name, ch) in [
+        ("Control (Noise)", ctrl),
+        ("File Transfer", file),
+        ("Input Stream", input),
+        ("Screen Capture", screen),
+    ] {
+        let tx_b = ch["tx_bytes"].as_u64().unwrap_or(0);
+        let rx_b = ch["rx_bytes"].as_u64().unwrap_or(0);
+        let tx_f = ch["tx_frames"].as_u64().unwrap_or(0);
+        let rx_f = ch["rx_frames"].as_u64().unwrap_or(0);
+        println!(
+            "    {:<18} {:<16} {:<16} {:<12} {:<12}",
+            name,
+            format_bytes(tx_b),
+            format_bytes(rx_b),
+            tx_f,
+            rx_f
+        );
+    }
+
+    println!("\n  Core Protocol Message Distribution:");
+    println!(
+        "    {:<18} {:<12} {:<12}",
+        "Message Type", "TX Count", "RX Count"
+    );
+    println!("    {}", "-".repeat(44));
+    for (name, tx_key, rx_key) in [
+        ("Ping", "ping_tx", "ping_rx"),
+        ("Pong", "pong_tx", "pong_rx"),
+        ("Notify", "notify_tx", "notify_rx"),
+        ("Clipboard", "clip_tx", "clip_rx"),
+        ("File Offer", "file_offer_tx", "file_offer_rx"),
+    ] {
+        let tx_c = msgs[tx_key].as_u64().unwrap_or(0);
+        let rx_c = msgs[rx_key].as_u64().unwrap_or(0);
+        println!("    {:<18} {:<12} {:<12}", name, tx_c, rx_c);
+    }
+
+    Ok(())
+}
+
+async fn handle_caps_cmd(
+    peer: Option<String>,
+    enable: Option<String>,
+    disable: Option<String>,
+    json: bool,
+    ui_port: u16,
+) -> anyhow::Result<()> {
+    if enable.is_some() || disable.is_some() {
+        let mut enables = Vec::new();
+        if let Some(e) = enable {
+            enables.push(e);
+        }
+        let mut disables = Vec::new();
+        if let Some(d) = disable {
+            disables.push(d);
+        }
+        let req_body = serde_json::json!({
+            "enable": enables,
+            "disable": disables,
+        });
+        let (code, resp) = tetherly_node::loopback_post(
+            ui_port,
+            "/api/caps",
+            serde_json::to_vec(&req_body).unwrap_or_default().as_slice(),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+        if code != 200 {
+            anyhow::bail!(
+                "node returned HTTP {code}: {}",
+                String::from_utf8_lossy(&resp)
+            );
+        }
+        if json {
+            println!("{}", String::from_utf8_lossy(&resp));
+            return Ok(());
+        }
+        let rep: serde_json::Value = serde_json::from_slice(&resp)
+            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+        let dev = rep["device_id"].as_str().unwrap_or("-");
+        let feats = rep["features"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let fp = rep["file_port"].as_u64().unwrap_or(0);
+        let ip = rep["input_port"].as_u64().unwrap_or(0);
+        let sp = rep["screen_port"].as_u64().unwrap_or(0);
+
+        println!("Local node capabilities updated:");
+        println!("  Node ID:     {dev}");
+        println!("  Features:    [{feats}]");
+        println!("  Ports:       file: {fp}, input: {ip}, screen: {sp}");
+        return Ok(());
+    }
+
+    if let Some(ref target) = peer {
+        let path = format!("/api/peers/caps?peer={target}");
+        let (code, resp) = tetherly_node::loopback_get(ui_port, &path).await.map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+        if code != 200 {
+            anyhow::bail!(
+                "node returned HTTP {code}: {}",
+                String::from_utf8_lossy(&resp)
+            );
+        }
+        if json {
+            println!("{}", String::from_utf8_lossy(&resp));
+            return Ok(());
+        }
+        let rep: serde_json::Value = serde_json::from_slice(&resp)
+            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+        println!("Peer Capabilities ({target}):");
+        if let Some(arr) = rep["peers"].as_array() {
+            if arr.is_empty() {
+                println!("  (peer not found)");
+            } else {
+                for p in arr {
+                    let dev = p["device_id"].as_str().unwrap_or("-");
+                    let name = p["name"].as_str().unwrap_or("-");
+                    let alias = p["alias"].as_str();
+                    let alias_str = match alias {
+                        Some(a) if !a.is_empty() && a != name => format!(" (alias: \"{a}\")"),
+                        _ => String::new(),
+                    };
+                    let online = p["online"].as_bool().unwrap_or(false);
+                    let online_str = if online { "ONLINE" } else { "OFFLINE" };
+                    let feats = p["features"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    let fp = p["file_port"]
+                        .as_u64()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "n/a".into());
+                    let ip = p["input_port"]
+                        .as_u64()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "n/a".into());
+                    let sp = p["screen_port"]
+                        .as_u64()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "n/a".into());
+
+                    println!("  * [{online_str}] {name}{alias_str} · {dev}");
+                    println!("    Features: [{feats}]");
+                    println!("    Ports:    file: {fp}, input: {ip}, screen: {sp}");
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // Both local and peers
+    let (code_local, resp_local) = tetherly_node::loopback_get(ui_port, "/api/caps")
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    let (code_peers, resp_peers) = tetherly_node::loopback_get(ui_port, "/api/peers/caps")
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code_local != 200 {
+        anyhow::bail!(
+            "node returned HTTP {code_local}: {}",
+            String::from_utf8_lossy(&resp_local)
+        );
+    }
+    if code_peers != 200 {
+        anyhow::bail!(
+            "node returned HTTP {code_peers}: {}",
+            String::from_utf8_lossy(&resp_peers)
+        );
+    }
+    if json {
+        let local_v: serde_json::Value = serde_json::from_slice(&resp_local)
+            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+        let peers_v: serde_json::Value = serde_json::from_slice(&resp_peers)
+            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "local": local_v,
+                "peers": peers_v,
+            })
+        );
+        return Ok(());
+    }
+
+    let local_v: serde_json::Value = serde_json::from_slice(&resp_local)
+        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+    let peers_v: serde_json::Value = serde_json::from_slice(&resp_peers)
+        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+
+    let self_id = local_v["device_id"].as_str().unwrap_or("-");
+    let local_feats = local_v["features"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let fp = local_v["file_port"].as_u64().unwrap_or(0);
+    let ip = local_v["input_port"].as_u64().unwrap_or(0);
+    let sp = local_v["screen_port"].as_u64().unwrap_or(0);
+
+    println!("Local Node Capabilities:");
+    println!("  Node ID:     {self_id}");
+    println!("  Features:    [{local_feats}]");
+    println!("  Ports:       file: {fp}, input: {ip}, screen: {sp}");
+
+    let count = peers_v["count"].as_u64().unwrap_or(0);
+    println!("\nConnected Peers Capabilities ({count}):");
+    if let Some(arr) = peers_v["peers"].as_array() {
+        if arr.is_empty() {
+            println!("  (no live peers connected)");
+        } else {
+            for p in arr {
+                let dev = p["device_id"].as_str().unwrap_or("-");
+                let name = p["name"].as_str().unwrap_or("-");
+                let alias = p["alias"].as_str();
+                let alias_str = match alias {
+                    Some(a) if !a.is_empty() && a != name => format!(" (alias: \"{a}\")"),
+                    _ => String::new(),
+                };
+                let feats = p["features"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                let p_fp = p["file_port"]
+                    .as_u64()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "n/a".into());
+                let p_ip = p["input_port"]
+                    .as_u64()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "n/a".into());
+                let p_sp = p["screen_port"]
+                    .as_u64()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "n/a".into());
+
+                println!("  * {name}{alias_str} · {dev}");
+                println!("    Features: [{feats}]");
+                println!("    Ports:    file: {p_fp}, input: {p_ip}, screen: {p_sp}");
+            }
+        }
     }
     Ok(())
 }
@@ -2332,6 +2767,23 @@ fn print_event(v: &serde_json::Value) {
             let present = v["present"].as_bool().unwrap_or(false);
             let lan_only = v["lan_only"].as_bool().unwrap_or(false);
             println!("[overlay] present={present} lan_only={lan_only}");
+        }
+        "metrics_reset" => {
+            let ts = v["timestamp_ms"].as_u64().unwrap_or(0);
+            println!("[metrics_reset] timestamp_ms={ts}");
+        }
+        "peer_caps_changed" => {
+            let dev = v["device_id"].as_str().unwrap_or("?");
+            let feats = v["features"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            println!("[peer_caps_changed] peer={dev} features=[{feats}]");
         }
         other => {
             println!("[{other}] {v}");

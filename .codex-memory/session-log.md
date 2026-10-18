@@ -1,5 +1,26 @@
 # Session log
 
+## 2026-10-17 (45) - Peer capabilities introspection, multi-dimensional feature negotiation, and dynamic capability governance (v1.48 / ADR-041)
+- Task: 实现对端能力全景透视、多维特性协商与动态功能边界治理，打通应用层功能黑盒与动态特性启闭链路。
+- **背景与缺陷根因**:
+  在 Tetherly v1.47 实现了全协议网络流量透视与无锁原子遥测度量后，系统具备了微秒级网络吞吐可观测性。但在应用层多通道（通知同步、剪贴板共享、文件传输、键鼠控制、远程屏幕）交互演进中，暴露出对端功能能力黑盒与特性协商可观测性断层的严重架构缺陷：
+  1. 对端能力完全丢弃与黑盒化：协议虽然定义了 `TYPE_CAPS_UPDATE` 帧与 `CapsUpdate { caps: Vec<String> }`，但在 `runtime.rs` 接收到对端 `CapsUpdate` 时，仅提取了端口号（`fileport=`, `inputport=`, `screenport=`），将所有的核心功能特性标签（`notify`, `clip`, `file`, `input`, `screen` 等）完全抛弃；`LivePeer` 结构体缺少 `caps` 存储字段，系统在连接建立后对对端究竟支持哪些特性一无所知；
+  2. 缺少能力全景透视端点：`GET /api/peers` 与 `GET /api/state` 均未暴露对端能力列表，外部控制面无法获知对端已就绪的功能矩阵；缺少专用轻量级回环端点 `GET /api/caps`（透视本机支持并对外广播的能力清单）与 `GET /api/peers/caps`（查询所有对端或指定对端的能力矩阵）；
+  3. 缺少动态能力热更新与即时广播机制：本机能力此前静态写死，无法在运行时按需启闭某项功能（例如在受限场景动态关闭屏幕推流或剪贴板共享）；缺乏 `Node::broadcast_caps()` / `POST /api/caps` 动态热更新并向所有活动 Noise 会话广播最新能力帧的原语；
+  4. 事件总线缺少能力变更事件：对端更新能力或本机广播能力变更时，事件总线没有对应的 `UiEvent::PeerCapsChanged`，导致外部控制面与 UI 视图无法实时响应；
+  5. 双端命令行与 Web UI 缺失能力透视与指示徽标：`tetherly` 与 `tetherly-cli` 缺乏 `caps` 命令群，`peers` 列表缺少能力标签；Web UI 对端卡片缺少能力徽标（`[通知]` `[剪贴板]` `[文件]` `[输入]` `[屏幕]`）。
+- **架构设计与落地 (ADR-041)**:
+  1. 能力模型与纯特性解耦 (`LocalCapsReport`, `PeerCapsDto`, `PeersCapsReport`, `extract_features`): 在 `runtime.rs` 与 `lib.rs` 引入纯特性提取工具函数 `extract_features`，过滤包含 `=` 的端口声明，提取唯一排序的特性列表；扩展 `LivePeer` 增设 `caps: Vec<String>`。
+  2. 动态能力状态治理与热广播 (`Shared.local_caps`, `Node::update_local_caps`, `Node::broadcast_caps`): 在 `Shared` 中维护动态能力集（默认 `notify`, `clip`, `file`, `input`, `screen`），支持在运行时按需启闭特性；组装最新 `CapsUpdate` 帧全量异步广播至所有活动的 Noise 会话，并派发本地 `UiEvent::PeerCapsChanged`。
+  3. 轻量级回环 HTTP 控制面端点 (`crates/tetherly-node/src/uihttp.rs`): `GET /api/caps` 返回本机能力画像；`POST /api/caps` 与 `PUT /api/caps` 支持 `{"enable": [...], "disable": [...]}` 动态热更新与广播；`GET /api/peers/caps` 支持 `?peer=<id_or_alias>` 智能解析查询；升级 `GET /api/peers` 与 `GET /api/state` 暴露 `caps` 与 `features` 数组；严格红线守卫 127.0.0.1+Host 校验与合法字符白名单。
+  4. CLI 双端全同构升级 (`crates/tetherly-node/src/bin/tetherly.rs` 与 `bins/tetherly-cli/src/main.rs`): 新增 `Cmd::Caps`，支持 `--peer <PEER>`, `--enable <CAP>`, `--disable <CAP>`, `--json`, `--ui-port <PORT>`；升级 `peers` 命令输出能力徽标；SSE 事件监听器接入 `peer_caps_changed`。
+  5. Web UI 能力看板与交互控制 (`ui/index.html`): 增设「节点能力与特性边界」卡片，提供快捷按键动态启闭特性；对端卡片增设多维特性徽标胶囊（`[通知]`, `[剪贴板]`, `[文件]`, `[输入]`, `[屏幕]`）；接入 SSE `peer_caps_changed` 实现无感局部刷新。
+  6. 端到端集成测试全覆盖 (`tests/phase1.rs`): 增设 `peer_capabilities_negotiation_and_introspection_via_loopback_api` 完备验证初态查询、对端能力提取、智能解析检索、动态启闭热广播、SSE 变更事件及非法输入边界防御全流程。
+- **发布与文档同步**:
+  - SSOT `docs/DEVELOPMENT.md` 升至 v1.48，确立 ADR-041。
+  - Obsidian 知识库 `tetherly 开发文档.md` 与路由表 `AI-DOC-ROUTER.md` 同步更新。
+  - GitHub Actions 5 平台 CI 矩阵全绿验证。
+
 ## 2026-10-17 (44) - Unified network traffic & protocol telemetry observability and runtime resets (v1.47 / ADR-040)
 - Task: 实现全协议网络流量透视、多通道遥测度量与运行时可观测性闭环，打通四大 TCP 通道与核心协议帧的可观测性盲区。
 - **背景与缺陷根因**:

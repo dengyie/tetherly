@@ -67,6 +67,11 @@ pub enum UiEvent {
     MetricsReset {
         timestamp_ms: u64,
     },
+    PeerCapsChanged {
+        device_id: String,
+        caps: Vec<String>,
+        features: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -3,12 +3,54 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.47** |
+| 文档版本 | **1.48** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）**——(1) **无锁原子遥测引擎 (`TrafficTelemetry`)**：基于 `AtomicU64` 变量与 `Ordering::Relaxed` 构建高性能无锁度量引擎，以零锁竞争和 $O(1)$ 时间复杂度在网络高速传输热路径上原子累加控制 (45717)、文件 (45718)、输入 (45719)、屏幕 (45720) 四大 TCP 通道的出入站字节与数据帧数；(2) **端到端核心协议消息与会话生命周期遥测**：覆盖 Ping 探活、Pong 响应、Notification 通知推送、Clipboard 剪贴板同步、FileOffer 文件提议等协议消息出入站计数，以及建连成功数、正常拆除数与握手失败数全景指标；(3) **轻量级回环控制面端点 (`GET /api/metrics`, `GET /api/traffic`, `POST /api/metrics/reset`, `POST /api/traffic/reset`)**：统一提供全维度网络流量与协议消息快照，支持按需一键原子重置基准并联动 `UiEvent::MetricsReset` 事件广播；(4) **CLI 双端全同构升级 (`tetherly metrics` / `traffic`)**：支持自适应单位表格展示（B/KiB/MiB/GiB）、四通道带宽分布柱状占比、`--json` 与 `--reset`；(5) **Web UI 实时遥测仪表盘与交互闭环 (`ui/index.html`)**：增设全协议网络流量卡片，展示总出入站吞吐、四通道带宽分布条、核心协议消息计数徽标与一键重置按键；(6) **端到端测试闭环 (`tests/phase1.rs`)**：增设 `traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api` 严谨验证全链路度量与重置逻辑。+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）**——(1) **对端能力全景透视与特性模型解耦 (`extract_features`, `LocalCapsReport`, `PeerCapsDto`, `PeersCapsReport`)**：在协议层将端口声明与纯特性标签解耦，扩展 `LivePeer.caps` 补齐对端能力存储断层；(2) **运行时动态能力状态治理与全量热广播 (`Shared.local_caps`, `Node::update_local_caps`, `Node::broadcast_caps`)**：支持在运行时零连接中断按需动态启闭特性，并向所有活动 Noise 会话广播 `CapsUpdate` 帧；(3) **事件总线能力变更实时感知 (`UiEvent::PeerCapsChanged`)**：对端通告与本机更新即时派发 `{ device_id, caps, features }`，联动 SSE 实时刷新；(4) **轻量级回环控制面端点 (`GET /api/caps`, `POST /api/caps`, `PUT /api/caps`, `GET /api/peers/caps`)**：提供本机能力报告、动态更新与智能解析对端能力矩阵，升级 `GET /api/peers` 暴露对端特性；(5) **CLI 双端全同构升级 (`tetherly caps`, `tetherly-cli caps`)**：支持 `--peer`, `--enable`, `--disable`, `--json`，并在 `peers` 列表直观渲染能力徽标；(6) **Web UI 能力看板与交互控制 (`ui/index.html`)**：增设「节点能力与特性边界」卡片，提供快捷切换按键并为在线对端渲染多维特性徽标胶囊；(7) **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**：增设 `peer_capabilities_negotiation_and_introspection_via_loopback_api` 严谨验证全链路特性协商、回环治理与防御逻辑。+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.48 相对 1.47(对端能力全景透视、多维特性协商与动态功能边界治理)**
+
+- **动机(对端能力完全黑盒、特性协商可观测性断层、动态能力边界不可控、CLI 与 UI 无感知)**:
+  在 Tetherly v1.47 实现了全协议网络流量透视与无锁原子遥测度量后，系统具备了微秒级网络吞吐可观测性。但在应用层多通道（通知同步、剪贴板共享、文件传输、键鼠控制、远程屏幕）交互演进中，暴露出**对端功能能力黑盒与特性协商可观测性断层**的严重架构缺陷：
+  1. **对端能力完全丢弃与黑盒化**：协议虽然定义了 `TYPE_CAPS_UPDATE` 帧与 `CapsUpdate { caps: Vec<String> }`，但在 `runtime.rs` 接收到对端 `CapsUpdate` 时，仅提取了端口号（`fileport=`, `inputport=`, `screenport=`），将所有的核心功能特性标签（`notify`, `clip`, `file`, `input`, `screen` 等）完全抛弃；`LivePeer` 结构体缺少 `caps` 存储字段，系统在连接建立后对对端究竟支持哪些特性一无所知；
+  2. **缺少能力全景透视端点**：`GET /api/peers` 与 `GET /api/state` 均未暴露对端能力列表，外部控制面无法获知对端已就绪的功能矩阵；缺少专用轻量级回环端点 `GET /api/caps`（透视本机支持并对外广播的能力清单）与 `GET /api/peers/caps`（查询所有对端或指定对端的能力矩阵）；
+  3. **缺少动态能力热更新与即时广播机制**：本机能力此前静态写死，无法在运行时按需启闭某项功能（例如在网络受限或高安全要求场景动态关闭屏幕推流或剪贴板共享）；缺乏 `Node::broadcast_caps()` / `POST /api/caps` 动态热更新并向所有活动 Noise 会话广播最新能力帧的原语；
+  4. **事件总线缺少能力变更事件**：对端更新能力或本机广播能力变更时，事件总线没有对应的 `UiEvent::PeerCapsChanged`，导致外部控制面与 UI 视图无法实时响应；
+  5. **双端命令行与 Web UI 缺失能力透视与指示徽标**：`tetherly` 与 `tetherly-cli` 缺乏 `caps` 命令群，`peers` 列表缺少能力标签；Web UI（`ui/index.html`）对端卡片缺少能力徽标（`[通知]` `[剪贴板]` `[文件]` `[输入]` `[屏幕]`），用户无法直观了解对端具备何种功能。
+
+- **架构与协议设计(ADR-041 对端能力全景透视、多维特性协商与动态功能边界治理)**:
+  1. **能力数据结构与 DTO 模型设计 (`runtime.rs`, `events.rs`, `lib.rs`)**:
+     - 扩展 `LivePeer` 结构体，增加 `caps: Vec<String>` 存储字段，全生命周期跟踪对端通告的能力列表；
+     - 引入纯特性提取工具函数 `extract_features(caps: &[String]) -> Vec<String>`：严格过滤包含 `=` 的端口通告，保留唯一排序的纯特性标签；
+     - 定义全景能力报告模型：
+       - `LocalCapsReport`: `{ ok, device_id, caps, features, file_port, input_port, screen_port }`；
+       - `PeerCapsDto`: `{ device_id, name, alias, caps, features, file_port, input_port, screen_port, online }`；
+       - `PeersCapsReport`: `{ ok, count, peers }`；
+     - 在 `events.rs` 增设 `UiEvent::PeerCapsChanged { device_id, caps, features }`，联动 SSE 实时推送；
+  2. **运行时存储、动态广播与事件链路集成 (`runtime.rs`)**:
+     - 在 `Shared` 维护 `local_caps: Mutex<HashSet<String>>`，默认包含 `"notify"`, `"clip"`, `"file"`, `"input"`, `"screen"`；
+     - 实现 `Node::local_caps_report(&self) -> LocalCapsReport`；
+     - 实现 `Node::peers_caps_report(&self, target_peer: Option<&str>) -> Result<PeersCapsReport, CoreError>`（支持基于设备 ID、别名与广播名的智能解析）；
+     - 实现 `Node::update_local_caps(&self, enable: &[String], disable: &[String]) -> Result<LocalCapsReport, CoreError>`：运行时热更新本机特性集，组装最新 `CapsUpdate` 帧全量异步广播至所有活动会话，并派发本地 `UiEvent::PeerCapsChanged`；
+     - 在 `SessionEvent::Caps(update)` 处理分支中保留完整 `caps` 列表并更新 `LivePeer.caps`，触发 `UiEvent::PeerCapsChanged`；
+  3. **轻量级回环控制面端点 (`uihttp.rs`)**:
+     - `GET /api/caps`：返回本机能力的 `LocalCapsReport`；
+     - `POST /api/caps` 与 `PUT /api/caps`：支持 `{"enable": [...], "disable": [...]}` 动态启闭并热广播；
+     - `GET /api/peers/caps`：支持 `?peer=<id_or_alias>` 查询对端能力矩阵 `PeersCapsReport`；
+     - 升级 `GET /api/peers` 与 `GET /api/state`：在对端 DTO 中完整暴露 `caps` 与 `features` 数组；
+     - 安全红线铁律：严格绑定 `127.0.0.1` 环回接口，校验 `Host: 127.0.0.1|localhost`（不匹配返回 403）；校验特性名称合法性（仅允许 1..=32 字节英文字母、数字、下划线及连字符，严禁 `=`、控制字符与敏感载荷）；
+  4. **CLI 双端全同构升级 (`tetherly caps`, `tetherly-cli caps`)**:
+     - 新增 `Cmd::Caps` 命令群，支持 `--peer <PEER>`, `--enable <CAP>`, `--disable <CAP>`, `--json`, `--ui-port <PORT>`；
+     - 升级 `Cmd::Peers` 输出，直观附加展示对端能力标签（如 `caps: [notify, clip, file, screen]`）；
+     - SSE 事件监听器接入 `peer_caps_changed` 实时流；
+  5. **Web UI 能力看板与交互控制 (`ui/index.html`)**:
+     - 增设「节点能力与特性边界」卡片，展示当前广播特性并提供按键动态启闭（交互调用 `/api/caps`）；
+     - 对端卡片增设彩色特性徽标胶囊（`[通知]`, `[剪贴板]`, `[文件]`, `[输入]`, `[屏幕]`）；
+     - 接入 SSE `peer_caps_changed` 事件实现无感局部重绘；
+  6. **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**:
+     - 增设 `peer_capabilities_negotiation_and_introspection_via_loopback_api`：全面覆盖初态查询、对端能力提取、智能解析检索、动态启闭热广播、SSE 变更事件及非法输入边界防御。
 
 **1.47 相对 1.46(全协议网络流量透视、多通道遥测度量与运行时可观测性闭环)**
 
