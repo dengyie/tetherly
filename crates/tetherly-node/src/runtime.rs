@@ -4203,7 +4203,19 @@ impl Node {
         peer_filter: Option<&str>,
     ) -> Result<FileBatchDecisionReport, CoreError> {
         let target_peer = if let Some(p) = peer_filter {
-            Some(self.resolve_peer(p)?)
+            match self.resolve_peer(p) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    return Ok(FileBatchDecisionReport {
+                        ok: true,
+                        action: "accepted".to_string(),
+                        accepted_count: 0,
+                        rejected_count: 0,
+                        total_evaluated: 0,
+                        decisions: Vec::new(),
+                    });
+                }
+            }
         } else {
             None
         };
@@ -4242,7 +4254,19 @@ impl Node {
         peer_filter: Option<&str>,
     ) -> Result<FileBatchDecisionReport, CoreError> {
         let target_peer = if let Some(p) = peer_filter {
-            Some(self.resolve_peer(p)?)
+            match self.resolve_peer(p) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    return Ok(FileBatchDecisionReport {
+                        ok: true,
+                        action: "rejected".to_string(),
+                        accepted_count: 0,
+                        rejected_count: 0,
+                        total_evaluated: 0,
+                        decisions: Vec::new(),
+                    });
+                }
+            }
         } else {
             None
         };
@@ -4282,7 +4306,17 @@ impl Node {
         peer_filter: Option<&str>,
     ) -> Result<FileOffersReport, CoreError> {
         let target_peer = if let Some(p) = peer_filter {
-            Some(self.resolve_peer(p)?)
+            match self.resolve_peer(p) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    return Ok(FileOffersReport {
+                        ok: true,
+                        count: 0,
+                        auto_accept_trusted: self.shared.auto_accept_trusted.load(Ordering::Relaxed),
+                        offers: Vec::new(),
+                    });
+                }
+            }
         } else {
             None
         };
