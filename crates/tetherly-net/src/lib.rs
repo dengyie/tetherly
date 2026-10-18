@@ -10,6 +10,7 @@ pub mod filechan;
 pub mod mdns;
 pub mod session;
 
+pub use codec::TaggedReader;
 pub use dispatch::SessionEvent;
 pub use error::NetError;
 pub use filechan::{

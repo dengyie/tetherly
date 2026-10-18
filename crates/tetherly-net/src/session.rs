@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::codec::{
-    read_len_prefixed, read_tagged, write_len_prefixed, write_tagged, TAG_DATA, TAG_REKEY,
+    read_len_prefixed, read_tagged, write_len_prefixed, write_tagged, TaggedReader, TAG_DATA,
+    TAG_REKEY,
 };
 use crate::error::NetError;
 use std::collections::VecDeque;
@@ -47,6 +48,7 @@ pub struct ActiveSession {
     pub peer_addr: SocketAddr,
     reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
+    tagged_reader: TaggedReader,
     transport: NoiseTransport,
     next_msg_id: u64,
     replay: ReplayGuard,
@@ -135,7 +137,7 @@ impl ActiveSession {
             if let Some(frame) = self.pending.pop_front() {
                 break frame;
             }
-            let (tag, body) = read_tagged(&mut self.reader).await?;
+            let (tag, body) = self.tagged_reader.read_tagged(&mut self.reader).await?;
             match tag {
                 TAG_DATA => {
                     let plain = self.transport.decrypt(&body)?;
@@ -199,7 +201,7 @@ impl ActiveSession {
                     // Park the state before reading so a select! cancelled read
                     // resumes the same handshake instead of dropping it.
                     self.rekey_state = Some(inflight);
-                    let (tag, body) = read_tagged(&mut self.reader).await?;
+                    let (tag, body) = self.tagged_reader.read_tagged(&mut self.reader).await?;
                     inflight = self.rekey_state.take().expect("rekey in flight");
                     match tag {
                         TAG_REKEY => {
@@ -691,6 +693,7 @@ async fn finish_noise(
         peer_addr,
         reader,
         writer,
+        tagged_reader: TaggedReader::new(),
         transport,
         next_msg_id: 1,
         replay: ReplayGuard::default(),

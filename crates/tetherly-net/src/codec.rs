@@ -56,17 +56,78 @@ pub async fn write_tagged<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// A cancellation-safe reader for tagged messages (`tag | u32 len | body`).
+///
+/// Because `read_exact` loses in-flight bytes when dropped inside a `tokio::select!`
+/// branch, [`TaggedReader`] maintains partially read header and body buffers across
+/// future cancellations.
+#[derive(Debug, Default)]
+pub struct TaggedReader {
+    header_buf: [u8; 5],
+    header_read: usize,
+    body_buf: Vec<u8>,
+    body_read: usize,
+    body_allocated: bool,
+}
+
+impl TaggedReader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Read the next tagged message, resuming from any previously read partial bytes.
+    pub async fn read_tagged<R: AsyncRead + Unpin>(
+        &mut self,
+        r: &mut R,
+    ) -> Result<(u8, Vec<u8>), NetError> {
+        while self.header_read < 5 {
+            let n = r.read(&mut self.header_buf[self.header_read..5]).await?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "stream closed during header",
+                )
+                .into());
+            }
+            self.header_read += n;
+        }
+
+        if !self.body_allocated {
+            let len = u32::from_be_bytes(
+                self.header_buf[1..5]
+                    .try_into()
+                    .expect("header_buf slice is 4 bytes"),
+            ) as usize;
+            if len > MAX_OUTER {
+                return Err(NetError::TooLarge);
+            }
+            self.body_buf = vec![0u8; len];
+            self.body_read = 0;
+            self.body_allocated = true;
+        }
+
+        while self.body_read < self.body_buf.len() {
+            let n = r.read(&mut self.body_buf[self.body_read..]).await?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "stream closed during body",
+                )
+                .into());
+            }
+            self.body_read += n;
+        }
+
+        let tag = self.header_buf[0];
+        let body = std::mem::take(&mut self.body_buf);
+        self.header_read = 0;
+        self.body_read = 0;
+        self.body_allocated = false;
+        Ok((tag, body))
+    }
+}
+
 /// Read one tagged message written by [`write_tagged`].
 pub async fn read_tagged<R: AsyncRead + Unpin>(r: &mut R) -> Result<(u8, Vec<u8>), NetError> {
-    let mut tag = [0u8; 1];
-    r.read_exact(&mut tag).await?;
-    let mut len_buf = [0u8; 4];
-    r.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > MAX_OUTER {
-        return Err(NetError::TooLarge);
-    }
-    let mut body = vec![0u8; len];
-    r.read_exact(&mut body).await?;
-    Ok((tag[0], body))
+    TaggedReader::new().read_tagged(r).await
 }

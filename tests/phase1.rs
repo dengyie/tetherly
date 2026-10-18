@@ -4803,6 +4803,29 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
         serde_json::from_slice(&body_after_rej).unwrap();
     assert_eq!(after_rej_rep.count, 0);
 
+    // Wait until peer receives the rejection frame and marks transfer_id1 Failed
+    let start_peer_rej = std::time::Instant::now();
+    loop {
+        let (_, b_peer_xfers) = tetherly_node::loopback_get(peer_ui, "/api/file/transfers")
+            .await
+            .unwrap();
+        let rep_peer_xfers: tetherly_node::TransfersReport =
+            serde_json::from_slice(&b_peer_xfers).unwrap();
+        if let Some(t) = rep_peer_xfers
+            .transfers
+            .iter()
+            .find(|t| t.transfer_id == transfer_id1)
+        {
+            if t.phase == tetherly_node::TransferPhase::Failed {
+                break;
+            }
+        }
+        if start_peer_rej.elapsed() > Duration::from_secs(10) {
+            panic!("timed out waiting for peer to observe rejection of {transfer_id1}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
     // 5. Test Batch Reject: Peer offers 2 files
     let file_a_path = send_dir.join("batch_a.bin");
     let file_b_path = send_dir.join("batch_b.bin");
@@ -4890,6 +4913,35 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     let after_batch: tetherly_node::FileOffersReport =
         serde_json::from_slice(&b_after_batch).unwrap();
     assert_eq!(after_batch.count, 0);
+
+    // Wait until peer receives the rejection frames and marks both id_a and id_b Failed
+    let start_peer_batch = std::time::Instant::now();
+    loop {
+        let (_, b_peer_xfers) = tetherly_node::loopback_get(peer_ui, "/api/file/transfers")
+            .await
+            .unwrap();
+        let rep_peer_xfers: tetherly_node::TransfersReport =
+            serde_json::from_slice(&b_peer_xfers).unwrap();
+        let a_failed = rep_peer_xfers
+            .transfers
+            .iter()
+            .find(|t| t.transfer_id == id_a)
+            .map(|t| t.phase == tetherly_node::TransferPhase::Failed)
+            .unwrap_or(false);
+        let b_failed = rep_peer_xfers
+            .transfers
+            .iter()
+            .find(|t| t.transfer_id == id_b)
+            .map(|t| t.phase == tetherly_node::TransferPhase::Failed)
+            .unwrap_or(false);
+        if a_failed && b_failed {
+            break;
+        }
+        if start_peer_batch.elapsed() > Duration::from_secs(10) {
+            panic!("timed out waiting for peer to observe batch rejection of {id_a} and {id_b}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // 6. Test Auto-Accept Policy for Trusted Peers on Peer node
     let mut peer_rx = peer.subscribe();
