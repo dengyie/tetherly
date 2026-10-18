@@ -613,3 +613,18 @@
 - Results: Pending CI after push.
 - Next: Confirm Windows check is green.
 - Blockers: None.
+
+## 2026-10-19
+- Task: Tetherly v1.53 Production Code Review Root-Cause Fix, Verification, and Dual-Archival (Obsidian & GitHub).
+- Actions:
+  1. Root-cause fixed P1 multi-file cumulative `total_bytes` sum in `file_offers` (`crates/tetherly-node/src/runtime.rs`);
+  2. Root-cause fixed P2 `user_accept_file_reported` and `user_reject_file_reported` state machine race condition and lock granularity (consolidated to single atomic `hubs` lock scope);
+  3. Deduplicated `user_accept_file` and `user_reject_file` by directly wrapping their `_reported` variants;
+  4. Added multi-file offer cumulative size (4000 bytes) and atomic decision report assertion in E2E integration test `tests/phase1.rs`;
+  5. Multi-platform CI verified: GitHub Actions CI run `39162786508` passed 100% green across all 5 jobs (`deny`, `android`, `check (ubuntu-latest)`, `check (macos-latest)`, `check (windows-latest)`);
+  6. Documentation synchronized: `docs/DEVELOPMENT.md` ADR-046 Section 10, Obsidian canonical note `Note/Project/tetherly/tetherly 开发文档.md`, and root router `00.MOC/AI-DOC-ROUTER.md`;
+  7. Ran `scan-stale-docs` in Obsidian vault (1462 files scanned, 0 stale hits); pushed Obsidian vault commits to `origin master`;
+  8. Updated `.codex-memory` project state and session log.
+- Results: 100% green CI on all platforms, zero-plaintext security invariants strictly preserved, documentation and code archives fully synchronized to Obsidian and GitHub.
+- Next: Ready for next architectural milestone.
+- Blockers: None.

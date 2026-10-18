@@ -302,18 +302,23 @@
   6. 轻量级回环控制面端点升级：`GET /api/file/offers`、`POST /api/file/accept`、`POST /api/file/reject`、`GET/POST /api/file/auto-accept`（严格校验 127.0.0.1 回环绑定与 Host 403）；
   7. CLI 双端全同构升级：`offers`、`accept`、`reject`、`auto-accept` 子命令，并在 `events` 监听器中高亮展示；
   8. Web UI 提议治理卡片与自动接收开关；
-  9. 网络层取消安全与多路复用健壮性强化：设计实现状态化 `TaggedReader` 环形缓冲状态机，消除 Tokio `select!` 竞态丢弃分支时的 partial-read 网络帧解包失步，在 `tests/phase1.rs` 增设步骤 4/5 对端拒绝观测同步，5 平台 CI 100% 全绿。
+  9. 网络层取消安全与多路复用健壮性强化：设计实现状态化 `TaggedReader` 环形缓冲状态机，消除 Tokio `select!` 竞态丢弃分支时的 partial-read 网络帧解包失步，在 `tests/phase1.rs` 增设步骤 4/5 对端拒绝观测同步，5 平台 CI 100% 全绿；
+  10. 生产级代码审查修复、原子锁治理与多文件提议尺寸纠偏：
+     - **修复 P1 多文件累积字节统计失真**：`file_offers` 中 `total_bytes` 与 `size` 改为全文件求和 `t.files.iter().map(|f| f.size).sum()`；
+     - **修复 P2 拒绝状态流转清理竞态与单点原子锁收敛**：`user_accept_file_reported` 与 `user_reject_file_reported` 将状态转换与元数据提取收敛至单次持锁临界区，加锁由 3 次降为 1 次且消灭并发 prune 竞态；
+     - **代码去重与接口收敛**：`user_accept_file` 与 `user_reject_file` 直接委托 `*_reported` 变体；
+     - **端到端集成测试增强**：`tests/phase1.rs` 增设包含 2 个子文件的多文件提议注入，验证累积 4000 字节及原子拒绝上报。
 
 ## Current Branch
 - `main` @ `https://github.com/dengyie/tetherly`
 
 ## Last Verified
-- GitHub Actions CI Run `39159576824`（commit `15d16a8`）全部 5 个平台矩阵任务 100% 全绿通过：
-  - `deny` (45s): PASSED
-  - `android` (1m51s): PASSED
-  - `check (windows-latest)` (4m52s): PASSED
+- GitHub Actions CI Run `39162786508`（commit `3b3c061`）全部 5 个平台矩阵任务 100% 全绿通过：
+  - `deny` (44s): PASSED
+  - `android` (1m50s): PASSED
+  - `check (windows-latest)` (5m16s): PASSED
   - `check (macos-latest)` (2m39s): PASSED
-  - `check (ubuntu-latest)` (3m43s): PASSED
+  - `check (ubuntu-latest)` (3m44s): PASSED
 - `cargo fmt --all --check` & `cargo clippy --all-targets -- -D warnings` 全部干净通过。
 - `cargo deny check`（advisories, bans, licenses, sources）全部通过。
 - 300+ 单元测试与端到端集成测试全绿。

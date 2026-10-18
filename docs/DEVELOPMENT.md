@@ -77,6 +77,11 @@
   9. **Windows 平台异步端到端测试与生命周期健壮性加固 (`crates/tetherly-android/tests/client_e2e.rs`)**:
      - 针对 Windows CI Runner 虚拟化 CPU 在多测试并行压力下的 Argon2id 密钥派生耗时与线程调度延迟，将 `android_client_pairs_and_delivers_notify` 连线等待截止时间从 10s 调整为 30s；
      - 针对 `android_client_receives_a_quick_reply_once`，移除了对端 mock 服务端脆弱的固定 500ms 休眠设计，引入 `tokio::sync::oneshot::channel()` 双向生命周期同步，确保服务端在客户端完全取走快速回复帧并完成校验前维持会话存活。
+  10. **生产级代码审查修复、原子锁治理与多文件提议尺寸纠偏 (`crates/tetherly-node/src/runtime.rs`, `tests/phase1.rs`)**:
+     - **修复 P1 多文件累积字节统计失真**：在 `file_offers` 检索中将 `total_bytes` 与 `size` 统一求和 `t.files.iter().map(|f| f.size).sum()`，终结了多文件传输时提议体积仅按首个文件计算的问题；
+     - **修复 P2 拒绝状态流转清理竞态与单点原子锁收敛**：在 `user_accept_file_reported` 与 `user_reject_file_reported` 中，将决策状态转换与来源/文件名/总大小提取合并到持有 `hubs` 锁的单次临界区内，避免了 `hubs.files.reject` 后并发 prune 导致提取 source 失败抛出 `UnknownTransfer` 的竞态风险，同时将加锁次数由 3 次彻底降为 1 次；
+     - **代码去重与接口收敛**：将 `user_accept_file` 与 `user_reject_file` 重构为直接包装 `*_reported` 变体，消除重复逻辑；
+     - **端到端集成测试增强**：在 `tests/phase1.rs` 中增设包含 2 个子文件的多文件提议网络注入，验证回环 `GET /api/file/offers?id=...` 返回准确的累积字节数 4000，且通过 `user_reject_file_reported` 完成原子拒绝与报告校验；5 平台 CI（Ubuntu, macOS, Windows, Android NDK, Deny）100% 验证通过。
 
 **1.52 相对 1.51(跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环)**
 
