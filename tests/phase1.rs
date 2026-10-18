@@ -3697,14 +3697,13 @@ async fn peer_active_connect_and_disconnect_lifecycle_via_loopback_api() {
     let mut saw_peer_down = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(500), sse.next_ui_event()).await {
-            Ok(Ok(Some(UiEvent::PeerDown { device_id }))) => {
-                if device_id == peer_id.as_str() {
-                    saw_peer_down = true;
-                    break;
-                }
+        if let Ok(Ok(Some(UiEvent::PeerDown { device_id }))) =
+            tokio::time::timeout(Duration::from_millis(500), sse.next_ui_event()).await
+        {
+            if device_id == peer_id.as_str() {
+                saw_peer_down = true;
+                break;
             }
-            _ => {}
         }
     }
     assert!(saw_peer_down, "must emit PeerDown on disconnect");
