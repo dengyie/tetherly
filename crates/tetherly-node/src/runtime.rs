@@ -4312,7 +4312,10 @@ impl Node {
                     return Ok(FileOffersReport {
                         ok: true,
                         count: 0,
-                        auto_accept_trusted: self.shared.auto_accept_trusted.load(Ordering::Relaxed),
+                        auto_accept_trusted: self
+                            .shared
+                            .auto_accept_trusted
+                            .load(Ordering::Relaxed),
                         offers: Vec::new(),
                     });
                 }
