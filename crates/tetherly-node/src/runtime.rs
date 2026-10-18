@@ -1454,12 +1454,12 @@ impl Node {
         &self,
         target_peer: Option<&str>,
     ) -> Result<PeersCapsReport, CoreError> {
-        let live_map = self.shared.live.lock().expect("live");
         let trusted = self.trusted();
         let mut reports = Vec::new();
 
         if let Some(query) = target_peer {
             let target_id = self.resolve_peer(query)?;
+            let live_map = self.shared.live.lock().expect("live");
             if let Some(lp) = live_map.get(&target_id) {
                 let alias = trusted
                     .iter()
@@ -1505,6 +1505,7 @@ impl Node {
                 });
             }
         } else {
+            let live_map = self.shared.live.lock().expect("live");
             for (id, lp) in live_map.iter() {
                 let alias = trusted.iter().find(|t| t.device_id == *id).and_then(|t| {
                     if t.alias.is_empty() {

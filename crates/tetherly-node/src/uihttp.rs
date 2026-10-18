@@ -808,10 +808,15 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 disable: Vec<String>,
             }
             match serde_json::from_slice::<CapsUpdateBody>(body) {
-                Ok(b) => match node.update_local_caps(&b.enable, &b.disable).await {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(400, &e.to_string()),
-                },
+                Ok(b) => {
+                    if b.enable.is_empty() && b.disable.is_empty() {
+                        return err(400, "no capability changes specified");
+                    }
+                    match node.update_local_caps(&b.enable, &b.disable).await {
+                        Ok(rep) => json_ok(&rep),
+                        Err(e) => err(400, &e.to_string()),
+                    }
+                }
                 Err(_) => err(
                     400,
                     "bad json, expected { enable?: string[], disable?: string[] }",
@@ -826,6 +831,9 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 .map(|s| s.as_str());
             match node.peers_caps_report(target_peer) {
                 Ok(rep) => json_ok(&rep),
+                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
+                    err(404, &format!("peer not found: {e}"))
+                }
                 Err(e) => err(400, &e.to_string()),
             }
         }
