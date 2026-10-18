@@ -605,7 +605,7 @@ function render(s) {
         return '<span class="badge" style="background:var(--card-bg);border:1px solid var(--border);color:var(--text);font-size:11px;margin-right:3px">[' + label + ']</span>';
       }).join('') + '</span>';
     }
-    const card = el('<div class="card"><div style="flex:1"><div class="title"><span></span>' + pathBadge + rttBadge + capsBadges + '</div><div class="meta"></div></div><div class="row"><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost ping-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">测速</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
+    const card = el('<div class="card"><div style="flex:1"><div class="title"><span></span>' + pathBadge + rttBadge + capsBadges + '</div><div class="meta"></div></div><div class="row"><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost ping-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">测速</button><button class="ghost disconnect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">断开</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
     const displayName = (x.alias && x.alias !== x.name) ? (x.name + ' ("' + x.alias + '")') : x.name;
     card.querySelector(".title span").textContent = displayName;
     card.querySelector(".meta").textContent = x.platform + " · " + (x.path || "lan") + " · " + x.device_id;
@@ -637,6 +637,17 @@ function render(s) {
       }
       tick();
     };
+    const disconnectBtn = card.querySelector(".disconnect-btn");
+    disconnectBtn.onclick = async () => {
+      disconnectBtn.disabled = true;
+      disconnectBtn.textContent = "断开中…";
+      try {
+        await api("/api/peers/disconnect", { peer: x.device_id });
+      } catch (e) {
+        alert("断开连接失败: " + e.message);
+      }
+      tick();
+    };
     const unpairBtn = card.querySelector(".unpair-btn");
     unpairBtn.onclick = async () => {
       if (confirm("确认解除与设备 " + x.name + " (" + x.device_id + ") 的配对？")) {
@@ -664,7 +675,10 @@ function render(s) {
         const badge = t.online
           ? '<span class="badge completed" style="margin-right:6px">在线</span>'
           : '<span class="badge offline" style="margin-right:6px">离线</span>';
-        const card = el('<div class="card"><div style="flex:1"><div class="title">' + badge + '<span></span></div><div class="meta"></div></div><div class="row"><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
+        const actionBtns = t.online
+          ? '<button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost disconnect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">断开</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button>'
+          : '<button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost connect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">连接</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button>';
+        const card = el('<div class="card"><div style="flex:1"><div class="title">' + badge + '<span></span></div><div class="meta"></div></div><div class="row">' + actionBtns + '</div></div>');
         card.querySelector(".title span").textContent = t.alias || t.device_id;
         card.querySelector(".meta").textContent = t.device_id;
         const aliasBtn = card.querySelector(".alias-btn");
@@ -675,6 +689,37 @@ function render(s) {
             tick();
           }
         };
+        const connectBtn = card.querySelector(".connect-btn");
+        if (connectBtn) {
+          connectBtn.onclick = async () => {
+            connectBtn.disabled = true;
+            connectBtn.textContent = "连接中…";
+            try {
+              const res = await api("/api/peers/connect", { peer: t.device_id });
+              if (res && res.ok) {
+                connectBtn.textContent = "已连接";
+              }
+            } catch (e) {
+              alert("连接失败: " + e.message);
+              connectBtn.textContent = "连接";
+              connectBtn.disabled = false;
+            }
+            tick();
+          };
+        }
+        const disconnectBtn = card.querySelector(".disconnect-btn");
+        if (disconnectBtn) {
+          disconnectBtn.onclick = async () => {
+            disconnectBtn.disabled = true;
+            disconnectBtn.textContent = "断开中…";
+            try {
+              await api("/api/peers/disconnect", { peer: t.device_id });
+            } catch (e) {
+              alert("断开失败: " + e.message);
+            }
+            tick();
+          };
+        }
         const unpairBtn = card.querySelector(".unpair-btn");
         unpairBtn.onclick = async () => {
           if (confirm("确认解除与设备 " + (t.alias || t.device_id) + " (" + t.device_id + ") 的配对？")) {

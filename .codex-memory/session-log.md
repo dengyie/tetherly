@@ -1,5 +1,39 @@
 # Session log
 
+## 2026-10-17 (46) - Peer connection session governance, on-demand direct connect and graceful disconnect (v1.49 / ADR-042)
+- Task: 实现对端连接会话全域治理、主动按需直连与优雅断开控制闭环，彻底解耦会话状态与配对信任关系。
+- **背景与缺陷根因**:
+  在 Tetherly v1.48 实现了对端能力全景透视与特性协商后，多通道交互具备了动态边界治理能力。但在日常多节点拓扑运行中，暴露出会话生命周期与信任关系强耦合、主动连接能力缺失的关键运维痛点：
+  1. 会话断连与信任解绑混淆：此前仅存在 `POST /api/peers/unpair`（以及 CLI `unpair`），一旦调用便会彻底清除 `trusted.json` 中的对称密钥与信任关系，并抹除 `routes.json` 物理寻址缓存；若用户仅希望暂时断开某台设备的活动 TCP 会话（例如切换网络、开会节能或暂停多端同步），此前完全无法在保留配对信任的前提下优雅断开；
+  2. 缺少按需主动发起直连原语：已配对受信任设备断线后，系统完全依赖后台 30 秒轮询定时器（`spawn_reconnect`）尝试回拨；若后台重连被用户禁用（`--reconnect false`）或对端刚上线，用户无法主动下达指令要求节点立即与对端建立连接，必须等待长达 30 秒甚至重启守护进程；
+  3. 缺少轻量级回环控制端点：外部运维脚本与桌面前端缺少 `POST /api/peers/connect` 与 `POST /api/peers/disconnect` 原语，无法精准控制指定对端的会话在线状态；
+  4. 双端命令行缺失连接与断开子命令：`tetherly` 与 `tetherly-cli` 仅有初次配对用的 `dial`，缺少面向已受信任设备的 `connect` 与 `disconnect` 命令群；
+  5. Web 前端卡片缺少操作按键：Web UI 对端卡片无法一键手动断开在线会话，离线受信任卡片无法一键触发重新连接。
+- **架构设计与落地 (ADR-042)**:
+  1. 对端会话生命周期模型解耦与 DTO 抽象 (`PeerConnectReport`, `PeerDisconnectReport`):
+     - `PeerConnectReport`: `{ ok, device_id, name, alias, addr, connected, already_connected }`；
+     - `PeerDisconnectReport`: `{ ok, device_id, name, alias, disconnected, already_disconnected }`；
+     - 严格区分「临时断开会话 (disconnect)」与「永久撤销信任 (unpair)」：disconnect 仅断开活动 TCP 传输信道，绝不修改 `trusted.json` 与 `routes.json`；
+  2. 节点运行时主动连接与优雅断开控制原语 (`runtime.rs`):
+     - `Node::connect_peer(&self, query: &str, direct_addr: Option<&str>) -> Result<PeerConnectReport, CoreError>`：支持基于设备 ID、别名或广播名的智能解析，若已在线幂等返回 `already_connected: true`；若提供显式 `direct_addr` 校验套接字与非零端口并更新 `routes.json` 缓存，未提供则从 `routes.json` 自动解析物理地址；异步触发 `dial(addr)` 握手建连；
+     - `Node::disconnect_peer(&self, query: &str) -> Result<PeerDisconnectReport, CoreError>`：智能解析定位对端，若已离线幂等返回 `already_disconnected: true`，否则从 `Shared.sessions` 移除发送端关闭信道、从 `Shared.live` 驱逐、复位输入焦点（`input_seat`）并向事件总线广播 `UiEvent::PeerDown`；
+  3. 轻量级回环控制面端点 (`uihttp.rs`):
+     - `POST /api/peers/connect`：支持 JSON 体 `{"peer": "...", "addr": "..."}` 与 Query 参数 `?peer=...&addr=...`；未知对端返回 404，寻址失败或地址非法返回 400；
+     - `POST /api/peers/disconnect`：支持 JSON 体 `{"peer": "..."}` 与 Query 参数 `?peer=...`；未知对端返回 404；
+     - 严格守卫安全红线：仅绑定 `127.0.0.1`，强校验 `Host: 127.0.0.1|localhost`；
+  4. CLI 双端全同构升级 (`tetherly connect/disconnect`, `tetherly-cli connect/disconnect`):
+     - `connect`: `--peer <PEER> [--addr <IP:PORT>] [--json] [--ui-port <PORT>]`；
+     - `disconnect`: `--peer <PEER> [--json] [--ui-port <PORT>]`；
+  5. Web UI 会话治理按键与交互闭环 (`ui/index.html`):
+     - 在线设备卡片增设「断开」交互按键，点击调用 `POST /api/peers/disconnect`；
+     - 受信任设备卡片依据 `online` 状态动态呈现「断开」或「连接」按键，点击分别调用对应回环接口；
+     - 接入 SSE `peer_up` 与 `peer_down` 事件驱动界面实时局部重绘；
+  6. 端到端集成测试全绿覆盖 (`tests/phase1.rs`):
+     - 增设 `peer_active_connect_and_disconnect_lifecycle_via_loopback_api`：覆盖已在线状态检测、断开会话、SSE `PeerDown` 捕获、信任保持、幂等二次断开、按需直连重连、显式地址连接、以及非法地址与未知对端防御全流程。
+- **发布与文档同步**:
+  - SSOT `docs/DEVELOPMENT.md` 升至 v1.49，确立 ADR-042。
+  - Obsidian 知识库 `tetherly 开发文档.md` 与路由表 `AI-DOC-ROUTER.md` 同步更新。
+
 ## 2026-10-17 (45) - Peer capabilities introspection, multi-dimensional feature negotiation, and dynamic capability governance (v1.48 / ADR-041)
 - Task: 实现对端能力全景透视、多维特性协商与动态功能边界治理，打通应用层功能黑盒与动态特性启闭链路。
 - **背景与缺陷根因**:

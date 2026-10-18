@@ -3621,6 +3621,236 @@ async fn peer_capabilities_negotiation_and_introspection_via_loopback_api() {
     peer.shutdown();
 }
 
+/// ADR-042: Peer connection session governance, on-demand direct connect and graceful disconnect.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_active_connect_and_disconnect_lifecycle_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_id = peer.identity().device_id().clone();
+    let peer_addr = peer.control_addr();
+
+    // 1. Assign friendly alias to peer
+    let alias_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "alias": "Workstation"
+    });
+    let (code_alias, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/alias",
+        &serde_json::to_vec(&alias_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_alias, 200);
+
+    // 2. Connect to SSE event stream
+    let mut sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("SSE connects");
+
+    // 3. Verify initial online state:
+    // a. GET /api/peers shows peer online
+    let (code_peers, body_peers) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .unwrap();
+    assert_eq!(code_peers, 200);
+    let peers_rep: serde_json::Value = serde_json::from_slice(&body_peers).unwrap();
+    let live_peers = peers_rep["live"].as_array().unwrap();
+    assert!(live_peers.iter().any(|p| p["device_id"] == peer_id.as_str()));
+
+    // b. POST /api/peers/connect when already live returns already_connected: true
+    let conn_payload = serde_json::json!({ "peer": "Workstation" });
+    let (code_c1, body_c1) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/connect",
+        &serde_json::to_vec(&conn_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_c1, 200);
+    let rep_c1: tetherly_node::PeerConnectReport = serde_json::from_slice(&body_c1).unwrap();
+    assert!(rep_c1.ok);
+    assert!(rep_c1.connected);
+    assert!(rep_c1.already_connected);
+    assert_eq!(rep_c1.device_id, peer_id.as_str());
+    assert_eq!(rep_c1.alias.as_deref(), Some("Workstation"));
+
+    // 4. Actively disconnect session:
+    let disc_payload = serde_json::json!({ "peer": "Workstation" });
+    let (code_d1, body_d1) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/disconnect",
+        &serde_json::to_vec(&disc_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_d1, 200);
+    let rep_d1: tetherly_node::PeerDisconnectReport = serde_json::from_slice(&body_d1).unwrap();
+    assert!(rep_d1.ok);
+    assert!(rep_d1.disconnected);
+    assert!(!rep_d1.already_disconnected);
+    assert_eq!(rep_d1.device_id, peer_id.as_str());
+
+    // 5. Verify SSE emitted PeerDown:
+    let mut saw_peer_down = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), sse.next_ui_event()).await {
+            Ok(Ok(Some(UiEvent::PeerDown { device_id }))) => {
+                if device_id == peer_id.as_str() {
+                    saw_peer_down = true;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_peer_down, "must emit PeerDown on disconnect");
+
+    // 6. Verify trust is maintained and status is offline:
+    let (_, body_peers_off) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .unwrap();
+    let peers_off: serde_json::Value = serde_json::from_slice(&body_peers_off).unwrap();
+    let live_arr = peers_off["live"].as_array().unwrap();
+    assert!(!live_arr.iter().any(|p| p["device_id"] == peer_id.as_str()));
+    let trusted_arr = peers_off["trusted"].as_array().unwrap();
+    let trusted_match = trusted_arr
+        .iter()
+        .find(|t| t["device_id"] == peer_id.as_str())
+        .expect("trusted entry must still exist");
+    assert_eq!(trusted_match["online"], false);
+
+    // 7. Disconnecting again is idempotent: returns already_disconnected: true
+    let (code_d2, body_d2) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/disconnect",
+        &serde_json::to_vec(&disc_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_d2, 200);
+    let rep_d2: tetherly_node::PeerDisconnectReport = serde_json::from_slice(&body_d2).unwrap();
+    assert!(rep_d2.ok);
+    assert!(!rep_d2.disconnected);
+    assert!(rep_d2.already_disconnected);
+
+    // 8. Actively reconnect on-demand using remembered route:
+    let (code_c2, body_c2) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/connect",
+        &serde_json::to_vec(&conn_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_c2, 200);
+    let rep_c2: tetherly_node::PeerConnectReport = serde_json::from_slice(&body_c2).unwrap();
+    assert!(rep_c2.ok);
+    assert!(rep_c2.connected);
+    assert!(!rep_c2.already_connected);
+
+    // Verify online again in GET /api/peers:
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (_, body_peers_on) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .unwrap();
+    let peers_on: serde_json::Value = serde_json::from_slice(&body_peers_on).unwrap();
+    let live_arr_on = peers_on["live"].as_array().unwrap();
+    assert!(live_arr_on.iter().any(|p| p["device_id"] == peer_id.as_str()));
+
+    // 9. Disconnect and reconnect with explicit socket address:
+    let (code_d3, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/disconnect",
+        &serde_json::to_vec(&disc_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_d3, 200);
+
+    let explicit_addr_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "addr": peer_addr.to_string(),
+    });
+    let (code_c3, body_c3) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/connect",
+        &serde_json::to_vec(&explicit_addr_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_c3, 200);
+    let rep_c3: tetherly_node::PeerConnectReport = serde_json::from_slice(&body_c3).unwrap();
+    assert!(rep_c3.ok);
+    assert!(rep_c3.connected);
+    assert_eq!(rep_c3.addr.as_deref(), Some(peer_addr.to_string().as_str()));
+
+    // 10. Negative validation & edge cases:
+    // a. Empty peer query returns 400
+    let empty_payload = serde_json::json!({});
+    let (code_err1, body_err1) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/connect",
+        &serde_json::to_vec(&empty_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_err1, 400);
+    assert!(String::from_utf8_lossy(&body_err1).contains("peer identifier required"));
+
+    // b. Unknown peer query returns 404
+    let unknown_payload = serde_json::json!({ "peer": "tdev_9999999999999999" });
+    let (code_err2, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/connect",
+        &serde_json::to_vec(&unknown_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_err2, 404);
+
+    let (code_err3, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/disconnect",
+        &serde_json::to_vec(&unknown_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_err3, 404);
+
+    // c. Invalid socket address returns 400
+    let invalid_addr_payload = serde_json::json!({
+        "peer": "Workstation",
+        "addr": "not-a-socket-addr"
+    });
+    let (code_err4, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/connect",
+        &serde_json::to_vec(&invalid_addr_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_err4, 400);
+
+    // d. Zero port socket address returns 400
+    let zero_port_payload = serde_json::json!({
+        "peer": "Workstation",
+        "addr": "127.0.0.1:0"
+    });
+    let (code_err5, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/connect",
+        &serde_json::to_vec(&zero_port_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_err5, 400);
+
+    // 11. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

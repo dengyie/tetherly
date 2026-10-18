@@ -255,6 +255,29 @@ pub struct PinReport {
     pub created_at_ms: u64,
 }
 
+/// Report returned when actively connecting to a trusted peer on demand.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PeerConnectReport {
+    pub ok: bool,
+    pub device_id: String,
+    pub name: Option<String>,
+    pub alias: Option<String>,
+    pub addr: Option<String>,
+    pub connected: bool,
+    pub already_connected: bool,
+}
+
+/// Report returned when actively disconnecting a live peer session on demand.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PeerDisconnectReport {
+    pub ok: bool,
+    pub device_id: String,
+    pub name: Option<String>,
+    pub alias: Option<String>,
+    pub disconnected: bool,
+    pub already_disconnected: bool,
+}
+
 struct Hubs {
     notify: NotifyHub,
     clip: ClipHub,
@@ -2375,6 +2398,158 @@ impl Node {
             });
         }
         had_trust || had_session || had_live
+    }
+
+    /// Actively connect to a trusted peer (specified by device ID, alias, or name).
+    ///
+    /// If `direct_addr` is provided, parses and validates the socket address, remembers it
+    /// in `routes.json`, and attempts to dial it. Otherwise looks up remembered routes.
+    /// If the peer is already live, returns immediately with `already_connected: true`.
+    pub async fn connect_peer(
+        &self,
+        query: &str,
+        direct_addr: Option<&str>,
+    ) -> Result<PeerConnectReport, CoreError> {
+        let target_id = self.resolve_peer(query)?;
+        let trusted = self.trusted();
+        let matched = trusted.iter().find(|t| t.device_id == target_id);
+        let alias = matched.and_then(|t| {
+            if t.alias.is_empty() {
+                None
+            } else {
+                Some(t.alias.clone())
+            }
+        });
+
+        // Check if already live
+        {
+            let live = self.shared.live.lock().expect("live");
+            if let Some(lp) = live.get(&target_id) {
+                return Ok(PeerConnectReport {
+                    ok: true,
+                    device_id: target_id.to_string(),
+                    name: Some(lp.name.clone()),
+                    alias,
+                    addr: Some(lp.addr.to_string()),
+                    connected: true,
+                    already_connected: true,
+                });
+            }
+        }
+
+        let addr = if let Some(raw_addr) = direct_addr {
+            let parsed: SocketAddr = raw_addr
+                .trim()
+                .parse()
+                .map_err(|e| CoreError::InvalidRoute(format!("invalid socket address '{raw_addr}': {e}")))?;
+            if parsed.port() == 0 {
+                return Err(CoreError::InvalidRoute(
+                    "socket port must be non-zero".to_string(),
+                ));
+            }
+            let _ = crate::store::remember_route(
+                &self.shared.cfg.data_dir,
+                target_id.as_str(),
+                &parsed.to_string(),
+            );
+            parsed
+        } else {
+            let routes = crate::store::load_routes(&self.shared.cfg.data_dir);
+            route_addr(&routes, target_id.as_str()).ok_or_else(|| {
+                CoreError::InvalidRoute(format!("no known route for peer {}", target_id))
+            })?
+        };
+
+        match self.dial(addr).await {
+            Ok(()) => {
+                let live_name = {
+                    let live = self.shared.live.lock().expect("live");
+                    live.get(&target_id).map(|lp| lp.name.clone())
+                };
+                let name = live_name.or_else(|| alias.clone());
+                Ok(PeerConnectReport {
+                    ok: true,
+                    device_id: target_id.to_string(),
+                    name,
+                    alias,
+                    addr: Some(addr.to_string()),
+                    connected: true,
+                    already_connected: false,
+                })
+            }
+            Err(e) => Err(CoreError::InvalidRoute(format!(
+                "failed to dial {} at {}: {}",
+                target_id, addr, e
+            ))),
+        }
+    }
+
+    /// Actively disconnect an active session with the specified peer (by id, alias, or name)
+    /// without revoking trust or forgetting its route.
+    ///
+    /// Drops the outbound session channel, evicts the peer from live state,
+    /// emits `UiEvent::PeerDown`, and returns a `PeerDisconnectReport`.
+    pub async fn disconnect_peer(
+        &self,
+        query: &str,
+    ) -> Result<PeerDisconnectReport, CoreError> {
+        let target_id = self.resolve_peer(query)?;
+        let trusted = self.trusted();
+        let matched = trusted.iter().find(|t| t.device_id == target_id);
+        let alias = matched.and_then(|t| {
+            if t.alias.is_empty() {
+                None
+            } else {
+                Some(t.alias.clone())
+            }
+        });
+        let live_name = {
+            let live = self.shared.live.lock().expect("live");
+            live.get(&target_id).map(|lp| lp.name.clone())
+        };
+        let name = live_name.or_else(|| alias.clone());
+
+        let had_session = self
+            .shared
+            .sessions
+            .lock()
+            .await
+            .remove(&target_id)
+            .is_some();
+        let had_live = self
+            .shared
+            .live
+            .lock()
+            .expect("live")
+            .remove(&target_id)
+            .is_some();
+
+        if *self.shared.input_seat.lock().expect("seat") == Some(CursorSeat::Remote) {
+            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        }
+
+        if had_session || had_live {
+            self.emit(UiEvent::PeerDown {
+                device_id: target_id.to_string(),
+            });
+            Ok(PeerDisconnectReport {
+                ok: true,
+                device_id: target_id.to_string(),
+                name,
+                alias,
+                disconnected: true,
+                already_disconnected: false,
+            })
+        } else {
+            Ok(PeerDisconnectReport {
+                ok: true,
+                device_id: target_id.to_string(),
+                name,
+                alias,
+                disconnected: false,
+                already_disconnected: true,
+            })
+        }
     }
 
     fn already_live_on_ip(&self, addr: SocketAddr) -> bool {

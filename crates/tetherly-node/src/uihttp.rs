@@ -553,6 +553,24 @@ struct PeerTargetBody {
 }
 
 #[derive(serde::Deserialize, Default)]
+struct PeerConnectBody {
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    peer: Option<String>,
+    #[serde(default)]
+    addr: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct PeerDisconnectBody {
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    peer: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
 struct TransfersQueryBody {
     id: Option<String>,
     active: Option<bool>,
@@ -677,6 +695,71 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             },
             Err(_) => err(400, "bad json"),
         },
+        ("POST", "/api/peers/connect") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<PeerConnectBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<PeerConnectBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => {
+                        return err(400, "bad json, expected { peer: string, addr?: string }")
+                    }
+                }
+            };
+            let target_query = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone().or_else(|| b.device_id.clone()))
+                .or_else(|| qmap.get("peer").cloned())
+                .or_else(|| qmap.get("device_id").cloned())
+                .unwrap_or_default();
+            let direct_addr = parsed_body
+                .as_ref()
+                .and_then(|b| b.addr.clone())
+                .or_else(|| qmap.get("addr").cloned());
+
+            if target_query.trim().is_empty() {
+                return err(400, "peer identifier required (peer or device_id)");
+            }
+            match node
+                .connect_peer(target_query.trim(), direct_addr.as_deref())
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
+                    err(404, &format!("peer not found: {e}"))
+                }
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/peers/disconnect") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<PeerDisconnectBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<PeerDisconnectBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected { peer: string }"),
+                }
+            };
+            let target_query = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone().or_else(|| b.device_id.clone()))
+                .or_else(|| qmap.get("peer").cloned())
+                .or_else(|| qmap.get("device_id").cloned())
+                .unwrap_or_default();
+
+            if target_query.trim().is_empty() {
+                return err(400, "peer identifier required (peer or device_id)");
+            }
+            match node.disconnect_peer(target_query.trim()).await {
+                Ok(rep) => json_ok(&rep),
+                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
+                    err(404, &format!("peer not found: {e}"))
+                }
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         ("POST", "/api/peers/alias") | ("PUT", "/api/peers/alias") => {
             match serde_json::from_slice::<PeerAliasBody>(body) {
                 Ok(d) => {

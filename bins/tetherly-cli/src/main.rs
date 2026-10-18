@@ -393,6 +393,33 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Actively connect to a trusted peer device on demand.
+    Connect {
+        /// Target peer (device_id like tdev_... or friendly alias/name).
+        #[arg(long)]
+        peer: String,
+        /// Optional direct physical socket address (e.g. 192.168.1.50:45717).
+        #[arg(long)]
+        addr: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Actively disconnect an active session with a peer device without unpairing.
+    Disconnect {
+        /// Target peer (device_id like tdev_... or friendly alias/name).
+        #[arg(long)]
+        peer: String,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2439,6 +2466,89 @@ async fn main() -> Result<()> {
             ui_port,
         } => {
             handle_caps_cmd(peer, enable, disable, json, ui_port).await?;
+        }
+        Cmd::Connect {
+            peer,
+            addr,
+            json,
+            ui_port,
+        } => {
+            let payload = serde_json::json!({
+                "peer": peer,
+                "addr": addr,
+            });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = loopback_post(ui_port, "/api/peers/connect", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "node refused connect (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let device_id = v["device_id"].as_str().unwrap_or("?");
+                let name = v["alias"]
+                    .as_str()
+                    .or_else(|| v["name"].as_str())
+                    .unwrap_or("peer");
+                let addr_str = v["addr"].as_str().unwrap_or("unknown");
+                let already = v["already_connected"].as_bool().unwrap_or(false);
+                if already {
+                    println!("peer {device_id} ({name}) is already connected (addr: {addr_str})");
+                } else {
+                    println!("successfully connected to {device_id} ({name}) at {addr_str}");
+                }
+            }
+        }
+        Cmd::Disconnect {
+            peer,
+            json,
+            ui_port,
+        } => {
+            let payload = serde_json::json!({ "peer": peer });
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = loopback_post(ui_port, "/api/peers/disconnect", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "node refused disconnect (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                let device_id = v["device_id"].as_str().unwrap_or("?");
+                let name = v["alias"]
+                    .as_str()
+                    .or_else(|| v["name"].as_str())
+                    .unwrap_or("peer");
+                let already = v["already_disconnected"].as_bool().unwrap_or(false);
+                if already {
+                    println!("peer {device_id} ({name}) is already disconnected");
+                } else {
+                    println!("successfully disconnected session with {device_id} ({name})");
+                }
+            }
         }
     }
     Ok(())

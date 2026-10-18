@@ -3,12 +3,51 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.48** |
+| 文档版本 | **1.49** |
 | 日期 | 2026-10-17 |
-| 状态 | **v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）**——(1) **对端能力全景透视与特性模型解耦 (`extract_features`, `LocalCapsReport`, `PeerCapsDto`, `PeersCapsReport`)**：在协议层将端口声明与纯特性标签解耦，扩展 `LivePeer.caps` 补齐对端能力存储断层；(2) **运行时动态能力状态治理与全量热广播 (`Shared.local_caps`, `Node::update_local_caps`, `Node::broadcast_caps`)**：支持在运行时零连接中断按需动态启闭特性，并向所有活动 Noise 会话广播 `CapsUpdate` 帧；(3) **事件总线能力变更实时感知 (`UiEvent::PeerCapsChanged`)**：对端通告与本机更新即时派发 `{ device_id, caps, features }`，联动 SSE 实时刷新；(4) **轻量级回环控制面端点 (`GET /api/caps`, `POST /api/caps`, `PUT /api/caps`, `GET /api/peers/caps`)**：提供本机能力报告、动态更新与智能解析对端能力矩阵，升级 `GET /api/peers` 暴露对端特性；(5) **CLI 双端全同构升级 (`tetherly caps`, `tetherly-cli caps`)**：支持 `--peer`, `--enable`, `--disable`, `--json`，并在 `peers` 列表直观渲染能力徽标；(6) **Web UI 能力看板与交互控制 (`ui/index.html`)**：增设「节点能力与特性边界」卡片，提供快捷切换按键并为在线对端渲染多维特性徽标胶囊；(7) **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**：增设 `peer_capabilities_negotiation_and_introspection_via_loopback_api` 严谨验证全链路特性协商、回环治理与防御逻辑。+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）**——(1) **对端会话生命周期模型解耦与 DTO 抽象 (`PeerConnectReport`, `PeerDisconnectReport`)**：打破配对解绑 (unpair) 抹除信任与普通网络断连的混淆，提供结构化会话连接与断开报告，保留受信任关系与持久化路由；(2) **节点运行时主动连接与优雅断开控制原语 (`Node::connect_peer`, `Node::disconnect_peer`)**：支持基于设备 ID、友好别名或广播名智能解析，实现按需主动发起直连（无缝支持从 `routes.json` 自动解析物理地址或传入显式套接字地址），以及按需安全断开活动 TCP 会话信道、驱逐 live 状态、复位输入焦点并派发 `UiEvent::PeerDown`；(3) **轻量级回环控制面端点 (`POST /api/peers/connect`, `POST /api/peers/disconnect`)**：提供毫秒级响应并严格守卫 127.0.0.1+Host 校验红线，支持 JSON 体与 Query 参数多维解析；(4) **CLI 双端全同构升级 (`tetherly connect/disconnect`, `tetherly-cli connect/disconnect`)**：支持 `--peer`, `--addr`, `--json`, `--ui-port`，彻底消除必须等待后台 30 秒重连定时器的死板缺陷；(5) **Web UI 会话治理按键与交互闭环 (`ui/index.html`)**：在在线设备卡片增设「断开」按键，在离线受信任卡片增设「连接」按键，联动 SSE `peer_up`/`peer_down` 实现无感局部刷新；(6) **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**：增设 `peer_active_connect_and_disconnect_lifecycle_via_loopback_api` 完备验证治理全流程。+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.49 相对 1.48(对端连接会话全域治理、主动按需直连与优雅断开控制闭环)**
+
+- **动机(会话与信任生命周期混淆、主动重连能力缺失、按需断开无门、CLI 与 UI 控制缺失)**:
+  在 Tetherly v1.48 实现了对端能力全景透视与特性协商后，多通道交互具备了动态边界治理能力。但在日常多节点拓扑运行中，暴露出**会话生命周期与信任关系强耦合、主动连接能力缺失**的关键运维痛点：
+  1. **会话断连与信任解绑混淆**：此前仅存在 `POST /api/peers/unpair`（以及 CLI `unpair`），一旦调用便会彻底清除 `trusted.json` 中的对称密钥与信任关系，并抹除 `routes.json` 物理寻址缓存；若用户仅希望暂时断开某台设备的活动 TCP 会话（例如切换网络、开会节能或暂停多端同步），此前完全无法在保留配对信任的前提下优雅断开；
+  2. **缺少按需主动发起直连原语**：已配对受信任设备断线后，系统完全依赖后台 30 秒轮询定时器（`spawn_reconnect`）尝试回拨；若后台重连被用户禁用（`--reconnect false`）或对端刚上线，用户无法主动下达指令要求节点立即与对端建立连接，必须等待长达 30 秒甚至重启守护进程；
+  3. **缺少轻量级回环控制端点**：外部运维脚本与桌面前端缺少 `POST /api/peers/connect` 与 `POST /api/peers/disconnect` 原语，无法精准控制指定对端的会话在线状态；
+  4. **双端命令行缺失连接与断开子命令**：`tetherly` 与 `tetherly-cli` 仅有初次配对用的 `dial`，缺少面向已受信任设备的 `connect` 与 `disconnect` 命令群；
+  5. **Web 前端卡片缺少操作按键**：Web UI 对端卡片无法一键手动断开在线会话，离线受信任卡片无法一键触发重新连接。
+
+- **架构与协议设计(ADR-042 对端连接会话全域治理、主动按需直连与优雅断开控制闭环)**:
+  1. **对端会话生命周期模型解耦与 DTO 抽象 (`runtime.rs`, `lib.rs`)**:
+     - `PeerConnectReport`: `{ ok, device_id, name, alias, addr, connected, already_connected }`；
+     - `PeerDisconnectReport`: `{ ok, device_id, name, alias, disconnected, already_disconnected }`；
+     - 严格区分「临时断开会话 (disconnect)」与「永久撤销信任 (unpair)」：disconnect 仅断开活动 TCP 传输信道，绝不修改 `trusted.json` 与 `routes.json`；
+  2. **节点运行时主动连接与优雅断开控制原语 (`runtime.rs`)**:
+     - `Node::connect_peer(&self, query: &str, direct_addr: Option<&str>) -> Result<PeerConnectReport, CoreError>`：
+       - 支持基于设备 ID、别名或广播名的智能解析（`resolve_peer`）；
+       - 若已在线，幂等返回 `already_connected: true`；
+       - 若提供显式 `direct_addr`，校验套接字与非零端口并更新 `routes.json` 缓存；若未提供则从 `routes.json` 自动解析物理地址；
+       - 异步触发 `dial(addr)` 握手建连，成功后返回完整报告；
+     - `Node::disconnect_peer(&self, query: &str) -> Result<PeerDisconnectReport, CoreError>`：
+       - 智能解析定位对端；
+       - 若已处于离线状态，幂等返回 `already_disconnected: true`；
+       - 否则从 `Shared.sessions` 移除发送端以关闭信道，从 `Shared.live` 驱逐，复位输入焦点（`input_seat`），并向事件总线广播 `UiEvent::PeerDown`；
+  3. **轻量级回环控制面端点 (`uihttp.rs`)**:
+     - `POST /api/peers/connect`：支持 JSON 体 `{"peer": "...", "addr": "..."}` 与 Query 参数 `?peer=...&addr=...`；未知对端返回 404，寻址失败或地址非法返回 400；
+     - `POST /api/peers/disconnect`：支持 JSON 体 `{"peer": "..."}` 与 Query 参数 `?peer=...`；未知对端返回 404；
+     - 严格守卫安全红线：仅绑定 `127.0.0.1`，强校验 `Host: 127.0.0.1|localhost`；
+  4. **CLI 双端全同构升级 (`tetherly connect/disconnect`, `tetherly-cli connect/disconnect`)**:
+     - `connect`: `--peer <PEER> [--addr <IP:PORT>] [--json] [--ui-port <PORT>]`；
+     - `disconnect`: `--peer <PEER> [--json] [--ui-port <PORT>]`；
+  5. **Web UI 会话治理按键与交互闭环 (`ui/index.html`)**:
+     - 在在线设备卡片增设「断开」交互按键，点击调用 `POST /api/peers/disconnect`；
+     - 在受信任设备卡片中，依据 `online` 状态动态呈现「断开」或「连接」按键，点击分别调用对应回环接口；
+     - 接入 SSE `peer_up` 与 `peer_down` 事件驱动界面实时局部重绘；
+  6. **端到端集成测试全绿覆盖 (`tests/phase1.rs`)**:
+     - 增设 `peer_active_connect_and_disconnect_lifecycle_via_loopback_api`：覆盖已在线状态检测、断开会话、SSE `PeerDown` 捕获、信任保持、幂等二次断开、按需直连重连、显式地址连接、以及非法地址与未知对端防御全流程。
 
 **1.48 相对 1.47(对端能力全景透视、多维特性协商与动态功能边界治理)**
 
