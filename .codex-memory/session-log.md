@@ -54,6 +54,9 @@
      - 增设 `file_offer_lifecycle_and_terminal_governance_via_loopback_api`：完备验证初始态、提议到达与透视、单项拒绝及事件广播、批量拒绝与报告、受信任对端自动接收生效及收件箱 SHA-256 完整性校验、错误边界（400/404）与优雅停机，确立 ADR-046，SSOT 升至 v1.53。
   8. 网络层取消安全与多路复用健壮性强化 (`crates/tetherly-net/src/codec.rs`, `session.rs`):
      - 设计并实现状态化 `TaggedReader` 环形缓冲状态机，彻底消除 Tokio `select!` 竞态丢弃分支时丢失 header/body 字节导致的帧解包失步；`ActiveSession` 全量集成 `TaggedReader`，并在 `tests/phase1.rs` 增设对端拒绝状态观察同步，GitHub Actions CI 5 平台矩阵 100% 全绿通过。
+  9. Windows 平台异步端到端测试与生命周期健壮性加固 (`crates/tetherly-android/tests/client_e2e.rs`):
+     - 针对 Windows CI Runner 虚拟化 CPU 在多测试并行压力下的 Argon2id 密钥派生耗时与线程调度延迟，将 `android_client_pairs_and_delivers_notify` 连线等待截止时间从 10s 调整为 30s；
+     - 针对 `android_client_receives_a_quick_reply_once`，移除了对端 mock 服务端脆弱的固定 500ms 休眠设计，引入 `tokio::sync::oneshot::channel()` 双向生命周期同步，确保服务端在客户端完全取走快速回复帧并完成校验前维持会话存活。
 
 ## 2026-10-18 (49) - Clipboard lifecycle governance, metadata telemetry auditing, and history observability closed-loop (v1.52 / ADR-045)
 - Task: 实现跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环，消除剪贴板事件流黑盒与明文泄漏风险，建立纯元数据受控环形缓冲区、主动安全清空复位与双端 CLI/Web UI 全同构控制面。

@@ -63,7 +63,7 @@ async fn android_client_pairs_and_delivers_notify() {
         false,
     );
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while handle.connected_peer().is_none() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -157,6 +157,7 @@ async fn android_client_receives_a_quick_reply_once() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, addr) = listener.accept().await.unwrap();
         let mut sess = accept_session(stream, addr, &server_cfg()).await.unwrap();
@@ -166,8 +167,8 @@ async fn android_client_receives_a_quick_reply_once() {
             text: "收到,马上回电".into(),
         };
         sess.send_inner(reply.to_frame().unwrap()).await.unwrap();
-        // Keep the session alive until the client drains and stops.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Keep the session alive until the client drains and stops, or timeout.
+        let _ = tokio::time::timeout(Duration::from_secs(30), done_rx).await;
     });
 
     let dir = std::env::temp_dir().join(format!(
@@ -182,7 +183,7 @@ async fn android_client_receives_a_quick_reply_once() {
         false,
     );
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let replies = loop {
         let r = handle.take_replies();
         if !r.is_empty() {
@@ -200,6 +201,7 @@ async fn android_client_receives_a_quick_reply_once() {
     // Drained exactly once: the Kotlin layer fires the action a single time.
     assert!(handle.take_replies().is_empty());
 
+    let _ = done_tx.send(());
     handle.stop();
     let _ = server.await;
     let _ = std::fs::remove_dir_all(&dir);

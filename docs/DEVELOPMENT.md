@@ -74,6 +74,9 @@
      - 引入状态化 `TaggedReader` 环形缓冲状态机，彻底消除 Tokio `select!` 竞态丢弃分支时由栈内局部变量丢失导致的网络帧解包失步（partial-read frame desynchronization）；
      - `ActiveSession` 会话层全量接入 `TaggedReader`，确保高并发文件提议与拒绝交错时 TCP 帧边界零丢失；
      - 在 `tests/phase1.rs` 中增加了步骤 4 与步骤 5 对端拒绝观测同步，5 平台 CI 矩阵 100% 验证通过。
+  9. **Windows 平台异步端到端测试与生命周期健壮性加固 (`crates/tetherly-android/tests/client_e2e.rs`)**:
+     - 针对 Windows CI Runner 虚拟化 CPU 在多测试并行压力下的 Argon2id 密钥派生耗时与线程调度延迟，将 `android_client_pairs_and_delivers_notify` 连线等待截止时间从 10s 调整为 30s；
+     - 针对 `android_client_receives_a_quick_reply_once`，移除了对端 mock 服务端脆弱的固定 500ms 休眠设计，引入 `tokio::sync::oneshot::channel()` 双向生命周期同步，确保服务端在客户端完全取走快速回复帧并完成校验前维持会话存活。
 
 **1.52 相对 1.51(跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环)**
 
