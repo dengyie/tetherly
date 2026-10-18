@@ -100,6 +100,8 @@ pub enum CoreError {
     InvalidConfig(String),
     #[error("invalid route: {0}")]
     InvalidRoute(String),
+    #[error("invalid payload: {0}")]
+    InvalidPayload(String),
 }
 
 impl From<serde_json::Error> for CoreError {
