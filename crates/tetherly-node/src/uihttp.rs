@@ -806,6 +806,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             }
             match node.remove_route(&peer) {
                 Ok(rep) => json_ok(&rep),
+                Err(tetherly_core::CoreError::PeerNotFound(msg)) => err(404, &msg),
                 Err(e) => err(400, &e.to_string()),
             }
         }
