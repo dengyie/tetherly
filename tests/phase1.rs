@@ -3347,13 +3347,9 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
     assert!(rep3.messages.file_offers_sent >= 1);
 
     // 5. Reset metrics via POST /api/metrics/reset
-    let (code_rst, body_rst) = tetherly_node::loopback_post(
-        host_ui,
-        "/api/metrics/reset",
-        b"{}",
-    )
-    .await
-    .expect("reset metrics succeeds");
+    let (code_rst, body_rst) = tetherly_node::loopback_post(host_ui, "/api/metrics/reset", b"{}")
+        .await
+        .expect("reset metrics succeeds");
     assert_eq!(code_rst, 200);
     let rst_json: serde_json::Value = serde_json::from_slice(&body_rst).unwrap();
     assert_eq!(rst_json["ok"], true);
@@ -3386,13 +3382,9 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
     assert_eq!(rep4.sessions_established, 0);
 
     // Also test POST /api/traffic/reset endpoint
-    let (code_rst2, body_rst2) = tetherly_node::loopback_post(
-        host_ui,
-        "/api/traffic/reset",
-        b"",
-    )
-    .await
-    .expect("reset traffic succeeds");
+    let (code_rst2, body_rst2) = tetherly_node::loopback_post(host_ui, "/api/traffic/reset", b"")
+        .await
+        .expect("reset traffic succeeds");
     assert_eq!(code_rst2, 200);
     let rst_json2: serde_json::Value = serde_json::from_slice(&body_rst2).unwrap();
     assert_eq!(rst_json2["ok"], true);

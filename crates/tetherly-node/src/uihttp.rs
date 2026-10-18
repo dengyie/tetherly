@@ -828,9 +828,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 "overlay": overlay_dto,
             }))
         }
-        ("GET", "/api/metrics") | ("GET", "/api/traffic") => {
-            json_ok(&node.traffic_report())
-        }
+        ("GET", "/api/metrics") | ("GET", "/api/traffic") => json_ok(&node.traffic_report()),
         ("POST", "/api/metrics/reset") | ("POST", "/api/traffic/reset") => {
             node.reset_traffic_metrics();
             json_ok(&serde_json::json!({
