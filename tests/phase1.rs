@@ -3272,11 +3272,9 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
         .expect("connect loopback sse");
 
     // 3. Ping round-trip to generate control traffic and ping/pong protocol messages
-    let rtt = host
-        .ping_peer(&peer_id, Duration::from_secs(5))
-        .await
-        .expect("ping succeeds");
-    assert!(rtt.as_millis() <= 5000);
+    let ping_rep = host.ping_peer(&peer_id).await.expect("ping succeeds");
+    assert!(ping_rep.ok);
+    assert!(ping_rep.rtt_ms <= 5000);
 
     // Also trigger notify message
     let notify_payload = serde_json::json!({
@@ -3362,7 +3360,7 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
         .expect("read sse event")
         .expect("some ui event");
     match sse_event {
-        tetherly_node::UiEvent::MetricsReset => {}
+        tetherly_node::UiEvent::MetricsReset { timestamp_ms: _ } => {}
         other => panic!("expected MetricsReset, got: {other:?}"),
     }
 
