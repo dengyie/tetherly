@@ -4516,7 +4516,9 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
     // 4. Inbound sync on Host: Peer sends text back to Host
     let test_msg2 = "tetherly-v1.52-response-clip-2";
     let clip2_hash = hex_sha256(test_msg2.as_bytes());
-    peer.send_clipboard_text(test_msg2, Some(&host_id)).await.unwrap();
+    peer.send_clipboard_text(test_msg2, Some(&host_id))
+        .await
+        .unwrap();
 
     // Host should receive and emit UiEvent::ClipboardSynced (inbound)
     let start = std::time::Instant::now();
