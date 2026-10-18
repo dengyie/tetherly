@@ -11,7 +11,7 @@ use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tetherly_core::frame::{
@@ -436,7 +436,8 @@ pub const MAX_TERMINAL_TRANSFERS: usize = 64;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct FileOffersReport {
     pub ok: bool,
-    pub total: usize,
+    pub count: usize,
+    pub auto_accept_trusted: bool,
     pub offers: Vec<FileOfferDto>,
 }
 
@@ -444,15 +445,18 @@ pub struct FileOffersReport {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct FileOfferDto {
     pub transfer_id: String,
+    pub filename: String,
+    pub total_bytes: u64,
+    pub resume_from: u64,
+    pub source: String,
     pub peer: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_alias: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_name: Option<String>,
-    pub filename: String,
     pub size: u64,
     pub sha256: String,
-    pub resume_from: Option<u64>,
+    pub timestamp_ms: u64,
     pub offered_ms: u64,
 }
 
@@ -460,8 +464,9 @@ pub struct FileOfferDto {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct FileDecisionReport {
     pub ok: bool,
-    pub transfer_id: String,
+    pub accepted: bool,
     pub action: String,
+    pub transfer_id: String,
     pub peer: String,
     pub filename: String,
     pub total_bytes: u64,
@@ -474,15 +479,17 @@ pub struct FileDecisionReport {
 pub struct FileBatchDecisionReport {
     pub ok: bool,
     pub action: String,
-    pub processed_count: usize,
-    pub transfers: Vec<FileDecisionReport>,
+    pub accepted_count: usize,
+    pub rejected_count: usize,
+    pub total_evaluated: usize,
+    pub decisions: Vec<FileDecisionReport>,
 }
 
 /// Status and configuration of auto-accept policy for trusted peers.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct AutoAcceptReport {
     pub ok: bool,
-    pub auto_accept_trusted: bool,
+    pub enabled: bool,
     pub auto_accepted_count: u64,
 }
 
@@ -4144,8 +4151,9 @@ impl Node {
         self.user_accept_file(transfer_id).await?;
         Ok(FileDecisionReport {
             ok: true,
-            transfer_id: transfer_id.to_string(),
+            accepted: true,
             action: "accepted".to_string(),
+            transfer_id: transfer_id.to_string(),
             peer: source.to_string(),
             filename: name,
             total_bytes: total,
@@ -4178,8 +4186,9 @@ impl Node {
         self.user_reject_file(transfer_id).await?;
         Ok(FileDecisionReport {
             ok: true,
-            transfer_id: transfer_id.to_string(),
+            accepted: false,
             action: "rejected".to_string(),
+            transfer_id: transfer_id.to_string(),
             peer: source.to_string(),
             filename: name,
             total_bytes: total,
@@ -4211,16 +4220,19 @@ impl Node {
                 .collect()
         };
         let mut reports = Vec::with_capacity(candidates.len());
-        for tid in candidates {
-            if let Ok(rep) = self.user_accept_file_reported(&tid).await {
+        for tid in &candidates {
+            if let Ok(rep) = self.user_accept_file_reported(tid).await {
                 reports.push(rep);
             }
         }
+        let accepted_count = reports.len();
         Ok(FileBatchDecisionReport {
             ok: true,
             action: "accepted".to_string(),
-            processed_count: reports.len(),
-            transfers: reports,
+            accepted_count,
+            rejected_count: 0,
+            total_evaluated: candidates.len(),
+            decisions: reports,
         })
     }
 
@@ -4247,16 +4259,19 @@ impl Node {
                 .collect()
         };
         let mut reports = Vec::with_capacity(candidates.len());
-        for tid in candidates {
-            if let Ok(rep) = self.user_reject_file_reported(&tid).await {
+        for tid in &candidates {
+            if let Ok(rep) = self.user_reject_file_reported(tid).await {
                 reports.push(rep);
             }
         }
+        let rejected_count = reports.len();
         Ok(FileBatchDecisionReport {
             ok: true,
             action: "rejected".to_string(),
-            processed_count: reports.len(),
-            transfers: reports,
+            accepted_count: 0,
+            rejected_count,
+            total_evaluated: candidates.len(),
+            decisions: reports,
         })
     }
 
@@ -4272,12 +4287,19 @@ impl Node {
             None
         };
         let raw_offers = self.offered_files();
-        let trusted_map: HashMap<DeviceId, (Option<String>, String)> = {
+        let trusted_map: HashMap<DeviceId, Option<String>> = {
             let trust = self.shared.trust.lock().expect("trust");
             trust
                 .all()
                 .into_iter()
-                .map(|p| (p.device_id, (p.alias, p.name)))
+                .map(|p| {
+                    let alias = if p.alias.is_empty() {
+                        None
+                    } else {
+                        Some(p.alias)
+                    };
+                    (p.device_id, alias)
+                })
                 .collect()
         };
         let mut filtered = Vec::new();
@@ -4292,10 +4314,7 @@ impl Node {
                     continue;
                 }
             }
-            let (peer_alias, peer_name) = trusted_map
-                .get(&t.source)
-                .cloned()
-                .unwrap_or((None, t.source.to_string()));
+            let peer_alias = trusted_map.get(&t.source).cloned().flatten();
             let (name, size, sha256) = t
                 .files
                 .first()
@@ -4303,24 +4322,26 @@ impl Node {
                 .unwrap_or_default();
             filtered.push(FileOfferDto {
                 transfer_id: t.transfer_id,
+                filename: name,
+                total_bytes: size,
+                resume_from: t.resume_from.unwrap_or(0),
+                source: t.source.to_string(),
                 peer: t.source.to_string(),
                 peer_alias,
-                peer_name: Some(peer_name),
-                filename: name,
+                peer_name: None,
                 size,
                 sha256,
-                resume_from: t.resume_from,
+                timestamp_ms: t.offered_ms,
                 offered_ms: t.offered_ms,
             });
         }
-        if let Some(_) = id_filter {
-            if filtered.is_empty() {
-                return Err(CoreError::UnknownTransfer);
-            }
+        if id_filter.is_some() && filtered.is_empty() {
+            return Err(CoreError::UnknownTransfer);
         }
         Ok(FileOffersReport {
             ok: true,
-            total: filtered.len(),
+            count: filtered.len(),
+            auto_accept_trusted: self.shared.auto_accept_trusted.load(Ordering::Relaxed),
             offers: filtered,
         })
     }
@@ -4329,7 +4350,7 @@ impl Node {
     pub fn auto_accept_status(&self) -> AutoAcceptReport {
         AutoAcceptReport {
             ok: true,
-            auto_accept_trusted: self.shared.auto_accept_trusted.load(Ordering::Relaxed),
+            enabled: self.shared.auto_accept_trusted.load(Ordering::Relaxed),
             auto_accepted_count: self.shared.auto_accepted_count.load(Ordering::Relaxed),
         }
     }

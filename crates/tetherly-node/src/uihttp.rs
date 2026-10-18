@@ -1484,7 +1484,17 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 .or_else(|| qmap.get("device_id"))
                 .map(String::as_str);
             match node.file_offers(q_id, q_peer) {
-                Ok(rep) => json_ok(&rep),
+                Ok(rep) => {
+                    if q_id.is_some() {
+                        if let Some(first) = rep.offers.first() {
+                            json_ok(first)
+                        } else {
+                            err(404, "transfer offer not found")
+                        }
+                    } else {
+                        json_ok(&rep)
+                    }
+                }
                 Err(tetherly_core::CoreError::UnknownTransfer) => {
                     err(404, "transfer offer not found")
                 }
