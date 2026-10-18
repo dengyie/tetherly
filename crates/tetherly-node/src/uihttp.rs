@@ -1538,6 +1538,9 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             } else if let Some(id) = target_id {
                 match node.user_accept_file_reported(&id).await {
                     Ok(rep) => json_ok(&rep),
+                    Err(tetherly_core::CoreError::UnknownTransfer) => {
+                        err(404, "transfer offer not found")
+                    }
                     Err(e) => err(400, &e.to_string()),
                 }
             } else {
@@ -1581,6 +1584,9 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             } else if let Some(id) = target_id {
                 match node.user_reject_file_reported(&id).await {
                     Ok(rep) => json_ok(&rep),
+                    Err(tetherly_core::CoreError::UnknownTransfer) => {
+                        err(404, "transfer offer not found")
+                    }
                     Err(e) => err(400, &e.to_string()),
                 }
             } else {

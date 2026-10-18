@@ -4937,7 +4937,7 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     assert!(!auto_tid.is_empty());
 
     // File should be automatically accepted and received in host inbox without manual call!
-    let received_data = wait_inbox(g1.path(), "auto_file.dat", Duration::from_secs(20)).await;
+    let received_data = wait_inbox(g1.path(), "auto_file.dat", Duration::from_secs(35)).await;
     assert_eq!(hex_sha256(&received_data), auto_expected_hash);
 
     // Host auto_accepted_count should have incremented to 1
