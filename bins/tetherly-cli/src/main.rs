@@ -2486,8 +2486,8 @@ async fn handle_caps_cmd(
             println!("{}", String::from_utf8_lossy(&resp));
             return Ok(());
         }
-        let rep: serde_json::Value = serde_json::from_slice(&resp)
-            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+        let rep: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
         let dev = rep["device_id"].as_str().unwrap_or("-");
         let feats = rep["features"]
             .as_array()
@@ -2527,8 +2527,8 @@ async fn handle_caps_cmd(
             println!("{}", String::from_utf8_lossy(&resp));
             return Ok(());
         }
-        let rep: serde_json::Value = serde_json::from_slice(&resp)
-            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+        let rep: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
         println!("Peer Capabilities ({target}):");
         if let Some(arr) = rep["peers"].as_array() {
             if arr.is_empty() {
@@ -2617,10 +2617,10 @@ async fn handle_caps_cmd(
         return Ok(());
     }
 
-    let local_v: serde_json::Value = serde_json::from_slice(&resp_local)
-        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
-    let peers_v: serde_json::Value = serde_json::from_slice(&resp_peers)
-        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+    let local_v: serde_json::Value =
+        serde_json::from_slice(&resp_local).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+    let peers_v: serde_json::Value =
+        serde_json::from_slice(&resp_peers).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
 
     let self_id = local_v["device_id"].as_str().unwrap_or("-");
     let local_feats = local_v["features"]

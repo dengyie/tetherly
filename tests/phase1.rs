@@ -3432,11 +3432,13 @@ async fn peer_capabilities_negotiation_and_introspection_via_loopback_api() {
         .expect("connect loopback sse");
 
     // 3. Inspect peer capabilities via GET /api/peers/caps
-    let (code_peers_caps, body_peers_caps) = tetherly_node::loopback_get(host_ui, "/api/peers/caps")
-        .await
-        .expect("peers caps query succeeds");
+    let (code_peers_caps, body_peers_caps) =
+        tetherly_node::loopback_get(host_ui, "/api/peers/caps")
+            .await
+            .expect("peers caps query succeeds");
     assert_eq!(code_peers_caps, 200);
-    let peers_rep: tetherly_node::PeersCapsReport = serde_json::from_slice(&body_peers_caps).unwrap();
+    let peers_rep: tetherly_node::PeersCapsReport =
+        serde_json::from_slice(&body_peers_caps).unwrap();
     assert!(peers_rep.ok);
     assert_eq!(peers_rep.count, 1);
     let peer_caps = &peers_rep.peers[0];
@@ -3454,9 +3456,10 @@ async fn peer_capabilities_negotiation_and_introspection_via_loopback_api() {
 
     // 4. Smart Peer Resolution on /api/peers/caps:
     // a. Query by exact device ID
-    let (code_p1, body_p1) = tetherly_node::loopback_get(host_ui, &format!("/api/peers/caps?peer={peer_id}"))
-        .await
-        .expect("query peer caps by id succeeds");
+    let (code_p1, body_p1) =
+        tetherly_node::loopback_get(host_ui, &format!("/api/peers/caps?peer={peer_id}"))
+            .await
+            .expect("query peer caps by id succeeds");
     assert_eq!(code_p1, 200);
     let p1_rep: tetherly_node::PeersCapsReport = serde_json::from_slice(&body_p1).unwrap();
     assert_eq!(p1_rep.count, 1);

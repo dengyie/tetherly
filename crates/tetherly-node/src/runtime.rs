@@ -1461,13 +1461,16 @@ impl Node {
         if let Some(query) = target_peer {
             let target_id = self.resolve_peer(query)?;
             if let Some(lp) = live_map.get(&target_id) {
-                let alias = trusted.iter().find(|t| t.device_id == target_id).and_then(|t| {
-                    if t.alias.is_empty() {
-                        None
-                    } else {
-                        Some(t.alias.clone())
-                    }
-                });
+                let alias = trusted
+                    .iter()
+                    .find(|t| t.device_id == target_id)
+                    .and_then(|t| {
+                        if t.alias.is_empty() {
+                            None
+                        } else {
+                            Some(t.alias.clone())
+                        }
+                    });
                 reports.push(PeerCapsDto {
                     device_id: target_id.to_string(),
                     name: lp.name.clone(),
@@ -2699,9 +2702,7 @@ impl Node {
         initial_caps.push(format!("fileport={file_port}"));
         initial_caps.push(format!("inputport={input_port}"));
         initial_caps.push(format!("screenport={screen_port}"));
-        let caps = CapsUpdate {
-            caps: initial_caps,
-        };
+        let caps = CapsUpdate { caps: initial_caps };
         if let Ok(frame) = caps.to_frame() {
             let _ = tx.try_send(frame);
         }
@@ -4858,11 +4859,7 @@ fn parse_port_cap(caps: &[String], prefix: &str) -> Option<u16> {
 
 /// Extract pure feature capability tokens from a capability list, filtering out port assignments.
 pub fn extract_features(caps: &[String]) -> Vec<String> {
-    let mut feats: Vec<String> = caps
-        .iter()
-        .filter(|c| !c.contains('='))
-        .cloned()
-        .collect();
+    let mut feats: Vec<String> = caps.iter().filter(|c| !c.contains('=')).cloned().collect();
     feats.sort();
     feats.dedup();
     feats

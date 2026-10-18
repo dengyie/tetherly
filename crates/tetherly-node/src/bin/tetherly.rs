@@ -2510,8 +2510,8 @@ async fn handle_caps_cmd(
             println!("{}", String::from_utf8_lossy(&resp));
             return Ok(());
         }
-        let rep: serde_json::Value = serde_json::from_slice(&resp)
-            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+        let rep: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
         let dev = rep["device_id"].as_str().unwrap_or("-");
         let feats = rep["features"]
             .as_array()
@@ -2535,12 +2535,14 @@ async fn handle_caps_cmd(
 
     if let Some(ref target) = peer {
         let path = format!("/api/peers/caps?peer={target}");
-        let (code, resp) = tetherly_node::loopback_get(ui_port, &path).await.map_err(|e| {
-            anyhow::anyhow!(
-                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                 start one with `tetherly --data-dir <dir> run` first"
-            )
-        })?;
+        let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
         if code != 200 {
             anyhow::bail!(
                 "node returned HTTP {code}: {}",
@@ -2551,8 +2553,8 @@ async fn handle_caps_cmd(
             println!("{}", String::from_utf8_lossy(&resp));
             return Ok(());
         }
-        let rep: serde_json::Value = serde_json::from_slice(&resp)
-            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+        let rep: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
         println!("Peer Capabilities ({target}):");
         if let Some(arr) = rep["peers"].as_array() {
             if arr.is_empty() {
@@ -2643,10 +2645,10 @@ async fn handle_caps_cmd(
         return Ok(());
     }
 
-    let local_v: serde_json::Value = serde_json::from_slice(&resp_local)
-        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
-    let peers_v: serde_json::Value = serde_json::from_slice(&resp_peers)
-        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+    let local_v: serde_json::Value =
+        serde_json::from_slice(&resp_local).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+    let peers_v: serde_json::Value =
+        serde_json::from_slice(&resp_peers).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
 
     let self_id = local_v["device_id"].as_str().unwrap_or("-");
     let local_feats = local_v["features"]
