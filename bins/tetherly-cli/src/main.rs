@@ -128,6 +128,70 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// List pending incoming file transfer offers.
+    Offers {
+        /// Filter offers by source peer ID or alias.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Filter by specific transfer ID.
+        #[arg(long)]
+        id: Option<String>,
+        /// Output raw JSON instead of table.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Accept one or all pending incoming file transfer offers.
+    Accept {
+        /// Transfer ID to accept (e.g. tfl_...).
+        id: Option<String>,
+        /// Accept all pending offers (optionally filtered by peer).
+        #[arg(long)]
+        all: bool,
+        /// Filter by source peer ID or alias when accepting.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reject one or all pending incoming file transfer offers.
+    Reject {
+        /// Transfer ID to reject (e.g. tfl_...).
+        id: Option<String>,
+        /// Reject all pending offers (optionally filtered by peer).
+        #[arg(long)]
+        all: bool,
+        /// Filter by source peer ID or alias when rejecting.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Query or configure automatic acceptance of files from trusted peers.
+    AutoAccept {
+        /// Enable auto-accepting files from trusted peers.
+        #[arg(long)]
+        enable: bool,
+        /// Disable auto-accepting files from trusted peers.
+        #[arg(long)]
+        disable: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Unpair and revoke trust for a paired peer device by device_id.
     Unpair {
         /// Device ID of the peer to unpair (tdev_...).
@@ -861,6 +925,19 @@ fn print_event(v: &serde_json::Value) {
             let tid = v["transfer_id"].as_str().unwrap_or("?");
             println!("[file_done] transfer={tid}");
         }
+        "file_rejected" => {
+            let tid = v["transfer_id"].as_str().unwrap_or("?");
+            let src = v["source"].as_str().unwrap_or("?");
+            let reason = v["reason"]
+                .as_str()
+                .map(|r| format!(" reason=\"{r}\""))
+                .unwrap_or_default();
+            println!("[file_rejected] transfer={tid} peer={src}{reason}");
+        }
+        "file_auto_accept_changed" => {
+            let enabled = v["enabled"].as_bool().unwrap_or(false);
+            println!("[file_auto_accept_changed] enabled={enabled}");
+        }
         "pairing_needed" => {
             let dev = v["device_id"].as_str().unwrap_or("?");
             let fp = v["fp"].as_str().unwrap_or("?");
@@ -1276,6 +1353,40 @@ async fn main() -> Result<()> {
                 serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
             let cleared = v.get("cleared").and_then(|c| c.as_u64()).unwrap_or(0);
             println!("cleared {cleared} finished transfer(s) from history");
+        }
+        Cmd::Offers {
+            peer,
+            id,
+            json,
+            ui_port,
+        } => {
+            do_file_offers(ui_port, peer, id, json).await?;
+        }
+        Cmd::Accept {
+            id,
+            all,
+            peer,
+            json,
+            ui_port,
+        } => {
+            do_file_accept(ui_port, id, all, peer, json).await?;
+        }
+        Cmd::Reject {
+            id,
+            all,
+            peer,
+            json,
+            ui_port,
+        } => {
+            do_file_reject(ui_port, id, all, peer, json).await?;
+        }
+        Cmd::AutoAccept {
+            enable,
+            disable,
+            json,
+            ui_port,
+        } => {
+            do_file_auto_accept(ui_port, enable, disable, json).await?;
         }
         Cmd::Unpair { device_id, ui_port } => {
             let payload = serde_json::json!({ "device_id": device_id });
@@ -3716,6 +3827,298 @@ async fn do_transfers(
         }
     }
 
+    Ok(())
+}
+
+async fn do_file_offers(
+    ui_port: u16,
+    peer: Option<String>,
+    id: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let mut query_params = Vec::new();
+    if let Some(ref target_id) = id {
+        query_params.push(format!("id={target_id}"));
+    }
+    if let Some(ref target_peer) = peer {
+        query_params.push(format!("peer={target_peer}"));
+    }
+    let path = if query_params.is_empty() {
+        "/api/file/offers".to_string()
+    } else {
+        format!("/api/file/offers?{}", query_params.join("&"))
+    };
+    let (code, resp) = loopback_get(ui_port, &path).await.map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
+    if code == 404 {
+        if let Some(ref target_id) = id {
+            bail!("file offer not found: {target_id}");
+        } else {
+            bail!("endpoint returned 404: {}", String::from_utf8_lossy(&resp));
+        }
+    }
+    if code != 200 {
+        bail!(
+            "query file offers failed (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+
+    if id.is_some() {
+        let tid = v.get("transfer_id").and_then(|s| s.as_str()).unwrap_or("?");
+        let filename = v.get("filename").and_then(|s| s.as_str()).unwrap_or("?");
+        let source = v.get("source").and_then(|s| s.as_str()).unwrap_or("?");
+        let total_bytes = v.get("total_bytes").and_then(|s| s.as_u64()).unwrap_or(0);
+        let resume_from = v.get("resume_from").and_then(|s| s.as_u64()).unwrap_or(0);
+        let ts = v.get("timestamp_ms").and_then(|s| s.as_u64()).unwrap_or(0);
+
+        println!("File Offer {tid}:");
+        println!("  File:        {filename}");
+        println!("  Source:      {source}");
+        println!("  Total Bytes: {total_bytes} ({})", format_bytes(total_bytes));
+        println!("  Resume From: {resume_from} ({})", format_bytes(resume_from));
+        println!("  Offered At:  {ts}ms");
+        return Ok(());
+    }
+
+    let count = v.get("count").and_then(|c| c.as_u64()).unwrap_or(0);
+    let auto_accept = v
+        .get("auto_accept_trusted")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    println!("Pending File Offers (count: {count}, auto_accept_trusted: {auto_accept}):");
+    if let Some(offers) = v.get("offers").and_then(|o| o.as_array()) {
+        if offers.is_empty() {
+            println!("  (no pending file offers)");
+        } else {
+            for o in offers {
+                let tid = o.get("transfer_id").and_then(|s| s.as_str()).unwrap_or("?");
+                let filename = o.get("filename").and_then(|s| s.as_str()).unwrap_or("?");
+                let source = o.get("source").and_then(|s| s.as_str()).unwrap_or("?");
+                let total_bytes = o.get("total_bytes").and_then(|s| s.as_u64()).unwrap_or(0);
+                let resume_from = o.get("resume_from").and_then(|s| s.as_u64()).unwrap_or(0);
+                let resume_str = if resume_from > 0 {
+                    format!(" [resuming from {}]", format_bytes(resume_from))
+                } else {
+                    "".to_string()
+                };
+                println!(
+                    "  - [{tid}] {filename} ({}) from {source}{resume_str}",
+                    format_bytes(total_bytes)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn do_file_accept(
+    ui_port: u16,
+    id: Option<String>,
+    all: bool,
+    peer: Option<String>,
+    json: bool,
+) -> Result<()> {
+    if !all && id.is_none() {
+        bail!("specify a transfer ID to accept or use --all");
+    }
+    let body_json = serde_json::json!({
+        "id": id,
+        "all": if all { Some(true) } else { None },
+        "peer": peer,
+    });
+    let body = serde_json::to_vec(&body_json)?;
+    let (code, resp) = loopback_post(ui_port, "/api/file/accept", &body)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        bail!(
+            "accept file offer failed (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    if all {
+        let count = v.get("accepted_count").and_then(|c| c.as_u64()).unwrap_or(0);
+        let total = v.get("total_evaluated").and_then(|c| c.as_u64()).unwrap_or(0);
+        println!("Accepted {count} of {total} pending file offer(s)");
+        if let Some(decisions) = v.get("decisions").and_then(|d| d.as_array()) {
+            for d in decisions {
+                let tid = d.get("transfer_id").and_then(|s| s.as_str()).unwrap_or("?");
+                let filename = d.get("filename").and_then(|s| s.as_str()).unwrap_or("?");
+                let p = d.get("peer").and_then(|s| s.as_str()).unwrap_or("?");
+                let bytes = d.get("total_bytes").and_then(|b| b.as_u64()).unwrap_or(0);
+                println!(
+                    "  * accepted [{tid}] {filename} ({}) from {p}",
+                    format_bytes(bytes)
+                );
+            }
+        }
+    } else {
+        let tid = v.get("transfer_id").and_then(|s| s.as_str()).unwrap_or("?");
+        let filename = v.get("filename").and_then(|s| s.as_str()).unwrap_or("?");
+        let p = v.get("peer").and_then(|s| s.as_str()).unwrap_or("?");
+        let bytes = v.get("total_bytes").and_then(|b| b.as_u64()).unwrap_or(0);
+        println!(
+            "Accepted file offer [{tid}] {filename} ({}) from {p}",
+            format_bytes(bytes)
+        );
+    }
+    Ok(())
+}
+
+async fn do_file_reject(
+    ui_port: u16,
+    id: Option<String>,
+    all: bool,
+    peer: Option<String>,
+    json: bool,
+) -> Result<()> {
+    if !all && id.is_none() {
+        bail!("specify a transfer ID to reject or use --all");
+    }
+    let body_json = serde_json::json!({
+        "id": id,
+        "all": if all { Some(true) } else { None },
+        "peer": peer,
+    });
+    let body = serde_json::to_vec(&body_json)?;
+    let (code, resp) = loopback_post(ui_port, "/api/file/reject", &body)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        bail!(
+            "reject file offer failed (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    if all {
+        let count = v.get("rejected_count").and_then(|c| c.as_u64()).unwrap_or(0);
+        let total = v.get("total_evaluated").and_then(|c| c.as_u64()).unwrap_or(0);
+        println!("Rejected {count} of {total} pending file offer(s)");
+        if let Some(decisions) = v.get("decisions").and_then(|d| d.as_array()) {
+            for d in decisions {
+                let tid = d.get("transfer_id").and_then(|s| s.as_str()).unwrap_or("?");
+                let filename = d.get("filename").and_then(|s| s.as_str()).unwrap_or("?");
+                let p = d.get("peer").and_then(|s| s.as_str()).unwrap_or("?");
+                println!("  * rejected [{tid}] {filename} from {p}");
+            }
+        }
+    } else {
+        let tid = v.get("transfer_id").and_then(|s| s.as_str()).unwrap_or("?");
+        let filename = v.get("filename").and_then(|s| s.as_str()).unwrap_or("?");
+        let p = v.get("peer").and_then(|s| s.as_str()).unwrap_or("?");
+        println!("Rejected file offer [{tid}] {filename} from {p}");
+    }
+    Ok(())
+}
+
+async fn do_file_auto_accept(
+    ui_port: u16,
+    enable: bool,
+    disable: bool,
+    json: bool,
+) -> Result<()> {
+    if enable && disable {
+        bail!("cannot specify both --enable and --disable");
+    }
+    if enable || disable {
+        let body_json = serde_json::json!({
+            "enabled": enable,
+        });
+        let body = serde_json::to_vec(&body_json)?;
+        let (code, resp) = loopback_post(ui_port, "/api/file/auto-accept", &body)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+        if code != 200 {
+            bail!(
+                "configure auto-accept failed (HTTP {code}): {}",
+                String::from_utf8_lossy(&resp)
+            );
+        }
+        let v: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        } else {
+            let enabled = v.get("enabled").and_then(|b| b.as_bool()).unwrap_or(false);
+            let count = v
+                .get("auto_accepted_count")
+                .and_then(|c| c.as_u64())
+                .unwrap_or(0);
+            println!(
+                "File auto-accept policy updated: enabled={} (trusted peers only, cumulative auto-accepted: {})",
+                enabled, count
+            );
+        }
+        return Ok(());
+    }
+
+    let (code, resp) = loopback_get(ui_port, "/api/file/auto-accept")
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        bail!(
+            "query auto-accept status failed (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else {
+        let enabled = v.get("enabled").and_then(|b| b.as_bool()).unwrap_or(false);
+        let count = v
+            .get("auto_accepted_count")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0);
+        println!("File Auto-Accept Policy:");
+        println!("  Enabled:             {enabled}");
+        println!("  Auto-Accepted Count: {count}");
+        println!("  Target:              Trusted Noise-authenticated peers only");
+    }
     Ok(())
 }
 

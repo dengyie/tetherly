@@ -1,5 +1,58 @@
 # Session log
 
+## 2026-10-18 (50) - File offer lifecycle governance, lightweight offer introspection, and auto-accept closed-loop (v1.53 / ADR-046)
+- Task: 实现跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环，消除提议状态黑盒与重载全快照序列化开销，补齐受信任对端自动接收无人值守策略与双端 CLI/Web UI 批量治理。
+- **背景与缺陷根因**:
+  在 Tetherly v1.52 实现了跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环后，数据协同与安全体系得到大幅提升。但在核心应用层的跨端文件传输系统（File Ingress & Offer Lifecycle）中，暴露出提议状态黑盒、轻量级提议可观测性断层、批量决策能力缺失与无人值守自动化空白：
+  1. 待确认文件提议缺乏轻量级透视端点（Heavy Snapshot vs Lightweight Offers Introspection）：
+     - 此前客户端或外部工具若要感知「当前有哪些待确认的接收提议」，必须调用重量级的全节点状态快照 `GET /api/state`。该接口会序列化整个节点的所有会话、候选通知、路由表、全局指标与剪贴板状态，在轮询与低资源场景下开销巨大；
+     - 缺乏专用的 `GET /api/file/offers`，无法针对单一提议执行按 `transfer_id` 的 $O(1)$ 精准透视，亦无法按来源对端 `peer` 进行定向筛选；
+  2. 提议决策动作缺乏零明文结构化报告（Zero-Plaintext Structured Decision Reports）：
+     - 现存接收（`POST /api/file/accept`）与拒绝（`POST /api/file/reject`）接口返回松散字典，未提供可追溯的 `FileDecisionReport` 与 `FileBatchDecisionReport`；控制端无法审计被确认或拒绝的文件名、字节大小、断点续传偏移与来源对端；
+  3. 缺乏面向生产环境的批量提议治理原语（Batch Decision Governance）：
+     - 当对端批量投递多份文件，或多个协作设备同时发起传输时，用户或守护进程缺乏一键「全部接收」（`--all`）、「全部拒绝」或按特定设备定向批处理的能力；
+  4. 无人值守与受信任对端自动接收策略空白（Auto-Accept Policy for Trusted Peers）：
+     - 在 NAS、无头运行（Headless Linux/macOS/Windows Daemon）或已严格通过 Noise 密钥配对的个人多设备协同场景下，每次对端发来文件都需要人工干预调用 API 确认，极大阻碍了无人值守工作流；
+     - 严格遵守安全红线铁律（Verbatim Security Red Line）：「信任库只在 Noise transport 成功后写」与「仅允许受信任对端触发自动接收」。因此，自动接收策略必须严格受限于 `is_trusted(peer) == true`，严禁未经鉴权的外部设备绕过确认机制；
+  5. 事件总线生命周期缺失（Missing Event Bus Lifecycle for Rejection & Policy Change）：
+     - 当文件提议被拒绝（本地拒绝或对端拒绝）时，系统此前处于完全静默状态，从未派发任何 `UiEvent`；同时自动接收策略变更亦未在事件流中广播，导致 Web UI、SSE 订阅客户端与 CLI 监听器无法感知；
+  6. 双端 CLI 与 Web UI 全同构控制闭环缺失：
+     - `tetherly` 与 `tetherly-cli` 缺少 `offers`、`accept`、`reject`、`auto-accept` 命令群；Web UI 缺少待确认文件治理面板与自动接收配置开关。
+- **架构设计与落地 (ADR-046)**:
+  1. 结构化 DTO 报告设计 (`crates/tetherly-node/src/runtime.rs`, `lib.rs`):
+     - `FileOfferDto`：封装 `transfer_id`、`filename`、`total_bytes`、`resume_from`、`source` 与 `timestamp_ms`；
+     - `FileOffersReport`：封装 `ok`、`count`、`offers: Vec<FileOfferDto>` 与 `auto_accept_trusted: bool`；
+     - `FileDecisionReport`：封装单项决策结果 `transfer_id`、`filename`、`total_bytes`、`resume_from`、`peer`、`accepted` 与 `timestamp_ms`；
+     - `FileBatchDecisionReport`：封装批量决策结果 `accepted_count` / `rejected_count`、`total_evaluated` 与 `decisions` 列表；
+     - `AutoAcceptReport`：封装自动接收策略状态 `enabled`、`auto_accepted_count` 与 `target: "trusted_peers_only"`；
+  2. 事件总线扩展 (`crates/tetherly-node/src/events.rs`):
+     - 新增 `UiEvent::FileRejected { transfer_id, source, reason }` 与 `UiEvent::FileAutoAcceptChanged { enabled }`；
+  3. 运行时控制原语与受信对端自动接收策略 (`crates/tetherly-node/src/runtime.rs`):
+     - 在 `Shared` 状态中增设原子控制位 `auto_accept_trusted: AtomicBool` 与原子计数器 `auto_accepted_count: AtomicU64`；
+     - 实现 `Node::is_trusted(&self, peer: &str) -> bool`，基于 `trust_table` 判定 Noise 鉴权受信状态；
+     - 在 `SessionEvent::FileOffer` 核心处理循环中集成自动接收判定：若 `auto_accept_trusted` 开启且 `is_trusted(peer)`，则自动触发异步 `user_accept_file` 并将 `auto_accepted_count` 递增；
+     - 在 `SessionEvent::FileReject` 与本地主动拒绝时广播 `UiEvent::FileRejected`；
+     - 增设 `file_offers`、`user_accept_file_reported`、`user_reject_file_reported`、`batch_accept_files`、`batch_reject_files`、`auto_accept_status` 与 `set_auto_accept` 原语；
+  4. 轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`):
+     - `GET /api/file/offers`：支持按 `?id=tfl_...`（404 on missing）与 `?peer=...` 查询过滤；
+     - `POST /api/file/accept`：支持按 `id` 单项接收或 `{ "all": true, "peer": ... }` 批量接收；
+     - `POST /api/file/reject`：支持按 `id` 单项拒绝或 `{ "all": true, "peer": ... }` 批量拒绝；
+     - `GET /api/file/auto-accept` 与 `POST /api/file/auto-accept`：支持查询与切换受信对端自动接收策略；
+     - 严格 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 校验（403 on mismatch）；
+  5. CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs` 与 `crates/tetherly-node/src/bin/tetherly.rs`):
+     - `offers [--id <id>] [--peer <peer>] [--json] [--ui-port <port>]`：轻量级检索待确认文件提议；
+     - `accept [--id <id>] [--all] [--peer <peer>] [--json] [--ui-port <port>]`：单项或批量接收文件提议；
+     - `reject [--id <id>] [--all] [--peer <peer>] [--reason <r>] [--json] [--ui-port <port>]`：单项或批量拒绝文件提议；
+     - `auto-accept [--enable] [--disable] [--json] [--ui-port <port>]`：查询或切换受信对端自动接收；
+     - `events` 监听器增设 `[file_rejected]` 与 `[file_auto_accept_changed]` 格式化打印；
+  6. Web UI 实时交互与治理看板 (`ui/index.html`):
+     - 增设「待确认文件与提议治理」卡片，显示待确认文件列表、文件名、大小、断点续传标记与来源对端；
+     - 增设单项接收/拒绝按钮、一键「全部接收」与「全部拒绝」按钮；
+     - 增设「自动接收受信任对端」复选框开关与自动接收累计计数徽标；
+     - SSE 监听器对接 `file_rejected` 与 `file_auto_accept_changed`，动态局部重绘；
+  7. 端到端集成测试全覆盖 (`tests/phase1.rs`):
+     - 增设 `file_offer_lifecycle_and_terminal_governance_via_loopback_api`：完备验证初始态、提议到达与透视、单项拒绝及事件广播、批量拒绝与报告、受信任对端自动接收生效及收件箱 SHA-256 完整性校验、错误边界（400/404）与优雅停机，确立 ADR-046，SSOT 升至 v1.53。
+
 ## 2026-10-18 (49) - Clipboard lifecycle governance, metadata telemetry auditing, and history observability closed-loop (v1.52 / ADR-045)
 - Task: 实现跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环，消除剪贴板事件流黑盒与明文泄漏风险，建立纯元数据受控环形缓冲区、主动安全清空复位与双端 CLI/Web UI 全同构控制面。
 - **背景与缺陷根因**:

@@ -3,12 +3,73 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.52** |
+| 文档版本 | **1.53** |
 | 日期 | 2026-10-18 |
-| 状态 | **v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）**——(1) **核心模型与元数据环形缓冲区 (`clip.rs`, `lib.rs`)**：定义 `ClipDirection` 与 `ClipMetaEntry` 纯元数据结构，`ClipHub` 集成固定容量环形缓冲区 `MAX_CLIP_HISTORY = 32` 与 `inbound_count`/`outbound_count` 统计计数器，提供 `record_entry`、`history`、`clear_history`、`reset_state` 与 `stats` 原语；(2) **事件总线扩展与安全红线守卫 (`events.rs`, `runtime.rs`, `lib.rs`)**：新增 `UiEvent::ClipboardSynced` 与 `UiEvent::ClipboardCleared`（严格遵守零明文原则，严禁携带文本或 OTP），定义 `ClipStatusReport`、`ClipHistoryReport`、`ClipMetaEntryDto` 与 `ClipClearReport`；(3) **运行时可观测性闭环与控制原语 (`runtime.rs`)**：`apply_clip` 与 `send_clipboard_to`/`send_clipboard_text` 闭环记录元数据并广播 `UiEvent::ClipboardSynced`，实现 `Node::clipboard_status`、`Node::clipboard_history` 与 `Node::clear_clipboard`；(4) **轻量级回环控制面端点升级 (`uihttp.rs`)**：新增 `GET /api/clip/status`、`GET /api/clip/history`、`POST /api/clip/clear` 与 `DELETE /api/clip`（严格校验 127.0.0.1 与 Host 403）；(5) **CLI 双端全同构升级 (`tetherly` 与 `tetherly-cli`)**：新增 `clip status`、`clip history`、`clip clear` 子命令，`events` 监听器高亮 `[clipboard_synced]` 与 `[clipboard_cleared]`；(6) **Web UI 实时交互与历史可视化 (`ui/index.html`)**：增设剪贴板状态徽标、最近 5 条同步历史列表、清空剪贴板按钮，对接 SSE 实时局部刷新；(7) **端到端集成测试全覆盖 (`tests/phase1.rs`)**：增设 `clipboard_lifecycle_history_and_observability_via_loopback_api` 完备验证。+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）**——(1) **轻量级文件提议透视与 DTO 设计 (`runtime.rs`, `lib.rs`)**：解耦重量级全节点快照 `GET /api/state`，定义 `FileOfferDto`、`FileOffersReport`、`FileDecisionReport`、`FileBatchDecisionReport` 与 `AutoAcceptReport` 结构化报告，提供按 `transfer_id` 的 $O(1)$ 精准查询与按来源对端 `peer` 的轻量级过滤；(2) **事件总线生命周期补完与安全守卫 (`events.rs`, `runtime.rs`)**：新增 `UiEvent::FileRejected` 与 `UiEvent::FileAutoAcceptChanged`，闭环消除文件提议拒绝与策略变更的事件黑盒；(3) **运行时控制原语与受信任自动接收策略 (`runtime.rs`)**：Shared 状态集成原子控制位 `auto_accept_trusted: AtomicBool` 与统计计数器 `auto_accepted_count: AtomicU64`，在 `SessionEvent::FileOffer` 中自动识别 Noise 鉴权受信对端（`is_trusted(peer)`）并异步自动接收，新增 `file_offers`、`user_accept_file_reported`、`user_reject_file_reported`、`batch_accept_files`、`batch_reject_files`、`auto_accept_status` 与 `set_auto_accept` 原语；(4) **轻量级回环控制面端点升级 (`uihttp.rs`)**：新增 `GET /api/file/offers`、`POST /api/file/accept`、`POST /api/file/reject`、`GET /api/file/auto-accept` 与 `POST /api/file/auto-accept`（严格校验 127.0.0.1 回环绑定与 Host 403）；(5) **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：新增 `offers`、`accept`、`reject`、`auto-accept` 子命令，并在 `events` 监听器中高亮 `[file_rejected]` 与 `[file_auto_accept_changed]`；(6) **Web UI 提议治理与策略开关 (`ui/index.html`)**：增设待确认文件提议治理面板、一键全部接收/全部拒绝、受信对端自动接收复选框与实时计数徽标，对接 SSE 动态刷新；(7) **端到端集成测试全覆盖 (`tests/phase1.rs`)**：增设 `file_offer_lifecycle_and_terminal_governance_via_loopback_api` 完备验证。+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.53 相对 1.52(跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环)**
+
+- **动机(文件提议状态黑盒、重载全节点快照开销、缺乏轻量级提议透视、批量决策原语缺失、受信任对端自动接收空白及事件生命周期脱节)**:
+  在 Tetherly v1.52 实现了跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环后，数据协同与安全体系得到大幅提升。但在核心应用层的**跨端文件传输系统（File Ingress & Offer Lifecycle）**中，暴露出**提议状态黑盒、轻量级提议可观测性断层、批量决策能力缺失与无人值守自动化空白**：
+  1. **待确认文件提议缺乏轻量级透视端点（Heavy Snapshot vs Lightweight Offers Introspection）**：
+     - 此前客户端或外部工具若要感知「当前有哪些待确认的接收提议」，必须调用重量级的全节点状态快照 `GET /api/state`。该接口会序列化整个节点的所有会话、候选通知、路由表、全局指标与剪贴板状态，在轮询与低资源场景下开销巨大；
+     - 缺乏专用的 `GET /api/file/offers`，无法针对单一提议执行按 `transfer_id` 的 $O(1)$ 精准透视，亦无法按来源对端 `peer` 进行定向筛选；
+  2. **提议决策动作缺乏零明文结构化报告（Zero-Plaintext Structured Decision Reports）**：
+     - 现存接收（`POST /api/file/accept`）与拒绝（`POST /api/file/reject`）接口返回松散字典，未提供可追溯的 `FileDecisionReport` 与 `FileBatchDecisionReport`；控制端无法审计被确认或拒绝的文件名、字节大小、断点续传偏移与来源对端；
+  3. **缺乏面向生产环境的批量提议治理原语（Batch Decision Governance）**：
+     - 当对端批量投递多份文件，或多个协作设备同时发起传输时，用户或守护进程缺乏一键「全部接收」（`--all`）、「全部拒绝」或按特定设备定向批处理的能力；
+  4. **无人值守与受信任对端自动接收策略空白（Auto-Accept Policy for Trusted Peers）**：
+     - 在 NAS、无头运行（Headless Linux/macOS/Windows Daemon）或已严格通过 Noise 密钥配对的个人多设备协同场景下，每次对端发来文件都需要人工干预调用 API 确认，极大阻碍了无人值守工作流；
+     - **严格遵守安全红线铁律（Verbatim Security Red Line）**：「信任库只在 Noise transport 成功后写」与「仅允许受信任对端触发自动接收」。因此，自动接收策略必须严格受限于 `is_trusted(peer) == true`，严禁未经鉴权的外部设备绕过确认机制；
+  5. **事件总线生命周期缺失（Missing Event Bus Lifecycle for Rejection & Policy Change）**：
+     - 当文件提议被拒绝（本地拒绝或对端拒绝）时，系统此前处于完全静默状态，从未派发任何 `UiEvent`；同时自动接收策略变更亦未在事件流中广播，导致 Web UI、SSE 订阅客户端与 CLI 监听器无法感知；
+  6. **双端 CLI 与 Web UI 全同构控制闭环缺失**：
+     - `tetherly` 与 `tetherly-cli` 缺少 `offers`、`accept`、`reject`、`auto-accept` 命令群；Web UI 缺少待确认文件治理面板与自动接收配置开关。
+
+- **架构与协议设计(ADR-046 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环)**:
+  1. **结构化 DTO 报告设计 (`crates/tetherly-node/src/runtime.rs`, `lib.rs`)**:
+     - `FileOfferDto`：封装 `transfer_id`、`filename`、`total_bytes`、`resume_from`、`source` 与 `timestamp_ms`；
+     - `FileOffersReport`：封装 `ok`、`count`、`offers: Vec<FileOfferDto>` 与 `auto_accept_trusted: bool`；
+     - `FileDecisionReport`：封装单项决策结果 `transfer_id`、`filename`、`total_bytes`、`resume_from`、`peer`、`accepted` 与 `timestamp_ms`；
+     - `FileBatchDecisionReport`：封装批量决策结果 `accepted_count` / `rejected_count`、`total_evaluated` 与 `decisions` 列表；
+     - `AutoAcceptReport`：封装自动接收策略状态 `enabled`、`auto_accepted_count` 与 `target: "trusted_peers_only"`。
+  2. **事件总线扩展 (`crates/tetherly-node/src/events.rs`)**:
+     - 新增 `UiEvent::FileRejected { transfer_id, source, reason }` 与 `UiEvent::FileAutoAcceptChanged { enabled }`。
+  3. **运行时控制原语与受信对端自动接收策略 (`crates/tetherly-node/src/runtime.rs`)**:
+     - 在 `Shared` 状态中增设原子控制位 `auto_accept_trusted: AtomicBool` 与原子计数器 `auto_accepted_count: AtomicU64`；
+     - 实现 `Node::is_trusted(&self, peer: &str) -> bool`，基于 `trust_table` 判定 Noise 鉴权受信状态；
+     - 在 `SessionEvent::FileOffer` 核心处理循环中集成自动接收判定：若 `auto_accept_trusted` 开启且 `is_trusted(peer)`，则自动触发异步 `user_accept_file` 并将 `auto_accepted_count` 递增；
+     - 在 `SessionEvent::FileReject` 与本地主动拒绝时广播 `UiEvent::FileRejected`；
+     - 增设 `file_offers`、`user_accept_file_reported`、`user_reject_file_reported`、`batch_accept_files`、`batch_reject_files`、`auto_accept_status` 与 `set_auto_accept` 原语。
+  4. **轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/file/offers`：支持按 `?id=tfl_...`（404 on missing）与 `?peer=...` 查询过滤；
+     - `POST /api/file/accept`：支持按 `id` 单项接收或 `{ "all": true, "peer": ... }` 批量接收；
+     - `POST /api/file/reject`：支持按 `id` 单项拒绝或 `{ "all": true, "peer": ... }` 批量拒绝；
+     - `GET /api/file/auto-accept` 与 `POST /api/file/auto-accept`：查询与设置受信对端自动接收策略；
+     - 严格 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 校验（403 on mismatch）。
+  5. **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - `offers [--peer <peer>] [--id <id>] [--json] [--ui-port <port>]`；
+     - `accept [<id>] [--all] [--peer <peer>] [--json] [--ui-port <port>]`；
+     - `reject [<id>] [--all] [--peer <peer>] [--json] [--ui-port <port>]`；
+     - `auto-accept [--enable] [--disable] [--json] [--ui-port <port>]`；
+     - `events` 监听器增设 `[file_rejected]` 与 `[file_auto_accept_changed]` 格式化打印。
+  6. **Web UI 提议治理升级 (`ui/index.html`)**:
+     - 待确认文件列表增设断点续传徽标与来源标识；
+     - 增设「刷新提议」、「全部接收」、「全部拒绝」操作按钮；
+     - 增设「自动接收受信任对端」复选框与累计自动接收次数徽标；
+     - 对接 SSE 实时更新事件流。
+  7. **端到端集成测试全覆盖 (`tests/phase1.rs`)**:
+     - 增设 `file_offer_lifecycle_and_terminal_governance_via_loopback_api`：
+       - 验证初始提议与自动接收状态为空；
+       - 验证提议到达时 `GET /api/file/offers` 透视、按 ID 查询与按 peer 过滤；
+       - 验证单项拒绝、派发 `UiEvent::FileRejected` 与提议移除；
+       - 验证批量投递与批量拒绝（`FileBatchDecisionReport`）；
+       - 验证开启受信对端自动接收策略、自动静默入站接收与计数器递增；
+       - 验证关闭自动接收策略及非法请求边界校验；
+       - 验证优雅停机。
 
 **1.52 相对 1.51(跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环)**
 

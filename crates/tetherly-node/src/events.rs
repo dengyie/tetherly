@@ -27,6 +27,15 @@ pub enum UiEvent {
         source: String,
         files: Vec<FileView>,
     },
+    FileRejected {
+        transfer_id: String,
+        source: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    FileAutoAcceptChanged {
+        enabled: bool,
+    },
     FileDone {
         transfer_id: String,
     },

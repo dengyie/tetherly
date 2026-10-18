@@ -4641,6 +4641,366 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
     peer.shutdown();
 }
 
+/// ADR-046: Cross-Device File Offer Lifecycle Governance, Lightweight Offer Introspection,
+/// Batch Decision Control, Auto-Accept Trusted Peers Policy, and Loopback RESTful Closed-Loop.
+#[tokio::test(flavor = "multi_thread")]
+async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
+    let (host, peer, g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let peer_ui = peer.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    let mut host_rx = host.subscribe();
+
+    // 1. Initial State: No pending offers, auto-accept disabled, counter is 0
+    let (code_init, body_init) = tetherly_node::loopback_get(host_ui, "/api/file/offers")
+        .await
+        .unwrap();
+    assert_eq!(code_init, 200);
+    let init_offers: tetherly_node::FileOffersReport =
+        serde_json::from_slice(&body_init).unwrap();
+    assert!(init_offers.ok);
+    assert_eq!(init_offers.count, 0);
+    assert!(init_offers.offers.is_empty());
+    assert!(!init_offers.auto_accept_trusted);
+
+    let (code_auto_init, body_auto_init) =
+        tetherly_node::loopback_get(host_ui, "/api/file/auto-accept")
+            .await
+            .unwrap();
+    assert_eq!(code_auto_init, 200);
+    let auto_init: tetherly_node::AutoAcceptReport =
+        serde_json::from_slice(&body_auto_init).unwrap();
+    assert!(auto_init.ok);
+    assert!(!auto_init.enabled);
+    assert_eq!(auto_init.auto_accepted_count, 0);
+
+    // 2. Peer offers a file to Host
+    let (send_dir, _g_send) = temp_dir("offer-send");
+    let file1_path = send_dir.join("offer_doc1.txt");
+    let file1_data = b"Tetherly v1.53 Offer Ingestion and Lifecycle Test File 1";
+    std::fs::write(&file1_path, file1_data).unwrap();
+
+    let payload1 = serde_json::json!({
+        "path": file1_path.to_str().unwrap(),
+        "name": "offer_doc1.txt",
+        "peer": host_id,
+    });
+    let (code_s1, body_s1) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/file/send",
+        &serde_json::to_vec(&payload1).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_s1, 200);
+    let s1_resp: serde_json::Value = serde_json::from_slice(&body_s1).unwrap();
+    let transfer_id1 = s1_resp["transfer_id"].as_str().unwrap().to_string();
+
+    wait_offered(&host, Duration::from_secs(10)).await;
+
+    // 3. Introspect offers on Host via GET /api/file/offers
+    let (_, body_offers1) = tetherly_node::loopback_get(host_ui, "/api/file/offers")
+        .await
+        .unwrap();
+    let rep_offers1: tetherly_node::FileOffersReport =
+        serde_json::from_slice(&body_offers1).unwrap();
+    assert_eq!(rep_offers1.count, 1);
+    assert_eq!(rep_offers1.offers[0].transfer_id, transfer_id1);
+    assert_eq!(rep_offers1.offers[0].filename, "offer_doc1.txt");
+    assert_eq!(rep_offers1.offers[0].total_bytes, file1_data.len() as u64);
+    assert_eq!(rep_offers1.offers[0].resume_from, 0);
+    assert_eq!(rep_offers1.offers[0].source, peer_id);
+
+    // Test query by specific ID
+    let (code_by_id, body_by_id) = tetherly_node::loopback_get(
+        host_ui,
+        &format!("/api/file/offers?id={transfer_id1}"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_by_id, 200);
+    let single_offer: tetherly_node::FileOfferDto =
+        serde_json::from_slice(&body_by_id).unwrap();
+    assert_eq!(single_offer.transfer_id, transfer_id1);
+    assert_eq!(single_offer.filename, "offer_doc1.txt");
+
+    // Test query by peer filter
+    let (_, body_peer_filter) = tetherly_node::loopback_get(
+        host_ui,
+        &format!("/api/file/offers?peer={peer_id}"),
+    )
+    .await
+    .unwrap();
+    let peer_offers: tetherly_node::FileOffersReport =
+        serde_json::from_slice(&body_peer_filter).unwrap();
+    assert_eq!(peer_offers.count, 1);
+
+    // Non-matching peer filter returns 0 offers
+    let (_, body_empty_filter) =
+        tetherly_node::loopback_get(host_ui, "/api/file/offers?peer=tdev_nonexistent")
+            .await
+            .unwrap();
+    let empty_filter_rep: tetherly_node::FileOffersReport =
+        serde_json::from_slice(&body_empty_filter).unwrap();
+    assert_eq!(empty_filter_rep.count, 0);
+
+    // 404 for unknown transfer ID
+    let (code_404, _) =
+        tetherly_node::loopback_get(host_ui, "/api/file/offers?id=tfl_nonexistent")
+            .await
+            .unwrap();
+    assert_eq!(code_404, 404);
+
+    // 4. Reject the offer on Host via POST /api/file/reject
+    let rej_payload = serde_json::json!({ "id": transfer_id1 });
+    let (code_rej, body_rej) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/reject",
+        &serde_json::to_vec(&rej_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_rej, 200);
+    let rej_rep: tetherly_node::FileDecisionReport =
+        serde_json::from_slice(&body_rej).unwrap();
+    assert!(rej_rep.ok);
+    assert!(!rej_rep.accepted);
+    assert_eq!(rej_rep.transfer_id, transfer_id1);
+    assert_eq!(rej_rep.filename, "offer_doc1.txt");
+    assert_eq!(rej_rep.peer, peer_id);
+
+    // Verify host receives UiEvent::FileRejected
+    let start = std::time::Instant::now();
+    let mut file_rej_found = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        if let Ok(Ok(tetherly_node::UiEvent::FileRejected {
+            transfer_id,
+            source,
+            ..
+        })) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await
+        {
+            if transfer_id == transfer_id1 && source == peer_id {
+                file_rej_found = true;
+                break;
+            }
+        }
+    }
+    assert!(file_rej_found, "host did not emit FileRejected event");
+
+    // Pending offers is now empty
+    let (_, body_after_rej) = tetherly_node::loopback_get(host_ui, "/api/file/offers")
+        .await
+        .unwrap();
+    let after_rej_rep: tetherly_node::FileOffersReport =
+        serde_json::from_slice(&body_after_rej).unwrap();
+    assert_eq!(after_rej_rep.count, 0);
+
+    // 5. Test Batch Reject: Peer offers 2 files
+    let file_a_path = send_dir.join("batch_a.bin");
+    let file_b_path = send_dir.join("batch_b.bin");
+    std::fs::write(&file_a_path, b"Batch Content A").unwrap();
+    std::fs::write(&file_b_path, b"Batch Content B").unwrap();
+
+    let (c_a, b_a) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/file/send",
+        &serde_json::to_vec(&serde_json::json!({
+            "path": file_a_path.to_str().unwrap(),
+            "name": "batch_a.bin",
+            "peer": host_id,
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_a, 200);
+    let id_a = serde_json::from_slice::<serde_json::Value>(&b_a).unwrap()["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (c_b, b_b) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/file/send",
+        &serde_json::to_vec(&serde_json::json!({
+            "path": file_b_path.to_str().unwrap(),
+            "name": "batch_b.bin",
+            "peer": host_id,
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_b, 200);
+    let id_b = serde_json::from_slice::<serde_json::Value>(&b_b).unwrap()["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Wait until both offers appear on Host
+    let start_wait = std::time::Instant::now();
+    loop {
+        let (_, b_chk) = tetherly_node::loopback_get(host_ui, "/api/file/offers")
+            .await
+            .unwrap();
+        let rep_chk: tetherly_node::FileOffersReport =
+            serde_json::from_slice(&b_chk).unwrap();
+        if rep_chk.count == 2 {
+            break;
+        }
+        if start_wait.elapsed() > Duration::from_secs(10) {
+            panic!("timed out waiting for 2 offers, got {}", rep_chk.count);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Batch reject all offers from peer
+    let batch_rej_payload = serde_json::json!({
+        "all": true,
+        "peer": peer_id,
+    });
+    let (code_batch_rej, body_batch_rej) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/reject",
+        &serde_json::to_vec(&batch_rej_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_batch_rej, 200);
+    let batch_rej: tetherly_node::FileBatchDecisionReport =
+        serde_json::from_slice(&body_batch_rej).unwrap();
+    assert!(batch_rej.ok);
+    assert_eq!(batch_rej.rejected_count, 2);
+    assert_eq!(batch_rej.total_evaluated, 2);
+    assert_eq!(batch_rej.decisions.len(), 2);
+    assert!(batch_rej.decisions.iter().any(|d| d.transfer_id == id_a));
+    assert!(batch_rej.decisions.iter().any(|d| d.transfer_id == id_b));
+
+    // Verify both offers are gone
+    let (_, b_after_batch) = tetherly_node::loopback_get(host_ui, "/api/file/offers")
+        .await
+        .unwrap();
+    let after_batch: tetherly_node::FileOffersReport =
+        serde_json::from_slice(&b_after_batch).unwrap();
+    assert_eq!(after_batch.count, 0);
+
+    // 6. Test Auto-Accept Policy for Trusted Peers
+    let auto_enable_payload = serde_json::json!({ "enabled": true });
+    let (code_en, body_en) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/auto-accept",
+        &serde_json::to_vec(&auto_enable_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_en, 200);
+    let en_rep: tetherly_node::AutoAcceptReport = serde_json::from_slice(&body_en).unwrap();
+    assert!(en_rep.ok);
+    assert!(en_rep.enabled);
+
+    // Verify UiEvent::FileAutoAcceptChanged emission
+    let start = std::time::Instant::now();
+    let mut auto_ev_found = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        if let Ok(Ok(tetherly_node::UiEvent::FileAutoAcceptChanged { enabled })) =
+            tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await
+        {
+            if enabled {
+                auto_ev_found = true;
+                break;
+            }
+        }
+    }
+    assert!(auto_ev_found, "host did not emit FileAutoAcceptChanged event");
+
+    // Peer sends a file while auto-accept is enabled on host
+    let auto_file_path = send_dir.join("auto_file.dat");
+    let auto_data = b"Autonomous File Transfer Protocol Verification Data Payload v1.53";
+    std::fs::write(&auto_file_path, auto_data).unwrap();
+    let auto_expected_hash = hex_sha256(auto_data);
+
+    let (c_auto_send, b_auto_send) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/file/send",
+        &serde_json::to_vec(&serde_json::json!({
+            "path": auto_file_path.to_str().unwrap(),
+            "name": "auto_file.dat",
+            "peer": host_id,
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_auto_send, 200);
+    let auto_tid = serde_json::from_slice::<serde_json::Value>(&b_auto_send).unwrap()["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!auto_tid.is_empty());
+
+    // File should be automatically accepted and received in host inbox without manual call!
+    let received_data = wait_inbox(g1.path(), "auto_file.dat", Duration::from_secs(20)).await;
+    assert_eq!(hex_sha256(&received_data), auto_expected_hash);
+
+    // Host auto_accepted_count should have incremented to 1
+    let (_, body_auto_st) = tetherly_node::loopback_get(host_ui, "/api/file/auto-accept")
+        .await
+        .unwrap();
+    let auto_st: tetherly_node::AutoAcceptReport =
+        serde_json::from_slice(&body_auto_st).unwrap();
+    assert!(auto_st.enabled);
+    assert_eq!(auto_st.auto_accepted_count, 1);
+
+    // 7. Disable Auto-Accept Policy
+    let (code_dis, body_dis) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/auto-accept",
+        &serde_json::to_vec(&serde_json::json!({ "enabled": false })).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_dis, 200);
+    let dis_rep: tetherly_node::AutoAcceptReport = serde_json::from_slice(&body_dis).unwrap();
+    assert!(!dis_rep.enabled);
+
+    // 8. Error boundaries and Security Red Lines
+    // a. Accept with empty body (no ID, no all) returns 400 Bad Request
+    let (c_bad_acc, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/accept",
+        b"{}",
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_bad_acc, 400);
+
+    // b. Reject with unknown transfer ID returns 404 Not Found
+    let (c_bad_rej, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/reject",
+        &serde_json::to_vec(&serde_json::json!({ "id": "tfl_unknown_xyz" })).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_bad_rej, 404);
+
+    // c. Malformed JSON returns 400
+    let (c_mal, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/accept",
+        b"{ bad json",
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_mal, 400);
+
+    // 9. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

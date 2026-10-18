@@ -104,7 +104,19 @@
       <div id="replies"><div class="empty">没有待处理的回复。</div></div>
     </section>
     <section style="margin-top:16px">
-      <h2>待确认文件</h2>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2>待确认文件与提议治理</h2>
+        <div style="display:flex;gap:8px;align-items:center">
+          <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px;cursor:pointer">
+            <input type="checkbox" id="autoaccepttoggle" style="cursor:pointer"/>
+            自动接收受信任对端
+          </label>
+          <button id="refreshfileoffers" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--dim);border-radius:4px;cursor:pointer">刷新提议</button>
+          <button id="acceptallfiles" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--ok);color:var(--ok);border-radius:4px;cursor:pointer">全部接收</button>
+          <button id="rejectallfiles" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--bad);color:var(--bad);border-radius:4px;cursor:pointer">全部拒绝</button>
+        </div>
+      </div>
+      <div id="fileoffers-status" class="hint" style="margin-bottom:6px"></div>
       <div id="files"><div class="empty">没有待接收文件。</div></div>
     </section>
     <section style="margin-top:16px">
@@ -513,6 +525,55 @@ async function refreshTransfers() {
     console.error("refreshTransfers error", e);
   }
 }
+async function updateFileOffers() {
+  try {
+    const [offersRep, autoRep] = await Promise.all([
+      api("/api/file/offers"),
+      api("/api/file/auto-accept")
+    ]);
+    if (autoRep && $("autoaccepttoggle")) {
+      $("autoaccepttoggle").checked = !!autoRep.enabled;
+    }
+    const st = $("fileoffers-status");
+    if (st && autoRep) {
+      st.innerHTML = '自动接收策略: <b style="color:' + (autoRep.enabled ? 'var(--ok)' : 'var(--muted)') + '">' +
+        (autoRep.enabled ? '已启用 (仅限受信任对端)' : '已停用') + '</b> · 累计自动接收: <b>' + (autoRep.auto_accepted_count || 0) + '</b> 次';
+    }
+    if (offersRep && offersRep.ok) {
+      const f = $("files");
+      if (f && Array.isArray(offersRep.offers)) {
+        f.innerHTML = "";
+        if (!offersRep.offers.length) {
+          f.appendChild(el('<div class="empty">没有待接收文件。</div>'));
+        } else {
+          for (const x of offersRep.offers) {
+            const card = el('<div class="card"><div><div class="title"></div><div class="meta"></div></div><div class="row"></div></div>');
+            card.querySelector(".title").textContent = x.filename;
+            const resumeInfo = (x.resume_from && x.resume_from > 0) ? (' · 断点续传: ' + formatBytes(x.resume_from)) : '';
+            card.querySelector(".meta").textContent = formatBytes(x.total_bytes) + " · 来源: " + x.source + resumeInfo;
+            const ok = el('<button type="button">接收</button>');
+            ok.onclick = async () => {
+              await api("/api/file/accept", { id: x.transfer_id });
+              updateFileOffers();
+              tick();
+            };
+            const no = el('<button class="bad" type="button">拒绝</button>');
+            no.onclick = async () => {
+              await api("/api/file/reject", { id: x.transfer_id });
+              updateFileOffers();
+              tick();
+            };
+            card.querySelector(".row").appendChild(ok);
+            card.querySelector(".row").appendChild(no);
+            f.appendChild(card);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error("updateFileOffers error", e);
+  }
+}
 function render(s) {
   $("who").textContent = s.name + " · " + s.platform + " · " + s.device_id;
   const net = $("net");
@@ -612,11 +673,20 @@ function render(s) {
   for (const x of s.files) {
     const card = el('<div class="card"><div><div class="title"></div><div class="meta"></div></div><div class="row"></div></div>');
     card.querySelector(".title").textContent = x.name;
-    card.querySelector(".meta").textContent = formatBytes(x.size) + " · " + x.source;
+    const resumeInfo = (x.resume_from && x.resume_from > 0) ? (' · 断点续传: ' + formatBytes(x.resume_from)) : '';
+    card.querySelector(".meta").textContent = formatBytes(x.size) + " · 来源: " + x.source + resumeInfo;
     const ok = el('<button type="button">接收</button>');
-    ok.onclick = () => api("/api/file/accept", { id: x.transfer_id });
+    ok.onclick = async () => {
+      await api("/api/file/accept", { id: x.transfer_id });
+      updateFileOffers();
+      tick();
+    };
     const no = el('<button class="bad" type="button">拒绝</button>');
-    no.onclick = () => api("/api/file/reject", { id: x.transfer_id });
+    no.onclick = async () => {
+      await api("/api/file/reject", { id: x.transfer_id });
+      updateFileOffers();
+      tick();
+    };
     card.querySelector(".row").appendChild(ok);
     card.querySelector(".row").appendChild(no);
     f.appendChild(card);
@@ -887,6 +957,25 @@ $("screenstart").onclick = () => api("/api/screen/start", {});
 $("screenstop").onclick = () => api("/api/screen/stop", {});
 $("inputstart").onclick = () => api("/api/input/start", {});
 $("inputstop").onclick = () => api("/api/input/stop", {});
+const refreshFileOffersBtn = $("refreshfileoffers");
+if (refreshFileOffersBtn) refreshFileOffersBtn.onclick = () => updateFileOffers();
+const acceptAllFilesBtn = $("acceptallfiles");
+if (acceptAllFilesBtn) acceptAllFilesBtn.onclick = async () => {
+  await api("/api/file/accept", { all: true });
+  updateFileOffers();
+  tick();
+};
+const rejectAllFilesBtn = $("rejectallfiles");
+if (rejectAllFilesBtn) rejectAllFilesBtn.onclick = async () => {
+  await api("/api/file/reject", { all: true });
+  updateFileOffers();
+  tick();
+};
+const autoAcceptToggle = $("autoaccepttoggle");
+if (autoAcceptToggle) autoAcceptToggle.onchange = async () => {
+  await api("/api/file/auto-accept", { enabled: autoAcceptToggle.checked });
+  updateFileOffers();
+};
 const refreshTransfersBtn = $("refreshtransfers");
 if (refreshTransfersBtn) refreshTransfersBtn.onclick = () => refreshTransfers();
 const clearBtn = $("cleartransfers");
@@ -1457,10 +1546,25 @@ function setupEventSource() {
           let desc = ev.kind;
           if (ev.kind === "status") desc = "状态: " + ev.message;
           else if (ev.kind === "peer_up") desc = "节点上线: " + (ev.name || ev.device_id);
-          else if (ev.kind === "peer_down") desc = "节点离线: " + ev.device_id;
-          else if (ev.kind === "file_offered") desc = "文件到达: " + ev.transfer_id;
-          else if (ev.kind === "file_done") desc = "文件完成: " + ev.transfer_id;
-          else if (ev.kind === "pairing_needed") desc = "待配对: " + ev.device_id;
+	          else if (ev.kind === "peer_down") desc = "节点离线: " + ev.device_id;
+	          else if (ev.kind === "file_offered") {
+	            desc = "文件到达: " + ev.transfer_id;
+	            updateFileOffers();
+	          }
+	          else if (ev.kind === "file_done") {
+	            desc = "文件完成: " + ev.transfer_id;
+	            updateFileOffers();
+	            refreshTransfers();
+	          }
+	          else if (ev.kind === "file_rejected") {
+	            desc = "文件已拒绝: " + ev.transfer_id + (ev.reason ? (" (原因: " + ev.reason + ")") : "");
+	            updateFileOffers();
+	          }
+	          else if (ev.kind === "file_auto_accept_changed") {
+	            desc = "文件自动接收已" + (ev.enabled ? "开启" : "关闭");
+	            updateFileOffers();
+	          }
+	          else if (ev.kind === "pairing_needed") desc = "待配对: " + ev.device_id;
           else if (ev.kind === "peer_latency") desc = "时延度量: " + ev.device_id + " (" + ev.rtt_ms + "ms)";
           else if (ev.kind === "pin_state_changed") desc = "PIN 状态: " + (ev.active ? "已武装" : "已撤销/过期");
           else if (ev.kind === "peer_alias_changed") desc = "别名更新: " + ev.device_id + " -> \"" + ev.alias + "\"";
@@ -1537,8 +1641,10 @@ function setupEventSource() {
 	setInterval(updateTraffic, 2000);
 	updateBlocked();
 	setInterval(updateBlocked, 3000);
-	updateClipboard();
-	setInterval(updateClipboard, 3000);
+		updateClipboard();
+		setInterval(updateClipboard, 3000);
+		updateFileOffers();
+		setInterval(updateFileOffers, 3000);
 </script>
 </body>
 </html>

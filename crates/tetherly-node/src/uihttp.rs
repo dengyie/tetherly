@@ -505,6 +505,19 @@ struct IdBody {
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+struct FileDecisionBody {
+    id: Option<String>,
+    peer: Option<String>,
+    all: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct AutoAcceptBody {
+    enabled: Option<bool>,
+    auto_accept_trusted: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 struct NotifyDismissBody {
     id: Option<String>,
     peer: Option<String>,
@@ -1460,20 +1473,151 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 json_ok(&rep)
             }
         }
-        ("POST", "/api/file/accept") => match serde_json::from_slice::<IdBody>(body) {
-            Ok(d) => match node.user_accept_file(&d.id).await {
-                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+        ("GET", "/api/file/offers") | ("GET", "/api/offers") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let q_id = qmap
+                .get("id")
+                .or_else(|| qmap.get("transfer_id"))
+                .map(String::as_str);
+            let q_peer = qmap
+                .get("peer")
+                .or_else(|| qmap.get("device_id"))
+                .map(String::as_str);
+            match node.file_offers(q_id, q_peer) {
+                Ok(rep) => json_ok(&rep),
+                Err(tetherly_core::CoreError::UnknownTransfer) => {
+                    err(404, "transfer offer not found")
+                }
                 Err(e) => err(400, &e.to_string()),
-            },
-            Err(_) => err(400, "bad json"),
-        },
-        ("POST", "/api/file/reject") => match serde_json::from_slice::<IdBody>(body) {
-            Ok(d) => match node.user_reject_file(&d.id).await {
-                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
-                Err(e) => err(400, &e.to_string()),
-            },
-            Err(_) => err(400, "bad json"),
-        },
+            }
+        }
+        ("POST", "/api/file/accept") | ("POST", "/api/accept") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<FileDecisionBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<FileDecisionBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => {
+                        return err(
+                            400,
+                            "bad json, expected { id?: string, all?: bool, peer?: string }",
+                        )
+                    }
+                }
+            };
+            let is_all = parsed_body.as_ref().and_then(|b| b.all).unwrap_or(false)
+                || qmap
+                    .get("all")
+                    .and_then(|v| v.parse::<bool>().ok())
+                    .unwrap_or(false);
+            let target_peer = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone())
+                .or_else(|| {
+                    qmap.get("peer")
+                        .or_else(|| qmap.get("device_id"))
+                        .cloned()
+                });
+            let target_id = parsed_body
+                .as_ref()
+                .and_then(|b| b.id.clone())
+                .or_else(|| {
+                    qmap.get("id")
+                        .or_else(|| qmap.get("transfer_id"))
+                        .cloned()
+                });
+
+            if is_all || (target_id.is_none() && target_peer.is_some()) {
+                match node.batch_accept_files(target_peer.as_deref()).await {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(400, &e.to_string()),
+                }
+            } else if let Some(id) = target_id {
+                match node.user_accept_file_reported(&id).await {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(400, &e.to_string()),
+                }
+            } else {
+                err(400, "missing required 'id', 'all', or 'peer' parameter")
+            }
+        }
+        ("POST", "/api/file/reject") | ("POST", "/api/reject") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<FileDecisionBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<FileDecisionBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => {
+                        return err(
+                            400,
+                            "bad json, expected { id?: string, all?: bool, peer?: string }",
+                        )
+                    }
+                }
+            };
+            let is_all = parsed_body.as_ref().and_then(|b| b.all).unwrap_or(false)
+                || qmap
+                    .get("all")
+                    .and_then(|v| v.parse::<bool>().ok())
+                    .unwrap_or(false);
+            let target_peer = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone())
+                .or_else(|| {
+                    qmap.get("peer")
+                        .or_else(|| qmap.get("device_id"))
+                        .cloned()
+                });
+            let target_id = parsed_body
+                .as_ref()
+                .and_then(|b| b.id.clone())
+                .or_else(|| {
+                    qmap.get("id")
+                        .or_else(|| qmap.get("transfer_id"))
+                        .cloned()
+                });
+
+            if is_all || (target_id.is_none() && target_peer.is_some()) {
+                match node.batch_reject_files(target_peer.as_deref()).await {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(400, &e.to_string()),
+                }
+            } else if let Some(id) = target_id {
+                match node.user_reject_file_reported(&id).await {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(400, &e.to_string()),
+                }
+            } else {
+                err(400, "missing required 'id', 'all', or 'peer' parameter")
+            }
+        }
+        ("GET", "/api/file/auto-accept") | ("GET", "/api/auto-accept") => {
+            json_ok(&node.auto_accept_status())
+        }
+        ("POST", "/api/file/auto-accept")
+        | ("PUT", "/api/file/auto-accept")
+        | ("POST", "/api/auto-accept") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<AutoAcceptBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<AutoAcceptBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected { enabled?: bool }"),
+                }
+            };
+            let enabled = parsed_body
+                .and_then(|b| b.enabled.or(b.auto_accept_trusted))
+                .or_else(|| {
+                    qmap.get("enabled")
+                        .or_else(|| qmap.get("auto_accept_trusted"))
+                        .and_then(|v| v.parse::<bool>().ok())
+                })
+                .unwrap_or(true);
+            json_ok(&node.set_auto_accept(enabled))
+        }
         ("POST", "/api/file/cancel") => match serde_json::from_slice::<IdBody>(body) {
             Ok(d) => match node.cancel_transfer(&d.id).await {
                 Ok(()) => json_ok(&serde_json::json!({ "ok": true, "transfer_id": d.id })),

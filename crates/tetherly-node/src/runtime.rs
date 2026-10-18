@@ -432,6 +432,60 @@ pub struct TransfersReport {
 /// Maximum number of completed/failed transfer records retained in memory.
 pub const MAX_TERMINAL_TRANSFERS: usize = 64;
 
+/// Comprehensive report of pending incoming file transfer offers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct FileOffersReport {
+    pub ok: bool,
+    pub total: usize,
+    pub offers: Vec<FileOfferDto>,
+}
+
+/// Detailed metadata of a single pending file transfer offer.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct FileOfferDto {
+    pub transfer_id: String,
+    pub peer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_name: Option<String>,
+    pub filename: String,
+    pub size: u64,
+    pub sha256: String,
+    pub resume_from: Option<u64>,
+    pub offered_ms: u64,
+}
+
+/// Result of accepting or rejecting a file transfer offer.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct FileDecisionReport {
+    pub ok: bool,
+    pub transfer_id: String,
+    pub action: String,
+    pub peer: String,
+    pub filename: String,
+    pub total_bytes: u64,
+    pub resume_from: u64,
+    pub timestamp_ms: u64,
+}
+
+/// Result of batch accepting or rejecting file transfer offers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct FileBatchDecisionReport {
+    pub ok: bool,
+    pub action: String,
+    pub processed_count: usize,
+    pub transfers: Vec<FileDecisionReport>,
+}
+
+/// Status and configuration of auto-accept policy for trusted peers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AutoAcceptReport {
+    pub ok: bool,
+    pub auto_accept_trusted: bool,
+    pub auto_accepted_count: u64,
+}
+
 /// Session aggregate transfer metrics across all inbound and outbound files.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct TransferStats {
@@ -692,6 +746,8 @@ struct Shared {
     telemetry: Arc<TrafficTelemetry>,
     local_caps: Mutex<std::collections::HashSet<String>>,
     blocked: Mutex<crate::store::BlockedTable>,
+    auto_accept_trusted: AtomicBool,
+    auto_accepted_count: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -887,6 +943,8 @@ impl Node {
                 s
             }),
             blocked: Mutex::new(initial_blocked),
+            auto_accept_trusted: AtomicBool::new(false),
+            auto_accepted_count: AtomicU64::new(0),
         });
         Ok(Self { shared })
     }
@@ -1286,6 +1344,11 @@ impl Node {
 
     pub fn trusted(&self) -> Vec<tetherly_core::TrustedPeer> {
         self.shared.trust.lock().expect("trust").all()
+    }
+
+    pub fn is_trusted(&self, id: &DeviceId) -> bool {
+        let store = self.shared.trust.lock().expect("trust");
+        store.peers.get(id).map_or(false, |p| !p.revoked)
     }
 
     /// Update the local friendly alias for a trusted peer device.
@@ -3582,7 +3645,26 @@ impl Node {
                     )
                 };
                 match offered {
-                    Ok(t) => self.emit(file_offered(&t)),
+                    Ok(t) => {
+                        self.emit(file_offered(&t));
+                        if self.shared.auto_accept_trusted.load(Ordering::Relaxed)
+                            && self.is_trusted(peer)
+                        {
+                            let node_clone = self.clone();
+                            let tid_clone = tid.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = node_clone.user_accept_file(&tid_clone).await {
+                                    warn!(%e, transfer = %tid_clone, "auto-accept failed");
+                                } else {
+                                    node_clone
+                                        .shared
+                                        .auto_accepted_count
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    info!(transfer = %tid_clone, "auto-accepted file from trusted peer");
+                                }
+                            });
+                        }
+                    }
                     Err(e) => warn!(%e, transfer = %tid, "refused file offer"),
                 }
             }
@@ -3617,6 +3699,11 @@ impl Node {
                     TransferPhase::Failed,
                     Some("rejected by peer".into()),
                 );
+                self.emit(UiEvent::FileRejected {
+                    transfer_id: d.transfer_id.clone(),
+                    source: peer.to_string(),
+                    reason: Some("rejected by peer".into()),
+                });
             }
             SessionEvent::FileDone(done) => {
                 let mut hubs = self.shared.hubs.lock().expect("hubs");
@@ -4025,7 +4112,233 @@ impl Node {
                 .map(|t| t.source.clone())
                 .ok_or(CoreError::UnknownTransfer)?
         };
+        self.emit(UiEvent::FileRejected {
+            transfer_id: transfer_id.to_string(),
+            source: source.to_string(),
+            reason: Some("rejected locally".into()),
+        });
         self.send_to(&source, decision.reject_frame()?).await
+    }
+
+    /// Accepts an incoming file transfer and returns a structured decision report.
+    pub async fn user_accept_file_reported(
+        &self,
+        transfer_id: &str,
+    ) -> Result<FileDecisionReport, CoreError> {
+        let (source, name, total, resume_from) = {
+            let hubs = self.shared.hubs.lock().expect("hubs");
+            let t = hubs
+                .files
+                .get(transfer_id)
+                .ok_or(CoreError::UnknownTransfer)?;
+            (
+                t.source.clone(),
+                t.files
+                    .first()
+                    .map(|f| f.name.clone())
+                    .unwrap_or_else(|| "file.bin".into()),
+                t.files.iter().map(|f| f.size).sum::<u64>(),
+                t.resume_from.unwrap_or(0),
+            )
+        };
+        self.user_accept_file(transfer_id).await?;
+        Ok(FileDecisionReport {
+            ok: true,
+            transfer_id: transfer_id.to_string(),
+            action: "accepted".to_string(),
+            peer: source.to_string(),
+            filename: name,
+            total_bytes: total,
+            resume_from,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        })
+    }
+
+    /// Rejects an incoming file transfer and returns a structured decision report.
+    pub async fn user_reject_file_reported(
+        &self,
+        transfer_id: &str,
+    ) -> Result<FileDecisionReport, CoreError> {
+        let (source, name, total, resume_from) = {
+            let hubs = self.shared.hubs.lock().expect("hubs");
+            let t = hubs
+                .files
+                .get(transfer_id)
+                .ok_or(CoreError::UnknownTransfer)?;
+            (
+                t.source.clone(),
+                t.files
+                    .first()
+                    .map(|f| f.name.clone())
+                    .unwrap_or_else(|| "file.bin".into()),
+                t.files.iter().map(|f| f.size).sum::<u64>(),
+                t.resume_from.unwrap_or(0),
+            )
+        };
+        self.user_reject_file(transfer_id).await?;
+        Ok(FileDecisionReport {
+            ok: true,
+            transfer_id: transfer_id.to_string(),
+            action: "rejected".to_string(),
+            peer: source.to_string(),
+            filename: name,
+            total_bytes: total,
+            resume_from,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        })
+    }
+
+    /// Batch accepts pending incoming file offers, optionally filtered by peer.
+    pub async fn batch_accept_files(
+        &self,
+        peer_filter: Option<&str>,
+    ) -> Result<FileBatchDecisionReport, CoreError> {
+        let target_peer = if let Some(p) = peer_filter {
+            Some(self.resolve_peer(p)?)
+        } else {
+            None
+        };
+        let candidates: Vec<String> = {
+            let hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.files
+                .offered()
+                .into_iter()
+                .filter(|t| match &target_peer {
+                    Some(expected) => &t.source == expected,
+                    None => true,
+                })
+                .map(|t| t.transfer_id)
+                .collect()
+        };
+        let mut reports = Vec::with_capacity(candidates.len());
+        for tid in candidates {
+            if let Ok(rep) = self.user_accept_file_reported(&tid).await {
+                reports.push(rep);
+            }
+        }
+        Ok(FileBatchDecisionReport {
+            ok: true,
+            action: "accepted".to_string(),
+            processed_count: reports.len(),
+            transfers: reports,
+        })
+    }
+
+    /// Batch rejects pending incoming file offers, optionally filtered by peer.
+    pub async fn batch_reject_files(
+        &self,
+        peer_filter: Option<&str>,
+    ) -> Result<FileBatchDecisionReport, CoreError> {
+        let target_peer = if let Some(p) = peer_filter {
+            Some(self.resolve_peer(p)?)
+        } else {
+            None
+        };
+        let candidates: Vec<String> = {
+            let hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.files
+                .offered()
+                .into_iter()
+                .filter(|t| match &target_peer {
+                    Some(expected) => &t.source == expected,
+                    None => true,
+                })
+                .map(|t| t.transfer_id)
+                .collect()
+        };
+        let mut reports = Vec::with_capacity(candidates.len());
+        for tid in candidates {
+            if let Ok(rep) = self.user_reject_file_reported(&tid).await {
+                reports.push(rep);
+            }
+        }
+        Ok(FileBatchDecisionReport {
+            ok: true,
+            action: "rejected".to_string(),
+            processed_count: reports.len(),
+            transfers: reports,
+        })
+    }
+
+    /// Queries pending incoming file offers with optional transfer ID or peer filtering.
+    pub fn file_offers(
+        &self,
+        id_filter: Option<&str>,
+        peer_filter: Option<&str>,
+    ) -> Result<FileOffersReport, CoreError> {
+        let target_peer = if let Some(p) = peer_filter {
+            Some(self.resolve_peer(p)?)
+        } else {
+            None
+        };
+        let raw_offers = self.offered_files();
+        let trusted_map: HashMap<DeviceId, (Option<String>, String)> = {
+            let trust = self.shared.trust.lock().expect("trust");
+            trust
+                .all()
+                .into_iter()
+                .map(|p| (p.device_id, (p.alias, p.name)))
+                .collect()
+        };
+        let mut filtered = Vec::new();
+        for t in raw_offers {
+            if let Some(expected_id) = id_filter {
+                if t.transfer_id != expected_id {
+                    continue;
+                }
+            }
+            if let Some(ref expected_peer) = target_peer {
+                if &t.source != expected_peer {
+                    continue;
+                }
+            }
+            let (peer_alias, peer_name) = trusted_map
+                .get(&t.source)
+                .cloned()
+                .unwrap_or((None, t.source.to_string()));
+            let (name, size, sha256) = t
+                .files
+                .first()
+                .map(|f| (f.name.clone(), f.size, f.sha256.clone()))
+                .unwrap_or_default();
+            filtered.push(FileOfferDto {
+                transfer_id: t.transfer_id,
+                peer: t.source.to_string(),
+                peer_alias,
+                peer_name: Some(peer_name),
+                filename: name,
+                size,
+                sha256,
+                resume_from: t.resume_from,
+                offered_ms: t.offered_ms,
+            });
+        }
+        if let Some(_) = id_filter {
+            if filtered.is_empty() {
+                return Err(CoreError::UnknownTransfer);
+            }
+        }
+        Ok(FileOffersReport {
+            ok: true,
+            total: filtered.len(),
+            offers: filtered,
+        })
+    }
+
+    /// Status and configuration of auto-accept policy for trusted peers.
+    pub fn auto_accept_status(&self) -> AutoAcceptReport {
+        AutoAcceptReport {
+            ok: true,
+            auto_accept_trusted: self.shared.auto_accept_trusted.load(Ordering::Relaxed),
+            auto_accepted_count: self.shared.auto_accepted_count.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Configures the auto-accept policy for trusted peers and emits `UiEvent::FileAutoAcceptChanged`.
+    pub fn set_auto_accept(&self, enabled: bool) -> AutoAcceptReport {
+        self.shared.auto_accept_trusted.store(enabled, Ordering::Relaxed);
+        self.emit(UiEvent::FileAutoAcceptChanged { enabled });
+        self.auto_accept_status()
     }
 
     /// Syncs local clipboard to a specific peer or all connected peers.
