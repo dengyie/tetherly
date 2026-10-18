@@ -520,6 +520,36 @@ enum Cmd {
 
 #[derive(Subcommand, Debug)]
 enum ClipCmd {
+    /// View clipboard status, size, and synchronization statistics without leaking plaintext.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Inspect bounded clipboard synchronization history without leaking plaintext.
+    History {
+        /// Maximum number of history entries to return (1-32, default: 32).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Clear the local system clipboard and reset synchronization history.
+    Clear {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Sync the current local clipboard to connected peers.
     Sync {
         /// Target peer device_id (tdev_...). Omit to broadcast to all live peers.
@@ -1163,6 +1193,129 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Clip { action } => match action {
+            ClipCmd::Status { json, ui_port } => {
+                let (code, resp) =
+                    tetherly_node::loopback_get(ui_port, "/api/clip/status")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "clipboard status query failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let has_text = v["has_text"].as_bool().unwrap_or(false);
+                    let bytes = v["bytes"].as_u64().unwrap_or(0);
+                    let hash = v["hash"].as_str().unwrap_or("-");
+                    let last_seq = v["last_seq"].as_u64().unwrap_or(0);
+                    let inbound = v["inbound_count"].as_u64().unwrap_or(0);
+                    let outbound = v["outbound_count"].as_u64().unwrap_or(0);
+                    let history_count = v["history_count"].as_u64().unwrap_or(0);
+                    println!("Clipboard Status:");
+                    println!("  Has Content:     {has_text}");
+                    println!("  Bytes:           {bytes}");
+                    println!("  SHA-256 Digest:  {hash}");
+                    println!("  Last Sequence:   {last_seq}");
+                    println!("  Inbound Synced:  {inbound}");
+                    println!("  Outbound Synced: {outbound}");
+                    println!("  History Count:   {history_count}");
+                }
+            }
+            ClipCmd::History {
+                limit,
+                json,
+                ui_port,
+            } => {
+                let path = if let Some(n) = limit {
+                    format!("/api/clip/history?limit={n}")
+                } else {
+                    "/api/clip/history".to_string()
+                };
+                let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "clipboard history query failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let entries = v["entries"].as_array();
+                    match entries {
+                        Some(items) if !items.is_empty() => {
+                            println!(
+                                "{:<6} {:<10} {:<34} {:<8} {:<16} TIME",
+                                "SEQ", "DIR", "SOURCE", "BYTES", "SHA-256"
+                            );
+                            for item in items {
+                                let seq = item["seq"].as_u64().unwrap_or(0);
+                                let dir = item["direction"].as_str().unwrap_or("-");
+                                let src = item["source"].as_str().unwrap_or("-");
+                                let bytes = item["bytes"].as_u64().unwrap_or(0);
+                                let hash = item["hash"].as_str().unwrap_or("-");
+                                let short_hash = if hash.len() >= 12 {
+                                    &hash[..12]
+                                } else {
+                                    hash
+                                };
+                                let ts = item["timestamp_ms"].as_u64().unwrap_or(0);
+                                println!(
+                                    "{:<6} {:<10} {:<34} {:<8} {:<16} {}ms",
+                                    seq, dir, src, bytes, short_hash, ts
+                                );
+                            }
+                        }
+                        _ => println!("(no clipboard sync history)"),
+                    }
+                }
+            }
+            ClipCmd::Clear { json, ui_port } => {
+                let (code, resp) =
+                    tetherly_node::loopback_post(ui_port, "/api/clip/clear", b"{}")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "clipboard clear failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let cleared = v["cleared_history_count"].as_u64().unwrap_or(0);
+                    println!(
+                        "clipboard cleared successfully (evicted {cleared} history entries)"
+                    );
+                }
+            }
             ClipCmd::Sync { peer, ui_port } => {
                 let payload = serde_json::json!({ "peer": peer });
                 let bytes = serde_json::to_vec(&payload)?;
@@ -3156,6 +3309,28 @@ fn print_event(v: &serde_json::Value) {
         "peer_unblocked" => {
             let dev = v["device_id"].as_str().unwrap_or("?");
             println!("[peer_unblocked] peer={dev}");
+        }
+        "clipboard_synced" => {
+            let seq = v["seq"].as_u64().unwrap_or(0);
+            let dir = v["direction"].as_str().unwrap_or("?");
+            let src = v["source"].as_str().unwrap_or("local");
+            let bytes = v["bytes"].as_u64().unwrap_or(0);
+            let hash = v["hash"].as_str().unwrap_or("");
+            let short_hash = if hash.len() >= 12 { &hash[..12] } else { hash };
+            let peers = v["sent_peers"].as_u64().unwrap_or(0);
+            if dir == "outbound" {
+                println!(
+                    "[clipboard_synced] seq={seq} outbound from={src} ({bytes} bytes, sha256:{short_hash}...) to {peers} peer(s)"
+                );
+            } else {
+                println!(
+                    "[clipboard_synced] seq={seq} inbound from={src} ({bytes} bytes, sha256:{short_hash}...)"
+                );
+            }
+        }
+        "clipboard_cleared" => {
+            let ts = v["timestamp_ms"].as_u64().unwrap_or(0);
+            println!("[clipboard_cleared] timestamp_ms={ts}");
         }
         other => {
             println!("[{other}] {v}");

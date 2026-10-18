@@ -85,6 +85,18 @@ pub enum UiEvent {
     PeerUnblocked {
         device_id: String,
     },
+    ClipboardSynced {
+        seq: u64,
+        source: String,
+        direction: String,
+        bytes: usize,
+        hash: String,
+        timestamp_ms: u64,
+        sent_peers: usize,
+    },
+    ClipboardCleared {
+        timestamp_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

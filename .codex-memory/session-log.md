@@ -1,5 +1,59 @@
 # Session log
 
+## 2026-10-18 (49) - Clipboard lifecycle governance, metadata telemetry auditing, and history observability closed-loop (v1.52 / ADR-045)
+- Task: 实现跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环，消除剪贴板事件流黑盒与明文泄漏风险，建立纯元数据受控环形缓冲区、主动安全清空复位与双端 CLI/Web UI 全同构控制面。
+- **背景与缺陷根因**:
+  在 Tetherly v1.51 实现了通知全生命周期治理与双向同步后，跨端数据协同网络愈发成熟。但在应用层跨端安全剪贴板系统（Clipboard Lifecycle & Telemetry）中，暴露出事件黑盒、可观测性断层、元数据遥测缺失与历史审计空白：
+  1. 跨端剪贴板同步缺乏事件总线驱动与实时感知（Event Blackout）：
+     - 当手机端或外部对端向桌面节点推送剪贴板帧（`SessionEvent::Clip(clip)` -> `apply_clip`）并写入本地系统剪贴板时，底层从未向节点事件总线广播任何 `UiEvent`，导致 Web UI、SSE 订阅客户端与 CLI 事件监听器对对端剪贴板摄入完全处于「失明」状态；
+     - 本地主动发送剪贴板（`send_clipboard_to` / `send_clipboard_text`）同样未派发任何结构化事件，外部集成工具与诊断控制台无法通过统一事件流审计剪贴板出入站动作；
+  2. 缺乏安全的纯元数据透视端点（Metadata-Only Status Inspection）：
+     - 现存回环接口仅有 `GET /api/clip`，会直接返回明文文本（`text`）。在系统健康巡检、监控探针或状态展示场景下，调用方仅需要感知剪贴板状态（是否存在文本、字节大小、当前序号 `last_seq`、内容 SHA-256 哈希 `last_hash`、累计出入站次数），无需也不应将未经脱敏的明文文本暴露至日志或监控链路；
+  3. 缺乏受控的轻量级历史审计环形缓冲区（Bounded History Ring Buffer）：
+     - 节点缺乏剪贴板同步历史的可观测性。用户或客户端无法追溯「最近同步的剪贴板是何时发生、流向为何、来自哪个设备、大小是多少、校验哈希是什么」；
+     - 严格遵守安全红线铁律（Verbatim Security Red Line）：「UiEvent 严禁携带短信正文、一次性码、配对码、剪贴板纯文本」与「公开 issue / 日志禁止贴短信正文、一次性码、配对码、剪贴板」。因此，历史审计记录必须是纯元数据结构（Zero-Plaintext），仅记录 `(seq, source, direction, bytes, hash, timestamp_ms)`，绝对不存储任何明文字符；
+  4. 缺乏剪贴板主动清空与安全复位原语（Clipboard Reset & Purge）：
+     - 用户处理完敏感信息（如一次性密码、凭证碎片）后，缺乏通过回环控制面一键清空本地系统剪贴板、重置内容哈希并销毁审计历史的机制；
+  5. 回环端点与 CLI 缺乏规范化 RESTful 治理接口：
+     - 缺少 `GET /api/clip/status`（安全纯元数据查询）；
+     - 缺少 `GET /api/clip/history`（支持 `?limit=N` 的历史查询）；
+     - 缺少 `POST /api/clip/clear` 与 `DELETE /api/clip`（清空剪贴板与复位审计缓冲区）；
+     - 双端 CLI（`tetherly` 与 `tetherly-cli`）缺少 `clip status`、`clip history`、`clip clear` 命令，并在 `events` 监听器中缺少 `[clipboard_synced]` 与 `[clipboard_cleared]` 格式化高亮展示；
+  6. Web UI 实时交互与历史可视化补全：
+     - Web UI（`ui/index.html`）剪贴板卡片增设当前状态徽标、最近 5 条同步记录列表，以及一键「清空剪贴板」确认按钮，联动 SSE 事件动态局部刷新。
+- **架构设计与落地 (ADR-045)**:
+  1. 核心模型与元数据环形缓冲区 (`crates/tetherly-core/src/clip.rs`, `lib.rs`):
+     - 定义 `ClipDirection`（`Inbound`, `Outbound`）与 `ClipMetaEntry` 纯元数据结构；
+     - `ClipHub` 集成固定容量环形缓冲区 `MAX_CLIP_HISTORY: usize = 32`（`VecDeque<ClipMetaEntry>`）与 `inbound_count`, `outbound_count` 统计计数器；
+     - 提供 `record_entry`（自动 FIFO 逐出，保证 $O(1)$ 内存界限）、`history(limit)`、`clear_history`、`reset_state` 与 `stats` 原语；
+     - 增加核心单元测试 `history_and_bounded_ring_buffer` 验证容量约束与状态复位；
+  2. 事件总线扩展与安全红线守卫 (`crates/tetherly-node/src/events.rs`, `runtime.rs`, `lib.rs`):
+     - 新增 `UiEvent::ClipboardSynced { seq, source, direction, bytes, hash, timestamp_ms, sent_peers }` 与 `UiEvent::ClipboardCleared { timestamp_ms }`；严格遵守零明文原则（Zero-Plaintext），严禁包含文本内容或 OTP；
+     - 定义结构化 DTO 报告：`ClipStatusReport`、`ClipHistoryReport`、`ClipMetaEntryDto` 与 `ClipClearReport`；
+  3. 运行时可观测性闭环与控制原语 (`crates/tetherly-node/src/runtime.rs`):
+     - `apply_clip` 闭环：入站写入系统剪贴板后，记录元数据至 `ClipHub`，递增 `inbound_count`，向事件总线广播 `UiEvent::ClipboardSynced`（inbound）；
+     - `send_clipboard_to` / `send_clipboard_text` 闭环：出站投递至对端会话后，记录元数据至 `ClipHub`，递增 `outbound_count`，向事件总线广播 `UiEvent::ClipboardSynced`（outbound）；
+     - `Node::clipboard_status`：零泄漏状态查询原语；
+     - `Node::clipboard_history`：受控历史记录快照查询原语；
+     - `Node::clear_clipboard`：安全清空系统剪贴板（设为 `""`），复位 `ClipHub` 哈希与历史，广播 `UiEvent::ClipboardCleared`；
+  4. 轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`):
+     - `GET /api/clip/status`：返回 `ClipStatusReport`（零明文）；
+     - `GET /api/clip/history`：支持 `?limit=N`，返回 `ClipHistoryReport`；
+     - `POST /api/clip/clear` 与 `DELETE /api/clip`：清空剪贴板并返回 `ClipClearReport`；
+     - 严格 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 校验（403 on mismatch）；
+  5. CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs` 与 `crates/tetherly-node/src/bin/tetherly.rs`):
+     - `clip status [--json] [--ui-port <port>]`：格式化呈现当前剪贴板状态（字节数、序号、SHA-256、流向累计）；
+     - `clip history [--limit <n>] [--json] [--ui-port <port>]`：表格化呈现最近同步历史记录；
+     - `clip clear [--json] [--ui-port <port>]`：清空系统剪贴板与复位确认；
+     - `events` 监听器增设 `[clipboard_synced]` 与 `[clipboard_cleared]` 格式化打印；
+  6. Web UI 实时交互与历史可视化 (`ui/index.html`):
+     - 剪贴板卡片增设状态徽标（有效文本/空、大小、哈希缩写、流向计数）；
+     - 增设「清空剪贴板」确认按钮；
+     - 增设最近 5 条同步元数据条目（流向徽标、来源设备、大小、时间、SHA-256 缩写）；
+     - SSE 监听器对接 `clipboard_synced` 与 `clipboard_cleared`，动态局部重绘；
+  7. 端到端集成测试全覆盖 (`tests/phase1.rs`):
+     - 增设 `clipboard_lifecycle_history_and_observability_via_loopback_api`：完备验证初始态、出站同步事件、入站同步事件、32 环形容量上限 FIFO 逐出、清空复位与优雅停机，确立 ADR-045，SSOT 升至 v1.52。
+
 ## 2026-10-18 (48) - Notification full-lifecycle governance, bidirectional dismissal synchronization, and notification observability closed-loop (v1.51 / ADR-044)
 - Task: 实现通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环，彻底解决桌面消除通知后移动端常驻通知悬挂断层，完善多维批量治理与回环 RESTful 接口。
 - **背景与缺陷根因**:

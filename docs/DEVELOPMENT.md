@@ -3,12 +3,73 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.51** |
+| 文档版本 | **1.52** |
 | 日期 | 2026-10-18 |
-| 状态 | **v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）**——(1) **通知提取与消除原语强化 (`tetherly-core/src/notify.rs`)**：`take_candidate` 提取并保留元数据，新增 `dismiss_by_source`、`dismiss_by_app`、`clear_candidates` 批量消除原语，强化 `dismiss_wire_candidates` 返回被逐出候选以闭环事件广播；(2) **事件总线扩展与安全红线守卫 (`events.rs`, `runtime.rs`, `lib.rs`)**：新增 `UiEvent::CandidateDismissed { id, source, app_id, uid }`（严禁包含短信正文/OTP明文），定义 `CandidateDismissReport`、`BatchDismissReport` 与 `DismissFilter`；(3) **运行时跨端双向同步与多维批量消除 (`runtime.rs`)**：`Node::dismiss_candidate_sync` 发送 `InnerFrame::NotifyDismiss` 至活动会话并派发事件；`Node::dismiss_candidates` 支持按对端/应用/全量批量同步；`SessionEvent::Dismiss` 与 `AncsEvent::Removed` 闭环派发 `UiEvent::CandidateDismissed`；`Node::candidates_filtered` 支持 peer/app_id/has_otp 过滤；(4) **轻量级回环控制面端点升级 (`uihttp.rs`)**：`GET /api/notify/candidates` 增强 Query 过滤，`POST /api/dismiss` 升级支持网络同步并返回报告，新增标准 RESTful `POST /api/notify/dismiss` 与 `DELETE /api/notify/candidates`；(5) **CLI 双端全同构升级 (`tetherly` 与 `tetherly-cli`)**：`dismiss` 命令群支持 `[id]`、`--peer`、`--app-id`、`--all`、`--json`，`candidates` 支持过滤，`events` 监听器高亮 `[candidate_dismissed]`；(6) **Web UI 实时交互与一键清空 (`ui/index.html`)**：监听 `candidate_dismissed` SSE 事件，单通知忽略乐观置灰，增设「清空通知」一键消除按钮；(7) **端到端集成测试全覆盖 (`tests/phase1.rs`)**：增设 `notification_bidirectional_dismissal_and_lifecycle_governance_via_loopback_api` 完备验证。+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）**——(1) **核心模型与元数据环形缓冲区 (`clip.rs`, `lib.rs`)**：定义 `ClipDirection` 与 `ClipMetaEntry` 纯元数据结构，`ClipHub` 集成固定容量环形缓冲区 `MAX_CLIP_HISTORY = 32` 与 `inbound_count`/`outbound_count` 统计计数器，提供 `record_entry`、`history`、`clear_history`、`reset_state` 与 `stats` 原语；(2) **事件总线扩展与安全红线守卫 (`events.rs`, `runtime.rs`, `lib.rs`)**：新增 `UiEvent::ClipboardSynced` 与 `UiEvent::ClipboardCleared`（严格遵守零明文原则，严禁携带文本或 OTP），定义 `ClipStatusReport`、`ClipHistoryReport`、`ClipMetaEntryDto` 与 `ClipClearReport`；(3) **运行时可观测性闭环与控制原语 (`runtime.rs`)**：`apply_clip` 与 `send_clipboard_to`/`send_clipboard_text` 闭环记录元数据并广播 `UiEvent::ClipboardSynced`，实现 `Node::clipboard_status`、`Node::clipboard_history` 与 `Node::clear_clipboard`；(4) **轻量级回环控制面端点升级 (`uihttp.rs`)**：新增 `GET /api/clip/status`、`GET /api/clip/history`、`POST /api/clip/clear` 与 `DELETE /api/clip`（严格校验 127.0.0.1 与 Host 403）；(5) **CLI 双端全同构升级 (`tetherly` 与 `tetherly-cli`)**：新增 `clip status`、`clip history`、`clip clear` 子命令，`events` 监听器高亮 `[clipboard_synced]` 与 `[clipboard_cleared]`；(6) **Web UI 实时交互与历史可视化 (`ui/index.html`)**：增设剪贴板状态徽标、最近 5 条同步历史列表、清空剪贴板按钮，对接 SSE 实时局部刷新；(7) **端到端集成测试全覆盖 (`tests/phase1.rs`)**：增设 `clipboard_lifecycle_history_and_observability_via_loopback_api` 完备验证。+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.52 相对 1.51(跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环)**
+
+- **动机(剪贴板事件流黑盒、元数据透视断层、明文泄漏风险防范、缺乏历史审计与主动安全复位机制)**:
+  在 Tetherly v1.51 实现了通知全生命周期治理与双向同步后，跨端数据协同网络愈发成熟。但在应用层**跨端安全剪贴板系统（Clipboard Lifecycle & Telemetry）**中，暴露出**事件黑盒、可观测性断层、元数据遥测缺失与历史审计空白**：
+  1. **跨端剪贴板同步缺乏事件总线驱动与实时感知（Event Blackout）**：
+     - 当手机端或外部对端向桌面节点推送剪贴板帧（`SessionEvent::Clip(clip)` -> `apply_clip`）并写入本地系统剪贴板时，底层从未向节点事件总线广播任何 `UiEvent`，导致 Web UI、SSE 订阅客户端与 CLI 事件监听器对对端剪贴板摄入完全处于「失明」状态；
+     - 本地主动发送剪贴板（`send_clipboard_to` / `send_clipboard_text`）同样未派发任何结构化事件，外部集成工具与诊断控制台无法通过统一事件流审计剪贴板出入站动作；
+  2. **缺乏安全的纯元数据透视端点（Metadata-Only Status Inspection）**：
+     - 现存回环接口仅有 `GET /api/clip`，会直接返回明文文本（`text`）。在系统健康巡检、监控探针或状态展示场景下，调用方仅需要感知剪贴板状态（是否存在文本、字节大小、当前序号 `last_seq`、内容 SHA-256 哈希 `last_hash`、累计出入站次数），无需也不应将未经脱敏的明文文本暴露至日志或监控链路；
+  3. **缺乏受控的轻量级历史审计环形缓冲区（Bounded History Ring Buffer）**：
+     - 节点缺乏剪贴板同步历史的可观测性。用户或客户端无法追溯「最近同步的剪贴板是何时发生、流向为何、来自哪个设备、大小是多少、校验哈希是什么」；
+     - **严格遵守安全红线铁律（Verbatim Security Red Line）**：「UiEvent 严禁携带短信正文、一次性码、配对码、剪贴板纯文本」与「公开 issue / 日志禁止贴短信正文、一次性码、配对码、剪贴板」。因此，历史审计记录必须是**纯元数据结构（Zero-Plaintext）**，仅记录 `(seq, source, direction, bytes, hash, timestamp_ms)`，绝对不存储任何明文字符；
+  4. **缺乏剪贴板主动清空与安全复位原语（Clipboard Reset & Purge）**：
+     - 用户处理完敏感信息（如一次性密码、凭证碎片）后，缺乏通过回环控制面一键清空本地系统剪贴板、重置内容哈希并销毁审计历史的机制；
+  5. **回环端点与 CLI 缺乏规范化 RESTful 治理接口**：
+     - 缺少 `GET /api/clip/status`（安全纯元数据查询）；
+     - 缺少 `GET /api/clip/history`（支持 `?limit=N` 的历史查询）；
+     - 缺少 `POST /api/clip/clear` 与 `DELETE /api/clip`（清空剪贴板与复位审计缓冲区）；
+     - 双端 CLI（`tetherly` 与 `tetherly-cli`）缺少 `clip status`、`clip history`、`clip clear` 命令，并在 `events` 监听器中缺少 `[clipboard_synced]` 与 `[clipboard_cleared]` 格式化高亮展示；
+  6. **Web UI 实时交互与历史可视化补全**：
+     - Web UI（`ui/index.html`）剪贴板卡片增设当前状态徽标、最近 5 条同步记录列表，以及一键「清空剪贴板」确认按钮，联动 SSE 事件动态局部刷新。
+
+- **架构与协议设计(ADR-045 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环)**:
+  1. **核心模型与元数据环形缓冲区 (`crates/tetherly-core/src/clip.rs`, `lib.rs`)**:
+     - 定义 `ClipDirection`（`Inbound`, `Outbound`）与 `ClipMetaEntry` 纯元数据条目；
+     - `ClipHub` 集成固定容量环形缓冲区 `MAX_CLIP_HISTORY: usize = 32`（`VecDeque<ClipMetaEntry>`）与 `inbound_count`, `outbound_count` 统计计数器；
+     - 提供 `record_entry`（自动 FIFO 逐出，保证 $O(1)$ 内存界限）、`history(limit)`、`clear_history`、`reset_state` 与 `stats` 原语；
+     - 增加核心单元测试 `history_and_bounded_ring_buffer` 验证容量约束与状态复位。
+  2. **事件总线扩展与安全红线守卫 (`crates/tetherly-node/src/events.rs`, `runtime.rs`, `lib.rs`)**:
+     - 新增 `UiEvent::ClipboardSynced { seq, source, direction, bytes, hash, timestamp_ms, sent_peers }` 与 `UiEvent::ClipboardCleared { timestamp_ms }`；严格遵守**零明文原则（Zero-Plaintext）**，严禁包含文本内容或 OTP；
+     - 定义结构化 DTO 报告：`ClipStatusReport`、`ClipHistoryReport`、`ClipMetaEntryDto` 与 `ClipClearReport`。
+  3. **运行时可观测性闭环与控制原语 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `apply_clip` 闭环：入站写入系统剪贴板后，记录元数据至 `ClipHub`，递增 `inbound_count`，向事件总线广播 `UiEvent::ClipboardSynced`（inbound）；
+     - `send_clipboard_to` / `send_clipboard_text` 闭环：出站投递至对端会话后，记录元数据至 `ClipHub`，递增 `outbound_count`，向事件总线广播 `UiEvent::ClipboardSynced`（outbound）；
+     - `Node::clipboard_status`：零泄漏状态查询原语；
+     - `Node::clipboard_history`：受控历史记录快照查询原语；
+     - `Node::clear_clipboard`：安全清空系统剪贴板（设为 `""`），复位 `ClipHub` 哈希与历史，广播 `UiEvent::ClipboardCleared`。
+  4. **轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/clip/status`：返回 `ClipStatusReport`（零明文）；
+     - `GET /api/clip/history`：支持 `?limit=N`，返回 `ClipHistoryReport`；
+     - `POST /api/clip/clear` 与 `DELETE /api/clip`：清空剪贴板并返回 `ClipClearReport`；
+     - 严格 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 校验（403 on mismatch）。
+  5. **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - `clip status [--json] [--ui-port <port>]`：格式化呈现当前剪贴板状态（字节数、序号、SHA-256、流向累计）；
+     - `clip history [--limit <n>] [--json] [--ui-port <port>]`：表格化呈现最近同步历史记录；
+     - `clip clear [--json] [--ui-port <port>]`：清空系统剪贴板与复位确认；
+     - `events` 监听器增设 `[clipboard_synced]` 与 `[clipboard_cleared]` 格式化打印。
+  6. **Web UI 实时交互与历史可视化 (`ui/index.html`)**:
+     - 剪贴板卡片增设状态徽标（有效文本/空、大小、哈希缩写、流向计数）；
+     - 增设「清空剪贴板」确认按钮；
+     - 增设最近 5 条同步元数据条目（流向徽标、来源设备、大小、时间、SHA-256 缩写）；
+     - SSE 监听器对接 `clipboard_synced` 与 `clipboard_cleared`，动态局部重绘。
+  7. **端到端集成测试全覆盖 (`tests/phase1.rs`)**:
+     - 增设 `clipboard_lifecycle_history_and_observability_via_loopback_api`：
+       - 验证初始状态查询为空；
+       - 验证出站发送时派发 `UiEvent::ClipboardSynced`（outbound）、状态及历史递增；
+       - 验证对端入站同步时派发 `UiEvent::ClipboardSynced`（inbound）、系统剪贴板写入与哈希校验；
+       - 验证环形缓冲区容量上限为 32 条且超出时 FIFO 逐出；
+       - 验证 `POST /api/clip/clear` 与 `DELETE /api/clip` 清空系统剪贴板、重置状态与派发 `UiEvent::ClipboardCleared`；
+       - 验证优雅停机。
 
 **1.51 相对 1.50(通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环)**
 

@@ -1091,6 +1091,19 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 "timestamp_ms": node_clock_ms()
             }))
         }
+        ("GET", "/api/clip/status") => match node.clipboard_status() {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(500, &e.to_string()),
+        },
+        ("GET", "/api/clip/history") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let limit = qmap.get("limit").and_then(|s| s.parse::<usize>().ok());
+            json_ok(&node.clipboard_history(limit))
+        }
+        ("POST", "/api/clip/clear") | ("DELETE", "/api/clip") => match node.clear_clipboard() {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(500, &e.to_string()),
+        },
         ("GET", "/api/clip") => match node.get_clipboard_text() {
             Ok(Some(text)) => {
                 let hash = tetherly_core::hex_sha256(text.as_bytes());

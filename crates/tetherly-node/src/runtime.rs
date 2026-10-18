@@ -24,11 +24,12 @@ use tetherly_core::session::LockoutTable;
 use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
     ancs_actions, ancs_source_id, path_kind, AncsEvent, AncsIngress, AncsState, AncsTransport,
-    ClipApply, ClipHub, ConnectOutcome, ControlMsg, CoreError, CursorSeat, DeviceId, FileHub,
-    IngestOutcome, InputClient, InputEvent, InputServer, InputSink, MemoryScreenSink, MemorySink,
-    MemoryTrustStore, NotifyHub, OpenAllowlist, PathKind, ReplyView, ScreenAssembler, ScreenCodec,
-    ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats,
-    TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
+    ClipApply, ClipDirection, ClipHub, ClipMetaEntry, ConnectOutcome, ControlMsg, CoreError,
+    CursorSeat, DeviceId, FileHub, IngestOutcome, InputClient, InputEvent, InputServer, InputSink,
+    MemoryScreenSink, MemorySink, MemoryTrustStore, NotifyHub, OpenAllowlist, PathKind, ReplyView,
+    ScreenAssembler, ScreenCodec, ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink,
+    ScreenSource, ScreenState, ScreenStats, TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS,
+    OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -335,6 +336,46 @@ pub struct DismissFilter {
     pub peer: Option<String>,
     pub app_id: Option<String>,
     pub all: Option<bool>,
+}
+
+/// Status report for the node's clipboard state and statistics without leaking plaintext.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ClipStatusReport {
+    pub ok: bool,
+    pub has_text: bool,
+    pub bytes: usize,
+    pub hash: Option<String>,
+    pub last_seq: u64,
+    pub inbound_count: u64,
+    pub outbound_count: u64,
+    pub history_count: usize,
+}
+
+/// Bounded history report of clipboard synchronization events without leaking plaintext.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ClipHistoryReport {
+    pub ok: bool,
+    pub total: usize,
+    pub entries: Vec<ClipMetaEntryDto>,
+}
+
+/// Metadata entry representing a single inbound or outbound clipboard synchronization.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ClipMetaEntryDto {
+    pub seq: u64,
+    pub source: String,
+    pub direction: String,
+    pub bytes: usize,
+    pub hash: String,
+    pub timestamp_ms: u64,
+}
+
+/// Report returned when clearing the system clipboard and resetting hub state.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ClipClearReport {
+    pub ok: bool,
+    pub cleared_history_count: usize,
+    pub timestamp_ms: u64,
 }
 
 struct Hubs {
@@ -3621,6 +3662,9 @@ impl Node {
 
     fn apply_clip(&self, peer: &DeviceId, clip: ClipSet) -> Result<(), tetherly_net::NetError> {
         let now = self.shared.clock.unix_ms();
+        let bytes = clip.text.as_ref().map_or(0, |s| s.len());
+        let hash = clip.hash.clone();
+        let seq = clip.clip_seq;
         let apply = {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
             hubs.clip.apply_remote(peer, clip, now)?
@@ -3628,6 +3672,26 @@ impl Node {
         match apply {
             ClipApply::Apply(text) => {
                 self.shared.clip.set_text(&text)?;
+                {
+                    let mut hubs = self.shared.hubs.lock().expect("hubs");
+                    hubs.clip.record_entry(ClipMetaEntry {
+                        seq,
+                        source: Some(peer.clone()),
+                        direction: ClipDirection::Inbound,
+                        bytes,
+                        hash: hash.clone(),
+                        timestamp_ms: now,
+                    });
+                }
+                self.emit(UiEvent::ClipboardSynced {
+                    seq,
+                    source: peer.to_string(),
+                    direction: "inbound".to_string(),
+                    bytes,
+                    hash,
+                    timestamp_ms: now,
+                    sent_peers: 0,
+                });
             }
             ClipApply::Echo | ClipApply::RateLimited => {}
         }
@@ -3978,6 +4042,8 @@ impl Node {
         if text.len() > tetherly_core::CLIP_TEXT_MAX {
             return Err(CoreError::ClipboardTooLarge);
         }
+        let now = self.shared.clock.unix_ms();
+        let bytes = text.len();
         let set = {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
             hubs.clip.prepare_local(&text)?
@@ -3985,12 +4051,34 @@ impl Node {
         let Some(set) = set else {
             return Ok(0);
         };
+        let seq = set.clip_seq;
+        let hash = set.hash.clone();
         let frame = set.to_frame()?;
         let targets = self.resolve_clip_targets(target_peer)?;
         let count = targets.len();
-        for p in targets {
-            let _ = self.send_to(&p, frame.clone()).await;
+        for p in &targets {
+            let _ = self.send_to(p, frame.clone()).await;
         }
+        {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.clip.record_entry(ClipMetaEntry {
+                seq,
+                source: None,
+                direction: ClipDirection::Outbound,
+                bytes,
+                hash: hash.clone(),
+                timestamp_ms: now,
+            });
+        }
+        self.emit(UiEvent::ClipboardSynced {
+            seq,
+            source: "local".to_string(),
+            direction: "outbound".to_string(),
+            bytes,
+            hash,
+            timestamp_ms: now,
+            sent_peers: count,
+        });
         Ok(count)
     }
 
@@ -4010,16 +4098,40 @@ impl Node {
             return Err(CoreError::ClipboardTooLarge);
         }
         self.shared.clip.set_text(text)?;
+        let now = self.shared.clock.unix_ms();
+        let bytes = text.len();
         let set = {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
             hubs.clip.force_prepare_local(text)?
         };
+        let seq = set.clip_seq;
+        let hash = set.hash.clone();
         let frame = set.to_frame()?;
         let targets = self.resolve_clip_targets(target_peer)?;
         let count = targets.len();
-        for p in targets {
-            let _ = self.send_to(&p, frame.clone()).await;
+        for p in &targets {
+            let _ = self.send_to(p, frame.clone()).await;
         }
+        {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.clip.record_entry(ClipMetaEntry {
+                seq,
+                source: None,
+                direction: ClipDirection::Outbound,
+                bytes,
+                hash: hash.clone(),
+                timestamp_ms: now,
+            });
+        }
+        self.emit(UiEvent::ClipboardSynced {
+            seq,
+            source: "local".to_string(),
+            direction: "outbound".to_string(),
+            bytes,
+            hash,
+            timestamp_ms: now,
+            sent_peers: count,
+        });
         Ok(count)
     }
 
@@ -4041,6 +4153,74 @@ impl Node {
     /// Reads the current text from the local clipboard.
     pub fn get_clipboard_text(&self) -> Result<Option<String>, CoreError> {
         self.shared.clip.get_text()
+    }
+
+    /// Inspect clipboard status, size, and synchronization statistics without leaking plaintext.
+    pub fn clipboard_status(&self) -> Result<ClipStatusReport, CoreError> {
+        let cur = self.shared.clip.get_text()?;
+        let (has_text, bytes) = match cur {
+            Some(ref t) if !t.is_empty() => (true, t.len()),
+            _ => (false, 0),
+        };
+        let hubs = self.shared.hubs.lock().expect("hubs");
+        let (inbound_count, outbound_count) = hubs.clip.stats();
+        let last_seq = hubs.clip.last_seq();
+        let hash = hubs.clip.last_hash().map(|s| s.to_string());
+        let history_count = hubs.clip.history_count();
+        Ok(ClipStatusReport {
+            ok: true,
+            has_text,
+            bytes,
+            hash,
+            last_seq,
+            inbound_count,
+            outbound_count,
+            history_count,
+        })
+    }
+
+    /// Bounded clipboard history query without leaking plaintext.
+    pub fn clipboard_history(&self, limit: Option<usize>) -> ClipHistoryReport {
+        let hubs = self.shared.hubs.lock().expect("hubs");
+        let entries = hubs.clip.history(limit);
+        let total = entries.len();
+        let dtos = entries
+            .into_iter()
+            .map(|e| ClipMetaEntryDto {
+                seq: e.seq,
+                source: e.source.map_or_else(|| "local".to_string(), |s| s.to_string()),
+                direction: match e.direction {
+                    ClipDirection::Inbound => "inbound".to_string(),
+                    ClipDirection::Outbound => "outbound".to_string(),
+                },
+                bytes: e.bytes,
+                hash: e.hash,
+                timestamp_ms: e.timestamp_ms,
+            })
+            .collect();
+        ClipHistoryReport {
+            ok: true,
+            total,
+            entries: dtos,
+        }
+    }
+
+    /// Clears the system clipboard and resets hub state and history buffer.
+    pub fn clear_clipboard(&self) -> Result<ClipClearReport, CoreError> {
+        self.shared.clip.set_text("")?;
+        let cleared_history_count = {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.clip.reset_state()
+        };
+        let now_ms = self.shared.clock.unix_ms();
+        self.emit(UiEvent::ClipboardCleared {
+            timestamp_ms: now_ms,
+        });
+        Ok(ClipClearReport {
+            ok: true,
+            cleared_history_count,
+            timestamp_ms: now_ms,
+        })
     }
 
     pub async fn offer_and_send_bytes(

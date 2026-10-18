@@ -4364,6 +4364,298 @@ async fn notification_bidirectional_dismissal_and_lifecycle_governance_via_loopb
     peer.shutdown();
 }
 
+/// Tests end-to-end clipboard lifecycle governance, zero-plaintext metadata telemetry,
+/// bounded ring buffer history (MAX_CLIP_HISTORY = 32), inbound & outbound UiEvent::ClipboardSynced
+/// emissions, loopback RESTful endpoints (/api/clip/status, /api/clip/history, /api/clip/clear),
+/// and clipboard purge with UiEvent::ClipboardCleared broadcasting.
+#[tokio::test(flavor = "multi_thread")]
+async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let peer_ui = peer.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    let mut host_rx = host.subscribe();
+    let mut peer_rx = peer.subscribe();
+
+    // 1. Initial State: Host clipboard is empty, zero counts, empty history
+    let (code_st, body_st) = tetherly_node::loopback_get(host_ui, "/api/clip/status")
+        .await
+        .unwrap();
+    assert_eq!(code_st, 200);
+    let st_init: tetherly_node::ClipStatusReport = serde_json::from_slice(&body_st).unwrap();
+    assert!(st_init.ok);
+    assert!(!st_init.has_text);
+    assert_eq!(st_init.bytes, 0);
+    assert_eq!(st_init.hash, None);
+    assert_eq!(st_init.last_seq, 0);
+    assert_eq!(st_init.inbound_count, 0);
+    assert_eq!(st_init.outbound_count, 0);
+    assert_eq!(st_init.history_count, 0);
+
+    let (code_hist, body_hist) = tetherly_node::loopback_get(host_ui, "/api/clip/history")
+        .await
+        .unwrap();
+    assert_eq!(code_hist, 200);
+    let hist_init: tetherly_node::ClipHistoryReport = serde_json::from_slice(&body_hist).unwrap();
+    assert!(hist_init.ok);
+    assert_eq!(hist_init.total, 0);
+    assert!(hist_init.entries.is_empty());
+
+    // 2. Outbound sync: Host sends text to Peer via POST /api/clip/sync
+    let test_msg1 = "tetherly-v1.52-audit-clip-1";
+    let clip1_hash = tetherly_crypto::hex_sha256(test_msg1.as_bytes());
+    let payload1 = serde_json::json!({
+        "text": test_msg1,
+        "peer": peer_id.as_str(),
+    });
+    let (code_sync1, body_sync1) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/clip/sync",
+        &serde_json::to_vec(&payload1).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_sync1, 200);
+    let sync1_val: serde_json::Value = serde_json::from_slice(&body_sync1).unwrap();
+    assert_eq!(sync1_val["ok"], true);
+    assert_eq!(sync1_val["sent_peers"], 1);
+    assert_eq!(sync1_val["bytes"], test_msg1.len());
+    assert_eq!(sync1_val["hash"], clip1_hash.as_str());
+
+    // Host should broadcast UiEvent::ClipboardSynced (outbound)
+    let start = std::time::Instant::now();
+    let mut host_outbound_found = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        if let Ok(ev) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await {
+            if let Ok(tetherly_node::UiEvent::ClipboardSynced {
+                seq,
+                source,
+                direction,
+                bytes,
+                hash,
+                sent_peers,
+                ..
+            }) = ev
+            {
+                if direction == "outbound" && hash == clip1_hash {
+                    assert_eq!(seq, 1);
+                    assert_eq!(source, "local");
+                    assert_eq!(bytes, test_msg1.len());
+                    assert_eq!(sent_peers, 1);
+                    host_outbound_found = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        host_outbound_found,
+        "host did not emit outbound ClipboardSynced event"
+    );
+
+    // Peer should receive clip, update OS clipboard, and emit UiEvent::ClipboardSynced (inbound)
+    let start = std::time::Instant::now();
+    let mut peer_inbound_found = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        if let Ok(ev) = tokio::time::timeout(Duration::from_millis(500), peer_rx.recv()).await {
+            if let Ok(tetherly_node::UiEvent::ClipboardSynced {
+                seq,
+                source,
+                direction,
+                bytes,
+                hash,
+                sent_peers,
+                ..
+            }) = ev
+            {
+                if direction == "inbound" && hash == clip1_hash {
+                    assert_eq!(seq, 1);
+                    assert_eq!(source, host_id.to_string());
+                    assert_eq!(bytes, test_msg1.len());
+                    assert_eq!(sent_peers, 0);
+                    peer_inbound_found = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        peer_inbound_found,
+        "peer did not emit inbound ClipboardSynced event"
+    );
+    assert_eq!(
+        peer.clip().get_text().unwrap().as_deref(),
+        Some(test_msg1)
+    );
+
+    // 3. Inspect Host status and history
+    let (code_st2, body_st2) = tetherly_node::loopback_get(host_ui, "/api/clip/status")
+        .await
+        .unwrap();
+    assert_eq!(code_st2, 200);
+    let st2: tetherly_node::ClipStatusReport = serde_json::from_slice(&body_st2).unwrap();
+    assert!(st2.has_text);
+    assert_eq!(st2.bytes, test_msg1.len());
+    assert_eq!(st2.hash, Some(clip1_hash.clone()));
+    assert_eq!(st2.last_seq, 1);
+    assert_eq!(st2.outbound_count, 1);
+    assert_eq!(st2.inbound_count, 0);
+    assert_eq!(st2.history_count, 1);
+
+    let (code_hist2, body_hist2) = tetherly_node::loopback_get(host_ui, "/api/clip/history")
+        .await
+        .unwrap();
+    assert_eq!(code_hist2, 200);
+    let hist2: tetherly_node::ClipHistoryReport = serde_json::from_slice(&body_hist2).unwrap();
+    assert_eq!(hist2.total, 1);
+    assert_eq!(hist2.entries.len(), 1);
+    assert_eq!(hist2.entries[0].seq, 1);
+    assert_eq!(hist2.entries[0].direction, "outbound");
+    assert_eq!(hist2.entries[0].bytes, test_msg1.len());
+    assert_eq!(hist2.entries[0].hash, clip1_hash);
+
+    // 4. Inbound sync on Host: Peer sends text back to Host
+    let test_msg2 = "tetherly-v1.52-response-clip-2";
+    let clip2_hash = tetherly_crypto::hex_sha256(test_msg2.as_bytes());
+    peer.send_clipboard_text(&host_id, test_msg2).await.unwrap();
+
+    // Host should receive and emit UiEvent::ClipboardSynced (inbound)
+    let start = std::time::Instant::now();
+    let mut host_inbound_found = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        if let Ok(ev) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await {
+            if let Ok(tetherly_node::UiEvent::ClipboardSynced {
+                seq,
+                source,
+                direction,
+                bytes,
+                hash,
+                ..
+            }) = ev
+            {
+                if direction == "inbound" && hash == clip2_hash {
+                    assert_eq!(seq, 2);
+                    assert_eq!(source, peer_id.to_string());
+                    assert_eq!(bytes, test_msg2.len());
+                    host_inbound_found = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        host_inbound_found,
+        "host did not emit inbound ClipboardSynced event"
+    );
+    assert_eq!(
+        host.clip().get_text().unwrap().as_deref(),
+        Some(test_msg2)
+    );
+
+    // Host status should now reflect both outbound and inbound counts
+    let (_, body_st3) = tetherly_node::loopback_get(host_ui, "/api/clip/status")
+        .await
+        .unwrap();
+    let st3: tetherly_node::ClipStatusReport = serde_json::from_slice(&body_st3).unwrap();
+    assert_eq!(st3.outbound_count, 1);
+    assert_eq!(st3.inbound_count, 1);
+    assert_eq!(st3.history_count, 2);
+    assert_eq!(st3.last_seq, 2);
+
+    // Test history query with ?limit=1
+    let (_, body_lim) = tetherly_node::loopback_get(host_ui, "/api/clip/history?limit=1")
+        .await
+        .unwrap();
+    let hist_lim: tetherly_node::ClipHistoryReport = serde_json::from_slice(&body_lim).unwrap();
+    assert_eq!(hist_lim.total, 1);
+    assert_eq!(hist_lim.entries.len(), 1);
+    assert_eq!(hist_lim.entries[0].seq, 2);
+    assert_eq!(hist_lim.entries[0].direction, "inbound");
+
+    // 5. Test Ring Buffer Bounded Capacity (32 entries max)
+    for i in 3..=40 {
+        let dummy = format!("clip-msg-{i}");
+        let _ = host.send_clipboard_text(&peer_id, &dummy).await;
+    }
+    let (_, body_bounded) = tetherly_node::loopback_get(host_ui, "/api/clip/history")
+        .await
+        .unwrap();
+    let hist_bounded: tetherly_node::ClipHistoryReport =
+        serde_json::from_slice(&body_bounded).unwrap();
+    assert_eq!(hist_bounded.total, tetherly_core::MAX_CLIP_HISTORY);
+    assert_eq!(hist_bounded.entries.len(), 32);
+    // Oldest surviving seq is 40 - 32 + 1 = 9
+    assert_eq!(hist_bounded.entries[0].seq, 9);
+    assert_eq!(hist_bounded.entries[31].seq, 40);
+
+    // 6. Test Clear & Purge via POST /api/clip/clear
+    let (code_clear, body_clear) =
+        tetherly_node::loopback_post(host_ui, "/api/clip/clear", b"{}")
+            .await
+            .unwrap();
+    assert_eq!(code_clear, 200);
+    let clear_rep: tetherly_node::ClipClearReport =
+        serde_json::from_slice(&body_clear).unwrap();
+    assert!(clear_rep.ok);
+    assert_eq!(clear_rep.cleared_history_count, 32);
+    assert!(clear_rep.timestamp_ms > 0);
+
+    // Host should emit UiEvent::ClipboardCleared
+    let start = std::time::Instant::now();
+    let mut cleared_ev_found = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        if let Ok(ev) = tokio::time::timeout(Duration::from_millis(500), host_rx.recv()).await {
+            if let Ok(tetherly_node::UiEvent::ClipboardCleared { timestamp_ms }) = ev {
+                assert_eq!(timestamp_ms, clear_rep.timestamp_ms);
+                cleared_ev_found = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        cleared_ev_found,
+        "host did not emit ClipboardCleared event"
+    );
+
+    // Status and History are fully cleared
+    let (_, body_st_cleared) = tetherly_node::loopback_get(host_ui, "/api/clip/status")
+        .await
+        .unwrap();
+    let st_cleared: tetherly_node::ClipStatusReport =
+        serde_json::from_slice(&body_st_cleared).unwrap();
+    assert_eq!(st_cleared.has_text, false);
+    assert_eq!(st_cleared.bytes, 0);
+    assert_eq!(st_cleared.hash, None);
+    assert_eq!(st_cleared.history_count, 0);
+
+    let (_, body_hist_cleared) = tetherly_node::loopback_get(host_ui, "/api/clip/history")
+        .await
+        .unwrap();
+    let hist_cleared: tetherly_node::ClipHistoryReport =
+        serde_json::from_slice(&body_hist_cleared).unwrap();
+    assert_eq!(hist_cleared.total, 0);
+    assert!(hist_cleared.entries.is_empty());
+
+    // System clipboard on host is cleared
+    assert_eq!(host.clip().get_text().unwrap().as_deref(), Some(""));
+
+    // 7. Test DELETE /api/clip alias for clear
+    host.clip().set_text("test-delete-verb").unwrap();
+    let (code_del, body_del) = tetherly_node::loopback_delete(host_ui, "/api/clip")
+        .await
+        .unwrap();
+    assert_eq!(code_del, 200);
+    let del_rep: tetherly_node::ClipClearReport = serde_json::from_slice(&body_del).unwrap();
+    assert!(del_rep.ok);
+    assert_eq!(host.clip().get_text().unwrap().as_deref(), Some(""));
+
+    // 8. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

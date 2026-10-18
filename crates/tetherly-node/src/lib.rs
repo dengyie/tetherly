@@ -22,11 +22,12 @@ pub use platform::{cursor_pos, screen_size, start_input_hooks, HookControl, RawI
 pub use platform::{MemoryInsertor, MemoryOpener, SystemInputSink, SystemOpener};
 pub use runtime::{
     extract_features, ActiveTransfer, AncsReport, BatchDismissReport, BlockedPeersReport,
-    CandidateDismissReport, DismissFilter, HealthReport, LivePeer, LocalCapsReport, Node,
-    NodeConfig, NodeConfigReport, NodePorts, PeerBlockReport, PeerCapsDto, PeerConnectReport,
-    PeerDisconnectReport, PeerPingReport, PeerUnblockReport, PeersCapsReport, PinReport,
-    RouteEntryDto, RouteMutateReport, RoutesReport, StorageCleanReport, StorageReport,
-    TransferDirection, TransferPhase, TransferStats, TransfersReport, UserCommand,
+    CandidateDismissReport, ClipClearReport, ClipHistoryReport, ClipMetaEntryDto, ClipStatusReport,
+    DismissFilter, HealthReport, LivePeer, LocalCapsReport, Node, NodeConfig, NodeConfigReport,
+    NodePorts, PeerBlockReport, PeerCapsDto, PeerConnectReport, PeerDisconnectReport, PeerPingReport,
+    PeerUnblockReport, PeersCapsReport, PinReport, RouteEntryDto, RouteMutateReport, RoutesReport,
+    StorageCleanReport, StorageReport, TransferDirection, TransferPhase, TransferStats,
+    TransfersReport, UserCommand,
 };
 pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
 pub use telemetry::{ChannelTrafficDto, ProtocolMessagesDto, TrafficReport, TrafficTelemetry};

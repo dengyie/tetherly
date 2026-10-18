@@ -131,8 +131,25 @@
       <div id="sendstatus" class="hint"></div>
     </section>
     <section style="margin-top:16px">
-      <h2>剪贴板同步</h2>
-      <div class="hint">将文本或本机系统剪贴板安全推送到已配对的活跃设备。</div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>剪贴板同步与生命周期</h2>
+        <button id="clipclearbtn" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--text);border-radius:4px;cursor:pointer">清空剪贴板</button>
+      </div>
+      <div class="hint">安全同步跨端剪贴板（零明文审计，仅记录元数据哈希与大小）。</div>
+      <div id="clipmetastatus" style="margin-top:8px;font-size:12px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">当前状态：</span>
+          <span id="clip-has-text" style="font-family:ui-monospace, Consolas, monospace">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">内容哈希 (SHA-256)：</span>
+          <span id="clip-last-hash" style="font-family:ui-monospace, Consolas, monospace">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">累计流向遥测：</span>
+          <span id="clip-counts" style="font-family:ui-monospace, Consolas, monospace">-</span>
+        </div>
+      </div>
       <div class="row" style="margin-top:8px">
         <button id="clipsyncbtn" type="button">同步本机剪贴板至所有对端</button>
       </div>
@@ -141,6 +158,10 @@
         <button id="clipsendbtn" type="button">发送文本</button>
       </div>
       <div id="clipstatus" class="hint" style="margin-top:6px"></div>
+      <div style="margin-top:10px">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px">最近同步元数据历史（最多保留 32 条环形缓冲）：</div>
+        <div id="cliphistorylist" style="font-size:11px;font-family:ui-monospace, Consolas, monospace;display:flex;flex-direction:column;gap:4px"></div>
+      </div>
     </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center">
@@ -916,6 +937,7 @@ if (clipSyncBtn) {
       const r = await api("/api/clip/sync", {});
       if (r && r.ok) {
         if (st) st.textContent = "已同步 " + r.bytes + " 字节到 " + r.sent_peers + " 台设备 (sha256:" + r.hash.slice(0, 12) + "…)";
+        updateClipboard();
       } else {
         if (st) st.textContent = "同步失败: " + (r && r.error ? r.error : "未知错误");
       }
@@ -939,6 +961,7 @@ if (clipSendBtn) {
       if (r && r.ok) {
         if (st) st.textContent = "已广播 " + r.bytes + " 字节到 " + r.sent_peers + " 台设备 (sha256:" + r.hash.slice(0, 12) + "…)";
         if ($("cliptext")) $("cliptext").value = "";
+        updateClipboard();
       } else {
         if (st) st.textContent = "发送失败: " + (r && r.error ? r.error : "未知错误");
       }
@@ -946,6 +969,69 @@ if (clipSendBtn) {
       if (st) st.textContent = "发送请求异常: " + err;
     }
   };
+}
+const clipClearBtn = $("clipclearbtn");
+if (clipClearBtn) {
+  clipClearBtn.onclick = async () => {
+    if (!confirm("确定要清空本地剪贴板并复位元数据历史记录吗？")) return;
+    const st = $("clipstatus");
+    if (st) st.textContent = "正在清空本地剪贴板与复位状态…";
+    try {
+      const r = await api("/api/clip/clear", {});
+      if (r && r.ok) {
+        if (st) st.textContent = "已成功清空系统剪贴板并重置状态 (清理 " + r.cleared_history_count + " 条历史)";
+        updateClipboard();
+      } else {
+        if (st) st.textContent = "清空失败: " + (r && r.error ? r.error : "未知错误");
+      }
+    } catch (err) {
+      if (st) st.textContent = "清空请求异常: " + err;
+    }
+  };
+}
+async function updateClipboard() {
+  try {
+    const s = await api("/api/clip/status");
+    if (s && s.ok) {
+      if ($("clip-has-text")) {
+        $("clip-has-text").innerHTML = s.has_text
+          ? '<span style="color:var(--ok)">有效文本 (' + formatBytes(s.bytes) + ') · seq #' + s.last_seq + '</span>'
+          : '<span style="color:var(--muted)">空 (0 字节)</span>';
+      }
+      if ($("clip-last-hash")) {
+        const h = s.hash ? (s.hash.slice(0, 16) + "…") : "无";
+        $("clip-last-hash").textContent = h;
+      }
+      if ($("clip-counts")) {
+        $("clip-counts").textContent = "入站: " + s.inbound_count + " 次 · 出站: " + s.outbound_count + " 次 · 历史缓冲: " + s.history_count + "/32";
+      }
+    }
+  } catch (e) {}
+
+  try {
+    const h = await api("/api/clip/history?limit=5");
+    const list = $("cliphistorylist");
+    if (list) {
+      if (!h || !h.ok || !h.entries || h.entries.length === 0) {
+        list.innerHTML = '<div style="color:var(--muted)">暂无剪贴板同步元数据记录</div>';
+      } else {
+        list.innerHTML = "";
+        for (const it of h.entries) {
+          const row = document.createElement("div");
+          row.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:3px 6px;background:rgba(255,255,255,0.02);border:1px solid var(--line);border-radius:4px";
+          const isOut = it.direction === "outbound";
+          const dirBadge = isOut
+            ? '<span class="badge outbound">出站</span>'
+            : '<span class="badge inbound">入站</span>';
+          const timeStr = it.timestamp_ms ? new Date(it.timestamp_ms).toLocaleTimeString() : "-";
+          const shortHash = it.hash ? (it.hash.slice(0, 10) + "…") : "-";
+          const srcStr = isOut ? "local" : (it.source ? (it.source.slice(0, 12) + "…") : "?");
+          row.innerHTML = '<div>' + dirBadge + ' <span style="margin-left:4px">#' + it.seq + '</span> <span style="color:var(--muted)">[' + srcStr + ']</span> ' + formatBytes(it.bytes) + ' <span style="color:var(--muted)">sha256:' + shortHash + '</span></div><div style="color:var(--muted)">' + timeStr + '</div>';
+          list.appendChild(row);
+        }
+      }
+    }
+  } catch (e) {}
 }
 async function updateStorage() {
   try {
@@ -1398,51 +1484,61 @@ function setupEventSource() {
 	            desc = "对端已屏蔽: " + ev.device_id + (ev.reason ? (" (原因: " + ev.reason + ")") : "");
 	            updateBlocked();
 	          }
-		          else if (ev.kind === "peer_unblocked") {
-		            desc = "对端已解除屏蔽: " + ev.device_id;
-		            updateBlocked();
-		          }
-		          else if (ev.kind === "candidate_dismissed") {
-		            desc = "通知已消除: " + ev.id + (ev.app_id ? (" (" + ev.app_id + ")") : "");
-		          }
-          $("ev-last").textContent = "[" + t + "] " + desc;
-        }
-      } catch (err) {
-        if ($("ev-last")) $("ev-last").textContent = e.data;
-      }
-      tick();
-    };
-    es.onerror = () => {
-      if ($("ev-status")) $("ev-status").innerHTML = '<span class="badge offline">重连中…</span>';
-      es.close();
-      if (!sseReconnectTimer) {
-        sseReconnectTimer = setTimeout(() => {
-          sseReconnectTimer = null;
-          setupEventSource();
-        }, 3000);
-      }
-    };
-  } catch (e) {
-    if ($("ev-status")) $("ev-status").innerHTML = '<span class="badge offline">不可用</span>';
-  }
-}
-tick();
-setupEventSource();
-setInterval(tick, 2000);
-loadCaps();
-setInterval(loadCaps, 3000);
-updateConfig();
-setInterval(updateConfig, 3000);
-updateRoutes();
-setInterval(updateRoutes, 3000);
-updateStorage();
-setInterval(updateStorage, 3000);
-updateHealth();
-setInterval(updateHealth, 2000);
-updateTraffic();
-setInterval(updateTraffic, 2000);
-updateBlocked();
-setInterval(updateBlocked, 3000);
+			          else if (ev.kind === "peer_unblocked") {
+			            desc = "对端已解除屏蔽: " + ev.device_id;
+			            updateBlocked();
+			          }
+			          else if (ev.kind === "candidate_dismissed") {
+			            desc = "通知已消除: " + ev.id + (ev.app_id ? (" (" + ev.app_id + ")") : "");
+			          }
+			          else if (ev.kind === "clipboard_synced") {
+			            desc = "剪贴板同步: " + ev.direction + " (#" + ev.seq + ", " + formatBytes(ev.bytes) + ")";
+			            updateClipboard();
+			          }
+			          else if (ev.kind === "clipboard_cleared") {
+			            desc = "剪贴板已清空";
+			            updateClipboard();
+			          }
+	          $("ev-last").textContent = "[" + t + "] " + desc;
+	        }
+	      } catch (err) {
+	        if ($("ev-last")) $("ev-last").textContent = e.data;
+	      }
+	      tick();
+	    };
+	    es.onerror = () => {
+	      if ($("ev-status")) $("ev-status").innerHTML = '<span class="badge offline">重连中…</span>';
+	      es.close();
+	      if (!sseReconnectTimer) {
+	        sseReconnectTimer = setTimeout(() => {
+	          sseReconnectTimer = null;
+	          setupEventSource();
+	        }, 3000);
+	      }
+	    };
+	  } catch (e) {
+	    if ($("ev-status")) $("ev-status").innerHTML = '<span class="badge offline">不可用</span>';
+	  }
+	}
+	tick();
+	setupEventSource();
+	setInterval(tick, 2000);
+	loadCaps();
+	setInterval(loadCaps, 3000);
+	updateConfig();
+	setInterval(updateConfig, 3000);
+	updateRoutes();
+	setInterval(updateRoutes, 3000);
+	updateStorage();
+	setInterval(updateStorage, 3000);
+	updateHealth();
+	setInterval(updateHealth, 2000);
+	updateTraffic();
+	setInterval(updateTraffic, 2000);
+	updateBlocked();
+	setInterval(updateBlocked, 3000);
+	updateClipboard();
+	setInterval(updateClipboard, 3000);
 </script>
 </body>
 </html>
