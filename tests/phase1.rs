@@ -5123,12 +5123,10 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
 
     let start_multi = std::time::Instant::now();
     loop {
-        let (code_multi, body_multi) = tetherly_node::loopback_get(
-            host_ui,
-            &format!("/api/file/offers?id={multi_offer_id}"),
-        )
-        .await
-        .unwrap();
+        let (code_multi, body_multi) =
+            tetherly_node::loopback_get(host_ui, &format!("/api/file/offers?id={multi_offer_id}"))
+                .await
+                .unwrap();
         if code_multi == 200 {
             let multi_dto: tetherly_node::FileOfferDto =
                 serde_json::from_slice(&body_multi).unwrap();

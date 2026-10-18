@@ -4102,7 +4102,9 @@ impl Node {
     }
 
     pub async fn user_accept_file(&self, transfer_id: &str) -> Result<(), CoreError> {
-        self.user_accept_file_reported(transfer_id).await.map(|_| ())
+        self.user_accept_file_reported(transfer_id)
+            .await
+            .map(|_| ())
     }
 
     pub fn file_token_for(&self, peer: &DeviceId, transfer_id: &str) -> Option<[u8; 32]> {
@@ -4163,7 +4165,9 @@ impl Node {
     }
 
     pub async fn user_reject_file(&self, transfer_id: &str) -> Result<(), CoreError> {
-        self.user_reject_file_reported(transfer_id).await.map(|_| ())
+        self.user_reject_file_reported(transfer_id)
+            .await
+            .map(|_| ())
     }
 
     /// Batch accepts pending incoming file offers, optionally filtered by peer.
