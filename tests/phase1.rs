@@ -3368,7 +3368,10 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
             Err(_) => {}
         }
     }
-    assert!(found_reset, "expected to receive UiEvent::MetricsReset on SSE");
+    assert!(
+        found_reset,
+        "expected to receive UiEvent::MetricsReset on SSE"
+    );
 
     // 7. Verify metrics reset took effect via GET /api/metrics
     let (code_m4, body_m4) = tetherly_node::loopback_get(host_ui, "/api/metrics")
