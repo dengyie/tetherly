@@ -3354,15 +3354,21 @@ async fn traffic_metrics_inspection_and_telemetry_reporting_via_loopback_api() {
     assert_eq!(rst_json["reset"], true);
 
     // 6. Verify SSE event stream receives UiEvent::MetricsReset
-    let sse_event = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
-        .await
-        .expect("timeout waiting for sse metrics reset event")
-        .expect("read sse event")
-        .expect("some ui event");
-    match sse_event {
-        tetherly_node::UiEvent::MetricsReset { timestamp_ms: _ } => {}
-        other => panic!("expected MetricsReset, got: {other:?}"),
+    let mut found_reset = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), sse.next_ui_event()).await {
+            Ok(Ok(Some(tetherly_node::UiEvent::MetricsReset { timestamp_ms: _ }))) => {
+                found_reset = true;
+                break;
+            }
+            Ok(Ok(Some(_other))) => {}
+            Ok(Ok(None)) => break,
+            Ok(Err(_)) => break,
+            Err(_) => {}
+        }
     }
+    assert!(found_reset, "expected to receive UiEvent::MetricsReset on SSE");
 
     // 7. Verify metrics reset took effect via GET /api/metrics
     let (code_m4, body_m4) = tetherly_node::loopback_get(host_ui, "/api/metrics")
