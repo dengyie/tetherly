@@ -2627,11 +2627,13 @@ impl Node {
                 tetherly_core::frame::TYPE_NOTIFY_REPLY,
             ),
             SessionEvent::Clip(c) => (
-                (c.text.len() + 32) as u64,
+                (c.text.as_ref().map_or(0, |s| s.len()) + 32) as u64,
                 tetherly_core::frame::TYPE_CLIP_SET,
             ),
             SessionEvent::FileOffer(f) => (
-                (f.name.len() + 64) as u64,
+                (f.transfer_id.len()
+                    + f.files.iter().map(|item| item.name.len()).sum::<usize>()
+                    + 64) as u64,
                 tetherly_core::frame::TYPE_FILE_OFFER,
             ),
             SessionEvent::FileAccept(_) => (32u64, tetherly_core::frame::TYPE_FILE_ACCEPT),
