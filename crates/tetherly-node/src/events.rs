@@ -106,6 +106,36 @@ pub enum UiEvent {
     ClipboardCleared {
         timestamp_ms: u64,
     },
+    ScreenStateChanged {
+        state: String,
+        allowed: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        peer: Option<String>,
+    },
+    InputSeatChanged {
+        seat: String,
+        channel_open: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        peer: Option<String>,
+    },
+}
+
+impl UiEvent {
+    pub fn screen_state_changed(
+        state: impl Into<String>,
+        allowed: bool,
+        peer: Option<String>,
+    ) -> Self {
+        screen_state_changed(state, allowed, peer)
+    }
+
+    pub fn input_seat_changed(
+        seat: impl Into<String>,
+        channel_open: bool,
+        peer: Option<String>,
+    ) -> Self {
+        input_seat_changed(seat, channel_open, peer)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,5 +216,29 @@ pub fn peer_up(id: &DeviceId, name: &str, platform: &str) -> UiEvent {
         device_id: id.to_string(),
         name: name.to_string(),
         platform: platform.to_string(),
+    }
+}
+
+pub fn screen_state_changed(
+    state: impl Into<String>,
+    allowed: bool,
+    peer: Option<String>,
+) -> UiEvent {
+    UiEvent::ScreenStateChanged {
+        state: state.into(),
+        allowed,
+        peer,
+    }
+}
+
+pub fn input_seat_changed(
+    seat: impl Into<String>,
+    channel_open: bool,
+    peer: Option<String>,
+) -> UiEvent {
+    UiEvent::InputSeatChanged {
+        seat: seat.into(),
+        channel_open,
+        peer,
     }
 }

@@ -4,6 +4,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.4)'
+        required: false
+        default: ''
 
 env:
   CARGO_TERM_COLOR: always
@@ -100,9 +105,47 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - name: build native .so (arm64-v8a)
+        run: cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p tetherly-android --release
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.9"
+      - name: unit tests
+        working-directory: android
+        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
+      - name: assemble debug
+        working-directory: android
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+      - name: stage artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/tetherly-android-arm64-v8a.apk
+          cp android/app/src/main/jniLibs/arm64-v8a/libtetherly_android.so dist/libtetherly_android-arm64-v8a.so
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tetherly-android-arm64-v8a
+          path: dist/*
+          if-no-files-found: error
+
   publish:
-    needs: [build-linux, build-desktop]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-linux, build-desktop, build-android]
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -115,15 +158,20 @@ jobs:
       - name: publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_INPUT: ${{ inputs.tag }}
         run: |
           set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${TAG_INPUT}" ]; then
+            tag="${TAG_INPUT}"
+          fi
           ls -l dist
-          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber dist/*
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${tag}" --repo "${GITHUB_REPOSITORY}" --clobber dist/*
           else
-            gh release create "${GITHUB_REF_NAME}" \
+            gh release create "${tag}" \
               --repo "${GITHUB_REPOSITORY}" \
-              --title "Tetherly ${GITHUB_REF_NAME}" \
+              --title "Tetherly ${tag}" \
               --generate-notes \
               dist/*
           fi

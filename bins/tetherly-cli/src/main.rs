@@ -607,12 +607,18 @@ enum ClipCmd {
 enum ScreenCmd {
     /// Allow the local screen to be viewed by a connected visitor (local consent).
     Allow {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
     /// Revoke local screen viewing consent.
     Revoke {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -622,12 +628,18 @@ enum ScreenCmd {
         /// Target peer device_id (tdev_...). Required if multiple peers are connected.
         #[arg(long)]
         peer: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
     /// Stop screen streaming.
     Stop {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -650,12 +662,18 @@ enum InputCmd {
         /// Target peer device_id (tdev_...). Required if multiple peers are connected.
         #[arg(long)]
         peer: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
     /// Stop remote keyboard/mouse channel and return cursor locally.
     Stop {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -1023,6 +1041,24 @@ fn print_event(v: &serde_json::Value) {
         "clipboard_cleared" => {
             let ts = v["timestamp_ms"].as_u64().unwrap_or(0);
             println!("[clipboard_cleared] timestamp_ms={ts}");
+        }
+        "screen_state_changed" => {
+            let state = v["state"].as_str().unwrap_or("unknown");
+            let allowed = v["allowed"].as_bool().unwrap_or(false);
+            let peer = v["peer"]
+                .as_str()
+                .map(|p| format!(" peer={p}"))
+                .unwrap_or_default();
+            println!("[screen_state_changed] state={state} allowed={allowed}{peer}");
+        }
+        "input_seat_changed" => {
+            let seat = v["seat"].as_str().unwrap_or("unknown");
+            let open = v["channel_open"].as_bool().unwrap_or(false);
+            let peer = v["peer"]
+                .as_str()
+                .map(|p| format!(" peer={p}"))
+                .unwrap_or_default();
+            println!("[input_seat_changed] seat={seat} channel_open={open}{peer}");
         }
         other => {
             println!("[{other}] {v}");
@@ -1872,7 +1908,7 @@ async fn main() -> Result<()> {
             println!("app_id: {app}, uid: {uid}, text: {text}");
         }
         Cmd::Screen { action } => match action {
-            ScreenCmd::Allow { ui_port } => {
+            ScreenCmd::Allow { json, ui_port } => {
                 let (code, resp) = loopback_post(ui_port, "/api/screen/allow", b"{}")
                     .await
                     .map_err(|e| {
@@ -1887,9 +1923,19 @@ async fn main() -> Result<()> {
                         String::from_utf8_lossy(&resp)
                     );
                 }
-                println!("Screen viewing allowed (local consent granted).");
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let allowed = v.get("allowed").and_then(|b| b.as_bool()).unwrap_or(true);
+                    println!(
+                        "Screen viewing allowed (local consent granted). State: {state}, Allowed: {allowed}"
+                    );
+                }
             }
-            ScreenCmd::Revoke { ui_port } => {
+            ScreenCmd::Revoke { json, ui_port } => {
                 let (code, resp) = loopback_post(ui_port, "/api/screen/revoke", b"{}")
                     .await
                     .map_err(|e| {
@@ -1904,9 +1950,21 @@ async fn main() -> Result<()> {
                         String::from_utf8_lossy(&resp)
                     );
                 }
-                println!("Screen viewing consent revoked.");
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let allowed = v.get("allowed").and_then(|b| b.as_bool()).unwrap_or(false);
+                    println!("Screen viewing consent revoked. State: {state}, Allowed: {allowed}");
+                }
             }
-            ScreenCmd::Start { peer, ui_port } => {
+            ScreenCmd::Start {
+                peer,
+                json,
+                ui_port,
+            } => {
                 let payload = serde_json::json!({ "peer": peer });
                 let bytes = serde_json::to_vec(&payload)?;
                 let (code, resp) = loopback_post(ui_port, "/api/screen/start", &bytes)
@@ -1923,9 +1981,17 @@ async fn main() -> Result<()> {
                         String::from_utf8_lossy(&resp)
                     );
                 }
-                println!("Screen streaming started.");
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let p = v.get("peer").and_then(|s| s.as_str()).unwrap_or("none");
+                    println!("Screen streaming started. State: {state}, Target peer: {p}");
+                }
             }
-            ScreenCmd::Stop { ui_port } => {
+            ScreenCmd::Stop { json, ui_port } => {
                 let (code, resp) = loopback_post(ui_port, "/api/screen/stop", b"{}")
                     .await
                     .map_err(|e| {
@@ -1940,7 +2006,14 @@ async fn main() -> Result<()> {
                         String::from_utf8_lossy(&resp)
                     );
                 }
-                println!("Screen streaming stopped.");
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    println!("Screen streaming stopped. State: {state}");
+                }
             }
             ScreenCmd::Status { json, ui_port } => {
                 let (code, resp) = loopback_get(ui_port, "/api/screen").await.map_err(|e| {
@@ -1961,25 +2034,33 @@ async fn main() -> Result<()> {
                     let v: serde_json::Value = serde_json::from_slice(&resp)
                         .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
                     let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let allowed = v.get("allowed").and_then(|b| b.as_bool()).unwrap_or(false);
                     let open = v
                         .get("channel_open")
                         .and_then(|b| b.as_bool())
                         .unwrap_or(false);
+                    let active_peer = v.get("active_peer").and_then(|s| s.as_str());
                     let sent = v.get("sent").and_then(|n| n.as_u64()).unwrap_or(0);
                     let received = v.get("received").and_then(|n| n.as_u64()).unwrap_or(0);
                     let dropped = v.get("dropped").and_then(|n| n.as_u64()).unwrap_or(0);
                     let refused = v.get("refused").and_then(|n| n.as_u64()).unwrap_or(0);
                     let bytes = v.get("bytes").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let rx_bytes = v.get("rx_bytes").and_then(|n| n.as_u64()).unwrap_or(0);
                     let p95 = v.get("p95_frame_interval_us").and_then(|n| n.as_u64());
 
                     println!("Screen Channel Status:");
                     println!("  State:        {state}");
+                    println!("  Allowed:      {allowed}");
                     println!("  Channel Open: {open}");
+                    if let Some(peer) = active_peer {
+                        println!("  Active Peer:  {peer}");
+                    }
                     println!("  Frames Sent:  {sent}");
                     println!("  Frames Recv:  {received}");
                     println!("  Dropped:      {dropped}");
                     println!("  Refused:      {refused}");
-                    println!("  Bytes:        {bytes}");
+                    println!("  Bytes Sent:   {bytes}");
+                    println!("  Bytes Recv:   {rx_bytes}");
                     match p95 {
                         Some(us) => {
                             println!("  p95 Interval: {:.2} ms ({us} us)", us as f64 / 1000.0);
@@ -1990,7 +2071,11 @@ async fn main() -> Result<()> {
             }
         },
         Cmd::Input { action } => match action {
-            InputCmd::Start { peer, ui_port } => {
+            InputCmd::Start {
+                peer,
+                json,
+                ui_port,
+            } => {
                 let payload = serde_json::json!({ "peer": peer });
                 let bytes = serde_json::to_vec(&payload)?;
                 let (code, resp) = loopback_post(ui_port, "/api/input/start", &bytes)
@@ -2007,12 +2092,17 @@ async fn main() -> Result<()> {
                         String::from_utf8_lossy(&resp)
                     );
                 }
-                let v: serde_json::Value = serde_json::from_slice(&resp)
-                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-                let seat = v.get("seat").and_then(|s| s.as_str()).unwrap_or("unknown");
-                println!("Input channel connected. Cursor seat: {seat}");
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let seat = v.get("seat").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let p = v.get("peer").and_then(|s| s.as_str()).unwrap_or("none");
+                    println!("Input channel connected. Cursor seat: {seat}, Peer: {p}");
+                }
             }
-            InputCmd::Stop { ui_port } => {
+            InputCmd::Stop { json, ui_port } => {
                 let (code, resp) = loopback_post(ui_port, "/api/input/stop", b"{}")
                     .await
                     .map_err(|e| {
@@ -2027,10 +2117,14 @@ async fn main() -> Result<()> {
                         String::from_utf8_lossy(&resp)
                     );
                 }
-                let v: serde_json::Value = serde_json::from_slice(&resp)
-                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
-                let seat = v.get("seat").and_then(|s| s.as_str()).unwrap_or("local");
-                println!("Input channel disconnected. Cursor seat: {seat}");
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let seat = v.get("seat").and_then(|s| s.as_str()).unwrap_or("local");
+                    println!("Input channel disconnected. Cursor seat: {seat}");
+                }
             }
             InputCmd::Status { json, ui_port } => {
                 let (code, resp) = loopback_get(ui_port, "/api/input").await.map_err(|e| {
@@ -2055,9 +2149,13 @@ async fn main() -> Result<()> {
                         .and_then(|b| b.as_bool())
                         .unwrap_or(false);
                     let seat = v.get("seat").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let active_peer = v.get("active_peer").and_then(|s| s.as_str());
                     println!("Input Channel Status:");
                     println!("  Channel Open: {open}");
                     println!("  Cursor Seat:  {seat}");
+                    if let Some(peer) = active_peer {
+                        println!("  Active Peer:  {peer}");
+                    }
                 }
             }
         },

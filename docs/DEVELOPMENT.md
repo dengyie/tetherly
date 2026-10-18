@@ -3,14 +3,63 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.53** |
-| 日期 | 2026-10-18 |
-| 状态 | **v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）**——(1) **轻量级文件提议透视与 DTO 设计 (`runtime.rs`, `lib.rs`)**：解耦重量级全节点快照 `GET /api/state`，定义 `FileOfferDto`、`FileOffersReport`、`FileDecisionReport`、`FileBatchDecisionReport` 与 `AutoAcceptReport` 结构化报告，提供按 `transfer_id` 的 $O(1)$ 精准查询与按来源对端 `peer` 的轻量级过滤；(2) **事件总线生命周期补完与安全守卫 (`events.rs`, `runtime.rs`)**：新增 `UiEvent::FileRejected` 与 `UiEvent::FileAutoAcceptChanged`，闭环消除文件提议拒绝与策略变更的事件黑盒；(3) **运行时控制原语与受信任自动接收策略 (`runtime.rs`)**：Shared 状态集成原子控制位 `auto_accept_trusted: AtomicBool` 与统计计数器 `auto_accepted_count: AtomicU64`，在 `SessionEvent::FileOffer` 中自动识别 Noise 鉴权受信对端（`is_trusted(peer)`）并异步自动接收，新增 `file_offers`、`user_accept_file_reported`、`user_reject_file_reported`、`batch_accept_files`、`batch_reject_files`、`auto_accept_status` 与 `set_auto_accept` 原语；(4) **轻量级回环控制面端点升级 (`uihttp.rs`)**：新增 `GET /api/file/offers`、`POST /api/file/accept`、`POST /api/file/reject`、`GET /api/file/auto-accept` 与 `POST /api/file/auto-accept`（严格校验 127.0.0.1 回环绑定与 Host 403）；(5) **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：新增 `offers`、`accept`、`reject`、`auto-accept` 子命令，并在 `events` 监听器中高亮 `[file_rejected]` 与 `[file_auto_accept_changed]`；(6) **Web UI 提议治理与策略开关 (`ui/index.html`)**：增设待确认文件提议治理面板、一键全部接收/全部拒绝、受信对端自动接收复选框与实时计数徽标，对接 SSE 动态刷新；(7) **端到端集成测试全覆盖 (`tests/phase1.rs`)**：增设 `file_offer_lifecycle_and_terminal_governance_via_loopback_api` 完备验证。+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 文档版本 | **1.54** |
+| 日期 | 2026-10-19 |
+| 状态 | **v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）**——(1) **事件总线扩展与安全红线守卫 (`events.rs`)**：新增 `UiEvent::ScreenStateChanged` 与 `UiEvent::InputSeatChanged`，严格遵守 Zero-Plaintext 铁律，不携带像素缓冲区、按键扫描码或光标敏感轨迹，仅传递状态标识、Seat 席位与对端 ID；(2) **结构化 DTO 抽象与运行时控制原语 (`runtime.rs`, `lib.rs`)**：定义并导出 `ScreenStatusReport`、`ScreenControlReport`、`InputStatusReport`、`InputControlReport`，在 `Shared` 中维护 `screen_peer` 与 `input_peer` 互斥追踪，新增 `screen_status_report`、`screen_allow_reported`、`screen_revoke_reported`、`screen_start_reported`、`screen_stop_reported`、`input_status_report`、`input_start_reported`、`input_stop_reported`；(3) **轻量级回环控制面端点升级 (`uihttp.rs`)**：重构 `/api/screen` 与 `/api/input` 响应，完全由强类型 DTO 驱动，严格 127.0.0.1 回环绑定与 Host 403 校验；(4) **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**：`screen status` 与 `input status` 支持高亮排版与 `--json` 原生管道输出，SSE `events` 监听器高亮 `[screen_state_changed]` 与 `[input_seat_changed]`；(5) **Web UI 实时动态刷新与状态徽标 (`ui/index.html`)**：在 SSE 分发循环中挂载屏幕与键鼠状态变更监听，动态展示活动对端与遥测统计；(6) **端到端集成测试全覆盖 (`tests/phase5.rs`)**：新增 `screen_and_input_lifecycle_governance_and_events_via_loopback_api` 完备验证。+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
 
-**1.53 相对 1.52(跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环)**
+**1.54 相对 1.53(远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环)**
+
+- **动机(事件总线静默脱节、缺乏结构化遥测报告 DTO、活动对端追踪盲区与可观测性断层)**:
+  在 Tetherly 陆续完成文件提议治理 (v1.53 / ADR-046)、剪贴板审计 (v1.52 / ADR-045)、通知双向同步 (v1.51 / ADR-044)、黑名单治理 (v1.50 / ADR-043) 后，核心多媒体与控制通道——**远程屏幕串流 (Phase 5 / 45720) 与键鼠输入共享 (Phase 3 / 45719)** 暴露出状态黑盒与事件盲区：
+  1. **事件总线静默脱节（Event Blackout）**：
+     - 当远程屏幕在 `Idle`、`Requested`、`Allowed`、`Streaming` 间流转，或者键鼠共享连线/断开/焦点在 `Local` 与 `Remote` 之间切换（`input_seat`）时，底层从不向节点事件总线广播任何 `UiEvent`。导致 Web UI（SSE `EventSource`）和 CLI 事件监听器（`tetherly events`）完全处于失明状态；
+  2. **缺乏结构化遥测报告 DTO（Missing Typed Reports）**：
+     - `/api/screen` 与 `/api/input` 接口目前仅返回松散的内联 JSON，缺乏类型严谨的 `ScreenStatusReport`、`ScreenControlReport`、`InputStatusReport`、`InputControlReport` 结构化定义，未在 `lib.rs` 中对外导出；
+  3. **活动对端与双向遥测透视缺失（Peer Tracking & Telemetry Blindspots）**：
+     - Host 端未显式记录当前连入的受信任访客（Visitor），访客端未显式记录当前查看的宿主（Host），控制器与受控端未记录焦点对端 ID；发送端与接收端度量指标未统一归一化；
+  4. **终端全同构控制与可观测性闭环缺失**：
+     - CLI 缺少对结构化报告的整洁呈现与统一 `--json` 管道输出，SSE 事件监听器缺少 `[screen_state_changed]` 与 `[input_seat_changed]` 格式化高亮。
+
+- **架构与协议设计(ADR-047 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环)**:
+  1. **事件总线扩展与安全红线守卫 (`crates/tetherly-node/src/events.rs`)**:
+     - 新增结构化变体 `UiEvent::ScreenStateChanged { state: String, allowed: bool, peer: Option<String> }`；
+     - 新增结构化变体 `UiEvent::InputSeatChanged { seat: String, channel_open: bool, peer: Option<String> }`；
+     - **严格遵守安全红线铁律（Zero-Plaintext Invariant）**：事件载荷绝对禁止携带屏幕像素缓冲区、按键扫描码、字符文本或坐标敏感轨迹，仅携带状态标记、席位标识与对端 ID；
+     - 提供 `screen_state_changed` 与 `input_seat_changed` 构造辅助函数及 Associated Functions。
+  2. **结构化 DTO 抽象与运行时控制原语 (`crates/tetherly-node/src/runtime.rs`, `lib.rs`)**:
+     - `ScreenStatusReport`：封装 `ok`、`state`、`channel_open`、`allowed`、`sent`、`received`、`dropped`、`refused`、`bytes`、`rx_bytes`、`p95_frame_interval_us` 与 `active_peer`；
+     - `ScreenControlReport`：封装 `ok`、`action`、`state`、`allowed`、`peer` 与 `timestamp_ms`；
+     - `InputStatusReport`：封装 `ok`、`channel_open`、`seat` 与 `active_peer`；
+     - `InputControlReport`：封装 `ok`、`action`、`seat`、`channel_open`、`peer` 与 `timestamp_ms`；
+     - 在 `Shared` 中维护活动对端互斥锁 `screen_peer: Mutex<Option<DeviceId>>` 与 `input_peer: Mutex<Option<DeviceId>>`；
+     - 增设 `screen_status_report`、`screen_allow_reported`、`screen_revoke_reported`、`screen_start_reported`、`screen_stop_reported`、`input_status_report`、`input_start_reported` 与 `input_stop_reported` 原语；
+     - 在屏幕连接、授权许可、授权撤销、推流启动与停止、键鼠连接断开与边缘跨越切换时全生命周期广播 `UiEvent`。
+  3. **轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen` 返回强类型 `ScreenStatusReport`；
+     - `POST /api/screen/allow` 与 `POST /api/screen/revoke` 返回强类型 `ScreenControlReport`；
+     - `POST /api/screen/start` 与 `POST /api/screen/stop` 返回强类型 `ScreenControlReport`；
+     - `GET /api/input` 返回强类型 `InputStatusReport`；
+     - `POST /api/input/start` 与 `POST /api/input/stop` 返回强类型 `InputControlReport`；
+     - 严格 127.0.0.1 回环绑定与 `Host` 校验（403 on mismatch）。
+  4. **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - `screen status` 与 `input status` 支持富文本排版与 `--json` 原生管道输出；
+     - `screen allow/revoke/start/stop` 与 `input start/stop` 打印规范操作确认信息与当前对端；
+     - `events` 监听器新增对 `[screen_state_changed]` 与 `[input_seat_changed]` 的格式化着色打印。
+  5. **Web UI 实时动态刷新与状态徽标 (`ui/index.html`)**:
+     - 在 SSE 事件总线分发循环中挂载 `screen_state_changed` 与 `input_seat_changed` 监听器；
+     - 解耦重量级全节点快照 `render(s)`，支持屏幕与键鼠卡片根据 SSE 事件驱动局部即时渲染。
+  6. **端到端集成测试全覆盖 (`tests/phase5.rs`)**:
+     - 增设 `screen_and_input_lifecycle_governance_and_events_via_loopback_api`：
+       - 验证初始屏幕与键鼠状态透视；
+       - 验证访客握手连入触发 `Requested` 状态及活动对端记录；
+       - 验证宿主调用 `/api/screen/allow` 派发 `ScreenStateChanged` 事件；
+       - 验证屏幕串流启动、通道激活与双向数据流转遥测；
+       - 验证宿主调用 `/api/screen/revoke` 撤销授权与事件派发；
+       - 验证键鼠通道连线、`InputSeatChanged` 事件派发与优雅断开；
+       - 验证节点优雅停机。
 
 - **动机(文件提议状态黑盒、重载全节点快照开销、缺乏轻量级提议透视、批量决策原语缺失、受信任对端自动接收空白及事件生命周期脱节)**:
   在 Tetherly v1.52 实现了跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环后，数据协同与安全体系得到大幅提升。但在核心应用层的**跨端文件传输系统（File Ingress & Offer Lifecycle）**中，暴露出**提议状态黑盒、轻量级提议可观测性断层、批量决策能力缺失与无人值守自动化空白**：

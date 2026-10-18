@@ -293,6 +293,13 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
+- **v1.54 (ADR-047)**: 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环已落地：
+  1. **事件总线扩展与安全红线守卫 (`events.rs`)**：新增 `UiEvent::ScreenStateChanged` 与 `UiEvent::InputSeatChanged`，严格遵守 Zero-Plaintext 铁律，不携带像素缓冲区、按键扫描码或光标敏感轨迹；
+  2. **结构化 DTO 抽象与运行时控制原语 (`runtime.rs`, `lib.rs`)**：定义并导出 `ScreenStatusReport`、`ScreenControlReport`、`InputStatusReport`、`InputControlReport`，在 `Shared` 中维护 `screen_peer` 与 `input_peer` 互斥追踪，新增 `screen_status_report`、`screen_allow_reported`、`screen_revoke_reported`、`screen_start_reported`、`screen_stop_reported`、`input_status_report`、`input_start_reported`、`input_stop_reported`；
+  3. **轻量级回环控制面端点升级 (`uihttp.rs`)**：重构 `/api/screen` 与 `/api/input` 响应，完全由强类型 DTO 驱动，严格 127.0.0.1 回环绑定与 Host 403 校验；
+  4. **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**：`screen status` 与 `input status` 支持高亮排版与 `--json` 原生管道输出，SSE `events` 监听器高亮 `[screen_state_changed]` 与 `[input_seat_changed]`；
+  5. **Web UI 实时动态刷新与状态徽标 (`ui/index.html`)**：在 SSE 分发循环中挂载屏幕与键鼠状态变更监听，动态展示活动对端与遥测统计；
+  6. **端到端集成测试全覆盖 (`tests/phase5.rs`)**：新增 `screen_and_input_lifecycle_governance_and_events_via_loopback_api` 完备验证。
 - **v1.53 (ADR-046)**: 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环已落地：
   1. 解耦重量级全节点快照 `GET /api/state`，新增专用的轻量级 `GET /api/file/offers`，支持按 `transfer_id` 的 $O(1)$ 精准透视与按 `peer` 的轻量过滤；
   2. 提议决策动作零明文结构化报告：定义 `FileOfferDto`、`FileOffersReport`、`FileDecisionReport`、`FileBatchDecisionReport` 与 `AutoAcceptReport`；
@@ -324,11 +331,11 @@
 - 300+ 单元测试与端到端集成测试全绿。
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.53)
+- `docs/DEVELOPMENT.md` (SSOT v1.54)
 - `crates/tetherly-{core,crypto,net,node,android}`
 - `bins/tetherly-cli`, `crates/tetherly-node/src/bin/tetherly.rs`
 - `crates/tetherly-net/src/codec.rs` (`TaggedReader`), `crates/tetherly-net/src/session.rs`
 - `crates/tetherly-node/src/{runtime.rs,uihttp.rs,events.rs}`
-- `ui/index.html`, `tests/phase1.rs`
+- `ui/index.html`, `tests/phase1.rs`, `tests/phase5.rs`
 - GitHub: `dengyie/tetherly`
 - Vault: `Note/Project/tetherly/tetherly 开发文档.md`

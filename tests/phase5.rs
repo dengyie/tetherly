@@ -579,3 +579,260 @@ async fn screen_and_input_lifecycle_and_peer_targeting_via_loopback_api() {
     host.shutdown();
     visitor.shutdown();
 }
+
+// --------------------------------------------------------------------------
+// v1.54 / ADR-047 — Screen & input lifecycle governance, typed reports, active
+// peer tracking, and event bus integration.
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn screen_and_input_lifecycle_governance_and_events_via_loopback_api() {
+    let (host, visitor, _ga, _gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_input_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_input_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // Connect to SSE stream on host
+    let mut host_sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("host SSE connects");
+
+    // 1. Initial GET /api/screen on host -> ScreenStatusReport
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let s0: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(s0.ok);
+    assert_eq!(s0.state, "idle");
+    assert!(!s0.allowed);
+    assert!(!s0.channel_open);
+    assert_eq!(s0.sent, 0);
+    assert_eq!(s0.dropped, 0);
+    assert_eq!(s0.refused, 0);
+    assert_eq!(s0.active_peer, None);
+
+    // 2. Initial GET /api/input on visitor -> InputStatusReport
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/input")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let i0: tetherly_node::InputStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(i0.ok);
+    assert!(!i0.channel_open);
+    assert_eq!(i0.seat, "local");
+    assert_eq!(i0.active_peer, None);
+
+    // Open screen channel from visitor to host so host enters requested state.
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    // Verify host transitioned to requested state and tracks visitor as active_peer
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let s_req: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(s_req.state, "requested");
+    assert_eq!(s_req.active_peer.as_deref(), Some(visitor_id.as_str()));
+
+    // 3. Host grants consent via POST /api/screen/allow -> ScreenControlReport
+    let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let allow_rep: tetherly_node::ScreenControlReport = serde_json::from_slice(&b).unwrap();
+    assert!(allow_rep.ok);
+    assert_eq!(allow_rep.action, "allow");
+    assert_eq!(allow_rep.state, "allowed");
+    assert!(allow_rep.allowed);
+
+    // Verify host SSE receives ScreenStateChanged event for allow
+    let mut found_allow_event = false;
+    let start_ev = std::time::Instant::now();
+    while start_ev.elapsed() < Duration::from_secs(3) {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), host_sse.next_event()).await
+        {
+            if let Ok(ev) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if ev["kind"] == "screen_state_changed"
+                    && ev["state"] == "allowed"
+                    && ev["allowed"] == true
+                {
+                    found_allow_event = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        found_allow_event,
+        "host SSE received ScreenStateChanged for allow"
+    );
+
+    // 4. Host revokes consent via POST /api/screen/revoke -> ScreenControlReport
+    let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/revoke", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let revoke_rep: tetherly_node::ScreenControlReport = serde_json::from_slice(&b).unwrap();
+    assert!(revoke_rep.ok);
+    assert_eq!(revoke_rep.action, "revoke");
+    assert_eq!(revoke_rep.state, "requested");
+    assert!(!revoke_rep.allowed);
+
+    // Verify host SSE receives ScreenStateChanged event for revoke
+    let mut found_revoke_event = false;
+    let start_ev = std::time::Instant::now();
+    while start_ev.elapsed() < Duration::from_secs(3) {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), host_sse.next_event()).await
+        {
+            if let Ok(ev) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if ev["kind"] == "screen_state_changed" && ev["allowed"] == false {
+                    found_revoke_event = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        found_revoke_event,
+        "host SSE received ScreenStateChanged for revoke"
+    );
+
+    // 5. Host grants consent again
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    // 6. Visitor starts screen streaming targeting the host peer via POST /api/screen/start
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let start_rep: tetherly_node::ScreenControlReport = serde_json::from_slice(&b).unwrap();
+    assert!(start_rep.ok);
+    assert_eq!(start_rep.action, "start");
+    assert_eq!(start_rep.peer.as_deref(), Some(host_id.as_str()));
+
+    // Wait until host enters streaming state
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            assert!(s.allowed);
+            assert!(s.channel_open);
+            assert_eq!(s.active_peer.as_deref(), Some(visitor_id.as_str()));
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host pushes 2 frames
+    assert!(host.screen_send_frame().await.unwrap());
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Verify GET /api/screen reflects frames sent and active peer
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let s_streaming: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(s_streaming.sent >= 2);
+    assert_eq!(
+        s_streaming.active_peer.as_deref(),
+        Some(visitor_id.as_str())
+    );
+
+    // 7. Visitor stops screen streaming via POST /api/screen/stop
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/stop", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let stop_rep: tetherly_node::ScreenControlReport = serde_json::from_slice(&b).unwrap();
+    assert!(stop_rep.ok);
+    assert_eq!(stop_rep.action, "stop");
+
+    // 8. Test input channel lifecycle and events
+    let mut visitor_sse = tetherly_node::loopback_events_connect(visitor_ui)
+        .await
+        .expect("visitor SSE connects");
+
+    let input_start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/input/start",
+        &serde_json::to_vec(&input_start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let inp_start_rep: tetherly_node::InputControlReport = serde_json::from_slice(&b).unwrap();
+    assert!(inp_start_rep.ok);
+    assert_eq!(inp_start_rep.action, "start");
+    assert!(inp_start_rep.channel_open);
+    assert_eq!(inp_start_rep.seat, "local");
+    assert_eq!(inp_start_rep.peer.as_deref(), Some(host_id.as_str()));
+
+    // Query visitor input status
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/input")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let inp_status: tetherly_node::InputStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(inp_status.ok);
+    assert!(inp_status.channel_open);
+    assert_eq!(inp_status.seat, "local");
+    assert_eq!(inp_status.active_peer.as_deref(), Some(host_id.as_str()));
+
+    // Disconnect input channel via POST /api/input/stop
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/input/stop", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let inp_stop_rep: tetherly_node::InputControlReport = serde_json::from_slice(&b).unwrap();
+    assert!(inp_stop_rep.ok);
+    assert_eq!(inp_stop_rep.action, "stop");
+    assert!(!inp_stop_rep.channel_open);
+    assert_eq!(inp_stop_rep.seat, "local");
+
+    // Verify visitor SSE received InputSeatChanged event for teardown
+    let mut found_input_event = false;
+    let start_inp_ev = std::time::Instant::now();
+    while start_inp_ev.elapsed() < Duration::from_secs(3) {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), visitor_sse.next_event()).await
+        {
+            if let Ok(ev) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if ev["kind"] == "input_seat_changed" && ev["channel_open"] == false {
+                    found_input_event = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        found_input_event,
+        "visitor SSE received InputSeatChanged for stop"
+    );
+
+    host.shutdown();
+    visitor.shutdown();
+}

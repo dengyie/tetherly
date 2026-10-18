@@ -1,5 +1,36 @@
 # Session log
 
+## 2026-10-19 (51) - Remote screen & shared input streaming lifecycle governance, real-time telemetry observability & event bus integration (v1.54 / ADR-047)
+- Task: 实现远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环，消除屏幕与键鼠通道的事件静默脱节与状态盲区，提供强类型 DTO 报告、活动对端追踪、双端 CLI 结构化排版及 Web UI 局部即时渲染。
+- **背景与缺陷根因**:
+  在 Tetherly 陆续完成文件提议治理 (v1.53 / ADR-046)、剪贴板审计 (v1.52 / ADR-045)、通知双向同步 (v1.51 / ADR-044)、黑名单治理 (v1.50 / ADR-043) 后，核心多媒体与控制通道——远程屏幕串流 (Phase 5 / 45720) 与键鼠输入共享 (Phase 3 / 45719) 成为仅存的状态黑盒与事件盲区：
+  1. 事件总线静默脱节（Event Blackout）：底层状态在 `Idle`、`Requested`、`Allowed`、`Streaming` 间流转，或者键鼠共享连线/断开/焦点在 `Local` 与 `Remote` 之间切换（`input_seat`）时，底层从不向节点事件总线广播任何 `UiEvent`，导致 Web UI 与 CLI 事件监听器失明；
+  2. 缺乏结构化遥测报告 DTO（Missing Typed Reports）：`/api/screen` 与 `/api/input` 接口此前返回松散内联 JSON，缺乏类型严谨的 `ScreenStatusReport`、`ScreenControlReport`、`InputStatusReport`、`InputControlReport` 定义；
+  3. 活动对端与双向遥测透视缺失（Peer Tracking & Telemetry Blindspots）：Host 端未记录连入的受信任访客（Visitor），访客端未记录查看的宿主（Host），控制器与受控端未记录焦点对端 ID；发送端与接收端度量指标未统一归一化；
+  4. 终端全同构控制与可观测性闭环缺失：CLI 缺少对结构化报告的整洁呈现与统一 `--json` 管道输出，SSE 事件监听器缺少 `[screen_state_changed]` 与 `[input_seat_changed]` 格式化高亮。
+- **架构设计与落地 (ADR-047)**:
+  1. 事件总线扩展与安全红线守卫 (`crates/tetherly-node/src/events.rs`):
+     - 新增结构化变体 `UiEvent::ScreenStateChanged { state: String, allowed: bool, peer: Option<String> }`；
+     - 新增结构化变体 `UiEvent::InputSeatChanged { seat: String, channel_open: bool, peer: Option<String> }`；
+     - 严格遵守 Zero-Plaintext 铁律，不携带像素缓冲区、按键扫描码或光标敏感轨迹；提供 associated functions 与 standalone 辅助函数；
+  2. 结构化 DTO 抽象与运行时控制原语 (`crates/tetherly-node/src/runtime.rs`, `lib.rs`):
+     - 定义并导出 `ScreenStatusReport`、`ScreenControlReport`、`InputStatusReport`、`InputControlReport`；
+     - 在 `Shared` 状态维护活动对端追踪锁 `screen_peer: Mutex<Option<DeviceId>>` 与 `input_peer: Mutex<Option<DeviceId>>`；
+     - 实现 `screen_status_report`、`screen_allow_reported`、`screen_revoke_reported`、`screen_start_reported`、`screen_stop_reported`、`input_status_report`、`input_start_reported`、`input_stop_reported` 控制原语；
+     - 在握手连入、许可授权、撤销授权、推流启停、键鼠连线断开与边缘跨越时全生命周期广播 `UiEvent`；
+  3. 轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`):
+     - 重构 `/api/screen` 与 `/api/input` 响应，完全由强类型 DTO 驱动，返回静态导出的结构化 JSON；
+     - 严格 127.0.0.1 回环绑定与 `Host` 校验（403 on mismatch）；
+  4. CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`):
+     - `screen status` 与 `input status` 支持富文本高亮排版与 `--json` 原生管道输出；
+     - `screen allow/revoke/start/stop` 与 `input start/stop` 打印操作确认与活动对端；
+     - `events` 监听器新增对 `[screen_state_changed]` 与 `[input_seat_changed]` 的格式化着色打印；
+  5. Web UI 实时动态刷新与状态徽标 (`ui/index.html`):
+     - 在 SSE 事件总线分发循环中挂载 `screen_state_changed` 与 `input_seat_changed` 监听器；
+     - 解耦重量级全节点快照 `render(s)`，支持屏幕与键鼠卡片根据 SSE 事件驱动局部即时渲染；
+  6. 端到端集成测试全覆盖 (`tests/phase5.rs`):
+     - 增设 `screen_and_input_lifecycle_governance_and_events_via_loopback_api`：完备验证初始透视、访客握手接入、宿主授权许可及事件派发、屏幕串流与遥测统计、授权撤销与事件派发、键鼠通道连接断开与席位变更、错误边界与优雅退出，确立 ADR-047，SSOT 升至 v1.54。
+
 ## 2026-10-18 (50) - File offer lifecycle governance, lightweight offer introspection, and auto-accept closed-loop (v1.53 / ADR-046)
 - Task: 实现跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环，消除提议状态黑盒与重载全快照序列化开销，补齐受信任对端自动接收无人值守策略与双端 CLI/Web UI 批量治理。
 - **背景与缺陷根因**:

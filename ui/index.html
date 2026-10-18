@@ -897,15 +897,49 @@ function render(s) {
   const sc = $("screen");
   if (sc) {
     const st = s.screen || {};
-    sc.textContent = "状态:" + (st.state || "idle")
-      + " · 已发送 " + (st.sent || 0)
-      + " · 拒绝 " + (st.refused || 0);
+    let txt = "状态: " + (st.state || "idle");
+    if (st.allowed) txt += " · 已授权";
+    if (st.active_peer) txt += " · 对端: " + st.active_peer;
+    txt += " · 已发 " + (st.sent || 0) + " 帧 / 收 " + (st.received || 0) + " 帧";
+    if (st.bytes) txt += " (" + formatBytes(st.bytes) + ")";
+    if (st.refused) txt += " · 拒绝 " + st.refused;
+    sc.textContent = txt;
   }
   const inp = $("input");
   if (inp) {
-    inp.textContent = (s.input_channel ? "通道已连接" : "通道未连接")
-      + " · 光标:" + (s.input_seat === "remote" ? "对端" : "本机");
+    let txt = (s.input_channel ? "通道已连接" : "通道未连接")
+      + " · 光标: " + (s.input_seat === "remote" ? "对端" : "本机");
+    if (s.input_peer) txt += " · 对端: " + s.input_peer;
+    inp.textContent = txt;
   }
+}
+async function updateScreenStatus() {
+  try {
+    const rep = await fetch("/api/screen").then(r => r.json());
+    const sc = $("screen");
+    if (sc && rep) {
+      let txt = "状态: " + (rep.state || "idle");
+      if (rep.allowed) txt += " · 已授权";
+      if (rep.channel_open) txt += " · 通道已开";
+      if (rep.active_peer) txt += " · 对端: " + rep.active_peer;
+      txt += " · 已发 " + (rep.sent || 0) + " 帧 / 收 " + (rep.received || 0) + " 帧";
+      if (rep.bytes) txt += " (" + formatBytes(rep.bytes) + ")";
+      if (rep.refused) txt += " · 拒绝 " + rep.refused;
+      sc.textContent = txt;
+    }
+  } catch (e) {}
+}
+async function updateInputStatus() {
+  try {
+    const rep = await fetch("/api/input").then(r => r.json());
+    const inp = $("input");
+    if (inp && rep) {
+      let txt = (rep.channel_open ? "通道已连接" : "通道未连接")
+        + " · 光标: " + (rep.seat === "remote" ? "对端" : "本机");
+      if (rep.active_peer) txt += " · 对端: " + rep.active_peer;
+      inp.textContent = txt;
+    }
+  } catch (e) {}
 }
 async function refreshPin() {
   try {
@@ -951,12 +985,12 @@ $("openadd").onclick = async () => {
   $("openurl").value = "";
   poll();
 };
-$("screenallow").onclick = () => api("/api/screen/allow", {});
-$("screenrevoke").onclick = () => api("/api/screen/revoke", {});
-$("screenstart").onclick = () => api("/api/screen/start", {});
-$("screenstop").onclick = () => api("/api/screen/stop", {});
-$("inputstart").onclick = () => api("/api/input/start", {});
-$("inputstop").onclick = () => api("/api/input/stop", {});
+$("screenallow").onclick = async () => { await api("/api/screen/allow", {}); updateScreenStatus(); };
+$("screenrevoke").onclick = async () => { await api("/api/screen/revoke", {}); updateScreenStatus(); };
+$("screenstart").onclick = async () => { await api("/api/screen/start", {}); updateScreenStatus(); };
+$("screenstop").onclick = async () => { await api("/api/screen/stop", {}); updateScreenStatus(); };
+$("inputstart").onclick = async () => { await api("/api/input/start", {}); updateInputStatus(); };
+$("inputstop").onclick = async () => { await api("/api/input/stop", {}); updateInputStatus(); };
 const refreshFileOffersBtn = $("refreshfileoffers");
 if (refreshFileOffersBtn) refreshFileOffersBtn.onclick = () => updateFileOffers();
 const acceptAllFilesBtn = $("acceptallfiles");
@@ -1599,10 +1633,18 @@ function setupEventSource() {
 			            desc = "剪贴板同步: " + ev.direction + " (#" + ev.seq + ", " + formatBytes(ev.bytes) + ")";
 			            updateClipboard();
 			          }
-			          else if (ev.kind === "clipboard_cleared") {
-			            desc = "剪贴板已清空";
-			            updateClipboard();
-			          }
+				          else if (ev.kind === "clipboard_cleared") {
+				            desc = "剪贴板已清空";
+				            updateClipboard();
+				          }
+				          else if (ev.kind === "screen_state_changed") {
+				            desc = "屏幕状态: " + ev.state + " (授权:" + (ev.allowed ? "是" : "否") + ")" + (ev.peer ? (" · 对端:" + ev.peer) : "");
+				            updateScreenStatus();
+				          }
+				          else if (ev.kind === "input_seat_changed") {
+				            desc = "键鼠共享: 光标" + (ev.seat === "remote" ? "移至对端" : "返回本机") + (ev.channel_open ? " (通道开启)" : " (通道关闭)") + (ev.peer ? (" · 对端:" + ev.peer) : "");
+				            updateInputStatus();
+				          }
 	          $("ev-last").textContent = "[" + t + "] " + desc;
 	        }
 	      } catch (err) {

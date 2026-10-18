@@ -1787,34 +1787,18 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
         // Remote screen: consent is local and explicit. `allow` is the only
         // gate into streaming; nothing a peer sends can flip it.
         ("GET", "/api/screen") => {
-            let stats = node.screen_stats();
-            let rx_stats = node.screen_rx_stats();
-            let p95 = node.screen_latency_p95_us();
-            let channel_open = node.screen_channel_open().await;
-            json_ok(&serde_json::json!({
-                "ok": true,
-                "state": node.screen_state().as_str(),
-                "channel_open": channel_open,
-                "sent": stats.sent,
-                "received": rx_stats.received,
-                "dropped": stats.dropped,
-                "bytes": stats.bytes,
-                "refused": stats.refused,
-                "p95_frame_interval_us": p95,
-            }))
+            let rep = node.screen_status_report().await;
+            json_ok(&rep)
         }
         ("POST", "/api/screen/allow") => {
-            node.screen_allow();
-            json_ok(&serde_json::json!({ "state": node.screen_state().as_str() }))
+            let rep = node.screen_allow_reported();
+            json_ok(&rep)
         }
         ("POST", "/api/screen/revoke") => {
-            node.screen_revoke();
-            json_ok(&serde_json::json!({ "ok": true, "state": node.screen_state().as_str() }))
+            let rep = node.screen_revoke_reported();
+            json_ok(&rep)
         }
         ("POST", "/api/screen/start") => {
-            // The Start control only means something on an open screen
-            // channel, and the UI has no channel concept: dial the trusted
-            // peer on demand. An optional `peer` specifies which live peer to dial.
             let target_opt = if !body.is_empty() {
                 match serde_json::from_slice::<PeerTargetBody>(body) {
                     Ok(b) => b.peer,
@@ -1823,61 +1807,21 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             } else {
                 None
             };
-            let open = match target_opt.as_deref().filter(|s| !s.is_empty()) {
-                Some(raw) => match node.resolve_peer(raw) {
-                    Ok(id) => {
-                        let peers = node.live_peers();
-                        if peers.iter().any(|p| p.device_id == id) {
-                            if node.screen_channel_open().await {
-                                Ok(())
-                            } else {
-                                node.open_screen(&id).await.map_err(|e| e.to_string())
-                            }
-                        } else {
-                            Err("peer is not connected".to_string())
-                        }
-                    }
-                    Err(e) => Err(format!("bad peer id: {e}")),
-                },
-                None => {
-                    if node.screen_channel_open().await {
-                        Ok(())
-                    } else {
-                        let mut peers = node.live_peers();
-                        peers.sort_by_key(|p| p.device_id.to_string());
-                        match peers.len() {
-                            0 => Err("no connected peer".to_string()),
-                            1 => node
-                                .open_screen(&peers[0].device_id)
-                                .await
-                                .map_err(|e| e.to_string()),
-                            _ => Err("multiple peers connected; pass peer (tdev_…)".to_string()),
-                        }
-                    }
-                }
-            };
-            match open {
-                Err(msg) => err(400, &format!("screen open: {msg}")),
-                Ok(()) => match node.screen_start().await {
-                    Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
-                    Err(e) => err(400, &e.to_string()),
-                },
+            match node.screen_start_reported(target_opt.as_deref()).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
             }
         }
-        ("POST", "/api/screen/stop") => match node.screen_stop().await {
-            Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+        ("POST", "/api/screen/stop") => match node.screen_stop_reported().await {
+            Ok(rep) => json_ok(&rep),
             Err(e) => err(400, &e.to_string()),
         },
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
         ("GET", "/api/input") => {
-            let channel_open = node.input_channel_open().await;
-            json_ok(&serde_json::json!({
-                "ok": true,
-                "channel_open": channel_open,
-                "seat": node.input_seat_str(),
-            }))
+            let rep = node.input_status_report().await;
+            json_ok(&rep)
         }
         ("POST", "/api/input/start") => {
             let target_opt = if !body.is_empty() {
@@ -1888,48 +1832,13 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             } else {
                 None
             };
-            let open = match target_opt.as_deref().filter(|s| !s.is_empty()) {
-                Some(raw) => match node.resolve_peer(raw) {
-                    Ok(id) => {
-                        let peers = node.live_peers();
-                        if peers.iter().any(|p| p.device_id == id) {
-                            if node.input_channel_open().await {
-                                Ok(())
-                            } else {
-                                node.open_input(&id).await.map_err(|e| e.to_string())
-                            }
-                        } else {
-                            Err("peer is not connected".to_string())
-                        }
-                    }
-                    Err(e) => Err(format!("bad peer id: {e}")),
-                },
-                None => {
-                    if node.input_channel_open().await {
-                        Ok(())
-                    } else {
-                        let mut peers = node.live_peers();
-                        peers.sort_by_key(|p| p.device_id.to_string());
-                        match peers.len() {
-                            0 => Err("no connected peer".to_string()),
-                            1 => node
-                                .open_input(&peers[0].device_id)
-                                .await
-                                .map_err(|e| e.to_string()),
-                            _ => Err("multiple peers connected; pass peer (tdev_…)".to_string()),
-                        }
-                    }
-                }
-            };
-            match open {
-                Err(msg) => err(400, &format!("input open: {msg}")),
-                Ok(()) => {
-                    json_ok(&serde_json::json!({ "ok": true, "seat": node.input_seat_str() }))
-                }
+            match node.input_start_reported(target_opt.as_deref()).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
             }
         }
-        ("POST", "/api/input/stop") => match node.input_stop().await {
-            Ok(()) => json_ok(&serde_json::json!({ "ok": true, "seat": node.input_seat_str() })),
+        ("POST", "/api/input/stop") => match node.input_stop_reported().await {
+            Ok(rep) => json_ok(&rep),
             Err(e) => err(400, &e.to_string()),
         },
         (_, "/api/events" | "/api/events/stream") => err(405, "method not allowed"),

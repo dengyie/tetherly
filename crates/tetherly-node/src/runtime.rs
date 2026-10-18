@@ -615,6 +615,58 @@ pub struct RouteMutateReport {
     pub action: String,
 }
 
+/// Comprehensive status report for remote screen streaming.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ScreenStatusReport {
+    pub ok: bool,
+    pub state: String,
+    pub channel_open: bool,
+    pub allowed: bool,
+    pub sent: u64,
+    pub received: u64,
+    pub dropped: u64,
+    pub refused: u64,
+    pub bytes: u64,
+    pub rx_bytes: u64,
+    pub p95_frame_interval_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_peer: Option<String>,
+}
+
+/// Control result report for remote screen streaming actions (allow, revoke, start, stop).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ScreenControlReport {
+    pub ok: bool,
+    pub action: String,
+    pub state: String,
+    pub allowed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+    pub timestamp_ms: u64,
+}
+
+/// Comprehensive status report for input sharing (mouse & keyboard).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InputStatusReport {
+    pub ok: bool,
+    pub channel_open: bool,
+    pub seat: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_peer: Option<String>,
+}
+
+/// Control result report for input sharing actions (start, stop).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InputControlReport {
+    pub ok: bool,
+    pub action: String,
+    pub seat: String,
+    pub channel_open: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+    pub timestamp_ms: u64,
+}
+
 enum OutboundSource {
     Bytes(Vec<u8>),
     Path(std::path::PathBuf),
@@ -715,8 +767,12 @@ struct Shared {
     input_real_sink: Option<Arc<Mutex<dyn InputSink>>>,
     /// Seq lives here so repeated edge crossings do not replay seq 1.
     input_engine: Mutex<InputServer>,
+    /// Active input peer currently bound or focused.
+    input_peer: Mutex<Option<DeviceId>>,
     /// Frames outbound to the screen controller on 45720. None until attached.
     screen_out: AsyncMutex<Option<mpsc::Sender<InnerFrame>>>,
+    /// Active screen peer currently streaming or attached.
+    screen_peer: Mutex<Option<DeviceId>>,
     /// Sender-side screen state machine: consent, seq, refusal counts.
     screen_engine: Mutex<ScreenSender>,
     /// Where sender-side frames come from. MemorySource in CI; real capture
@@ -920,7 +976,9 @@ impl Node {
             input_sink: Mutex::new(MemorySink::default()),
             input_real_sink,
             input_engine: Mutex::new(InputServer::new(1, 1)),
+            input_peer: Mutex::new(None),
             screen_out: AsyncMutex::new(None),
+            screen_peer: Mutex::new(None),
             screen_engine: Mutex::new(ScreenSender::new()),
             screen_source,
             screen_observer: Mutex::new(screen_observer),
@@ -2675,6 +2733,18 @@ impl Node {
         if *self.shared.input_seat.lock().expect("seat") == Some(CursorSeat::Remote) {
             *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
         }
+        {
+            let mut sp = self.shared.screen_peer.lock().expect("screen_peer");
+            if sp.as_ref() == Some(device_id) {
+                *sp = None;
+            }
+        }
+        {
+            let mut ip = self.shared.input_peer.lock().expect("input_peer");
+            if ip.as_ref() == Some(device_id) {
+                *ip = None;
+            }
+        }
         if had_session || had_live {
             self.emit(UiEvent::PeerDown {
                 device_id: device_id.to_string(),
@@ -2713,6 +2783,18 @@ impl Node {
             .is_some();
         if *self.shared.input_seat.lock().expect("seat") == Some(CursorSeat::Remote) {
             *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        }
+        {
+            let mut sp = self.shared.screen_peer.lock().expect("screen_peer");
+            if sp.as_ref() == Some(device_id) {
+                *sp = None;
+            }
+        }
+        {
+            let mut ip = self.shared.input_peer.lock().expect("input_peer");
+            if ip.as_ref() == Some(device_id) {
+                *ip = None;
+            }
         }
         if had_session || had_live {
             self.emit(UiEvent::PeerDown {
@@ -2854,6 +2936,18 @@ impl Node {
 
         if *self.shared.input_seat.lock().expect("seat") == Some(CursorSeat::Remote) {
             *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        }
+        {
+            let mut sp = self.shared.screen_peer.lock().expect("screen_peer");
+            if sp.as_ref() == Some(&target_id) {
+                *sp = None;
+            }
+        }
+        {
+            let mut ip = self.shared.input_peer.lock().expect("input_peer");
+            if ip.as_ref() == Some(&target_id) {
+                *ip = None;
+            }
         }
 
         if had_session || had_live {
@@ -4977,12 +5071,18 @@ impl Node {
     /// the channel. The capture hooks stay armed (they are cheap while local).
     pub async fn input_stop(&self) -> Result<(), CoreError> {
         *self.shared.input_out.lock().await = None;
+        let peer = self.shared.input_peer.lock().expect("input_peer").take();
         self.shared
             .input_engine
             .lock()
             .expect("engine")
             .on_peer_gone();
         *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        self.emit(UiEvent::input_seat_changed(
+            "local",
+            false,
+            peer.as_ref().map(|p| p.to_string()),
+        ));
         Ok(())
     }
 
@@ -5094,6 +5194,14 @@ impl Node {
         self.send_input_events(events).await?;
         if edge.is_some() {
             *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Remote);
+            let peer = self
+                .shared
+                .input_peer
+                .lock()
+                .expect("input_peer")
+                .as_ref()
+                .map(|p| p.to_string());
+            self.emit(UiEvent::input_seat_changed("remote", true, peer));
         }
         Ok(edge)
     }
@@ -5206,8 +5314,16 @@ impl Node {
     }
 
     async fn attach_input_server(&self, mut sess: ActiveSession) {
+        let peer_id = sess.peer_id.clone();
         let (tx, mut rx) = mpsc::channel::<InnerFrame>(SESSION_QUEUE_DEPTH);
         *self.shared.input_out.lock().await = Some(tx);
+        *self.shared.input_peer.lock().expect("input_peer") = Some(peer_id.clone());
+        let current_seat = self.input_seat_str();
+        self.emit(UiEvent::input_seat_changed(
+            current_seat,
+            true,
+            Some(peer_id.to_string()),
+        ));
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
         tokio::spawn(async move {
@@ -5240,6 +5356,11 @@ impl Node {
                                     if matches!(ev.kind, tetherly_core::InputKind::Leave) {
                                         node.shared.input_engine.lock().expect("engine").on_remote_leave();
                                         *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                                        node.emit(UiEvent::input_seat_changed(
+                                            "local",
+                                            true,
+                                            Some(sess.peer_id.to_string()),
+                                        ));
                                     }
                                 }
                             }
@@ -5252,16 +5373,20 @@ impl Node {
                 }
             }
             *node.shared.input_out.lock().await = None;
+            *node.shared.input_peer.lock().expect("input_peer") = None;
             node.shared
                 .input_engine
                 .lock()
                 .expect("engine")
                 .on_peer_gone();
             *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+            node.emit(UiEvent::input_seat_changed("local", false, None));
         });
     }
 
     async fn attach_input_client(&self, mut sess: ActiveSession) {
+        let peer_id = sess.peer_id.clone();
+        *self.shared.input_peer.lock().expect("input_peer") = Some(peer_id.clone());
         let mut client = InputClient::new(MemorySink::default());
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
@@ -5320,12 +5445,21 @@ impl Node {
                                         }
                                         forwarded = total;
                                     }
-                                    let seat = if client.focused() {
+                                    let new_seat = if client.focused() {
                                         CursorSeat::Remote
                                     } else {
                                         CursorSeat::Local
                                     };
-                                    *node.shared.input_seat.lock().expect("seat") = Some(seat);
+                                    let old_seat = *node.shared.input_seat.lock().expect("seat");
+                                    *node.shared.input_seat.lock().expect("seat") = Some(new_seat);
+                                    if Some(new_seat) != old_seat {
+                                        let seat_str = if client.focused() { "remote" } else { "local" };
+                                        node.emit(UiEvent::input_seat_changed(
+                                            seat_str,
+                                            true,
+                                            Some(sess.peer_id.to_string()),
+                                        ));
+                                    }
                                 } else if let Err(e) = InputEvent::from_frame(&frame) {
                                     tracing::warn!(%e, "input client: bad frame");
                                 }
@@ -5339,8 +5473,10 @@ impl Node {
                 }
             }
             client.on_peer_gone();
+            *node.shared.input_peer.lock().expect("input_peer") = None;
             *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
             *node.shared.input_sink.lock().expect("sink") = client.sink().clone();
+            node.emit(UiEvent::input_seat_changed("local", false, None));
         });
     }
 
@@ -5349,8 +5485,10 @@ impl Node {
     /// run locally. Frames are pushed by the app calling `screen_send_frame()`
     /// at its own cadence (CLI loop on real hardware).
     async fn attach_screen_server(&self, mut sess: ActiveSession) {
+        let peer_id = sess.peer_id.clone();
         let (tx, mut rx) = mpsc::channel::<InnerFrame>(SCREEN_QUEUE_DEPTH);
         *self.shared.screen_out.lock().await = Some(tx);
+        *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
         {
             self.shared
                 .screen_engine
@@ -5358,6 +5496,13 @@ impl Node {
                 .expect("screen")
                 .on_peer_connected();
         }
+        let state = self.screen_state();
+        let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
+        self.emit(UiEvent::screen_state_changed(
+            state.as_str(),
+            allowed,
+            Some(peer_id.to_string()),
+        ));
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
         // Pipe outbound frames to the session and inbound controls into the
@@ -5395,6 +5540,16 @@ impl Node {
                                         .lock()
                                         .expect("screen")
                                         .on_control(msg);
+                                    let cur_state = node.screen_state();
+                                    let cur_allowed = matches!(
+                                        cur_state,
+                                        ScreenState::Allowed | ScreenState::Streaming
+                                    );
+                                    node.emit(UiEvent::screen_state_changed(
+                                        cur_state.as_str(),
+                                        cur_allowed,
+                                        Some(sess.peer_id.to_string()),
+                                    ));
                                     if let Ok(Some(reply)) = reply {
                                         if let Ok(f) = reply.to_frame() {
                                             let r_len = (f.payload.len() + 12) as u64;
@@ -5415,7 +5570,16 @@ impl Node {
                 .lock()
                 .expect("screen")
                 .on_peer_gone();
+            *node.shared.screen_peer.lock().expect("screen_peer") = None;
             *node.shared.screen_out.lock().await = None;
+            let final_state = node.screen_state();
+            let final_allowed =
+                matches!(final_state, ScreenState::Allowed | ScreenState::Streaming);
+            node.emit(UiEvent::screen_state_changed(
+                final_state.as_str(),
+                final_allowed,
+                None,
+            ));
         });
     }
 
@@ -5423,8 +5587,15 @@ impl Node {
     /// Reassembles `TMF1` fragments, decodes the codec, presents through the
     /// sink, and acks the sequence it accepted.
     async fn attach_screen_client(&self, mut sess: ActiveSession) {
+        let peer_id = sess.peer_id.clone();
         let (ctl_tx, mut ctl_rx) = mpsc::channel::<ControlMsg>(SCREEN_QUEUE_DEPTH);
         *self.shared.screen_ctl.lock().await = Some(ctl_tx);
+        *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
+        self.emit(UiEvent::screen_state_changed(
+            "connected",
+            false,
+            Some(peer_id.to_string()),
+        ));
         let mut receiver = ScreenReceiver::new();
         let mut assembler = ScreenAssembler::new();
         let mut stop = self.shared.shutdown.subscribe();
@@ -5529,7 +5700,9 @@ impl Node {
                 }
             }
             receiver.on_peer_gone();
+            *node.shared.screen_peer.lock().expect("screen_peer") = None;
             *node.shared.screen_ctl.lock().await = None;
+            node.emit(UiEvent::screen_state_changed("idle", false, None));
         });
     }
 
@@ -5640,17 +5813,148 @@ impl Node {
     /// into `Allowed`; nothing a peer sends can reach it.
     pub fn screen_allow(&self) {
         self.shared.screen_engine.lock().expect("screen").allow();
+        let peer = self
+            .shared
+            .screen_peer
+            .lock()
+            .expect("screen_peer")
+            .as_ref()
+            .map(|p| p.to_string());
+        let state = self.screen_state();
+        let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
+        self.emit(UiEvent::screen_state_changed(state.as_str(), allowed, peer));
+    }
+
+    /// Local consent with a strongly typed report return.
+    pub fn screen_allow_reported(&self) -> ScreenControlReport {
+        self.screen_allow();
+        let peer = self
+            .shared
+            .screen_peer
+            .lock()
+            .expect("screen_peer")
+            .as_ref()
+            .map(|p| p.to_string());
+        let state = self.screen_state();
+        let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
+        ScreenControlReport {
+            ok: true,
+            action: "allow".to_string(),
+            state: state.as_str().to_string(),
+            allowed,
+            peer,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
     }
 
     /// Revoke local consent; any queued frames are dropped.
     pub fn screen_revoke(&self) {
         self.shared.screen_engine.lock().expect("screen").revoke();
+        let peer = self
+            .shared
+            .screen_peer
+            .lock()
+            .expect("screen_peer")
+            .as_ref()
+            .map(|p| p.to_string());
+        let state = self.screen_state();
+        let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
+        self.emit(UiEvent::screen_state_changed(state.as_str(), allowed, peer));
+    }
+
+    /// Revoke local consent with a strongly typed report return.
+    pub fn screen_revoke_reported(&self) -> ScreenControlReport {
+        self.screen_revoke();
+        let peer = self
+            .shared
+            .screen_peer
+            .lock()
+            .expect("screen_peer")
+            .as_ref()
+            .map(|p| p.to_string());
+        let state = self.screen_state();
+        let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
+        ScreenControlReport {
+            ok: true,
+            action: "revoke".to_string(),
+            state: state.as_str().to_string(),
+            allowed,
+            peer,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
     }
 
     /// Visitor: ask the host to begin sending. Refused by the host until it has
     /// allowed locally.
     pub async fn screen_start(&self) -> Result<(), CoreError> {
-        self.send_screen_control(ControlMsg::Start).await
+        self.send_screen_control(ControlMsg::Start).await?;
+        let peer = self
+            .shared
+            .screen_peer
+            .lock()
+            .expect("screen_peer")
+            .as_ref()
+            .map(|p| p.to_string());
+        let state = self.screen_state();
+        let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
+        self.emit(UiEvent::screen_state_changed(state.as_str(), allowed, peer));
+        Ok(())
+    }
+
+    /// Ask the host to begin sending with channel auto-dial and strongly typed report return.
+    pub async fn screen_start_reported(
+        &self,
+        peer_target: Option<&str>,
+    ) -> Result<ScreenControlReport, CoreError> {
+        let target_id = match peer_target.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => {
+                let id = self.resolve_peer(raw)?;
+                let peers = self.live_peers();
+                if !peers.iter().any(|p| p.device_id == id) {
+                    return Err(CoreError::PeerNotFound(format!(
+                        "peer {} is not connected",
+                        id
+                    )));
+                }
+                id
+            }
+            None => {
+                if let Some(existing) = self.shared.screen_peer.lock().expect("screen_peer").clone()
+                {
+                    existing
+                } else {
+                    let mut peers = self.live_peers();
+                    peers.sort_by_key(|p| p.device_id.to_string());
+                    match peers.len() {
+                        0 => return Err(CoreError::PeerNotFound("no connected peer".to_string())),
+                        1 => peers[0].device_id.clone(),
+                        _ => {
+                            return Err(CoreError::Json(
+                                "multiple peers connected; specify target peer".to_string(),
+                            ))
+                        }
+                    }
+                }
+            }
+        };
+
+        if !self.screen_channel_open().await {
+            self.open_screen(&target_id)
+                .await
+                .map_err(|e| CoreError::Json(format!("screen open: {e}")))?;
+        }
+
+        self.screen_start().await?;
+        let state = self.screen_state();
+        let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
+        Ok(ScreenControlReport {
+            ok: true,
+            action: "start".to_string(),
+            state: state.as_str().to_string(),
+            allowed,
+            peer: Some(target_id.to_string()),
+            timestamp_ms: self.shared.clock.unix_ms(),
+        })
     }
 
     /// True while a screen control channel to a host is attached. The UI uses
@@ -5661,7 +5965,163 @@ impl Node {
 
     /// Visitor: ask the host to stop sending.
     pub async fn screen_stop(&self) -> Result<(), CoreError> {
-        self.send_screen_control(ControlMsg::Stop).await
+        self.send_screen_control(ControlMsg::Stop).await?;
+        let peer = self
+            .shared
+            .screen_peer
+            .lock()
+            .expect("screen_peer")
+            .as_ref()
+            .map(|p| p.to_string());
+        let state = self.screen_state();
+        let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
+        self.emit(UiEvent::screen_state_changed(state.as_str(), allowed, peer));
+        Ok(())
+    }
+
+    /// Stop remote screen streaming with strongly typed report return.
+    pub async fn screen_stop_reported(&self) -> Result<ScreenControlReport, CoreError> {
+        self.screen_stop().await?;
+        let peer = self
+            .shared
+            .screen_peer
+            .lock()
+            .expect("screen_peer")
+            .as_ref()
+            .map(|p| p.to_string());
+        let state = self.screen_state();
+        let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
+        Ok(ScreenControlReport {
+            ok: true,
+            action: "stop".to_string(),
+            state: state.as_str().to_string(),
+            allowed,
+            peer,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        })
+    }
+
+    /// Comprehensive telemetry and lifecycle status report for remote screen streaming.
+    pub async fn screen_status_report(&self) -> ScreenStatusReport {
+        let stats = self.screen_stats();
+        let rx_stats = self.screen_rx_stats();
+        let p95 = self.screen_latency_p95_us();
+        let channel_open =
+            self.screen_channel_open().await || self.shared.screen_out.lock().await.is_some();
+        let active_peer = self
+            .shared
+            .screen_peer
+            .lock()
+            .expect("screen_peer")
+            .as_ref()
+            .map(|p| p.to_string());
+        let state = self.screen_state();
+        ScreenStatusReport {
+            ok: true,
+            state: state.as_str().to_string(),
+            channel_open,
+            allowed: matches!(state, ScreenState::Allowed | ScreenState::Streaming),
+            sent: stats.sent,
+            received: rx_stats.received,
+            dropped: stats.dropped,
+            refused: stats.refused,
+            bytes: stats.bytes,
+            rx_bytes: rx_stats.bytes,
+            p95_frame_interval_us: p95,
+            active_peer,
+        }
+    }
+
+    /// Comprehensive status report for input sharing.
+    pub async fn input_status_report(&self) -> InputStatusReport {
+        let channel_open = self.input_channel_open().await;
+        let active_peer = self
+            .shared
+            .input_peer
+            .lock()
+            .expect("input_peer")
+            .as_ref()
+            .map(|p| p.to_string());
+        InputStatusReport {
+            ok: true,
+            channel_open,
+            seat: self.input_seat_str().to_string(),
+            active_peer,
+        }
+    }
+
+    /// Start input sharing with channel auto-dial and strongly typed report return.
+    pub async fn input_start_reported(
+        &self,
+        peer_target: Option<&str>,
+    ) -> Result<InputControlReport, CoreError> {
+        let target_id = match peer_target.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => {
+                let id = self.resolve_peer(raw)?;
+                let peers = self.live_peers();
+                if !peers.iter().any(|p| p.device_id == id) {
+                    return Err(CoreError::PeerNotFound(format!(
+                        "peer {} is not connected",
+                        id
+                    )));
+                }
+                id
+            }
+            None => {
+                if let Some(existing) = self.shared.input_peer.lock().expect("input_peer").clone() {
+                    existing
+                } else {
+                    let mut peers = self.live_peers();
+                    peers.sort_by_key(|p| p.device_id.to_string());
+                    match peers.len() {
+                        0 => return Err(CoreError::PeerNotFound("no connected peer".to_string())),
+                        1 => peers[0].device_id.clone(),
+                        _ => {
+                            return Err(CoreError::Json(
+                                "multiple peers connected; specify target peer".to_string(),
+                            ))
+                        }
+                    }
+                }
+            }
+        };
+
+        if !self.input_channel_open().await {
+            self.open_input(&target_id)
+                .await
+                .map_err(|e| CoreError::Json(format!("input open: {e}")))?;
+        }
+
+        let now = self.shared.clock.unix_ms();
+        Ok(InputControlReport {
+            ok: true,
+            action: "start".to_string(),
+            seat: self.input_seat_str().to_string(),
+            channel_open: true,
+            peer: Some(target_id.to_string()),
+            timestamp_ms: now,
+        })
+    }
+
+    /// Stop input sharing with strongly typed report return.
+    pub async fn input_stop_reported(&self) -> Result<InputControlReport, CoreError> {
+        let peer = self
+            .shared
+            .input_peer
+            .lock()
+            .expect("input_peer")
+            .as_ref()
+            .map(|p| p.to_string());
+        self.input_stop().await?;
+        let now = self.shared.clock.unix_ms();
+        Ok(InputControlReport {
+            ok: true,
+            action: "stop".to_string(),
+            seat: self.input_seat_str().to_string(),
+            channel_open: false,
+            peer,
+            timestamp_ms: now,
+        })
     }
 
     pub fn screen_state(&self) -> ScreenState {
