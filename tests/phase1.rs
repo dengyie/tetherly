@@ -4405,7 +4405,7 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
 
     // 2. Outbound sync: Host sends text to Peer via POST /api/clip/sync
     let test_msg1 = "tetherly-v1.52-audit-clip-1";
-    let clip1_hash = tetherly_crypto::hex_sha256(test_msg1.as_bytes());
+    let clip1_hash = hex_sha256(test_msg1.as_bytes());
     let payload1 = serde_json::json!({
         "text": test_msg1,
         "peer": peer_id.as_str(),
@@ -4515,8 +4515,8 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
 
     // 4. Inbound sync on Host: Peer sends text back to Host
     let test_msg2 = "tetherly-v1.52-response-clip-2";
-    let clip2_hash = tetherly_crypto::hex_sha256(test_msg2.as_bytes());
-    peer.send_clipboard_text(&host_id, test_msg2).await.unwrap();
+    let clip2_hash = hex_sha256(test_msg2.as_bytes());
+    peer.send_clipboard_text(test_msg2, Some(&host_id)).await.unwrap();
 
     // Host should receive and emit UiEvent::ClipboardSynced (inbound)
     let start = std::time::Instant::now();
@@ -4571,7 +4571,7 @@ async fn clipboard_lifecycle_history_and_observability_via_loopback_api() {
     // 5. Test Ring Buffer Bounded Capacity (32 entries max)
     for i in 3..=40 {
         let dummy = format!("clip-msg-{i}");
-        let _ = host.send_clipboard_text(&peer_id, &dummy).await;
+        let _ = host.send_clipboard_text(&dummy, Some(&peer_id)).await;
     }
     let (_, body_bounded) = tetherly_node::loopback_get(host_ui, "/api/clip/history")
         .await
