@@ -3657,19 +3657,14 @@ impl Node {
                         if self.shared.auto_accept_trusted.load(Ordering::Relaxed)
                             && self.is_trusted(peer)
                         {
-                            let node_clone = self.clone();
-                            let tid_clone = tid.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = node_clone.user_accept_file(&tid_clone).await {
-                                    warn!(%e, transfer = %tid_clone, "auto-accept failed");
-                                } else {
-                                    node_clone
-                                        .shared
-                                        .auto_accepted_count
-                                        .fetch_add(1, Ordering::Relaxed);
-                                    info!(transfer = %tid_clone, "auto-accepted file from trusted peer");
-                                }
-                            });
+                            if let Err(e) = self.user_accept_file(&tid).await {
+                                warn!(%e, transfer = %tid, "auto-accept failed");
+                            } else {
+                                self.shared
+                                    .auto_accepted_count
+                                    .fetch_add(1, Ordering::Relaxed);
+                                info!(transfer = %tid, "auto-accepted file from trusted peer");
+                            }
                         }
                     }
                     Err(e) => warn!(%e, transfer = %tid, "refused file offer"),
