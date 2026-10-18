@@ -3656,7 +3656,9 @@ async fn peer_active_connect_and_disconnect_lifecycle_via_loopback_api() {
     assert_eq!(code_peers, 200);
     let peers_rep: serde_json::Value = serde_json::from_slice(&body_peers).unwrap();
     let live_peers = peers_rep["live"].as_array().unwrap();
-    assert!(live_peers.iter().any(|p| p["device_id"] == peer_id.as_str()));
+    assert!(live_peers
+        .iter()
+        .any(|p| p["device_id"] == peer_id.as_str()));
 
     // b. POST /api/peers/connect when already live returns already_connected: true
     let conn_payload = serde_json::json!({ "peer": "Workstation" });
@@ -3756,7 +3758,9 @@ async fn peer_active_connect_and_disconnect_lifecycle_via_loopback_api() {
         .unwrap();
     let peers_on: serde_json::Value = serde_json::from_slice(&body_peers_on).unwrap();
     let live_arr_on = peers_on["live"].as_array().unwrap();
-    assert!(live_arr_on.iter().any(|p| p["device_id"] == peer_id.as_str()));
+    assert!(live_arr_on
+        .iter()
+        .any(|p| p["device_id"] == peer_id.as_str()));
 
     // 9. Disconnect and reconnect with explicit socket address:
     let (code_d3, _) = tetherly_node::loopback_post(

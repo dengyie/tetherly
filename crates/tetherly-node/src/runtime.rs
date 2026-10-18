@@ -2438,10 +2438,9 @@ impl Node {
         }
 
         let addr = if let Some(raw_addr) = direct_addr {
-            let parsed: SocketAddr = raw_addr
-                .trim()
-                .parse()
-                .map_err(|e| CoreError::InvalidRoute(format!("invalid socket address '{raw_addr}': {e}")))?;
+            let parsed: SocketAddr = raw_addr.trim().parse().map_err(|e| {
+                CoreError::InvalidRoute(format!("invalid socket address '{raw_addr}': {e}"))
+            })?;
             if parsed.port() == 0 {
                 return Err(CoreError::InvalidRoute(
                     "socket port must be non-zero".to_string(),
@@ -2489,10 +2488,7 @@ impl Node {
     ///
     /// Drops the outbound session channel, evicts the peer from live state,
     /// emits `UiEvent::PeerDown`, and returns a `PeerDisconnectReport`.
-    pub async fn disconnect_peer(
-        &self,
-        query: &str,
-    ) -> Result<PeerDisconnectReport, CoreError> {
+    pub async fn disconnect_peer(&self, query: &str) -> Result<PeerDisconnectReport, CoreError> {
         let target_id = self.resolve_peer(query)?;
         let trusted = self.trusted();
         let matched = trusted.iter().find(|t| t.device_id == target_id);
