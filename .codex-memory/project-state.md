@@ -282,7 +282,7 @@
 - Cloud phones reach the host only via adb (overlay is host→phone); on-device E2E uses `adb reverse`.
 - `snow` 0.9 has no `rekey()`; sessions **rebuild a fresh IK handshake in band** when the transport hits 2^16 msgs or 3600s (initiator-driven, cancellation-safe; `RekeyRequired` is retired).
 - Screen `seq` must stay session-monotonic; `on_peer_gone` resets it and a reconnect must not replay old frames.
-- Phase 4's Windows BLE transport exists (v1.23) and macOS CoreBluetooth transport has landed in v1.57 (ADR-050); Linux (BlueZ) GATT stack remains open (`open()` honestly `Ok(None)`). Runtime behavior against a physical iPhone remains Manual-required.
+- Phase 4 ANCS GATT 传输栈已在 Windows (WinRT v1.23)、macOS (CoreBluetooth v1.57 ADR-050) 与 Linux (BlueZ D-Bus v1.58 ADR-051) 三大主流桌面操作系统实现 100% 同构全闭环。真实物理 iPhone 运行时接入（配对及 M4.1 p95 时延）仍属 Manual-required。
 - AGPL/GPL screen-capture crates are banned by deny.toml; only permissive impls (windows, core-graphics, x11rb) are eligible.
 
 ## Active Blockers

@@ -3,12 +3,57 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.57** |
+| 文档版本 | **1.58** |
 | 日期 | 2026-10-19 |
-| 状态 | **v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）**——(1) **跨平台外设地址抽象与解析器 (`crates/tetherly-core/src/ancs.rs` & `lib.rs`)**：确立强类型 `BleAddress` 枚举，桥接 Windows 48 位物理 MAC (`Mac([u8; 6])`) 与 macOS CoreBluetooth 128 位 RFC 4122 `NSUUID` (`Uuid([u8; 16])`)，实现通用解析器 `parse_ble_address` 与规范化字符串序列化 `to_canonical_string`；(2) **守护进程启动链路与状态机所有权修复 (`crates/tetherly-node/src/bin/tetherly.rs`)**：彻底修复 CLI `--ancs <addr>` 参数解析后静默丢弃传输层的致命缺陷，在 `Node::start` 前将 `cfg.ancs = Some(transport)` 与 `cfg.ancs_peripheral = addr` 注入配置，确保内部状态机持有传输层所有权，打通 `spawn_ancs_pump` 与 `ancs_connect` 链路；(3) **macOS 原生 CoreBluetooth GATT 传输栈构建 (`crates/tetherly-node/src/ancs/macos.rs` & `ancs.rs`)**：基于 `objc2-core-bluetooth` 与 GCD 串行调度队列构建自包含 Objective-C 代理 `AncsDelegate`，在独立后台线程运行 `CBCentralManager`，依据 128 位 UUID 检索并连接外设，解析 ANCS 服务与 3 个特征（Notification Source、Data Source、Control Point），非阻塞流式推送到 `AncsInbound`，串行化带响应写入 Control Point，支持断线自动触发退避重连；(4) **运行时可观测性与控制面透视 (`crates/tetherly-node/src/runtime.rs` & `bin/tetherly.rs`)**：`AncsReport` 扩充 `peripheral: Option<String>` 字段，节点状态打印清晰指示外设硬件 MAC 或 CoreBluetooth UUID；(5) **端到端集成与回归验证 (`tests/phase4.rs` & `tetherly-core`)**：新增 `test_ble_address_and_daemon_ancs_wiring_regression` 验证跨平台外设地址解析、配置注入与守护进程状态机初始化。+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）**——(1) **Linux 桌面平台 BlueZ GATT 传输栈原生构建 (`crates/tetherly-node/src/ancs/bluez.rs` & `ancs.rs`)**：终结 Linux 桌面与工作站平台（`#[cfg(all(unix, not(target_os = "macos")))]`）此前硬编码返回 `Ok(None)` 的平台断层，基于 Linux 标准 System D-Bus（`org.bluez`）接口实现完整 GATT 客户端驱动，完成 Windows（WinRT）、macOS（CoreBluetooth）、Linux（BlueZ）三大桌面操作系统的 100% 同构全闭环；(2) **零 Lockfile 扰动纯 Rust D-Bus 依赖架构 (`Cargo.toml`)**：在 `[target.'cfg(unix)'.dependencies]` 中复用 `Cargo.lock` 已锁定的 `zbus 4.4.0`（源自 `secret-service` 底层依赖），杜绝引入任何新的第三方 C/C++ 共享库或 AGPL/非许可协议包，`deny.toml` 检验 100% 纯净通过；(3) **线程隔离与单线程异步驱动 Runtime (`tetherly-ancs-bluez`)**：前端 `BluezAncsTransport` 仅持有 `Sender<Cmd>`，天然满足 `Send + Sync` 契约，支持 10s 超时同步确认与 `Drop` 自动优雅析构；后台独立线程驱动专属单线程 Tokio Runtime，避免与全局或上层异步运行时产生嵌套死锁；(4) **BlueZ D-Bus 对象拓扑遍历与 48 位 MAC 寻址 (`dev_path_from_mac`)**：通过 `org.freedesktop.DBus.ObjectManager.GetManagedObjects` 动态解析 `/org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX` 下的 ANCS 服务 (`7905f431-b5ce-4e99-a40f-4b1e122d00d0`) 及 3 个特征（Notification Source、Data Source、Control Point）；(5) **严格恪守 SSOT §9.4 硬约束**：严格按顺序订阅 Data Source 与 Notification Source，D-Bus `PropertiesChanged` 信号下将 `Value` 属性解析出的原始字节推入 `AncsInbound`，信号回调严禁反向写 Control Point；Control Point 写操作通过 `WriteValue(bytes, {"type": "request"})` 严格串行执行并等待 ATT 响应确认；监听 `Device1.Connected == false` 突变推入 `Disconnected` 触发退避重连；(6) **单元测试与跨平台验证**：内置 MAC 地址 BlueZ 路径格式化、断开响应转换、命令往返 ACK、D-Bus `ay` 字节向量安全解包以及非法地址拒收等单元测试，全工作区 325+ 项测试 100% 全绿，clippy 零告警。+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.58 相对 1.57(Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环)**
+
+- **动机(Linux 平台 GATT 传输栈缺失与三端全闭环最后一公里)**:
+  在 Tetherly 陆续完成 ANCS 苹果通知服务全生命周期治理与事件总线闭环 (v1.56 / ADR-049)、macOS 原生 CoreBluetooth 传输栈与跨平台地址抽象 (v1.57 / ADR-050) 后，Tetherly 在 Windows（WinRT GATT）与 macOS（CoreBluetooth）均已具备原生硬件级 ANCS 接入能力。然而，在 **Linux 桌面与工作站平台（`#[cfg(all(unix, not(target_os = "macos")))]`）** 上，底层传输层仍存在显著断层：
+  1. **Linux 平台传输栈缺失（Missing Linux GATT Transport）**：
+     `crates/tetherly-node/src/ancs.rs` 中针对 Linux 依然硬编码返回 `Ok(None)`，守护进程在 Linux 上启动时若传入 `--ancs <addr>`，只能打印 `ANCS is not implemented on this platform; iPhone notifications stay off` 并直接丢弃通知接入能力；
+  2. **三端架构异构统一的最后一公里**：
+     - Windows 采用 WinRT MTA 异步驱动 (`win_gatt.rs`)；
+     - macOS 采用 CoreBluetooth + GCD 串行调度队列驱动 (`macos.rs`)；
+     - Linux 平台缺乏对应的标准 BlueZ D-Bus GATT 驱动；
+     需要依托 Linux 标准 System D-Bus（`org.bluez`）接口，实现基于纯 Rust 异步 D-Bus 客户端（`zbus`）的高性能自包含传输栈，完成 Windows / macOS / Linux 三大桌面平台 ANCS GATT 驱动的 100% 同构全闭环。
+
+- **架构与协议设计(ADR-051 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环)**:
+  1. **零 Lockfile 扰动纯 Rust D-Bus 依赖架构 (`crates/tetherly-node/Cargo.toml`)**:
+     - 在 `[target.'cfg(unix)'.dependencies]` 中配置 `zbus`：
+       ```toml
+       [target.'cfg(unix)'.dependencies]
+       # D-Bus client for BlueZ GATT ANCS (src/ancs/bluez.rs). Reuses zbus 4.4.0 already in Cargo.lock.
+       zbus = { version = "4", default-features = false, features = ["tokio"] }
+       ```
+     - 彻底复用 `secret-service` 锁定的 `zbus 4.4.0`，杜绝任何外部 C 依赖与 AGPL 协议违规，`deny.toml` 100% 检验通过。
+  2. **前端契约与线程隔离架构 (`crates/tetherly-node/src/ancs/bluez.rs`)**:
+     - 前端结构体 `BluezAncsTransport` 仅持有 `std::sync::mpsc::Sender<Cmd>`，天然满足 `Send + Sync` 契约；
+     - 内部同步方法在 `ACK_TIMEOUT = Duration::from_secs(10)` 内等待后台响应，超时映射为 `CoreError::AncsSubscribe` 或 `CoreError::AncsWrite`；
+     - 实现 `Drop` 自动向后台派发 `Cmd::Stop` 信号触发优雅退出；
+     - 后台专用线程 `"tetherly-ancs-bluez"` 拥有独立的单线程 Tokio Runtime，避免与上层运行时冲突死锁。
+  3. **BlueZ D-Bus 对象树拓扑与 48 位 MAC 寻址 (`dev_path_from_mac`)**:
+     - 提供标准转换函数：
+       ```rust
+       pub fn dev_path_from_mac(mac: &[u8; 6]) -> String {
+           format!(
+               "/org/bluez/hci0/dev_{:02X}_{:02X}_{:02X}_{:02X}_{:02X}_{:02X}",
+               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+           )
+       }
+       ```
+     - 连接系统 D-Bus (`Connection::system()`)，通过 `org.freedesktop.DBus.ObjectManager.GetManagedObjects` 检索设备路径及其子路径下的 ANCS 特征。
+  4. **严格恪守 SSOT §9.4 硬约束**:
+     - 严格按顺序订阅：首先订阅 Data Source (`StartNotify`)，再订阅 Notification Source (`StartNotify`)；
+     - 监听 D-Bus `PropertiesChanged` 信号，解析 `ay`（字节数组）属性推入 `AncsInbound::NotificationSource` 与 `AncsInbound::DataSource`，严禁在信号监听线程反向写入 Control Point；
+     - Control Point 写入命令通过 BlueZ `WriteValue(bytes, {"type": "request"})` 严格串行执行并等待 ATT Write Response 确认；
+     - 监听设备 `Connected == false` 突变推入 `AncsInbound::Disconnected`，退出驱动循环触发指数退避重连 (`ancs_backoff_delay`)。
+  5. **跨平台统一装配与路由 (`crates/tetherly-node/src/ancs.rs`)**:
+     - Linux 平台 (`#[cfg(all(unix, not(target_os = "macos")))]`) 正式接入 `bluez::open(address).map(Some)`，达成三端原生 GATT 栈全闭环。
 
 **1.57 相对 1.56(macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复)**
 

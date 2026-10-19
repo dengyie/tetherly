@@ -112,6 +112,10 @@ objc2-core-bluetooth = { version = "0.3", default-features = false, features = [
     "dispatch2",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+# D-Bus client for BlueZ GATT ANCS (src/ancs/bluez.rs). Reuses zbus 4.4.0 already in Cargo.lock.
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # Secret Service (libsecret) storage over the session bus (src/cred/linux.rs).
 # `rt-tokio-crypto-rust` uses the pure-Rust crypto backend (no openssl).

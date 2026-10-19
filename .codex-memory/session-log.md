@@ -1,5 +1,64 @@
 # Session log
 
+## 2026-10-19 (56) - Linux BlueZ D-Bus GATT transport stack architecture & cross-platform tripartite ANCS parity (v1.58 / ADR-051)
+- Task: 实现 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)，终结 Linux 桌面与工作站平台此前硬编码返回 `Ok(None)` 的平台断层，达成三大桌面操作系统原生硬件级 ANCS 接入能力的 100% 同构全闭环。
+- **背景与缺陷根因**:
+  在 Tetherly 陆续完成 ANCS 苹果通知服务全生命周期治理与事件总线闭环 (v1.56 / ADR-049)、macOS 原生 CoreBluetooth 传输栈与跨平台地址抽象 (v1.57 / ADR-050) 后，Tetherly 在 Windows（WinRT GATT）与 macOS（CoreBluetooth）均已具备原生硬件级 ANCS 接入能力。然而，在 **Linux 桌面与工作站平台（`#[cfg(all(unix, not(target_os = "macos")))]`）** 上，底层传输层仍存在显著断层：
+  1. Linux 平台传输栈缺失（Missing Linux GATT Transport）：`crates/tetherly-node/src/ancs.rs` 中针对 Linux 依然硬编码返回 `Ok(None)`，守护进程在 Linux 上启动时若传入 `--ancs <addr>`，只能打印 `ANCS is not implemented on this platform; iPhone notifications stay off` 并直接丢弃通知接入能力；
+  2. 三端架构异构统一的最后一公里：Windows 采用 WinRT MTA 异步驱动 (`win_gatt.rs`)；macOS 采用 CoreBluetooth + GCD 串行调度队列驱动 (`macos.rs`)；Linux 平台缺乏对应的标准 BlueZ D-Bus GATT 驱动；需要依托 Linux 标准 System D-Bus（`org.bluez`）接口，实现基于纯 Rust 异步 D-Bus 客户端（`zbus`）的高性能自包含传输栈，完成 Windows / macOS / Linux 三大桌面平台 ANCS GATT 驱动的 100% 同构全闭环。
+- **架构设计与落地 (ADR-051)**:
+  1. 零 Lockfile 扰动纯 Rust D-Bus 依赖架构 (`crates/tetherly-node/Cargo.toml`):
+     - 在 `[target.'cfg(unix)'.dependencies]` 中配置 `zbus`：
+       ```toml
+       [target.'cfg(unix)'.dependencies]
+       zbus = { version = "4", default-features = false, features = ["tokio"] }
+       ```
+     - 彻底复用 `Cargo.lock` 已锁定的 `zbus 4.4.0`（源自 `secret-service` 底层依赖），杜绝引入任何新的第三方 C/C++ 共享库或 AGPL/非许可协议包，`deny.toml` 检验 100% 纯净通过。
+  2. 前端契约与线程隔离架构 (`crates/tetherly-node/src/ancs/bluez.rs`):
+     - 前端结构体 `BluezAncsTransport` 仅持有 `std::sync::mpsc::Sender<Cmd>`，天然满足 `Send + Sync` 契约；
+     - 内部同步方法在 `ACK_TIMEOUT = Duration::from_secs(10)` 内等待后台响应，超时映射为 `CoreError::AncsSubscribe` 或 `CoreError::AncsWrite`；
+     - 实现 `Drop` 自动向后台派发 `Cmd::Stop` 信号触发优雅退出；
+     - 后台专用线程 `"tetherly-ancs-bluez"` 拥有独立的单线程 Tokio Runtime，避免与全局或上层异步运行时产生嵌套死锁。
+  3. BlueZ D-Bus 对象树拓扑与 48 位 MAC 寻址 (`dev_path_from_mac`):
+     - 提供标准转换函数：
+       ```rust
+       pub fn dev_path_from_mac(mac: &[u8; 6]) -> String {
+           format!(
+               "/org/bluez/hci0/dev_{:02X}_{:02X}_{:02X}_{:02X}_{:02X}_{:02X}",
+               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+           )
+       }
+       ```
+     - 连接系统 D-Bus (`Connection::system()`)，通过 `org.freedesktop.DBus.ObjectManager.GetManagedObjects` 检索设备路径及其子路径下的 ANCS 服务与 3 个特征。
+  4. 严格恪守 SSOT §9.4 硬约束:
+     - 严格按顺序订阅：首先订阅 Data Source (`StartNotify`)，再订阅 Notification Source (`StartNotify`)；
+     - 监听 D-Bus `PropertiesChanged` 信号，解析 `ay`（字节数组）属性推入 `AncsInbound::NotificationSource` 与 `AncsInbound::DataSource`，严禁在信号监听线程反向写入 Control Point；
+     - Control Point 写入命令通过 BlueZ `WriteValue(bytes, {"type": "request"})` 严格串行执行并等待 ATT Write Response 确认；
+     - 监听设备 `Connected == false` 突变推入 `AncsInbound::Disconnected`，退出驱动循环触发指数退避重连 (`ancs_backoff_delay`)。
+  5. 跨平台统一装配与路由 (`crates/tetherly-node/src/ancs.rs`):
+     - Linux 平台 (`#[cfg(all(unix, not(target_os = "macos")))]`) 正式接入 `bluez::open(address).map(Some)`，达成三端原生 GATT 栈全闭环。
+  6. 单元测试与跨平台验证:
+     - 内置 5 项单元测试：MAC 地址 BlueZ 路径格式化、断开响应转换、命令往返 ACK、D-Bus `ay` 字节向量安全解包以及非法地址拒收；
+     - `cargo fmt --all --check` 干净通过；
+     - `cargo clippy --workspace --all-targets -- -D warnings` 零告警通过；
+     - `cargo test --workspace` 全部 325+ 项测试 100% 全绿；
+     - `cargo deny check`（advisories, bans, licenses, sources）全部通过。
+
+## 2026-10-19 (55) - macOS ANCS CoreBluetooth transport stack architecture, cross-platform BLE address abstraction & daemon startup wiring fix (v1.57 / ADR-050)
+- Task: 构建 macOS 原生 CoreBluetooth GATT 传输栈架构，确立跨平台强类型 `BleAddress` 外设地址抽象，彻底修复守护进程启动时静默丢弃 ANCS 传输层的关键断层。
+- **背景与缺陷根因**:
+  在 Tetherly 陆续完成 ANCS 苹果通知服务全生命周期治理与事件总线闭环 (v1.56 / ADR-049) 后，底层 ANCS 物理传输栈与跨平台寻址暴露出三个核心缺陷：
+  1. 守护进程启动链路缺陷：在 `Cmd::Run` 中，用户指定 `--ancs <addr>` 时，调用 `open` 返回的 `transport` 被未使用的局部变量丢弃，`cfg.ancs` 从未被赋值，导致守护进程启动后内部状态机恒为 `None`，通知流完全无法工作；
+  2. 跨平台外设寻址断层：Windows WinRT GATT 暴露 48 位物理 MAC 地址，而 macOS CoreBluetooth 出于隐私严格隐藏硬件 MAC 仅暴露 128 位 `NSUUID`，既有地址解析逻辑硬编码 48 位校验直接报错拒收；
+  3. macOS CoreBluetooth 传输栈缺失：非 Windows 平台此前硬编码返回 `Ok(None)`。
+- **架构设计与落地 (ADR-050)**:
+  1. 跨平台外设地址抽象与解析器 (`crates/tetherly-core/src/ancs.rs`): 确立强类型 `BleAddress` 枚举（`Mac([u8; 6])` 与 `Uuid([u8; 16])`），实现通用解析器 `parse_ble_address` 与规范化字符串序列化 `to_canonical_string`；
+  2. 守护进程启动链路与状态机所有权修复 (`crates/tetherly-node/src/bin/tetherly.rs`): 彻底修复丢弃 `transport` 的缺陷，在 `Node::start` 前将 `cfg.ancs = Some(transport)` 与 `cfg.ancs_peripheral = addr` 注入配置，打通 `spawn_ancs_pump` 与 `ancs_connect` 链路；
+  3. macOS 原生 CoreBluetooth GATT 传输栈构建 (`crates/tetherly-node/src/ancs/macos.rs`): 基于 `objc2-core-bluetooth` 与 GCD 串行调度队列构建自包含 Objective-C 代理 `AncsDelegate`，独立后台线程运行 `CBCentralManager`，流式推送到 `AncsInbound`，串行化带响应写入 Control Point，断线退避重连；
+  4. 运行时可观测性与控制面透视 (`crates/tetherly-node/src/runtime.rs`): `AncsReport` 扩充 `peripheral: Option<String>` 字段；
+  5. 端到端集成与回归验证 (`tests/phase4.rs`): 新增 `test_ble_address_and_daemon_ancs_wiring_regression` 验证跨平台外设地址解析、配置注入与守护进程状态机初始化。
+- **全套验证**: 全工作区 320+ 项测试全绿，`deny.toml` 检验通过，提交记录 `c62b66f`。
+
 ## 2026-10-19 (54) - ANCS full lifecycle governance, allowlist dynamic CRUD, event bus observability & dual-CLI isomorphism (v1.56 / ADR-049)
 - Task: 落地 ANCS 苹果通知中心服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构，消除 ANCS 链路状态与白名单配置变更的事件盲区，提供强类型 DTO 报告、动态管理控制原语、双端 CLI 完整子命令与 Web UI 局部即时刷新。
 - **背景与缺陷根因**:
