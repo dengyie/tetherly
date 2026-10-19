@@ -2040,6 +2040,66 @@ async fn node_health_probe_ping_and_graceful_shutdown_via_loopback_api() {
     );
 }
 
+/// ADR-057: Daemon process resources, thread count, file descriptors and host system telemetry.
+#[tokio::test(flavor = "multi_thread")]
+async fn system_telemetry_metrics_and_probe_via_loopback_api() {
+    let (data_dir, _guard) = temp_dir("sys-test");
+    let node = Node::start(cfg(data_dir.clone(), "sys-node", "macos")).unwrap();
+    let ui_port = node.spawn_ui().await.unwrap();
+    assert_ne!(ui_port, 0, "test node must serve loopback UI");
+
+    // 1. Direct Rust API inspection
+    let rep = node.system_report().expect("system report");
+    assert!(rep.ok);
+    assert_eq!(rep.node_name, "sys-node");
+    assert_eq!(rep.process.pid, std::process::id());
+    assert!(rep.process.rss_bytes > 0, "RSS must be > 0");
+    assert!(rep.process.thread_count >= 1, "thread count must be >= 1");
+    assert!(rep.host.num_cpus >= 1, "CPU count must be >= 1");
+
+    // 2. HTTP GET /api/sys
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/sys")
+        .await
+        .expect("sys get");
+    assert_eq!(code, 200);
+    let val: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
+    assert_eq!(val["ok"], true);
+    assert_eq!(val["node_name"], "sys-node");
+    assert_eq!(val["process"]["pid"], std::process::id());
+    assert!(val["process"]["rss_bytes"].as_u64().unwrap_or(0) > 0);
+
+    // 3. HTTP GET aliases: /api/system and /api/process
+    let (code_system, _) = tetherly_node::loopback_get(ui_port, "/api/system")
+        .await
+        .expect("system get");
+    assert_eq!(code_system, 200);
+
+    let (code_proc, _) = tetherly_node::loopback_get(ui_port, "/api/process")
+        .await
+        .expect("process get");
+    assert_eq!(code_proc, 200);
+
+    // 4. Host header validation: non-loopback Host header must return 403 Forbidden
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], ui_port));
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect to ui port");
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let evil_req = "GET /api/sys HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+    stream
+        .write_all(evil_req.as_bytes())
+        .await
+        .expect("write req");
+    stream.flush().await.expect("flush");
+    let mut resp_buf = Vec::new();
+    stream.read_to_end(&mut resp_buf).await.expect("read resp");
+    let resp_str = String::from_utf8_lossy(&resp_buf);
+    assert!(
+        resp_str.starts_with("HTTP/1.1 403"),
+        "expected 403 Forbidden on invalid Host header, got: {resp_str}"
+    );
+}
+
 /// ADR-033: Node real-time event streaming via loopback Server-Sent Events (SSE).
 #[tokio::test(flavor = "multi_thread")]
 async fn node_events_stream_sse_via_loopback_api() {
@@ -6065,6 +6125,139 @@ async fn inbox_file_download_raw_preview_and_native_open_via_loopback_api() {
         .expect("connect to ui port");
     let evil_req =
         "GET /api/file/inbox/download?name=report.txt HTTP/1.1\r\nHost: evil.attacker.com\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    node.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn node_system_telemetry_probe_injection_and_metrics_via_loopback_api() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (data_dir, _guard) = temp_dir("sys-telemetry");
+    let node = Node::start(cfg(data_dir.clone(), "sys-node", "macos")).unwrap();
+    let ui_port = node.spawn_ui().await.unwrap();
+    assert_ne!(ui_port, 0, "test node must bind loopback UI");
+
+    // 1. Direct PlatformSysProbe report test
+    let rep_native = node.system_report().expect("native system_report");
+    assert!(rep_native.ok);
+    assert_eq!(rep_native.node_name, "sys-node");
+    assert_eq!(rep_native.process.pid, std::process::id());
+    assert!(rep_native.process.thread_count >= 1);
+    assert!(rep_native.host.num_cpus >= 1);
+    assert_eq!(rep_native.host.os, std::env::consts::OS);
+    assert_eq!(rep_native.host.arch, std::env::consts::ARCH);
+
+    // 2. Deterministic test mocking via MemorySysProbe
+    let mock_probe = tetherly_node::MemorySysProbe::default();
+    mock_probe.set_process(tetherly_node::ProcessSample {
+        rss_bytes: 42 * 1024 * 1024,
+        virt_bytes: 128 * 1024 * 1024,
+        thread_count: 12,
+        open_fds: Some(36),
+        cpu_time_ms: 54321,
+    });
+    mock_probe.set_host(tetherly_node::HostSample {
+        total_memory_bytes: Some(32 * 1024 * 1024 * 1024),
+    });
+    node.set_sys_probe(Arc::new(mock_probe));
+
+    let mock_rep = node.system_report().expect("mock system_report");
+    assert_eq!(mock_rep.process.rss_bytes, 42 * 1024 * 1024);
+    assert_eq!(mock_rep.process.virt_bytes, 128 * 1024 * 1024);
+    assert_eq!(mock_rep.process.thread_count, 12);
+    assert_eq!(mock_rep.process.open_fds, Some(36));
+    assert_eq!(mock_rep.process.cpu_time_ms, 54321);
+    assert_eq!(mock_rep.process.memory_rss_formatted, "42.00 MiB");
+    assert_eq!(mock_rep.process.memory_virt_formatted, "128.00 MiB");
+    assert_eq!(
+        mock_rep.host.total_memory_bytes,
+        Some(32 * 1024 * 1024 * 1024)
+    );
+    assert_eq!(
+        mock_rep.host.total_memory_formatted,
+        Some("32.00 GiB".to_string())
+    );
+
+    // 3. Connect to SSE stream
+    let mut sse = tetherly_node::loopback_events_connect(ui_port)
+        .await
+        .expect("connect loopback sse");
+
+    // 4. Query /api/sys via loopback HTTP
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/sys")
+        .await
+        .expect("get /api/sys");
+    assert_eq!(code, 200);
+    let json_val: serde_json::Value =
+        serde_json::from_slice(&resp).expect("parse /api/sys response");
+    assert_eq!(json_val["ok"], true);
+    assert_eq!(json_val["node_name"], "sys-node");
+    assert_eq!(json_val["process"]["rss_bytes"], 42 * 1024 * 1024);
+    assert_eq!(json_val["process"]["virt_bytes"], 128 * 1024 * 1024);
+    assert_eq!(json_val["process"]["thread_count"], 12);
+    assert_eq!(json_val["process"]["open_fds"], 36);
+    assert_eq!(json_val["process"]["cpu_time_ms"], 54321);
+    assert_eq!(
+        json_val["host"]["total_memory_bytes"],
+        32 * 1024 * 1024 * 1024u64
+    );
+
+    // 5. Query /api/system and /api/process aliases
+    let (c_sys, _) = tetherly_node::loopback_get(ui_port, "/api/system")
+        .await
+        .expect("get /api/system");
+    assert_eq!(c_sys, 200);
+
+    let (c_proc, _) = tetherly_node::loopback_get(ui_port, "/api/process")
+        .await
+        .expect("get /api/process");
+    assert_eq!(c_proc, 200);
+
+    // 6. Verify SSE event broadcast (UiEvent::SystemMetricsRefreshed)
+    let ev = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse")
+        .expect("read event")
+        .expect("some event");
+    match ev {
+        tetherly_node::UiEvent::SystemMetricsRefreshed {
+            pid,
+            rss_bytes,
+            virt_bytes,
+            thread_count,
+            open_fds,
+            cpu_time_ms,
+            num_cpus,
+            total_memory_bytes,
+            ..
+        } => {
+            assert_eq!(pid, std::process::id());
+            assert_eq!(rss_bytes, 42 * 1024 * 1024);
+            assert_eq!(virt_bytes, 128 * 1024 * 1024);
+            assert_eq!(thread_count, 12);
+            assert_eq!(open_fds, Some(36));
+            assert_eq!(cpu_time_ms, 54321);
+            assert!(num_cpus >= 1);
+            assert_eq!(total_memory_bytes, Some(32 * 1024 * 1024 * 1024));
+        }
+        other => panic!("expected SystemMetricsRefreshed, got: {other:?}"),
+    }
+
+    // 7. Security Red Line: Loopback Isolation Host 403 Forbidden check
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{ui_port}"))
+        .await
+        .expect("connect to ui port");
+    let evil_req = "GET /api/sys HTTP/1.1\r\nHost: evil.attacker.com\r\n\r\n";
     evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
     evil_stream.flush().await.unwrap();
     let mut evil_buf = vec![0u8; 1024];

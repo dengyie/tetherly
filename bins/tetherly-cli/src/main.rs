@@ -4825,6 +4825,50 @@ fn print_status_summary(v: &serde_json::Value) {
     }
 }
 
+fn print_system_report(v: &serde_json::Value) {
+    let node_name = v["node_name"].as_str().unwrap_or("?");
+    let device_id = v["device_id"].as_str().unwrap_or("?");
+    let proc = &v["process"];
+    let host = &v["host"];
+
+    let pid = proc["pid"].as_u64().unwrap_or(0);
+    let uptime_secs = proc["uptime_secs"].as_u64().unwrap_or(0);
+    let rss = proc["rss_bytes"].as_u64().unwrap_or(0);
+    let virt = proc["virt_bytes"].as_u64().unwrap_or(0);
+    let threads = proc["thread_count"].as_u64().unwrap_or(0);
+    let fds = proc["open_fds"]
+        .as_u64()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "N/A".to_string());
+    let cpu_time_ms = proc["cpu_time_ms"].as_u64().unwrap_or(0);
+
+    let os = host["os"].as_str().unwrap_or("?");
+    let arch = host["arch"].as_str().unwrap_or("?");
+    let num_cpus = host["num_cpus"].as_u64().unwrap_or(1);
+    let total_mem = host["total_memory_bytes"].as_u64();
+
+    println!("Tetherly Node System Telemetry & Performance Profile:");
+    println!("  Node Name:        {node_name}");
+    println!("  Device ID:        {device_id}");
+    println!("  Host Platform:    {os} ({arch}), {num_cpus} CPU cores");
+    if let Some(tm) = total_mem {
+        println!("  Host Memory:      {}", format_bytes(tm));
+    }
+    println!("  Daemon PID:       {pid}");
+    println!(
+        "  Daemon Uptime:    {} ({uptime_secs}s)",
+        format_uptime(uptime_secs)
+    );
+    println!("  Active Threads:   {threads}");
+    println!("  Open Descriptors: {fds}");
+    println!("  Resident Memory:  {} ({rss} B)", format_bytes(rss));
+    println!("  Virtual Memory:   {} ({virt} B)", format_bytes(virt));
+    println!(
+        "  CPU Runtime:      {cpu_time_ms}ms ({:.2}s)",
+        cpu_time_ms as f64 / 1000.0
+    );
+}
+
 fn url_encode(input: &str) -> String {
     let mut out = String::new();
     for b in input.bytes() {

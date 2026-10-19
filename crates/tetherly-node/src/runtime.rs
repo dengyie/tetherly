@@ -1504,7 +1504,12 @@ impl Node {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let node_name = self.shared.node_name.lock().expect("node_name lock").clone();
+        let node_name = self
+            .shared
+            .node_name
+            .lock()
+            .expect("node_name lock")
+            .clone();
         let device_id = self.shared.identity.device_id().to_string();
 
         let report = SystemReport {

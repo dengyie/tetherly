@@ -454,6 +454,21 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect daemon process resources (RSS/Virt memory, threads, FDs, CPU) and host metrics.
+    Sys {
+        /// Watch mode: refresh system telemetry periodically until interrupted.
+        #[arg(long, short)]
+        watch: bool,
+        /// Refresh interval in seconds for --watch (default: 1).
+        #[arg(long, default_value_t = 1)]
+        interval: u64,
+        /// Output raw JSON system metrics report instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Check health, uptime, and bound ports of the running node daemon.
     Health {
         /// Output raw JSON health report instead of formatted text.
@@ -3359,6 +3374,41 @@ async fn main() -> Result<()> {
             }
             tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
         },
+        Cmd::Sys {
+            watch,
+            interval,
+            json,
+            ui_port,
+        } => loop {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/sys")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "node refused system telemetry query (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                if watch {
+                    print!("\x1b[2J\x1b[H");
+                }
+                print_system_report(&v);
+            }
+            if !watch {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
+        },
         Cmd::Health { json, ui_port } => {
             let t0 = std::time::Instant::now();
             let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/health")
@@ -4476,6 +4526,22 @@ fn print_event(v: &serde_json::Value) {
             let dev = v["device_id"].as_str().unwrap_or("?");
             println!("[peer_expired] peer={dev}");
         }
+        "system_metrics_refreshed" => {
+            let pid = v["pid"].as_u64().unwrap_or(0);
+            let rss = v["rss_bytes"].as_u64().unwrap_or(0);
+            let virt = v["virt_bytes"].as_u64().unwrap_or(0);
+            let threads = v["thread_count"].as_u64().unwrap_or(0);
+            let fds = v["open_fds"]
+                .as_u64()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "-".into());
+            let cpu_ms = v["cpu_time_ms"].as_u64().unwrap_or(0);
+            println!(
+                "[system_metrics_refreshed] pid={pid} rss={} virt={} threads={threads} fds={fds} cpu_time={cpu_ms}ms",
+                format_bytes(rss),
+                format_bytes(virt)
+            );
+        }
         other => {
             println!("[{other}] {v}");
         }
@@ -4603,6 +4669,50 @@ fn print_status_summary(v: &serde_json::Value) {
             failed
         );
     }
+}
+
+fn print_system_report(v: &serde_json::Value) {
+    let node_name = v["node_name"].as_str().unwrap_or("?");
+    let device_id = v["device_id"].as_str().unwrap_or("?");
+    let proc = &v["process"];
+    let host = &v["host"];
+
+    let pid = proc["pid"].as_u64().unwrap_or(0);
+    let uptime_secs = proc["uptime_secs"].as_u64().unwrap_or(0);
+    let rss = proc["rss_bytes"].as_u64().unwrap_or(0);
+    let virt = proc["virt_bytes"].as_u64().unwrap_or(0);
+    let threads = proc["thread_count"].as_u64().unwrap_or(0);
+    let fds = proc["open_fds"]
+        .as_u64()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "N/A".to_string());
+    let cpu_time_ms = proc["cpu_time_ms"].as_u64().unwrap_or(0);
+
+    let os = host["os"].as_str().unwrap_or("?");
+    let arch = host["arch"].as_str().unwrap_or("?");
+    let num_cpus = host["num_cpus"].as_u64().unwrap_or(1);
+    let total_mem = host["total_memory_bytes"].as_u64();
+
+    println!("Tetherly Node System Telemetry & Performance Profile:");
+    println!("  Node Name:        {node_name}");
+    println!("  Device ID:        {device_id}");
+    println!("  Host Platform:    {os} ({arch}), {num_cpus} CPU cores");
+    if let Some(tm) = total_mem {
+        println!("  Host Memory:      {}", format_bytes(tm));
+    }
+    println!("  Daemon PID:       {pid}");
+    println!(
+        "  Daemon Uptime:    {} ({uptime_secs}s)",
+        format_uptime(uptime_secs)
+    );
+    println!("  Active Threads:   {threads}");
+    println!("  Open Descriptors: {fds}");
+    println!("  Resident Memory:  {} ({rss} B)", format_bytes(rss));
+    println!("  Virtual Memory:   {} ({virt} B)", format_bytes(virt));
+    println!(
+        "  CPU Runtime:      {cpu_time_ms}ms ({:.2}s)",
+        cpu_time_ms as f64 / 1000.0
+    );
 }
 
 fn url_encode(input: &str) -> String {

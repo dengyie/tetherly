@@ -256,6 +256,44 @@
     </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>节点系统资源与运行时画像</h2>
+        <button id="refreshsysbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">刷新度量</button>
+      </div>
+      <div class="hint">守护进程物理内存 (RSS)、虚拟内存、活跃线程、文件描述符与 CPU 消耗深度遥测。</div>
+      <div id="sysstatus" style="margin-top:8px;font-size:12px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">宿主平台 / CPU 拓扑：</span>
+          <span id="sys-host" style="font-family:ui-monospace, Consolas, monospace">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">宿主物理总内存：</span>
+          <span id="sys-host-mem">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">常驻物理内存 (RSS)：</span>
+          <span id="sys-rss" style="font-weight:600;color:var(--ok)">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">虚拟内存占用 (Virt)：</span>
+          <span id="sys-virt">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">活跃线程数：</span>
+          <span id="sys-threads" style="font-family:ui-monospace, Consolas, monospace">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">打开文件描述符 (FDs)：</span>
+          <span id="sys-fds" style="font-family:ui-monospace, Consolas, monospace">-</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--muted)">CPU 用户+系统耗时：</span>
+          <span id="sys-cpu">-</span>
+        </div>
+      </div>
+      <div id="sysmsg" class="hint" style="margin-top:6px"></div>
+    </section>
+    <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
         <h2>网络流量与全协议遥测</h2>
         <button id="resetmetricsbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">重置度量</button>
       </div>
@@ -1600,6 +1638,52 @@ if (shutdownBtn) {
     }
   };
 }
+async function updateSysMetrics() {
+  try {
+    const rep = await api("/api/sys");
+    if (!rep || !rep.ok) return;
+    const p = rep.process || {};
+    const h = rep.host || {};
+    if ($("sys-host")) {
+      $("sys-host").textContent = (h.os || "?") + " (" + (h.arch || "?") + "), " + (h.num_cpus || 1) + " 核心";
+    }
+    if ($("sys-host-mem")) {
+      $("sys-host-mem").textContent = h.total_memory_formatted || (h.total_memory_bytes ? formatBytes(h.total_memory_bytes) : "未知");
+    }
+    if ($("sys-rss")) {
+      $("sys-rss").textContent = p.memory_rss_formatted || formatBytes(p.rss_bytes);
+    }
+    if ($("sys-virt")) {
+      $("sys-virt").textContent = p.memory_virt_formatted || formatBytes(p.virt_bytes);
+    }
+    if ($("sys-threads")) {
+      $("sys-threads").textContent = p.thread_count != null ? p.thread_count : "-";
+    }
+    if ($("sys-fds")) {
+      $("sys-fds").textContent = p.open_fds != null ? p.open_fds : "-";
+    }
+    if ($("sys-cpu")) {
+      const ms = p.cpu_time_ms || 0;
+      $("sys-cpu").textContent = ms + " ms (" + (ms / 1000).toFixed(2) + "s)";
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+const refreshSysBtn = $("refreshsysbtn");
+if (refreshSysBtn) {
+  refreshSysBtn.onclick = async () => {
+    const msg = $("sysmsg");
+    if (msg) msg.textContent = "正在实时采样守护进程与系统指标…";
+    await updateSysMetrics();
+    if (msg) {
+      msg.textContent = "系统度量采样已刷新 (" + new Date().toLocaleTimeString() + ")";
+      setTimeout(() => {
+        if (msg.textContent.indexOf("系统度量采样已刷新") !== -1) msg.textContent = "";
+      }, 3000);
+    }
+  };
+}
 let currentConfig = null;
 async function updateConfig() {
   try {
@@ -2353,11 +2437,15 @@ function setupEventSource() {
 								            desc = "桌面通知已派发: " + ev.title + (ev.app_name ? (" (" + ev.app_name + ")") : "") + (ev.is_otp ? " [验证码]" : "");
 								            updateNotifyBanner();
 								          }
-								          else if (ev.kind === "notify_config_changed") {
-								            desc = "通知配置更新: 横幅=" + (ev.banners_enabled ? "开" : "关") + ", 免打扰=" + ev.dnd_mode;
-								            updateNotifyBanner();
-								          }
-		          $("ev-last").textContent = "[" + t + "] " + desc;
+									          else if (ev.kind === "notify_config_changed") {
+									            desc = "通知配置更新: 横幅=" + (ev.banners_enabled ? "开" : "关") + ", 免打扰=" + ev.dnd_mode;
+									            updateNotifyBanner();
+									          }
+									          else if (ev.kind === "system_metrics_refreshed") {
+									            desc = "系统度量刷新: PID " + ev.pid + ", RSS " + formatBytes(ev.rss_bytes) + ", 线程 " + ev.thread_count + ", CPU " + ev.cpu_time_ms + "ms";
+									            updateSysMetrics();
+									          }
+			          $("ev-last").textContent = "[" + t + "] " + desc;
 		        }
 		      } catch (err) {
 		        if ($("ev-last")) $("ev-last").textContent = e.data;
@@ -2405,8 +2493,10 @@ function setupEventSource() {
 					setInterval(updateInbox, 3000);
 						updateDiscovery();
 						setInterval(updateDiscovery, 3000);
-						updateNotifyBanner();
-						setInterval(updateNotifyBanner, 3000);
-</script>
+							updateNotifyBanner();
+							setInterval(updateNotifyBanner, 3000);
+							updateSysMetrics();
+							setInterval(updateSysMetrics, 3000);
+	</script>
 </body>
 </html>

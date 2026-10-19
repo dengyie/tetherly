@@ -815,6 +815,7 @@ impl SysProbe for PlatformSysProbe {
             }
 
             #[cfg(target_os = "macos")]
+            #[allow(deprecated)]
             unsafe {
                 let mut info = std::mem::zeroed::<libc::mach_task_basic_info>();
                 let mut count = (std::mem::size_of::<libc::mach_task_basic_info>()
@@ -907,4 +908,3 @@ impl SysProbe for PlatformSysProbe {
         Ok(sample)
     }
 }
-
