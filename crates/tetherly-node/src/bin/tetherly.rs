@@ -895,6 +895,28 @@ enum InboxCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Extract / download a completed file from the incoming inbox to a local destination.
+    Get {
+        /// Filename to extract (basename inside inbox).
+        name: String,
+        /// Destination local file path (defaults to current directory with same filename).
+        #[arg(long, short)]
+        dest: Option<PathBuf>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Open a file in the system default application, or reveal the inbox directory if omitted.
+    Open {
+        /// Filename to open (basename inside inbox; omit to open inbox directory).
+        name: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3084,6 +3106,90 @@ async fn main() -> Result<()> {
                     );
                 }
             }
+            InboxCmd::Get {
+                name,
+                dest,
+                ui_port,
+            } => {
+                let encoded_name = url_encode(&name);
+                let path = format!("/api/file/inbox/download?name={encoded_name}");
+                let (code, resp) =
+                    tetherly_node::loopback_get(ui_port, &path)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "inbox get failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                let target_path = match dest {
+                    Some(p) => {
+                        if p.is_dir() {
+                            p.join(&name)
+                        } else {
+                            p
+                        }
+                    }
+                    None => PathBuf::from(&name),
+                };
+                if let Some(parent) = target_path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                std::fs::write(&target_path, &resp)?;
+                println!(
+                    "Extracted '{}' ({} bytes) -> {}",
+                    name,
+                    resp.len(),
+                    target_path.display()
+                );
+            }
+            InboxCmd::Open {
+                name,
+                json,
+                ui_port,
+            } => {
+                let payload = serde_json::json!({ "name": name });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) =
+                    tetherly_node::loopback_post(ui_port, "/api/file/inbox/open", &bytes)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "inbox open failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let rep: tetherly_node::InboxOpenReport = serde_json::from_slice(&resp)?;
+                    if let Some(f) = rep.name {
+                        println!(
+                            "Opened file '{}' in system default handler (path: {}).",
+                            f, rep.path
+                        );
+                    } else {
+                        println!(
+                            "Opened inbox directory in system file manager (path: {}).",
+                            rep.path
+                        );
+                    }
+                }
+            }
         },
         Cmd::Status {
             watch,
@@ -4043,6 +4149,13 @@ fn print_event(v: &serde_json::Value) {
                 format_bytes(freed)
             );
         }
+        "inbox_file_opened" => {
+            let name = v["name"].as_str();
+            match name {
+                Some(n) => println!("[inbox_file_opened] name={n}"),
+                None => println!("[inbox_file_opened] directory"),
+            }
+        }
         "pairing_needed" => {
             let dev = v["device_id"].as_str().unwrap_or("?");
             let fp = v["fp"].as_str().unwrap_or("?");
@@ -4341,6 +4454,18 @@ fn print_status_summary(v: &serde_json::Value) {
             failed
         );
     }
+}
+
+fn url_encode(input: &str) -> String {
+    let mut out = String::new();
+    for b in input.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
 }
 
 fn format_bytes(bytes: u64) -> String {

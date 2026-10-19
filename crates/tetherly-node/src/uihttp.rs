@@ -126,8 +126,72 @@ async fn handle(mut stream: TcpStream, node: Node) -> std::io::Result<()> {
         body.extend_from_slice(&more[..k]);
     }
     body.truncate(content_len);
-    let (code, ctype, payload) = route(method, path, &body, &node).await;
-    write_http(&mut stream, code, ctype, &payload).await
+    let resp = route(method, path, &body, &node).await;
+    write_http_response(&mut stream, &resp).await
+}
+
+/// Structured HTTP response for the loopback UI server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiResponse {
+    pub code: u16,
+    pub ctype: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl UiResponse {
+    pub fn new(code: u16, ctype: impl Into<String>, body: Vec<u8>) -> Self {
+        Self {
+            code,
+            ctype: ctype.into(),
+            headers: Vec::new(),
+            body,
+        }
+    }
+
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+}
+
+impl From<(u16, &'static str, Vec<u8>)> for UiResponse {
+    fn from((code, ctype, body): (u16, &'static str, Vec<u8>)) -> Self {
+        let content_type = if ctype.contains("charset") {
+            ctype.to_string()
+        } else if ctype.starts_with("text/") || ctype == "application/json" {
+            format!("{ctype}; charset=utf-8")
+        } else {
+            ctype.to_string()
+        };
+        UiResponse::new(code, content_type, body)
+    }
+}
+
+async fn write_http_response(stream: &mut TcpStream, resp: &UiResponse) -> std::io::Result<()> {
+    let reason = match resp.code {
+        200 => "OK",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        _ => "Error",
+    };
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
+        resp.code,
+        reason,
+        resp.ctype,
+        resp.body.len()
+    );
+    for (k, v) in &resp.headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(&resp.body).await?;
+    stream.flush().await
 }
 
 async fn write_http(
@@ -136,21 +200,31 @@ async fn write_http(
     ctype: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
-    let reason = match code {
-        200 => "OK",
-        400 => "Bad Request",
-        403 => "Forbidden",
-        404 => "Not Found",
-        413 => "Payload Too Large",
-        _ => "Error",
+    let content_type = if ctype.contains("charset") {
+        ctype.to_string()
+    } else if ctype.starts_with("text/") || ctype == "application/json" {
+        format!("{ctype}; charset=utf-8")
+    } else {
+        ctype.to_string()
     };
-    let head = format!(
-        "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes()).await?;
-    stream.write_all(body).await?;
-    stream.flush().await
+    let resp = UiResponse::new(code, content_type, body.to_vec());
+    write_http_response(stream, &resp).await
+}
+
+/// Binary-safe parser for raw HTTP responses.
+fn parse_http_response(buf: &[u8]) -> (u16, Vec<u8>) {
+    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n");
+    let (head_bytes, body_bytes) = match header_end {
+        Some(pos) => (&buf[..pos], &buf[pos + 4..]),
+        None => (buf, &[][..]),
+    };
+    let head_text = String::from_utf8_lossy(head_bytes);
+    let code = head_text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    (code, body_bytes.to_vec())
 }
 
 /// POST a small JSON body to a node's own loopback UI API and return the HTTP
@@ -170,18 +244,7 @@ pub async fn loopback_post(port: u16, path: &str, body: &[u8]) -> std::io::Resul
     stream.flush().await?;
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await?;
-    let text = String::from_utf8_lossy(&buf);
-    let code = text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .unwrap_or(0);
-    let payload = text
-        .split("\r\n\r\n")
-        .nth(1)
-        .map(|b| b.as_bytes().to_vec())
-        .unwrap_or_default();
-    Ok((code, payload))
+    Ok(parse_http_response(&buf))
 }
 
 /// PUT a JSON payload to a node's loopback UI API and return the HTTP status
@@ -198,18 +261,7 @@ pub async fn loopback_put(port: u16, path: &str, body: &[u8]) -> std::io::Result
     stream.flush().await?;
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await?;
-    let text = String::from_utf8_lossy(&buf);
-    let code = text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .unwrap_or(0);
-    let payload = text
-        .split("\r\n\r\n")
-        .nth(1)
-        .map(|b| b.as_bytes().to_vec())
-        .unwrap_or_default();
-    Ok((code, payload))
+    Ok(parse_http_response(&buf))
 }
 
 /// GET a path from a node's loopback UI API and return the HTTP status with
@@ -222,18 +274,7 @@ pub async fn loopback_get(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8
     stream.flush().await?;
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await?;
-    let text = String::from_utf8_lossy(&buf);
-    let code = text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .unwrap_or(0);
-    let payload = text
-        .split("\r\n\r\n")
-        .nth(1)
-        .map(|b| b.as_bytes().to_vec())
-        .unwrap_or_default();
-    Ok((code, payload))
+    Ok(parse_http_response(&buf))
 }
 
 /// DELETE a path from a node's loopback UI API and return the HTTP status with
@@ -246,18 +287,7 @@ pub async fn loopback_delete(port: u16, path: &str) -> std::io::Result<(u16, Vec
     stream.flush().await?;
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await?;
-    let text = String::from_utf8_lossy(&buf);
-    let code = text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .unwrap_or(0);
-    let payload = text
-        .split("\r\n\r\n")
-        .nth(1)
-        .map(|b| b.as_bytes().to_vec())
-        .unwrap_or_default();
-    Ok((code, payload))
+    Ok(parse_http_response(&buf))
 }
 
 async fn handle_sse(stream: &mut TcpStream, node: &Node) -> std::io::Result<()> {
@@ -570,6 +600,12 @@ struct InboxClearBody {
     before_secs: Option<u64>,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct InboxOpenBody {
+    #[serde(default)]
+    name: Option<String>,
+}
+
 fn default_open_url() -> String {
     "tetherly://open".to_string()
 }
@@ -668,6 +704,32 @@ struct RouteAddBody {
     addr: String,
 }
 
+fn percent_decode(s: &str) -> String {
+    let mut bytes = Vec::with_capacity(s.len());
+    let mut iter = s.as_bytes().iter().copied();
+    while let Some(b) = iter.next() {
+        if b == b'%' {
+            let h1 = iter.next();
+            let h2 = iter.next();
+            if let (Some(c1), Some(c2)) = (h1, h2) {
+                let hex_str = [c1, c2];
+                if let Ok(val) = std::str::from_utf8(&hex_str)
+                    .map_err(|_| ())
+                    .and_then(|h| u8::from_str_radix(h, 16).map_err(|_| ()))
+                {
+                    bytes.push(val);
+                    continue;
+                }
+            }
+        } else if b == b'+' {
+            bytes.push(b' ');
+            continue;
+        }
+        bytes.push(b);
+    }
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
 fn parse_query_map(q: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for pair in q.split('&') {
@@ -675,21 +737,23 @@ fn parse_query_map(q: &str) -> std::collections::HashMap<String, String> {
             continue;
         }
         if let Some((k, v)) = pair.split_once('=') {
-            map.insert(k.to_string(), v.to_string());
+            map.insert(percent_decode(k), percent_decode(v));
         } else {
-            map.insert(pair.to_string(), String::new());
+            map.insert(percent_decode(pair), String::new());
         }
     }
     map
 }
 
-async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'static str, Vec<u8>) {
+async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse {
     let (path_only, query_str) = match path.split_once('?') {
         Some((p, q)) => (p, Some(q)),
         None => (path, None),
     };
     match (method, path_only) {
-        ("GET", "/") | ("GET", "/index.html") => (200, "text/html", INDEX.as_bytes().to_vec()),
+        ("GET", "/") | ("GET", "/index.html") => {
+            UiResponse::new(200, "text/html; charset=utf-8", INDEX.as_bytes().to_vec())
+        }
         ("GET", "/api/state") => json_ok(&snapshot(node).await),
         ("GET", "/api/config") => json_ok(&node.config_report()),
         ("POST", "/api/config") | ("PUT", "/api/config") => {
@@ -1382,10 +1446,13 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             }
         }
         ("POST", "/api/open") => match serde_json::from_slice::<IdBody>(body) {
-            Ok(d) => match node.open_candidate(&d.id, &crate::platform::SystemOpener) {
-                Ok(url) => json_ok(&serde_json::json!({ "ok": true, "url": url })),
-                Err(e) => err(400, &e.to_string()),
-            },
+            Ok(d) => {
+                let op = node.opener();
+                match node.open_candidate(&d.id, op.as_ref()) {
+                    Ok(url) => json_ok(&serde_json::json!({ "ok": true, "url": url })),
+                    Err(e) => err(400, &e.to_string()),
+                }
+            }
             Err(_) => err(400, "bad json"),
         },
         // Quick reply typed on the desktop, sent back to the phone that owns
@@ -1923,6 +1990,75 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 Err(e) => err(400, &e.to_string()),
             }
         }
+        ("GET", "/api/file/inbox/download") | ("GET", "/api/inbox/download") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let name = qmap
+                .get("name")
+                .or_else(|| qmap.get("file"))
+                .map(|s| s.trim());
+            match name {
+                Some(n) if !n.is_empty() => match node.read_inbox_file(n) {
+                    Ok((clean_name, mime, bytes)) => UiResponse::new(200, mime, bytes).with_header(
+                        "Content-Disposition",
+                        format!("attachment; filename=\"{clean_name}\""),
+                    ),
+                    Err(tetherly_core::CoreError::UnsafeFileName) => err(400, "unsafe file name"),
+                    Err(tetherly_core::CoreError::File(ref msg)) if msg.contains("not found") => {
+                        err(404, "file not found in inbox")
+                    }
+                    Err(tetherly_core::CoreError::FileTooLarge(sz)) => {
+                        err(413, &format!("file too large ({sz} bytes)"))
+                    }
+                    Err(e) => err(400, &e.to_string()),
+                },
+                _ => err(400, "missing required 'name' query parameter"),
+            }
+        }
+        ("GET", "/api/file/inbox/raw") | ("GET", "/api/inbox/raw") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let name = qmap
+                .get("name")
+                .or_else(|| qmap.get("file"))
+                .map(|s| s.trim());
+            match name {
+                Some(n) if !n.is_empty() => match node.read_inbox_file(n) {
+                    Ok((clean_name, mime, bytes)) => UiResponse::new(200, mime, bytes).with_header(
+                        "Content-Disposition",
+                        format!("inline; filename=\"{clean_name}\""),
+                    ),
+                    Err(tetherly_core::CoreError::UnsafeFileName) => err(400, "unsafe file name"),
+                    Err(tetherly_core::CoreError::File(ref msg)) if msg.contains("not found") => {
+                        err(404, "file not found in inbox")
+                    }
+                    Err(tetherly_core::CoreError::FileTooLarge(sz)) => {
+                        err(413, &format!("file too large ({sz} bytes)"))
+                    }
+                    Err(e) => err(400, &e.to_string()),
+                },
+                _ => err(400, "missing required 'name' query parameter"),
+            }
+        }
+        ("POST", "/api/file/inbox/open") | ("POST", "/api/inbox/open") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let name = qmap.get("name").cloned().or_else(|| {
+                if !body.is_empty() {
+                    serde_json::from_slice::<InboxOpenBody>(body)
+                        .ok()
+                        .and_then(|b| b.name)
+                } else {
+                    None
+                }
+            });
+            let op = node.opener();
+            match node.open_inbox_file(name.as_deref(), op.as_ref()) {
+                Ok(rep) => json_ok(&rep),
+                Err(tetherly_core::CoreError::UnsafeFileName) => err(400, "unsafe file name"),
+                Err(tetherly_core::CoreError::File(ref msg)) if msg.contains("not found") => {
+                    err(404, "file not found in inbox")
+                }
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         ("GET", "/api/health") => {
             let rep = node.health_report();
             json_ok(&rep)
@@ -1997,7 +2133,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             Err(e) => err(400, &e.to_string()),
         },
         (_, "/api/events" | "/api/events/stream") => err(405, "method not allowed"),
-        _ => (404, "text/plain", b"not found".to_vec()),
+        _ => UiResponse::new(404, "text/plain; charset=utf-8", b"not found".to_vec()),
     }
 }
 
@@ -2113,17 +2249,17 @@ async fn snapshot(node: &Node) -> Snapshot {
     }
 }
 
-fn json_ok<T: Serialize>(v: &T) -> (u16, &'static str, Vec<u8>) {
+fn json_ok<T: Serialize>(v: &T) -> UiResponse {
     match serde_json::to_vec(v) {
-        Ok(b) => (200, "application/json", b),
+        Ok(b) => UiResponse::new(200, "application/json; charset=utf-8", b),
         Err(_) => err(400, "encode"),
     }
 }
 
-fn err(code: u16, msg: &str) -> (u16, &'static str, Vec<u8>) {
-    (
+fn err(code: u16, msg: &str) -> UiResponse {
+    UiResponse::new(
         code,
-        "application/json",
+        "application/json; charset=utf-8",
         serde_json::to_vec(&serde_json::json!({ "error": msg })).unwrap_or_default(),
     )
 }

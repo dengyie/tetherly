@@ -745,6 +745,48 @@ pub struct InboxClearReport {
     pub freed_bytes: u64,
 }
 
+/// Result of opening a specific file or the inbox directory itself in the OS.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InboxOpenReport {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub path: String,
+    pub message: String,
+}
+
+/// Helper to determine the standard MIME type from a file name or extension.
+pub fn mime_type_from_name(name: &str) -> &'static str {
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("pdf") => "application/pdf",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("json") => "application/json",
+        Some("html") | Some("htm") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "application/javascript",
+        Some("csv") => "text/csv; charset=utf-8",
+        Some("zip") => "application/zip",
+        Some("gz") | Some("tgz") => "application/gzip",
+        Some("tar") => "application/x-tar",
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("mkv") => "video/x-matroska",
+        _ => "application/octet-stream",
+    }
+}
+
 /// Port assignments bound by the running node.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct NodePorts {
@@ -1068,6 +1110,7 @@ struct Shared {
     auto_accepted_count: AtomicU64,
     discovered: Mutex<HashMap<String, DiscoveredPeerInfo>>,
     rescan_trigger: broadcast::Sender<()>,
+    opener: Mutex<Arc<dyn tetherly_core::Opener>>,
 }
 
 #[derive(Clone)]
@@ -1270,8 +1313,17 @@ impl Node {
             auto_accepted_count: AtomicU64::new(0),
             discovered: Mutex::new(HashMap::new()),
             rescan_trigger,
+            opener: Mutex::new(Arc::new(crate::platform::SystemOpener)),
         });
         Ok(Self { shared })
+    }
+
+    pub fn set_opener(&self, opener: Arc<dyn tetherly_core::Opener>) {
+        *self.shared.opener.lock().expect("set_opener lock") = opener;
+    }
+
+    pub fn opener(&self) -> Arc<dyn tetherly_core::Opener> {
+        self.shared.opener.lock().expect("opener lock").clone()
     }
 
     pub fn identity(&self) -> &Identity {
@@ -3428,6 +3480,114 @@ impl Node {
             deleted_count,
             freed_bytes,
         })
+    }
+
+    /// Open a specific file in the inbox with the system default application,
+    /// or open the inbox directory itself if no name is specified.
+    pub fn open_inbox_file(
+        &self,
+        name: Option<&str>,
+        opener: &dyn tetherly_core::Opener,
+    ) -> Result<InboxOpenReport, CoreError> {
+        let inbox_dir = self.shared.cfg.data_dir.join("inbox");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        match name.filter(|s| !s.trim().is_empty()) {
+            Some(n) => {
+                if n.is_empty()
+                    || n.contains('/')
+                    || n.contains('\\')
+                    || n.contains("..")
+                    || n.contains('\0')
+                    || n.starts_with('.')
+                {
+                    return Err(CoreError::UnsafeFileName);
+                }
+
+                let clean_name = tetherly_core::sanitize_file_name(n)?;
+                if clean_name != n || clean_name.starts_with('.') {
+                    return Err(CoreError::UnsafeFileName);
+                }
+
+                let file_path = inbox_dir.join(&clean_name);
+                if !file_path.exists() || !file_path.is_file() {
+                    return Err(CoreError::File("file not found in inbox".into()));
+                }
+
+                let path_str = file_path.to_str().ok_or(CoreError::UnsafeFileName)?;
+                opener.open(path_str)?;
+
+                let _ = self
+                    .shared
+                    .events
+                    .send(UiEvent::inbox_file_opened(Some(&clean_name), now_ms));
+
+                Ok(InboxOpenReport {
+                    ok: true,
+                    name: Some(clean_name),
+                    path: file_path.display().to_string(),
+                    message: "file opened in system default handler".into(),
+                })
+            }
+            None => {
+                std::fs::create_dir_all(&inbox_dir)?;
+                let path_str = inbox_dir.to_str().ok_or(CoreError::UnsafeFileName)?;
+                opener.open(path_str)?;
+
+                let _ = self
+                    .shared
+                    .events
+                    .send(UiEvent::inbox_file_opened(None::<String>, now_ms));
+
+                Ok(InboxOpenReport {
+                    ok: true,
+                    name: None,
+                    path: inbox_dir.display().to_string(),
+                    message: "inbox directory opened in system file manager".into(),
+                })
+            }
+        }
+    }
+
+    /// Read the bytes and MIME type of a completed file from the inbox,
+    /// enforcing strict path traversal guards and FILE_MAX limits.
+    pub fn read_inbox_file(
+        &self,
+        name: &str,
+    ) -> Result<(String, &'static str, Vec<u8>), CoreError> {
+        if name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+            || name.contains("..")
+            || name.contains('\0')
+            || name.starts_with('.')
+        {
+            return Err(CoreError::UnsafeFileName);
+        }
+
+        let clean_name = tetherly_core::sanitize_file_name(name)?;
+        if clean_name != name || clean_name.starts_with('.') {
+            return Err(CoreError::UnsafeFileName);
+        }
+
+        let inbox_dir = self.shared.cfg.data_dir.join("inbox");
+        let file_path = inbox_dir.join(&clean_name);
+
+        if !file_path.exists() || !file_path.is_file() {
+            return Err(CoreError::File("file not found in inbox".into()));
+        }
+
+        let meta = std::fs::metadata(&file_path)?;
+        if meta.len() > tetherly_core::FILE_MAX {
+            return Err(CoreError::FileTooLarge(meta.len()));
+        }
+
+        let bytes = std::fs::read(&file_path)?;
+        let mime = mime_type_from_name(&clean_name);
+        Ok((clean_name, mime, bytes))
     }
 
     /// Bring the ANCS link up: Data Source first, then Notification Source.

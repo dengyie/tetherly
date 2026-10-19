@@ -372,28 +372,35 @@
   7. CLI 双端全同构升级：`offers`、`accept`、`reject`、`auto-accept` 子命令，并在 `events` 监听器中高亮展示；
   8. Web UI 提议治理卡片与自动接收开关；
   9. 网络层取消安全与多路复用健壮性强化：设计实现状态化 `TaggedReader` 环形缓冲状态机，消除 Tokio `select!` 竞态丢弃分支时的 partial-read 网络帧解包失步，在 `tests/phase1.rs` 增设步骤 4/5 对端拒绝观测同步，5 平台 CI 100% 全绿；
-  10. 生产级代码审查修复、原子锁治理与多文件提议尺寸纠偏：
-     - **修复 P1 多文件累积字节统计失真**：`file_offers` 中 `total_bytes` 与 `size` 改为全文件求和 `t.files.iter().map(|f| f.size).sum()`；
-     - **修复 P2 拒绝状态流转清理竞态与单点原子锁收敛**：`user_accept_file_reported` 与 `user_reject_file_reported` 将状态转换与元数据提取收敛至单次持锁临界区，加锁由 3 次降为 1 次且消灭并发 prune 竞态；
-     - **代码去重与接口收敛**：`user_accept_file` 与 `user_reject_file` 直接委托 `*_reported` 变体；
-     - **端到端集成测试增强**：`tests/phase1.rs` 增设包含 2 个子文件的多文件提议注入，验证累积 4000 字节及原子拒绝上报。
+	  10. 生产级代码审查修复、原子锁治理与多文件提议尺寸纠偏：
+	     - **修复 P1 多文件累积字节统计失真**：`file_offers` 中 `total_bytes` 与 `size` 改为全文件求和 `t.files.iter().map(|f| f.size).sum()`；
+	     - **修复 P2 拒绝状态流转清理竞态与单点原子锁收敛**：`user_accept_file_reported` 与 `user_reject_file_reported` 将状态转换与元数据提取收敛至单次持锁临界区，加锁由 3 次降为 1 次且消灭并发 prune 竞态；
+	     - **代码去重与接口收敛**：`user_accept_file` 与 `user_reject_file` 直接委托 `*_reported` 变体；
+	     - **端到端集成测试增强**：`tests/phase1.rs` 增设包含 2 个子文件的多文件提议注入，验证累积 4000 字节及原子拒绝上报。
+	  11. **v1.62 (ADR-055) 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环**：
+	     - **HTTP 响应协议头与流式结构升级**：`UiResponse` 替代旧三元组，支持任意状态码、标准 MIME 类型映射（`mime_type_from_name` 智能识别 20+ 种格式）与 `Content-Disposition` 协议头；
+	     - **二进制安全字节流防失真提取**：重构 `parse_http_response` 为滑动窗口字节切分（`b"\r\n\r\n"`），彻底消除 `String::from_utf8_lossy` 导致的非 UTF-8 字节损毁；
+	     - **收件箱文件内容直读与系统原生调起原语**：`Node::read_inbox_file` 与 `Node::open_inbox_file`，对接系统默认打开器（macOS `open`、Windows `rundll32 url.dll,FileProtocolHandler`、Linux `xdg-open`），支持测试注入 `MemoryOpener`；
+	     - **严格多层路径穿越红线拦截**：拦截任何包含 `..`、`/`、`\`、`\0` 或以 `.` 开头的文件名（`CoreError::UnsafeFileName`）；
+	     - **事件总线零明文审计**：新增 `UiEvent::InboxFileOpened` 变体，仅透出脱敏文件名与时间戳，严禁携带私钥或文件敏感正文；
+	     - **回环端点与隔离铁律**：`GET /api/file/inbox/download`、`GET /api/file/inbox/raw`、`POST /api/file/inbox/open`，127.0.0.1 物理绑定与 Host 403 强阻断；
+	     - **双端 CLI 全同构升级**：`inbox get <name> [--dest <path>]`、`inbox open [<name>]`，SSE `events` 监听器高亮格式化；
+	     - **Web UI 收件箱提取与交互联动**：新增「打开目录」按钮，卡片行新增「打开」、「下载」及「预览」操作，实时联动 SSE；
+	     - **端到端集成测试**：`tests/phase1.rs` 增设 `inbox_file_download_raw_preview_and_native_open_via_loopback_api` 全绿。
 
 ## Current Branch
 - `main` @ `https://github.com/dengyie/tetherly`
 
 ## Last Verified
-- GitHub Actions CI Run `39162786508`（commit `3b3c061`）全部 5 个平台矩阵任务 100% 全绿通过：
-  - `deny` (44s): PASSED
-  - `android` (1m50s): PASSED
-  - `check (windows-latest)` (5m16s): PASSED
-  - `check (macos-latest)` (2m39s): PASSED
-  - `check (ubuntu-latest)` (3m44s): PASSED
-- `cargo fmt --all --check` & `cargo clippy --all-targets -- -D warnings` 全部干净通过。
-- `cargo deny check`（advisories, bans, licenses, sources）全部通过。
-- 全部 308 项单元测试与端到端集成测试 100% 全绿。
+- 本地全工作区验证 100% 通过：
+  - `cargo fmt --all --check`：PASSED (0 diff)
+  - `cargo clippy --workspace --all-targets -- -D warnings`：PASSED (0 warnings)
+  - `cargo check --target aarch64-unknown-linux-gnu`：PASSED (0 errors)
+  - `cargo test --workspace`：PASSED (全量 260+ 项测试全部通过)
+  - `cargo deny check`（advisories, bans, licenses, sources）：PASSED (0 security/license violations)
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.56)
+- `docs/DEVELOPMENT.md` (SSOT v1.62)
 - `crates/tetherly-{core,crypto,net,node,android}`
 - `bins/tetherly-cli`, `crates/tetherly-node/src/bin/tetherly.rs`
 - `crates/tetherly-net/src/codec.rs` (`TaggedReader`), `crates/tetherly-net/src/session.rs`

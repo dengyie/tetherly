@@ -180,6 +180,7 @@
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
         <div style="display:flex;gap:6px;align-items:center">
           <input id="inboxsearch" placeholder="搜索文件名…" style="padding:2px 8px;font-size:12px;border:1px solid var(--line);border-radius:4px;background:#0d1218;color:var(--text);width:130px"/>
+          <button id="openinboxdirbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">打开目录</button>
           <button id="refreshinboxbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">刷新</button>
           <button id="clearinboxbtn" class="bad ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">清空收件箱</button>
         </div>
@@ -1373,6 +1374,8 @@ async function updateInbox() {
         ? '<span class="badge completed" style="font-size:10px;margin-right:4px">安全</span>'
         : '<span class="badge offline" style="font-size:10px;margin-right:4px">可疑</span>';
       const timeStr = f.modified_at_secs ? new Date(f.modified_at_secs * 1000).toLocaleString() : "-";
+      const downloadUrl = "/api/file/inbox/download?name=" + encodeURIComponent(f.name);
+      const rawUrl = "/api/file/inbox/raw?name=" + encodeURIComponent(f.name);
       const card = el('<div class="card" style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px">' +
         '<div style="flex:1;min-width:0;margin-right:12px">' +
           '<div class="title" style="display:flex;align-items:center;gap:4px">' +
@@ -1383,11 +1386,35 @@ async function updateInbox() {
             formatBytes(f.size) + ' · 修改时间: ' + timeStr +
           '</div>' +
         '</div>' +
-        '<div class="row">' +
-          '<button class="bad ghost del-btn" type="button" style="padding:2px 8px;font-size:12px">删除</button>' +
+        '<div class="row" style="display:flex;gap:6px;align-items:center">' +
+          '<button class="ghost open-btn" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">打开</button>' +
+          '<a class="ghost download-btn" href="' + downloadUrl + '" download style="padding:2px 8px;font-size:12px;text-decoration:none;display:inline-block;border:1px solid var(--line);border-radius:4px;color:var(--text);cursor:pointer">下载</a>' +
+          '<a class="ghost preview-btn" href="' + rawUrl + '" target="_blank" rel="noopener noreferrer" style="padding:2px 8px;font-size:12px;text-decoration:none;display:inline-block;border:1px solid var(--line);border-radius:4px;color:var(--text);cursor:pointer">预览</a>' +
+          '<button class="bad ghost del-btn" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">删除</button>' +
         '</div>' +
       '</div>');
       card.querySelector(".filename-text").textContent = f.name;
+      const openBtn = card.querySelector(".open-btn");
+      openBtn.onclick = async () => {
+        openBtn.disabled = true;
+        const msg = $("inboxmsg");
+        if (msg) msg.textContent = "正在调起系统应用打开 \"" + f.name + "\"…";
+        try {
+          const res = await api("/api/file/inbox/open", { name: f.name });
+          if (res && res.ok) {
+            if (msg) msg.textContent = "已调起系统应用打开: " + f.name;
+            setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+          } else {
+            alert("打开失败: " + (res && res.error ? res.error : "未知错误"));
+            if (msg) msg.textContent = "";
+          }
+        } catch (err) {
+          alert("打开异常: " + err);
+          if (msg) msg.textContent = "";
+        } finally {
+          openBtn.disabled = false;
+        }
+      };
       const delBtn = card.querySelector(".del-btn");
       delBtn.onclick = async () => {
         if (!confirm("确定要删除收件箱中的文件 \"" + f.name + "\" 吗？此操作不可逆。")) return;
@@ -1414,6 +1441,29 @@ async function updateInbox() {
   } catch (e) {
     console.error("updateInbox error", e);
   }
+}
+const openInboxDirBtn = $("openinboxdirbtn");
+if (openInboxDirBtn) {
+  openInboxDirBtn.onclick = async () => {
+    openInboxDirBtn.disabled = true;
+    const msg = $("inboxmsg");
+    if (msg) msg.textContent = "正在调起系统文件管理器打开收件箱目录…";
+    try {
+      const res = await api("/api/file/inbox/open", {});
+      if (res && res.ok) {
+        if (msg) msg.textContent = "已在系统文件管理器中打开收件箱目录";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+      } else {
+        alert("打开收件箱目录失败: " + (res && res.error ? res.error : "未知错误"));
+        if (msg) msg.textContent = "";
+      }
+    } catch (err) {
+      alert("打开收件箱目录异常: " + err);
+      if (msg) msg.textContent = "";
+    } finally {
+      openInboxDirBtn.disabled = false;
+    }
+  };
 }
 const refreshInboxBtn = $("refreshinboxbtn");
 if (refreshInboxBtn) {
@@ -2003,11 +2053,14 @@ function setupEventSource() {
 		            updateStorage();
 		            updateInbox();
 		          }
-		          else if (ev.kind === "inbox_cleared") {
-		            desc = "收件箱已清空: 删除 " + ev.deleted_count + " 个文件 (释放 " + formatBytes(ev.freed_bytes) + ")";
-		            updateStorage();
-		            updateInbox();
-		          }
+			          else if (ev.kind === "inbox_cleared") {
+			            desc = "收件箱已清空: 删除 " + ev.deleted_count + " 个文件 (释放 " + formatBytes(ev.freed_bytes) + ")";
+			            updateStorage();
+			            updateInbox();
+			          }
+			          else if (ev.kind === "inbox_file_opened") {
+			            desc = ev.name ? ("收件箱文件已在系统中打开: " + ev.name) : "收件箱目录已在系统文件管理器中打开";
+			          }
 	          else if (ev.kind === "file_rejected") {
 	            desc = "文件已拒绝: " + ev.transfer_id + (ev.reason ? (" (原因: " + ev.reason + ")") : "");
 	            updateFileOffers();

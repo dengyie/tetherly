@@ -155,6 +155,11 @@ pub enum UiEvent {
         freed_bytes: u64,
         timestamp_ms: u64,
     },
+    InboxFileOpened {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        timestamp_ms: u64,
+    },
     PeerDiscovered {
         device_id: String,
         name: String,
@@ -183,6 +188,13 @@ impl UiEvent {
         UiEvent::InboxCleared {
             deleted_count,
             freed_bytes,
+            timestamp_ms,
+        }
+    }
+
+    pub fn inbox_file_opened(name: Option<impl Into<String>>, timestamp_ms: u64) -> Self {
+        UiEvent::InboxFileOpened {
+            name: name.map(Into::into),
             timestamp_ms,
         }
     }

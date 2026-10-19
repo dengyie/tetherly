@@ -3,12 +3,53 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.61** |
+| 文档版本 | **1.62** |
 | 日期 | 2026-10-19 |
-| 状态 | **v1.61 局域网设备自发现治理、信标可观测性与一键拨号配对闭环（ADR-054）**——(1) **网络层 mDNS 服务浏览与信标监听原语 (`crates/tetherly-net/src/mdns.rs` & `lib.rs`)**：彻底终结既有系统单向广播自身但从未浏览/监听对端信标的“监听黑盒”，封装 `browse` 与 `stop_browse` 原语接收 `ServiceEvent::ServiceResolved` 与 `ServiceRemoved`，并在非 `lan` 特性下提供安全无害桩函数；(2) **局域网发现强类型 DTO 抽象与运行时自发现画像 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`)**：设计 `DiscoveredPeerDto`、`DiscoveryReport` 与 `DiscoveryRescanReport`，维护线程安全自发现表 `discovered: Mutex<HashMap<String, DiscoveredPeerInfo>>`，支持自动过滤自身设备 ID、单遍汇总在线与受信任状态并按活跃时间倒序排布；(3) **动态重新探测与智能拨号寻址原语**：实现 `Node::rescan_discovery` 主动触发信标组播重探，并在 `Node::dial_peer` 中提供智能寻址引擎（按物理套接字地址、发现设备名/ID、路由表对端标识优先级链式解析，并配备 2s 单目标快速超时，彻底避免跨网段挂死）；(4) **事件总线零明文审计与即时分发 (`crates/tetherly-node/src/events.rs`)**：扩展 `UiEvent::PeerDiscovered` 与 `UiEvent::PeerExpired` 变体，严格践行 Zero-Plaintext 铁律（仅传输脱敏公开元数据、名称、地址与能力列表，严禁传输任何私钥或敏感负载），通过 SSE 实时分发；(5) **回环控制面端点全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET /api/discovery`（别名 `/api/peers/discovered`）、`POST /api/discovery/rescan`（别名 `/api/peers/discover`），增强 `POST /api/dial` 原生支持 `peer` 智能寻址，全量端点严格执行 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强阻断；(6) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：增设 `discover [--rescan] [--json]` 子命令、升级 `dial [--addr] [--peer <name|id>]` 智能拨号，并在 SSE `events` 监听器中提供高亮格式化输出；(7) **Web UI 局域网自发现交互面板 (`ui/index.html`)**：新增「局域网自动发现设备 (Discovered LAN Devices)」卡片，支持实时设备列表、能力特性徽标、一键地址填入、一键快捷拨号与 SSE 联动无感局部重绘；(8) **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 增设完整集成测试覆盖自发现初态、主动刷新探测、模拟对端广播、智能寻址解析与拨号、信标过期与 SSE 验证、Host 403 恶意阻断，全工作区 273+ 项测试、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 通过。+ v1.60 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环（ADR-053）+ v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.62 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环（ADR-055）**——(1) **HTTP 响应协议头与流式结构升级 (`crates/tetherly-node/src/uihttp.rs`)**：从单一的三元组响应抽象彻底升级为强类型 `UiResponse` 结构，原生支持灵活配置动态状态码、标准 MIME 类型映射（`image/png`, `application/pdf`, `text/plain`, `application/octet-stream` 等）以及标准 HTTP 头扩展（如 `Content-Disposition: attachment/inline`）；(2) **二进制安全字节流防失真提取 (`crates/tetherly-node/src/uihttp.rs` & `bins/tetherly-cli/src/main.rs`)**：重构 `parse_http_response` 客户端解析逻辑，以原始字节窗口滑动匹配 `\r\n\r\n` 隔离协议头与内容载荷，彻底解决既有 `String::from_utf8_lossy` 损毁非 UTF-8 二进制文件（图片、视频、压缩包、二进制执行体）字节的致命缺陷；(3) **收件箱文件内容直读与系统原生调起原语 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`)**：设计 `InboxOpenReport` 与 `mime_type_from_name` 规范，实现 `Node::read_inbox_file` 与 `Node::open_inbox_file`，全面对接宿主操作系统应用启动器（macOS `open`、Windows `rundll32 url.dll,FileProtocolHandler`、Linux `xdg-open`），支持定向打开指定收件箱文件或定位 `<data_dir>/inbox` 目录；(4) **严格多层路径穿越红线拦截 (Security Red Line)**：严禁任何试图逃逸收件箱的行为，凡包含 `..`、`/`、`\`、`\0` 或以 `.` 开头的文件名，均被底层安全红线强行拦截并返回 400 (`CoreError::UnsafeFileName`)；(5) **事件总线零明文审计与即时分发 (`crates/tetherly-node/src/events.rs`)**：扩展 `UiEvent::InboxFileOpened` 变体，严格践行 Zero-Plaintext 铁律（仅传输脱敏文件名与操作时间戳，严禁携带私钥或文件敏感正文），通过 SSE 实时分发；(6) **回环控制面端点全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET /api/file/inbox/download`（别名 `/api/inbox/download`，附件流式下载）、`GET /api/file/inbox/raw`（别名 `/api/inbox/raw`，内联多媒体/文本预览）与 `POST /api/file/inbox/open`（别名 `/api/inbox/open`，原生打开文件或收件箱），全量端点严格执行 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离；(7) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：增设 `inbox get <name> [--dest <path>]`（流式提取并落盘）与 `inbox open [<name>]`（调起系统默认应用打开文件或打开收件箱），并在 SSE `events` 监听器中提供高亮格式化输出；(8) **Web UI 收件箱提取与交互联动 (`ui/index.html`)**：在收件箱面板中增设「打开目录」按钮，在文件列表中为每个文件提供「打开」、「下载」及「预览」一键操作，实时监听 `inbox_file_opened` 事件；(9) **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 增设完整集成测试覆盖二进制流式下载保真度、Content-Disposition 响应头、raw 内联预览、系统直开调用捕获（`MemoryOpener`）、路径穿越阻断、404 不存在处理与 Host 403 恶意阻断，全工作区 274+ 项测试、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 通过。+ v1.61 局域网设备自发现治理、信标可观测性与一键拨号配对闭环（ADR-054）+ v1.60 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环（ADR-053）+ v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.62 相对 1.61(跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环)**
+
+- **动机(收件箱落地文件提取与系统交互断层痛点)**:
+  在 Tetherly 陆续完成局域网自发现与信标治理 (v1.61 / ADR-054)、收件箱生命周期查询与安全删除 (v1.60 / ADR-053)、批量文件提议与断点续传可观测性 (v1.59 / ADR-052) 之后，核心传输网络已能稳定接收文件并入库落盘至 `<data_dir>/inbox/`。然而，在**收件箱落地文件的提取、使用与操作系统联动（Inbox Extraction, Native Open & Content Delivery）**层面，依然存在严重的使用闭环断层：
+  1. **收件箱文件无法提取与下载（No Content Extraction / Download API）**：
+     现存系统仅提供元数据查询接口（`GET /api/file/inbox`）与删除接口（`POST /api/file/inbox/delete`），完全缺乏文件内容提取与下载端点；Web 控制台只能查看文件列表，用户无法点击下载到浏览器本地目录或预览多媒体内容；命令行 CLI 缺乏导出子命令，在无头或远程模式下无法提取落盘文件；
+  2. **既有回环客户端 UTF-8 损毁二进制（Binary Corruption in Text Splitter）**：
+     既有 `loopback_get` 等客户端实现使用 `String::from_utf8_lossy` 按文本切分头部与载荷，导致下载非 UTF-8 二进制文件（如图片、视频、压缩包、二进制执行体）时产生严重的字节替换损毁（`\u{FFFD}`）；
+  3. **缺乏操作系统级默认应用直开与所在目录定位原语（Native Open & Reveal In File Manager）**：
+     在桌面操作系统（macOS / Windows / Linux）上，用户收到文件后最自然的高频交互是“双击/打开该文件”或“在系统文件管理器中显示收件箱”；既有 `SystemOpener` 虽然具备调起操作系统的能力，但仅用于打开白名单 URL，未与收件箱文件系统打通；
+  4. **路径穿越防御红线（Strict Path Traversal Guard）**：
+     文件读取与系统调起必须坚守路径穿越防御红线：坚决拦截任何包含 `..`、`/`、`\`、`\0` 或以 `.` 开头的文件名，校验 `clean_name == name`；
+  5. **事件总线零明文审计与即时分发（Zero-Plaintext Invariant）**：
+     当文件被系统打开或被读取时，向事件总线派发 `UiEvent::InboxFileOpened`；严格恪守零明文铁律：事件载荷仅允许携带脱敏后的文件名与时间戳，严禁携带私钥或文件内部机密正文。
+
+- **架构与协议设计(ADR-055 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环)**:
+  1. **强类型 HTTP 响应抽象与二进制安全切分 (`crates/tetherly-node/src/uihttp.rs` & `bins/tetherly-cli/src/main.rs`)**:
+     - 升级控制面响应模型为强类型 `UiResponse`，支持状态码、MIME 类型、动态 HTTP 响应头扩展与原始载荷；
+     - 重构客户端 `parse_http_response` 为滑动窗口字节匹配 `b"\r\n\r\n"`，确保 100% 二进制无损传输；
+  2. **收件箱内容提取与系统调起原子原语 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`)**:
+     - 扩展 `InboxOpenReport` 与 MIME 类型智能映射函数 `mime_type_from_name`（识别 PNG、JPEG、GIF、WEBP、SVG、PDF、TXT、JSON、HTML、CSS、JS、CSV、ZIP、GZ、TAR、MP3、WAV、MP4、WEBM、MKV 等）；
+     - 实现 `Node::open_inbox_file` 与 `Node::read_inbox_file`，支持打开具体文件或打开 `<data_dir>/inbox` 目录；
+     - 注入可插拔 `Opener` 支持测试隔离（`MemoryOpener`）与生产真实调起（`SystemOpener`）；
+  3. **事件总线零明文审计与即时分发 (`crates/tetherly-node/src/events.rs`)**:
+     - 新增 `UiEvent::InboxFileOpened { name: Option<String>, timestamp_ms: u64 }`，零明文审计，实时通知前端与 CLI 监听器；
+  4. **轻量级回环控制面端点全闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/file/inbox/download`（与别名 `/api/inbox/download`）：流式下载附件，设置 `Content-Disposition: attachment; filename="..."`；
+     - `GET /api/file/inbox/raw`（与别名 `/api/inbox/raw`）：内联查看多媒体/文本，设置 `Content-Disposition: inline; filename="..."`；
+     - `POST /api/file/inbox/open`（与别名 `/api/inbox/open`）：接收可选 `{"name": "..."}`，调起系统默认应用打开文件或收件箱；
+     - 严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离；
+  5. **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - `tetherly inbox get <name> [--dest <path>] [--ui-port <port>]`：从收件箱流式提取落盘；
+     - `tetherly inbox open [<name>] [--ui-port <port>]`：调起系统默认应用打开文件或收件箱目录；
+     - SSE `events` 监听器高亮输出 `[inbox_file_opened]`；
+  6. **Web UI 收件箱提取与交互联动 (`ui/index.html`)**:
+     - 收件箱面板标题栏新增「打开目录」按钮；
+     - 文件列表项新增「打开」、「下载」与「预览」按钮；
+     - 监听 `inbox_file_opened` 事件；
+  7. **端到端集成测试与全量安全基线全绿**:
+     - `tests/phase1.rs` 增设 `inbox_file_download_raw_preview_and_native_open_via_loopback_api` 完整覆盖流式下载二进制保真度、Content-Disposition 响应头、raw 内联预览、系统直开调用捕获、路径穿越阻断、404 不存在处理与 Host 403 恶意阻断。
 
 **1.61 相对 1.60(局域网设备自发现治理、信标可观测性与一键拨号配对闭环)**
 

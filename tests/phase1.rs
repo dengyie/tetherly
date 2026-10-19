@@ -5817,6 +5817,280 @@ async fn lan_discovery_and_beacon_governance_via_loopback_api() {
     node.shutdown();
 }
 
+/// ADR-055: Inbox content extraction, binary-safe download, media raw preview, native open & loopback isolation.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbox_file_download_raw_preview_and_native_open_via_loopback_api() {
+    let (data_dir, _guard) = temp_dir("inbox-download-test");
+    let node = Node::start(cfg(data_dir.clone(), "inbox-download-node", "macos")).unwrap();
+    let ui_port = node.spawn_ui().await.expect("spawn UI succeeds");
+
+    // Inject MemoryOpener to intercept system open calls without side effects
+    let opener = tetherly_node::MemoryOpener::new();
+    node.set_opener(Arc::new(opener.clone()));
+
+    // Connect to loopback SSE event stream
+    let mut sse = tetherly_node::loopback_events_connect(ui_port)
+        .await
+        .expect("connect loopback sse");
+
+    // 1. Prepare sample files in <data_dir>/inbox
+    let inbox_path = data_dir.join("inbox");
+    std::fs::create_dir_all(&inbox_path).unwrap();
+
+    let txt_name = "report.txt";
+    let txt_bytes = b"Hello Tetherly Inbox Content Delivery!";
+    std::fs::write(inbox_path.join(txt_name), txt_bytes).unwrap();
+
+    let png_name = "screenshot.png";
+    // Binary PNG bytes containing non-UTF-8 sequences to verify binary fidelity
+    let png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\xaa\xbb\xcc\xdd\xee\xff";
+    std::fs::write(inbox_path.join(png_name), png_bytes).unwrap();
+
+    let json_name = "data.json";
+    let json_bytes = br#"{"system": "tetherly", "version": "1.62", "safe": true}"#;
+    std::fs::write(inbox_path.join(json_name), json_bytes).unwrap();
+
+    // 2. Binary-Safe Streaming Download: GET /api/file/inbox/download
+    // 2a. Download text file and verify body
+    let (c_txt, b_txt) = tetherly_node::loopback_get(
+        ui_port,
+        &format!("/api/file/inbox/download?name={txt_name}"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_txt, 200);
+    assert_eq!(b_txt, txt_bytes);
+
+    // 2b. Download binary PNG via alias /api/inbox/download and verify byte-for-byte fidelity
+    let (c_png, b_png) =
+        tetherly_node::loopback_get(ui_port, &format!("/api/inbox/download?name={png_name}"))
+            .await
+            .unwrap();
+    assert_eq!(c_png, 200);
+    assert_eq!(
+        b_png, png_bytes,
+        "binary download must maintain 100% byte fidelity"
+    );
+
+    // 2c. Direct TCP request to verify Content-Disposition: attachment and MIME headers
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut tcp_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{ui_port}"))
+        .await
+        .expect("connect to ui port");
+    let req = format!("GET /api/file/inbox/download?name={png_name} HTTP/1.1\r\nHost: 127.0.0.1:{ui_port}\r\n\r\n");
+    tcp_stream.write_all(req.as_bytes()).await.unwrap();
+    tcp_stream.flush().await.unwrap();
+    let mut resp_buf = vec![0u8; 4096];
+    let n = tcp_stream.read(&mut resp_buf).await.unwrap();
+    let resp_str = String::from_utf8_lossy(&resp_buf[..n]);
+    assert!(resp_str.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str.contains("Content-Type: image/png"));
+    assert!(resp_str.contains(&format!(
+        "Content-Disposition: attachment; filename=\"{png_name}\""
+    )));
+
+    // 3. Raw Media / Content Preview: GET /api/file/inbox/raw
+    // 3a. Read raw JSON
+    let (c_raw_json, b_raw_json) =
+        tetherly_node::loopback_get(ui_port, &format!("/api/file/inbox/raw?name={json_name}"))
+            .await
+            .unwrap();
+    assert_eq!(c_raw_json, 200);
+    assert_eq!(b_raw_json, json_bytes);
+
+    // 3b. Direct TCP request to verify Content-Disposition: inline
+    let mut tcp_stream2 = tokio::net::TcpStream::connect(format!("127.0.0.1:{ui_port}"))
+        .await
+        .expect("connect to ui port");
+    let req2 = format!(
+        "GET /api/file/inbox/raw?name={json_name} HTTP/1.1\r\nHost: 127.0.0.1:{ui_port}\r\n\r\n"
+    );
+    tcp_stream2.write_all(req2.as_bytes()).await.unwrap();
+    tcp_stream2.flush().await.unwrap();
+    let mut resp_buf2 = vec![0u8; 4096];
+    let n2 = tcp_stream2.read(&mut resp_buf2).await.unwrap();
+    let resp_str2 = String::from_utf8_lossy(&resp_buf2[..n2]);
+    assert!(resp_str2.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str2.contains("Content-Type: application/json"));
+    assert!(resp_str2.contains(&format!(
+        "Content-Disposition: inline; filename=\"{json_name}\""
+    )));
+
+    // 4. Native Open via POST /api/file/inbox/open
+    // 4a. Open specific file
+    let open_file_payload = serde_json::json!({ "name": txt_name });
+    let (c_open_file, b_open_file) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/inbox/open",
+        &serde_json::to_vec(&open_file_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_open_file, 200);
+    let open_file_rep: tetherly_node::InboxOpenReport =
+        serde_json::from_slice(&b_open_file).unwrap();
+    assert!(open_file_rep.ok);
+    assert_eq!(open_file_rep.name.as_deref(), Some(txt_name));
+    assert!(open_file_rep.path.ends_with(txt_name));
+
+    // Verify MemoryOpener recorded opened path
+    let opened_urls = opener.opened();
+    assert_eq!(opened_urls.len(), 1);
+    assert!(opened_urls[0].ends_with(txt_name));
+
+    // Verify SSE receives UiEvent::InboxFileOpened with Zero-Plaintext sanitized metadata
+    let sse_ev1 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse inbox file opened event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_ev1 {
+        tetherly_node::UiEvent::InboxFileOpened { name, timestamp_ms } => {
+            assert_eq!(name.as_deref(), Some(txt_name));
+            assert!(timestamp_ms > 0);
+        }
+        other => panic!("expected InboxFileOpened, got: {other:?}"),
+    }
+
+    // 4b. Open inbox directory itself (name: None) via alias POST /api/inbox/open
+    let (c_open_dir, b_open_dir) = tetherly_node::loopback_post(ui_port, "/api/inbox/open", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c_open_dir, 200);
+    let open_dir_rep: tetherly_node::InboxOpenReport = serde_json::from_slice(&b_open_dir).unwrap();
+    assert!(open_dir_rep.ok);
+    assert_eq!(open_dir_rep.name, None);
+    assert!(open_dir_rep.path.ends_with("inbox"));
+
+    // Verify MemoryOpener recorded opened directory
+    let opened_urls2 = opener.opened();
+    assert_eq!(opened_urls2.len(), 2);
+    assert!(opened_urls2[1].ends_with("inbox"));
+
+    // Verify SSE receives UiEvent::InboxFileOpened with name: None
+    let sse_ev2 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse inbox dir opened event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_ev2 {
+        tetherly_node::UiEvent::InboxFileOpened { name, timestamp_ms } => {
+            assert_eq!(name, None);
+            assert!(timestamp_ms > 0);
+        }
+        other => panic!("expected InboxFileOpened for dir, got: {other:?}"),
+    }
+
+    // 5. Security Red Line: Path traversal guard on download, raw and open
+    let evil_payloads = [
+        "../outside.txt",
+        "../../etc/passwd",
+        "/absolute/file.txt",
+        r"..\windows\path.txt",
+        ".hidden_file",
+        "..",
+        "sub/folder.txt",
+    ];
+    for evil in evil_payloads {
+        // Download traversal check -> 400 Bad Request
+        let encoded_evil = tetherly_cli_test_url_encode(evil);
+        let (c_dl_evil, _) = tetherly_node::loopback_get(
+            ui_port,
+            &format!("/api/file/inbox/download?name={encoded_evil}"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            c_dl_evil, 400,
+            "download with evil path '{evil}' must return 400"
+        );
+
+        // Raw traversal check -> 400 Bad Request
+        let (c_raw_evil, _) = tetherly_node::loopback_get(
+            ui_port,
+            &format!("/api/file/inbox/raw?name={encoded_evil}"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            c_raw_evil, 400,
+            "raw preview with evil path '{evil}' must return 400"
+        );
+
+        // Open traversal check -> 400 Bad Request
+        let evil_open_req = serde_json::json!({ "name": evil });
+        let (c_open_evil, _) = tetherly_node::loopback_post(
+            ui_port,
+            "/api/file/inbox/open",
+            &serde_json::to_vec(&evil_open_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            c_open_evil, 400,
+            "open with evil path '{evil}' must return 400"
+        );
+    }
+
+    // 6. Non-existent file error handling -> 404 Not Found
+    let (c_dl_404, _) = tetherly_node::loopback_get(
+        ui_port,
+        "/api/file/inbox/download?name=non_existent_file.pdf",
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_dl_404, 404);
+
+    let (c_raw_404, _) =
+        tetherly_node::loopback_get(ui_port, "/api/file/inbox/raw?name=non_existent_file.pdf")
+            .await
+            .unwrap();
+    assert_eq!(c_raw_404, 404);
+
+    let not_found_req = serde_json::json!({ "name": "non_existent_file.pdf" });
+    let (c_open_404, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/inbox/open",
+        &serde_json::to_vec(&not_found_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_open_404, 404);
+
+    // 7. Security Red Line: Loopback Isolation Host 403 Forbidden check
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{ui_port}"))
+        .await
+        .expect("connect to ui port");
+    let evil_req =
+        "GET /api/file/inbox/download?name=report.txt HTTP/1.1\r\nHost: evil.attacker.com\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    node.shutdown();
+}
+
+fn tetherly_cli_test_url_encode(s: &str) -> String {
+    let mut res = String::new();
+    for b in s.as_bytes() {
+        match *b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                res.push(*b as char);
+            }
+            byte => {
+                res.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    res
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

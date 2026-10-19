@@ -937,3 +937,22 @@
 - Results: All checks and tests passed 100% green. Daemon startup ANCS bug fixed, macOS CoreBluetooth stack operational, cross-platform address resolution complete.
 - Next: Update `.codex-memory/todo.md` and Obsidian knowledge base docs.
 - Blockers: None.
+
+## 2026-10-19
+- Task: Land Tetherly v1.62 (ADR-055) 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环.
+- Actions:
+  1. Extended `UiEvent` in `crates/tetherly-node/src/events.rs` with `InboxFileOpened` variant adhering to Zero-Plaintext invariant (only sanitized metadata, no file contents or private keys);
+  2. Implemented `InboxOpenReport`, `mime_type_from_name`, `open_inbox_file`, and `read_inbox_file` in `crates/tetherly-node/src/runtime.rs` with strict multi-layer path traversal guards (`CoreError::UnsafeFileName`);
+  3. Added thread-safe injectable `Opener` on `Node` (`set_opener` / `opener`) defaulting to `SystemOpener` (macOS `open`, Windows `rundll32`, Linux `xdg-open`) while allowing `MemoryOpener` for tests;
+  4. Upgraded `uihttp.rs` from static 3-tuple responses to full `UiResponse` structure with dynamic MIME types and `Content-Disposition` headers;
+  5. Fixed binary distortion bug in `parse_http_response` across both `uihttp.rs` and `bins/tetherly-cli/src/main.rs` by switching from `String::from_utf8_lossy` text splitting to raw byte window scanning `buf.windows(4).position(|w| w == b"\r\n\r\n")`;
+  6. Added loopback endpoints: `GET /api/file/inbox/download`, `GET /api/file/inbox/raw`, `POST /api/file/inbox/open` (and `/api/inbox/*` aliases) with loopback binding and Host 403 Forbidden check;
+  7. Fully upgraded dual-CLI targets (`bins/tetherly-cli` and `crates/tetherly-node/src/bin/tetherly.rs`) with `inbox get <name> [--dest <path>]` and `inbox open [<name>]`, plus SSE `events` formatting;
+  8. Enhanced Web UI in `ui/index.html` with "打开目录" button, file card actions ("打开", "下载", "预览", "删除"), and SSE `inbox_file_opened` live update;
+  9. Added comprehensive E2E integration test in `tests/phase1.rs`: `inbox_file_download_raw_preview_and_native_open_via_loopback_api`;
+  10. Verified all workspace baselines: `cargo fmt --all --check` (clean), `cargo clippy --workspace --all-targets -- -D warnings` (clean), `cargo check --target aarch64-unknown-linux-gnu` (clean), `cargo test --workspace` (all 260+ tests pass), `cargo deny check` (advisories ok, bans ok, licenses ok, sources ok);
+  11. Updated SSOT `docs/DEVELOPMENT.md` to v1.62 (ADR-055), updated `.codex-memory/decisions.md`, `.codex-memory/project-state.md`, and synchronized to Obsidian vault (`Note/Project/tetherly/tetherly 开发文档.md`).
+- Results: All 9 tasks for v1.62 completed and verified 100% green.
+- Next: Git commit keeping working tree clean.
+- Blockers: None.
+

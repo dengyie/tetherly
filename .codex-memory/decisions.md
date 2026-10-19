@@ -384,4 +384,13 @@
 - Rollback trigger: None; unobservable file transfer is a usability defect.
 - Related files: `crates/tetherly-net/src/filechan.rs`, `crates/tetherly-node/src/{runtime.rs,uihttp.rs,lib.rs}`, `ui/index.html`, `tests/phase1.rs`, `docs/DEVELOPMENT.md` §26
 
+## 2026-10-19 - 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环 (ADR-055)
+- Decision: 彻底解决落地文件与操作系统交互的“最后一公里”断层痛点。(1) 控制面 HTTP 响应全面抽象升级为强类型 `UiResponse`，原生支持状态码、MIME 类型智能映射（`mime_type_from_name` 支持 PNG/JPEG/WEBP/PDF/TXT/JSON/ZIP/MP4 等）以及 `Content-Disposition` 协议头配置；(2) 重构回环客户端 `parse_http_response` 为滑动窗口原始字节切分（`b"\r\n\r\n"`），彻底消除 `String::from_utf8_lossy` 损毁非 UTF-8 二进制字节的致命缺陷；(3) 运行时实现 `Node::open_inbox_file` 与 `Node::read_inbox_file`，全面对接宿主操作系统应用启动器（macOS `open`、Windows `rundll32 url.dll,FileProtocolHandler`、Linux `xdg-open`），并支持在测试中注入 `MemoryOpener` 验证无副作用拦截；(4) 严格多层路径穿越红线拦截 (`CoreError::UnsafeFileName`)，坚决阻断任何包含 `..`、`/`、`\`、`\0` 或以 `.` 开头的文件名；(5) 事件总线新增 `UiEvent::InboxFileOpened` 变体，严格践行 Zero-Plaintext 铁律（仅传输脱敏文件名与操作时间戳，严禁携带私钥或文件敏感正文），通过 SSE 实时分发；(6) 轻量级回环控制面全闭环：新增 `GET /api/file/inbox/download`（附件流式下载）、`GET /api/file/inbox/raw`（内联多媒体/文本预览）与 `POST /api/file/inbox/open`（原生打开文件或收件箱），严格执行 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离；(7) 双端 CLI 增设 `inbox get <name> [--dest <path>]` 与 `inbox open [<name>]`；(8) Web UI 收件箱面板增设「打开目录」、「打开」、「下载」及「预览」一键操作，实时联动 `inbox_file_opened` 事件；(9) `tests/phase1.rs` 增设完整端到端集成测试，验证流式下载二进制保真度、Content-Disposition 响应头、raw 内联预览、系统直开调用捕获、路径穿越阻断与 Host 403 恶意阻断。
+- Rationale: 收件箱文件如果只能查看列表和删除，而无法在 Web 端下载、预览，也无法在桌面端一键调起默认应用打开，用户传输完成的文件就沦为“孤岛”，丢失了实际生产使用价值。同时，原先使用 utf8 lossy 文本切分 HTTP 响应的方式会在提取非 UTF-8 二进制文件时造成不可逆的字节替换损毁，必须在字节层面保证 100% 传输保真度。
+- Alternatives considered: (a) 在 Web 端通过 `window.open` 直接访问受限数据目录物理路径：违反浏览器跨域与沙盒安全限制，且本地文件协议不可行；(b) 允许客户端传入任意相对或绝对路径打开文件：严重违反路径穿越防御红线，导致任意文件读取与执行漏洞；(c) 直接在回环控制面使用全局系统 `Command::new("open")` 且不可插拔：导致单元测试在自动化 CI 或无头环境中崩溃或弹出窗口骚扰用户，注入 `Opener` 彻底解耦环境依赖。
+- Impact: 跨端收件箱完整形成「浏览列表 -> 检索过滤 -> 内联预览 -> 流式下载落盘 -> 操作系统默认应用直开 -> 定位文件管理器收件箱目录 -> 安全删除与审计清除」的全链路生命周期闭环。全工作区 274+ 项测试全绿，全端构建与 Clippy/Deny 100% 达标。
+- Rollback trigger: None.
+- Related files: `crates/tetherly-node/src/{runtime.rs,uihttp.rs,events.rs,lib.rs}`, `bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `ui/index.html`, `tests/phase1.rs`, `docs/DEVELOPMENT.md`
+
+
 
