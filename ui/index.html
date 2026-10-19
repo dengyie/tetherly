@@ -556,6 +556,47 @@
       <div id="blocked-peers-box" style="margin-top:8px"><div class="empty">无黑名单设备</div></div>
       <div id="blockmsg" class="hint" style="margin-top:6px"></div>
     </section>
+    <section style="margin-top:16px" id="audit-trail-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">节点安全审计轨迹与操作日志 (Security Audit Trail)</h2>
+        <div style="display:flex;gap:6px">
+          <button id="clearauditbtn" class="ghost bad" type="button" style="padding:2px 8px;font-size:12px">清空审计日志</button>
+          <button id="refreshauditbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新日志</button>
+        </div>
+      </div>
+      <div class="hint">零明文结构化环形审计日志（Zero-Plaintext Invariant）。严禁明文凭据/OTP/正文落盘或广播，支持多维度过滤检索。</div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">
+        <label style="font-size:12px;color:var(--muted)">分类:
+          <select id="audit-filter-cat" style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px">
+            <option value="">全部分类</option>
+            <option value="security">Security (安全/配对/黑名单)</option>
+            <option value="peer">Peer (节点会话)</option>
+            <option value="file">File (收件箱/传输)</option>
+            <option value="clipboard">Clipboard (剪贴板)</option>
+            <option value="notify">Notify (通知/勿扰)</option>
+            <option value="route">Route (物理寻址)</option>
+            <option value="config">Config (配置/调谐)</option>
+          </select>
+        </label>
+        <label style="font-size:12px;color:var(--muted)">最低严重等级:
+          <select id="audit-filter-sev" style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px">
+            <option value="">全部等级</option>
+            <option value="info">Info 及以上</option>
+            <option value="notice">Notice 及以上</option>
+            <option value="warning">Warning 及以上</option>
+            <option value="alert">Alert 仅严重警报</option>
+          </select>
+        </label>
+        <label style="font-size:12px;color:var(--muted)">返回数量:
+          <input id="audit-filter-limit" type="number" value="50" min="1" max="500" style="width:50px;margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px" />
+        </label>
+        <span id="audit-stat-badge" class="badge outbound" style="font-size:11px">记录 0 条</span>
+      </div>
+      <div id="auditmsg" class="hint" style="margin-top:6px"></div>
+      <div id="audit-logs-box" style="margin-top:8px;max-height:420px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:6px;background:var(--bg)">
+        <div class="empty">无审计记录</div>
+      </div>
+    </section>
   </div>
 </main>
 <script>
@@ -588,6 +629,15 @@ function formatEta(remainingBytes, bps) {
   const min = Math.floor(sec / 60);
   const remSec = sec % 60;
   return "剩余 " + min + "m" + remSec + "s";
+}
+function escapeHtml(s) {
+  if (s == null) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 function renderTransfers(list, stats) {
   const tstat = $("transferstats");
@@ -2404,6 +2454,91 @@ if (tuneHbBtn) {
     }
   };
 }
+async function updateAuditLogs() {
+  const box = $("audit-logs-box");
+  const stat = $("audit-stat-badge");
+  if (!box) return;
+  try {
+    const cat = $("audit-filter-cat") ? $("audit-filter-cat").value : "";
+    const sev = $("audit-filter-sev") ? $("audit-filter-sev").value : "";
+    const lim = $("audit-filter-limit") ? $("audit-filter-limit").value : "50";
+    let url = "/api/audit?limit=" + encodeURIComponent(lim);
+    if (cat) url += "&category=" + encodeURIComponent(cat);
+    if (sev) url += "&severity=" + encodeURIComponent(sev);
+    const rep = await fetch(url).then(r => r.ok ? r.json() : null);
+    if (!rep || !rep.ok) return;
+    if (stat) {
+      stat.textContent = "匹配 " + (rep.entries ? rep.entries.length : 0) + " / 累计 " + (rep.total || 0) + " 条";
+    }
+    const entries = rep.entries || [];
+    if (!entries.length) {
+      box.innerHTML = '<div class="empty">无匹配审计记录</div>';
+      return;
+    }
+    box.innerHTML = "";
+    for (const e of entries) {
+      let sevClass = "outbound";
+      if (e.severity === "notice") sevClass = "completed";
+      else if (e.severity === "warning") sevClass = "verifying";
+      else if (e.severity === "alert") sevClass = "failed";
+
+      let statusBadge = e.success
+        ? '<span class="badge completed" style="font-size:11px;padding:1px 6px">成功</span>'
+        : '<span class="badge failed" style="font-size:11px;padding:1px 6px">失败</span>';
+
+      const timeStr = new Date(e.timestamp_ms).toLocaleTimeString();
+      const targetStr = e.target ? (' <span style="color:var(--muted)">目标: ' + escapeHtml(e.target) + '</span>') : '';
+      const row = el(
+        '<div style="border-bottom:1px solid var(--line);padding:6px 4px;font-size:12px;display:flex;align-items:flex-start;justify-content:space-between;gap:8px">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+              '<span class="badge ' + sevClass + '" style="font-size:10px;text-transform:uppercase">' + escapeHtml(e.severity) + '</span>' +
+              '<span class="badge offline" style="font-size:10px;text-transform:uppercase">' + escapeHtml(e.category) + '</span>' +
+              '<strong style="font-size:12px">' + escapeHtml(e.action) + '</strong>' +
+              statusBadge +
+              '<span style="font-size:11px;color:var(--muted)">#' + e.id + ' · ' + timeStr + '</span>' +
+            '</div>' +
+            '<div style="margin-top:3px;color:var(--text);word-break:break-all">' +
+              escapeHtml(e.summary) + targetStr +
+            '</div>' +
+          '</div>' +
+        '</div>'
+      );
+      box.appendChild(row);
+    }
+  } catch (err) {
+    if (box) box.innerHTML = '<div class="empty">加载审计日志异常</div>';
+  }
+}
+const refreshAuditBtn = $("refreshauditbtn");
+if (refreshAuditBtn) {
+  refreshAuditBtn.onclick = () => {
+    updateAuditLogs();
+  };
+}
+const clearAuditBtn = $("clearauditbtn");
+if (clearAuditBtn) {
+  clearAuditBtn.onclick = async () => {
+    if (!confirm("确定清空环形审计日志？该操作不可撤销。")) return;
+    const msg = $("auditmsg");
+    if (msg) msg.textContent = "正在清空审计日志…";
+    try {
+      const rep = await fetch("/api/audit/clear", { method: "POST" }).then(r => r.json());
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "环形审计日志已清空 (清空前记录: " + (rep.cleared_count || 0) + " 条)";
+        updateAuditLogs();
+      } else {
+        if (msg) msg.textContent = "清空失败";
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "清空异常: " + e;
+    }
+  };
+}
+if ($("audit-filter-cat")) $("audit-filter-cat").onchange = updateAuditLogs;
+if ($("audit-filter-sev")) $("audit-filter-sev").onchange = updateAuditLogs;
+if ($("audit-filter-limit")) $("audit-filter-limit").onchange = updateAuditLogs;
+
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
   refreshPin();
@@ -2597,14 +2732,20 @@ function setupEventSource() {
 										            desc = "系统度量刷新: PID " + ev.pid + ", RSS " + formatBytes(ev.rss_bytes) + ", 线程 " + ev.thread_count + ", CPU " + ev.cpu_time_ms + "ms";
 										            updateSysMetrics();
 										          }
-										          else if (ev.kind === "peer_link_quality_refreshed") {
-										            desc = "链路质量刷新: " + ev.peer + " RTT=" + (ev.avg_rtt_ms != null ? ev.avg_rtt_ms.toFixed(1) : "-") + "ms, 抖动=" + (ev.jitter_ms != null ? ev.jitter_ms.toFixed(1) : "-") + "ms, 丢包=" + (ev.packet_loss_rate != null ? ev.packet_loss_rate.toFixed(1) : "-") + "% (" + ev.grade + ")";
-										            updateLinkQuality();
-										          }
-										          else if (ev.kind === "heartbeat_config_changed") {
-										            desc = "保活配置更新: 间隔=" + ev.interval_secs + "s, 失活=" + ev.deadline_secs + "s";
-										            updateLinkQuality();
-										          }
+											          else if (ev.kind === "peer_link_quality_refreshed") {
+											            desc = "链路质量刷新: " + ev.peer + " RTT=" + (ev.avg_rtt_ms != null ? ev.avg_rtt_ms.toFixed(1) : "-") + "ms, 抖动=" + (ev.jitter_ms != null ? ev.jitter_ms.toFixed(1) : "-") + "ms, 丢包=" + (ev.packet_loss_rate != null ? ev.packet_loss_rate.toFixed(1) : "-") + "% (" + ev.grade + ")";
+											            updateLinkQuality();
+											          }
+											          else if (ev.kind === "heartbeat_config_changed") {
+											            desc = "保活配置更新: 间隔=" + ev.interval_secs + "s, 失活=" + ev.deadline_secs + "s";
+											            updateLinkQuality();
+											          }
+											          else if (ev.kind === "audit_event_recorded") {
+											            const statusStr = ev.success ? "成功" : "失败";
+											            const targetStr = ev.target ? (" -> " + ev.target) : "";
+											            desc = "安全审计: [" + ev.severity + "] [" + ev.category + "] " + ev.action + targetStr + " (" + statusStr + ")";
+											            updateAuditLogs();
+											          }
 			          $("ev-last").textContent = "[" + t + "] " + desc;
 		        }
 		      } catch (err) {
@@ -2655,10 +2796,12 @@ function setupEventSource() {
 						setInterval(updateDiscovery, 3000);
 							updateNotifyBanner();
 							setInterval(updateNotifyBanner, 3000);
-								updateSysMetrics();
-								setInterval(updateSysMetrics, 3000);
-								updateLinkQuality();
-								setInterval(updateLinkQuality, 3000);
+									updateSysMetrics();
+									setInterval(updateSysMetrics, 3000);
+									updateLinkQuality();
+									setInterval(updateLinkQuality, 3000);
+									updateAuditLogs();
+									setInterval(updateAuditLogs, 3000);
 		</script>
 </body>
 </html>

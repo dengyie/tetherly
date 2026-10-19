@@ -3,10 +3,55 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.65** |
+| 文档版本 | **1.66** |
 | 日期 | 2026-10-19 |
-| 状态 | **v1.65 对端加密连接保活心跳治理、动态心跳间隔调谐、多维链路质量画像与主动探活遥测全闭环（ADR-058）**——(1) **对端会话心跳治理与动态间隔调谐 (`crates/tetherly-core/src/liveness.rs`, `crates/tetherly-node/src/runtime.rs` & `lib.rs`)**：抽象动态心跳与保活配置模型 `HeartbeatConfig`（`interval_secs`, `deadline_secs`），默认 15s 周期发送 Ping，45s 无数据判定离线（3倍心跳容错）。支持在会话运行期动态重载心跳间隔与超时阈值，无需断开重连；严格执行参数合法性校验（`interval_secs >= 1 && interval_secs <= 3600`，`deadline_secs > interval_secs && deadline_secs <= 86400`）；并在 `Liveness` 状态机中新增 `set_deadline` 原语实现超时重置；(2) **滑动窗口链路质量画像引擎 (`PeerLinkTracker` & `crates/tetherly-node/src/runtime.rs`)**：维护 32 样本环形滑动窗口，实时计算最小/最大/移动平均 RTT（`min_rtt_ms`、`max_rtt_ms`、`avg_rtt_ms`）、网络抖动（`jitter_ms`: $\frac{1}{N-1}\sum |RTT_{i+1} - RTT_i|$）与累积发包丢包率（`packet_loss_rate`: $\frac{\text{Lost}}{\text{Sent}} \times 100\%$），并映射五级链路质量评价模型（`LinkGrade`: `Excellent` / `Good` / `Fair` / `Poor` / `Unreachable`）；(3) **主动多包并发探活遥测原语 (`Node::probe_peer_link` & `LinkProbeReport`)**：支持对指定在线对端设备发起按需突发 Ping 探针探测（1~20 个探针包，10~1000ms 间隔），并发安全且不破坏现有保活心跳流，实时回传探测报告并推入链路画像分析；(4) **Zero-Plaintext 零明文安全红线与事件总线可观测性 (`crates/tetherly-node/src/events.rs`)**：新增 `UiEvent::PeerLinkQualityRefreshed` 与 `UiEvent::HeartbeatConfigChanged`，坚决恪守零明文铁律，仅分发链路指标数值与时间戳，严禁携带敏感上下文或私钥；(5) **回环控制面端点全闭环与 403 强隔离防御 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET /api/peers/link`（及其别名 `/api/peer/link`、`/api/peers/quality`）、`POST /api/peers/link/probe`、`GET/POST /api/peers/heartbeat`（及其别名 `/api/peers/ping`），严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离防御；(6) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：新增 `link` 子命令族（`link [status]`、`link probe <peer> [--count <n>] [--delay-ms <ms>]`、`link config [--interval <secs>] [--deadline <secs>]`），并在 SSE `events` 监听器中提供高亮格式化输出；(7) **Web UI 链路画像透视卡片与一键探活测速交互 (`ui/index.html`)**：在控制台中增设「对端链路质量画像与保活调谐」独立面板，展示品质徽标、RTT 范围、Jitter、丢包率，支持一键发起突发测速与保活配置动态调整；(8) **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 增设完整集成测试覆盖默认配置查询、动态心跳调谐、边界非法参数阻断、链路画像生成、突发多包探针、滑动窗口度量更新、SSE 广播与 Host 403 恶意阻断，全工作区测试全绿、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 达标。+ v1.64 节点系统资源深度遥测、进程级性能画像与运行时健康度量闭环（ADR-057）+ v1.63 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环（ADR-056）+ v1.62 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环（ADR-055）+ v1.61 局域网设备自发现治理、信标可观测性与一键拨号配对闭环（ADR-054）+ v1.60 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环（ADR-053）+ v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.66 节点安全审计轨迹、环形结构化审计日志、多维安全检索与遥测全闭环（ADR-059）**——(1) **环形缓冲区审计引擎 (`AuditEngine`, `crates/tetherly-node/src/runtime.rs` & `lib.rs`)**：构建定额 500 条内存环形缓冲区，维护严格时间序与强类型安全审计分类（`AuditCategory`: `Security` / `Peer` / `File` / `Clipboard` / `Notify` / `Route` / `Config`）与四级严重度（`AuditSeverity`: `Info` / `Notice` / `Warning` / `Alert`），提供 $O(1)$ 均摊压入、多维条件检索（分类、最低级别、条数上限、时间戳上限）与清空治理原语；(2) **全安全关键链路无死角埋点与状态流转闭环**：在配对授权（PIN验证、信任持久化、主动解绑）、对端接入控制（黑名单拉黑与解封）、文件收件箱安全生命周期（接收、删除、清空、直开）、跨端剪贴板主动同步与清空、原生系统级通知与免打扰、物理寻址路由表增删、心跳保活调谐等关键安全路径无死角埋点；(3) **Zero-Plaintext 零明文安全红线与事件总线可观测性 (`crates/tetherly-node/src/events.rs`)**：新增 `UiEvent::AuditEventRecorded` 零明文事件变体，坚决恪守零明文铁律，载荷仅广播脱敏摘要与非敏感元数据，严禁明文凭据/OTP/正文落盘或广播；(4) **回环控制面端点全闭环与 403 强隔离防御 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET /api/audit`（别名 `/api/audit/logs`）、`POST /api/audit/query`、`POST /api/audit/clear`，严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离防御；(5) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：新增 `audit` 子命令族（`audit [list]`、`audit clear`、`audit watch`），支持 `--category`、`--severity`、`--limit`、`--since`、`--watch`、`--clear`、`--json` 等丰富标志，并在 SSE `events` 监听器中提供高亮格式化输出；(6) **Web UI 审计轨迹透视面板与实时日志交互 (`ui/index.html`)**：在控制台中增设「节点安全审计轨迹与操作日志」独立面板，支持分类与级别多维筛选、一键清空与刷新、实时日志展示与 SSE 自动追加；(7) **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 增设完整集成测试覆盖多维事件触发、多维筛选检索、清空治理、SSE 实时流广播与 Host 403 恶意阻断，全工作区测试全绿、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 达标。+ v1.65 对端加密连接保活心跳治理、动态心跳间隔调谐、多维链路质量画像与主动探活遥测全闭环（ADR-058）+ v1.64 节点系统资源深度遥测、进程级性能画像与运行时健康度量闭环（ADR-057）+ v1.63 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环（ADR-056）+ v1.62 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环（ADR-055）+ v1.61 局域网设备自发现治理、信标可观测性与一键拨号配对闭环（ADR-054）+ v1.60 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环（ADR-053）+ v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
+
+本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.66 相对 1.65(节点安全审计轨迹、环形结构化审计日志、多维安全检索与遥测全闭环)**
+
+- **动机(安全审计可见性缺失、凭据泄露风险与审计闭环诉求)**:
+  在 Tetherly 陆续完成对端加密连接保活心跳治理与链路画像 (v1.65 / ADR-058)、节点系统资源深度遥测 (v1.64 / ADR-057)、跨端桌面原生系统级通知推送 (v1.63 / ADR-056) 与跨端收件箱流式下载与直开 (v1.62 / ADR-055) 后，网络节点承载了跨设备配对认证、受信任设备解绑、黑名单接入鉴权、文件生命周期流转、跨端剪贴板内容同步以及静态路由寻址等大量关键安全操作。然而，在**节点安全审计轨迹与操作日志（Security Audit Trail & Governance）**维度，系统面临以下关键痛点：
+  1. **安全关键事件轨迹黑盒与不可追溯**：
+     此前节点对关键安全事件（如设备被加入黑名单、未授权握手拦截、PIN 码验证失败、文件被远程或本地删除、路由被篡改注入）仅通过松散的 `tracing::info!` 打出日志，没有统一的、结构化的安全审计轨迹与内存归档，无法向管理员或本地用户提供操作时间线；
+  2. **内存泄露与磁盘耗尽风险（Memory Bound Invariant）**：
+     若无界保存审计事件，在遭遇持续暴力探测或长周期运行时极易导致节点内存溢出（OOM）或日志磁盘打爆。必须引入严格定额的内存环形缓冲区（Bounded Circular Ring Buffer），实现自动老化置换与 $O(1)$ 常数级复杂度；
+  3. **Zero-Plaintext 零明文安全铁律（Zero-Plaintext Invariant）**：
+     审计日志绝不允许记录任何明文私钥、对称密钥、PIN 码、一次性验证码（OTP）、剪贴板正文或通知正文，仅允许持久化脱敏的安全摘要（Summary）与实体标识，杜绝因日志导出导致凭据二次泄露；
+  4. **全端多维检索、清空治理与 403 强隔离防御**：
+     需提供支持按安全分类（Category）、严重级别（Severity）、时间戳（Since）与数量上限（Limit）的多维检索与清空治理端点，双端 CLI 全同构治理，Web UI 实时交互卡片与 Host 403 防御。
+
+- **架构与协议设计(ADR-059 节点安全审计轨迹、环形结构化审计日志、多维安全检索与遥测全闭环)**:
+  1. **强类型数据模型与环形缓冲区审计引擎 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`)**:
+     - 抽象强类型审计分类 `AuditCategory`：`Security`（配对/PIN/信任/黑名单）、`Peer`（节点上下线/断开）、`File`（收件箱删除/清空/直开/传输）、`Clipboard`（剪贴板同步/清空）、`Notify`（通知/免打扰）、`Route`（路由注入/删除）、`Config`（配置/心跳调谐）；
+     - 抽象四级安全严重度 `AuditSeverity`：`Info`、`Notice`、`Warning`、`Alert`，实现 `Ord` 关系支持最低级别过滤（`severity >= threshold`）；
+     - 定义结构化条目 `AuditEntry`：自增唯一标识 `id`、时间戳 `timestamp_ms`、分类 `category`、严重度 `severity`、动作名称 `action`、目标实体 `target`、脱敏摘要 `summary`、执行结果 `success`；
+     - 抽象定额环形缓冲区 `AuditEngine`（默认容量 500 条，`VecDeque<AuditEntry>`）：提供 $O(1)$ 均摊压入 `push`、多维筛选查询 `query` 与一键重置 `clear`；
+  2. **全安全关键链路深度埋点与运行时原语**:
+     - 运行时原语：`Node::record_audit(...)`、`Node::audit_report(...)`、`Node::clear_audit_log(&self) -> AuditClearReport`；
+     - 在配对授权（PIN 验证、配对成功/失败、主动解除信任）、黑名单接入控制（添加/移除黑名单）、文件收件箱安全生命周期（文件接收、安全删除、清空、直开）、跨端剪贴板主动同步与清空、原生系统级通知与免打扰、物理寻址路由表增删、心跳保活动态调谐等关键路径全面埋点；
+  3. **Zero-Plaintext 零明文安全红线与事件总线 (`crates/tetherly-node/src/events.rs`)**:
+     - 新增 `UiEvent::AuditEventRecorded` 零明文事件变体，载荷仅分发脱敏摘要与元数据，严禁广播敏感机密；
+  4. **回环控制面端点全闭环与 403 强隔离防御 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/audit`（别名 `/api/audit/logs`）：支持 URL Query 参数 `category`, `severity`, `limit`, `since`；
+     - `POST /api/audit/query`：接收 JSON 请求体执行多维高级过滤检索；
+     - `POST /api/audit/clear`：安全清空当前内存中的所有审计记录，并自动记录一条 Audit 清空审计日志；
+     - 严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离防御；
+  5. **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - 增设 `tetherly audit` 与 `tetherly-cli audit` 子命令族：
+       - `audit [list]`：支持 `--category <cat>`、`--severity <sev>`、`--limit <n>`、`--since <ms>`、`--json` 输出格式化表格；
+       - `audit clear`：一键清空审计轨迹；
+       - `audit watch`：基于 SSE 实时监听输出高亮审计事件流；
+     - SSE `events` 监听器中提供 `[audit_event_recorded]` 高亮格式化输出；
+  6. **Web UI 审计轨迹透视面板与实时日志交互 (`ui/index.html`)**:
+     - 增设「节点安全审计轨迹与操作日志」独立面板，支持分类与严重度下拉筛选、条数限制、实时统计徽标（如 `匹配 10 / 累计 42 条`）；
+     - 提供「清空审计日志」与「刷新日志」操作，实时渲染彩色列、状态徽标与脱敏摘要；
+     - 接入 SSE `audit_event_recorded` 事件实时增量响应；
+  7. **端到端集成测试与全量安全基线全绿 (`tests/phase1.rs`)**:
+     - 增设 `node_security_audit_trail_filtering_purging_and_zero_plaintext_via_loopback_api` 集成测试；
+     - 验证配对/路由/配置等操作的审计记录生成、多维条件筛选过滤、非法参数阻断、清空治理重置、SSE 广播捕获与 Host 403 恶意阻断。
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
 

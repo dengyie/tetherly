@@ -217,9 +217,42 @@ pub enum UiEvent {
         deadline_secs: u64,
         timestamp_ms: u64,
     },
+    AuditEventRecorded {
+        id: u64,
+        category: String,
+        severity: String,
+        action: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        summary: String,
+        success: bool,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
+    #[allow(clippy::too_many_arguments)]
+    pub fn audit_event_recorded(
+        id: u64,
+        category: impl Into<String>,
+        severity: impl Into<String>,
+        action: impl Into<String>,
+        target: Option<impl Into<String>>,
+        summary: impl Into<String>,
+        success: bool,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::AuditEventRecorded {
+            id,
+            category: category.into(),
+            severity: severity.into(),
+            action: action.into(),
+            target: target.map(Into::into),
+            summary: summary.into(),
+            success,
+            timestamp_ms,
+        }
+    }
     pub fn inbox_file_deleted(
         name: impl Into<String>,
         freed_bytes: u64,

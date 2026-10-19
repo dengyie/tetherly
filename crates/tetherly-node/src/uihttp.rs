@@ -453,6 +453,8 @@ struct Snapshot {
     lan: Vec<crate::lan::IfaceReport>,
     /// Aggregate network traffic and protocol telemetry report.
     traffic: crate::telemetry::TrafficReport,
+    /// Total audit entries recorded in ring buffer.
+    audit_count: usize,
 }
 
 #[derive(Serialize)]
@@ -638,6 +640,18 @@ struct SendFileBody {
 struct ClipSyncBody {
     peer: Option<String>,
     text: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct AuditQueryBody {
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    severity: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    since: Option<u64>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -2338,6 +2352,78 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             Ok(rep) => json_ok(&rep),
             Err(e) => err(400, &e.to_string()),
         },
+        ("GET", "/api/audit")
+        | ("GET", "/api/security/audit")
+        | ("GET", "/api/audit/logs")
+        | ("POST", "/api/audit/query") => {
+            let mut q_cat: Option<String> = None;
+            let mut q_sev: Option<String> = None;
+            let mut q_lim: Option<usize> = None;
+            let mut q_since: Option<u64> = None;
+
+            if let Some(q) = query_str {
+                let map = parse_query_map(q);
+                if let Some(c) = map.get("category").or_else(|| map.get("cat")) {
+                    q_cat = Some(c.clone());
+                }
+                if let Some(s) = map.get("severity").or_else(|| map.get("sev")) {
+                    q_sev = Some(s.clone());
+                }
+                if let Some(l) = map.get("limit").and_then(|s| s.parse::<usize>().ok()) {
+                    q_lim = Some(l);
+                }
+                if let Some(since) = map
+                    .get("since")
+                    .or_else(|| map.get("since_ms"))
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    q_since = Some(since);
+                }
+            }
+
+            if !body.is_empty() {
+                match serde_json::from_slice::<AuditQueryBody>(body) {
+                    Ok(b) => {
+                        if b.category.is_some() {
+                            q_cat = b.category;
+                        }
+                        if b.severity.is_some() {
+                            q_sev = b.severity;
+                        }
+                        if b.limit.is_some() {
+                            q_lim = b.limit;
+                        }
+                        if b.since.is_some() {
+                            q_since = b.since;
+                        }
+                    }
+                    Err(_) => return err(400, "bad json"),
+                }
+            }
+
+            let cat = match q_cat.as_deref().filter(|s| !s.trim().is_empty()) {
+                Some(c) => match c.parse::<crate::runtime::AuditCategory>() {
+                    Ok(cat) => Some(cat),
+                    Err(e) => return err(400, &e),
+                },
+                None => None,
+            };
+
+            let sev = match q_sev.as_deref().filter(|s| !s.trim().is_empty()) {
+                Some(s) => match s.parse::<crate::runtime::AuditSeverity>() {
+                    Ok(sev) => Some(sev),
+                    Err(e) => return err(400, &e),
+                },
+                None => None,
+            };
+
+            let report = node.audit_report(cat, sev, q_lim, q_since);
+            json_ok(&report)
+        }
+        ("POST", "/api/audit/clear") | ("DELETE", "/api/audit") | ("DELETE", "/api/audit/logs") => {
+            let report = node.clear_audit_log();
+            json_ok(&report)
+        }
         (_, "/api/events" | "/api/events/stream") => err(405, "method not allowed"),
         _ => UiResponse::new(404, "text/plain; charset=utf-8", b"not found".to_vec()),
     }
@@ -2452,6 +2538,7 @@ async fn snapshot(node: &Node) -> Snapshot {
         input_seat: node.input_seat_str().to_string(),
         lan: crate::lan::interface_report(),
         traffic: node.traffic_report(),
+        audit_count: node.audit_report(None, None, Some(0), None).total,
     }
 }
 

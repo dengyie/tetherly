@@ -2566,17 +2566,18 @@ async fn pin_lifecycle_inspection_and_revocation_via_loopback_api() {
     assert_eq!(clear_val["cleared"], true);
 
     // 7. Verify SSE stream receives UiEvent::PinStateChanged { active: false }
-    let sse_event2 = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
-        .await
-        .expect("timeout waiting for sse pin cleared event")
-        .expect("read sse event")
-        .expect("some ui event");
-    match sse_event2 {
-        tetherly_node::UiEvent::PinStateChanged { active } => {
+    let mut saw_pin_cleared = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(tetherly_node::UiEvent::PinStateChanged { active }))) =
+            tokio::time::timeout(Duration::from_millis(500), sse.next_ui_event()).await
+        {
             assert!(!active);
+            saw_pin_cleared = true;
+            break;
         }
-        other => panic!("expected PinStateChanged active=false, got: {other:?}"),
     }
+    assert!(saw_pin_cleared, "expected PinStateChanged active=false");
 
     // 8. Query /api/pin after revocation: inactive, no digits, 0 remaining seconds
     let (code_cleared, body_cleared) = tetherly_node::loopback_get(ui_port, "/api/pin")
@@ -3123,23 +3124,23 @@ async fn route_table_governance_and_static_injection_via_loopback_api() {
     assert_eq!(up_rep.addr.as_deref(), Some(updated_addr));
 
     // 7. Verify SSE stream receives UiEvent::RouteChanged { action: "updated" }
-    let sse_event2 = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
-        .await
-        .expect("timeout waiting for sse route updated event")
-        .expect("read sse event")
-        .expect("some ui event");
-    match sse_event2 {
-        tetherly_node::UiEvent::RouteChanged {
+    let mut saw_route_updated = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(tetherly_node::UiEvent::RouteChanged {
             device_id,
             addr,
             action,
-        } => {
-            assert_eq!(device_id, static_device_id);
-            assert_eq!(addr, updated_addr);
-            assert_eq!(action, "updated");
+        }))) = tokio::time::timeout(Duration::from_millis(500), sse.next_ui_event()).await
+        {
+            if device_id == static_device_id && action == "updated" {
+                assert_eq!(addr, updated_addr);
+                saw_route_updated = true;
+                break;
+            }
         }
-        other => panic!("expected RouteChanged updated, got: {other:?}"),
     }
+    assert!(saw_route_updated, "expected RouteChanged updated");
 
     // 8. Smart Peer Resolution: update route using peer's advertised name or alias
     let smart_addr = "10.144.144.99:45717";
@@ -3160,23 +3161,23 @@ async fn route_table_governance_and_static_injection_via_loopback_api() {
     assert_eq!(smart_rep.addr.as_deref(), Some(smart_addr));
 
     // Consume SSE event for smart route update
-    let sse_smart = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
-        .await
-        .expect("timeout waiting for sse smart route event")
-        .expect("read sse event")
-        .expect("some ui event");
-    match sse_smart {
-        tetherly_node::UiEvent::RouteChanged {
+    let mut saw_smart_updated = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(tetherly_node::UiEvent::RouteChanged {
             device_id,
             addr,
             action,
-        } => {
-            assert_eq!(device_id, peer_id.as_str());
-            assert_eq!(addr, smart_addr);
-            assert_eq!(action, "updated");
+        }))) = tokio::time::timeout(Duration::from_millis(500), sse.next_ui_event()).await
+        {
+            if device_id == peer_id.as_str() && action == "updated" {
+                assert_eq!(addr, smart_addr);
+                saw_smart_updated = true;
+                break;
+            }
         }
-        other => panic!("expected RouteChanged updated, got: {other:?}"),
     }
+    assert!(saw_smart_updated, "expected smart RouteChanged updated");
 
     // 9. Delete route via DELETE /api/routes?peer=... (using loopback_delete)
     let (code_del1, body_del1) =
@@ -3191,20 +3192,20 @@ async fn route_table_governance_and_static_injection_via_loopback_api() {
     assert!(del1_rep.addr.is_none());
 
     // Verify SSE receives removal event
-    let sse_event3 = tokio::time::timeout(Duration::from_secs(10), sse.next_ui_event())
-        .await
-        .expect("timeout waiting for sse route removed event")
-        .expect("read sse event")
-        .expect("some ui event");
-    match sse_event3 {
-        tetherly_node::UiEvent::RouteChanged {
+    let mut saw_route_removed = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(tetherly_node::UiEvent::RouteChanged {
             device_id, action, ..
-        } => {
-            assert_eq!(device_id, static_device_id);
-            assert_eq!(action, "removed");
+        }))) = tokio::time::timeout(Duration::from_millis(500), sse.next_ui_event()).await
+        {
+            if device_id == static_device_id && action == "removed" {
+                saw_route_removed = true;
+                break;
+            }
         }
-        other => panic!("expected RouteChanged removed, got: {other:?}"),
     }
+    assert!(saw_route_removed, "expected RouteChanged removed");
 
     // 10. Delete route via POST /api/routes/delete with body and smart peer resolution
     let del2_payload = serde_json::json!({
@@ -5610,22 +5611,22 @@ async fn inbox_file_lifecycle_query_deletion_and_safe_purge_via_loopback_api() {
     assert!(inbox_dir.join(hidden_resume).exists());
 
     // Verify SSE receives UiEvent::InboxCleared
-    let sse_ev2 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
-        .await
-        .expect("timeout waiting for sse inbox cleared event")
-        .expect("read sse event")
-        .expect("some ui event");
-    match sse_ev2 {
-        tetherly_node::UiEvent::InboxCleared {
+    let mut saw_inbox_cleared = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(tetherly_node::UiEvent::InboxCleared {
             deleted_count,
             freed_bytes,
             ..
-        } => {
+        }))) = tokio::time::timeout(Duration::from_millis(500), sse.next_ui_event()).await
+        {
             assert_eq!(deleted_count, 3);
             assert_eq!(freed_bytes, 1024 + 4096 + 512);
+            saw_inbox_cleared = true;
+            break;
         }
-        other => panic!("expected InboxCleared, got: {other:?}"),
     }
+    assert!(saw_inbox_cleared, "expected InboxCleared");
 
     // 8. Loopback Isolation: Host 403 Forbidden check
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -6030,18 +6031,20 @@ async fn inbox_file_download_raw_preview_and_native_open_via_loopback_api() {
     assert!(opened_urls2[1].ends_with("inbox"));
 
     // Verify SSE receives UiEvent::InboxFileOpened with name: None
-    let sse_ev2 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
-        .await
-        .expect("timeout waiting for sse inbox dir opened event")
-        .expect("read sse event")
-        .expect("some ui event");
-    match sse_ev2 {
-        tetherly_node::UiEvent::InboxFileOpened { name, timestamp_ms } => {
-            assert_eq!(name, None);
-            assert!(timestamp_ms > 0);
+    let mut saw_open_dir = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(tetherly_node::UiEvent::InboxFileOpened { name, timestamp_ms }))) =
+            tokio::time::timeout(Duration::from_millis(500), sse.next_ui_event()).await
+        {
+            if name.is_none() {
+                assert!(timestamp_ms > 0);
+                saw_open_dir = true;
+                break;
+            }
         }
-        other => panic!("expected InboxFileOpened for dir, got: {other:?}"),
     }
+    assert!(saw_open_dir, "expected InboxFileOpened for dir");
 
     // 5. Security Red Line: Path traversal guard on download, raw and open
     let evil_payloads = [
@@ -6482,6 +6485,322 @@ async fn peer_link_quality_profiling_keepalive_tuning_and_burst_probe_via_loopba
     );
 
     // 12. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
+/// ADR-059: Node security audit trail, structured circular audit log, multi-dimensional filtering,
+/// clearing governance, SSE real-time broadcasting, and zero-plaintext compliance.
+#[tokio::test(flavor = "multi_thread")]
+async fn node_security_audit_trail_filtering_purging_and_zero_plaintext_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to SSE stream on host UI
+    let mut sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("SSE connects");
+
+    // 2. Query initial audit report via GET /api/audit and aliases
+    let (code_audit, body_audit) = tetherly_node::loopback_get(host_ui, "/api/audit")
+        .await
+        .unwrap();
+    assert_eq!(code_audit, 200);
+    let audit_rep: tetherly_node::AuditLogReport = serde_json::from_slice(&body_audit).unwrap();
+    assert!(audit_rep.ok);
+    assert!(audit_rep.capacity >= 500);
+    // At least the pairing action was recorded
+    assert!(
+        audit_rep.total >= 1,
+        "initial pairing must be logged in audit trail"
+    );
+
+    // Verify alias endpoints
+    let (code_alias1, _) = tetherly_node::loopback_get(host_ui, "/api/security/audit")
+        .await
+        .unwrap();
+    assert_eq!(code_alias1, 200);
+    let (code_alias2, _) = tetherly_node::loopback_get(host_ui, "/api/audit/logs")
+        .await
+        .unwrap();
+    assert_eq!(code_alias2, 200);
+
+    // Verify snapshot reflects audit count
+    let (code_state, body_state) = tetherly_node::loopback_get(host_ui, "/api/state")
+        .await
+        .unwrap();
+    assert_eq!(code_state, 200);
+    let state_val: serde_json::Value = serde_json::from_slice(&body_state).unwrap();
+    assert_eq!(
+        state_val["audit_count"].as_u64().unwrap_or(0),
+        audit_rep.total as u64
+    );
+
+    // 3. Trigger diverse actions to populate audit engine:
+    // a. Peer block and unblock (Security category)
+    let block_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "reason": "suspicious probe activity"
+    });
+    let (code_block, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/block",
+        &serde_json::to_vec(&block_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_block, 200);
+
+    let unblock_payload = serde_json::json!({
+        "peer": peer_id.as_str()
+    });
+    let (code_unblock, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/unblock",
+        &serde_json::to_vec(&unblock_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_unblock, 200);
+
+    // b. Heartbeat tuning (Config category)
+    let hb_payload = serde_json::json!({
+        "interval_secs": 25,
+        "deadline_secs": 75,
+    });
+    let (code_hb, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/heartbeat",
+        &serde_json::to_vec(&hb_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_hb, 200);
+
+    // c. Route addition and removal (Route category)
+    let route_add_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "addr": "192.168.1.188:45715"
+    });
+    let (code_rt_add, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/routes",
+        &serde_json::to_vec(&route_add_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_rt_add, 200);
+
+    let route_rm_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "addr": "192.168.1.188:45715"
+    });
+    let (code_rt_rm, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/routes/remove",
+        &serde_json::to_vec(&route_rm_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_rt_rm, 200);
+
+    // d. Directly record custom security events with different severities
+    let sec_alert = host.record_audit(
+        tetherly_node::AuditCategory::Security,
+        tetherly_node::AuditSeverity::Alert,
+        "auth_failure",
+        Some("tdev_untrusted_node"),
+        "Excessive failed handshake attempts detected",
+        false,
+    );
+    assert_eq!(sec_alert.category, tetherly_node::AuditCategory::Security);
+    assert_eq!(sec_alert.severity, tetherly_node::AuditSeverity::Alert);
+    assert!(!sec_alert.success);
+
+    let file_warn = host.record_audit(
+        tetherly_node::AuditCategory::File,
+        tetherly_node::AuditSeverity::Warning,
+        "inbox_quota_warning",
+        Some("large_archive.zip"),
+        "Inbox capacity utilization exceeded 90%",
+        true,
+    );
+    assert_eq!(file_warn.category, tetherly_node::AuditCategory::File);
+    assert_eq!(file_warn.severity, tetherly_node::AuditSeverity::Warning);
+
+    // 4. Verify SSE receives AuditEventRecorded
+    let mut saw_audit_event = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(UiEvent::AuditEventRecorded {
+            action,
+            category,
+            severity,
+            target,
+            summary,
+            success,
+            ..
+        }))) = tokio::time::timeout(Duration::from_millis(500), sse.next_ui_event()).await
+        {
+            if action == "auth_failure" {
+                assert_eq!(category, "security");
+                assert_eq!(severity, "alert");
+                assert_eq!(target.as_deref(), Some("tdev_untrusted_node"));
+                assert!(!success);
+                // Zero-plaintext assertion: verify no sensitive token leaks in summary
+                assert!(!summary.contains("private_key"));
+                assert!(!summary.contains("password"));
+                saw_audit_event = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_audit_event,
+        "must emit AuditEventRecorded over SSE for high severity audit action"
+    );
+
+    // 5. Multi-dimensional filtering validation via query params:
+    // a. Filter by category=security
+    let (code_cat, body_cat) = tetherly_node::loopback_get(host_ui, "/api/audit?category=security")
+        .await
+        .unwrap();
+    assert_eq!(code_cat, 200);
+    let cat_rep: tetherly_node::AuditLogReport = serde_json::from_slice(&body_cat).unwrap();
+    assert!(!cat_rep.entries.is_empty());
+    for entry in &cat_rep.entries {
+        assert_eq!(
+            entry.category,
+            tetherly_node::AuditCategory::Security,
+            "all returned entries must belong to Security category"
+        );
+    }
+
+    // b. Filter by category=route
+    let (code_rt, body_rt) = tetherly_node::loopback_get(host_ui, "/api/audit?category=route")
+        .await
+        .unwrap();
+    assert_eq!(code_rt, 200);
+    let rt_rep: tetherly_node::AuditLogReport = serde_json::from_slice(&body_rt).unwrap();
+    assert!(!rt_rep.entries.is_empty());
+    for entry in &rt_rep.entries {
+        assert_eq!(entry.category, tetherly_node::AuditCategory::Route);
+    }
+
+    // c. Filter by severity=warning (matches Warning and Alert, excludes Info and Notice)
+    let (code_sev, body_sev) = tetherly_node::loopback_get(host_ui, "/api/audit?severity=warning")
+        .await
+        .unwrap();
+    assert_eq!(code_sev, 200);
+    let sev_rep: tetherly_node::AuditLogReport = serde_json::from_slice(&body_sev).unwrap();
+    assert!(!sev_rep.entries.is_empty());
+    for entry in &sev_rep.entries {
+        assert!(
+            entry.severity >= tetherly_node::AuditSeverity::Warning,
+            "severity must be >= Warning"
+        );
+    }
+
+    // d. Filter by severity=alert (only Alert)
+    let (code_alert, body_alert) =
+        tetherly_node::loopback_get(host_ui, "/api/audit?severity=alert")
+            .await
+            .unwrap();
+    assert_eq!(code_alert, 200);
+    let alert_rep: tetherly_node::AuditLogReport = serde_json::from_slice(&body_alert).unwrap();
+    assert!(!alert_rep.entries.is_empty());
+    for entry in &alert_rep.entries {
+        assert_eq!(entry.severity, tetherly_node::AuditSeverity::Alert);
+    }
+
+    // e. Limit constraint
+    let (code_lim, body_lim) = tetherly_node::loopback_get(host_ui, "/api/audit?limit=2")
+        .await
+        .unwrap();
+    assert_eq!(code_lim, 200);
+    let lim_rep: tetherly_node::AuditLogReport = serde_json::from_slice(&body_lim).unwrap();
+    assert_eq!(lim_rep.entries.len(), 2);
+
+    // 6. Multi-dimensional filtering via POST /api/audit/query
+    let query_post = serde_json::json!({
+        "category": "security",
+        "severity": "warning",
+        "limit": 5,
+    });
+    let (code_qpost, body_qpost) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/audit/query",
+        &serde_json::to_vec(&query_post).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_qpost, 200);
+    let qpost_rep: tetherly_node::AuditLogReport = serde_json::from_slice(&body_qpost).unwrap();
+    assert!(!qpost_rep.entries.is_empty());
+    assert!(qpost_rep.entries.len() <= 5);
+    for entry in &qpost_rep.entries {
+        assert_eq!(entry.category, tetherly_node::AuditCategory::Security);
+        assert!(entry.severity >= tetherly_node::AuditSeverity::Warning);
+    }
+
+    // 7. Negative parameter validation:
+    // a. Invalid category returns 400
+    let (code_bad_cat, _) =
+        tetherly_node::loopback_get(host_ui, "/api/audit?category=unknown_nonsense_category")
+            .await
+            .unwrap();
+    assert_eq!(code_bad_cat, 400);
+
+    // b. Invalid severity returns 400
+    let (code_bad_sev, _) =
+        tetherly_node::loopback_get(host_ui, "/api/audit?severity=super_ultra_urgent")
+            .await
+            .unwrap();
+    assert_eq!(code_bad_sev, 400);
+
+    // 8. Audit Log Purging / Clearing Governance:
+    // Call POST /api/audit/clear (or DELETE /api/audit)
+    let (code_clear, body_clear) = tetherly_node::loopback_post(host_ui, "/api/audit/clear", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(code_clear, 200);
+    let clear_rep: tetherly_node::AuditClearReport = serde_json::from_slice(&body_clear).unwrap();
+    assert!(clear_rep.ok);
+    assert!(clear_rep.cleared_count >= 5);
+
+    // Query audit report after clear:
+    // The clear action itself leaves a single record documenting that the log was cleared!
+    let (code_after, body_after) = tetherly_node::loopback_get(host_ui, "/api/audit")
+        .await
+        .unwrap();
+    assert_eq!(code_after, 200);
+    let after_rep: tetherly_node::AuditLogReport = serde_json::from_slice(&body_after).unwrap();
+    assert_eq!(after_rep.total, 1);
+    assert_eq!(after_rep.entries.len(), 1);
+    assert_eq!(after_rep.entries[0].action, "audit_log_cleared");
+    assert_eq!(
+        after_rep.entries[0].category,
+        tetherly_node::AuditCategory::Security
+    );
+
+    // 9. Security Red Line: Loopback Isolation Host 403 Forbidden check
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{host_ui}"))
+        .await
+        .expect("connect to ui port");
+    let evil_req = "GET /api/audit HTTP/1.1\r\nHost: evil.attacker.com\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    // 10. Clean shutdown
     host.shutdown();
     peer.shutdown();
 }

@@ -26,6 +26,7 @@ pub use platform::{
 pub use runtime::{
     extract_features, format_memory_bytes, mime_type_from_name, ActiveTransfer,
     AncsClearRulesReport, AncsConnectReport, AncsDisconnectReport, AncsReport, AncsRuleReport,
+    AuditCategory, AuditClearReport, AuditEngine, AuditEntry, AuditLogReport, AuditSeverity,
     AutoAcceptReport, BatchDismissReport, BatchSendItem, BatchSendReport, BatchSendRequest,
     BatchTransferItemReport, BlockedPeersReport, CandidateDismissReport, ClipClearReport,
     ClipHistoryReport, ClipMetaEntryDto, ClipStatusReport, DiscoveredPeerDto, DiscoveryReport,
