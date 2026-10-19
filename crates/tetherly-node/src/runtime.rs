@@ -669,6 +669,42 @@ pub struct StorageCleanReport {
     pub cleared_resume_entries: usize,
 }
 
+/// Metadata entry for a completed received file in the incoming inbox.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InboxFileDto {
+    pub name: String,
+    pub size: u64,
+    pub modified_at_secs: u64,
+    pub is_safe: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+}
+
+/// Comprehensive report of files residing in the incoming inbox.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InboxReport {
+    pub ok: bool,
+    pub count: usize,
+    pub total_bytes: u64,
+    pub files: Vec<InboxFileDto>,
+}
+
+/// Result of deleting a specific file from the incoming inbox.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InboxDeleteReport {
+    pub ok: bool,
+    pub name: String,
+    pub freed_bytes: u64,
+}
+
+/// Result of clearing multiple or all files from the incoming inbox.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InboxClearReport {
+    pub ok: bool,
+    pub deleted_count: usize,
+    pub freed_bytes: u64,
+}
+
 /// Port assignments bound by the running node.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct NodePorts {
@@ -2880,6 +2916,190 @@ impl Node {
             deleted_files_count,
             cleared_resume_entries,
         }
+    }
+
+    /// Inspect files in the incoming inbox, optionally filtering by search substring or limiting output count.
+    pub fn inbox_report(&self, search: Option<&str>, limit: Option<usize>) -> InboxReport {
+        let inbox_dir = self.shared.cfg.data_dir.join("inbox");
+        let mut files = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&inbox_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) if !n.starts_with('.') => n.to_string(),
+                    _ => continue,
+                };
+
+                let (file_len, modified_at_secs) = entry
+                    .metadata()
+                    .map(|m| {
+                        let len = m.len();
+                        let mod_time = m
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        (len, mod_time)
+                    })
+                    .unwrap_or((0, 0));
+
+                if let Some(q) = search {
+                    if !q.is_empty() && !name.to_lowercase().contains(&q.to_lowercase()) {
+                        continue;
+                    }
+                }
+
+                let is_safe = tetherly_core::sanitize_file_name(&name).is_ok();
+                let extension = std::path::Path::new(&name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_string());
+
+                files.push(InboxFileDto {
+                    name,
+                    size: file_len,
+                    modified_at_secs,
+                    is_safe,
+                    extension,
+                });
+            }
+        }
+
+        // Sort descending by modified_at_secs, then ascending by name
+        files.sort_by(|a, b| {
+            b.modified_at_secs
+                .cmp(&a.modified_at_secs)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        let total_bytes: u64 = files.iter().map(|f| f.size).sum();
+        let count = files.len();
+
+        if let Some(lim) = limit {
+            if files.len() > lim {
+                files.truncate(lim);
+            }
+        }
+
+        InboxReport {
+            ok: true,
+            count,
+            total_bytes,
+            files,
+        }
+    }
+
+    /// Safely delete a file from the incoming inbox, guarding against path traversal attacks.
+    pub fn delete_inbox_file(&self, name: &str) -> Result<InboxDeleteReport, CoreError> {
+        if name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+            || name.contains("..")
+            || name.contains('\0')
+            || name.starts_with('.')
+        {
+            return Err(CoreError::UnsafeFileName);
+        }
+
+        let clean_name = tetherly_core::sanitize_file_name(name)?;
+        if clean_name != name || clean_name.starts_with('.') {
+            return Err(CoreError::UnsafeFileName);
+        }
+
+        let inbox_dir = self.shared.cfg.data_dir.join("inbox");
+        let file_path = inbox_dir.join(&clean_name);
+
+        if !file_path.exists() || !file_path.is_file() {
+            return Err(CoreError::File("file not found in inbox".into()));
+        }
+
+        let freed_bytes = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+
+        std::fs::remove_file(&file_path)?;
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let _ = self.shared.events.send(UiEvent::inbox_file_deleted(
+            &clean_name,
+            freed_bytes,
+            now_ms,
+        ));
+
+        Ok(InboxDeleteReport {
+            ok: true,
+            name: clean_name,
+            freed_bytes,
+        })
+    }
+
+    /// Clear completed received files from the incoming inbox, optionally filtering by modified cutoff time.
+    pub fn clear_inbox(&self, before_secs: Option<u64>) -> Result<InboxClearReport, CoreError> {
+        let inbox_dir = self.shared.cfg.data_dir.join("inbox");
+        let mut deleted_count: usize = 0;
+        let mut freed_bytes: u64 = 0;
+
+        if let Ok(entries) = std::fs::read_dir(&inbox_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) if !n.starts_with('.') => n,
+                    _ => continue,
+                };
+                let _ = name;
+
+                let (file_len, mod_time) = entry
+                    .metadata()
+                    .map(|m| {
+                        let len = m.len();
+                        let t = m
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        (len, t)
+                    })
+                    .unwrap_or((0, 0));
+
+                if let Some(cutoff) = before_secs {
+                    if mod_time >= cutoff {
+                        continue;
+                    }
+                }
+
+                if std::fs::remove_file(&path).is_ok() {
+                    deleted_count += 1;
+                    freed_bytes += file_len;
+                }
+            }
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let _ = self
+            .shared
+            .events
+            .send(UiEvent::inbox_cleared(deleted_count, freed_bytes, now_ms));
+
+        Ok(InboxClearReport {
+            ok: true,
+            deleted_count,
+            freed_bytes,
+        })
     }
 
     /// Bring the ANCS link up: Data Source first, then Notification Source.

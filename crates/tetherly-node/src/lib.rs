@@ -26,13 +26,14 @@ pub use runtime::{
     BatchSendItem, BatchSendReport, BatchSendRequest, BatchTransferItemReport, BlockedPeersReport,
     CandidateDismissReport, ClipClearReport, ClipHistoryReport, ClipMetaEntryDto, ClipStatusReport,
     DismissFilter, FileBatchDecisionReport, FileDecisionReport, FileOfferDto, FileOffersReport,
-    HealthReport, IfaceReportDto, InputControlReport, InputStatusReport, LivePeer, LocalCapsReport,
-    NetworkRefreshReport, NetworkReport, Node, NodeConfig, NodeConfigReport, NodePorts,
-    OpenRuleDto, OverlayStatusReport, PeerBlockReport, PeerCapsDto, PeerConnectReport,
-    PeerDisconnectReport, PeerPingReport, PeerUnblockReport, PeersCapsReport, PinReport,
-    ResumeMarkerDto, ResumeMarkersReport, RouteEntryDto, RouteMutateReport, RoutesReport,
-    ScreenControlReport, ScreenStatusReport, StorageCleanReport, StorageReport, TransferDirection,
-    TransferPhase, TransferStats, TransfersReport, UserCommand,
+    HealthReport, IfaceReportDto, InboxClearReport, InboxDeleteReport, InboxFileDto, InboxReport,
+    InputControlReport, InputStatusReport, LivePeer, LocalCapsReport, NetworkRefreshReport,
+    NetworkReport, Node, NodeConfig, NodeConfigReport, NodePorts, OpenRuleDto, OverlayStatusReport,
+    PeerBlockReport, PeerCapsDto, PeerConnectReport, PeerDisconnectReport, PeerPingReport,
+    PeerUnblockReport, PeersCapsReport, PinReport, ResumeMarkerDto, ResumeMarkersReport,
+    RouteEntryDto, RouteMutateReport, RoutesReport, ScreenControlReport, ScreenStatusReport,
+    StorageCleanReport, StorageReport, TransferDirection, TransferPhase, TransferStats,
+    TransfersReport, UserCommand,
 };
 pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
 pub use telemetry::{ChannelTrafficDto, ProtocolMessagesDto, TrafficReport, TrafficTelemetry};

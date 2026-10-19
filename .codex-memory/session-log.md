@@ -1,5 +1,40 @@
 # Session log
 
+## 2026-10-19 (58) - Inbox file lifecycle, multi-dimensional query & safe purge governance (v1.60 / ADR-053)
+- Task: 实现跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环 (Inbox File Lifecycle, Multi-Dimensional Query & Safe Purge Governance)，解决收件箱落盘后细粒度画像盲区、缺乏单文件与批量销毁原语及事件总线断层痛点，确立严格路径穿越拦截与零明文审计红线，提供双端 CLI/Web UI 全同构控制面。
+- **背景与缺陷根因**:
+  在 Tetherly 完成跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环 (v1.59 / ADR-052) 之后，文件协同网络在发送端提议、网络层流式分块、断点续传和存储统计上已达成强一致性。然而，在收件箱（Received Files / Inbox）文件生命周期与安全治理层面，依然暴露出显著的功能盲区与审计空白：
+  1. 收件箱文件生命周期与细粒度画像盲区（Inbox File Inspection Blackout）：
+     - 当对端推送的文件传输完成并原子校验入库落盘在 `<data_dir>/inbox/` 目录后，既有系统仅能在 `GET /api/storage` 中提供粗粒度的总量概览（`inbox_files_count` 与 `inbox_total_bytes`）；外部调用方、CLI 终端与 Web UI 无法探查收件箱内具体存有哪些文件（文件名、大小、修改/入库时间戳、文件后缀扩展名、安全文件名合规标记），缺乏多维条件过滤（按文件名搜索 `search`、按最近修改时间倒序、按数量分页 `limit`）；
+  2. 缺乏已接收文件的安全治理与生命周期销毁原语（Secure Deletion & Safe Purge）：
+     - 目前系统仅有针对断点续传临时分块的 `POST /api/storage/clean`（仅清理 `.<id>.part` 与 `.<id>.resume.json`），缺乏针对已落盘完成文件的安全管理机制；当用户接收了敏感临时文件或需要释放存储空间时，无法通过回环控制面或 CLI 安全删除指定文件或一键清空收件箱；
+  3. 路径遍历安全红线守卫（Path Traversal Guard）：
+     - 文件删除操作必须严格限制在 `inbox/` 根目录内部，调用 `tetherly_core::sanitize_file_name` 严密防范包含 `..`、绝对路径、隐藏文件或 NUL 字节的任意文件删除与目录逃逸攻击；
+  4. 收件箱事件总线生命周期断层（Event Blackout on File Receipt & Removal）：
+     - 文件从收件箱删除或清空时，未向事件总线派发任何事件；Web UI 与 SSE 订阅者无法实现无缝即时局部刷新；必须严格恪守 Zero-Plaintext 铁律：事件载荷仅允许携带脱敏元数据（`name`, `freed_bytes`, `timestamp_ms` 等），严禁携带文件物理路径或内部内容；
+  5. 双端 CLI 与 Web UI 缺少全同构治理入口：
+     - 缺少双端同构的 `inbox` 子命令族（`inbox list`、`inbox delete <name>`、`inbox clear`）；Web UI 缺乏已接收文件治理面板、检索框与行内删除/一键清空交互。
+- **架构设计与落地 (ADR-053)**:
+  1. 核心模型设计与 DTO 抽象 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`):
+     - 定义结构化 DTO：`InboxFileDto`（`name`、`size`、`modified_at_secs`、`is_safe`、`extension`）、`InboxReport`、`InboxDeleteReport` 与 `InboxClearReport`；
+     - 实现 `Node::inbox_report(&self, search: Option<&str>, limit: Option<usize>) -> InboxReport`：单遍扫描 `<data_dir>/inbox` 目录，跳过隐藏/侧车文件，计算安全合规性，支持 search 不区分大小写搜索与时间倒序排序与分页 limit 截断；
+     - 实现 `Node::delete_inbox_file(&self, name: &str) -> Result<InboxDeleteReport, CoreError>`：严密执行路径穿越阻断（拒绝包含 `..`、`/`、`\`、NUL 或以 `.` 开头的文件名），严格校验 `clean_name == name`，物理删除目标文件，释放字节并向事件总线广播 `UiEvent::InboxFileDeleted`；
+     - 实现 `Node::clear_inbox(&self, before_secs: Option<u64>) -> Result<InboxClearReport, CoreError>`：扫描并安全删除常规文件（保护断点续传侧车文件），支持 `before_secs` 时间截断，统计释放容量并向事件总线广播 `UiEvent::InboxCleared`；
+  2. 事件总线扩展与安全红线守卫 (`crates/tetherly-node/src/events.rs`):
+     - 新增 `UiEvent::InboxFileDeleted` 与 `UiEvent::InboxCleared` 事件变体，严格遵守 Zero-Plaintext 铁律，不携带任何文件正文与物理磁盘路径；
+  3. 轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`):
+     - 新增 `GET /api/file/inbox`（与别名 `GET /api/inbox`），支持 `?search=` 与 `?limit=`；
+     - 新增 `POST /api/file/inbox/delete`（与别名 `DELETE /api/file/inbox`），支持 body 或 query 传参，文件不存在返回 404；
+     - 新增 `POST /api/file/inbox/clear`（与别名 `DELETE /api/file/inbox/all`），支持可选 `before_secs`；
+     - 严格 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 403 校验；
+  4. CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs` 与 `crates/tetherly-node/src/bin/tetherly.rs`):
+     - 增设 `inbox` 子命令族（`inbox list`、`inbox delete`、`inbox clear`）；
+     - SSE `events` 监听器高亮 `[inbox_file_deleted]` 与 `[inbox_cleared]`；
+  5. Web UI 已收文件治理交互面板 (`ui/index.html`):
+     - 新增「已接收文件与收件箱治理 (Inbox)」卡片，支持实时搜索过滤、单项删除与一键清空，SSE 自动局部重绘；
+  6. 端到端集成测试全覆盖 (`tests/phase1.rs`):
+     - 新增 `inbox_file_lifecycle_query_deletion_and_safe_purge_via_loopback_api` 完备验证单测/集成测试，全部 342+ 项测试 100% 全绿，确立 ADR-053，SSOT 升至 v1.60。
+
 ## 2026-10-19 (57) - Batch file offer lifecycle, multi-file pipeline & deep resume observability (v1.59 / ADR-052)
 - Task: 实现跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环 (Batch File Offer Lifecycle, Multi-File Pipeline & Deep Resume Observability)，解决此前单文件逐个提议导致的对端弹窗洪泛与缺乏批次聚合统计痛点，打破分块断点续传侧车黑盒，提供双端 CLI/Web UI 全同构控制面与互斥锁自死锁解耦。
 - **背景与缺陷根因**:

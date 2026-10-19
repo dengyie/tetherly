@@ -555,6 +555,18 @@ struct StorageCleanBody {
     orphaned_only: Option<bool>,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct InboxDeleteBody {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct InboxClearBody {
+    #[serde(default)]
+    before_secs: Option<u64>,
+}
+
 fn default_open_url() -> String {
     "tetherly://open".to_string()
 }
@@ -1835,6 +1847,63 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             };
             let rep = node.clean_storage(orphaned_only);
             json_ok(&rep)
+        }
+        ("GET", "/api/file/inbox") | ("GET", "/api/inbox") => {
+            let mut search: Option<String> = None;
+            let mut limit: Option<usize> = None;
+            if let Some(q) = query_str {
+                let map = parse_query_map(q);
+                if let Some(s) = map.get("search").or_else(|| map.get("q")) {
+                    search = Some(s.clone());
+                }
+                if let Some(l) = map.get("limit").and_then(|s| s.parse::<usize>().ok()) {
+                    limit = Some(l);
+                }
+            }
+            let rep = node.inbox_report(search.as_deref(), limit);
+            json_ok(&rep)
+        }
+        ("POST", "/api/file/inbox/delete") | ("DELETE", "/api/file/inbox") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let name = qmap.get("name").cloned().or_else(|| {
+                if !body.is_empty() {
+                    serde_json::from_slice::<InboxDeleteBody>(body)
+                        .ok()
+                        .and_then(|b| b.name)
+                } else {
+                    None
+                }
+            });
+            if let Some(name) = name.filter(|s| !s.trim().is_empty()) {
+                match node.delete_inbox_file(&name) {
+                    Ok(rep) => json_ok(&rep),
+                    Err(tetherly_core::CoreError::File(ref msg)) if msg.contains("not found") => {
+                        err(404, "file not found in inbox")
+                    }
+                    Err(e) => err(400, &e.to_string()),
+                }
+            } else {
+                err(400, "missing required 'name' in query or body")
+            }
+        }
+        ("POST", "/api/file/inbox/clear") | ("DELETE", "/api/file/inbox/all") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let before_secs = qmap
+                .get("before_secs")
+                .and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| {
+                    if !body.is_empty() {
+                        serde_json::from_slice::<InboxClearBody>(body)
+                            .ok()
+                            .and_then(|b| b.before_secs)
+                    } else {
+                        None
+                    }
+                });
+            match node.clear_inbox(before_secs) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
         }
         ("GET", "/api/health") => {
             let rep = node.health_report();

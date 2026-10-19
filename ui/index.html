@@ -176,6 +176,20 @@
       </div>
     </section>
     <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2>已接收文件与收件箱治理 (Inbox)</h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input id="inboxsearch" placeholder="搜索文件名…" style="padding:2px 8px;font-size:12px;border:1px solid var(--line);border-radius:4px;background:#0d1218;color:var(--text);width:130px"/>
+          <button id="refreshinboxbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">刷新</button>
+          <button id="clearinboxbtn" class="bad ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">清空收件箱</button>
+        </div>
+      </div>
+      <div class="hint">浏览并治理落盘在本地收件箱的已接收文件，支持按名称过滤、安全单项删除与安全审计清除。</div>
+      <div id="inbox-status" class="hint" style="margin:6px 0"></div>
+      <div id="inboxfiles"><div class="empty">收件箱为空。</div></div>
+      <div id="inboxmsg" class="hint" style="margin-top:6px"></div>
+    </section>
+    <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <h2>存储与数据目录</h2>
         <button id="cleanstoragebtn" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--text);border-radius:4px;cursor:pointer">清理孤儿分块</button>
@@ -1318,6 +1332,114 @@ if (cleanBtn) {
     }
   };
 }
+let currentInboxSearch = "";
+async function updateInbox() {
+  try {
+    let url = "/api/file/inbox?limit=50";
+    if (currentInboxSearch && currentInboxSearch.trim()) {
+      url += "&search=" + encodeURIComponent(currentInboxSearch.trim());
+    }
+    const rep = await api(url);
+    if (!rep || !rep.ok) return;
+    const st = $("inbox-status");
+    if (st) {
+      st.innerHTML = '共 <b>' + rep.count + '</b> 个文件 · 总占用: <b>' + formatBytes(rep.total_bytes) + '</b>' +
+        (currentInboxSearch ? (' (过滤: "' + currentInboxSearch + '")') : '');
+    }
+    const box = $("inboxfiles");
+    if (!box) return;
+    box.innerHTML = "";
+    const files = rep.files || [];
+    if (!files.length) {
+      box.appendChild(el('<div class="empty">收件箱为空' + (currentInboxSearch ? '（无匹配文件）' : '') + '。</div>'));
+      return;
+    }
+    for (const f of files) {
+      const extBadge = f.extension
+        ? '<span class="badge" style="background:var(--card-bg);border:1px solid var(--border);color:var(--text);font-size:11px;margin-right:4px">.' + f.extension + '</span>'
+        : '';
+      const safeBadge = f.is_safe
+        ? '<span class="badge completed" style="font-size:10px;margin-right:4px">安全</span>'
+        : '<span class="badge offline" style="font-size:10px;margin-right:4px">可疑</span>';
+      const timeStr = f.modified_at_secs ? new Date(f.modified_at_secs * 1000).toLocaleString() : "-";
+      const card = el('<div class="card" style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px">' +
+        '<div style="flex:1;min-width:0;margin-right:12px">' +
+          '<div class="title" style="display:flex;align-items:center;gap:4px">' +
+            safeBadge + extBadge +
+            '<span class="filename-text" style="word-break:break-all;font-size:13px"></span>' +
+          '</div>' +
+          '<div class="meta" style="margin-top:2px;font-size:11px;color:var(--muted)">' +
+            formatBytes(f.size) + ' · 修改时间: ' + timeStr +
+          '</div>' +
+        '</div>' +
+        '<div class="row">' +
+          '<button class="bad ghost del-btn" type="button" style="padding:2px 8px;font-size:12px">删除</button>' +
+        '</div>' +
+      '</div>');
+      card.querySelector(".filename-text").textContent = f.name;
+      const delBtn = card.querySelector(".del-btn");
+      delBtn.onclick = async () => {
+        if (!confirm("确定要删除收件箱中的文件 \"" + f.name + "\" 吗？此操作不可逆。")) return;
+        delBtn.disabled = true;
+        delBtn.textContent = "删除中…";
+        try {
+          const res = await api("/api/file/inbox/delete", { name: f.name });
+          if (res && res.ok) {
+            updateInbox();
+            updateStorage();
+          } else {
+            alert("删除失败: " + (res && res.error ? res.error : "未知错误"));
+            delBtn.disabled = false;
+            delBtn.textContent = "删除";
+          }
+        } catch (err) {
+          alert("删除异常: " + err);
+          delBtn.disabled = false;
+          delBtn.textContent = "删除";
+        }
+      };
+      box.appendChild(card);
+    }
+  } catch (e) {
+    console.error("updateInbox error", e);
+  }
+}
+const refreshInboxBtn = $("refreshinboxbtn");
+if (refreshInboxBtn) {
+  refreshInboxBtn.onclick = () => updateInbox();
+}
+const searchInboxInput = $("inboxsearch");
+if (searchInboxInput) {
+  let searchTimer = null;
+  searchInboxInput.oninput = () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      currentInboxSearch = searchInboxInput.value.trim();
+      updateInbox();
+    }, 250);
+  };
+}
+const clearInboxBtn = $("clearinboxbtn");
+if (clearInboxBtn) {
+  clearInboxBtn.onclick = async () => {
+    if (!confirm("确定要清空收件箱中的所有已接收文件吗？此操作将永久释放磁盘空间且不可逆。")) return;
+    const msg = $("inboxmsg");
+    if (msg) msg.textContent = "正在清空收件箱…";
+    try {
+      const res = await api("/api/file/inbox/clear", {});
+      if (res && res.ok) {
+        if (msg) msg.textContent = "清空完成：删除了 " + res.deleted_count + " 个文件 (释放 " + formatBytes(res.freed_bytes) + ")";
+        updateInbox();
+        updateStorage();
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 4000);
+      } else {
+        if (msg) msg.textContent = "清空失败: " + (res && res.error ? res.error : "未知错误");
+      }
+    } catch (err) {
+      if (msg) msg.textContent = "清空异常: " + err;
+    }
+  };
+}
 function formatUptime(secs) {
   if (secs == null || isNaN(secs)) return "-";
   const d = Math.floor(secs / 86400);
@@ -1766,11 +1888,23 @@ function setupEventSource() {
 	            desc = "文件到达: " + ev.transfer_id;
 	            updateFileOffers();
 	          }
-	          else if (ev.kind === "file_done") {
-	            desc = "文件完成: " + ev.transfer_id;
-	            updateFileOffers();
-	            refreshTransfers();
-	          }
+		          else if (ev.kind === "file_done") {
+		            desc = "文件完成: " + ev.transfer_id;
+		            updateFileOffers();
+		            refreshTransfers();
+		            updateStorage();
+		            updateInbox();
+		          }
+		          else if (ev.kind === "inbox_file_deleted") {
+		            desc = "收件箱文件已删除: " + ev.name + " (释放 " + formatBytes(ev.freed_bytes) + ")";
+		            updateStorage();
+		            updateInbox();
+		          }
+		          else if (ev.kind === "inbox_cleared") {
+		            desc = "收件箱已清空: 删除 " + ev.deleted_count + " 个文件 (释放 " + formatBytes(ev.freed_bytes) + ")";
+		            updateStorage();
+		            updateInbox();
+		          }
 	          else if (ev.kind === "file_rejected") {
 	            desc = "文件已拒绝: " + ev.transfer_id + (ev.reason ? (" (原因: " + ev.reason + ")") : "");
 	            updateFileOffers();
@@ -1884,8 +2018,10 @@ function setupEventSource() {
 			setInterval(updateClipboard, 3000);
 			updateFileOffers();
 			setInterval(updateFileOffers, 3000);
-			updateAncsStatus();
-			setInterval(updateAncsStatus, 3000);
+				updateAncsStatus();
+				setInterval(updateAncsStatus, 3000);
+				updateInbox();
+				setInterval(updateInbox, 3000);
 </script>
 </body>
 </html>

@@ -5362,6 +5362,228 @@ async fn batch_file_offer_pipeline_and_resume_observability_via_loopback_api() {
     peer.shutdown();
 }
 
+/// ADR-053: Inbox file lifecycle governance, multi-dimensional query, safe single deletion, and batch purge.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbox_file_lifecycle_query_deletion_and_safe_purge_via_loopback_api() {
+    let (data_dir, _guard) = temp_dir("inbox-lifecycle-test");
+    let node = Node::start(cfg(data_dir.clone(), "inbox-node", "macos")).unwrap();
+    let ui_port = node.spawn_ui().await.expect("spawn UI succeeds");
+
+    // Connect to loopback SSE event stream
+    let mut sse = tetherly_node::loopback_events_connect(ui_port)
+        .await
+        .expect("connect loopback sse");
+
+    let inbox_dir = data_dir.join("inbox");
+    std::fs::create_dir_all(&inbox_dir).unwrap();
+
+    // 1. Initial empty inbox check via GET /api/file/inbox and /api/inbox alias
+    let (c_init, b_init) = tetherly_node::loopback_get(ui_port, "/api/file/inbox")
+        .await
+        .unwrap();
+    assert_eq!(c_init, 200);
+    let init_rep: tetherly_node::InboxReport = serde_json::from_slice(&b_init).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.count, 0);
+    assert_eq!(init_rep.total_bytes, 0);
+    assert!(init_rep.files.is_empty());
+
+    let (c_alias, b_alias) = tetherly_node::loopback_get(ui_port, "/api/inbox")
+        .await
+        .unwrap();
+    assert_eq!(c_alias, 200);
+    let alias_rep: tetherly_node::InboxReport = serde_json::from_slice(&b_alias).unwrap();
+    assert_eq!(alias_rep.count, 0);
+
+    // 2. Populate inbox with realistic test files and hidden/sidecar files
+    let file1_name = "report_alpha.pdf";
+    let file2_name = "photo_vacation.jpg";
+    let file3_name = "archive_data.tar.gz";
+    let file4_name = "alpha_notes.txt";
+    let hidden_part = ".tfl_123.part";
+    let hidden_resume = ".tfl_123.resume.json";
+
+    std::fs::write(inbox_dir.join(file1_name), vec![0x01; 1024]).unwrap(); // 1 KiB
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    std::fs::write(inbox_dir.join(file2_name), vec![0x02; 2048]).unwrap(); // 2 KiB
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    std::fs::write(inbox_dir.join(file3_name), vec![0x03; 4096]).unwrap(); // 4 KiB
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    std::fs::write(inbox_dir.join(file4_name), vec![0x04; 512]).unwrap(); // 512 B
+
+    // Hidden sidecars should NOT be listed as inbox user files
+    std::fs::write(inbox_dir.join(hidden_part), vec![0xFF; 8192]).unwrap();
+    std::fs::write(inbox_dir.join(hidden_resume), b"{}").unwrap();
+
+    let total_user_bytes = 1024 + 2048 + 4096 + 512;
+
+    // 3. Inspect full inbox list
+    let (c_full, b_full) = tetherly_node::loopback_get(ui_port, "/api/file/inbox")
+        .await
+        .unwrap();
+    assert_eq!(c_full, 200);
+    let full_rep: tetherly_node::InboxReport = serde_json::from_slice(&b_full).unwrap();
+    assert_eq!(full_rep.count, 4);
+    assert_eq!(full_rep.total_bytes, total_user_bytes);
+    assert_eq!(full_rep.files.len(), 4);
+    // Verify files sorted descending by modification time (most recent first: file4, file3, file2, file1)
+    assert_eq!(full_rep.files[0].name, file4_name);
+    assert_eq!(full_rep.files[0].extension.as_deref(), Some("txt"));
+    assert!(full_rep.files[0].is_safe);
+    assert_eq!(full_rep.files[0].size, 512);
+
+    assert_eq!(full_rep.files[1].name, file3_name);
+    assert_eq!(full_rep.files[1].extension.as_deref(), Some("gz"));
+
+    // 4. Multi-dimensional query: substring search and limit
+    // Search for "alpha" (case-insensitive substring: should match file4_name and file1_name)
+    let (c_search, b_search) = tetherly_node::loopback_get(ui_port, "/api/file/inbox?search=ALPHA")
+        .await
+        .unwrap();
+    assert_eq!(c_search, 200);
+    let search_rep: tetherly_node::InboxReport = serde_json::from_slice(&b_search).unwrap();
+    assert_eq!(search_rep.count, 2);
+    assert_eq!(search_rep.total_bytes, 1024 + 512);
+    assert_eq!(search_rep.files.len(), 2);
+    assert!(search_rep.files.iter().any(|f| f.name == file1_name));
+    assert!(search_rep.files.iter().any(|f| f.name == file4_name));
+
+    // Limit parameter
+    let (c_lim, b_lim) = tetherly_node::loopback_get(ui_port, "/api/file/inbox?limit=2")
+        .await
+        .unwrap();
+    assert_eq!(c_lim, 200);
+    let lim_rep: tetherly_node::InboxReport = serde_json::from_slice(&b_lim).unwrap();
+    assert_eq!(lim_rep.count, 4); // total matched count remains 4
+    assert_eq!(lim_rep.files.len(), 2); // truncated to 2
+
+    // 5. Security Red Line: Path traversal guard on delete
+    // Malicious filenames with .., /, \, or hidden prefix must return 400 Bad Request
+    let evil_payloads = [
+        "../outside.txt",
+        "../../etc/passwd",
+        "/absolute/path/file.txt",
+        r"..\windows\path.txt",
+        ".hidden_file",
+        "",
+        "..",
+        "folder/file.txt",
+    ];
+    for evil in evil_payloads {
+        let payload = serde_json::json!({ "name": evil });
+        let (c_evil, b_evil) = tetherly_node::loopback_post(
+            ui_port,
+            "/api/file/inbox/delete",
+            &serde_json::to_vec(&payload).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(c_evil, 400, "evil path '{evil}' must be rejected with 400");
+        let err_msg = String::from_utf8_lossy(&b_evil);
+        assert!(
+            err_msg.contains("unsafe file name") || err_msg.contains("missing required 'name'"),
+            "error response must reject evil path '{evil}', got: {err_msg}"
+        );
+    }
+
+    // 6. Delete a single file safely via POST /api/file/inbox/delete
+    let del_payload = serde_json::json!({ "name": file2_name });
+    let (c_del, b_del) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/inbox/delete",
+        &serde_json::to_vec(&del_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_del, 200);
+    let del_rep: tetherly_node::InboxDeleteReport = serde_json::from_slice(&b_del).unwrap();
+    assert!(del_rep.ok);
+    assert_eq!(del_rep.name, file2_name);
+    assert_eq!(del_rep.freed_bytes, 2048);
+
+    // Verify physical file is deleted on disk
+    assert!(!inbox_dir.join(file2_name).exists());
+
+    // Verify SSE receives UiEvent::InboxFileDeleted
+    let sse_ev1 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse inbox file deleted event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_ev1 {
+        tetherly_node::UiEvent::InboxFileDeleted {
+            name, freed_bytes, ..
+        } => {
+            assert_eq!(name, file2_name);
+            assert_eq!(freed_bytes, 2048);
+        }
+        other => panic!("expected InboxFileDeleted, got: {other:?}"),
+    }
+
+    // Deleting a non-existent file returns 404
+    let (c_404, _) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/file/inbox/delete",
+        &serde_json::to_vec(&del_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_404, 404);
+
+    // 7. Clear all remaining files via POST /api/file/inbox/clear
+    let (c_clr, b_clr) = tetherly_node::loopback_post(ui_port, "/api/file/inbox/clear", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c_clr, 200);
+    let clr_rep: tetherly_node::InboxClearReport = serde_json::from_slice(&b_clr).unwrap();
+    assert!(clr_rep.ok);
+    assert_eq!(clr_rep.deleted_count, 3); // file1, file3, file4
+    assert_eq!(clr_rep.freed_bytes, 1024 + 4096 + 512);
+
+    // Verify all 3 user files deleted from disk, but hidden files (.part, .resume.json) untouched
+    assert!(!inbox_dir.join(file1_name).exists());
+    assert!(!inbox_dir.join(file3_name).exists());
+    assert!(!inbox_dir.join(file4_name).exists());
+    assert!(inbox_dir.join(hidden_part).exists());
+    assert!(inbox_dir.join(hidden_resume).exists());
+
+    // Verify SSE receives UiEvent::InboxCleared
+    let sse_ev2 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse inbox cleared event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_ev2 {
+        tetherly_node::UiEvent::InboxCleared {
+            deleted_count,
+            freed_bytes,
+            ..
+        } => {
+            assert_eq!(deleted_count, 3);
+            assert_eq!(freed_bytes, 1024 + 4096 + 512);
+        }
+        other => panic!("expected InboxCleared, got: {other:?}"),
+    }
+
+    // 8. Loopback Isolation: Host 403 Forbidden check
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{ui_port}"))
+        .await
+        .expect("connect to ui port");
+    let evil_req = "GET /api/file/inbox HTTP/1.1\r\nHost: evil.attacker.com\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    node.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

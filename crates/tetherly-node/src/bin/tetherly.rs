@@ -414,6 +414,11 @@ enum Cmd {
         #[command(subcommand)]
         action: StorageCmd,
     },
+    /// Manage received files in the incoming inbox (list, delete, clear).
+    Inbox {
+        #[command(subcommand)]
+        action: InboxCmd,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -826,6 +831,51 @@ enum StorageCmd {
         /// Clean all incomplete partials, not just orphaned ones.
         #[arg(long)]
         all: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum InboxCmd {
+    /// List completed received files in the incoming inbox.
+    List {
+        /// Filter by filename search term (case-insensitive substring).
+        #[arg(long, short)]
+        search: Option<String>,
+        /// Limit maximum number of displayed entries.
+        #[arg(long, short)]
+        limit: Option<usize>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Safely delete a specific file from the incoming inbox.
+    Delete {
+        /// Filename to delete (basename inside inbox).
+        name: String,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Clear completed received files from the incoming inbox.
+    Clear {
+        /// Skip confirmation prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Only delete files modified before this UNIX timestamp (seconds).
+        #[arg(long)]
+        before_secs: Option<u64>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -2789,6 +2839,155 @@ async fn main() -> Result<()> {
                 }
             }
         },
+        Cmd::Inbox { action } => match action {
+            InboxCmd::List {
+                search,
+                limit,
+                json,
+                ui_port,
+            } => {
+                let mut path = "/api/file/inbox".to_string();
+                let mut query_params = Vec::new();
+                if let Some(s) = search {
+                    query_params.push(format!("search={s}"));
+                }
+                if let Some(l) = limit {
+                    query_params.push(format!("limit={l}"));
+                }
+                if !query_params.is_empty() {
+                    path.push('?');
+                    path.push_str(&query_params.join("&"));
+                }
+                let (code, resp) =
+                    tetherly_node::loopback_get(ui_port, &path)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "inbox list query failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let rep: tetherly_node::InboxReport = serde_json::from_slice(&resp)?;
+                    if rep.files.is_empty() {
+                        println!("Inbox is empty (0 files).");
+                    } else {
+                        println!(
+                            "Inbox Files ({}, total {}):",
+                            rep.count,
+                            format_bytes(rep.total_bytes)
+                        );
+                        println!(
+                            "{:<32} {:<12} {:<16} {:<6}",
+                            "NAME", "SIZE", "MODIFIED", "SAFE"
+                        );
+                        println!("{:-<70}", "");
+                        for f in &rep.files {
+                            let mod_str = format_timestamp_ago(f.modified_at_secs);
+                            let safe_str = if f.is_safe { "yes" } else { "no" };
+                            let name_display = if f.name.len() > 30 {
+                                format!("{}...", &f.name[..27])
+                            } else {
+                                f.name.clone()
+                            };
+                            println!(
+                                "{:<32} {:<12} {:<16} {:<6}",
+                                name_display,
+                                format_bytes(f.size),
+                                mod_str,
+                                safe_str,
+                            );
+                        }
+                    }
+                }
+            }
+            InboxCmd::Delete {
+                name,
+                json,
+                ui_port,
+            } => {
+                let payload = serde_json::json!({ "name": name });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) =
+                    tetherly_node::loopback_post(ui_port, "/api/file/inbox/delete", &bytes)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "inbox delete failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let rep: tetherly_node::InboxDeleteReport = serde_json::from_slice(&resp)?;
+                    println!(
+                        "Deleted inbox file '{}' (freed {}).",
+                        rep.name,
+                        format_bytes(rep.freed_bytes)
+                    );
+                }
+            }
+            InboxCmd::Clear {
+                yes,
+                before_secs,
+                json,
+                ui_port,
+            } => {
+                if !yes && !json {
+                    eprint!(
+                        "Are you sure you want to clear completed files from the inbox? [y/N] "
+                    );
+                    let mut input = String::new();
+                    let _ = std::io::stdin().read_line(&mut input);
+                    if !input.trim().eq_ignore_ascii_case("y") {
+                        println!("Inbox clear aborted.");
+                        return Ok(());
+                    }
+                }
+                let payload = serde_json::json!({ "before_secs": before_secs });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) =
+                    tetherly_node::loopback_post(ui_port, "/api/file/inbox/clear", &bytes)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "inbox clear failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let rep: tetherly_node::InboxClearReport = serde_json::from_slice(&resp)?;
+                    println!(
+                        "Inbox cleared: deleted {} files (freed {}).",
+                        rep.deleted_count,
+                        format_bytes(rep.freed_bytes)
+                    );
+                }
+            }
+        },
         Cmd::Status {
             watch,
             interval,
@@ -3731,6 +3930,22 @@ fn print_event(v: &serde_json::Value) {
             let enabled = v["enabled"].as_bool().unwrap_or(false);
             println!("[file_auto_accept_changed] enabled={enabled}");
         }
+        "inbox_file_deleted" => {
+            let name = v["name"].as_str().unwrap_or("?");
+            let freed = v["freed_bytes"].as_u64().unwrap_or(0);
+            println!(
+                "[inbox_file_deleted] name={name} freed={}",
+                format_bytes(freed)
+            );
+        }
+        "inbox_cleared" => {
+            let count = v["deleted_count"].as_u64().unwrap_or(0);
+            let freed = v["freed_bytes"].as_u64().unwrap_or(0);
+            println!(
+                "[inbox_cleared] deleted={count} freed={}",
+                format_bytes(freed)
+            );
+        }
         "pairing_needed" => {
             let dev = v["device_id"].as_str().unwrap_or("?");
             let fp = v["fp"].as_str().unwrap_or("?");
@@ -3902,6 +4117,30 @@ fn format_uptime(secs: u64) -> String {
         format!("{minutes}m {s}s")
     } else {
         format!("{s}s")
+    }
+}
+
+fn format_timestamp_ago(secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if secs == 0 {
+        return "-".to_string();
+    }
+    if now >= secs {
+        let diff = now - secs;
+        if diff < 60 {
+            format!("{diff}s ago")
+        } else if diff < 3600 {
+            format!("{}m ago", diff / 60)
+        } else if diff < 86400 {
+            format!("{}h ago", diff / 3600)
+        } else {
+            format!("{}d ago", diff / 86400)
+        }
+    } else {
+        format!("in {}s", secs - now)
     }
 }
 

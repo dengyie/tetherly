@@ -293,6 +293,14 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
+- **v1.60 (ADR-053)**: 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环已落地：
+  1. **收件箱生命周期治理与强类型 DTO 抽象 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`)**：解决收件箱落盘后细粒度画像盲区与缺乏删除原语的痛点，设计 `InboxFileDto`、`InboxReport`、`InboxDeleteReport` 与 `InboxClearReport`，支持单遍扫描 `<data_dir>/inbox/` 目录，单文件尺寸提取、UNIX 时间戳、扩展名解析与合规安全性校验；
+  2. **安全单文件删除与批量审计清空原语**：实现 `Node::delete_inbox_file` 与 `Node::clear_inbox`，严格执行路径穿越红线守卫（坚决拦截 `..`、`/`、`\`、NUL、隐藏文件等恶意路径，返回 `CoreError::UnsafeFileName`），并支持按 `before_secs` 截断安全清除过期文件；
+  3. **事件总线生命周期闭环与零明文审计**：在 `UiEvent` 中扩展 `InboxFileDeleted` 与 `InboxCleared` 事件变体，严格践行 Zero-Plaintext 铁律（仅传输安全文件名、释放字节数与时间戳，严禁携带敏感正文与路径），实现 SSE 实时推送；
+  4. **回环控制面端点群全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET /api/file/inbox`（别名 `/api/inbox`）、`POST /api/file/inbox/delete`（别名 `DELETE /api/file/inbox`）与 `POST /api/file/inbox/clear`（别名 `DELETE /api/file/inbox/all`），全量执行 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强阻断校验；
+  5. **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：增设 `inbox` 子命令族（`inbox list [--search] [--limit] [--json]`、`inbox delete <name>`、`inbox clear [--yes] [--before-secs]`），并增强 SSE 事件监听器高亮输出；
+  6. **Web UI 已收文件治理交互面板 (`ui/index.html`)**：新增「已接收文件与收件箱治理 (Inbox)」卡片，支持实时搜索过滤、单项删除、一键清空与 SSE 联动即时局部重绘；
+  7. **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 增设完整集成测试覆盖空收件箱查询、多文件排序、关键字过滤与 limit 截断、路径穿越攻击阻断、单项物理删除与 SSE 事件、批量清空与保留分块侧车、Host 403 恶意头阻断，全工作区 342+ 项测试、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 通过。
 - **v1.59 (ADR-052)**: 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环已落地：
   1. **批量文件提议管道与原子批次治理 (`crates/tetherly-node/src/runtime.rs`)**：解决此前传输仅能单文件逐个提议导致的对端弹窗洪泛与缺乏批次聚合统计的痛点，设计 `BatchSendRequest`、`BatchSendItem`、`BatchSendReport` 与 `BatchTransferItemReport`，引入全局唯一批次标识 `tbt_<hex12>`，支持物理路径与 Base64 内存缓冲混合提议，严格执行 $O(1)$ 内存流式分块哈希（64 KiB 增量 SHA-256 计算）与总字节数、成功/失败计数原子回报；
   2. **深度断点续传可观测性画像 (`ResumeMarkerDto` & `ResumeMarkersReport`)**：打破分块断点续传标记此前仅在内存与磁盘 `.resume.json` 侧车文件中的黑盒盲区，实现 `Node::resume_markers_report`，双重检索内存 `ResumeTable` 与 `inbox/` 目录中的 `.<transfer_id>.resume.json` 与 `.part` 实体，计算块对齐特征、精确进度百分比（`progress_percent`）并反解对端友好别名，并入 `StorageReport`；

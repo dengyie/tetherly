@@ -145,9 +145,39 @@ pub enum UiEvent {
         url: Option<String>,
         rules_count: usize,
     },
+    InboxFileDeleted {
+        name: String,
+        freed_bytes: u64,
+        timestamp_ms: u64,
+    },
+    InboxCleared {
+        deleted_count: usize,
+        freed_bytes: u64,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
+    pub fn inbox_file_deleted(
+        name: impl Into<String>,
+        freed_bytes: u64,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::InboxFileDeleted {
+            name: name.into(),
+            freed_bytes,
+            timestamp_ms,
+        }
+    }
+
+    pub fn inbox_cleared(deleted_count: usize, freed_bytes: u64, timestamp_ms: u64) -> Self {
+        UiEvent::InboxCleared {
+            deleted_count,
+            freed_bytes,
+            timestamp_ms,
+        }
+    }
+
     pub fn screen_state_changed(
         state: impl Into<String>,
         allowed: bool,
