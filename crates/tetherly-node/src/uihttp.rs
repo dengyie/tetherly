@@ -544,6 +544,12 @@ struct OpenRuleBody {
 }
 
 #[derive(serde::Deserialize, Default)]
+struct OpenRuleRemoveBody {
+    #[serde(default)]
+    app_id: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
 struct StorageCleanBody {
     #[serde(default)]
     orphaned_only: Option<bool>,
@@ -1721,26 +1727,50 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
         }
         // Step 1 of the phone wizard: the user connected the iPhone in the OS
         // Bluetooth settings, so we only have to subscribe to ANCS here.
-        ("POST", "/api/ancs/connect") => match node.ancs_connect() {
-            Ok(Some(tetherly_core::ConnectOutcome::Subscribed)) => {
-                json_ok(&serde_json::json!({ "state": "ready" }))
-            }
-            Ok(Some(tetherly_core::ConnectOutcome::BackingOff { retry_at_ms })) => {
-                json_ok(&serde_json::json!({ "state": "backoff", "retry_at_ms": retry_at_ms }))
-            }
-            Ok(None) => err(400, "no ANCS transport attached"),
+        ("POST", "/api/ancs/connect") => match node.ancs_connect_reported() {
+            Ok(rep) => json_ok(&rep),
             Err(e) => err(400, &e.to_string()),
         },
-        ("POST", "/api/ancs/allow") => match serde_json::from_slice::<OpenRuleBody>(body) {
-            Ok(d) => match node.add_open_rule(tetherly_core::OpenRule {
-                app_id: d.app_id,
-                url: d.url,
-            }) {
-                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
-                Err(e) => err(400, &e.to_string()),
-            },
-            Err(_) => err(400, "bad json"),
-        },
+        ("POST", "/api/ancs/disconnect") => {
+            let rep = node.ancs_disconnect_reported();
+            json_ok(&rep)
+        }
+        ("POST", "/api/ancs/allow") | ("POST", "/api/ancs/rules/add") => {
+            match serde_json::from_slice::<OpenRuleBody>(body) {
+                Ok(d) => match node.add_open_rule_reported(tetherly_core::OpenRule {
+                    app_id: d.app_id,
+                    url: d.url,
+                }) {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(400, &e.to_string()),
+                },
+                Err(_) => err(400, "bad json, expected { app_id: string, url?: string }"),
+            }
+        }
+        ("DELETE", "/api/ancs/allow")
+        | ("POST", "/api/ancs/rules/remove")
+        | ("DELETE", "/api/ancs/rules") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let app_id = qmap.get("app_id").cloned().or_else(|| {
+                if !body.is_empty() {
+                    serde_json::from_slice::<OpenRuleRemoveBody>(body)
+                        .ok()
+                        .and_then(|b| b.app_id)
+                } else {
+                    None
+                }
+            });
+            if let Some(app_id) = app_id.filter(|s| !s.trim().is_empty()) {
+                let rep = node.remove_open_rule_reported(&app_id);
+                json_ok(&rep)
+            } else {
+                err(400, "missing required 'app_id' in query or body")
+            }
+        }
+        ("POST", "/api/ancs/rules/clear") | ("DELETE", "/api/ancs/rules/clear") => {
+            let rep = node.clear_open_rules_reported();
+            json_ok(&rep)
+        }
         ("GET", "/api/storage") => {
             let rep = node.storage_report();
             json_ok(&rep)

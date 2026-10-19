@@ -744,6 +744,18 @@ enum AncsCmd {
     },
     /// Trigger connection or re-subscription to iPhone ANCS GATT characteristics.
     Connect {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Disconnect ANCS Bluetooth subscription and enter idle or backoff state.
+    Disconnect {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -755,6 +767,29 @@ enum AncsCmd {
         /// Optional URL scheme or template (e.g. weixin://).
         #[arg(long)]
         url: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Remove an application ID from the notification open allowlist.
+    Remove {
+        /// Target application bundle ID (e.g. com.tencent.xin).
+        app_id: String,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Clear all rules from the notification open allowlist.
+    Clear {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -2355,6 +2390,7 @@ async fn main() -> Result<()> {
                     let attached = v.get("attached").and_then(|b| b.as_bool()).unwrap_or(false);
                     let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
                     let retry = v.get("retry_at_ms").and_then(|n| n.as_u64());
+                    let rules = v.get("rules").and_then(|r| r.as_array());
                     let allowlist = v.get("allowlist").and_then(|a| a.as_array());
 
                     println!("Apple Notification Center Service (ANCS):");
@@ -2364,20 +2400,33 @@ async fn main() -> Result<()> {
                         Some(ms) => println!("  Retry Backoff At:   {ms} ms"),
                         None => println!("  Retry Backoff At:   none"),
                     }
-                    println!("  Open Allowlist:");
-                    match allowlist {
-                        Some(arr) if !arr.is_empty() => {
-                            for item in arr {
-                                if let Some(app) = item.as_str() {
-                                    println!("    * {app}");
+                    if let Some(r_arr) = rules {
+                        if !r_arr.is_empty() {
+                            println!("  Open Allowlist Rules ({}):", r_arr.len());
+                            for r in r_arr {
+                                let app = r["app_id"].as_str().unwrap_or("?");
+                                let url = r["url"].as_str().unwrap_or("?");
+                                println!("    * {app} -> {url}");
+                            }
+                        } else {
+                            println!("  Open Allowlist Rules: none");
+                        }
+                    } else {
+                        println!("  Open Allowlist:");
+                        match allowlist {
+                            Some(arr) if !arr.is_empty() => {
+                                for item in arr {
+                                    if let Some(app) = item.as_str() {
+                                        println!("    * {app}");
+                                    }
                                 }
                             }
+                            _ => println!("    (no applications in allowlist)"),
                         }
-                        _ => println!("    (no applications in allowlist)"),
                     }
                 }
             }
-            AncsCmd::Connect { ui_port } => {
+            AncsCmd::Connect { json, ui_port } => {
                 let (code, resp) =
                     tetherly_node::loopback_post(ui_port, "/api/ancs/connect", b"{}")
                         .await
@@ -2393,11 +2442,48 @@ async fn main() -> Result<()> {
                         String::from_utf8_lossy(&resp)
                     );
                 }
-                println!("ANCS connection triggered successfully.");
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let state = v["state"].as_str().unwrap_or("unknown");
+                    let msg = v["message"]
+                        .as_str()
+                        .unwrap_or("ANCS connection triggered successfully.");
+                    println!("{msg} (state: {state})");
+                }
+            }
+            AncsCmd::Disconnect { json, ui_port } => {
+                let (code, resp) =
+                    tetherly_node::loopback_post(ui_port, "/api/ancs/disconnect", b"{}")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "ANCS disconnect failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let state = v["state"].as_str().unwrap_or("unknown");
+                    let msg = v["message"].as_str().unwrap_or("ANCS disconnected.");
+                    println!("{msg} (state: {state})");
+                }
             }
             AncsCmd::Allow {
                 app_id,
                 url,
+                json,
                 ui_port,
             } => {
                 let payload = match url {
@@ -2419,7 +2505,76 @@ async fn main() -> Result<()> {
                         String::from_utf8_lossy(&resp)
                     );
                 }
-                println!("Allowed open action for '{app_id}'.");
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let total = v["total_rules"].as_u64().unwrap_or(0);
+                    println!("Allowed open action for '{app_id}' (total rules: {total}).");
+                }
+            }
+            AncsCmd::Remove {
+                app_id,
+                json,
+                ui_port,
+            } => {
+                let payload = serde_json::json!({ "app_id": app_id });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) =
+                    tetherly_node::loopback_post(ui_port, "/api/ancs/rules/remove", &bytes)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "ANCS remove rule failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let action = v["action"].as_str().unwrap_or("removed");
+                    let total = v["total_rules"].as_u64().unwrap_or(0);
+                    if action == "removed" {
+                        println!("Removed rule for '{app_id}' (total rules: {total}).");
+                    } else {
+                        println!("Rule for '{app_id}' not found (total rules: {total}).");
+                    }
+                }
+            }
+            AncsCmd::Clear { json, ui_port } => {
+                let (code, resp) =
+                    tetherly_node::loopback_post(ui_port, "/api/ancs/rules/clear", b"{}")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "ANCS clear rules failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let cleared = v["cleared_count"].as_u64().unwrap_or(0);
+                    let total = v["total_rules"].as_u64().unwrap_or(0);
+                    println!("Cleared {cleared} allowlist rule(s) (remaining: {total}).");
+                }
             }
         },
         Cmd::Storage { action } => match action {
@@ -3561,6 +3716,28 @@ fn print_event(v: &serde_json::Value) {
             println!(
                 "[overlay_state_changed] present={present} source={source} peers={peer_count} local_ips=[{local_ips}]"
             );
+        }
+        "ancs_state_changed" => {
+            let state = v["state"].as_str().unwrap_or("unknown");
+            let attached = v["attached"].as_bool().unwrap_or(false);
+            let retry = v["retry_at_ms"]
+                .as_u64()
+                .map(|r| format!(" retry_at_ms={r}"))
+                .unwrap_or_default();
+            println!("[ancs_state_changed] state={state} attached={attached}{retry}");
+        }
+        "ancs_rule_changed" => {
+            let action = v["action"].as_str().unwrap_or("unknown");
+            let app_id = v["app_id"]
+                .as_str()
+                .map(|a| format!(" app_id={a}"))
+                .unwrap_or_default();
+            let url = v["url"]
+                .as_str()
+                .map(|u| format!(" url={u}"))
+                .unwrap_or_default();
+            let rules_count = v["rules_count"].as_u64().unwrap_or(0);
+            println!("[ancs_rule_changed] action={action}{app_id}{url} rules_count={rules_count}");
         }
         other => {
             println!("[{other}] {v}");

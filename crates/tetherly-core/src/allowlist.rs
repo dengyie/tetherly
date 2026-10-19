@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::error::CoreError;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path};
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenRule {
     pub app_id: String,
     pub url: String,
@@ -46,6 +46,23 @@ impl OpenAllowlist {
         next.push(rule);
         *self = Self::from_rules(next)?;
         Ok(())
+    }
+
+    /// Remove the first rule matching `app_id` (either exact match or rule pattern).
+    /// Returns the removed rule if found.
+    pub fn remove(&mut self, app_id: &str) -> Option<OpenRule> {
+        if let Some(pos) = self.rules.iter().position(|r| r.app_id == app_id) {
+            Some(self.rules.remove(pos))
+        } else {
+            None
+        }
+    }
+
+    /// Remove all allowlist rules, returning the number of rules removed.
+    pub fn clear(&mut self) -> usize {
+        let count = self.rules.len();
+        self.rules.clear();
+        count
     }
 }
 
@@ -108,5 +125,43 @@ mod tests {
         assert_eq!(sanitize_file_name("/tmp/../etc/passwd").unwrap(), "passwd");
         assert!(sanitize_file_name("..").is_err());
         assert!(sanitize_file_name("").is_err());
+    }
+
+    #[test]
+    fn rule_removal_and_clearing() {
+        let mut list = OpenAllowlist::default();
+        list.push(OpenRule {
+            app_id: "com.tencent.xin".into(),
+            url: "weixin://".into(),
+        })
+        .unwrap();
+        list.push(OpenRule {
+            app_id: "com.eg.android.AlipayGphone".into(),
+            url: "alipay://".into(),
+        })
+        .unwrap();
+        assert_eq!(list.rules().len(), 2);
+
+        let removed = list.remove("com.tencent.xin");
+        assert_eq!(
+            removed,
+            Some(OpenRule {
+                app_id: "com.tencent.xin".into(),
+                url: "weixin://".into()
+            })
+        );
+        assert_eq!(list.rules().len(), 1);
+        assert_eq!(list.url_for("com.tencent.xin"), None);
+        assert_eq!(
+            list.url_for("com.eg.android.AlipayGphone"),
+            Some("alipay://")
+        );
+
+        assert_eq!(list.remove("nonexistent"), None);
+
+        let cleared_count = list.clear();
+        assert_eq!(cleared_count, 1);
+        assert_eq!(list.rules().len(), 0);
+        assert_eq!(list.url_for("com.eg.android.AlipayGphone"), None);
     }
 }

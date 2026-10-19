@@ -293,13 +293,23 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
-- **v1.55 (ADR-048)**: 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环已落地：
+- **v1.56 (ADR-049)**: ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构已落地：
+  1. **核心白名单原语扩展与 URL 注入守卫 (`allowlist.rs` & `error.rs`)**：`OpenAllowlist` 扩展 `remove` 与 `clear` 原语，`OpenRule` 派生 `Serialize`；严格校验 `is_local_scheme` 阻止外部恶意 URL scheme 劫持注入；核心错误确立 `CoreError::NoAncsTransport` 变体；
+  2. **事件总线扩展与安全红线守卫 (`events.rs`)**：新增 `UiEvent::AncsStateChanged` 与 `UiEvent::AncsRuleChanged`，严格遵守 Zero-Plaintext 铁律，不携带任何苹果通知消息正文、标题或敏感属性，仅传递状态、附着标记、退避时间戳、动作与规则计数；
+  3. **结构化 DTO 抽象与运行时控制原语 (`runtime.rs`, `lib.rs`)**：定义并导出 `OpenRuleDto`、`AncsConnectReport`、`AncsDisconnectReport`、`AncsRuleReport`、`AncsClearRulesReport`，升级 `AncsReport` 支持 `rules: Vec<OpenRuleDto>`，实现 `ancs_connect_reported`、`ancs_disconnect_reported`、`add_open_rule_reported`、`remove_open_rule_reported`、`clear_open_rules_reported`，在发生状态流转或白名单变更时全生命周期广播 `UiEvent`；
+  4. **轻量级回环控制面端点升级 (`uihttp.rs`)**：重构 `GET /api/ancs` 返回强类型 `AncsReport`，重构 `POST /api/ancs/connect` 与 `POST /api/ancs/disconnect` 返回强类型报告，扩展 `POST /api/ancs/allow` (及 `POST /api/ancs/rules/add`)、`DELETE /api/ancs/allow` (及 `POST /api/ancs/rules/remove` 与 `DELETE /api/ancs/rules`)、`POST /api/ancs/rules/clear` (及 `DELETE /api/ancs/rules/clear`)；严格执行 127.0.0.1 回环绑定与 Host 403 校验；
+  5. **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**：`ancs` 命令族扩展 `status`、`connect`、`disconnect`、`allow`、`remove`、`clear` 子命令，提供整洁对齐列表与 `--json` 原生管道输出，SSE `events` 监听器高亮 `[ancs_state_changed]` 与 `[ancs_rule_changed]`；
+  6. **Web UI 实时动态刷新与状态徽标 (`ui/index.html`)**：新增「断开 ANCS」操作、规则列表行内即时删除标签 (`×`) 与「清空白名单」按钮，在 SSE 分发循环中挂载状态与规则事件监听，实现毫秒级局部刷新；
+  7. **端到端集成测试全覆盖 (`tests/phase4.rs`)**：新增 `ancs_lifecycle_governance_rule_management_and_events_via_loopback_api` 完备验证。
+- **v1.55 (ADR-048 / Release v0.1.5)**: 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环已完成开发、全矩阵 CI 验证、Release 四端构建并在线上生产 VPS 验证通过：
   1. **事件总线扩展与安全红线守卫 (`events.rs`)**：新增 `UiEvent::NetworkRefreshed` 与 `UiEvent::OverlayStateChanged`，严格遵守 Zero-Plaintext 铁律，不泄露私网敏感信息，仅携带分类网卡统计、监听计数、侧车状态及对端数量；
   2. **结构化 DTO 抽象与运行时控制原语 (`runtime.rs`, `lib.rs`)**：定义并导出 `IfaceReportDto`、`OverlayStatusReport`、`NetworkReport`、`NetworkRefreshReport`，实现 `Node::network_report_dto` 与 `Node::refresh_network`，在运行时主动执行物理网卡重新枚举与 EasyTier 侧车连接探测，在侧车状态演进或主动重探时全生命周期广播 `UiEvent`；后台 `overlay_scan_loop` 同步在侧车状态演进时派发 `UiEvent::OverlayStateChanged`；
   3. **轻量级回环控制面端点升级 (`uihttp.rs`)**：重构 `GET /api/net` 返回强类型 `NetworkReport`，新增 `POST /api/net/refresh` 与 `POST /api/net/probe` 返回强类型 `NetworkRefreshReport`，严格 127.0.0.1 回环绑定与 Host 403 校验；
   4. **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**：`net` 子命令增设 `--refresh` (`-r`) 参数，支持主动重探与 `--json` 管道输出，SSE `events` 监听器高亮 `[network_refreshed]` 与 `[overlay_state_changed]`；
   5. **Web UI 实时动态刷新与状态徽标 (`ui/index.html`)**：在「网络与接口诊断」面板新增「探测刷新」按钮与即时反馈，在 SSE 分发循环中挂载网络探测与侧车状态变更监听，实现局部解耦渲染；
-  6. **端到端集成测试全覆盖 (`tests/phase2.rs`)**：新增 `dynamic_network_rescan_and_overlay_events_via_loopback_api` 完备验证。
+  6. **端到端集成测试全覆盖 (`tests/phase2.rs`)**：新增 `dynamic_network_rescan_and_overlay_events_via_loopback_api` 完备验证，并通过 `wait_for_network_refreshed` 过滤消除 Windows CI 广播竞争条件；
+  7. **GitHub Actions 5 端 CI 全绿 + 4 端 Release 构建发布 (`v0.1.5`)**：Linux (bullseye glibc 2.31 容器)、Windows (x86_64)、macOS (Apple Silicon arm64)、Android (NDK arm64-v8a + APK) 产物全部就绪并发布到 GitHub Release；
+  8. **生产 VPS 真实环境验证与清理**：在 `aws-tokyo` 线上 VPS 成功下载 `v0.1.5` Linux 二进制，全面验证守护进程启动、健康检查、非回环 Host 403 阻断、网卡探测重探与双端 CLI 交互，并完成现场全量干净清理。
 - **v1.54 (ADR-047)**: 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环已落地：
   1. **事件总线扩展与安全红线守卫 (`events.rs`)**：新增 `UiEvent::ScreenStateChanged` 与 `UiEvent::InputSeatChanged`，严格遵守 Zero-Plaintext 铁律，不携带像素缓冲区、按键扫描码或光标敏感轨迹；
   2. **结构化 DTO 抽象与运行时控制原语 (`runtime.rs`, `lib.rs`)**：定义并导出 `ScreenStatusReport`、`ScreenControlReport`、`InputStatusReport`、`InputControlReport`，在 `Shared` 中维护 `screen_peer` 与 `input_peer` 互斥追踪，新增 `screen_status_report`、`screen_allow_reported`、`screen_revoke_reported`、`screen_start_reported`、`screen_stop_reported`、`input_status_report`、`input_start_reported`、`input_stop_reported`；
@@ -335,14 +345,14 @@
   - `check (ubuntu-latest)` (3m44s): PASSED
 - `cargo fmt --all --check` & `cargo clippy --all-targets -- -D warnings` 全部干净通过。
 - `cargo deny check`（advisories, bans, licenses, sources）全部通过。
-- 300+ 单元测试与端到端集成测试全绿。
+- 全部 308 项单元测试与端到端集成测试 100% 全绿。
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.55)
+- `docs/DEVELOPMENT.md` (SSOT v1.56)
 - `crates/tetherly-{core,crypto,net,node,android}`
 - `bins/tetherly-cli`, `crates/tetherly-node/src/bin/tetherly.rs`
 - `crates/tetherly-net/src/codec.rs` (`TaggedReader`), `crates/tetherly-net/src/session.rs`
-- `crates/tetherly-node/src/{runtime.rs,uihttp.rs,events.rs,lan.rs,sidecar.rs}`
-- `ui/index.html`, `tests/phase1.rs`, `tests/phase2.rs`, `tests/phase5.rs`
+- `crates/tetherly-node/src/{runtime.rs,uihttp.rs,events.rs,lan.rs,sidecar.rs,ancs.rs}`
+- `ui/index.html`, `tests/phase1.rs`, `tests/phase2.rs`, `tests/phase4.rs`, `tests/phase5.rs`
 - GitHub: `dengyie/tetherly`
 - Vault: `Note/Project/tetherly/tetherly 开发文档.md`

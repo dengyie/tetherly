@@ -131,6 +131,20 @@ pub enum UiEvent {
         local_ips: Vec<String>,
         peer_count: usize,
     },
+    AncsStateChanged {
+        state: String,
+        attached: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retry_at_ms: Option<u64>,
+    },
+    AncsRuleChanged {
+        action: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        app_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        rules_count: usize,
+    },
 }
 
 impl UiEvent {
@@ -166,6 +180,23 @@ impl UiEvent {
         peer_count: usize,
     ) -> Self {
         overlay_state_changed(present, source, local_ips, peer_count)
+    }
+
+    pub fn ancs_state_changed(
+        state: impl Into<String>,
+        attached: bool,
+        retry_at_ms: Option<u64>,
+    ) -> Self {
+        ancs_state_changed(state, attached, retry_at_ms)
+    }
+
+    pub fn ancs_rule_changed(
+        action: impl Into<String>,
+        app_id: Option<String>,
+        url: Option<String>,
+        rules_count: usize,
+    ) -> Self {
+        ancs_rule_changed(action, app_id, url, rules_count)
     }
 }
 
@@ -299,5 +330,31 @@ pub fn overlay_state_changed(
         source: source.into(),
         local_ips,
         peer_count,
+    }
+}
+
+pub fn ancs_state_changed(
+    state: impl Into<String>,
+    attached: bool,
+    retry_at_ms: Option<u64>,
+) -> UiEvent {
+    UiEvent::AncsStateChanged {
+        state: state.into(),
+        attached,
+        retry_at_ms,
+    }
+}
+
+pub fn ancs_rule_changed(
+    action: impl Into<String>,
+    app_id: Option<String>,
+    url: Option<String>,
+    rules_count: usize,
+) -> UiEvent {
+    UiEvent::AncsRuleChanged {
+        action: action.into(),
+        app_id,
+        url,
+        rules_count,
     }
 }

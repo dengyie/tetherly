@@ -1,5 +1,74 @@
 # Session log
 
+## 2026-10-19 (54) - ANCS full lifecycle governance, allowlist dynamic CRUD, event bus observability & dual-CLI isomorphism (v1.56 / ADR-049)
+- Task: 落地 ANCS 苹果通知中心服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构，消除 ANCS 链路状态与白名单配置变更的事件盲区，提供强类型 DTO 报告、动态管理控制原语、双端 CLI 完整子命令与 Web UI 局部即时刷新。
+- **背景与缺陷根因**:
+  在 Tetherly 陆续完成网络拓扑透视 (v1.55 / ADR-048)、远程屏幕与键鼠治理 (v1.54 / ADR-047)、文件提议治理 (v1.53 / ADR-046)、剪贴板审计 (v1.52 / ADR-045) 后，底层 ANCS 苹果通知中心服务与本地打开应用白名单治理暴露出一系列痛点：
+  1. 事件总线静默脱节（Event Blackout on ANCS Transitions & Allowlist Mutations）：当 ANCS 客户端在 `Idle`、`Ready`、`Backoff` 之间流转，或者用户动态新增规则、移除规则、一键清空白名单时，底层从未广播任何 `UiEvent`，导致 Web UI 与 CLI 事件监听器失明；
+  2. 白名单单向只增不减与治理原语缺失（Allowlist Immutability Defect）：`OpenAllowlist` 此前仅提供 `push` 追加操作，缺乏按 `app_id` 精准移除单条规则（`remove`）与全量清空规则（`clear`）的原语，导致用户配置错误规则后无法撤销或重置，造成潜在的恶意 URL scheme 驻留风险；
+  3. 控制面缺乏结构化强类型 DTO 抽象（Missing Strongly-Typed DTOs）：`/api/ancs` 接口此前返回内联构造的松散 JSON，缺乏类型严谨的 `OpenRuleDto`、`AncsConnectReport`、`AncsDisconnectReport`、`AncsRuleReport`、`AncsClearRulesReport` 统一结构定义，未在 `lib.rs` 对外导出；
+  4. 终端全同构控制与局部渲染闭环缺失：CLI 缺乏 `ancs disconnect`、`ancs remove`、`ancs clear` 等核心治理子命令；Web UI 缺少主动断开、行内删除规则与一键清空按键，且未基于 SSE 事件总线实施局部就绪刷新。
+- **架构设计与落地 (ADR-049)**:
+  1. 核心白名单原语扩展与 URL 注入守卫 (`crates/tetherly-core/src/allowlist.rs` & `error.rs`):
+     - `OpenRule` 派生 `Serialize, Deserialize, PartialEq, Eq`；
+     - `OpenAllowlist` 扩展 `remove(&mut self, app_id: &str) -> Option<OpenRule>` 与 `clear(&mut self) -> usize` 原语；
+     - 严格遵循 ADR-008「打开应用的 URL 只来自本机规则」，仅允许本地自定义协议，拒绝 `http://`、`https://`、`file://` 等可能被外部恶意 payload 诱导打开的非本地 Scheme；
+     - 核心错误新增 `CoreError::NoAncsTransport` 变体；
+  2. 事件总线扩展与安全红线守卫 (`crates/tetherly-node/src/events.rs`):
+     - 新增结构化变体 `UiEvent::AncsStateChanged { state: String, attached: bool, retry_at_ms: Option<u64> }`；
+     - 新增结构化变体 `UiEvent::AncsRuleChanged { action: String, app_id: Option<String>, url: Option<String>, rules_count: usize }`；
+     - 严格遵守 Zero-Plaintext 铁律，不携带任何苹果通知消息正文、标题或敏感属性，仅传递状态、附着标记、退避时间戳、动作与规则计数；
+     - 提供 `ancs_state_changed` 与 `ancs_rule_changed` 构造辅助函数及关联方法；
+  3. 结构化 DTO 抽象与运行时控制原语 (`crates/tetherly-node/src/runtime.rs`, `lib.rs`):
+     - 定义并导出 `OpenRuleDto`、`AncsConnectReport`、`AncsDisconnectReport`、`AncsRuleReport`、`AncsClearRulesReport`，升级 `AncsReport` 支持 `rules: Vec<OpenRuleDto>`；
+     - 实现 `ancs_connect_reported`、`ancs_disconnect_reported`、`add_open_rule_reported`、`remove_open_rule_reported`、`clear_open_rules_reported`，在发生状态流转或白名单变更时全生命周期广播 `UiEvent`；
+  4. 轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`):
+     - `GET /api/ancs` 重构为返回强类型 `AncsReport`；
+     - `POST /api/ancs/connect` 返回强类型 `AncsConnectReport`；
+     - `POST /api/ancs/disconnect` 返回强类型 `AncsDisconnectReport`；
+     - `POST /api/ancs/allow` (及 `POST /api/ancs/rules/add`) 支持添加白名单规则并返回强类型 `AncsRuleReport`；
+     - `DELETE /api/ancs/allow` (及 `POST /api/ancs/rules/remove` 与 `DELETE /api/ancs/rules`) 支持按 Query 或 JSON 体删除规则；
+     - `POST /api/ancs/rules/clear` (及 `DELETE /api/ancs/rules/clear`) 支持一键清空规则；
+     - 严格遵循 `127.0.0.1` 回环绑定与 `Host` 头守卫，拦截非回环请求并返回 HTTP 403 Forbidden (`loopback only`)；
+  5. CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`):
+     - `ancs` 命令族扩展 `status`、`connect`、`disconnect`、`allow`、`remove`、`clear` 子命令；
+     - 格式化表格呈现与 `--json` 管道输出支持；
+     - SSE `events` 监听器新增对 `[ancs_state_changed]` 与 `[ancs_rule_changed]` 的格式化着色打印；
+  6. Web UI 实时动态刷新与状态徽标 (`ui/index.html`):
+     - 新增「断开 ANCS」操作按键、规则列表行内即时删除标签 (`×`) 与「清空白名单」按钮；
+     - 实现 `updateAncsStatus()` 轻量级局部渲染，在 SSE 分发循环中捕获 `ancs_state_changed` 与 `ancs_rule_changed` 驱动局部就绪刷新；
+  7. 端到端集成测试全覆盖 (`tests/phase4.rs`):
+     - 增设 `ancs_lifecycle_governance_rule_management_and_events_via_loopback_api`：完备验证 Host 403 阻断、SSE 事件订阅、GET 初始透视、POST 连接与状态变更广播、规则添加/删除/清空与规则事件广播、主动断开与退避重试事件广播全链路；
+  8. 全工作区检验通过：
+     - `cargo fmt --all --check` 干净通过；
+     - `cargo clippy --workspace --all-targets -- -D warnings` 零警告通过；
+     - `cargo test --workspace` 全部 308 项测试 100% 全绿；
+     - `cargo deny check`（advisories, bans, licenses, sources）全部通过。
+
+## 2026-10-19 (53) - v1.55 release matrix build, Windows CI broadcast race fix & online VPS live verification
+- Task: 修复 Windows CI 并发 SSE 事件竞争条件，推进 v1.55 (ADR-048) 全平台 Release 构建与线上 VPS 生产环境端到端验证及环境清理。
+- **Windows CI 竞争条件根因与修复**:
+  - 在 GitHub Actions Windows 调度环境下，多线程运行时下的 `overlay_scan_loop` 与 `POST /api/net/refresh` 并发执行，`UiEvent::Overlay` 偶发抢先到达测试消费者的 SSE 流，导致 `tests/phase2.rs` 的单步匹配断言失败；
+  - 增设 `wait_for_network_refreshed` 过滤轮询辅助函数，平滑过滤非目标广播事件并限定超时，消除并发时序竞争。
+- **发布版本构建与多端矩阵 (v0.1.5 / SSOT v1.55)**:
+  - 升级 `Cargo.toml` 与 `Cargo.lock` 版本至 `0.1.5`；
+  - 触发 GitHub Actions CI (run `39174094878`): `android`、`check (macos-latest)`、`check (ubuntu-latest)`、`check (windows-latest)`、`deny` 全部通过；
+  - 打标签 `v0.1.5` 并触发 GitHub Actions Release 工作流 (run `39174517893`)，四端 Release 产物 100% 成功构建并发布至 GitHub Release `v0.1.5`：
+    - `tetherly-linux-x86_64`, `tetherly-cli-linux-x86_64` (Debian 11 bullseye glibc 2.31 容器编译)
+    - `tetherly-windows-x86_64.exe`, `tetherly-cli-windows-x86_64.exe` (Windows x86_64)
+    - `tetherly-macos-arm64`, `tetherly-cli-macos-arm64` (macOS Apple Silicon arm64)
+    - `tetherly-android-arm64-v8a.apk`, `libtetherly_android-arm64-v8a.so` (Android arm64-v8a NDK)
+- **线上 VPS 生产端到端验证与现场清理**:
+  - 选取生产 VPS `aws-tokyo` (Debian 12 x86_64, glibc 2.36)；
+  - 下载 Release `v0.1.5` 的 `tetherly-linux-x86_64` 与 `tetherly-cli-linux-x86_64`；
+  - 启动隔离测试节点（端口 46717-46721，独立临时目录）；
+  - 验证健康检查 `/api/health` 正常就绪；
+  - 严格校验安全红线：伪造外部 `Host: evil.attacker.com` 请求被回环控制面阻断并返回 `403 Forbidden` (`loopback only`)；
+  - 验证 `GET /api/net`、`POST /api/net/refresh`、`POST /api/net/probe` 返回强类型结构化 JSON 报告；
+  - 验证 CLI 子命令：`tetherly net`、`tetherly net --refresh --json`、`tetherly screen status --json`、`tetherly input status --json`、`tetherly peers --json` 及其 `tetherly-cli` 镜像命令完全同构通过；
+  - 验证 `tetherly stop` 优雅停止节点；
+  - 严格清理现场：彻底移除 `/tmp/tetherly-test-v155`，核实无残留后台进程或文件。
+
 ## 2026-10-19 (52) - Network topology telemetry, dynamic NIC rescan governance, EasyTier sidecar observability & event bus synchronization (v1.55 / ADR-048)
 - Task: 实现网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环，消除网络与虚拟网卡通道的事件盲区，提供强类型 DTO 报告、动态重探控制原语、双端 CLI 结构化排版及 Web UI 局部即时渲染。
 - **背景与缺陷根因**:

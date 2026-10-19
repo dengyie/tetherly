@@ -502,6 +502,13 @@ pub struct TransferStats {
     pub failed_count: u64,
 }
 
+/// Structured DTO representing one allowlist rule for ANCS notification action open.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct OpenRuleDto {
+    pub app_id: String,
+    pub url: String,
+}
+
 /// Lightweight status report for the ANCS (Apple Notification Center Service) ingress.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct AncsReport {
@@ -509,7 +516,48 @@ pub struct AncsReport {
     pub attached: bool,
     pub state: String,
     pub retry_at_ms: Option<u64>,
+    pub rules: Vec<OpenRuleDto>,
     pub allowlist: Vec<String>,
+}
+
+/// Report returned by an ANCS connect attempt.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AncsConnectReport {
+    pub ok: bool,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_at_ms: Option<u64>,
+    pub message: String,
+}
+
+/// Report returned by an ANCS disconnect or reset action.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AncsDisconnectReport {
+    pub ok: bool,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_at_ms: Option<u64>,
+    pub message: String,
+}
+
+/// Report returned when an allowlist rule is added or removed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AncsRuleReport {
+    pub ok: bool,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<OpenRuleDto>,
+    pub total_rules: usize,
+    pub timestamp_ms: u64,
+}
+
+/// Report returned when all ANCS allowlist rules are cleared.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AncsClearRulesReport {
+    pub ok: bool,
+    pub cleared_count: usize,
+    pub total_rules: usize,
+    pub timestamp_ms: u64,
 }
 
 /// Lightweight status report for node data directory and storage consumption.
@@ -2244,18 +2292,173 @@ impl Node {
                 },
             }
         };
-        let allowlist = self
+        let rules: Vec<OpenRuleDto> = self
             .open_allowlist()
             .rules()
             .iter()
-            .map(|r| r.app_id.clone())
+            .map(|r| OpenRuleDto {
+                app_id: r.app_id.clone(),
+                url: r.url.clone(),
+            })
             .collect();
+        let allowlist = rules.iter().map(|r| r.app_id.clone()).collect();
         AncsReport {
             ok: true,
             attached,
             state,
             retry_at_ms,
+            rules,
             allowlist,
+        }
+    }
+
+    /// Trigger ANCS connection and return a structured report, broadcasting state changes.
+    pub fn ancs_connect_reported(&self) -> Result<AncsConnectReport, CoreError> {
+        match self.ancs_connect()? {
+            Some(ConnectOutcome::Subscribed) => {
+                self.emit(UiEvent::ancs_state_changed("ready", true, None));
+                Ok(AncsConnectReport {
+                    ok: true,
+                    state: "ready".to_string(),
+                    retry_at_ms: None,
+                    message: "ANCS subscribed".to_string(),
+                })
+            }
+            Some(ConnectOutcome::BackingOff { retry_at_ms }) => {
+                self.emit(UiEvent::ancs_state_changed(
+                    "backoff",
+                    true,
+                    Some(retry_at_ms),
+                ));
+                Ok(AncsConnectReport {
+                    ok: true,
+                    state: "backoff".to_string(),
+                    retry_at_ms: Some(retry_at_ms),
+                    message: "ANCS backing off".to_string(),
+                })
+            }
+            None => Err(CoreError::NoAncsTransport),
+        }
+    }
+
+    /// Trigger ANCS disconnection or backoff reset, broadcasting state changes.
+    pub fn ancs_disconnect_reported(&self) -> AncsDisconnectReport {
+        let retry_at_ms = self.ancs_disconnected();
+        let state = if retry_at_ms.is_some() {
+            "backoff".to_string()
+        } else {
+            "idle".to_string()
+        };
+        self.emit(UiEvent::ancs_state_changed(&state, true, retry_at_ms));
+        AncsDisconnectReport {
+            ok: true,
+            state,
+            retry_at_ms,
+            message: "ANCS disconnected".to_string(),
+        }
+    }
+
+    /// Add one allowlist rule (validated), returning a structured report and broadcasting to event bus.
+    pub fn add_open_rule_reported(
+        &self,
+        rule: tetherly_core::OpenRule,
+    ) -> Result<AncsRuleReport, CoreError> {
+        let app_id = rule.app_id.clone();
+        let url = rule.url.clone();
+        self.add_open_rule(rule)?;
+        let total_rules = self
+            .shared
+            .allowlist
+            .lock()
+            .expect("allowlist")
+            .rules()
+            .len();
+        self.emit(UiEvent::ancs_rule_changed(
+            "added",
+            Some(app_id.clone()),
+            Some(url.clone()),
+            total_rules,
+        ));
+        Ok(AncsRuleReport {
+            ok: true,
+            action: "added".to_string(),
+            rule: Some(OpenRuleDto { app_id, url }),
+            total_rules,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        })
+    }
+
+    /// Remove one allowlist rule by `app_id`, returning a structured report and broadcasting to event bus.
+    pub fn remove_open_rule_reported(&self, app_id: &str) -> AncsRuleReport {
+        let removed = self
+            .shared
+            .allowlist
+            .lock()
+            .expect("allowlist")
+            .remove(app_id);
+        let total_rules = self
+            .shared
+            .allowlist
+            .lock()
+            .expect("allowlist")
+            .rules()
+            .len();
+        let action = if removed.is_some() {
+            "removed".to_string()
+        } else {
+            "not_found".to_string()
+        };
+        let rule_dto = removed.as_ref().map(|r| OpenRuleDto {
+            app_id: r.app_id.clone(),
+            url: r.url.clone(),
+        });
+        if removed.is_some() {
+            self.emit(UiEvent::ancs_rule_changed(
+                "removed",
+                Some(app_id.to_string()),
+                removed.as_ref().map(|r| r.url.clone()),
+                total_rules,
+            ));
+        }
+        AncsRuleReport {
+            ok: true,
+            action,
+            rule: rule_dto,
+            total_rules,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        }
+    }
+
+    /// Clear all allowlist rules, returning a structured report and broadcasting to event bus.
+    pub fn clear_open_rules_reported(&self) -> AncsClearRulesReport {
+        let cleared_count = self.shared.allowlist.lock().expect("allowlist").clear();
+        let total_rules = self
+            .shared
+            .allowlist
+            .lock()
+            .expect("allowlist")
+            .rules()
+            .len();
+        self.emit(UiEvent::ancs_rule_changed(
+            "cleared",
+            None,
+            None,
+            total_rules,
+        ));
+        AncsClearRulesReport {
+            ok: true,
+            cleared_count,
+            total_rules,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
         }
     }
 

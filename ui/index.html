@@ -356,13 +356,16 @@
       <div id="ancs" class="hint" style="margin-top:8px">状态：读取中…</div>
       <div class="row" style="margin-top:10px">
         <button id="ancsgo" type="button">系统蓝牙已连上 → 启动 / 重连 ANCS</button>
+        <button id="ancsdisconnect" class="ghost" type="button">断开 ANCS</button>
       </div>
+      <div id="ancs-msg" class="hint" style="color:var(--accent, #64b5f6); margin-top:4px"></div>
       <div class="hint" style="margin-top:12px; margin-bottom:6px">已生效跳转白名单（允许桌面通知提供「打开」操作）：</div>
       <div id="openapps" style="display:flex; flex-wrap:wrap; margin-bottom:8px">（空）</div>
       <div class="row">
         <input id="openapp" placeholder="App ID（如 com.tencent.xin）"/>
         <input id="openurl" placeholder="URL 模板（可选，如 weixin://）"/>
         <button id="openadd" type="button">加入白名单</button>
+        <button id="ancsclearrules" class="ghost" type="button">清空白名单</button>
       </div>
     </section>
     <section style="margin-top:16px">
@@ -945,6 +948,67 @@ async function updateInputStatus() {
     }
   } catch (e) {}
 }
+async function updateAncsStatus() {
+  try {
+    const rep = await fetch("/api/ancs").then(r => r.json());
+    const a = $("ancs");
+    if (a && rep) {
+      let badgeHtml = "";
+      if (!rep.attached || rep.state === "off") {
+        badgeHtml = '<span class="badge offline">未挂载传输栈</span> <span class="meta">本机未接入蓝牙</span>';
+      } else if (rep.state === "ready") {
+        badgeHtml = '<span class="badge completed">已就绪 (Ready)</span> <span class="meta">正常接收 iPhone 通知</span>';
+      } else if (rep.state === "idle") {
+        badgeHtml = '<span class="badge verifying">空闲 (Idle)</span> <span class="meta">等待握手连接</span>';
+      } else if (rep.state === "backoff") {
+        badgeHtml = '<span class="badge verifying">退避重试 (Backoff)</span>' + (rep.retry_at_ms ? (' <span class="meta">' + rep.retry_at_ms + ' ms</span>') : '');
+      } else {
+        badgeHtml = '<span class="badge verifying">' + rep.state + '</span>';
+      }
+      a.innerHTML = badgeHtml;
+    }
+    const oa = $("openapps");
+    if (oa && rep) {
+      oa.innerHTML = "";
+      const rules = rep.rules || (rep.allowlist ? rep.allowlist.map(id => ({ app_id: id, url: "tetherly://open" })) : []);
+      if (rules.length > 0) {
+        for (const rule of rules) {
+          const item = document.createElement("div");
+          item.style.display = "inline-flex";
+          item.style.alignItems = "center";
+          item.style.gap = "6px";
+          item.style.margin = "3px 6px 3px 0";
+          item.style.padding = "3px 8px";
+          item.style.background = "var(--bg-tertiary, #222)";
+          item.style.borderRadius = "4px";
+          item.style.fontSize = "12px";
+
+          const textSpan = document.createElement("span");
+          textSpan.textContent = rule.app_id + (rule.url ? " → " + rule.url : "");
+          item.appendChild(textSpan);
+
+          const delBtn = document.createElement("button");
+          delBtn.type = "button";
+          delBtn.className = "ghost";
+          delBtn.style.padding = "1px 6px";
+          delBtn.style.fontSize = "11px";
+          delBtn.style.minHeight = "auto";
+          delBtn.textContent = "×";
+          delBtn.title = "移除此白名单规则";
+          delBtn.onclick = async () => {
+            await api("/api/ancs/rules/remove", { app_id: rule.app_id });
+            updateAncsStatus();
+          };
+          item.appendChild(delBtn);
+
+          oa.appendChild(item);
+        }
+      } else {
+        oa.innerHTML = '<span class="hint">（空）</span>';
+      }
+    }
+  } catch (e) {}
+}
 async function refreshPin() {
   try {
     const r = await fetch("/api/pin").then(res => res.json());
@@ -977,8 +1041,26 @@ $("clrpin").onclick = async () => {
 };
 $("dial").onclick = () => api("/api/dial", { addr: $("addr").value, pin: $("peerpin").value || null });
 $("ancsgo").onclick = async () => {
-  await api("/api/ancs/connect", {});
-  poll();
+  const msg = $("ancs-msg");
+  if (msg) msg.textContent = "正在连接 ANCS...";
+  const res = await api("/api/ancs/connect", {});
+  if (msg) {
+    if (res && res.ok) msg.textContent = res.message || "已触发连接";
+    else msg.textContent = "连接失败: " + ((res && res.error) || "未知错误");
+    setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+  }
+  updateAncsStatus();
+};
+$("ancsdisconnect").onclick = async () => {
+  const msg = $("ancs-msg");
+  if (msg) msg.textContent = "正在断开 ANCS...";
+  const res = await api("/api/ancs/disconnect", {});
+  if (msg) {
+    if (res && res.ok) msg.textContent = res.message || "已断开连接";
+    else msg.textContent = "断开失败: " + ((res && res.error) || "未知错误");
+    setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+  }
+  updateAncsStatus();
 };
 $("openadd").onclick = async () => {
   const app_id = $("openapp").value.trim();
@@ -987,7 +1069,11 @@ $("openadd").onclick = async () => {
   await api("/api/ancs/allow", { app_id, url });
   $("openapp").value = "";
   $("openurl").value = "";
-  poll();
+  updateAncsStatus();
+};
+$("ancsclearrules").onclick = async () => {
+  await api("/api/ancs/rules/clear", {});
+  updateAncsStatus();
 };
 $("screenallow").onclick = async () => { await api("/api/screen/allow", {}); updateScreenStatus(); };
 $("screenrevoke").onclick = async () => { await api("/api/screen/revoke", {}); updateScreenStatus(); };
@@ -1706,52 +1792,62 @@ function setupEventSource() {
 					            desc = "网络已重探: 扫描 " + ev.iface_count + " 网卡 (监听 " + ev.listen_count + ")" + (ev.overlay_present ? (" · 侧车: " + (ev.overlay_source || "在网")) : "");
 					            updateNetworkStatus();
 					          }
-					          else if (ev.kind === "overlay_state_changed") {
-					            desc = "EasyTier 侧车变更: " + (ev.present ? "在线" : "离线") + " (" + (ev.source || "") + ") · peers " + (ev.peer_count || 0);
-					            updateNetworkStatus();
-					          }
-	          $("ev-last").textContent = "[" + t + "] " + desc;
-	        }
-	      } catch (err) {
-	        if ($("ev-last")) $("ev-last").textContent = e.data;
-	      }
-	      tick();
-	    };
-	    es.onerror = () => {
-	      if ($("ev-status")) $("ev-status").innerHTML = '<span class="badge offline">重连中…</span>';
-	      es.close();
-	      if (!sseReconnectTimer) {
-	        sseReconnectTimer = setTimeout(() => {
-	          sseReconnectTimer = null;
-	          setupEventSource();
-	        }, 3000);
-	      }
-	    };
-	  } catch (e) {
-	    if ($("ev-status")) $("ev-status").innerHTML = '<span class="badge offline">不可用</span>';
-	  }
-	}
-	tick();
-	setupEventSource();
-	setInterval(tick, 2000);
-	loadCaps();
-	setInterval(loadCaps, 3000);
-	updateConfig();
-	setInterval(updateConfig, 3000);
-	updateRoutes();
-	setInterval(updateRoutes, 3000);
-	updateStorage();
-	setInterval(updateStorage, 3000);
-	updateHealth();
-	setInterval(updateHealth, 2000);
-	updateTraffic();
-	setInterval(updateTraffic, 2000);
-	updateBlocked();
-	setInterval(updateBlocked, 3000);
-		updateClipboard();
-		setInterval(updateClipboard, 3000);
-		updateFileOffers();
-		setInterval(updateFileOffers, 3000);
+						          else if (ev.kind === "overlay_state_changed") {
+						            desc = "EasyTier 侧车变更: " + (ev.present ? "在线" : "离线") + " (" + (ev.source || "") + ") · peers " + (ev.peer_count || 0);
+						            updateNetworkStatus();
+						          }
+						          else if (ev.kind === "ancs_state_changed") {
+						            desc = "ANCS 状态变更: " + ev.state + (ev.attached ? " (已挂载)" : " (未挂载)") + (ev.retry_at_ms ? (" · 重试于 " + ev.retry_at_ms + "ms") : "");
+						            updateAncsStatus();
+						          }
+						          else if (ev.kind === "ancs_rule_changed") {
+						            desc = "ANCS 规则变更: " + ev.action + (ev.app_id ? (" · " + ev.app_id) : "") + " (共 " + ev.rules_count + " 条)";
+						            updateAncsStatus();
+						          }
+		          $("ev-last").textContent = "[" + t + "] " + desc;
+		        }
+		      } catch (err) {
+		        if ($("ev-last")) $("ev-last").textContent = e.data;
+		      }
+		      tick();
+		    };
+		    es.onerror = () => {
+		      if ($("ev-status")) $("ev-status").innerHTML = '<span class="badge offline">重连中…</span>';
+		      es.close();
+		      if (!sseReconnectTimer) {
+		        sseReconnectTimer = setTimeout(() => {
+		          sseReconnectTimer = null;
+		          setupEventSource();
+		        }, 3000);
+		      }
+		    };
+		  } catch (e) {
+		    if ($("ev-status")) $("ev-status").innerHTML = '<span class="badge offline">不可用</span>';
+		  }
+		}
+		tick();
+		setupEventSource();
+		setInterval(tick, 2000);
+		loadCaps();
+		setInterval(loadCaps, 3000);
+		updateConfig();
+		setInterval(updateConfig, 3000);
+		updateRoutes();
+		setInterval(updateRoutes, 3000);
+		updateStorage();
+		setInterval(updateStorage, 3000);
+		updateHealth();
+		setInterval(updateHealth, 2000);
+		updateTraffic();
+		setInterval(updateTraffic, 2000);
+		updateBlocked();
+		setInterval(updateBlocked, 3000);
+			updateClipboard();
+			setInterval(updateClipboard, 3000);
+			updateFileOffers();
+			setInterval(updateFileOffers, 3000);
+			updateAncsStatus();
+			setInterval(updateAncsStatus, 3000);
 </script>
 </body>
 </html>

@@ -13,7 +13,11 @@ use tetherly_core::{
     OpenAllowlist, OpenRule, APP_NAME_WAIT_MS,
 };
 use tetherly_node::ancs::AncsInbound;
-use tetherly_node::{MemoryOpener, Node, NodeConfig, OverlayConfig};
+use tetherly_node::{
+    loopback_delete, loopback_events_connect, loopback_get, loopback_post, AncsClearRulesReport,
+    AncsConnectReport, AncsDisconnectReport, AncsReport, AncsRuleReport, MemoryOpener, Node,
+    NodeConfig, OverlayConfig, SseStream,
+};
 
 struct DirGuard(PathBuf);
 
@@ -718,4 +722,246 @@ async fn ancs_status_inspection_connection_and_allowlist_via_loopback_api() {
     assert_eq!(report.retry_at_ms, Some(retry_at));
 
     node2.shutdown();
+}
+
+async fn wait_event<F>(sse: &mut SseStream, predicate: F) -> serde_json::Value
+where
+    F: Fn(&serde_json::Value) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline - tokio::time::Instant::now();
+        if let Ok(Ok(Some(raw))) = tokio::time::timeout(remaining, sse.next_event()).await {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if predicate(&v) {
+                    return v;
+                }
+            }
+        }
+    }
+    panic!("timed out waiting for matching event");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ancs_lifecycle_governance_rule_management_and_events_via_loopback_api() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let transport = Arc::new(MemoryAncsTransport::default());
+    let (node, _clock, _guard) = start("ancs-gov", Some(transport.clone()));
+    let ui_port = node.spawn_ui().await.expect("spawn ui");
+
+    // 1. Host header loopback guard: Reject non-loopback Host with 403 Forbidden
+    {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", ui_port))
+            .await
+            .expect("tcp connect");
+        let req = b"GET /api/ancs HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(req).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf);
+        assert!(
+            resp.starts_with("HTTP/1.1 403"),
+            "must reject evil Host with 403: {resp}"
+        );
+        assert!(
+            resp.contains("loopback only"),
+            "body must state 'loopback only'"
+        );
+    }
+
+    // 2. Connect SSE event stream to verify live broadcast of state and rule changes
+    let mut sse = loopback_events_connect(ui_port).await.expect("connect sse");
+
+    // 3. Initial GET /api/ancs inspection
+    let (code, resp) = loopback_get(ui_port, "/api/ancs").await.expect("get ancs");
+    assert_eq!(code, 200);
+    let initial_report: AncsReport = serde_json::from_slice(&resp).expect("parse AncsReport");
+    assert!(initial_report.ok);
+    assert!(initial_report.attached);
+    assert_eq!(initial_report.state, "idle");
+    assert_eq!(initial_report.retry_at_ms, None);
+    assert!(initial_report.rules.is_empty());
+    assert!(initial_report.allowlist.is_empty());
+
+    // 4. POST /api/ancs/connect -> Subscribed (ready) and verifies UiEvent::AncsStateChanged
+    let (code, resp) = loopback_post(ui_port, "/api/ancs/connect", b"{}")
+        .await
+        .expect("post ancs connect");
+    assert_eq!(code, 200);
+    let conn_rep: AncsConnectReport =
+        serde_json::from_slice(&resp).expect("parse AncsConnectReport");
+    assert!(conn_rep.ok);
+    assert_eq!(conn_rep.state, "ready");
+    assert_eq!(conn_rep.retry_at_ms, None);
+    assert_eq!(conn_rep.message, "ANCS subscribed");
+
+    let ev = wait_event(&mut sse, |v| v["kind"] == "ancs_state_changed").await;
+    assert_eq!(ev["state"], "ready");
+    assert_eq!(ev["attached"], true);
+    assert!(ev["retry_at_ms"].is_null());
+
+    // 5. Add allowlist rule 1 via POST /api/ancs/allow
+    let rule1_payload = serde_json::json!({
+        "app_id": "com.tencent.xin",
+        "url": "weixin://"
+    });
+    let (code, resp) = loopback_post(
+        ui_port,
+        "/api/ancs/allow",
+        &serde_json::to_vec(&rule1_payload).unwrap(),
+    )
+    .await
+    .expect("post allow rule 1");
+    assert_eq!(code, 200);
+    let r1_rep: AncsRuleReport = serde_json::from_slice(&resp).expect("parse AncsRuleReport 1");
+    assert!(r1_rep.ok);
+    assert_eq!(r1_rep.action, "added");
+    assert_eq!(r1_rep.total_rules, 1);
+    let r1_dto = r1_rep.rule.expect("rule dto");
+    assert_eq!(r1_dto.app_id, "com.tencent.xin");
+    assert_eq!(r1_dto.url, "weixin://");
+
+    let ev_r1 = wait_event(&mut sse, |v| {
+        v["kind"] == "ancs_rule_changed"
+            && v["action"] == "added"
+            && v["app_id"] == "com.tencent.xin"
+    })
+    .await;
+    assert_eq!(ev_r1["rules_count"], 1);
+    assert_eq!(ev_r1["url"], "weixin://");
+
+    // 6. Add allowlist rule 2 via alias POST /api/ancs/rules/add (default URL scheme)
+    let rule2_payload = serde_json::json!({
+        "app_id": "com.apple.MobileSMS"
+    });
+    let (code, resp) = loopback_post(
+        ui_port,
+        "/api/ancs/rules/add",
+        &serde_json::to_vec(&rule2_payload).unwrap(),
+    )
+    .await
+    .expect("post rules add rule 2");
+    assert_eq!(code, 200);
+    let r2_rep: AncsRuleReport = serde_json::from_slice(&resp).expect("parse AncsRuleReport 2");
+    assert!(r2_rep.ok);
+    assert_eq!(r2_rep.action, "added");
+    assert_eq!(r2_rep.total_rules, 2);
+    let r2_dto = r2_rep.rule.expect("rule dto 2");
+    assert_eq!(r2_dto.app_id, "com.apple.MobileSMS");
+    assert_eq!(r2_dto.url, "tetherly://open");
+
+    let ev_r2 = wait_event(&mut sse, |v| {
+        v["kind"] == "ancs_rule_changed"
+            && v["action"] == "added"
+            && v["app_id"] == "com.apple.MobileSMS"
+    })
+    .await;
+    assert_eq!(ev_r2["rules_count"], 2);
+
+    // 7. Verify GET /api/ancs returns both rules and backwards-compatible allowlist
+    let (code, resp) = loopback_get(ui_port, "/api/ancs")
+        .await
+        .expect("get ancs with 2 rules");
+    assert_eq!(code, 200);
+    let report_with_2: AncsReport = serde_json::from_slice(&resp).expect("parse report");
+    assert_eq!(report_with_2.rules.len(), 2);
+    assert_eq!(report_with_2.allowlist.len(), 2);
+    assert!(report_with_2
+        .rules
+        .iter()
+        .any(|r| r.app_id == "com.tencent.xin" && r.url == "weixin://"));
+    assert!(report_with_2
+        .rules
+        .iter()
+        .any(|r| r.app_id == "com.apple.MobileSMS" && r.url == "tetherly://open"));
+
+    // 8. Remove rule 1 via DELETE /api/ancs/allow?app_id=com.tencent.xin
+    let (code, resp) = loopback_delete(ui_port, "/api/ancs/allow?app_id=com.tencent.xin")
+        .await
+        .expect("delete rule 1");
+    assert_eq!(code, 200);
+    let rem1_rep: AncsRuleReport =
+        serde_json::from_slice(&resp).expect("parse AncsRuleReport remove");
+    assert!(rem1_rep.ok);
+    assert_eq!(rem1_rep.action, "removed");
+    assert_eq!(rem1_rep.total_rules, 1);
+    assert_eq!(
+        rem1_rep.rule.as_ref().map(|r| r.app_id.as_str()),
+        Some("com.tencent.xin")
+    );
+
+    let ev_rem = wait_event(&mut sse, |v| {
+        v["kind"] == "ancs_rule_changed" && v["action"] == "removed"
+    })
+    .await;
+    assert_eq!(ev_rem["app_id"], "com.tencent.xin");
+    assert_eq!(ev_rem["rules_count"], 1);
+
+    // 9. Remove non-existent rule via POST /api/ancs/rules/remove -> not_found
+    let not_found_payload = serde_json::json!({
+        "app_id": "com.tencent.xin"
+    });
+    let (code, resp) = loopback_post(
+        ui_port,
+        "/api/ancs/rules/remove",
+        &serde_json::to_vec(&not_found_payload).unwrap(),
+    )
+    .await
+    .expect("remove already removed rule");
+    assert_eq!(code, 200);
+    let rem_nf_rep: AncsRuleReport =
+        serde_json::from_slice(&resp).expect("parse AncsRuleReport not found");
+    assert!(rem_nf_rep.ok);
+    assert_eq!(rem_nf_rep.action, "not_found");
+    assert_eq!(rem_nf_rep.total_rules, 1);
+    assert!(rem_nf_rep.rule.is_none());
+
+    // 10. Clear all rules via POST /api/ancs/rules/clear
+    let (code, resp) = loopback_post(ui_port, "/api/ancs/rules/clear", b"{}")
+        .await
+        .expect("post clear rules");
+    assert_eq!(code, 200);
+    let clear_rep: AncsClearRulesReport =
+        serde_json::from_slice(&resp).expect("parse AncsClearRulesReport");
+    assert!(clear_rep.ok);
+    assert_eq!(clear_rep.cleared_count, 1);
+    assert_eq!(clear_rep.total_rules, 0);
+
+    let ev_clr = wait_event(&mut sse, |v| {
+        v["kind"] == "ancs_rule_changed" && v["action"] == "cleared"
+    })
+    .await;
+    assert_eq!(ev_clr["rules_count"], 0);
+
+    // Verify GET /api/ancs is now completely empty
+    let (code, resp) = loopback_get(ui_port, "/api/ancs")
+        .await
+        .expect("get ancs empty");
+    assert_eq!(code, 200);
+    let empty_rep: AncsReport = serde_json::from_slice(&resp).expect("parse empty report");
+    assert!(empty_rep.rules.is_empty());
+    assert!(empty_rep.allowlist.is_empty());
+
+    // 11. Disconnect ANCS via POST /api/ancs/disconnect -> backoff and verifies UiEvent::AncsStateChanged
+    let (code, resp) = loopback_post(ui_port, "/api/ancs/disconnect", b"{}")
+        .await
+        .expect("post ancs disconnect");
+    assert_eq!(code, 200);
+    let disc_rep: AncsDisconnectReport =
+        serde_json::from_slice(&resp).expect("parse AncsDisconnectReport");
+    assert!(disc_rep.ok);
+    assert_eq!(disc_rep.state, "backoff");
+    assert!(disc_rep.retry_at_ms.is_some());
+    assert_eq!(disc_rep.message, "ANCS disconnected");
+
+    let ev_disc = wait_event(&mut sse, |v| {
+        v["kind"] == "ancs_state_changed" && v["state"] == "backoff"
+    })
+    .await;
+    assert_eq!(ev_disc["attached"], true);
+    assert!(ev_disc["retry_at_ms"].as_u64().is_some());
+
+    node.shutdown();
 }

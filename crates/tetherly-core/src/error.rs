@@ -70,6 +70,8 @@ pub enum CoreError {
     InputRequiresTrust,
     #[error("malformed ANCS frame")]
     AncsFrame,
+    #[error("no ANCS transport attached")]
+    NoAncsTransport,
     #[error("ANCS subscribe failed")]
     AncsSubscribe,
     #[error("ANCS control point write failed")]
