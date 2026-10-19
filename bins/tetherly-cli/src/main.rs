@@ -399,6 +399,11 @@ enum Cmd {
         #[command(subcommand)]
         action: InboxCmd,
     },
+    /// Manage native desktop notification banners and Do-Not-Disturb (DND) policy.
+    Banner {
+        #[command(subcommand)]
+        action: BannerCmd,
+    },
     /// Query status of the *running* daemon (peers, transfers, and listen interfaces).
     Status {
         /// Watch mode: refresh status periodically until interrupted.
@@ -885,6 +890,49 @@ enum InboxCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum BannerCmd {
+    /// Query or update desktop notification banner settings and DND mode.
+    Config {
+        /// Enable or disable desktop notification banners.
+        #[arg(long)]
+        banners: Option<bool>,
+        /// Set Do-Not-Disturb mode (`off`, `silent`, or `all`).
+        #[arg(long)]
+        dnd: Option<String>,
+        /// Enable or disable notification sounds.
+        #[arg(long)]
+        sound: Option<bool>,
+        /// Enable or disable masking OTP codes on desktop notification banners.
+        #[arg(long)]
+        mask_otp: Option<bool>,
+        /// Allow high-urgency OTP notifications even in DND mode.
+        #[arg(long)]
+        allow_otp_dnd: Option<bool>,
+        /// Output in JSON format.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Send a test notification banner to the local desktop.
+    Test {
+        /// Optional custom notification title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Optional custom notification body text.
+        #[arg(long, short)]
+        body: Option<String>,
+        /// Output in JSON format.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum RouteCmd {
     /// List cached physical addressing routes.
     List {
@@ -1274,6 +1322,26 @@ fn print_event(v: &serde_json::Value) {
         "peer_expired" => {
             let dev = v["device_id"].as_str().unwrap_or("?");
             println!("[peer_expired] peer={dev}");
+        }
+        "notification_banner_sent" => {
+            let title = v["title"].as_str().unwrap_or("");
+            let app = v["app_name"]
+                .as_str()
+                .map(|a| format!(" app={a}"))
+                .unwrap_or_default();
+            let is_otp = v["is_otp"].as_bool().unwrap_or(false);
+            let otp_str = if is_otp { " [OTP]" } else { "" };
+            println!("[notification_banner_sent] title=\"{title}\"{app}{otp_str}");
+        }
+        "notify_config_changed" => {
+            let banners = v["banners_enabled"].as_bool().unwrap_or(false);
+            let dnd = v["dnd_mode"].as_str().unwrap_or("off");
+            let sound = v["sound_enabled"].as_bool().unwrap_or(true);
+            let mask = v["mask_otp"].as_bool().unwrap_or(true);
+            let allow_otp = v["allow_otp_in_dnd"].as_bool().unwrap_or(true);
+            println!(
+                "[notify_config_changed] banners={banners} dnd={dnd} sound={sound} mask_otp={mask} allow_otp_in_dnd={allow_otp}"
+            );
         }
         other => {
             println!("[{other}] {v}");
@@ -3489,6 +3557,134 @@ async fn main() -> Result<()> {
                             "Opened inbox directory in system file manager (path: {}).",
                             path_str
                         );
+                    }
+                }
+            }
+        },
+        Cmd::Banner { action } => match action {
+            BannerCmd::Config {
+                banners,
+                dnd,
+                sound,
+                mask_otp,
+                allow_otp_dnd,
+                json,
+                ui_port,
+            } => {
+                let has_update = banners.is_some()
+                    || dnd.is_some()
+                    || sound.is_some()
+                    || mask_otp.is_some()
+                    || allow_otp_dnd.is_some();
+                let (code, resp) = if has_update {
+                    let mut payload = serde_json::Map::new();
+                    if let Some(b) = banners {
+                        payload.insert("banners_enabled".into(), serde_json::Value::Bool(b));
+                    }
+                    if let Some(d) = dnd {
+                        payload.insert("dnd_mode".into(), serde_json::Value::String(d));
+                    }
+                    if let Some(s) = sound {
+                        payload.insert("sound_enabled".into(), serde_json::Value::Bool(s));
+                    }
+                    if let Some(m) = mask_otp {
+                        payload.insert("mask_otp".into(), serde_json::Value::Bool(m));
+                    }
+                    if let Some(a) = allow_otp_dnd {
+                        payload.insert("allow_otp_in_dnd".into(), serde_json::Value::Bool(a));
+                    }
+                    let bytes = serde_json::to_vec(&payload)?;
+                    loopback_post(ui_port, "/api/notify/config", &bytes)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?
+                } else {
+                    loopback_get(ui_port, "/api/notify/config")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?
+                };
+                if code != 200 {
+                    bail!(
+                        "notify config failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let cfg = &rep["config"];
+                    let banners_enabled = cfg["banners_enabled"].as_bool().unwrap_or(true);
+                    let dnd_mode = cfg["dnd_mode"].as_str().unwrap_or("off");
+                    let sound_enabled = cfg["sound_enabled"].as_bool().unwrap_or(true);
+                    let mask_otp = cfg["mask_otp"].as_bool().unwrap_or(true);
+                    let allow_otp_in_dnd = cfg["allow_otp_in_dnd"].as_bool().unwrap_or(true);
+                    let total_dispatched = rep["total_dispatched"].as_u64().unwrap_or(0);
+                    let total_suppressed = rep["total_suppressed"].as_u64().unwrap_or(0);
+
+                    println!("Desktop Notification Configuration:");
+                    println!("  Banners Enabled:  {banners_enabled}");
+                    println!("  DND Mode:         {dnd_mode}");
+                    println!("  Sound Enabled:    {sound_enabled}");
+                    println!("  Mask OTP Code:    {mask_otp}");
+                    println!("  Allow OTP in DND: {allow_otp_in_dnd}");
+                    println!("  Total Dispatched: {total_dispatched}");
+                    println!("  Total Suppressed: {total_suppressed}");
+                }
+            }
+            BannerCmd::Test {
+                title,
+                body,
+                json,
+                ui_port,
+            } => {
+                let payload = serde_json::json!({
+                    "title": title,
+                    "body": body,
+                });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) = loopback_post(ui_port, "/api/notify/test", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "notify test failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let sent = rep["sent"].as_bool().unwrap_or(false);
+                    let suppressed = rep["suppressed"].as_bool().unwrap_or(false);
+                    let reason = rep["suppression_reason"].as_str();
+                    let title = rep["title"].as_str().unwrap_or("");
+                    if sent {
+                        println!("Test notification banner sent: \"{title}\"");
+                    } else if suppressed {
+                        println!(
+                            "Test notification banner suppressed ({})",
+                            reason.unwrap_or("dnd or disabled")
+                        );
+                    } else {
+                        println!("Test notification banner processed.");
                     }
                 }
             }

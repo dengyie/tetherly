@@ -135,8 +135,60 @@ pub trait Clip: Send + Sync {
     fn get_text(&self) -> Result<Option<String>, CoreError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationUrgency {
+    Low,
+    #[default]
+    Normal,
+    Critical,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationPayload {
+    pub title: String,
+    pub body: String,
+    pub app_name: Option<String>,
+    pub sound: bool,
+    pub urgency: NotificationUrgency,
+}
+
+impl NotificationPayload {
+    pub fn new(title: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            body: body.into(),
+            app_name: None,
+            sound: true,
+            urgency: NotificationUrgency::Normal,
+        }
+    }
+
+    pub fn with_app_name(mut self, app_name: impl Into<String>) -> Self {
+        self.app_name = Some(app_name.into());
+        self
+    }
+
+    pub fn with_sound(mut self, sound: bool) -> Self {
+        self.sound = sound;
+        self
+    }
+
+    pub fn with_urgency(mut self, urgency: NotificationUrgency) -> Self {
+        self.urgency = urgency;
+        self
+    }
+}
+
 pub trait Notifier: Send + Sync {
-    fn show(&self, title: &str, body_len: usize, score: i32) -> Result<(), CoreError>;
+    /// Show a notification banner on the local machine.
+    fn notify(&self, payload: &NotificationPayload) -> Result<(), CoreError>;
+
+    /// Legacy / lightweight show hook for backward compatibility.
+    fn show(&self, title: &str, body_len: usize, score: i32) -> Result<(), CoreError> {
+        let _ = (title, body_len, score);
+        Ok(())
+    }
 }
 
 /// Pull one screen frame from the OS. Implemented in tetherly-node only; the

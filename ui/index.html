@@ -395,6 +395,56 @@
       </div>
     </section>
     <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>桌面原生系统级通知与免打扰 (Desktop Banners & DND)</h2>
+        <button id="testbannerbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">测试横幅</button>
+      </div>
+      <div class="hint">治理收到跨端通知、文件传输完成时的原生操作系统弹窗（macOS 通知中心 / Windows Toast / Linux 桌面横幅）。</div>
+      <div id="notifybannerstatus" style="margin-top:8px;font-size:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="color:var(--muted)">桌面通知横幅总开关：</span>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span id="nb-banners-badge"><span class="badge completed">已开启</span></span>
+            <button id="togglenbbannersbtn" class="ghost" type="button" style="padding:1px 6px;font-size:11px">切换</button>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="color:var(--muted)">免打扰模式 (DND Mode)：</span>
+          <select id="nb-dnd-select" style="background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px;padding:2px 6px;font-size:11px">
+            <option value="off">关闭 (正常弹窗与提示音)</option>
+            <option value="silent">静音 (仅弹窗不响提示音)</option>
+            <option value="all">全免打扰 (全面拦截抑制)</option>
+          </select>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="color:var(--muted)">横幅提示音 (Sound)：</span>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span id="nb-sound-badge"><span class="badge completed">已开启</span></span>
+            <button id="togglenbsoundbtn" class="ghost" type="button" style="padding:1px 6px;font-size:11px">切换</button>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="color:var(--muted)">短信验证码脱敏保护 (Mask OTP)：</span>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span id="nb-maskotp-badge"><span class="badge completed">已开启 (防偷窥)</span></span>
+            <button id="togglenbmaskotpbtn" class="ghost" type="button" style="padding:1px 6px;font-size:11px">切换</button>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="color:var(--muted)">免打扰下放行验证码 (Allow OTP in DND)：</span>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span id="nb-allowotpdnd-badge"><span class="badge completed">已放行</span></span>
+            <button id="togglenballowotpdndbtn" class="ghost" type="button" style="padding:1px 6px;font-size:11px">切换</button>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:6px;padding-top:4px;border-top:1px dashed var(--line);font-size:11px;color:var(--muted)">
+          <span>累计派发横幅: <b id="nb-dispatched-count" style="color:var(--ok)">0</b></span>
+          <span>免打扰抑制拦截: <b id="nb-suppressed-count" style="color:var(--warn)">0</b></span>
+        </div>
+      </div>
+      <div id="notifybannermsg" class="hint" style="margin-top:6px"></div>
+    </section>
+    <section style="margin-top:16px">
       <h2>远程屏幕（实验）</h2>
       <div id="screen" class="hint">状态：读取中…</div>
       <div class="row" style="margin-top:8px">
@@ -1846,6 +1896,165 @@ if (addRouteBtn) {
     }
   };
 }
+let currentNotifyConfig = null;
+async function updateNotifyBanner() {
+  try {
+    const rep = await api("/api/notify/config");
+    if (!rep || !rep.ok || !rep.config) return;
+    currentNotifyConfig = rep.config;
+    const cfg = rep.config;
+    if ($("nb-banners-badge")) {
+      $("nb-banners-badge").innerHTML = cfg.banners_enabled
+        ? '<span class="badge completed">已开启</span>'
+        : '<span class="badge offline">已关闭</span>';
+    }
+    if ($("nb-dnd-select")) {
+      $("nb-dnd-select").value = cfg.dnd_mode || "off";
+    }
+    if ($("nb-sound-badge")) {
+      $("nb-sound-badge").innerHTML = cfg.sound_enabled
+        ? '<span class="badge completed">已开启</span>'
+        : '<span class="badge offline">已静音</span>';
+    }
+    if ($("nb-maskotp-badge")) {
+      $("nb-maskotp-badge").innerHTML = cfg.mask_otp
+        ? '<span class="badge completed">已开启 (防偷窥)</span>'
+        : '<span class="badge offline">未开启 (明文显示)</span>';
+    }
+    if ($("nb-allowotpdnd-badge")) {
+      $("nb-allowotpdnd-badge").innerHTML = cfg.allow_otp_in_dnd
+        ? '<span class="badge completed">已放行</span>'
+        : '<span class="badge offline">阻止</span>';
+    }
+    if ($("nb-dispatched-count")) {
+      $("nb-dispatched-count").textContent = rep.total_dispatched || 0;
+    }
+    if ($("nb-suppressed-count")) {
+      $("nb-suppressed-count").textContent = rep.total_suppressed || 0;
+    }
+  } catch (e) {}
+}
+
+const toggleNbBannersBtn = $("togglenbbannersbtn");
+if (toggleNbBannersBtn) {
+  toggleNbBannersBtn.onclick = async () => {
+    if (!currentNotifyConfig) return;
+    const newBanners = !currentNotifyConfig.banners_enabled;
+    const msg = $("notifybannermsg");
+    if (msg) msg.textContent = "正在更新桌面横幅开关…";
+    try {
+      const r = await api("/api/notify/config", { banners_enabled: newBanners });
+      if (r && r.ok) {
+        if (msg) msg.textContent = "横幅开关已" + (newBanners ? "开启" : "关闭");
+        updateNotifyBanner();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "更新异常: " + e;
+    }
+  };
+}
+
+const nbDndSelect = $("nb-dnd-select");
+if (nbDndSelect) {
+  nbDndSelect.onchange = async () => {
+    const newMode = nbDndSelect.value;
+    const msg = $("notifybannermsg");
+    if (msg) msg.textContent = "正在更新免打扰模式…";
+    try {
+      const r = await api("/api/notify/config", { dnd_mode: newMode });
+      if (r && r.ok) {
+        if (msg) msg.textContent = "免打扰模式已设置为: " + newMode;
+        updateNotifyBanner();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "更新异常: " + e;
+    }
+  };
+}
+
+const toggleNbSoundBtn = $("togglenbsoundbtn");
+if (toggleNbSoundBtn) {
+  toggleNbSoundBtn.onclick = async () => {
+    if (!currentNotifyConfig) return;
+    const newSound = !currentNotifyConfig.sound_enabled;
+    const msg = $("notifybannermsg");
+    if (msg) msg.textContent = "正在更新提示音开关…";
+    try {
+      const r = await api("/api/notify/config", { sound_enabled: newSound });
+      if (r && r.ok) {
+        if (msg) msg.textContent = "横幅提示音已" + (newSound ? "开启" : "静音");
+        updateNotifyBanner();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "更新异常: " + e;
+    }
+  };
+}
+
+const toggleNbMaskOtpBtn = $("togglenbmaskotpbtn");
+if (toggleNbMaskOtpBtn) {
+  toggleNbMaskOtpBtn.onclick = async () => {
+    if (!currentNotifyConfig) return;
+    const newMask = !currentNotifyConfig.mask_otp;
+    const msg = $("notifybannermsg");
+    if (msg) msg.textContent = "正在更新验证码脱敏保护…";
+    try {
+      const r = await api("/api/notify/config", { mask_otp: newMask });
+      if (r && r.ok) {
+        if (msg) msg.textContent = "验证码脱敏保护已" + (newMask ? "启用" : "停用");
+        updateNotifyBanner();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "更新异常: " + e;
+    }
+  };
+}
+
+const toggleNbAllowOtpDndBtn = $("togglenballowotpdndbtn");
+if (toggleNbAllowOtpDndBtn) {
+  toggleNbAllowOtpDndBtn.onclick = async () => {
+    if (!currentNotifyConfig) return;
+    const newAllow = !currentNotifyConfig.allow_otp_in_dnd;
+    const msg = $("notifybannermsg");
+    if (msg) msg.textContent = "正在更新免打扰放行规则…";
+    try {
+      const r = await api("/api/notify/config", { allow_otp_in_dnd: newAllow });
+      if (r && r.ok) {
+        if (msg) msg.textContent = "免打扰放行验证码已" + (newAllow ? "启用" : "停用");
+        updateNotifyBanner();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "更新异常: " + e;
+    }
+  };
+}
+
+const testBannerBtn = $("testbannerbtn");
+if (testBannerBtn) {
+  testBannerBtn.onclick = async () => {
+    const msg = $("notifybannermsg");
+    if (msg) msg.textContent = "正在向桌面发送测试横幅通知…";
+    try {
+      const rep = await api("/api/notify/test", {
+        title: "Tetherly 桌面通知测试",
+        body: "原生系统通知中心与横幅派发功能运作正常！"
+      });
+      if (rep && rep.ok) {
+        if (rep.sent) {
+          if (msg) msg.textContent = "测试横幅已向操作系统成功派发并响铃！";
+        } else if (rep.suppressed) {
+          if (msg) msg.textContent = "测试横幅已执行治理策略：被免打扰/总开关抑制 (" + (rep.suppression_reason || "dnd") + ")";
+        }
+        updateNotifyBanner();
+      } else {
+        if (msg) msg.textContent = "发送测试横幅失败: " + (rep && rep.error ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e;
+    }
+  };
+}
+
 async function loadCaps() {
   const box = $("local-caps-box");
   if (!box) return;
@@ -2136,10 +2345,18 @@ function setupEventSource() {
 							            desc = "发现局域网设备: " + (ev.name || ev.device_id) + " (" + ev.addr + ")";
 							            updateDiscovery();
 							          }
-							          else if (ev.kind === "peer_expired") {
-							            desc = "局域网设备信标过期: " + ev.device_id;
-							            updateDiscovery();
-							          }
+								          else if (ev.kind === "peer_expired") {
+								            desc = "局域网设备信标过期: " + ev.device_id;
+								            updateDiscovery();
+								          }
+								          else if (ev.kind === "notification_banner_sent") {
+								            desc = "桌面通知已派发: " + ev.title + (ev.app_name ? (" (" + ev.app_name + ")") : "") + (ev.is_otp ? " [验证码]" : "");
+								            updateNotifyBanner();
+								          }
+								          else if (ev.kind === "notify_config_changed") {
+								            desc = "通知配置更新: 横幅=" + (ev.banners_enabled ? "开" : "关") + ", 免打扰=" + ev.dnd_mode;
+								            updateNotifyBanner();
+								          }
 		          $("ev-last").textContent = "[" + t + "] " + desc;
 		        }
 		      } catch (err) {
@@ -2186,8 +2403,10 @@ function setupEventSource() {
 				setInterval(updateAncsStatus, 3000);
 					updateInbox();
 					setInterval(updateInbox, 3000);
-					updateDiscovery();
-					setInterval(updateDiscovery, 3000);
+						updateDiscovery();
+						setInterval(updateDiscovery, 3000);
+						updateNotifyBanner();
+						setInterval(updateNotifyBanner, 3000);
 </script>
 </body>
 </html>

@@ -952,7 +952,22 @@
   9. Added comprehensive E2E integration test in `tests/phase1.rs`: `inbox_file_download_raw_preview_and_native_open_via_loopback_api`;
   10. Verified all workspace baselines: `cargo fmt --all --check` (clean), `cargo clippy --workspace --all-targets -- -D warnings` (clean), `cargo check --target aarch64-unknown-linux-gnu` (clean), `cargo test --workspace` (all 260+ tests pass), `cargo deny check` (advisories ok, bans ok, licenses ok, sources ok);
   11. Updated SSOT `docs/DEVELOPMENT.md` to v1.62 (ADR-055), updated `.codex-memory/decisions.md`, `.codex-memory/project-state.md`, and synchronized to Obsidian vault (`Note/Project/tetherly/tetherly 开发文档.md`).
-- Results: All 9 tasks for v1.62 completed and verified 100% green.
+## 2026-10-19
+- Task: Land Tetherly v1.63 (ADR-056) 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环.
+- Actions:
+  1. Eliminated the historical dangling stub trait `Notifier` in `crates/tetherly-core/src/ports.rs` (one of the 6 fundamental platform ports in SSOT §2494: `Clock`, `Rng`, `TrustStore`, `Insertor`, `Clip`, `Notifier`) and upgraded it to `fn notify(&self, payload: &NotificationPayload) -> Result<(), CoreError>`;
+  2. Defined strongly-typed `NotificationPayload` and `NotificationUrgency` (`Low`, `Normal`, `Critical`) in `crates/tetherly-core/src/ports.rs`;
+  3. Implemented decoupled native OS desktop notification dispatch (`SystemNotifier` via macOS `osascript`, Windows PowerShell balloon/toast, Linux `notify-send`) and mockable test dispatch (`MemoryNotifier`) in `crates/tetherly-node/src/platform.rs`;
+  4. Extended `UiEvent` in `crates/tetherly-node/src/events.rs` with `NotificationBannerSent` and `NotifyConfigChanged` variants, rigorously enforcing the Zero-Plaintext invariant (only sanitized title, app source, OTP flag, and timestamp; strictly omitting message body and OTP digits);
+  5. Implemented centralized DND governance (`NotifyBannerConfig` with `banners_enabled: bool`, `dnd_mode`: `Off` / `Silent` / `All`, `sound_enabled: bool`, `mask_otp: bool`, `allow_otp_in_dnd: bool`), dispatch primitive `Node::dispatch_notification_banner`, and automated integration with phone push notifications (`Node::ingest_local_push`) and file transfer completion (`Node::receive_file_loop`) in `crates/tetherly-node/src/runtime.rs`;
+  6. Added loopback control endpoints: `GET/POST /api/notify/config` (with `/api/notify/banner` alias) and `POST /api/notify/test` in `crates/tetherly-node/src/uihttp.rs`, strictly enforcing 127.0.0.1 physical binding and Host 403 Forbidden check;
+  7. Upgraded dual-CLI targets (`bins/tetherly-cli` and `crates/tetherly-node/src/bin/tetherly.rs`) with `banner config` and `banner test` subcommands and rich SSE `events` formatting;
+  8. Built "桌面原生系统级通知与免打扰 (Desktop Banners & DND)" Web UI control card in `ui/index.html` with real-time toggles, DND select, metrics display, one-click test banner, and SSE listener;
+  9. Implemented comprehensive E2E integration test in `tests/phase2.rs`: `desktop_notification_banners_dnd_governance_and_otp_masking_via_loopback_api`, validating banner dispatch, memory capture, Zero-Plaintext SSE, OTP masking, critical urgency promotion, silent DND, all DND suppression and bypass, banner master switch disablement, and Host 403 rejection;
+  10. Ran full workspace verification: `cargo fmt --all --check` (clean), `cargo clippy --workspace --all-targets -- -D warnings` (clean), `cargo check --target aarch64-unknown-linux-gnu` (clean), `cargo test --workspace` (all 282+ tests pass), `cargo deny check` (advisories ok, bans ok, licenses ok, sources ok);
+  11. Updated SSOT `docs/DEVELOPMENT.md` to v1.63 (ADR-056), updated `.codex-memory/decisions.md`, `.codex-memory/project-state.md`, and synchronized to Obsidian vault (`Note/Project/tetherly/tetherly 开发文档.md`).
+- Results: All 9 tasks for v1.63 completed and verified 100% green.
 - Next: Git commit keeping working tree clean.
 - Blockers: None.
+
 

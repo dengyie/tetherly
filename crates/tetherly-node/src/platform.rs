@@ -3,7 +3,10 @@
 //! insert() and open() only run on a user click.
 
 use std::sync::{Arc, Mutex};
-use tetherly_core::{insertion_plan, Clip, CoreError, InsertionPlan, Insertor, Opener};
+use tetherly_core::{
+    insertion_plan, Clip, CoreError, InsertionPlan, Insertor, NotificationPayload,
+    NotificationUrgency, Notifier, Opener,
+};
 
 pub struct SystemClip;
 
@@ -123,6 +126,118 @@ impl MemoryOpener {
 impl Opener for MemoryOpener {
     fn open(&self, url: &str) -> Result<(), CoreError> {
         self.urls.lock().expect("opener").push(url.to_string());
+        Ok(())
+    }
+}
+
+/// Dispatches native OS notification banners (macOS Notification Center /
+/// Windows balloon & toast / Linux notify-send).
+pub struct SystemNotifier;
+
+impl Notifier for SystemNotifier {
+    fn notify(&self, payload: &NotificationPayload) -> Result<(), CoreError> {
+        let title = payload.title.replace('"', "\\\"").replace('\n', " ");
+        let body = payload.body.replace('"', "\\\"").replace('\n', " ");
+
+        let mut cmd = if cfg!(target_os = "macos") {
+            let script = if payload.sound {
+                format!(
+                    "display notification \"{}\" with title \"{}\" sound name \"default\"",
+                    body, title
+                )
+            } else {
+                format!("display notification \"{}\" with title \"{}\"", body, title)
+            };
+            let mut c = std::process::Command::new("osascript");
+            c.arg("-e").arg(script);
+            c
+        } else if cfg!(target_os = "windows") {
+            let ps_script = format!(
+                "[reflection.assembly]::loadwithpartialname('System.Windows.Forms') | Out-Null; \
+                 $notify = new-object system.windows.forms.notifyicon; \
+                 $notify.icon = [system.drawing.systemicons]::information; \
+                 $notify.visible = $true; \
+                 $notify.showballoontip(5000, '{}', '{}', [system.windows.forms.tooltipicon]::Info)",
+                title.replace('\'', "''"),
+                body.replace('\'', "''")
+            );
+            let mut c = std::process::Command::new("powershell.exe");
+            c.arg("-NoProfile")
+                .arg("-NonInteractive")
+                .arg("-Command")
+                .arg(ps_script);
+            c
+        } else {
+            let mut c = std::process::Command::new("notify-send");
+            if let Some(app) = &payload.app_name {
+                c.arg("-a").arg(app);
+            }
+            let urgency_str = match payload.urgency {
+                NotificationUrgency::Low => "low",
+                NotificationUrgency::Normal => "normal",
+                NotificationUrgency::Critical => "critical",
+            };
+            c.arg("-u").arg(urgency_str);
+            c.arg(&title).arg(&body);
+            c
+        };
+
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        match cmd.spawn() {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!(err = %e, "system notifier spawn failed");
+                Err(CoreError::Json(format!("system notify failed: {e}")))
+            }
+        }
+    }
+}
+
+/// In-memory notification sink for headless CI, unit tests and assertions.
+#[derive(Clone, Default)]
+pub struct MemoryNotifier {
+    records: Arc<Mutex<Vec<NotificationPayload>>>,
+}
+
+impl MemoryNotifier {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn notifications(&self) -> Vec<NotificationPayload> {
+        self.records.lock().expect("notifier").clone()
+    }
+
+    pub fn records(&self) -> Vec<NotificationPayload> {
+        self.records.lock().expect("notifier").clone()
+    }
+
+    pub fn count(&self) -> usize {
+        self.records.lock().expect("notifier").len()
+    }
+
+    pub fn latest(&self) -> Option<NotificationPayload> {
+        self.records.lock().expect("notifier").last().cloned()
+    }
+
+    pub fn clear(&self) {
+        self.records.lock().expect("notifier").clear();
+    }
+}
+
+impl Notifier for MemoryNotifier {
+    fn notify(&self, payload: &NotificationPayload) -> Result<(), CoreError> {
+        self.records.lock().expect("notifier").push(payload.clone());
+        Ok(())
+    }
+
+    fn show(&self, title: &str, body_len: usize, score: i32) -> Result<(), CoreError> {
+        let payload =
+            NotificationPayload::new(title, format!("<len:{body_len}>")).with_sound(score > 0);
+        self.records.lock().expect("notifier").push(payload);
         Ok(())
     }
 }

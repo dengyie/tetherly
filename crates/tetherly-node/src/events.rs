@@ -160,6 +160,20 @@ pub enum UiEvent {
         name: Option<String>,
         timestamp_ms: u64,
     },
+    NotificationBannerSent {
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        app_name: Option<String>,
+        is_otp: bool,
+        timestamp_ms: u64,
+    },
+    NotifyConfigChanged {
+        banners_enabled: bool,
+        dnd_mode: String,
+        sound_enabled: bool,
+        mask_otp: bool,
+        allow_otp_in_dnd: bool,
+    },
     PeerDiscovered {
         device_id: String,
         name: String,
@@ -196,6 +210,36 @@ impl UiEvent {
         UiEvent::InboxFileOpened {
             name: name.map(Into::into),
             timestamp_ms,
+        }
+    }
+
+    pub fn notification_banner_sent(
+        title: impl Into<String>,
+        app_name: Option<impl Into<String>>,
+        is_otp: bool,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::NotificationBannerSent {
+            title: title.into(),
+            app_name: app_name.map(Into::into),
+            is_otp,
+            timestamp_ms,
+        }
+    }
+
+    pub fn notify_config_changed(
+        banners_enabled: bool,
+        dnd_mode: impl Into<String>,
+        sound_enabled: bool,
+        mask_otp: bool,
+        allow_otp_in_dnd: bool,
+    ) -> Self {
+        UiEvent::NotifyConfigChanged {
+            banners_enabled,
+            dnd_mode: dnd_mode.into(),
+            sound_enabled,
+            mask_otp,
+            allow_otp_in_dnd,
         }
     }
 

@@ -606,6 +606,21 @@ struct InboxOpenBody {
     name: Option<String>,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct NotifyConfigUpdateBody {
+    banners_enabled: Option<bool>,
+    dnd_mode: Option<crate::runtime::DndMode>,
+    sound_enabled: Option<bool>,
+    mask_otp: Option<bool>,
+    allow_otp_in_dnd: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct NotifyTestBody {
+    title: Option<String>,
+    body: Option<String>,
+}
+
 fn default_open_url() -> String {
     "tetherly://open".to_string()
 }
@@ -1479,6 +1494,84 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             },
             Err(_) => err(400, "bad json"),
         },
+        ("GET", "/api/notify/config") | ("GET", "/api/notify/banner") => {
+            json_ok(&node.notify_config_report())
+        }
+        ("POST", "/api/notify/config") | ("POST", "/api/notify/banner") => {
+            let mut cfg = node.notify_config();
+            if let Some(q) = query_str {
+                let map = parse_query_map(q);
+                if let Some(b) = map.get("banners").or_else(|| map.get("banners_enabled")) {
+                    cfg.banners_enabled = b == "true" || b == "1";
+                }
+                if let Some(d) = map.get("dnd").or_else(|| map.get("dnd_mode")) {
+                    match d.as_str() {
+                        "all" => cfg.dnd_mode = crate::runtime::DndMode::All,
+                        "silent" => cfg.dnd_mode = crate::runtime::DndMode::Silent,
+                        "off" => cfg.dnd_mode = crate::runtime::DndMode::Off,
+                        _ => {}
+                    }
+                }
+                if let Some(s) = map.get("sound").or_else(|| map.get("sound_enabled")) {
+                    cfg.sound_enabled = s == "true" || s == "1";
+                }
+                if let Some(m) = map.get("mask_otp") {
+                    cfg.mask_otp = m == "true" || m == "1";
+                }
+                if let Some(a) = map.get("allow_otp_in_dnd") {
+                    cfg.allow_otp_in_dnd = a == "true" || a == "1";
+                }
+            }
+
+            if !body.is_empty() {
+                match serde_json::from_slice::<NotifyConfigUpdateBody>(body) {
+                    Ok(up) => {
+                        if let Some(b) = up.banners_enabled {
+                            cfg.banners_enabled = b;
+                        }
+                        if let Some(d) = up.dnd_mode {
+                            cfg.dnd_mode = d;
+                        }
+                        if let Some(s) = up.sound_enabled {
+                            cfg.sound_enabled = s;
+                        }
+                        if let Some(m) = up.mask_otp {
+                            cfg.mask_otp = m;
+                        }
+                        if let Some(a) = up.allow_otp_in_dnd {
+                            cfg.allow_otp_in_dnd = a;
+                        }
+                    }
+                    Err(_) => return err(400, "bad json for notify config"),
+                }
+            }
+
+            let rep = node.update_notify_config(cfg);
+            json_ok(&rep)
+        }
+        ("POST", "/api/notify/test") => {
+            let mut q_title: Option<String> = None;
+            let mut q_body: Option<String> = None;
+            if let Some(q) = query_str {
+                let map = parse_query_map(q);
+                q_title = map.get("title").cloned();
+                q_body = map.get("body").or_else(|| map.get("message")).cloned();
+            }
+
+            let (title, body_text) = if !body.is_empty() {
+                match serde_json::from_slice::<NotifyTestBody>(body) {
+                    Ok(b) => (b.title.or(q_title), b.body.or(q_body)),
+                    Err(_) => (q_title, q_body),
+                }
+            } else {
+                (q_title, q_body)
+            };
+
+            match node.test_notification_banner(title.as_deref(), body_text.as_deref()) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         ("GET", "/api/file/transfers")
         | ("GET", "/api/transfers")
         | ("POST", "/api/file/transfers")

@@ -26,10 +26,10 @@ use tetherly_core::{
     ancs_actions, ancs_source_id, path_kind, AncsEvent, AncsIngress, AncsState, AncsTransport,
     ClipApply, ClipDirection, ClipHub, ClipMetaEntry, ConnectOutcome, ControlMsg, CoreError,
     CursorSeat, DeviceId, FileHub, IngestOutcome, InputClient, InputEvent, InputServer, InputSink,
-    MemoryScreenSink, MemorySink, MemoryTrustStore, NotifyHub, OpenAllowlist, PathKind, ReplyView,
-    ScreenAssembler, ScreenCodec, ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink,
-    ScreenSource, ScreenState, ScreenStats, TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS,
-    OVERLAY_PROBE_MS,
+    MemoryScreenSink, MemorySink, MemoryTrustStore, NotificationPayload, NotificationUrgency,
+    Notifier, NotifyHub, OpenAllowlist, PathKind, ReplyView, ScreenAssembler, ScreenCodec,
+    ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats,
+    TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -376,6 +376,72 @@ pub struct DismissFilter {
     pub peer: Option<String>,
     pub app_id: Option<String>,
     pub all: Option<bool>,
+}
+
+/// Do-Not-Disturb modes for native desktop notification banners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DndMode {
+    #[default]
+    Off,
+    Silent,
+    All,
+}
+
+/// Node configuration for desktop notification banners.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NotifyBannerConfig {
+    pub banners_enabled: bool,
+    pub dnd_mode: DndMode,
+    pub sound_enabled: bool,
+    pub mask_otp: bool,
+    pub allow_otp_in_dnd: bool,
+}
+
+impl Default for NotifyBannerConfig {
+    fn default() -> Self {
+        Self {
+            banners_enabled: true,
+            dnd_mode: DndMode::Off,
+            sound_enabled: true,
+            mask_otp: true,
+            allow_otp_in_dnd: true,
+        }
+    }
+}
+
+/// Status report for desktop notification banners and telemetry.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct NotifyConfigReport {
+    pub ok: bool,
+    pub config: NotifyBannerConfig,
+    pub total_dispatched: u64,
+    pub total_suppressed: u64,
+}
+
+/// Result report for testing desktop notification banners.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct NotifyTestReport {
+    pub ok: bool,
+    pub sent: bool,
+    pub suppressed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppression_reason: Option<String>,
+    pub message: String,
+    pub title: String,
+}
+
+/// Optional payload parameters for triggering a test notification.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct NotifyTestRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sound: Option<bool>,
 }
 
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
@@ -1111,6 +1177,10 @@ struct Shared {
     discovered: Mutex<HashMap<String, DiscoveredPeerInfo>>,
     rescan_trigger: broadcast::Sender<()>,
     opener: Mutex<Arc<dyn tetherly_core::Opener>>,
+    notifier: Mutex<Arc<dyn Notifier>>,
+    notify_config: Mutex<NotifyBannerConfig>,
+    notify_dispatched_count: AtomicU64,
+    notify_suppressed_count: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -1314,6 +1384,10 @@ impl Node {
             discovered: Mutex::new(HashMap::new()),
             rescan_trigger,
             opener: Mutex::new(Arc::new(crate::platform::SystemOpener)),
+            notifier: Mutex::new(Arc::new(crate::platform::SystemNotifier)),
+            notify_config: Mutex::new(NotifyBannerConfig::default()),
+            notify_dispatched_count: AtomicU64::new(0),
+            notify_suppressed_count: AtomicU64::new(0),
         });
         Ok(Self { shared })
     }
@@ -1324,6 +1398,202 @@ impl Node {
 
     pub fn opener(&self) -> Arc<dyn tetherly_core::Opener> {
         self.shared.opener.lock().expect("opener lock").clone()
+    }
+
+    pub fn set_notifier(&self, notifier: Arc<dyn Notifier>) {
+        *self.shared.notifier.lock().expect("set_notifier lock") = notifier;
+    }
+
+    pub fn notifier(&self) -> Arc<dyn Notifier> {
+        self.shared.notifier.lock().expect("notifier lock").clone()
+    }
+
+    pub fn notify_config(&self) -> NotifyBannerConfig {
+        self.shared
+            .notify_config
+            .lock()
+            .expect("notify_config lock")
+            .clone()
+    }
+
+    pub fn notify_config_report(&self) -> NotifyConfigReport {
+        let config = self.notify_config();
+        let total_dispatched = self.shared.notify_dispatched_count.load(Ordering::Relaxed);
+        let total_suppressed = self.shared.notify_suppressed_count.load(Ordering::Relaxed);
+        NotifyConfigReport {
+            ok: true,
+            config,
+            total_dispatched,
+            total_suppressed,
+        }
+    }
+
+    pub fn update_notify_config(&self, new_cfg: NotifyBannerConfig) -> NotifyConfigReport {
+        {
+            let mut c = self
+                .shared
+                .notify_config
+                .lock()
+                .expect("notify_config lock");
+            *c = new_cfg.clone();
+        }
+        let dnd_str = match new_cfg.dnd_mode {
+            DndMode::Off => "off",
+            DndMode::Silent => "silent",
+            DndMode::All => "all",
+        };
+        let _ = self.shared.events.send(UiEvent::notify_config_changed(
+            new_cfg.banners_enabled,
+            dnd_str,
+            new_cfg.sound_enabled,
+            new_cfg.mask_otp,
+            new_cfg.allow_otp_in_dnd,
+        ));
+        self.notify_config_report()
+    }
+
+    pub fn dispatch_notification_banner(
+        &self,
+        title: &str,
+        body: &str,
+        app_name: Option<&str>,
+        is_otp: bool,
+    ) -> Result<bool, CoreError> {
+        let cfg = self.notify_config();
+        if !cfg.banners_enabled {
+            self.shared
+                .notify_suppressed_count
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(false);
+        }
+
+        let should_suppress = match cfg.dnd_mode {
+            DndMode::All => !(is_otp && cfg.allow_otp_in_dnd),
+            DndMode::Silent | DndMode::Off => false,
+        };
+
+        if should_suppress {
+            self.shared
+                .notify_suppressed_count
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(false);
+        }
+
+        let play_sound = cfg.sound_enabled && cfg.dnd_mode != DndMode::Silent;
+
+        let display_body = if is_otp && cfg.mask_otp {
+            "收到短信验证码 (已在通知中心就绪)".to_string()
+        } else {
+            body.to_string()
+        };
+
+        let urgency = if is_otp {
+            NotificationUrgency::Critical
+        } else {
+            NotificationUrgency::Normal
+        };
+
+        let mut payload = NotificationPayload::new(title, display_body)
+            .with_sound(play_sound)
+            .with_urgency(urgency);
+        if let Some(app) = app_name {
+            payload = payload.with_app_name(app);
+        }
+
+        let notifier = self.notifier();
+        notifier.notify(&payload)?;
+        self.shared
+            .notify_dispatched_count
+            .fetch_add(1, Ordering::Relaxed);
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let _ = self.shared.events.send(UiEvent::notification_banner_sent(
+            title, app_name, is_otp, now_ms,
+        ));
+
+        Ok(true)
+    }
+
+    pub fn test_notification_banner(
+        &self,
+        title: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<NotifyTestReport, CoreError> {
+        let t = title.unwrap_or("Tetherly 桌面通知测试");
+        let b = body.unwrap_or("这是一条来自 Tetherly 的测试通知横幅。跨设备互联已正常工作！");
+        let cfg = self.notify_config();
+        if !cfg.banners_enabled {
+            self.shared
+                .notify_suppressed_count
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(NotifyTestReport {
+                ok: true,
+                sent: false,
+                suppressed: true,
+                suppression_reason: Some("banners_disabled".into()),
+                message: "notification suppressed: banners are disabled in config".into(),
+                title: t.into(),
+            });
+        }
+
+        let should_suppress = match cfg.dnd_mode {
+            DndMode::All => true,
+            DndMode::Silent | DndMode::Off => false,
+        };
+
+        if should_suppress {
+            self.shared
+                .notify_suppressed_count
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(NotifyTestReport {
+                ok: true,
+                sent: false,
+                suppressed: true,
+                suppression_reason: Some(format!("dnd_mode_{:?}", cfg.dnd_mode).to_lowercase()),
+                message: format!(
+                    "notification suppressed by Do-Not-Disturb mode: {:?}",
+                    cfg.dnd_mode
+                ),
+                title: t.into(),
+            });
+        }
+
+        let play_sound = cfg.sound_enabled && cfg.dnd_mode != DndMode::Silent;
+        let payload = NotificationPayload::new(t, b)
+            .with_app_name("Tetherly")
+            .with_sound(play_sound)
+            .with_urgency(NotificationUrgency::Normal);
+
+        let notifier = self.notifier();
+        notifier.notify(&payload)?;
+        self.shared
+            .notify_dispatched_count
+            .fetch_add(1, Ordering::Relaxed);
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let _ = self.shared.events.send(UiEvent::notification_banner_sent(
+            t,
+            Some("Tetherly"),
+            false,
+            now_ms,
+        ));
+
+        Ok(NotifyTestReport {
+            ok: true,
+            sent: true,
+            suppressed: false,
+            suppression_reason: None,
+            message: "test desktop notification banner dispatched successfully".into(),
+            title: t.into(),
+        })
     }
 
     pub fn identity(&self) -> &Identity {
@@ -2717,6 +2987,9 @@ impl Node {
     }
 
     pub async fn ingest_local_push(&self, source: DeviceId, push: NotifyPush) -> IngestOutcome {
+        let title = push.title.clone();
+        let body = push.body.clone();
+        let app_name = push.app_name.clone();
         let outcome = {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
             hubs.notify.ingest_push(source, push, &*self.shared.clock)
@@ -2725,6 +2998,12 @@ impl Node {
             self.emit(UiEvent::Candidate {
                 candidate: CandidateViewDto::from(v.clone()),
             });
+            let app_opt = if app_name.is_empty() {
+                None
+            } else {
+                Some(app_name.as_str())
+            };
+            let _ = self.dispatch_notification_banner(&title, &body, app_opt, v.has_otp);
         }
         outcome
     }
@@ -5342,6 +5621,14 @@ impl Node {
         let _ = self.send_to(&source, done.to_frame()?).await;
         self.set_transfer_phase(&transfer_id, TransferPhase::Completed, None);
         self.emit(UiEvent::FileDone { transfer_id });
+        let banner_title = "已接收文件";
+        let banner_body = format!("文件 {name} 接收完成");
+        let _ = self.dispatch_notification_banner(
+            banner_title,
+            &banner_body,
+            Some("Tetherly File"),
+            false,
+        );
         Ok(())
     }
 

@@ -66,8 +66,9 @@ pub use overlay::{
 };
 pub use persist::{TrustFile, TrustedPeerDto};
 pub use ports::{
-    Clip, Clock, Insertor, ManualClock, MemoryTrustStore, Opener, PhoneNotification, Rng,
-    ScreenCodec, ScreenSink, ScreenSource, SystemClock, TrustStore, TrustedPeer,
+    Clip, Clock, Insertor, ManualClock, MemoryTrustStore, NotificationPayload, NotificationUrgency,
+    Notifier, Opener, PhoneNotification, Rng, ScreenCodec, ScreenSink, ScreenSource, SystemClock,
+    TrustStore, TrustedPeer,
 };
 pub use replay::ReplayGuard;
 pub use screen::{

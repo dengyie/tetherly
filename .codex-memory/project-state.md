@@ -377,16 +377,26 @@
 	     - **修复 P2 拒绝状态流转清理竞态与单点原子锁收敛**：`user_accept_file_reported` 与 `user_reject_file_reported` 将状态转换与元数据提取收敛至单次持锁临界区，加锁由 3 次降为 1 次且消灭并发 prune 竞态；
 	     - **代码去重与接口收敛**：`user_accept_file` 与 `user_reject_file` 直接委托 `*_reported` 变体；
 	     - **端到端集成测试增强**：`tests/phase1.rs` 增设包含 2 个子文件的多文件提议注入，验证累积 4000 字节及原子拒绝上报。
-	  11. **v1.62 (ADR-055) 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环**：
-	     - **HTTP 响应协议头与流式结构升级**：`UiResponse` 替代旧三元组，支持任意状态码、标准 MIME 类型映射（`mime_type_from_name` 智能识别 20+ 种格式）与 `Content-Disposition` 协议头；
-	     - **二进制安全字节流防失真提取**：重构 `parse_http_response` 为滑动窗口字节切分（`b"\r\n\r\n"`），彻底消除 `String::from_utf8_lossy` 导致的非 UTF-8 字节损毁；
-	     - **收件箱文件内容直读与系统原生调起原语**：`Node::read_inbox_file` 与 `Node::open_inbox_file`，对接系统默认打开器（macOS `open`、Windows `rundll32 url.dll,FileProtocolHandler`、Linux `xdg-open`），支持测试注入 `MemoryOpener`；
-	     - **严格多层路径穿越红线拦截**：拦截任何包含 `..`、`/`、`\`、`\0` 或以 `.` 开头的文件名（`CoreError::UnsafeFileName`）；
-	     - **事件总线零明文审计**：新增 `UiEvent::InboxFileOpened` 变体，仅透出脱敏文件名与时间戳，严禁携带私钥或文件敏感正文；
-	     - **回环端点与隔离铁律**：`GET /api/file/inbox/download`、`GET /api/file/inbox/raw`、`POST /api/file/inbox/open`，127.0.0.1 物理绑定与 Host 403 强阻断；
-	     - **双端 CLI 全同构升级**：`inbox get <name> [--dest <path>]`、`inbox open [<name>]`，SSE `events` 监听器高亮格式化；
-	     - **Web UI 收件箱提取与交互联动**：新增「打开目录」按钮，卡片行新增「打开」、「下载」及「预览」操作，实时联动 SSE；
-	     - **端到端集成测试**：`tests/phase1.rs` 增设 `inbox_file_download_raw_preview_and_native_open_via_loopback_api` 全绿。
+		  11. **v1.62 (ADR-055) 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环**：
+		     - **HTTP 响应协议头与流式结构升级**：`UiResponse` 替代旧三元组，支持任意状态码、标准 MIME 类型映射（`mime_type_from_name` 智能识别 20+ 种格式）与 `Content-Disposition` 协议头；
+		     - **二进制安全字节流防失真提取**：重构 `parse_http_response` 为滑动窗口字节切分（`b"\r\n\r\n"`），彻底消除 `String::from_utf8_lossy` 导致的非 UTF-8 字节损毁；
+		     - **收件箱文件内容直读与系统原生调起原语**：`Node::read_inbox_file` 与 `Node::open_inbox_file`，对接系统默认打开器（macOS `open`、Windows `rundll32 url.dll,FileProtocolHandler`、Linux `xdg-open`），支持测试注入 `MemoryOpener`；
+		     - **严格多层路径穿越红线拦截**：拦截任何包含 `..`、`/`、`\`、`\0` 或以 `.` 开头的文件名（`CoreError::UnsafeFileName`）；
+		     - **事件总线零明文审计**：新增 `UiEvent::InboxFileOpened` 变体，仅透出脱敏文件名与时间戳，严禁携带私钥或文件敏感正文；
+		     - **回环端点与隔离铁律**：`GET /api/file/inbox/download`、`GET /api/file/inbox/raw`、`POST /api/file/inbox/open`，127.0.0.1 物理绑定与 Host 403 强阻断；
+		     - **双端 CLI 全同构升级**：`inbox get <name> [--dest <path>]`、`inbox open [<name>]`，SSE `events` 监听器高亮格式化；
+		     - **Web UI 收件箱提取与交互联动**：新增「打开目录」按钮，卡片行新增「打开」、「下载」及「预览」操作，实时联动 SSE；
+		     - **端到端集成测试**：`tests/phase1.rs` 增设 `inbox_file_download_raw_preview_and_native_open_via_loopback_api` 全绿。
+		  12. **v1.63 (ADR-056) 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环**：
+		     - **消除遗留悬空特质存根**：重构 `crates/tetherly-core/src/ports.rs` 的 `Notifier` trait 与强类型 `NotificationPayload`、`NotificationUrgency`（Low / Normal / Critical），补齐六大平台端口全闭环；
+		     - **跨平台原生横幅调度与测试适配器**：`SystemNotifier` 驱动（macOS `osascript` 唤起通知中心横幅与声音、Windows PowerShell 调起气泡/Toast、Linux `notify-send`）与 `MemoryNotifier` 内存捕获容器；
+		     - **集中式免打扰 (DND) 与调度策略引擎**：`NotifyBannerConfig` 支持总开关（`banners_enabled`）、三级免打扰模式（`dnd_mode`: `off` / `silent` / `all`）、音效开关（`sound_enabled`）、验证码隐私防窥掩码（`mask_otp`）与紧急验证码免打扰穿透（`allow_otp_in_dnd`）；
+		     - **核心通信与传输事件驱动**：手机推送通知摄入（`Node::ingest_local_push`）与大文件接收完成（`Node::receive_file_loop`）自动调度原生横幅；
+		     - **Zero-Plaintext 零明文安全红线**：扩展 `UiEvent::NotificationBannerSent` 与 `UiEvent::NotifyConfigChanged`，坚守严禁广播正文与明文验证码铁律；
+		     - **回环控制面端点全闭环**：新增 `GET/POST /api/notify/config`（别名 `/api/notify/banner`）与 `POST /api/notify/test`，坚守 127.0.0.1 物理绑定与 Host 403 强隔离；
+		     - **双端 CLI 全同构升级**：增设 `banner config` 与 `banner test` 子命令，SSE 事件监听高亮格式化；
+		     - **Web UI 桌面通知与免打扰控制台**：新增独立治理卡片、实时开关、DND 下拉选择与一键测试横幅；
+		     - **端到端集成测试**：`tests/phase2.rs` 增设 `desktop_notification_banners_dnd_governance_and_otp_masking_via_loopback_api` 全绿。
 
 ## Current Branch
 - `main` @ `https://github.com/dengyie/tetherly`
@@ -396,15 +406,15 @@
   - `cargo fmt --all --check`：PASSED (0 diff)
   - `cargo clippy --workspace --all-targets -- -D warnings`：PASSED (0 warnings)
   - `cargo check --target aarch64-unknown-linux-gnu`：PASSED (0 errors)
-  - `cargo test --workspace`：PASSED (全量 260+ 项测试全部通过)
+  - `cargo test --workspace`：PASSED (全量 282+ 项测试全部通过)
   - `cargo deny check`（advisories, bans, licenses, sources）：PASSED (0 security/license violations)
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.62)
+- `docs/DEVELOPMENT.md` (SSOT v1.63)
 - `crates/tetherly-{core,crypto,net,node,android}`
 - `bins/tetherly-cli`, `crates/tetherly-node/src/bin/tetherly.rs`
 - `crates/tetherly-net/src/codec.rs` (`TaggedReader`), `crates/tetherly-net/src/session.rs`
-- `crates/tetherly-node/src/{runtime.rs,uihttp.rs,events.rs,lan.rs,sidecar.rs,ancs.rs}`
+- `crates/tetherly-node/src/{runtime.rs,uihttp.rs,events.rs,lan.rs,sidecar.rs,ancs.rs,platform.rs}`
 - `ui/index.html`, `tests/phase1.rs`, `tests/phase2.rs`, `tests/phase4.rs`, `tests/phase5.rs`
 - GitHub: `dengyie/tetherly`
 - Vault: `Note/Project/tetherly/tetherly 开发文档.md`

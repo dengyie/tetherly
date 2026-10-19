@@ -3,9 +3,60 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.62** |
+| 文档版本 | **1.63** |
 | 日期 | 2026-10-19 |
-| 状态 | **v1.62 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环（ADR-055）**——(1) **HTTP 响应协议头与流式结构升级 (`crates/tetherly-node/src/uihttp.rs`)**：从单一的三元组响应抽象彻底升级为强类型 `UiResponse` 结构，原生支持灵活配置动态状态码、标准 MIME 类型映射（`image/png`, `application/pdf`, `text/plain`, `application/octet-stream` 等）以及标准 HTTP 头扩展（如 `Content-Disposition: attachment/inline`）；(2) **二进制安全字节流防失真提取 (`crates/tetherly-node/src/uihttp.rs` & `bins/tetherly-cli/src/main.rs`)**：重构 `parse_http_response` 客户端解析逻辑，以原始字节窗口滑动匹配 `\r\n\r\n` 隔离协议头与内容载荷，彻底解决既有 `String::from_utf8_lossy` 损毁非 UTF-8 二进制文件（图片、视频、压缩包、二进制执行体）字节的致命缺陷；(3) **收件箱文件内容直读与系统原生调起原语 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`)**：设计 `InboxOpenReport` 与 `mime_type_from_name` 规范，实现 `Node::read_inbox_file` 与 `Node::open_inbox_file`，全面对接宿主操作系统应用启动器（macOS `open`、Windows `rundll32 url.dll,FileProtocolHandler`、Linux `xdg-open`），支持定向打开指定收件箱文件或定位 `<data_dir>/inbox` 目录；(4) **严格多层路径穿越红线拦截 (Security Red Line)**：严禁任何试图逃逸收件箱的行为，凡包含 `..`、`/`、`\`、`\0` 或以 `.` 开头的文件名，均被底层安全红线强行拦截并返回 400 (`CoreError::UnsafeFileName`)；(5) **事件总线零明文审计与即时分发 (`crates/tetherly-node/src/events.rs`)**：扩展 `UiEvent::InboxFileOpened` 变体，严格践行 Zero-Plaintext 铁律（仅传输脱敏文件名与操作时间戳，严禁携带私钥或文件敏感正文），通过 SSE 实时分发；(6) **回环控制面端点全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET /api/file/inbox/download`（别名 `/api/inbox/download`，附件流式下载）、`GET /api/file/inbox/raw`（别名 `/api/inbox/raw`，内联多媒体/文本预览）与 `POST /api/file/inbox/open`（别名 `/api/inbox/open`，原生打开文件或收件箱），全量端点严格执行 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离；(7) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：增设 `inbox get <name> [--dest <path>]`（流式提取并落盘）与 `inbox open [<name>]`（调起系统默认应用打开文件或打开收件箱），并在 SSE `events` 监听器中提供高亮格式化输出；(8) **Web UI 收件箱提取与交互联动 (`ui/index.html`)**：在收件箱面板中增设「打开目录」按钮，在文件列表中为每个文件提供「打开」、「下载」及「预览」一键操作，实时监听 `inbox_file_opened` 事件；(9) **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 增设完整集成测试覆盖二进制流式下载保真度、Content-Disposition 响应头、raw 内联预览、系统直开调用捕获（`MemoryOpener`）、路径穿越阻断、404 不存在处理与 Host 403 恶意阻断，全工作区 274+ 项测试、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 通过。+ v1.61 局域网设备自发现治理、信标可观测性与一键拨号配对闭环（ADR-054）+ v1.60 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环（ADR-053）+ v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.63 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环（ADR-056）**——(1) **消除历史悬空存根特质并重构核心通知抽象 (`crates/tetherly-core/src/ports.rs`)**：彻底消除了 SSOT §2494 中长期悬空的遗留 `Notifier` 接口存根，将其升级为强类型 `NotificationPayload` 与 `NotificationUrgency`（Low / Normal / Critical），彻底贯通六大平台核心特质（`Clock`, `Rng`, `TrustStore`, `Insertor`, `Clip`, `Notifier`）的完整闭环；(2) **跨平台操作系统原生横幅适配器 (`crates/tetherly-node/src/platform.rs`)**：实现真正解耦且跨平台兼容的 `SystemNotifier` 驱动，在 macOS 上利用 `osascript` 唤起系统通知中心横幅并附带提示音，在 Windows 上利用 PowerShell 调起托盘气泡与 Toast 横幅，在 Linux 上接入 freedesktop `notify-send` 标准驱动；同时提供零外部进程依赖的 `MemoryNotifier` 测试容器供自动化测试与断言验证；(3) **集中式通知治理与免打扰模式 (DND) 策略引擎 (`crates/tetherly-node/src/runtime.rs`)**：引入强类型 `NotifyBannerConfig`，支持桌面横幅总开关（`banners_enabled`）、三级免打扰模式（`dnd_mode`: `off` / `silent` / `all`）、音效开关（`sound_enabled`）、验证码隐私防窥掩码（`mask_otp`）与紧急验证码免打扰穿透（`allow_otp_in_dnd`）；(4) **传输与通信核心事件流深度接入与自动化触发 (`crates/tetherly-node/src/runtime.rs`)**：在跨端手机推送通知摄入（`Node::ingest_local_push`）与跨端文件流式接收落盘完成（`Node::receive_file_loop`）处接入自动调度，在后台静默收到文件或对端来信时，第一秒弹出宿主原生横幅；(5) **Zero-Plaintext 零明文安全红线与事件总线可观测性 (`crates/tetherly-node/src/events.rs`)**：新增 `UiEvent::NotificationBannerSent` 与 `UiEvent::NotifyConfigChanged`，坚守严禁在公网日志或 SSE 广播中泄露短信正文或明文验证码的铁律（仅传输脱敏标题、应用源、是否验证码标记及时间戳）；(6) **回环控制面端点全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET/POST /api/notify/config`（别名 `/api/notify/banner`，查询与动态更新通知策略）与 `POST /api/notify/test`（别名 `/api/notify/banner/test`，发送测试横幅），严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离；(7) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：增设 `banner config` 与 `banner test` 子命令（避免与对端对推 `notify` 冲突），并在 SSE `events` 监听器中提供高亮格式化输出；(8) **Web UI 桌面通知与免打扰控制台 (`ui/index.html`)**：在控制台中增设「桌面原生系统级通知与免打扰 (Desktop Banners & DND)」专区，提供开关、模式下拉框、即时指标与一键测试按钮，实时监听 SSE 动态；(9) **端到端集成测试与全量安全基线全绿**：`tests/phase2.rs` 增设完整集成测试覆盖测试横幅派发、内存捕获、Zero-Plaintext 校验、OTP 掩码与高危提升、静音模式、全部免打扰模式过滤与白名单放行、总开关禁用与 Host 403 恶意阻断，全工作区 282+ 项测试、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 达标。+ v1.62 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环（ADR-055）+ v1.61 局域网设备自发现治理、信标可观测性与一键拨号配对闭环（ADR-054）+ v1.60 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环（ADR-053）+ v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
+
+本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.63 相对 1.62(跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环)**
+
+- **动机(跨端桌面系统通知缺失、遗留悬空存根与打扰体验痛点)**:
+  在 Tetherly 陆续完成收件箱文件内容流式下载与系统直开 (v1.62 / ADR-055)、局域网自发现治理 (v1.61 / ADR-054)、收件箱生命周期管理 (v1.60 / ADR-053) 及大文件传输引擎后，核心传输网已能高度可靠地在设备间传递通知帧与落盘文件。然而，在**桌面操作系统原生通知呈现与用户专注体验（Native System Notification Banners & Do-Not-Disturb Governance）**层面，存在长期未决的设计与实现断层：
+  1. **历史悬空特质未贯通（Dangling Port Stub）**：
+     在 SSOT §2494 规划的六大系统平台端口中（`Clock`, `Rng`, `TrustStore`, `Insertor`, `Clip`, `Notifier`），`Notifier` 接口定义一直处于悬空存根状态，未被核心运行时与平台适配器真正接入；
+  2. **收到对端通知或大文件时桌面缺乏原生横幅感知（No Desktop OS Visual Awareness）**：
+     当手机对端推送短信、系统通知，或局域网对端完成数个 GiB 的大文件传输时，桌面用户必须主动切到 Web UI 或终端查阅，缺乏如 macOS 通知中心横幅、Windows 任务栏气泡/Toast、Linux freedesktop 横幅的原生即时提醒；
+  3. **缺乏集中式免打扰与声音控制治理（Lack of DND Governance & Sound Muting）**：
+     用户在专注编码、开会或游戏时，如果无法一键静音或抑制普通弹窗，频繁的弹窗会造成严重的打扰；同时，如果完全关闭通知，又会错过银行、登录或支付等高优先级的关键动态验证码；
+  4. **隐私防窥与零明文安全红线（Zero-Plaintext Invariant & Shoulder Surfing Protection）**：
+     在公共办公区或屏幕共享时，弹出包含完整验证码数字的明文横幅极易造成隐私泄露。系统必须支持在弹出横幅时自动掩码（如掩盖验证码正文），且在任何 SSE 事件、遥测日志或公开传输中严禁广播正文与一次性验证码明文；
+  5. **双端命令行与控制面缺乏治理能力**：
+     双端 CLI 与 Web 控制台此前完全缺乏配置通知开关、免打扰级别、触发测试横幅与查看派发/压制指标的途径。
+
+- **架构与协议设计(ADR-056 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环)**:
+  1. **核心通知特质重构 (`crates/tetherly-core/src/ports.rs`)**:
+     - 升级 `Notifier` trait 为 `fn notify(&self, payload: &NotificationPayload) -> Result<(), CoreError>`；
+     - 定义强类型 `NotificationPayload` 与 `NotificationUrgency`（Low / Normal / Critical），支持标题、正文、应用源、提示音开关与紧急程度标记；
+     - 彻底贯通六大平台底层端口契约；
+  2. **跨平台原生操作系统通知调度适配器 (`crates/tetherly-node/src/platform.rs`)**:
+     - `SystemNotifier`：在 macOS 上采用 `osascript -e 'display notification ...'`；在 Windows 上采用 PowerShell 调用 `System.Windows.Forms.NotifyIcon` 弹出气泡；在 Linux 上调用 `notify-send`；
+     - `MemoryNotifier`：提供线程安全内存容器（`Arc<Mutex<Vec<NotificationPayload>>>`），专为无界面无头 CI、单元测试及集成测试设计；
+  3. **集中式免打扰 (DND) 与调度策略引擎 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `NotifyBannerConfig` 包含：`banners_enabled: bool`, `dnd_mode: DndMode`（`off` / `silent` / `all`）, `sound_enabled: bool`, `mask_otp: bool`, `allow_otp_in_dnd: bool`；
+     - 调度原语 `Node::dispatch_notification_banner`：根据 DND 模式、OTP 识别结果进行压制检查与正文掩码处理，精准维护 `notify_dispatched_count` 与 `notify_suppressed_count` 计数器；
+  4. **传输核心自动化事件接入 (`crates/tetherly-node/src/runtime.rs`)**:
+     - 接收手机推送通知（`Node::ingest_local_push`）时自动调用横幅调度；
+     - 接收对端文件流式传输落盘完成（`Node::receive_file_loop`）时自动弹出「文件接收完成」横幅；
+  5. **零明文事件总线可观测性 (`crates/tetherly-node/src/events.rs`)**:
+     - 新增 `UiEvent::NotificationBannerSent`（仅传输标题、应用源、是否 OTP 及时间戳，坚决剔除正文与验证码明文）；
+     - 新增 `UiEvent::NotifyConfigChanged`，策略变更即时全端通知；
+  6. **回环控制面端点全闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/notify/config`（别名 `/api/notify/banner`）：读取当前配置与累计派发/压制指标；
+     - `POST /api/notify/config`（别名 `/api/notify/banner`）：增量或全量更新配置；
+     - `POST /api/notify/test`（别名 `/api/notify/banner/test`）：触发测试横幅；
+     - 严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离；
+  7. **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - `tetherly banner config [--banners] [--dnd off|silent|all] [--sound] [--mask-otp] [--allow-otp-dnd]`；
+     - `tetherly banner test [--title <str>] [--body <str>]`；
+     - SSE `events` 监听器高亮输出 `[notification_banner_sent]` 与 `[notify_config_changed]`；
+  8. **Web UI 桌面通知与免打扰控制台 (`ui/index.html`)**:
+     - 增设桌面通知与免打扰卡片、开关状态标签、DND 模式下拉选择、一键测试横幅按钮及实时数据回显；
+  9. **端到端集成测试全覆盖 (`tests/phase2.rs`)**:
+     - `desktop_notification_banners_dnd_governance_and_otp_masking_via_loopback_api` 覆盖横幅派发、内存捕获、Zero-Plaintext 校验、OTP 掩码与高危提升、静音模式、全部免打扰模式过滤与白名单放行、总开关禁用与 Host 403 恶意阻断。
+
+**1.62 相对 1.61(跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环)**
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。

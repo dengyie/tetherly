@@ -4,11 +4,13 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
-use tetherly_core::{NotifyPush, PathKind};
+use tetherly_core::{NotificationUrgency, NotifyPush, PathKind};
 use tetherly_node::{
-    loopback_events_connect, loopback_get, loopback_post, NetworkRefreshReport, NetworkReport,
-    Node, NodeConfig, OverlayConfig, OverlaySource, SseStream, UiEvent,
+    loopback_events_connect, loopback_get, loopback_post, DndMode, MemoryNotifier,
+    NetworkRefreshReport, NetworkReport, Node, NodeConfig, NotifyConfigReport, NotifyTestReport,
+    OverlayConfig, OverlaySource, SseStream, UiEvent,
 };
 
 const OTP_BODY: &str = "【测试】验证码：524681，您正在登录";
@@ -487,6 +489,272 @@ async fn dynamic_network_rescan_and_overlay_events_via_loopback_api() {
         wait_for_network_refreshed(&mut sse, Duration::from_secs(10)).await;
     assert!(d_iface >= 1);
     assert!(d_listen >= 1);
+
+    node.shutdown();
+}
+
+/// ADR-056: Desktop native system notification banners, notification dispatch governance & Do-Not-Disturb closed loop.
+#[tokio::test(flavor = "multi_thread")]
+async fn desktop_notification_banners_dnd_governance_and_otp_masking_via_loopback_api() {
+    let (data_dir, _guard) = temp_dir("notify-banner-test");
+    let node = Node::start(cfg(data_dir.clone(), "notifier-node", overlay_off())).unwrap();
+    let ui_port = node.spawn_ui().await.expect("spawn UI succeeds");
+
+    // Inject mock MemoryNotifier to capture system dispatch without launching external window/process
+    let mem_notifier = MemoryNotifier::default();
+    node.set_notifier(Arc::new(mem_notifier.clone()));
+
+    // Connect to loopback SSE event stream
+    let mut sse = loopback_events_connect(ui_port)
+        .await
+        .expect("connect loopback sse");
+
+    // 1. Initial configuration check: GET /api/notify/config and /api/notify/banner alias
+    let (c_cfg, b_cfg) = loopback_get(ui_port, "/api/notify/config").await.unwrap();
+    assert_eq!(c_cfg, 200);
+    let cfg_rep: NotifyConfigReport = serde_json::from_slice(&b_cfg).unwrap();
+    assert!(cfg_rep.ok);
+    assert!(cfg_rep.config.banners_enabled);
+    assert_eq!(cfg_rep.config.dnd_mode, DndMode::Off);
+    assert!(cfg_rep.config.sound_enabled);
+    assert!(cfg_rep.config.mask_otp);
+    assert!(cfg_rep.config.allow_otp_in_dnd);
+    assert_eq!(cfg_rep.total_dispatched, 0);
+    assert_eq!(cfg_rep.total_suppressed, 0);
+
+    let (c_alias, b_alias) = loopback_get(ui_port, "/api/notify/banner").await.unwrap();
+    assert_eq!(c_alias, 200);
+    let alias_rep: NotifyConfigReport = serde_json::from_slice(&b_alias).unwrap();
+    assert!(alias_rep.ok);
+    assert_eq!(alias_rep.config, cfg_rep.config);
+
+    // 2. Dispatch a standard notification banner via POST /api/notify/test
+    let test_payload = serde_json::json!({
+        "title": "测试会议提醒",
+        "body": "项目例会将在 10 分钟后召开",
+    });
+    let (c_test, b_test) = loopback_post(
+        ui_port,
+        "/api/notify/test",
+        &serde_json::to_vec(&test_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_test, 200);
+    let test_rep: NotifyTestReport = serde_json::from_slice(&b_test).unwrap();
+    assert!(test_rep.ok);
+    assert!(test_rep.sent);
+    assert!(!test_rep.suppressed);
+    assert_eq!(test_rep.title, "测试会议提醒");
+
+    // Verify MemoryNotifier captured the payload with sound and normal urgency
+    let records = mem_notifier.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].title, "测试会议提醒");
+    assert_eq!(records[0].body, "项目例会将在 10 分钟后召开");
+    assert!(records[0].sound);
+    assert_eq!(records[0].urgency, NotificationUrgency::Normal);
+
+    // Verify SSE receives UiEvent::NotificationBannerSent (Zero-Plaintext Invariant: title & metadata only, no body!)
+    let sse_ev1 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse banner sent event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_ev1 {
+        UiEvent::NotificationBannerSent {
+            title,
+            app_name,
+            is_otp,
+            ..
+        } => {
+            assert_eq!(title, "测试会议提醒");
+            assert_eq!(app_name.as_deref(), Some("Tetherly"));
+            assert!(!is_otp);
+        }
+        other => panic!("expected NotificationBannerSent, got: {other:?}"),
+    }
+
+    // 3. Dispatch an OTP notification: verify OTP code masking and Critical urgency
+    let otp_sent = node
+        .dispatch_notification_banner(
+            "银行短信验证码",
+            "您的动态验证码是 739102，切勿泄露给他人",
+            Some("短信"),
+            true,
+        )
+        .expect("dispatch otp banner");
+    assert!(otp_sent);
+
+    let records2 = mem_notifier.records();
+    assert_eq!(records2.len(), 2);
+    assert_eq!(records2[1].title, "银行短信验证码");
+    // Zero-Plaintext: sensitive verification code in body MUST be masked!
+    assert_eq!(records2[1].body, "收到短信验证码 (已在通知中心就绪)");
+    assert_eq!(records2[1].app_name.as_deref(), Some("短信"));
+    assert!(records2[1].sound);
+    assert_eq!(records2[1].urgency, NotificationUrgency::Critical);
+
+    let sse_ev2 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse otp banner sent event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_ev2 {
+        UiEvent::NotificationBannerSent {
+            title,
+            app_name,
+            is_otp,
+            ..
+        } => {
+            assert_eq!(title, "银行短信验证码");
+            assert_eq!(app_name.as_deref(), Some("短信"));
+            assert!(is_otp);
+        }
+        other => panic!("expected NotificationBannerSent is_otp=true, got: {other:?}"),
+    }
+
+    // 4. Update DND mode to "silent": banners still show, but sound is muted
+    let update_silent = serde_json::json!({ "dnd_mode": "silent" });
+    let (c_up1, b_up1) = loopback_post(
+        ui_port,
+        "/api/notify/config",
+        &serde_json::to_vec(&update_silent).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_up1, 200);
+    let up1_rep: NotifyConfigReport = serde_json::from_slice(&b_up1).unwrap();
+    assert_eq!(up1_rep.config.dnd_mode, DndMode::Silent);
+
+    let sse_ev3 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse notify config changed event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_ev3 {
+        UiEvent::NotifyConfigChanged { dnd_mode, .. } => {
+            assert_eq!(dnd_mode, "silent");
+        }
+        other => panic!("expected NotifyConfigChanged, got: {other:?}"),
+    }
+
+    let silent_sent = node
+        .dispatch_notification_banner("邮件到达", "您收到一封新邮件", Some("Mail"), false)
+        .expect("dispatch in silent dnd");
+    assert!(silent_sent);
+    let records3 = mem_notifier.records();
+    assert_eq!(records3.len(), 3);
+    assert_eq!(records3[2].title, "邮件到达");
+    assert!(
+        !records3[2].sound,
+        "silent DND must mute notification sound"
+    );
+
+    // 5. Update DND mode to "all": normal notifications are suppressed, OTP still passes through
+    let update_all = serde_json::json!({ "dnd_mode": "all" });
+    let (c_up2, _) = loopback_post(
+        ui_port,
+        "/api/notify/config",
+        &serde_json::to_vec(&update_all).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_up2, 200);
+
+    // Normal notification in DND All: must be suppressed!
+    let normal_suppressed = node
+        .dispatch_notification_banner("应用更新", "有新版本可用", None, false)
+        .expect("dispatch normal in dnd all");
+    assert!(
+        !normal_suppressed,
+        "normal banner must be suppressed in DND all"
+    );
+    assert_eq!(
+        mem_notifier.records().len(),
+        3,
+        "suppressed banner must not be notified"
+    );
+
+    let rep_supp = node.notify_config_report();
+    assert_eq!(rep_supp.total_suppressed, 1);
+
+    // OTP notification in DND All with allow_otp_in_dnd=true: passes through!
+    let otp_pass = node
+        .dispatch_notification_banner("支付验证码", "验证码 112233", None, true)
+        .expect("dispatch otp in dnd all");
+    assert!(
+        otp_pass,
+        "OTP banner must pass through DND all when allow_otp_in_dnd is true"
+    );
+    let records4 = mem_notifier.records();
+    assert_eq!(records4.len(), 4);
+    assert_eq!(records4[3].title, "支付验证码");
+    assert_eq!(records4[3].body, "收到短信验证码 (已在通知中心就绪)");
+
+    // 6. Disable allow_otp_in_dnd: OTP is now also suppressed in DND All
+    let update_disallow_otp = serde_json::json!({ "allow_otp_in_dnd": false });
+    let (c_up3, _) = loopback_post(
+        ui_port,
+        "/api/notify/config",
+        &serde_json::to_vec(&update_disallow_otp).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_up3, 200);
+
+    let otp_suppressed = node
+        .dispatch_notification_banner("支付验证码2", "验证码 998877", None, true)
+        .expect("dispatch otp when allow_otp_in_dnd=false");
+    assert!(
+        !otp_suppressed,
+        "OTP banner must be suppressed when allow_otp_in_dnd is false"
+    );
+    assert_eq!(mem_notifier.records().len(), 4);
+    assert_eq!(node.notify_config_report().total_suppressed, 2);
+
+    // 7. Test banners_enabled = false
+    let update_disable = serde_json::json!({ "banners_enabled": false });
+    let (c_up4, _) = loopback_post(
+        ui_port,
+        "/api/notify/config",
+        &serde_json::to_vec(&update_disable).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_up4, 200);
+
+    let (c_test_dis, b_test_dis) = loopback_post(
+        ui_port,
+        "/api/notify/test",
+        &serde_json::to_vec(&serde_json::json!({ "title": "Disabled Test" })).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_test_dis, 200);
+    let test_dis_rep: NotifyTestReport = serde_json::from_slice(&b_test_dis).unwrap();
+    assert!(!test_dis_rep.sent);
+    assert!(test_dis_rep.suppressed);
+    assert_eq!(
+        test_dis_rep.suppression_reason.as_deref(),
+        Some("banners_disabled")
+    );
+
+    // 8. Security Red Line: Loopback Isolation Host 403 Forbidden check
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{ui_port}"))
+        .await
+        .expect("connect to ui port");
+    let evil_req = "GET /api/notify/config HTTP/1.1\r\nHost: evil.attacker.com\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
 
     node.shutdown();
 }

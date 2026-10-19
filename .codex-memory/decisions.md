@@ -390,7 +390,14 @@
 - Alternatives considered: (a) 在 Web 端通过 `window.open` 直接访问受限数据目录物理路径：违反浏览器跨域与沙盒安全限制，且本地文件协议不可行；(b) 允许客户端传入任意相对或绝对路径打开文件：严重违反路径穿越防御红线，导致任意文件读取与执行漏洞；(c) 直接在回环控制面使用全局系统 `Command::new("open")` 且不可插拔：导致单元测试在自动化 CI 或无头环境中崩溃或弹出窗口骚扰用户，注入 `Opener` 彻底解耦环境依赖。
 - Impact: 跨端收件箱完整形成「浏览列表 -> 检索过滤 -> 内联预览 -> 流式下载落盘 -> 操作系统默认应用直开 -> 定位文件管理器收件箱目录 -> 安全删除与审计清除」的全链路生命周期闭环。全工作区 274+ 项测试全绿，全端构建与 Clippy/Deny 100% 达标。
 - Rollback trigger: None.
-- Related files: `crates/tetherly-node/src/{runtime.rs,uihttp.rs,events.rs,lib.rs}`, `bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `ui/index.html`, `tests/phase1.rs`, `docs/DEVELOPMENT.md`
+## 2026-10-19 - 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环 (ADR-056)
+- Decision: 彻底解决跨端桌面通知缺失、遗留悬空存根特质与免打扰体验断层痛点。(1) 消除 SSOT §2494 规划中长期悬空的遗留 `Notifier` 接口存根，将其升级为强类型 `NotificationPayload` 与 `NotificationUrgency`（Low / Normal / Critical），彻底贯通六大平台核心特质（`Clock`, `Rng`, `TrustStore`, `Insertor`, `Clip`, `Notifier`）的完整闭环；(2) 实现真正的跨平台原生横幅适配器 `SystemNotifier` 驱动（macOS `osascript` 唤起通知中心横幅并附带声音、Windows PowerShell 调起托盘气泡/Toast、Linux freedesktop `notify-send`），同时提供 `MemoryNotifier` 内存容器供无头 CI、单元测试及集成测试进行零外部进程依赖的断言捕获；(3) 引入强类型 `NotifyBannerConfig`，支持横幅总开关（`banners_enabled`）、三级免打扰模式（`dnd_mode`: `off` / `silent` / `all`）、音效开关（`sound_enabled`）、验证码隐私防窥掩码（`mask_otp`）与紧急验证码免打扰穿透（`allow_otp_in_dnd`）；(4) 传输与通信核心事件流深度接入：在跨端手机推送通知摄入（`Node::ingest_local_push`）与跨端文件流式接收落盘完成（`Node::receive_file_loop`）处接入自动调度；(5) 坚守 Zero-Plaintext 零明文安全红线与事件总线可观测性，新增 `UiEvent::NotificationBannerSent` 与 `UiEvent::NotifyConfigChanged`，仅广播标题、应用名、是否 OTP 标记及时间戳，严禁泄露正文与明文验证码；(6) 回环控制面端点全闭环：新增 `GET/POST /api/notify/config`（别名 `/api/notify/banner`）与 `POST /api/notify/test`，严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离；(7) 双端 CLI 命令行全同构升级：`banner config` 与 `banner test`；(8) Web UI 桌面通知与免打扰控制台；(9) 端到端集成测试全覆盖：`tests/phase2.rs` 增设完整测试，验证横幅派发、内存捕获、Zero-Plaintext 校验、OTP 掩码与高危提升、静音模式、全部免打扰模式过滤与白名单放行、总开关禁用与 Host 403 恶意阻断。
+- Rationale: 平台特质 `Notifier` 长期处于悬空存根状态，跨端推送与文件传输完成后桌面用户缺乏直观的原生操作系统感知。同时，缺乏免打扰治理与声音静音策略会导致用户在开会或专注工作时被频繁打扰，而在公屏展示时明文显示短信验证码又存在极大的隐私泄露风险。
+- Alternatives considered: (a) 引入重量级第三方跨平台通知库：引入巨大依赖树与 C/C++ 动态链接风险，违背轻量纯 Rust / 零 C 依赖架构；(b) 允许通知正文包含完整敏感验证码并在 SSE 广播：严重违反 Zero-Plaintext 铁律；(c) 在 CLI 中复用已有的 `notify` 子命令名：导致 CLI 命令名歧义（既有 `notify` 用于向远端设备推送，新功能用于本地横幅治理），因此独立命名为 `banner` 命令族。
+- Impact: 桌面用户获得与操作系统通知中心无缝融合的原生横幅弹窗，并具备灵活的免打扰与声音控制，彻底消除悬空接口，全系统保持 100% 零明文安全红线。全工作区测试全绿，全端构建与 Clippy/Deny 100% 达标。
+- Rollback trigger: None.
+- Related files: `crates/tetherly-core/src/ports.rs`, `crates/tetherly-node/src/{platform.rs,runtime.rs,events.rs,uihttp.rs,lib.rs}`, `bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `ui/index.html`, `tests/phase2.rs`, `docs/DEVELOPMENT.md`
+
 
 
 
