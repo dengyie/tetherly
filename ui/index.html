@@ -519,6 +519,19 @@
     </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">对端链路质量画像与保活调谐 (Peer Link Quality & Keep-Alive Tuning)</h2>
+        <div style="display:flex;gap:6px">
+          <button id="tuneheartbeatbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">保活配置</button>
+          <button id="refreshlinkbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新链路</button>
+        </div>
+      </div>
+      <div class="hint">滑动窗口多维度量统计（RTT 极差/均值、网络抖动、丢包率）与主动多包探针测速闭环。</div>
+      <div id="heartbeat-summary" class="hint" style="color:var(--text);margin-top:4px">心跳配置: 读取中…</div>
+      <div id="link-quality-msg" class="hint" style="color:var(--accent,#3d9cf0);margin-top:4px"></div>
+      <div id="link-quality-list" style="margin-top:8px"><div class="empty">暂无活跃链路度量</div></div>
+    </section>
+    <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2 style="margin:0">物理寻址路由与静态注入</h2>
         <button id="addroutebtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">+ 注入路由</button>
       </div>
@@ -2252,6 +2265,145 @@ if (addBlockBtn) {
     }
   };
 }
+async function updateLinkQuality() {
+  const box = $("link-quality-list");
+  const hbSummary = $("heartbeat-summary");
+  try {
+    const [linkRes, hbRes] = await Promise.all([
+      fetch("/api/peers/link").then(r => r.ok ? r.json() : null),
+      fetch("/api/peers/heartbeat").then(r => r.ok ? r.json() : null),
+    ]);
+    if (hbSummary && hbRes) {
+      hbSummary.textContent = "保活心跳: 间隔 " + hbRes.interval_secs + "s · 判定离线超时 " + hbRes.deadline_secs + "s";
+    }
+    if (!box) return;
+    if (!linkRes || !linkRes.links || linkRes.links.length === 0) {
+      box.innerHTML = '<div class="empty">暂无活跃链路度量</div>';
+      return;
+    }
+    box.innerHTML = "";
+    for (const p of linkRes.links) {
+      let gradeBadge = "";
+      const g = (p.grade || "").toLowerCase();
+      if (g === "excellent") {
+        gradeBadge = '<span class="badge completed" style="margin-right:6px">极佳 (Excellent)</span>';
+      } else if (g === "good") {
+        gradeBadge = '<span class="badge outbound" style="margin-right:6px">良好 (Good)</span>';
+      } else if (g === "fair") {
+        gradeBadge = '<span class="badge verifying" style="margin-right:6px">一般 (Fair)</span>';
+      } else if (g === "poor") {
+        gradeBadge = '<span class="badge failed" style="margin-right:6px">较差 (Poor)</span>';
+      } else {
+        gradeBadge = '<span class="badge offline" style="margin-right:6px">不可达 (Unreachable)</span>';
+      }
+
+      const statusBadge = p.is_online
+        ? '<span class="badge completed" style="margin-right:6px">在线</span>'
+        : '<span class="badge offline" style="margin-right:6px">离线</span>';
+
+      const peerDisplayName = p.name ? (p.name + (p.alias ? ' ("' + p.alias + '")' : '')) : p.device_id;
+      const rttStr = p.avg_rtt_ms != null
+        ? (p.avg_rtt_ms.toFixed(1) + " ms (极值: " + (p.min_rtt_ms != null ? p.min_rtt_ms : "-") + " ~ " + (p.max_rtt_ms != null ? p.max_rtt_ms : "-") + " ms)")
+        : (p.rtt_ms != null ? (p.rtt_ms + " ms") : "-");
+      const jitterStr = p.jitter_ms != null ? (p.jitter_ms.toFixed(1) + " ms") : "-";
+      const lossStr = p.packet_loss_rate != null ? (p.packet_loss_rate.toFixed(1) + "%") : "0.0%";
+      const lossBadgeCls = (p.packet_loss_rate && p.packet_loss_rate > 10) ? 'badge failed' : ((p.packet_loss_rate && p.packet_loss_rate > 0) ? 'badge verifying' : 'badge completed');
+
+      const card = el('<div class="card" style="flex-direction:column;align-items:stretch;gap:6px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center">' +
+          '<div class="title">' + statusBadge + gradeBadge + '<span>' + peerDisplayName + '</span></div>' +
+          '<div class="row" style="margin:0"><button class="ghost probe-btn" type="button" style="padding:2px 8px;font-size:12px">多包探针测速</button></div>' +
+        '</div>' +
+        '<div class="meta" style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:12px;background:rgba(0,0,0,0.15);padding:6px 8px;border-radius:4px">' +
+          '<div>平均 RTT: <span style="color:var(--text);font-family:ui-monospace,Consolas,monospace">' + rttStr + '</span></div>' +
+          '<div>网络抖动 (Jitter): <span style="color:var(--text);font-family:ui-monospace,Consolas,monospace">' + jitterStr + '</span></div>' +
+          '<div>丢包率: <span class="' + lossBadgeCls + '" style="font-family:ui-monospace,Consolas,monospace">' + lossStr + '</span> (发 ' + p.pings_sent + ' / 收 ' + p.pongs_recv + ')</div>' +
+          '<div>设备标识: <span style="font-family:ui-monospace,Consolas,monospace">' + p.device_id + '</span></div>' +
+        '</div>' +
+      '</div>');
+
+      const probeBtn = card.querySelector(".probe-btn");
+      if (probeBtn) {
+        probeBtn.onclick = async () => {
+          probeBtn.disabled = true;
+          probeBtn.textContent = "探针探测中…";
+          const msg = $("link-quality-msg");
+          if (msg) msg.textContent = "正在向 " + p.device_id + " 发送 5 轮心跳探针测速包…";
+          try {
+            const probeRes = await fetch("/api/peers/link/probe?peer=" + encodeURIComponent(p.device_id) + "&count=5&interval_ms=100", {
+              method: "POST"
+            }).then(r => r.json());
+            if (probeRes && probeRes.peer) {
+              const pLoss = (probeRes.packet_loss_rate != null ? probeRes.packet_loss_rate.toFixed(1) : "0.0") + "%";
+              const pAvg = probeRes.avg_rtt_ms != null ? (probeRes.avg_rtt_ms.toFixed(1) + "ms") : "-";
+              const pJit = probeRes.jitter_ms != null ? (probeRes.jitter_ms.toFixed(1) + "ms") : "-";
+              if (msg) msg.textContent = "探针探测完成: " + probeRes.peer + " (丢包=" + pLoss + ", 平均 RTT=" + pAvg + ", 抖动=" + pJit + ", 等级=" + probeRes.grade + ")";
+              updateLinkQuality();
+            } else {
+              if (msg) msg.textContent = "探针探测失败: " + (probeRes.error || "未知错误");
+            }
+          } catch (err) {
+            if (msg) msg.textContent = "探针请求异常: " + err;
+          } finally {
+            probeBtn.disabled = false;
+            probeBtn.textContent = "多包探针测速";
+          }
+        };
+      }
+      box.appendChild(card);
+    }
+  } catch (e) {
+    if (box) box.innerHTML = '<div class="empty">读取链路质量失败</div>';
+  }
+}
+const refreshLinkBtn = $("refreshlinkbtn");
+if (refreshLinkBtn) {
+  refreshLinkBtn.onclick = () => {
+    updateLinkQuality();
+  };
+}
+const tuneHbBtn = $("tuneheartbeatbtn");
+if (tuneHbBtn) {
+  tuneHbBtn.onclick = async () => {
+    let currInterval = 30;
+    let currDeadline = 90;
+    try {
+      const hb = await fetch("/api/peers/heartbeat").then(r => r.json());
+      if (hb && hb.interval_secs) {
+        currInterval = hb.interval_secs;
+        currDeadline = hb.deadline_secs;
+      }
+    } catch (e) {}
+    const newInt = prompt("输入保活心跳发送间隔 (秒，推荐 5-120):", currInterval);
+    if (newInt == null || !newInt.trim()) return;
+    const interval_secs = parseInt(newInt.trim(), 10);
+    if (isNaN(interval_secs) || interval_secs < 1) {
+      alert("心跳间隔必须为大于等于 1 的正整数");
+      return;
+    }
+    const newDead = prompt("输入失活判定超时 (秒，需大于心跳间隔):", currDeadline);
+    if (newDead == null || !newDead.trim()) return;
+    const deadline_secs = parseInt(newDead.trim(), 10);
+    if (isNaN(deadline_secs) || deadline_secs <= interval_secs) {
+      alert("失活判定超时必须大于心跳间隔");
+      return;
+    }
+    try {
+      const res = await fetch("/api/peers/heartbeat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ interval_secs, deadline_secs })
+      }).then(r => r.json());
+      if (res && res.interval_secs) {
+        const msg = $("link-quality-msg");
+        if (msg) msg.textContent = "保活配置调谐成功: 心跳=" + res.interval_secs + "s, 失活=" + res.deadline_secs + "s";
+        updateLinkQuality();
+      }
+    } catch (err) {
+      alert("修改保活配置失败: " + err);
+    }
+  };
+}
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
   refreshPin();
@@ -2437,14 +2589,22 @@ function setupEventSource() {
 								            desc = "桌面通知已派发: " + ev.title + (ev.app_name ? (" (" + ev.app_name + ")") : "") + (ev.is_otp ? " [验证码]" : "");
 								            updateNotifyBanner();
 								          }
-									          else if (ev.kind === "notify_config_changed") {
-									            desc = "通知配置更新: 横幅=" + (ev.banners_enabled ? "开" : "关") + ", 免打扰=" + ev.dnd_mode;
-									            updateNotifyBanner();
-									          }
-									          else if (ev.kind === "system_metrics_refreshed") {
-									            desc = "系统度量刷新: PID " + ev.pid + ", RSS " + formatBytes(ev.rss_bytes) + ", 线程 " + ev.thread_count + ", CPU " + ev.cpu_time_ms + "ms";
-									            updateSysMetrics();
-									          }
+										          else if (ev.kind === "notify_config_changed") {
+										            desc = "通知配置更新: 横幅=" + (ev.banners_enabled ? "开" : "关") + ", 免打扰=" + ev.dnd_mode;
+										            updateNotifyBanner();
+										          }
+										          else if (ev.kind === "system_metrics_refreshed") {
+										            desc = "系统度量刷新: PID " + ev.pid + ", RSS " + formatBytes(ev.rss_bytes) + ", 线程 " + ev.thread_count + ", CPU " + ev.cpu_time_ms + "ms";
+										            updateSysMetrics();
+										          }
+										          else if (ev.kind === "peer_link_quality_refreshed") {
+										            desc = "链路质量刷新: " + ev.peer + " RTT=" + (ev.avg_rtt_ms != null ? ev.avg_rtt_ms.toFixed(1) : "-") + "ms, 抖动=" + (ev.jitter_ms != null ? ev.jitter_ms.toFixed(1) : "-") + "ms, 丢包=" + (ev.packet_loss_rate != null ? ev.packet_loss_rate.toFixed(1) : "-") + "% (" + ev.grade + ")";
+										            updateLinkQuality();
+										          }
+										          else if (ev.kind === "heartbeat_config_changed") {
+										            desc = "保活配置更新: 间隔=" + ev.interval_secs + "s, 失活=" + ev.deadline_secs + "s";
+										            updateLinkQuality();
+										          }
 			          $("ev-last").textContent = "[" + t + "] " + desc;
 		        }
 		      } catch (err) {
@@ -2495,8 +2655,10 @@ function setupEventSource() {
 						setInterval(updateDiscovery, 3000);
 							updateNotifyBanner();
 							setInterval(updateNotifyBanner, 3000);
-							updateSysMetrics();
-							setInterval(updateSysMetrics, 3000);
-	</script>
+								updateSysMetrics();
+								setInterval(updateSysMetrics, 3000);
+								updateLinkQuality();
+								setInterval(updateLinkQuality, 3000);
+		</script>
 </body>
 </html>

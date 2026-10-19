@@ -719,6 +719,26 @@ struct RouteAddBody {
     addr: String,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct PeerLinkProbeBody {
+    #[serde(default)]
+    peer: Option<String>,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    count: Option<usize>,
+    #[serde(default)]
+    interval_ms: Option<u64>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct HeartbeatConfigBody {
+    #[serde(default)]
+    interval_secs: Option<u64>,
+    #[serde(default)]
+    deadline_secs: Option<u64>,
+}
+
 fn percent_decode(s: &str) -> String {
     let mut bytes = Vec::with_capacity(s.len());
     let mut iter = s.as_bytes().iter().copied();
@@ -1035,6 +1055,93 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             };
             match node.ping_peer(&target).await {
                 Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/peers/link") | ("GET", "/api/link") => json_ok(&node.link_quality_report()),
+        ("POST", "/api/peers/link/probe") | ("POST", "/api/link/probe") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<PeerLinkProbeBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<PeerLinkProbeBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json"),
+                }
+            };
+            let target_query = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone().or_else(|| b.device_id.clone()))
+                .or_else(|| qmap.get("peer").cloned())
+                .or_else(|| qmap.get("device_id").cloned())
+                .unwrap_or_default();
+            let count = parsed_body
+                .as_ref()
+                .and_then(|b| b.count)
+                .or_else(|| qmap.get("count").and_then(|s| s.parse().ok()))
+                .unwrap_or(5);
+            let interval_ms = parsed_body
+                .as_ref()
+                .and_then(|b| b.interval_ms)
+                .or_else(|| qmap.get("interval_ms").and_then(|s| s.parse().ok()))
+                .unwrap_or(100);
+
+            let mut peers = node.live_peers();
+            peers.sort_by_key(|p| p.device_id.to_string());
+            let target = match target_query.as_str().trim() {
+                s if !s.is_empty() => match node.resolve_peer(s) {
+                    Ok(id) => {
+                        if peers.iter().any(|p| p.device_id == id) {
+                            id
+                        } else {
+                            return err(400, "peer is not connected");
+                        }
+                    }
+                    Err(e) => return err(400, &format!("bad peer id: {e}")),
+                },
+                _ => match peers.len() {
+                    0 => return err(400, "no connected peer"),
+                    1 => peers[0].device_id.clone(),
+                    _ => return err(400, "multiple peers connected; pass peer (tdev_…)"),
+                },
+            };
+            match node
+                .probe_peer_link(target.as_str(), count, interval_ms)
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/peers/heartbeat") | ("GET", "/api/heartbeat") => {
+            json_ok(&node.heartbeat_config())
+        }
+        ("POST", "/api/peers/heartbeat")
+        | ("POST", "/api/heartbeat")
+        | ("PUT", "/api/peers/heartbeat")
+        | ("PUT", "/api/heartbeat") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<HeartbeatConfigBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<HeartbeatConfigBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json"),
+                }
+            };
+            let interval_secs = parsed_body
+                .as_ref()
+                .and_then(|b| b.interval_secs)
+                .or_else(|| qmap.get("interval_secs").and_then(|s| s.parse().ok()));
+            let deadline_secs = parsed_body
+                .as_ref()
+                .and_then(|b| b.deadline_secs)
+                .or_else(|| qmap.get("deadline_secs").and_then(|s| s.parse().ok()));
+            if interval_secs.is_none() && deadline_secs.is_none() {
+                return err(400, "interval_secs or deadline_secs required");
+            }
+            match node.update_heartbeat_config(interval_secs, deadline_secs) {
+                Ok(cfg) => json_ok(&cfg),
                 Err(e) => err(400, &e.to_string()),
             }
         }

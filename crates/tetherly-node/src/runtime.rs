@@ -17,7 +17,7 @@ use std::time::Duration;
 use tetherly_core::frame::{
     ping, pong, CapsUpdate, ClipSet, FileDone, FileOffer, InnerFrame, NotifyPush, NotifyReply,
 };
-use tetherly_core::liveness::{Liveness, SESSION_HEARTBEAT};
+use tetherly_core::liveness::Liveness;
 use tetherly_core::pin::{format_pin, generate_pin};
 use tetherly_core::ports::{Clip, Clock, Rng, SystemClock};
 use tetherly_core::session::LockoutTable;
@@ -498,6 +498,195 @@ pub fn format_memory_bytes(bytes: u64) -> String {
         format!("{:.2} KiB", bytes as f64 / KIB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+/// Overall assessment grade of peer connection quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkGrade {
+    Excellent,
+    Good,
+    Fair,
+    Poor,
+    Unreachable,
+}
+
+impl LinkGrade {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Excellent => "excellent",
+            Self::Good => "good",
+            Self::Fair => "fair",
+            Self::Poor => "poor",
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+
+/// Dynamic heartbeat keepalive configuration.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HeartbeatConfig {
+    pub interval_secs: u64,
+    pub deadline_secs: u64,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: 15,
+            deadline_secs: 45,
+        }
+    }
+}
+
+/// Link quality telemetry profile for a peer connection.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PeerLinkQualityDto {
+    pub device_id: String,
+    pub name: String,
+    pub addr: String,
+    pub is_online: bool,
+    pub last_seen_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_rtt_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_rtt_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_rtt_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jitter_ms: Option<f64>,
+    pub pings_sent: u64,
+    pub pongs_recv: u64,
+    pub packet_loss_rate: f64,
+    pub grade: LinkGrade,
+    pub samples_count: usize,
+    pub connected_uptime_secs: u64,
+}
+
+/// Overall link quality and heartbeat status report.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LinkQualityReport {
+    pub ok: bool,
+    pub heartbeat: HeartbeatConfig,
+    pub total_peers: usize,
+    pub online_peers: usize,
+    pub links: Vec<PeerLinkQualityDto>,
+}
+
+/// Result of an on-demand multi-ping probe.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LinkProbeReport {
+    pub ok: bool,
+    pub peer: String,
+    pub count: usize,
+    pub sent: usize,
+    pub received: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_rtt_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_rtt_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_rtt_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jitter_ms: Option<f64>,
+    pub packet_loss_rate: f64,
+    pub samples: Vec<u64>,
+    pub grade: LinkGrade,
+}
+
+/// Sliding window metrics tracker for an active peer link.
+#[derive(Debug, Clone)]
+pub struct PeerLinkTracker {
+    pub pings_sent: u64,
+    pub pongs_recv: u64,
+    pub recent_rtts: std::collections::VecDeque<u64>,
+    pub max_samples: usize,
+    pub connected_at_ms: u64,
+    pub last_ping_sent_ms: Option<u64>,
+}
+
+impl PeerLinkTracker {
+    pub fn new(now_ms: u64) -> Self {
+        Self {
+            pings_sent: 0,
+            pongs_recv: 0,
+            recent_rtts: std::collections::VecDeque::with_capacity(32),
+            max_samples: 32,
+            connected_at_ms: now_ms,
+            last_ping_sent_ms: None,
+        }
+    }
+
+    pub fn record_ping_sent(&mut self, now_ms: u64) {
+        self.pings_sent = self.pings_sent.saturating_add(1);
+        self.last_ping_sent_ms = Some(now_ms);
+    }
+
+    pub fn record_pong_recv(&mut self, rtt_ms: u64) {
+        self.pongs_recv = self.pongs_recv.saturating_add(1);
+        if self.recent_rtts.len() >= self.max_samples {
+            self.recent_rtts.pop_front();
+        }
+        self.recent_rtts.push_back(rtt_ms);
+    }
+
+    pub fn min_rtt(&self) -> Option<u64> {
+        self.recent_rtts.iter().copied().min()
+    }
+
+    pub fn max_rtt(&self) -> Option<u64> {
+        self.recent_rtts.iter().copied().max()
+    }
+
+    pub fn avg_rtt(&self) -> Option<f64> {
+        if self.recent_rtts.is_empty() {
+            None
+        } else {
+            let sum: u64 = self.recent_rtts.iter().sum();
+            Some((sum as f64 / self.recent_rtts.len() as f64 * 100.0).round() / 100.0)
+        }
+    }
+
+    pub fn jitter_ms(&self) -> Option<f64> {
+        if self.recent_rtts.len() < 2 {
+            return None;
+        }
+        let total_diff: f64 = self
+            .recent_rtts
+            .iter()
+            .zip(self.recent_rtts.iter().skip(1))
+            .map(|(a, b)| (*b as f64 - *a as f64).abs())
+            .sum();
+        let count = (self.recent_rtts.len() - 1) as f64;
+        Some(((total_diff / count) * 100.0).round() / 100.0)
+    }
+
+    pub fn packet_loss_rate(&self) -> f64 {
+        if self.pings_sent == 0 || self.pongs_recv >= self.pings_sent {
+            0.0
+        } else {
+            let lost = self.pings_sent.saturating_sub(self.pongs_recv);
+            let rate = (lost as f64 / self.pings_sent as f64) * 100.0;
+            (rate * 10.0).round() / 10.0
+        }
+    }
+
+    pub fn evaluate_grade(&self, is_online: bool) -> LinkGrade {
+        if !is_online {
+            return LinkGrade::Unreachable;
+        }
+        let loss = self.packet_loss_rate();
+        match self.avg_rtt() {
+            Some(avg) if avg < 25.0 && loss < 1.0 => LinkGrade::Excellent,
+            Some(avg) if avg < 100.0 && loss < 5.0 => LinkGrade::Good,
+            Some(avg) if avg < 300.0 && loss < 15.0 => LinkGrade::Fair,
+            Some(_) => LinkGrade::Poor,
+            None if self.pings_sent > 0 && self.pongs_recv == 0 => LinkGrade::Poor,
+            None => LinkGrade::Good,
+        }
     }
 }
 
@@ -1241,6 +1430,8 @@ struct Shared {
     notify_dispatched_count: AtomicU64,
     notify_suppressed_count: AtomicU64,
     sys_probe: Mutex<Arc<dyn crate::platform::SysProbe>>,
+    heartbeat_config: Mutex<HeartbeatConfig>,
+    link_trackers: Mutex<HashMap<DeviceId, PeerLinkTracker>>,
 }
 
 #[derive(Clone)]
@@ -1454,6 +1645,8 @@ impl Node {
             notify_dispatched_count: AtomicU64::new(0),
             notify_suppressed_count: AtomicU64::new(0),
             sys_probe: Mutex::new(Arc::new(crate::platform::PlatformSysProbe)),
+            heartbeat_config: Mutex::new(HeartbeatConfig::default()),
+            link_trackers: Mutex::new(HashMap::new()),
         });
         Ok(Self { shared })
     }
@@ -4210,6 +4403,13 @@ impl Node {
         }
 
         let now_ms = self.shared.clock.unix_ms();
+        {
+            let mut trackers = self.shared.link_trackers.lock().expect("link_trackers");
+            trackers
+                .entry(peer_id.clone())
+                .or_insert_with(|| PeerLinkTracker::new(now_ms))
+                .record_ping_sent(now_ms);
+        }
         if let Err(e) = self.send_to(peer_id, ping(now_ms)).await {
             let mut pw = self.shared.ping_waiters.lock().expect("ping_waiters");
             if let Some(list) = pw.get_mut(peer_id) {
@@ -4235,6 +4435,236 @@ impl Node {
                 Err(CoreError::PingTimeout)
             }
         }
+    }
+
+    /// Read the current heartbeat keepalive configuration.
+    pub fn heartbeat_config(&self) -> HeartbeatConfig {
+        self.shared
+            .heartbeat_config
+            .lock()
+            .expect("heartbeat_config")
+            .clone()
+    }
+
+    /// Dynamically update the heartbeat keepalive interval and deadline.
+    pub fn update_heartbeat_config(
+        &self,
+        interval_secs: Option<u64>,
+        deadline_secs: Option<u64>,
+    ) -> Result<HeartbeatConfig, CoreError> {
+        let mut cfg = self
+            .shared
+            .heartbeat_config
+            .lock()
+            .expect("heartbeat_config");
+        if let Some(i) = interval_secs {
+            if !(1..=3600).contains(&i) {
+                return Err(CoreError::Json(
+                    "heartbeat interval must be between 1 and 3600 seconds".into(),
+                ));
+            }
+            cfg.interval_secs = i;
+        }
+        if let Some(d) = deadline_secs {
+            if d <= cfg.interval_secs || d > 86400 {
+                return Err(CoreError::Json(
+                    "deadline must be strictly greater than heartbeat interval and <= 86400 seconds".into(),
+                ));
+            }
+            cfg.deadline_secs = d;
+        } else if cfg.deadline_secs <= cfg.interval_secs {
+            cfg.deadline_secs = cfg.interval_secs * 3;
+        }
+
+        let updated = cfg.clone();
+        drop(cfg);
+
+        self.emit(UiEvent::HeartbeatConfigChanged {
+            interval_secs: updated.interval_secs,
+            deadline_secs: updated.deadline_secs,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        });
+
+        info!(
+            interval = updated.interval_secs,
+            deadline = updated.deadline_secs,
+            "updated heartbeat configuration"
+        );
+        Ok(updated)
+    }
+
+    /// Generate comprehensive link quality and heartbeat status report for all peers.
+    pub fn link_quality_report(&self) -> LinkQualityReport {
+        let heartbeat = self.heartbeat_config();
+        let now_ms = self.shared.clock.unix_ms();
+
+        let live_map = self.shared.live.lock().expect("live");
+        let trackers_map = self.shared.link_trackers.lock().expect("link_trackers");
+        let trusted_list = self.trusted();
+
+        let mut links = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // 1. Process active connected peers
+        for (peer_id, live) in live_map.iter() {
+            seen.insert(peer_id.clone());
+            let (tracker, connected_uptime) = if let Some(t) = trackers_map.get(peer_id) {
+                let uptime = now_ms.saturating_sub(t.connected_at_ms) / 1000;
+                (t.clone(), uptime)
+            } else {
+                (PeerLinkTracker::new(now_ms), 0)
+            };
+
+            links.push(PeerLinkQualityDto {
+                device_id: peer_id.to_string(),
+                name: live.name.clone(),
+                addr: live.addr.to_string(),
+                is_online: true,
+                last_seen_ms: live.last_seen_ms,
+                rtt_ms: live.rtt_ms,
+                min_rtt_ms: tracker.min_rtt(),
+                max_rtt_ms: tracker.max_rtt(),
+                avg_rtt_ms: tracker.avg_rtt(),
+                jitter_ms: tracker.jitter_ms(),
+                pings_sent: tracker.pings_sent,
+                pongs_recv: tracker.pongs_recv,
+                packet_loss_rate: tracker.packet_loss_rate(),
+                grade: tracker.evaluate_grade(true),
+                samples_count: tracker.recent_rtts.len(),
+                connected_uptime_secs: connected_uptime,
+            });
+        }
+
+        // 2. Retain historical quality for trusted peers currently offline
+        for trusted in &trusted_list {
+            if !seen.contains(&trusted.device_id) {
+                if let Some(t) = trackers_map.get(&trusted.device_id) {
+                    seen.insert(trusted.device_id.clone());
+                    links.push(PeerLinkQualityDto {
+                        device_id: trusted.device_id.to_string(),
+                        name: trusted.alias.clone(),
+                        addr: "disconnected".to_string(),
+                        is_online: false,
+                        last_seen_ms: t.last_ping_sent_ms.unwrap_or(0),
+                        rtt_ms: None,
+                        min_rtt_ms: t.min_rtt(),
+                        max_rtt_ms: t.max_rtt(),
+                        avg_rtt_ms: t.avg_rtt(),
+                        jitter_ms: t.jitter_ms(),
+                        pings_sent: t.pings_sent,
+                        pongs_recv: t.pongs_recv,
+                        packet_loss_rate: 100.0,
+                        grade: LinkGrade::Unreachable,
+                        samples_count: t.recent_rtts.len(),
+                        connected_uptime_secs: 0,
+                    });
+                }
+            }
+        }
+
+        links.sort_by(|a, b| {
+            b.is_online
+                .cmp(&a.is_online)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.device_id.cmp(&b.device_id))
+        });
+
+        let total_peers = links.len();
+        let online_peers = links.iter().filter(|l| l.is_online).count();
+
+        LinkQualityReport {
+            ok: true,
+            heartbeat,
+            total_peers,
+            online_peers,
+            links,
+        }
+    }
+
+    /// Perform an on-demand multi-packet ping burst to accurately measure link quality.
+    pub async fn probe_peer_link(
+        &self,
+        peer_target: &str,
+        count: usize,
+        interval_ms: u64,
+    ) -> Result<LinkProbeReport, CoreError> {
+        let peer_id = self.resolve_peer(peer_target)?;
+        let count = count.clamp(1, 20);
+        let interval_ms = interval_ms.clamp(10, 1000);
+
+        // Verify peer is actually online before probing
+        {
+            let live = self.shared.live.lock().expect("live");
+            if !live.contains_key(&peer_id) {
+                return Err(CoreError::NoConnectedPeer);
+            }
+        }
+
+        let mut samples = Vec::new();
+        let mut sent = 0;
+        let mut received = 0;
+
+        for _ in 0..count {
+            sent += 1;
+            if let Ok(rep) = self.ping_peer(&peer_id).await {
+                received += 1;
+                samples.push(rep.rtt_ms);
+            }
+            if sent < count {
+                tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+            }
+        }
+
+        let min_rtt_ms = samples.iter().copied().min();
+        let max_rtt_ms = samples.iter().copied().max();
+        let avg_rtt_ms = if samples.is_empty() {
+            None
+        } else {
+            let sum: u64 = samples.iter().sum();
+            Some((sum as f64 / samples.len() as f64 * 100.0).round() / 100.0)
+        };
+        let jitter_ms = if samples.len() >= 2 {
+            let diff_sum: f64 = samples
+                .iter()
+                .zip(samples.iter().skip(1))
+                .map(|(a, b)| (*b as f64 - *a as f64).abs())
+                .sum();
+            Some(((diff_sum / (samples.len() - 1) as f64) * 100.0).round() / 100.0)
+        } else {
+            None
+        };
+
+        let packet_loss_rate = if sent == 0 {
+            0.0
+        } else {
+            let lost = sent.saturating_sub(received);
+            let rate = (lost as f64 / sent as f64) * 100.0;
+            (rate * 10.0).round() / 10.0
+        };
+
+        let grade = match avg_rtt_ms {
+            Some(avg) if avg < 25.0 && packet_loss_rate < 1.0 => LinkGrade::Excellent,
+            Some(avg) if avg < 100.0 && packet_loss_rate < 5.0 => LinkGrade::Good,
+            Some(avg) if avg < 300.0 && packet_loss_rate < 15.0 => LinkGrade::Fair,
+            Some(_) => LinkGrade::Poor,
+            None if sent > 0 && received == 0 => LinkGrade::Unreachable,
+            None => LinkGrade::Poor,
+        };
+
+        Ok(LinkProbeReport {
+            ok: true,
+            peer: peer_id.to_string(),
+            count,
+            sent,
+            received,
+            min_rtt_ms,
+            max_rtt_ms,
+            avg_rtt_ms,
+            jitter_ms,
+            packet_loss_rate,
+            samples,
+            grade,
+        })
     }
 
     pub fn clone_handle(&self) -> Self {
@@ -5197,17 +5627,34 @@ impl Node {
         let keep_tx = tx.clone();
         let keep_clock = clock.clone();
         let mut keep_stop = self.shared.shutdown.subscribe();
+        let keep_node = self.clone_handle();
+        let keep_peer = peer_id.clone();
         tokio::spawn(async move {
             loop {
+                let interval_secs = keep_node
+                    .shared
+                    .heartbeat_config
+                    .lock()
+                    .expect("heartbeat")
+                    .interval_secs
+                    .max(1);
                 tokio::select! {
                     _ = keep_stop.changed() => {
                         if *keep_stop.borrow() {
                             break;
                         }
                     }
-                    _ = tokio::time::sleep(SESSION_HEARTBEAT) => {
-                        match keep_tx.try_send(ping(keep_clock.unix_ms())) {
-                            Ok(()) => {}
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {
+                        let now_ms = keep_clock.unix_ms();
+                        match keep_tx.try_send(ping(now_ms)) {
+                            Ok(()) => {
+                                let mut trackers =
+                                    keep_node.shared.link_trackers.lock().expect("link_trackers");
+                                trackers
+                                    .entry(keep_peer.clone())
+                                    .or_insert_with(|| PeerLinkTracker::new(now_ms))
+                                    .record_ping_sent(now_ms);
+                            }
                             // A full queue is backpressure, not a dead peer.
                             Err(mpsc::error::TrySendError::Full(_)) => {}
                             Err(mpsc::error::TrySendError::Closed(_)) => break,
@@ -5218,8 +5665,23 @@ impl Node {
         });
         self.shared.telemetry.record_session_established();
         tokio::spawn(async move {
-            let mut live = Liveness::new(clock.unix_ms());
+            let hb = node.shared.heartbeat_config.lock().expect("hb").clone();
+            let mut live = Liveness::with(
+                std::time::Duration::from_secs(hb.interval_secs.max(1)),
+                std::time::Duration::from_secs(hb.deadline_secs.max(hb.interval_secs)),
+                clock.unix_ms(),
+            );
             loop {
+                let current_deadline = node
+                    .shared
+                    .heartbeat_config
+                    .lock()
+                    .expect("hb")
+                    .deadline_secs
+                    .max(1);
+                if live.deadline().as_secs() != current_deadline {
+                    live.set_deadline(std::time::Duration::from_secs(current_deadline));
+                }
                 tokio::select! {
                     _ = stop.changed() => {
                         if *stop.borrow() {
@@ -5350,6 +5812,31 @@ impl Node {
                     device_id: peer.to_string(),
                     rtt_ms: rtt,
                 });
+                let quality_event = {
+                    let mut trackers = self.shared.link_trackers.lock().expect("link_trackers");
+                    let tracker = trackers
+                        .entry(peer.clone())
+                        .or_insert_with(|| PeerLinkTracker::new(now_ms));
+                    tracker.record_pong_recv(rtt);
+                    let min_rtt_ms = tracker.min_rtt();
+                    let max_rtt_ms = tracker.max_rtt();
+                    let avg_rtt_ms = tracker.avg_rtt();
+                    let jitter_ms = tracker.jitter_ms();
+                    let packet_loss_rate = tracker.packet_loss_rate();
+                    let grade = tracker.evaluate_grade(true);
+                    UiEvent::PeerLinkQualityRefreshed {
+                        device_id: peer.to_string(),
+                        rtt_ms: rtt,
+                        min_rtt_ms,
+                        max_rtt_ms,
+                        avg_rtt_ms,
+                        jitter_ms,
+                        packet_loss_rate,
+                        grade: format!("{:?}", grade).to_lowercase(),
+                        timestamp_ms: now_ms,
+                    }
+                };
+                self.emit(quality_event);
                 let waiters = {
                     let mut pw = self.shared.ping_waiters.lock().expect("ping_waiters");
                     pw.remove(peer)

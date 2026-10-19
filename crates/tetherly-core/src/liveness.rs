@@ -53,6 +53,21 @@ impl Liveness {
         Duration::from_millis(self.heartbeat_ms)
     }
 
+    /// Maximum silent duration before the session is declared dead.
+    pub fn deadline(&self) -> Duration {
+        Duration::from_millis(self.deadline_ms)
+    }
+
+    /// Dynamically update the heartbeat interval.
+    pub fn set_heartbeat(&mut self, heartbeat: Duration) {
+        self.heartbeat_ms = heartbeat.as_millis() as u64;
+    }
+
+    /// Dynamically update the liveness deadline.
+    pub fn set_deadline(&mut self, deadline: Duration) {
+        self.deadline_ms = deadline.as_millis() as u64;
+    }
+
     pub fn last_inbound_ms(&self) -> u64 {
         self.last_inbound_ms
     }
@@ -100,5 +115,20 @@ mod tests {
         l.on_inbound(1_000_000);
         // A clock that jumped backwards must not be read as a long silence.
         assert!(!l.is_expired(500_000));
+    }
+
+    #[test]
+    fn dynamic_heartbeat_and_deadline_tuning() {
+        let mut l = Liveness::new(10_000);
+        assert_eq!(l.heartbeat(), Duration::from_secs(15));
+        assert_eq!(l.deadline(), Duration::from_secs(45));
+
+        l.set_heartbeat(Duration::from_secs(5));
+        l.set_deadline(Duration::from_secs(15));
+        assert_eq!(l.heartbeat(), Duration::from_secs(5));
+        assert_eq!(l.deadline(), Duration::from_secs(15));
+
+        assert!(!l.is_expired(10_000 + 14_999));
+        assert!(l.is_expired(10_000 + 15_000));
     }
 }

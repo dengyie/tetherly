@@ -6271,6 +6271,221 @@ async fn node_system_telemetry_probe_injection_and_metrics_via_loopback_api() {
     node.shutdown();
 }
 
+/// ADR-058: Peer connection session keep-alive heartbeat governance, dynamic ping interval tuning,
+/// multi-dimensional link quality profiling (min/max/avg RTT, jitter, loss rate) and active burst probing.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_link_quality_profiling_keepalive_tuning_and_burst_probe_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to SSE stream on host UI
+    let mut sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("SSE connects");
+
+    // 2. Query default heartbeat config via GET /api/peers/heartbeat and alias /api/heartbeat
+    let (code_hb, body_hb) = tetherly_node::loopback_get(host_ui, "/api/peers/heartbeat")
+        .await
+        .unwrap();
+    assert_eq!(code_hb, 200);
+    let hb_cfg: tetherly_node::HeartbeatConfig = serde_json::from_slice(&body_hb).unwrap();
+    assert_eq!(hb_cfg.interval_secs, 15);
+    assert_eq!(hb_cfg.deadline_secs, 45);
+
+    let (code_hb_alias, _) = tetherly_node::loopback_get(host_ui, "/api/heartbeat")
+        .await
+        .unwrap();
+    assert_eq!(code_hb_alias, 200);
+
+    // 3. Update heartbeat config via POST /api/peers/heartbeat
+    let update_hb = serde_json::json!({
+        "interval_secs": 20,
+        "deadline_secs": 60,
+    });
+    let (code_hb_post, body_hb_post) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/heartbeat",
+        &serde_json::to_vec(&update_hb).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_hb_post, 200);
+    let updated_cfg: tetherly_node::HeartbeatConfig =
+        serde_json::from_slice(&body_hb_post).unwrap();
+    assert_eq!(updated_cfg.interval_secs, 20);
+    assert_eq!(updated_cfg.deadline_secs, 60);
+
+    // Verify SSE receives HeartbeatConfigChanged
+    let mut saw_hb_event = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(UiEvent::HeartbeatConfigChanged {
+            interval_secs,
+            deadline_secs,
+            ..
+        }))) = tokio::time::timeout(Duration::from_millis(500), sse.next_ui_event()).await
+        {
+            if interval_secs == 20 && deadline_secs == 60 {
+                saw_hb_event = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_hb_event, "must emit HeartbeatConfigChanged over SSE");
+
+    // 4. Negative validation on heartbeat config:
+    // a. deadline <= interval returns 400
+    let bad_hb_1 = serde_json::json!({
+        "interval_secs": 30,
+        "deadline_secs": 30,
+    });
+    let (code_bad_1, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/heartbeat",
+        &serde_json::to_vec(&bad_hb_1).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_bad_1, 400);
+
+    // b. interval == 0 returns 400
+    let bad_hb_2 = serde_json::json!({
+        "interval_secs": 0,
+        "deadline_secs": 30,
+    });
+    let (code_bad_2, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/heartbeat",
+        &serde_json::to_vec(&bad_hb_2).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_bad_2, 400);
+
+    // 5. Query initial link quality report via GET /api/peers/link
+    let (code_link, body_link) = tetherly_node::loopback_get(host_ui, "/api/peers/link")
+        .await
+        .unwrap();
+    assert_eq!(code_link, 200);
+    let link_rep: tetherly_node::LinkQualityReport = serde_json::from_slice(&body_link).unwrap();
+    assert_eq!(link_rep.links.len(), 1);
+    assert_eq!(link_rep.links[0].device_id, peer_id.as_str());
+    assert!(link_rep.links[0].is_online);
+
+    // 6. Run on-demand multi-packet burst probe via POST /api/peers/link/probe
+    let probe_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "count": 4,
+        "interval_ms": 25,
+    });
+    let (code_probe, body_probe) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/link/probe",
+        &serde_json::to_vec(&probe_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_probe, 200);
+    let probe_rep: tetherly_node::LinkProbeReport = serde_json::from_slice(&body_probe).unwrap();
+    assert!(probe_rep.ok);
+    assert_eq!(probe_rep.peer, peer_id.as_str());
+    assert_eq!(probe_rep.sent, 4);
+    assert_eq!(probe_rep.received, 4);
+    assert_eq!(probe_rep.packet_loss_rate, 0.0);
+    assert!(probe_rep.avg_rtt_ms.is_some());
+    assert_eq!(probe_rep.grade, tetherly_node::LinkGrade::Excellent);
+
+    // 7. Verify SSE receives PeerLinkQualityRefreshed
+    let mut saw_link_event = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(UiEvent::PeerLinkQualityRefreshed {
+            device_id: ev_peer,
+            grade,
+            packet_loss_rate,
+            avg_rtt_ms,
+            ..
+        }))) = tokio::time::timeout(Duration::from_millis(500), sse.next_ui_event()).await
+        {
+            if ev_peer == peer_id.as_str() {
+                assert_eq!(grade, "excellent");
+                assert_eq!(packet_loss_rate, 0.0);
+                assert!(avg_rtt_ms.is_some());
+                saw_link_event = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_link_event,
+        "must emit PeerLinkQualityRefreshed over SSE"
+    );
+
+    // 8. Query updated link quality report to verify sliding-window metrics
+    let (code_link_after, body_link_after) =
+        tetherly_node::loopback_get(host_ui, "/api/peers/link")
+            .await
+            .unwrap();
+    assert_eq!(code_link_after, 200);
+    let link_after: tetherly_node::LinkQualityReport =
+        serde_json::from_slice(&body_link_after).unwrap();
+    let peer_stat = &link_after.links[0];
+    assert!(peer_stat.pings_sent >= 4);
+    assert!(peer_stat.pongs_recv >= 4);
+    assert_eq!(peer_stat.grade, tetherly_node::LinkGrade::Excellent);
+    assert!(peer_stat.avg_rtt_ms.is_some());
+    assert!(peer_stat.min_rtt_ms.is_some());
+    assert!(peer_stat.max_rtt_ms.is_some());
+
+    // 9. Test probe with URL query parameters
+    let (code_qprobe, body_qprobe) = tetherly_node::loopback_post(
+        host_ui,
+        &format!("/api/peers/link/probe?peer={peer_id}&count=2&interval_ms=20"),
+        b"{}",
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_qprobe, 200);
+    let qrep: tetherly_node::LinkProbeReport = serde_json::from_slice(&body_qprobe).unwrap();
+    assert_eq!(qrep.sent, 2);
+    assert_eq!(qrep.received, 2);
+
+    // 10. Negative probe validation: non-existent peer returns 400
+    let non_peer = serde_json::json!({
+        "peer": "tdev_nonexistent99999999",
+        "count": 3,
+    });
+    let (code_probe_err, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/link/probe",
+        &serde_json::to_vec(&non_peer).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_probe_err, 400);
+
+    // 11. Security Red Line: Loopback Isolation Host 403 Forbidden check
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{host_ui}"))
+        .await
+        .expect("connect to ui port");
+    let evil_req = "GET /api/peers/link HTTP/1.1\r\nHost: evil.attacker.com\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    // 12. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

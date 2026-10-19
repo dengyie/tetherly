@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use tetherly_core::{CandidateView, DeviceId, IncomingTransfer, ReplyView};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UiEvent {
     Candidate {
@@ -195,6 +195,26 @@ pub enum UiEvent {
         num_cpus: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         total_memory_bytes: Option<u64>,
+        timestamp_ms: u64,
+    },
+    PeerLinkQualityRefreshed {
+        device_id: String,
+        rtt_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        min_rtt_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_rtt_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        avg_rtt_ms: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        jitter_ms: Option<f64>,
+        packet_loss_rate: f64,
+        grade: String,
+        timestamp_ms: u64,
+    },
+    HeartbeatConfigChanged {
+        interval_secs: u64,
+        deadline_secs: u64,
         timestamp_ms: u64,
     },
 }

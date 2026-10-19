@@ -399,6 +399,17 @@ enum Cmd {
         #[command(subcommand)]
         action: InboxCmd,
     },
+    /// Peer link quality profiling, keep-alive tuning, and multi-packet ping burst probing.
+    Link {
+        #[command(subcommand)]
+        action: Option<LinkCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Manage native desktop notification banners and Do-Not-Disturb (DND) policy.
     Banner {
         #[command(subcommand)]
@@ -905,6 +916,58 @@ enum InboxCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum LinkCmd {
+    /// Show current link quality metrics for all connected peers (default).
+    Status {
+        /// Watch mode: continuously refresh link quality until interrupted.
+        #[arg(long, short)]
+        watch: bool,
+        /// Refresh interval in seconds for --watch (default: 1).
+        #[arg(long, default_value_t = 1)]
+        interval: u64,
+        /// Output raw JSON instead of human-readable tables.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Perform an on-demand multi-packet ping burst probe to measure latency, jitter and loss.
+    Probe {
+        /// Specific peer to probe (e.g. tdev_... or alias). Defaults to single connected peer.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Number of ping probes to send (1 to 20, default: 5).
+        #[arg(long, default_value_t = 5)]
+        count: usize,
+        /// Pacing interval between probes in milliseconds (10 to 1000, default: 100).
+        #[arg(long, default_value_t = 100)]
+        interval_ms: u64,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Inspect or update session keep-alive heartbeat interval and silent timeout deadline.
+    Config {
+        /// Update heartbeat ping interval in seconds (1 to 3600).
+        #[arg(long)]
+        interval: Option<u64>,
+        /// Update silent timeout deadline in seconds (interval to 86400).
+        #[arg(long)]
+        deadline: Option<u64>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum BannerCmd {
     /// Query or update desktop notification banner settings and DND mode.
     Config {
@@ -1102,6 +1165,314 @@ async fn loopback_events_connect(port: u16) -> std::io::Result<SseStream> {
         }
     }
     Ok(SseStream { lines })
+}
+
+async fn handle_link_cmd(
+    action: Option<LinkCmd>,
+    default_json: bool,
+    default_ui_port: u16,
+) -> Result<()> {
+    match action {
+        None => {
+            let (code, resp) = loopback_get(default_ui_port, "/api/peers/link")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{default_ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "node refused link quality query (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if default_json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let report: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                print_link_quality_report(&report);
+            }
+        }
+        Some(LinkCmd::Status {
+            watch: false,
+            interval: _,
+            json,
+            ui_port,
+        }) => {
+            let json = json || default_json;
+            let ui_port = if ui_port != 45716 {
+                ui_port
+            } else {
+                default_ui_port
+            };
+            let (code, resp) = loopback_get(ui_port, "/api/peers/link")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "node refused link quality query (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let report: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                print_link_quality_report(&report);
+            }
+        }
+        Some(LinkCmd::Status {
+            watch: true,
+            interval,
+            json,
+            ui_port,
+        }) => {
+            let json = json || default_json;
+            let ui_port = if ui_port != 45716 {
+                ui_port
+            } else {
+                default_ui_port
+            };
+            loop {
+                let (code, resp) = loopback_get(ui_port, "/api/peers/link")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "node refused link quality query (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let report: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    print!("\x1b[2J\x1b[H");
+                    print_link_quality_report(&report);
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
+            }
+        }
+        Some(LinkCmd::Probe {
+            peer,
+            count,
+            interval_ms,
+            json,
+            ui_port,
+        }) => {
+            let json = json || default_json;
+            let ui_port = if ui_port != 45716 {
+                ui_port
+            } else {
+                default_ui_port
+            };
+            let body = serde_json::json!({
+                "peer": peer,
+                "count": count,
+                "interval_ms": interval_ms,
+            });
+            let payload = serde_json::to_vec(&body)?;
+            let (code, resp) = loopback_post(ui_port, "/api/peers/link/probe", &payload)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                bail!(
+                    "node refused link probe (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let rep: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                print_link_probe_report(&rep);
+            }
+        }
+        Some(LinkCmd::Config {
+            interval,
+            deadline,
+            json,
+            ui_port,
+        }) => {
+            let json = json || default_json;
+            let ui_port = if ui_port != 45716 {
+                ui_port
+            } else {
+                default_ui_port
+            };
+            if interval.is_some() || deadline.is_some() {
+                let body = serde_json::json!({
+                    "interval_secs": interval,
+                    "deadline_secs": deadline,
+                });
+                let payload = serde_json::to_vec(&body)?;
+                let (code, resp) = loopback_post(ui_port, "/api/peers/heartbeat", &payload)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "node refused heartbeat config update (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let cfg: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    println!(
+                        "Updated heartbeat config: interval = {}s, deadline = {}s",
+                        cfg["interval_secs"].as_u64().unwrap_or(0),
+                        cfg["deadline_secs"].as_u64().unwrap_or(0)
+                    );
+                }
+            } else {
+                let (code, resp) = loopback_get(ui_port, "/api/peers/heartbeat")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "node refused heartbeat config query (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let cfg: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    println!(
+                        "Current heartbeat config: interval = {}s, deadline = {}s",
+                        cfg["interval_secs"].as_u64().unwrap_or(0),
+                        cfg["deadline_secs"].as_u64().unwrap_or(0)
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_link_quality_report(v: &serde_json::Value) {
+    let hb = &v["heartbeat"];
+    let hb_interval = hb["interval_secs"].as_u64().unwrap_or(0);
+    let hb_deadline = hb["deadline_secs"].as_u64().unwrap_or(0);
+    let total = v["total_peers"].as_u64().unwrap_or(0);
+    let online = v["online_peers"].as_u64().unwrap_or(0);
+
+    println!(
+        "Peer Link Quality Profiling (Heartbeat: {}s, Deadline: {}s) [{} online / {} total]",
+        hb_interval, hb_deadline, online, total
+    );
+    let empty_vec = vec![];
+    let links = v["links"].as_array().unwrap_or(&empty_vec);
+    if links.is_empty() {
+        println!("  (no peer links tracked)");
+        return;
+    }
+
+    println!(
+        "{:<20} {:<15} {:<8} {:<8} {:<18} {:<10} {:<8} {:<10}",
+        "PEER ID", "NAME", "STATUS", "RTT", "MIN/MAX/AVG", "JITTER", "LOSS", "GRADE"
+    );
+    for link in links {
+        let dev = link["device_id"].as_str().unwrap_or("?");
+        let short_dev = if dev.len() > 18 { &dev[..18] } else { dev };
+        let name = link["name"].as_str().unwrap_or("-");
+        let short_name = if name.len() > 14 { &name[..14] } else { name };
+        let status = if link["is_online"].as_bool().unwrap_or(false) {
+            "online"
+        } else {
+            "offline"
+        };
+        let rtt = link["rtt_ms"]
+            .as_u64()
+            .map(|r| format!("{r}ms"))
+            .unwrap_or_else(|| "-".into());
+        let min_rtt = link["min_rtt_ms"].as_u64();
+        let max_rtt = link["max_rtt_ms"].as_u64();
+        let avg_rtt = link["avg_rtt_ms"].as_f64();
+        let min_max_avg = match (min_rtt, max_rtt, avg_rtt) {
+            (Some(min), Some(max), Some(avg)) => format!("{min}/{max}/{avg:.1}ms"),
+            _ => "-".into(),
+        };
+        let jitter = link["jitter_ms"]
+            .as_f64()
+            .map(|j| format!("{j:.1}ms"))
+            .unwrap_or_else(|| "-".into());
+        let loss = format!("{:.1}%", link["packet_loss_rate"].as_f64().unwrap_or(0.0));
+        let grade = link["grade"].as_str().unwrap_or("unknown");
+
+        println!(
+            "{:<20} {:<15} {:<8} {:<8} {:<18} {:<10} {:<8} {:<10}",
+            short_dev, short_name, status, rtt, min_max_avg, jitter, loss, grade
+        );
+    }
+}
+
+fn print_link_probe_report(v: &serde_json::Value) {
+    let dev = v["device_id"].as_str().unwrap_or("?");
+    let name = v["name"].as_str().unwrap_or("-");
+    let sent = v["sent_count"].as_u64().unwrap_or(0);
+    let recv = v["recv_count"].as_u64().unwrap_or(0);
+    let loss = v["packet_loss_rate"].as_f64().unwrap_or(0.0);
+    let grade = v["grade"].as_str().unwrap_or("unknown");
+    let min_rtt = v["min_rtt_ms"]
+        .as_u64()
+        .map(|r| format!("{r}ms"))
+        .unwrap_or_else(|| "-".into());
+    let max_rtt = v["max_rtt_ms"]
+        .as_u64()
+        .map(|r| format!("{r}ms"))
+        .unwrap_or_else(|| "-".into());
+    let avg_rtt = v["avg_rtt_ms"]
+        .as_f64()
+        .map(|a| format!("{a:.1}ms"))
+        .unwrap_or_else(|| "-".into());
+    let jitter = v["jitter_ms"]
+        .as_f64()
+        .map(|j| format!("{j:.1}ms"))
+        .unwrap_or_else(|| "-".into());
+    let empty_vec = vec![];
+    let samples = v["samples_ms"].as_array().unwrap_or(&empty_vec);
+    let samples_str: Vec<String> = samples.iter().map(|s| s.to_string()).collect();
+
+    println!("Active Link Probe Report: {dev} ({name})");
+    println!("  Probes: {sent} sent, {recv} received, loss: {loss:.1}%");
+    println!("  Latency: min={min_rtt}, max={max_rtt}, avg={avg_rtt}, jitter={jitter}");
+    println!("  Link Grade: {grade}");
+    println!("  Samples (ms): [{}]", samples_str.join(", "));
 }
 
 fn print_event(v: &serde_json::Value) {
@@ -1373,6 +1744,28 @@ fn print_event(v: &serde_json::Value) {
                 format_bytes(rss),
                 format_bytes(virt)
             );
+        }
+        "peer_link_quality_refreshed" => {
+            let dev = v["device_id"].as_str().unwrap_or("?");
+            let rtt = v["rtt_ms"].as_u64().unwrap_or(0);
+            let avg = v["avg_rtt_ms"]
+                .as_f64()
+                .map(|a| format!("{a:.1}ms"))
+                .unwrap_or_else(|| "-".into());
+            let jitter = v["jitter_ms"]
+                .as_f64()
+                .map(|j| format!("{j:.1}ms"))
+                .unwrap_or_else(|| "-".into());
+            let loss = v["packet_loss_rate"].as_f64().unwrap_or(0.0);
+            let grade = v["grade"].as_str().unwrap_or("unknown");
+            println!(
+                "[peer_link_quality_refreshed] peer={dev} rtt={rtt}ms avg={avg} jitter={jitter} loss={loss:.1}% grade={grade}"
+            );
+        }
+        "heartbeat_config_changed" => {
+            let interval = v["interval_secs"].as_u64().unwrap_or(0);
+            let deadline = v["deadline_secs"].as_u64().unwrap_or(0);
+            println!("[heartbeat_config_changed] interval={interval}s deadline={deadline}s");
         }
         other => {
             println!("[{other}] {v}");
@@ -3592,6 +3985,13 @@ async fn main() -> Result<()> {
                 }
             }
         },
+        Cmd::Link {
+            action,
+            json,
+            ui_port,
+        } => {
+            handle_link_cmd(action, json, ui_port).await?;
+        }
         Cmd::Banner { action } => match action {
             BannerCmd::Config {
                 banners,
