@@ -70,9 +70,22 @@ security-framework-sys = "2"
 # CoreGraphics capture for src/screen/macos.rs. `default-features = false`
 # keeps the objc2-metal/dispatch2 surface out; `arboard` already pulls these
 # same crates, so no new package enters the lockfile.
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSUUID",
+    "NSString",
+    "NSArray",
+    "NSData",
+    "NSError",
+    "NSRunLoop",
+    "NSDate",
+    "NSObject",
+] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "CFCGTypes",
+    "CFRunLoop",
 ] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std",
@@ -81,6 +94,22 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "CGContext",
     "CGDirectDisplay",
     "CGImage",
+] }
+# CoreBluetooth GATT client for ANCS (src/ancs/macos.rs).
+dispatch2 = { version = "0.3", default-features = false, features = ["alloc", "objc2"] }
+objc2-core-bluetooth = { version = "0.3", default-features = false, features = [
+    "std",
+    "CBCentralManager",
+    "CBPeripheral",
+    "CBService",
+    "CBCharacteristic",
+    "CBUUID",
+    "CBManager",
+    "CBPeer",
+    "CBAttribute",
+    "CBError",
+    "bitflags",
+    "dispatch2",
 ] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]

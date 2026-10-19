@@ -762,3 +762,18 @@
 - Results: 100% green CI on all platforms, zero-plaintext security invariants strictly preserved, documentation and code archives fully synchronized to Obsidian and GitHub.
 - Next: Ready for next architectural milestone.
 - Blockers: None.
+
+## 2026-10-19
+- Task: Land Tetherly v1.57 (ADR-050) macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复.
+- Actions:
+  1. Abstracted cross-platform Bluetooth Low Energy peripheral addressing (`BleAddress` enum with `Mac([u8; 6])` and `Uuid([u8; 16])`) in `crates/tetherly-core/src/ancs.rs` and `lib.rs`;
+  2. Implemented universal parser `parse_ble_address` and canonical formatting `to_canonical_string`;
+  3. Fixed critical daemon startup bug in `crates/tetherly-node/src/bin/tetherly.rs` where CLI `--ancs <addr>` discarded transport and left `cfg.ancs` empty; properly wired `cfg.ancs = Some(transport)` and `cfg.ancs_peripheral = addr` into `NodeConfig` before `Node::start`;
+  4. Implemented native macOS CoreBluetooth GATT transport stack in `crates/tetherly-node/src/ancs/macos.rs` and wired it into `crates/tetherly-node/src/ancs.rs` using `objc2-core-bluetooth` and GCD serial dispatch queue;
+  5. Extended `AncsReport` with `peripheral: Option<String>` in `crates/tetherly-node/src/runtime.rs` and displayed peripheral address in CLI daemon status;
+  6. Added comprehensive unit and regression tests in `tetherly-core` and `tests/phase4.rs` (`test_ble_address_and_daemon_ancs_wiring_regression`);
+  7. Ran full workspace verification: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, full test suite pass (325+ tests green), `cargo deny check` passed;
+  8. Synchronized documentation: updated SSOT `docs/DEVELOPMENT.md` to v1.57 (ADR-050), updated `.codex-memory/project-state.md` and `session-log.md`.
+- Results: All checks and tests passed 100% green. Daemon startup ANCS bug fixed, macOS CoreBluetooth stack operational, cross-platform address resolution complete.
+- Next: Update `.codex-memory/todo.md` and Obsidian knowledge base docs.
+- Blockers: None.

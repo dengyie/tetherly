@@ -282,7 +282,7 @@
 - Cloud phones reach the host only via adb (overlay is host→phone); on-device E2E uses `adb reverse`.
 - `snow` 0.9 has no `rekey()`; sessions **rebuild a fresh IK handshake in band** when the transport hits 2^16 msgs or 3600s (initiator-driven, cancellation-safe; `RekeyRequired` is retired).
 - Screen `seq` must stay session-monotonic; `on_peer_gone` resets it and a reconnect must not replay old frames.
-- Phase 4's Windows BLE transport now exists (v1.23), but its **runtime** behaviour against a physical iPhone is unverified, and macOS (CoreBluetooth) / Linux (BlueZ) GATT stacks are still unimplemented (`open()` honestly `Ok(None)`).
+- Phase 4's Windows BLE transport exists (v1.23) and macOS CoreBluetooth transport has landed in v1.57 (ADR-050); Linux (BlueZ) GATT stack remains open (`open()` honestly `Ok(None)`). Runtime behavior against a physical iPhone remains Manual-required.
 - AGPL/GPL screen-capture crates are banned by deny.toml; only permissive impls (windows, core-graphics, x11rb) are eligible.
 
 ## Active Blockers
@@ -293,6 +293,12 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
+- **v1.57 (ADR-050)**: macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复已落地：
+  1. **跨平台外设地址抽象与通用解析器 (`tetherly-core/src/ancs.rs` & `lib.rs`)**：确立强类型 `BleAddress` 枚举，桥接 Windows 48 位物理 MAC (`Mac([u8; 6])`) 与 macOS CoreBluetooth 128 位 RFC 4122 `NSUUID` (`Uuid([u8; 16])`)，实现通用解析器 `parse_ble_address` 与规范化字符串序列化 `to_canonical_string`；
+  2. **守护进程启动链路与状态机所有权修复 (`crates/tetherly-node/src/bin/tetherly.rs`)**：彻底修复 CLI `--ancs <addr>` 参数解析后静默丢弃传输层的致命缺陷，在 `Node::start` 前将 `cfg.ancs = Some(transport)` 与 `cfg.ancs_peripheral = addr` 注入配置，确保内部状态机持有传输层所有权，打通 `spawn_ancs_pump` 与 `ancs_connect` 链路；
+  3. **macOS 原生 CoreBluetooth GATT 传输栈构建 (`crates/tetherly-node/src/ancs/macos.rs` & `ancs.rs`)**：基于 `objc2-core-bluetooth` 与 GCD 串行调度队列构建自包含 Objective-C 代理 `AncsDelegate`，在独立后台线程运行 `CBCentralManager`，依据 128 位 UUID 检索并连接外设，解析 ANCS 服务与 3 个特征（Notification Source、Data Source、Control Point），非阻塞流式推送到 `AncsInbound`，串行化带响应写入 Control Point，支持断线自动触发退避重连；
+  4. **运行时可观测性与控制面透视 (`crates/tetherly-node/src/runtime.rs` & `bin/tetherly.rs`)**：`AncsReport` 扩充 `pub peripheral: Option<String>` 字段，节点状态打印清晰指示外设硬件 MAC 或 CoreBluetooth UUID；
+  5. **端到端集成与回归验证 (`tests/phase4.rs` & `tetherly-core`)**：新增 `test_ble_address_and_daemon_ancs_wiring_regression` 验证跨平台外设地址解析、配置注入与守护进程状态机初始化。
 - **v1.56 (ADR-049)**: ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构已落地：
   1. **核心白名单原语扩展与 URL 注入守卫 (`allowlist.rs` & `error.rs`)**：`OpenAllowlist` 扩展 `remove` 与 `clear` 原语，`OpenRule` 派生 `Serialize`；严格校验 `is_local_scheme` 阻止外部恶意 URL scheme 劫持注入；核心错误确立 `CoreError::NoAncsTransport` 变体；
   2. **事件总线扩展与安全红线守卫 (`events.rs`)**：新增 `UiEvent::AncsStateChanged` 与 `UiEvent::AncsRuleChanged`，严格遵守 Zero-Plaintext 铁律，不携带任何苹果通知消息正文、标题或敏感属性，仅传递状态、附着标记、退避时间戳、动作与规则计数；

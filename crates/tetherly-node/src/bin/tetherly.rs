@@ -49,8 +49,9 @@ enum Cmd {
         #[arg(long)]
         ui_port: Option<u16>,
         /// Receive iPhone notifications over ANCS/BLE from the paired device with
-        /// this Bluetooth address (Windows notation, e.g. `11:22:33:44:55:66`).
-        /// Pair the phone in Windows Bluetooth settings first. Runtime against a
+        /// this Bluetooth address (Windows MAC `11:22:33:44:55:66` or macOS
+        /// CoreBluetooth UUID `9F82A2E6-B9C0-4E90-B8E5-3A21F5A67C43`).
+        /// Pair the phone in system Bluetooth settings first. Runtime against a
         /// real iPhone is Manual-required.
         #[arg(long)]
         ancs: Option<String>,
@@ -1033,7 +1034,7 @@ async fn main() -> Result<()> {
             // absent; the pump below is only started when a link comes up.
             let ancs_link = match ancs.as_deref() {
                 Some(address) => match tetherly_node::ancs::open(address) {
-                    Ok(Some(link)) => Some(link),
+                    Ok(Some(link)) => Some((address.to_string(), link)),
                     Ok(None) => {
                         info!("ANCS is not implemented on this platform; iPhone notifications stay off");
                         None
@@ -1045,13 +1046,22 @@ async fn main() -> Result<()> {
                 },
                 None => None,
             };
+            let (ancs_addr, inbound) = match ancs_link {
+                Some((addr, (transport, inbound))) => {
+                    cfg.ancs = Some(transport);
+                    cfg.ancs_peripheral = addr.clone();
+                    (Some(addr), Some(inbound))
+                }
+                None => (None, None),
+            };
             let node = Node::start(cfg)?;
             info!(device_id = %node.identity().device_id(), "run");
             info!("ui http://127.0.0.1:45716");
-            if let Some((_transport, inbound)) = ancs_link {
+            if let Some(inbound) = inbound {
                 node.spawn_ancs_pump(inbound);
                 info!(
-                    "ANCS link up; pair the iPhone in Windows Bluetooth settings if you have not"
+                    peripheral = ?ancs_addr,
+                    "ANCS link up; pair the iPhone in system Bluetooth settings if you have not"
                 );
             }
             // Controller-side capture: low-level mouse hook for edge crossings;

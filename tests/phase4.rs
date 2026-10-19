@@ -965,3 +965,78 @@ async fn ancs_lifecycle_governance_rule_management_and_events_via_loopback_api()
 
     node.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ble_address_and_daemon_ancs_wiring_regression() {
+    use tetherly_core::parse_ble_address;
+
+    // 1. Verify cross-platform BleAddress parsing
+    let mac = parse_ble_address("11:22:33:44:55:66").expect("parse mac");
+    assert_eq!(mac.to_canonical_string(), "11:22:33:44:55:66");
+    assert_eq!(mac.as_mac_u64(), Some(0x112233445566));
+    assert!(mac.is_mac());
+    assert!(!mac.is_uuid());
+
+    let uuid_str = "9F82A2E6-B9C0-4E90-B8E5-3A21F5A67C43";
+    let uuid = parse_ble_address(uuid_str).expect("parse uuid");
+    assert_eq!(
+        uuid.to_canonical_string(),
+        "9f82a2e6-b9c0-4e90-b8e5-3a21f5a67c43"
+    );
+    assert_eq!(uuid.as_mac_u64(), None);
+    assert!(uuid.is_uuid());
+    assert!(!uuid.is_mac());
+
+    // 2. Daemon wiring regression:
+    // With transport attached and configured into NodeConfig:
+    let (dir, _guard) = temp_dir("ancs-daemon-fix");
+    let clock = Arc::new(ManualClock::new(2_000_000));
+    let transport = Arc::new(MemoryAncsTransport::default());
+    let (in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let mut config = cfg(dir, Some(transport.clone()));
+    config.ancs_peripheral = uuid.to_canonical_string();
+
+    let node = Node::start_with_clock(config, clock.clone()).expect("start node with ancs config");
+    let ui_port = node.spawn_ui().await.expect("spawn ui");
+
+    // Spawn pump with inbound channel (replicates tetherly run daemon logic)
+    node.spawn_ancs_pump(in_rx);
+
+    // Initial check: transport is attached, peripheral is recorded, state is idle
+    let (code, resp) = loopback_get(ui_port, "/api/ancs").await.expect("get ancs");
+    assert_eq!(code, 200);
+    let report: AncsReport = serde_json::from_slice(&resp).expect("parse AncsReport");
+    assert!(report.ok);
+    assert!(report.attached);
+    assert_eq!(report.state, "idle");
+    assert_eq!(
+        report.peripheral.as_deref(),
+        Some("9f82a2e6-b9c0-4e90-b8e5-3a21f5a67c43")
+    );
+
+    // Inbound: Ready signal from transport stack
+    in_tx.send(AncsInbound::Ready).expect("send ready");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Ingress state transitioned to ready
+    let (code, resp) = loopback_get(ui_port, "/api/ancs").await.expect("get ancs");
+    assert_eq!(code, 200);
+    let report: AncsReport = serde_json::from_slice(&resp).expect("parse AncsReport");
+    assert_eq!(report.state, "ready");
+
+    // Inbound: Disconnected signal from transport stack
+    in_tx
+        .send(AncsInbound::Disconnected)
+        .expect("send disconnected");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Ingress state transitioned to backoff
+    let (code, resp) = loopback_get(ui_port, "/api/ancs").await.expect("get ancs");
+    assert_eq!(code, 200);
+    let report: AncsReport = serde_json::from_slice(&resp).expect("parse AncsReport");
+    assert_eq!(report.state, "backoff");
+    assert!(report.retry_at_ms.is_some());
+
+    node.shutdown();
+}

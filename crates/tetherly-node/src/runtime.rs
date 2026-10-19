@@ -515,6 +515,8 @@ pub struct AncsReport {
     pub ok: bool,
     pub attached: bool,
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peripheral: Option<String>,
     pub retry_at_ms: Option<u64>,
     pub rules: Vec<OpenRuleDto>,
     pub allowlist: Vec<String>,
@@ -2302,10 +2304,16 @@ impl Node {
             })
             .collect();
         let allowlist = rules.iter().map(|r| r.app_id.clone()).collect();
+        let peripheral = if self.shared.cfg.ancs_peripheral.is_empty() {
+            None
+        } else {
+            Some(self.shared.cfg.ancs_peripheral.clone())
+        };
         AncsReport {
             ok: true,
             attached,
             state,
+            peripheral,
             retry_at_ms,
             rules,
             allowlist,

@@ -27,6 +27,10 @@ use tetherly_core::{AncsTransport, CoreError};
 #[path = "ancs/win_gatt.rs"]
 mod win_gatt;
 
+#[cfg(target_os = "macos")]
+#[path = "ancs/macos.rs"]
+mod macos;
+
 /// One inbound ANCS event, already copied off the stack's callback thread.
 ///
 /// `tetherly-core` deliberately knows nothing about these: the node translates
@@ -53,17 +57,22 @@ pub type AncsLink = (
 );
 
 /// Open the platform ANCS BLE transport for the paired iPhone at `address`,
-/// written the way Windows Bluetooth settings shows it (`11:22:33:44:55:66`).
+/// written the way Windows Bluetooth settings shows it (`11:22:33:44:55:66`)
+/// or macOS CoreBluetooth shows it (`9F82A2E6-B9C0-4E90-B8E5-3A21F5A67C43`).
 ///
 /// Returns `Ok(Some(..))` where a stack exists, `Ok(None)` on targets whose
-/// stack is not implemented yet (macOS/Linux) so the caller can say so honestly,
+/// stack is not implemented yet (Linux BlueZ) so the caller can say so honestly,
 /// and `Err` only for a malformed address.
 pub fn open(address: &str) -> Result<Option<AncsLink>, CoreError> {
     #[cfg(windows)]
     {
         win_gatt::open(address).map(Some)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::open(address).map(Some)
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let _ = address;
         Ok(None)

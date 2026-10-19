@@ -62,6 +62,124 @@ pub fn uuid_bytes_le(uuid: &str) -> Option<[u8; 16]> {
     Some(be)
 }
 
+// ------------------------------------------------------------- Addressing
+
+/// A platform-neutral Bluetooth LE peripheral address.
+///
+/// Windows and Linux BlueZ address peripherals via 48-bit IEEE 802 MAC addresses.
+/// macOS CoreBluetooth obscures the MAC address and identifies peripherals via
+/// 128-bit RFC 4122 UUIDs (`NSUUID`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum BleAddress {
+    /// 48-bit IEEE 802 MAC address (most-significant octet first).
+    Mac([u8; 6]),
+    /// 128-bit RFC 4122 UUID (network byte order / big-endian).
+    Uuid([u8; 16]),
+}
+
+impl BleAddress {
+    /// Returns the canonical display string:
+    /// - MAC: lowercase colon-separated hex, e.g. "11:22:33:44:55:66"
+    /// - UUID: canonical RFC 4122 lowercase 8-4-4-4-12 hex, e.g. "9f82a2e6-b9c0-4e90-b8e5-3a21f5a67c43"
+    pub fn to_canonical_string(&self) -> String {
+        match self {
+            Self::Mac(mac) => format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            ),
+            Self::Uuid(uuid) => format!(
+                "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                uuid[0], uuid[1], uuid[2], uuid[3],
+                uuid[4], uuid[5],
+                uuid[6], uuid[7],
+                uuid[8], uuid[9],
+                uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]
+            ),
+        }
+    }
+
+    /// Return the 48-bit MAC address as a `u64` integer (most significant byte first),
+    /// or `None` if this address is a 128-bit UUID.
+    pub fn as_mac_u64(&self) -> Option<u64> {
+        match self {
+            Self::Mac(bytes) => {
+                let mut v = 0u64;
+                for &b in bytes {
+                    v = (v << 8) | (b as u64);
+                }
+                Some(v)
+            }
+            Self::Uuid(_) => None,
+        }
+    }
+
+    /// Return the 128-bit UUID bytes in big-endian order, or `None` if this is a MAC.
+    pub fn as_uuid_bytes(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::Uuid(bytes) => Some(*bytes),
+            Self::Mac(_) => None,
+        }
+    }
+
+    /// Return whether this address is a 128-bit CoreBluetooth UUID.
+    pub fn is_uuid(&self) -> bool {
+        matches!(self, Self::Uuid(_))
+    }
+
+    /// Return whether this address is a 48-bit MAC address.
+    pub fn is_mac(&self) -> bool {
+        matches!(self, Self::Mac(_))
+    }
+}
+
+impl std::fmt::Display for BleAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_canonical_string())
+    }
+}
+
+/// Parse a Bluetooth LE peripheral address from user or CLI input.
+///
+/// Accepts:
+/// - 48-bit MAC address: "11:22:33:44:55:66", "11-22-33-44-55-66", or bare 12 hex digits.
+/// - 128-bit UUID: canonical "9f82a2e6-b9c0-4e90-b8e5-3a21f5a67c43" or bare 32 hex digits.
+///
+/// Rejects malformed strings, invalid hex characters, or lengths other than 12 or 32 hex digits.
+pub fn parse_ble_address(text: &str) -> Result<BleAddress, CoreError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(CoreError::AncsFrame);
+    }
+
+    let clean: Vec<u8> = text.bytes().filter(|&b| b != b':' && b != b'-').collect();
+
+    let hex_digits = clean
+        .iter()
+        .map(|&b| match b {
+            b'0'..=b'9' => Ok(b - b'0'),
+            b'a'..=b'f' => Ok(b - b'a' + 10),
+            b'A'..=b'F' => Ok(b - b'A' + 10),
+            _ => Err(CoreError::AncsFrame),
+        })
+        .collect::<Result<Vec<u8>, CoreError>>()?;
+
+    if hex_digits.len() == 12 {
+        let mut mac = [0u8; 6];
+        for (i, chunk) in hex_digits.chunks_exact(2).enumerate() {
+            mac[i] = (chunk[0] << 4) | chunk[1];
+        }
+        Ok(BleAddress::Mac(mac))
+    } else if hex_digits.len() == 32 {
+        let mut uuid = [0u8; 16];
+        for (i, chunk) in hex_digits.chunks_exact(2).enumerate() {
+            uuid[i] = (chunk[0] << 4) | chunk[1];
+        }
+        Ok(BleAddress::Uuid(uuid))
+    } else {
+        Err(CoreError::AncsFrame)
+    }
+}
+
 // ------------------------------------------------- Notification Source
 
 pub const NOTIFICATION_EVENT_LEN: usize = 8;
@@ -1121,6 +1239,56 @@ mod tests {
     fn release(ing: &mut AncsIngress, clock: &ManualClock) {
         clock.set(clock.unix_ms() + APP_NAME_WAIT_MS);
         ing.tick().unwrap();
+    }
+
+    #[test]
+    fn ble_address_parsing_and_canonical_formatting() {
+        // 1. MAC address with colons
+        let mac1 = parse_ble_address("11:22:33:44:55:66").expect("parse mac colon");
+        assert_eq!(mac1, BleAddress::Mac([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]));
+        assert_eq!(mac1.to_canonical_string(), "11:22:33:44:55:66");
+        assert_eq!(mac1.as_mac_u64(), Some(0x112233445566));
+        assert_eq!(mac1.as_uuid_bytes(), None);
+        assert!(mac1.is_mac());
+        assert!(!mac1.is_uuid());
+
+        // 2. MAC address with hyphens and uppercase
+        let mac2 = parse_ble_address("AA-BB-CC-DD-EE-FF").expect("parse mac hyphen");
+        assert_eq!(mac2, BleAddress::Mac([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]));
+        assert_eq!(mac2.to_canonical_string(), "aa:bb:cc:dd:ee:ff");
+        assert_eq!(mac2.as_mac_u64(), Some(0xAABBCCDDEEFF));
+
+        // 3. Raw 12 hex digits
+        let mac3 = parse_ble_address("1234567890ab").expect("parse mac raw");
+        assert_eq!(mac3, BleAddress::Mac([0x12, 0x34, 0x56, 0x78, 0x90, 0xAB]));
+
+        // 4. Standard RFC 4122 UUID (CoreBluetooth format)
+        let uuid1 = parse_ble_address("9F82A2E6-B9C0-4E90-B8E5-3A21F5A67C43").expect("parse uuid");
+        let expected_uuid = [
+            0x9F, 0x82, 0xA2, 0xE6, 0xB9, 0xC0, 0x4E, 0x90, 0xB8, 0xE5, 0x3A, 0x21, 0xF5, 0xA6,
+            0x7C, 0x43,
+        ];
+        assert_eq!(uuid1, BleAddress::Uuid(expected_uuid));
+        assert_eq!(
+            uuid1.to_canonical_string(),
+            "9f82a2e6-b9c0-4e90-b8e5-3a21f5a67c43"
+        );
+        assert_eq!(uuid1.as_uuid_bytes(), Some(expected_uuid));
+        assert_eq!(uuid1.as_mac_u64(), None);
+        assert!(uuid1.is_uuid());
+        assert!(!uuid1.is_mac());
+
+        // 5. Bare 32 hex digits
+        let uuid2 = parse_ble_address("9f82a2e6b9c04e90b8e53a21f5a67c43").expect("parse raw uuid");
+        assert_eq!(uuid2, BleAddress::Uuid(expected_uuid));
+
+        // 6. Errors: invalid chars, wrong lengths, empty
+        assert!(parse_ble_address("").is_err());
+        assert!(parse_ble_address("   ").is_err());
+        assert!(parse_ble_address("11:22:33:44:55").is_err());
+        assert!(parse_ble_address("11:22:33:44:55:66:77").is_err());
+        assert!(parse_ble_address("11:22:33:44:55:GG").is_err());
+        assert!(parse_ble_address("9F82A2E6-B9C0-4E90-B8E5-3A21F5A67C4").is_err());
     }
 
     #[test]

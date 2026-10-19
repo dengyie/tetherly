@@ -29,11 +29,11 @@ pub mod session;
 
 pub use allowlist::{sanitize_file_name, OpenAllowlist, OpenRule};
 pub use ancs::{
-    ancs_actions, ancs_backoff_delay, ancs_source_id, AncsCharacteristic, AncsEvent, AncsIngress,
-    AncsNotification, AncsState, AncsTransport, Category, ConnectOutcome, DataAssembler, DataItem,
-    EventFlags, EventId, MemoryAncsTransport, NotificationEvent, APP_NAME_WAIT_MS, ATTR_MESSAGE,
-    ATTR_TITLE, NOTIF_ATTR_REQUEST, UUID_ANCS_SERVICE, UUID_CONTROL_POINT, UUID_DATA_SOURCE,
-    UUID_NOTIFICATION_SOURCE,
+    ancs_actions, ancs_backoff_delay, ancs_source_id, parse_ble_address, AncsCharacteristic,
+    AncsEvent, AncsIngress, AncsNotification, AncsState, AncsTransport, BleAddress, Category,
+    ConnectOutcome, DataAssembler, DataItem, EventFlags, EventId, MemoryAncsTransport,
+    NotificationEvent, APP_NAME_WAIT_MS, ATTR_MESSAGE, ATTR_TITLE, NOTIF_ATTR_REQUEST,
+    UUID_ANCS_SERVICE, UUID_CONTROL_POINT, UUID_DATA_SOURCE, UUID_NOTIFICATION_SOURCE,
 };
 pub use bind::{
     classify, classify_v4, is_unspecified_bind, should_listen, should_listen_v4, BindClass,
