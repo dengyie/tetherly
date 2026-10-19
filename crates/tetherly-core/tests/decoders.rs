@@ -16,7 +16,7 @@
 use proptest::prelude::*;
 use tetherly_core::frame::{
     CapsUpdate, ClipSet, FileDecision, FileDone, FileMeta, FileOffer, InnerFrame, NotifyDismiss,
-    NotifyPush, NotifyReply,
+    NotifyPush, NotifyReply, TextMessage,
 };
 use tetherly_core::screen::{
     ControlMsg, PixelFormat, ScreenAssembler, ScreenFrame, ScreenRect, SCREEN_PAYLOAD_MAX,
@@ -265,6 +265,13 @@ proptest! {
         let a = FileDone { transfer_id, sha256: sha };
         let payload = a.to_frame().unwrap().payload;
         prop_assert_eq!(FileDone::from_payload(&payload).unwrap(), a);
+    }
+
+    #[test]
+    fn text_message_roundtrips(id in text(24), txt in text(256), ts in any::<u64>()) {
+        let a = TextMessage::new(id, txt, ts).unwrap();
+        let payload = a.to_frame().unwrap().payload;
+        prop_assert_eq!(TextMessage::from_payload(&payload).unwrap(), a);
     }
 
     #[test]

@@ -6805,6 +6805,340 @@ async fn node_security_audit_trail_filtering_purging_and_zero_plaintext_via_loop
     peer.shutdown();
 }
 
+#[tokio::test]
+async fn node_direct_secure_messaging_history_governance_and_zero_plaintext_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to SSE stream on host UI and peer UI
+    let mut sse_host = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("host SSE connects");
+    let mut sse_peer = tetherly_node::loopback_events_connect(peer_ui)
+        .await
+        .expect("peer SSE connects");
+
+    // 2. Query initial message history on both host and peer
+    let (code_init, body_init) = tetherly_node::loopback_get(host_ui, "/api/message/history")
+        .await
+        .unwrap();
+    assert_eq!(code_init, 200);
+    let init_rep: tetherly_node::PeerMessageHistoryReport =
+        serde_json::from_slice(&body_init).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.total, 0);
+    assert_eq!(init_rep.unread, 0);
+    assert_eq!(init_rep.returned, 0);
+    assert!(init_rep.messages.is_empty());
+
+    // Verify snapshot initial unread count
+    let (code_state, body_state) = tetherly_node::loopback_get(host_ui, "/api/state")
+        .await
+        .unwrap();
+    assert_eq!(code_state, 200);
+    let state_val: serde_json::Value = serde_json::from_slice(&body_state).unwrap();
+    assert_eq!(
+        state_val["unread_messages_count"].as_u64().unwrap_or(999),
+        0
+    );
+
+    // 3. Send message from host to peer via POST /api/message/send
+    let test_msg_text = "Hello Peer! This is a secure end-to-end direct note.";
+    let send_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "text": test_msg_text,
+    });
+    let (code_send, body_send) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/message/send",
+        &serde_json::to_vec(&send_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_send, 200);
+    let send_rep: tetherly_node::PeerMessageSendReport =
+        serde_json::from_slice(&body_send).unwrap();
+    assert!(send_rep.ok);
+    assert_eq!(send_rep.message.text, test_msg_text);
+    assert_eq!(
+        send_rep.message.direction,
+        tetherly_node::MessageDirection::Outbound
+    );
+    assert!(send_rep.message.read);
+    assert_eq!(send_rep.message.peer, peer_id.to_string());
+
+    // 4. Verify SSE MessageSent event on host
+    let mut saw_sent_event = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(UiEvent::MessageSent { id, peer, len, .. }))) =
+            tokio::time::timeout(Duration::from_millis(500), sse_host.next_ui_event()).await
+        {
+            if peer == peer_id.to_string() && len == test_msg_text.len() {
+                assert_eq!(id, send_rep.message.id);
+                saw_sent_event = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_sent_event,
+        "host must emit MessageSent event over SSE with length and peer metadata"
+    );
+
+    // 5. Verify peer receives the message over Noise transport and ingests into peer engine
+    // Peer should emit MessageReceived event over SSE
+    let mut saw_recv_event = false;
+    let deadline_peer = tokio::time::Instant::now() + Duration::from_secs(4);
+    while tokio::time::Instant::now() < deadline_peer {
+        if let Ok(Ok(Some(UiEvent::MessageReceived { id, peer, len, .. }))) =
+            tokio::time::timeout(Duration::from_millis(500), sse_peer.next_ui_event()).await
+        {
+            if peer == host_id.to_string() && len == test_msg_text.len() {
+                assert_eq!(id, send_rep.message.id);
+                saw_recv_event = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_recv_event,
+        "peer must receive TextMessage frame over Noise and emit MessageReceived over SSE"
+    );
+
+    // 6. Query peer message history:
+    // Unread-only query without marking read
+    let (code_peer_hist, body_peer_hist) = tetherly_node::loopback_get(
+        peer_ui,
+        "/api/message/history?unread_only=true&mark_read=false",
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_peer_hist, 200);
+    let peer_rep: tetherly_node::PeerMessageHistoryReport =
+        serde_json::from_slice(&body_peer_hist).unwrap();
+    assert_eq!(peer_rep.total, 1);
+    assert_eq!(peer_rep.unread, 1);
+    assert_eq!(peer_rep.returned, 1);
+    let peer_msg = &peer_rep.messages[0];
+    assert_eq!(peer_msg.text, test_msg_text);
+    assert_eq!(peer_msg.direction, tetherly_node::MessageDirection::Inbound);
+    assert!(!peer_msg.read);
+    assert_eq!(peer_msg.peer, host_id.to_string());
+
+    // Peer snapshot reflects unread_messages_count == 1
+    let (code_peer_state, body_peer_state) = tetherly_node::loopback_get(peer_ui, "/api/state")
+        .await
+        .unwrap();
+    assert_eq!(code_peer_state, 200);
+    let peer_state_val: serde_json::Value = serde_json::from_slice(&body_peer_state).unwrap();
+    assert_eq!(
+        peer_state_val["unread_messages_count"]
+            .as_u64()
+            .unwrap_or(999),
+        1
+    );
+
+    // Now query with mark_read=true
+    let (code_peer_mark, body_peer_mark) =
+        tetherly_node::loopback_get(peer_ui, "/api/message/history?mark_read=true")
+            .await
+            .unwrap();
+    assert_eq!(code_peer_mark, 200);
+    let mark_rep: tetherly_node::PeerMessageHistoryReport =
+        serde_json::from_slice(&body_peer_mark).unwrap();
+    assert_eq!(mark_rep.total, 1);
+    assert_eq!(mark_rep.unread, 0);
+
+    // Peer snapshot reflects unread_messages_count == 0 after read
+    let (_, body_peer_state2) = tetherly_node::loopback_get(peer_ui, "/api/state")
+        .await
+        .unwrap();
+    let peer_state_val2: serde_json::Value = serde_json::from_slice(&body_peer_state2).unwrap();
+    assert_eq!(
+        peer_state_val2["unread_messages_count"]
+            .as_u64()
+            .unwrap_or(999),
+        0
+    );
+
+    // 7. Two-way communication: reply from peer to host
+    let reply_text = "Received loud and clear! Tetherly direct messaging confirmed.";
+    let reply_payload = serde_json::json!({
+        "peer": host_id.as_str(),
+        "text": reply_text,
+    });
+    let (code_reply, body_reply) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/message/send",
+        &serde_json::to_vec(&reply_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_reply, 200);
+    let reply_rep: tetherly_node::PeerMessageSendReport =
+        serde_json::from_slice(&body_reply).unwrap();
+    assert!(reply_rep.ok);
+
+    // Wait briefly for host to receive inbound reply
+    let deadline_host_recv = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut saw_host_recv = false;
+    while tokio::time::Instant::now() < deadline_host_recv {
+        if let Ok(Ok(Some(UiEvent::MessageReceived { id, peer, len, .. }))) =
+            tokio::time::timeout(Duration::from_millis(500), sse_host.next_ui_event()).await
+        {
+            if peer == peer_id.to_string() && len == reply_text.len() {
+                assert_eq!(id, reply_rep.message.id);
+                saw_host_recv = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_host_recv,
+        "host must receive reply TextMessage from peer over Noise"
+    );
+
+    // Host should now have 2 messages in history (1 outbound, 1 inbound)
+    let (code_host_hist, body_host_hist) =
+        tetherly_node::loopback_get(host_ui, "/api/message/history?mark_read=true")
+            .await
+            .unwrap();
+    assert_eq!(code_host_hist, 200);
+    let host_rep: tetherly_node::PeerMessageHistoryReport =
+        serde_json::from_slice(&body_host_hist).unwrap();
+    assert_eq!(host_rep.total, 2);
+    assert_eq!(host_rep.returned, 2);
+
+    // 8. Multi-dimensional filtering and query:
+    // a. Filter by peer
+    let (code_peer_filter, body_peer_filter) =
+        tetherly_node::loopback_get(host_ui, &format!("/api/message/history?peer={peer_id}"))
+            .await
+            .unwrap();
+    assert_eq!(code_peer_filter, 200);
+    let peer_filt_rep: tetherly_node::PeerMessageHistoryReport =
+        serde_json::from_slice(&body_peer_filter).unwrap();
+    assert_eq!(peer_filt_rep.returned, 2);
+
+    // b. Filter by limit=1
+    let (code_lim, body_lim) = tetherly_node::loopback_get(host_ui, "/api/message/history?limit=1")
+        .await
+        .unwrap();
+    assert_eq!(code_lim, 200);
+    let lim_rep: tetherly_node::PeerMessageHistoryReport =
+        serde_json::from_slice(&body_lim).unwrap();
+    assert_eq!(lim_rep.returned, 1);
+    assert_eq!(lim_rep.total, 2);
+
+    // c. Query via POST /api/message/query
+    let q_post_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "limit": 1,
+        "unread_only": false,
+        "mark_read": false,
+    });
+    let (code_qpost, body_qpost) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/message/query",
+        &serde_json::to_vec(&q_post_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_qpost, 200);
+    let qpost_rep: tetherly_node::PeerMessageHistoryReport =
+        serde_json::from_slice(&body_qpost).unwrap();
+    assert_eq!(qpost_rep.returned, 1);
+
+    // 9. Negative validation:
+    // a. Empty message text returns 400
+    let bad_empty_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "text": "   ",
+    });
+    let (code_empty, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/message/send",
+        &serde_json::to_vec(&bad_empty_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_empty, 400);
+
+    // b. Oversized message text (> 32 KiB) returns 400
+    let oversized_text = "A".repeat(33 * 1024);
+    let bad_oversized_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "text": oversized_text,
+    });
+    let (code_oversized, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/message/send",
+        &serde_json::to_vec(&bad_oversized_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_oversized, 400);
+
+    // c. Unknown non-existent peer returns 400
+    let bad_peer_payload = serde_json::json!({
+        "peer": "tdev_non_existent_fake_device_id",
+        "text": "hello",
+    });
+    let (code_bad_peer, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/message/send",
+        &serde_json::to_vec(&bad_peer_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_bad_peer, 400);
+
+    // 10. Message clearing governance:
+    let (code_clear, body_clear) =
+        tetherly_node::loopback_post(host_ui, "/api/message/clear", b"{}")
+            .await
+            .unwrap();
+    assert_eq!(code_clear, 200);
+    let clear_rep: tetherly_node::PeerMessageClearReport =
+        serde_json::from_slice(&body_clear).unwrap();
+    assert!(clear_rep.ok);
+    assert_eq!(clear_rep.cleared_count, 2);
+    assert_eq!(clear_rep.target, "all");
+
+    // History should now be empty
+    let (_, body_empty_hist) = tetherly_node::loopback_get(host_ui, "/api/message/history")
+        .await
+        .unwrap();
+    let empty_hist: tetherly_node::PeerMessageHistoryReport =
+        serde_json::from_slice(&body_empty_hist).unwrap();
+    assert_eq!(empty_hist.total, 0);
+    assert!(empty_hist.messages.is_empty());
+
+    // 11. Security Red Line: Loopback Isolation Host 403 Forbidden check
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{host_ui}"))
+        .await
+        .expect("connect to ui port");
+    let evil_req = "GET /api/message/history HTTP/1.1\r\nHost: evil.attacker.com\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    // 12. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

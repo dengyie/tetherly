@@ -238,13 +238,9 @@
 
 ## Last Verified
 - Local: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo test --workspace --locked` all green — **290 passed, 0 failed** (v1.24: 285 → 290, the 5 boundary regressions — core `bind` classifier invariants, core oversized-offer refusal, net declared-size-over-cap header refusal, node iface-report/listen-set agreement, and an end-to-end oversized offer that leaves the session alive; v1.17 had added 18 state-machine tests).
-  tests over the prior 251; the 18 = 11 proptest over arbitrary op-programs + 7 deterministic
-  non-vacuity witnesses).
-- Cross-check: `cargo clippy --target x86_64-unknown-linux-gnu --workspace --all-targets --locked -- -D warnings`
-  clean (needs `CC_x86_64_unknown_linux_gnu=gcc AR_...=ar` since Phase 5's `zstd-sys` wants a target C
-  compiler that isn't installed; check-only, nothing links). macOS cross-check not possible on this host.
-- `cargo deny check` → advisories ok, bans ok, licenses ok, sources ok (proptest 1.x MIT passes the allow-list).
+  `cargo test --workspace` all green — **349 passed, 0 failed** (v1.67: ADR-060 cross-device peer direct secure messaging, notes, unread status flow, circular message engine, and zero-plaintext SSE test added; 100% green across all crates).
+- Target cross-check: `cargo check --target aarch64-unknown-linux-gnu` clean.
+- `cargo deny check` → advisories ok, bans ok, licenses ok, sources ok (easytier* still banned; AGPL crates strictly rejected).
 - `cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p tetherly-android --release` →
   `libtetherly_android.so` (aarch64 ELF, NDK r29, ~1.6 MB), all 7 `Java_app_tetherly_*` symbols exported.
 - Review hardening (2026-10-11): `ScreenSource::interrupt` port method + 10s grab timeout in

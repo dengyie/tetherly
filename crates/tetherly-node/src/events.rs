@@ -228,6 +228,18 @@ pub enum UiEvent {
         success: bool,
         timestamp_ms: u64,
     },
+    MessageReceived {
+        id: String,
+        peer: String,
+        len: usize,
+        timestamp_ms: u64,
+    },
+    MessageSent {
+        id: String,
+        peer: String,
+        len: usize,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -253,6 +265,34 @@ impl UiEvent {
             timestamp_ms,
         }
     }
+    pub fn message_received(
+        id: impl Into<String>,
+        peer: impl Into<String>,
+        len: usize,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::MessageReceived {
+            id: id.into(),
+            peer: peer.into(),
+            len,
+            timestamp_ms,
+        }
+    }
+
+    pub fn message_sent(
+        id: impl Into<String>,
+        peer: impl Into<String>,
+        len: usize,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::MessageSent {
+            id: id.into(),
+            peer: peer.into(),
+            len,
+            timestamp_ms,
+        }
+    }
+
     pub fn inbox_file_deleted(
         name: impl Into<String>,
         freed_bytes: u64,

@@ -455,6 +455,8 @@ struct Snapshot {
     traffic: crate::telemetry::TrafficReport,
     /// Total audit entries recorded in ring buffer.
     audit_count: usize,
+    /// Total unread direct messages in ring buffer.
+    unread_messages_count: usize,
 }
 
 #[derive(Serialize)]
@@ -751,6 +753,32 @@ struct HeartbeatConfigBody {
     interval_secs: Option<u64>,
     #[serde(default)]
     deadline_secs: Option<u64>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MessageSendBody {
+    #[serde(default)]
+    peer: String,
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MessageQueryBody {
+    #[serde(default)]
+    peer: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    unread_only: Option<bool>,
+    #[serde(default)]
+    mark_read: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MessageClearBody {
+    #[serde(default)]
+    peer: Option<String>,
 }
 
 fn percent_decode(s: &str) -> String {
@@ -2424,6 +2452,106 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             let report = node.clear_audit_log();
             json_ok(&report)
         }
+        ("POST", "/api/message/send")
+        | ("POST", "/api/msg/send")
+        | ("POST", "/api/messages/send") => {
+            let req: MessageSendBody = match serde_json::from_slice(body) {
+                Ok(b) => b,
+                Err(_) => return err(400, "bad json"),
+            };
+            match node.send_message_to_peer(&req.peer, &req.text).await {
+                Ok(report) => json_ok(&report),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/message/history")
+        | ("GET", "/api/message/list")
+        | ("GET", "/api/messages")
+        | ("GET", "/api/messages/history")
+        | ("GET", "/api/msg/history")
+        | ("GET", "/api/msg/list")
+        | ("GET", "/api/msg")
+        | ("POST", "/api/message/query")
+        | ("POST", "/api/msg/query") => {
+            let mut q_peer: Option<String> = None;
+            let mut q_limit: Option<usize> = None;
+            let mut q_unread_only = false;
+            let mut q_mark_read = false;
+
+            if let Some(q) = query_str {
+                let map = parse_query_map(q);
+                if let Some(p) = map
+                    .get("peer")
+                    .or_else(|| map.get("to"))
+                    .or_else(|| map.get("target"))
+                {
+                    q_peer = Some(p.clone());
+                }
+                if let Some(l) = map.get("limit").and_then(|s| s.parse::<usize>().ok()) {
+                    q_limit = Some(l);
+                }
+                if let Some(u) = map.get("unread_only").or_else(|| map.get("unread")) {
+                    q_unread_only = u == "true" || u == "1";
+                }
+                if let Some(m) = map.get("mark_read").or_else(|| map.get("read")) {
+                    q_mark_read = m == "true" || m == "1";
+                }
+            }
+
+            if !body.is_empty() {
+                match serde_json::from_slice::<MessageQueryBody>(body) {
+                    Ok(b) => {
+                        if b.peer.is_some() {
+                            q_peer = b.peer;
+                        }
+                        if b.limit.is_some() {
+                            q_limit = b.limit;
+                        }
+                        if let Some(u) = b.unread_only {
+                            q_unread_only = u;
+                        }
+                        if let Some(m) = b.mark_read {
+                            q_mark_read = m;
+                        }
+                    }
+                    Err(_) => return err(400, "bad json"),
+                }
+            }
+
+            match node.message_history(q_peer.as_deref(), q_limit, q_unread_only, q_mark_read) {
+                Ok(report) => json_ok(&report),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/message/clear")
+        | ("POST", "/api/messages/clear")
+        | ("POST", "/api/msg/clear")
+        | ("DELETE", "/api/message")
+        | ("DELETE", "/api/messages")
+        | ("DELETE", "/api/msg") => {
+            let mut q_peer: Option<String> = None;
+            if let Some(q) = query_str {
+                let map = parse_query_map(q);
+                if let Some(p) = map
+                    .get("peer")
+                    .or_else(|| map.get("to"))
+                    .or_else(|| map.get("target"))
+                {
+                    q_peer = Some(p.clone());
+                }
+            }
+            if !body.is_empty() {
+                if let Ok(b) = serde_json::from_slice::<MessageClearBody>(body) {
+                    if b.peer.is_some() {
+                        q_peer = b.peer;
+                    }
+                }
+            }
+            match node.clear_messages(q_peer.as_deref()) {
+                Ok(report) => json_ok(&report),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         (_, "/api/events" | "/api/events/stream") => err(405, "method not allowed"),
         _ => UiResponse::new(404, "text/plain; charset=utf-8", b"not found".to_vec()),
     }
@@ -2539,6 +2667,10 @@ async fn snapshot(node: &Node) -> Snapshot {
         lan: crate::lan::interface_report(),
         traffic: node.traffic_report(),
         audit_count: node.audit_report(None, None, Some(0), None).total,
+        unread_messages_count: node
+            .message_history(None, Some(0), false, false)
+            .map(|r| r.unread)
+            .unwrap_or(0),
     }
 }
 

@@ -422,6 +422,30 @@
 - Rollback trigger: None.
 - Related files: `crates/tetherly-node/src/{platform.rs,runtime.rs,events.rs,uihttp.rs,lib.rs}`, `bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `ui/index.html`, `tests/phase1.rs`, `docs/DEVELOPMENT.md`
 
+## 2026-10-19 - 对端加密连接保活心跳治理、动态心跳间隔调谐、多维链路质量画像与主动探活遥测全闭环 (ADR-058)
+- Decision: 彻底解决长连接保活僵化、弱网与移动端功耗失衡、单点 RTT 误导及网络质量黑盒痛点。(1) 核心保活状态机 `Liveness` 支持动态重载超时时限 `set_deadline`；(2) 运行时引入强类型 `HeartbeatConfig`（`interval_secs`, `deadline_secs`），提供运行时动态调优原语 `Node::update_heartbeat_config`，支持秒级热重载；(3) 设计滑动窗口链路质量画像引擎 `PeerLinkTracker`（32 样本环形窗口），实时计算 `min_rtt_ms`、`max_rtt_ms`、`avg_rtt_ms`、网络抖动 `jitter_ms`、发包丢包率 `packet_loss_rate`，并给出五级综合评级 `LinkGrade`（Excellent / Good / Fair / Poor / Unreachable）；(4) 实现主动连续脉冲探活测速原语 `Node::probe_peer_link` 与 `LinkProbeReport`；(5) 坚守 Zero-Plaintext 零明文红线与事件总线可观测性：扩展 `UiEvent::HeartbeatConfigChanged` 与 `UiEvent::PeerLinkProbed`，严禁广播敏感凭据；(6) 回环控制面全闭环：新增 `GET/POST /api/peer/heartbeat`、`GET /api/peer/quality` 与 `POST /api/peer/probe`，严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离；(7) 双端 CLI 命令行全同构升级：`peer heartbeat`、`peer quality` 与 `peer probe`；(8) Web UI 链路质量与心跳调谐面板；(9) 端到端集成测试全覆盖。
+- Rationale: 固定硬编码的心跳与判定时限无法适应多样化的网络拓扑与功耗诉求；单一瞬时 RTT 无法真实表征网络健康度。
+- Alternatives considered: (a) 引入无界历史记录导致内存泄露：改用定额 32 样本滑动窗口保证 $O(1)$ 空间；(b) 在事件中泄露 Noise 密钥：严格执行零明文铁律。
+- Impact: 跨端 Mesh 网络具备了根据网络状况与功耗诉求按需调优心跳、透视抖动与丢包率的能力，探活排障能力显著增强。
+- Rollback trigger: None.
+- Related files: `crates/tetherly-core/src/liveness.rs`, `crates/tetherly-node/src/{runtime.rs,events.rs,uihttp.rs,lib.rs}`, `bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `ui/index.html`, `tests/phase1.rs`, `docs/DEVELOPMENT.md`
+
+## 2026-10-19 - 节点安全审计轨迹、环形结构化审计日志、多维安全检索与遥测全闭环 (ADR-059)
+- Decision: 建立节点级结构化安全操作审计与治理闭环。(1) 抽象强类型安全审计分类 `AuditCategory`（Security / Peer / File / Clipboard / Notify / Route / Config）与四级严重度 `AuditSeverity`（Info / Notice / Warning / Alert）；(2) 构建定额 500 条内存环形缓冲区 `AuditEngine`，提供 $O(1)$ 常数级写入、多维检索 `query` 与清空治理 `clear`，消除内存泄漏风险；(3) 在配对认证、黑名单拦截、文件生命周期、剪贴板同步、系统通知、路由变更、心跳调优等全安全关键链路深度埋点；(4) 严格恪守 Zero-Plaintext 零明文铁律，扩展 `UiEvent::AuditEventRecorded`，严禁在日志与广播中暴露任何私钥、OTP、剪贴板正文或通知正文；(5) 回环控制面端点全闭环：新增 `GET /api/audit`、`POST /api/audit/query` 与 `POST /api/audit/clear`，执行 127.0.0.1 物理绑定与 Host 403 强隔离；(6) 双端 CLI 命令行全同构升级：`audit list`、`audit clear` 与 `audit watch`；(7) Web UI 审计轨迹透视面板；(8) 端到端集成测试全覆盖。
+- Rationale: 关键安全操作如果缺乏结构化审计轨迹，会导致操作黑盒、故障与恶意入侵无法定责和追溯；但无界日志又会导致内存与磁盘耗尽风险，必须通过定额环形缓冲区与零明文脱敏达到平衡。
+- Alternatives considered: (a) 依赖未结构化的 tracing 文本输出：无法在前端或 CLI 实现多维结构化过滤查询与清空；(b) 允许记录完整明文：违反零明文铁律，存在严重安全凭据泄露漏洞。
+- Impact: 节点形成全生命周期安全操作可观测与可审计闭环。
+- Rollback trigger: None.
+- Related files: `crates/tetherly-node/src/{runtime.rs,events.rs,uihttp.rs,lib.rs}`, `bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `ui/index.html`, `tests/phase1.rs`, `docs/DEVELOPMENT.md`
+
+## 2026-10-19 - 跨端点对点安全文本/便签即时交互通道、离线消息缓冲、消息历史治理与双向全闭环 (ADR-060)
+- Decision: 彻底解决跨端文本沟通依赖剪贴板同步污染、缺乏即时便签通道与未读流转痛点。(1) 协议核心层定义专属传输帧 `TYPE_TEXT_MESSAGE: u16 = 0x0202` 与强类型 `TextMessage` 模型，限制单帧文本上限 32 KiB 确保在 Noise Transport Plaintext 65,519 字节物理上限内原子单帧交付；(2) 节点端构建定额 200 条内存环形缓冲区 `MessageEngine` 与强类型 `PeerMessage`（包含 ID、对端设备号、方向 Inbound/Outbound、已读标记、时间戳、正文），支持多维检索 `query`、原子批量标记已读 `mark_read`、清空治理 `clear_messages`；(3) 扩展事件总线 `UiEvent::MessageReceived` 与 `UiEvent::MessageSent`，严格践行 Zero-Plaintext 铁律（仅传输消息 ID、对端标识、字符长度与时间戳，严禁广播明文正文）；(4) 回环控制面端点全闭环：新增 `POST /api/message/send`、`GET /api/message/history`、`POST /api/message/query`、`POST /api/message/clear`，严格执行 127.0.0.1 物理绑定与 Host 403 强隔离；(5) 双端 CLI 命令行全同构升级：`message send`、`message history/list`、`message clear`、`message watch`，并支持对话气泡渲染；(6) Web UI 跨端即时对话与安全便签面板；(7) 端到端集成测试全覆盖。
+- Rationale: 跨设备文本交互强行依赖全局剪贴板同步会严重干扰用户当前编辑工作流，造成剪贴板污染；且通知系统单向回复机制无法满足桌面端与移动端之间的对等点对点交流。
+- Alternatives considered: (a) 复用剪贴板同步机制并静默还原：在多操作系统间还原剪贴板状态极其复杂且不可靠；(b) 允许在 SSE 广播中携带消息明文：严重破坏 Zero-Plaintext 铁律。
+- Impact: 用户获得真正的轻量级点对点加密文本/便签通道，支持离线缓冲、历史记录检索与未读标记流转，彻底告别剪贴板污染。
+- Rollback trigger: None.
+- Related files: `crates/tetherly-core/src/{frame.rs,lib.rs}`, `crates/tetherly-net/src/dispatch.rs`, `crates/tetherly-node/src/{runtime.rs,events.rs,uihttp.rs,lib.rs}`, `bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `ui/index.html`, `tests/phase1.rs`, `docs/DEVELOPMENT.md`
+
 
 
 

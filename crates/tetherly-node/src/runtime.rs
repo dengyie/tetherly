@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tetherly_core::frame::{
     ping, pong, CapsUpdate, ClipSet, FileDone, FileOffer, InnerFrame, NotifyPush, NotifyReply,
+    TextMessage,
 };
 use tetherly_core::liveness::Liveness;
 use tetherly_core::pin::{format_pin, generate_pin};
@@ -903,6 +904,147 @@ impl AuditEngine {
     }
 }
 
+/// Direction of a peer direct secure message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageDirection {
+    Inbound,
+    Outbound,
+}
+
+impl std::fmt::Display for MessageDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MessageDirection::Inbound => write!(f, "inbound"),
+            MessageDirection::Outbound => write!(f, "outbound"),
+        }
+    }
+}
+
+/// A direct message sent point-to-point to or received from a peer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeerMessage {
+    pub id: String,
+    pub peer: String,
+    pub direction: MessageDirection,
+    pub text: String,
+    pub timestamp_ms: u64,
+    pub read: bool,
+}
+
+/// In-memory bounded ring buffer for peer direct messages (default 200 items).
+#[derive(Debug)]
+pub struct MessageEngine {
+    max_capacity: usize,
+    messages: std::collections::VecDeque<PeerMessage>,
+}
+
+impl MessageEngine {
+    pub fn new(max_capacity: usize) -> Self {
+        Self {
+            max_capacity: max_capacity.max(10),
+            messages: std::collections::VecDeque::new(),
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.max_capacity
+    }
+
+    pub fn push(&mut self, msg: PeerMessage) {
+        if self.messages.len() >= self.max_capacity {
+            self.messages.pop_front();
+        }
+        self.messages.push_back(msg);
+    }
+
+    pub fn query(
+        &self,
+        peer: Option<&str>,
+        limit: Option<usize>,
+        unread_only: bool,
+    ) -> (usize, usize, Vec<PeerMessage>) {
+        let total = self.messages.len();
+        let unread = self.messages.iter().filter(|m| !m.read).count();
+        let lim = limit.unwrap_or(50).clamp(1, 500);
+        let mut list: Vec<PeerMessage> = self
+            .messages
+            .iter()
+            .rev()
+            .filter(|m| {
+                if let Some(p) = peer {
+                    if m.peer != p {
+                        return false;
+                    }
+                }
+                if unread_only && m.read {
+                    return false;
+                }
+                true
+            })
+            .take(lim)
+            .cloned()
+            .collect();
+        // Return in chronological order
+        list.reverse();
+        (total, unread, list)
+    }
+
+    pub fn mark_read(&mut self, peer: Option<&str>) -> usize {
+        let mut count = 0;
+        for m in self.messages.iter_mut() {
+            if !m.read {
+                if let Some(p) = peer {
+                    if m.peer != p {
+                        continue;
+                    }
+                }
+                m.read = true;
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn clear(&mut self, peer: Option<&str>) -> usize {
+        if let Some(p) = peer {
+            let before = self.messages.len();
+            self.messages.retain(|m| m.peer != p);
+            before - self.messages.len()
+        } else {
+            let count = self.messages.len();
+            self.messages.clear();
+            count
+        }
+    }
+}
+
+/// Report after sending a peer direct message.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeerMessageSendReport {
+    pub ok: bool,
+    pub message: PeerMessage,
+}
+
+/// Paginated/filtered history of peer direct messages.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeerMessageHistoryReport {
+    pub ok: bool,
+    pub total: usize,
+    pub returned: usize,
+    pub unread: usize,
+    pub messages: Vec<PeerMessage>,
+}
+
+/// Clear confirmation report.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeerMessageClearReport {
+    pub ok: bool,
+    pub target: String,
+    pub cleared_count: usize,
+    pub message: String,
+}
+
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ClipStatusReport {
@@ -1646,6 +1788,7 @@ struct Shared {
     heartbeat_config: Mutex<HeartbeatConfig>,
     link_trackers: Mutex<HashMap<DeviceId, PeerLinkTracker>>,
     audit_engine: Mutex<AuditEngine>,
+    message_engine: Mutex<MessageEngine>,
 }
 
 #[derive(Clone)]
@@ -1862,6 +2005,7 @@ impl Node {
             heartbeat_config: Mutex::new(HeartbeatConfig::default()),
             link_trackers: Mutex::new(HashMap::new()),
             audit_engine: Mutex::new(AuditEngine::new(500)),
+            message_engine: Mutex::new(MessageEngine::new(200)),
         });
         Ok(Self { shared })
     }
@@ -5037,6 +5181,218 @@ impl Node {
         }
     }
 
+    /// Send a direct secure text or note message to a connected peer.
+    pub async fn send_message_to_peer(
+        &self,
+        peer_target: &str,
+        text: &str,
+    ) -> Result<PeerMessageSendReport, CoreError> {
+        let peer_id = if peer_target.trim().is_empty() {
+            let live = self.live_peers();
+            match live.len() {
+                0 => return Err(CoreError::PeerNotFound("no connected peer".to_string())),
+                1 => live[0].device_id.clone(),
+                _ => {
+                    return Err(CoreError::PeerNotFound(
+                        "multiple peers connected; specify target peer".to_string(),
+                    ))
+                }
+            }
+        } else {
+            self.resolve_peer(peer_target)?
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::Json("message text cannot be empty".to_string()));
+        }
+        if trimmed.len() > tetherly_core::frame::TEXT_MESSAGE_MAX {
+            return Err(CoreError::PayloadTooLarge);
+        }
+
+        static MSG_OUT_COUNTER: AtomicU64 = AtomicU64::new(1);
+        let now_ms = self.shared.clock.unix_ms();
+        let msg_id = format!(
+            "msg_{}_{}",
+            now_ms,
+            MSG_OUT_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let wire_msg = TextMessage::new(&msg_id, trimmed, now_ms)?;
+        let frame = wire_msg.to_frame()?;
+        self.send_to(&peer_id, frame).await?;
+
+        let peer_str = peer_id.to_string();
+        let msg = PeerMessage {
+            id: msg_id.clone(),
+            peer: peer_str.clone(),
+            direction: MessageDirection::Outbound,
+            text: trimmed.to_string(),
+            timestamp_ms: now_ms,
+            read: true,
+        };
+
+        {
+            let mut engine = self
+                .shared
+                .message_engine
+                .lock()
+                .expect("message_engine lock");
+            engine.push(msg.clone());
+        }
+
+        self.record_audit(
+            AuditCategory::Peer,
+            AuditSeverity::Info,
+            "message_sent",
+            Some(peer_str.clone()),
+            format!("Sent direct text message (length: {} bytes)", trimmed.len()),
+            true,
+        );
+
+        self.emit(UiEvent::MessageSent {
+            id: msg_id,
+            peer: peer_str,
+            len: trimmed.len(),
+            timestamp_ms: now_ms,
+        });
+
+        Ok(PeerMessageSendReport {
+            ok: true,
+            message: msg,
+        })
+    }
+
+    /// Ingest a direct message received over the Noise connection from a peer.
+    pub fn receive_message(&self, peer_str: &str, wire_msg: TextMessage) {
+        let now_ms = self.shared.clock.unix_ms();
+        let len = wire_msg.text.len();
+        let msg = PeerMessage {
+            id: wire_msg.id.clone(),
+            peer: peer_str.to_string(),
+            direction: MessageDirection::Inbound,
+            text: wire_msg.text,
+            timestamp_ms: if wire_msg.timestamp_ms > 0 {
+                wire_msg.timestamp_ms
+            } else {
+                now_ms
+            },
+            read: false,
+        };
+
+        {
+            let mut engine = self
+                .shared
+                .message_engine
+                .lock()
+                .expect("message_engine lock");
+            engine.push(msg);
+        }
+
+        self.record_audit(
+            AuditCategory::Peer,
+            AuditSeverity::Info,
+            "message_received",
+            Some(peer_str.to_string()),
+            format!("Received direct text message (length: {} bytes)", len),
+            true,
+        );
+
+        self.emit(UiEvent::MessageReceived {
+            id: wire_msg.id,
+            peer: peer_str.to_string(),
+            len,
+            timestamp_ms: now_ms,
+        });
+    }
+
+    /// Query and filter direct message history, with optional unread-only filtering and mark_read flag.
+    pub fn message_history(
+        &self,
+        peer_target: Option<&str>,
+        limit: Option<usize>,
+        unread_only: bool,
+        mark_read: bool,
+    ) -> Result<PeerMessageHistoryReport, CoreError> {
+        let resolved_peer = if let Some(target) = peer_target {
+            if target.trim().is_empty() {
+                None
+            } else {
+                Some(self.resolve_peer(target)?.to_string())
+            }
+        } else {
+            None
+        };
+
+        let mut engine = self
+            .shared
+            .message_engine
+            .lock()
+            .expect("message_engine lock");
+        let (total, unread_before, mut messages) =
+            engine.query(resolved_peer.as_deref(), limit, unread_only);
+
+        let unread = if mark_read {
+            engine.mark_read(resolved_peer.as_deref());
+            for m in messages.iter_mut() {
+                if resolved_peer.is_none() || resolved_peer.as_deref() == Some(&m.peer) {
+                    m.read = true;
+                }
+            }
+            engine.messages.iter().filter(|m| !m.read).count()
+        } else {
+            unread_before
+        };
+
+        Ok(PeerMessageHistoryReport {
+            ok: true,
+            total,
+            returned: messages.len(),
+            unread,
+            messages,
+        })
+    }
+
+    /// Clear direct messages, optionally filtered by peer.
+    pub fn clear_messages(
+        &self,
+        peer_target: Option<&str>,
+    ) -> Result<PeerMessageClearReport, CoreError> {
+        let resolved_peer = if let Some(target) = peer_target {
+            if target.trim().is_empty() {
+                None
+            } else {
+                Some(self.resolve_peer(target)?.to_string())
+            }
+        } else {
+            None
+        };
+
+        let cleared_count = {
+            let mut engine = self
+                .shared
+                .message_engine
+                .lock()
+                .expect("message_engine lock");
+            engine.clear(resolved_peer.as_deref())
+        };
+
+        let target_label = resolved_peer.clone().unwrap_or_else(|| "all".to_string());
+        self.record_audit(
+            AuditCategory::Peer,
+            AuditSeverity::Notice,
+            "message_cleared",
+            resolved_peer,
+            format!("Cleared {cleared_count} direct messages for target: {target_label}"),
+            true,
+        );
+
+        Ok(PeerMessageClearReport {
+            ok: true,
+            target: target_label,
+            cleared_count,
+            message: format!("successfully cleared {cleared_count} messages"),
+        })
+    }
+
     pub fn clone_handle(&self) -> Self {
         Self {
             shared: self.shared.clone(),
@@ -6179,6 +6535,10 @@ impl Node {
                 (c.text.as_ref().map_or(0, |s| s.len()) + 32) as u64,
                 tetherly_core::frame::TYPE_CLIP_SET,
             ),
+            SessionEvent::TextMessage(m) => (
+                (m.text.len() + 32) as u64,
+                tetherly_core::frame::TYPE_TEXT_MESSAGE,
+            ),
             SessionEvent::FileOffer(f) => (
                 (f.transfer_id.len()
                     + f.files.iter().map(|item| item.name.len()).sum::<usize>()
@@ -6294,6 +6654,9 @@ impl Node {
             }
             SessionEvent::Clip(clip) => {
                 self.apply_clip(peer, clip)?;
+            }
+            SessionEvent::TextMessage(msg) => {
+                self.receive_message(peer.as_str(), msg);
             }
             SessionEvent::FileOffer(offer) => {
                 let total: u64 = offer.files.iter().map(|f| f.size).sum();

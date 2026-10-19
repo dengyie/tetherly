@@ -45,9 +45,9 @@ pub use error::CoreError;
 pub use filexfer::{FileHub, IncomingTransfer, ResumeState, ResumeTable, TransferStatus, FILE_MAX};
 pub use frame::{
     hex_lower, hex_sha256, CapsUpdate, ClipSet, FileDecision, FileDone, FileMeta, FileOffer,
-    IncrementalSha256, InnerFrame, NotifyDismiss, NotifyPush, NotifyReply, CANDIDATE_TTL_MS,
-    CLIPBOARD_OTP_CLEAR_MS, CLIP_TEXT_MAX, FILE_CHUNK, FILE_TOKEN_TTL_MS, NOTIFY_TEXT_MAX,
-    TYPE_PING, TYPE_PONG,
+    IncrementalSha256, InnerFrame, NotifyDismiss, NotifyPush, NotifyReply, TextMessage,
+    CANDIDATE_TTL_MS, CLIPBOARD_OTP_CLEAR_MS, CLIP_TEXT_MAX, FILE_CHUNK, FILE_TOKEN_TTL_MS,
+    NOTIFY_TEXT_MAX, TEXT_MESSAGE_MAX, TYPE_PING, TYPE_PONG, TYPE_TEXT_MESSAGE,
 };
 pub use hello::Hello;
 pub use input::{

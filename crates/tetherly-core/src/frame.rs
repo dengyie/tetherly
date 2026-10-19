@@ -28,6 +28,7 @@ pub const TYPE_NOTIFY_PUSH: u16 = 0x0101;
 pub const TYPE_NOTIFY_DISMISS: u16 = 0x0102;
 pub const TYPE_NOTIFY_REPLY: u16 = 0x0103;
 pub const TYPE_CLIP_SET: u16 = 0x0201;
+pub const TYPE_TEXT_MESSAGE: u16 = 0x0202;
 pub const TYPE_FILE_OFFER: u16 = 0x0301;
 pub const TYPE_FILE_ACCEPT: u16 = 0x0302;
 pub const TYPE_FILE_REJECT: u16 = 0x0303;
@@ -108,6 +109,7 @@ pub fn is_known_type(ty: u16) -> bool {
             | TYPE_NOTIFY_DISMISS
             | TYPE_NOTIFY_REPLY
             | TYPE_CLIP_SET
+            | TYPE_TEXT_MESSAGE
             | TYPE_FILE_OFFER
             | TYPE_FILE_ACCEPT
             | TYPE_FILE_REJECT
@@ -259,6 +261,46 @@ impl ClipSet {
 
     pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
         Ok(serde_json::from_slice(payload)?)
+    }
+}
+
+pub const TEXT_MESSAGE_MAX: usize = 32 * 1024;
+
+/// A direct secure text or note message sent point-to-point between paired peers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TextMessage {
+    pub id: String,
+    pub text: String,
+    pub timestamp_ms: u64,
+}
+
+impl TextMessage {
+    pub fn new(
+        id: impl Into<String>,
+        text: impl Into<String>,
+        timestamp_ms: u64,
+    ) -> Result<Self, CoreError> {
+        let text = text.into();
+        if text.len() > TEXT_MESSAGE_MAX || text.len() > INNER_PAYLOAD_MAX.saturating_sub(256) {
+            return Err(CoreError::PayloadTooLarge);
+        }
+        Ok(Self {
+            id: id.into(),
+            text,
+            timestamp_ms,
+        })
+    }
+
+    pub fn to_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_TEXT_MESSAGE, serde_json::to_vec(self)?)
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
+        let parsed: Self = serde_json::from_slice(payload)?;
+        if parsed.text.len() > TEXT_MESSAGE_MAX {
+            return Err(CoreError::PayloadTooLarge);
+        }
+        Ok(parsed)
     }
 }
 

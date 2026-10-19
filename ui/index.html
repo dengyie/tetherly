@@ -556,6 +556,35 @@
       <div id="blocked-peers-box" style="margin-top:8px"><div class="empty">无黑名单设备</div></div>
       <div id="blockmsg" class="hint" style="margin-top:6px"></div>
     </section>
+    <section style="margin-top:16px" id="direct-messaging-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">跨端点对点安全文本与即时便签通道 (Peer Direct Messaging)</h2>
+        <div style="display:flex;gap:6px">
+          <button id="clearmessagesbtn" class="ghost bad" type="button" style="padding:2px 8px;font-size:12px">清空会话记录</button>
+          <button id="refreshmessagesbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新消息</button>
+        </div>
+      </div>
+      <div class="hint">通过既有 Noise IK 加密隧道即时点对点交换文本与便签，完全隔离系统剪贴板与桌面弹窗横幅（零明文 SSE 广播保证）。</div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">
+        <label style="font-size:12px;color:var(--muted)">目标节点:
+          <select id="msg-target-peer" style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px">
+            <option value="">(自动选择首个在线节点)</option>
+          </select>
+        </label>
+        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px">
+          <input type="checkbox" id="msg-filter-unread"> 仅看未读
+        </label>
+        <span id="msg-stat-badge" class="badge outbound" style="font-size:11px">消息 0 条 (未读 0)</span>
+      </div>
+      <div id="messages-box" style="margin-top:8px;max-height:320px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:8px;background:var(--bg);display:flex;flex-direction:column;gap:6px">
+        <div class="empty">暂无交互消息</div>
+      </div>
+      <form id="msg-send-form" style="display:flex;gap:8px;margin-top:8px">
+        <input type="text" id="msg-input-text" placeholder="输入跨端加密即时便签或文字 (回车快捷发送，限 32 KiB)…" style="flex:1;padding:6px 10px;font-size:12px;background:var(--card-bg);color:var(--text);border:1px solid var(--line);border-radius:4px" maxlength="32768" required>
+        <button type="submit" id="msg-send-btn" class="primary" style="padding:6px 14px;font-size:12px;cursor:pointer">发送文本</button>
+      </form>
+      <div id="msgstatus" class="hint" style="margin-top:4px"></div>
+    </section>
     <section style="margin-top:16px" id="audit-trail-section">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2 style="margin:0">节点安全审计轨迹与操作日志 (Security Audit Trail)</h2>
@@ -887,6 +916,11 @@ function render(s) {
   if (sp) {
     sp.innerHTML = '<option value="">自动（唯一在线对端）</option>';
   }
+  const mp = $("msg-target-peer");
+  const prevMsgPeer = mp ? mp.value : "";
+  if (mp) {
+    mp.innerHTML = '<option value="">(自动选择首个在线节点)</option>';
+  }
   for (const x of s.peers) {
     let rttBadge = '<span class="badge offline" style="margin-left:6px">RTT 未测</span>';
     if (x.rtt_ms != null) {
@@ -973,6 +1007,13 @@ function render(s) {
       opt.textContent = displayName + " (" + x.device_id + ")";
       if (opt.value === prevPeer) opt.selected = true;
       sp.appendChild(opt);
+    }
+    if (mp) {
+      const opt = document.createElement("option");
+      opt.value = x.device_id;
+      opt.textContent = displayName + " (" + (x.path || "lan") + ")";
+      if (opt.value === prevMsgPeer) opt.selected = true;
+      mp.appendChild(opt);
     }
   }
   const tr = $("trusted");
@@ -2539,6 +2580,130 @@ if ($("audit-filter-cat")) $("audit-filter-cat").onchange = updateAuditLogs;
 if ($("audit-filter-sev")) $("audit-filter-sev").onchange = updateAuditLogs;
 if ($("audit-filter-limit")) $("audit-filter-limit").onchange = updateAuditLogs;
 
+async function updateMessageHistory() {
+  const box = $("messages-box");
+  const stat = $("msg-stat-badge");
+  if (!box) return;
+  const targetPeer = $("msg-target-peer") ? $("msg-target-peer").value : "";
+  const unreadOnly = $("msg-filter-unread") ? $("msg-filter-unread").checked : false;
+
+  let query = "?limit=50&mark_read=true";
+  if (targetPeer) query += "&peer=" + encodeURIComponent(targetPeer);
+  if (unreadOnly) query += "&unread_only=true";
+
+  try {
+    const rep = await fetch("/api/message/history" + query).then(r => r.json());
+    if (stat) {
+      stat.textContent = "消息 " + (rep.returned || 0) + " / 累计 " + (rep.total || 0) + " 条 (未读 " + (rep.unread || 0) + ")";
+    }
+    const messages = rep.messages || [];
+    if (!messages.length) {
+      box.innerHTML = '<div class="empty">暂无交互消息</div>';
+      return;
+    }
+    box.innerHTML = "";
+    for (const m of messages) {
+      const isOut = m.direction === "outbound";
+      const align = isOut ? "flex-end" : "flex-start";
+      const bg = isOut ? "rgba(34, 197, 94, 0.12)" : "rgba(56, 189, 248, 0.12)";
+      const border = isOut ? "rgba(34, 197, 94, 0.3)" : "rgba(56, 189, 248, 0.3)";
+      const dirTag = isOut
+        ? '<span class="badge outbound" style="font-size:10px">OUTBOUND</span>'
+        : '<span class="badge completed" style="font-size:10px">INBOUND</span>';
+      const timeStr = m.timestamp_ms ? new Date(m.timestamp_ms).toLocaleTimeString() : "";
+      const bubble = el(
+        '<div style="align-self:' + align + ';max-width:80%;display:flex;flex-direction:column;gap:3px">' +
+          '<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);justify-content:' + (isOut ? 'flex-end' : 'flex-start') + '">' +
+            dirTag +
+            '<span>' + (isOut ? '发往 ' : '来自 ') + escapeHtml(m.peer) + ' · ' + timeStr + '</span>' +
+          '</div>' +
+          '<div style="background:' + bg + ';border:1px solid ' + border + ';border-radius:6px;padding:8px 12px;font-size:13px;color:var(--text);white-space:pre-wrap;word-break:break-word"></div>' +
+        '</div>'
+      );
+      bubble.children[1].textContent = m.text || "";
+      box.appendChild(bubble);
+    }
+    box.scrollTop = box.scrollHeight;
+  } catch (err) {
+    if (box) box.innerHTML = '<div class="empty">加载消息历史异常</div>';
+  }
+}
+
+const sendMsgForm = $("msg-send-form");
+if (sendMsgForm) {
+  sendMsgForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const input = $("msg-input-text");
+    const targetPeer = $("msg-target-peer") ? $("msg-target-peer").value : "";
+    const msgStatus = $("msgstatus");
+    if (!input || !input.value.trim()) return;
+    const text = input.value.trim();
+    if (msgStatus) msgStatus.textContent = "正在发送消息…";
+    try {
+      const rep = await fetch("/api/message/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ peer: targetPeer, text }),
+      }).then(r => r.json());
+      if (rep && rep.ok) {
+        input.value = "";
+        if (msgStatus) {
+          msgStatus.textContent = "消息已送达 (ID: " + (rep.message ? rep.message.id : "") + ")";
+          setTimeout(() => {
+            if (msgStatus) msgStatus.textContent = "";
+          }, 3000);
+        }
+        updateMessageHistory();
+      } else {
+        if (msgStatus) msgStatus.textContent = "发送失败: " + (rep.error || "未知错误");
+      }
+    } catch (err) {
+      if (msgStatus) msgStatus.textContent = "发送异常: " + err.message;
+    }
+  };
+}
+
+const refreshMsgBtn = $("refreshmessagesbtn");
+if (refreshMsgBtn) {
+  refreshMsgBtn.onclick = () => {
+    updateMessageHistory();
+  };
+}
+
+const clearMsgBtn = $("clearmessagesbtn");
+if (clearMsgBtn) {
+  clearMsgBtn.onclick = async () => {
+    const targetPeer = $("msg-target-peer") ? $("msg-target-peer").value : "";
+    const targetLabel = targetPeer ? ("指定节点 " + targetPeer) : "所有会话";
+    if (!confirm("确定清空 " + targetLabel + " 的消息历史记录？")) return;
+    const msgStatus = $("msgstatus");
+    if (msgStatus) msgStatus.textContent = "正在清空消息…";
+    try {
+      const rep = await fetch("/api/message/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ peer: targetPeer || null }),
+      }).then(r => r.json());
+      if (rep && rep.ok) {
+        if (msgStatus) {
+          msgStatus.textContent = "消息已清空 (" + (rep.cleared_count || 0) + " 条已归零)";
+          setTimeout(() => {
+            if (msgStatus) msgStatus.textContent = "";
+          }, 3000);
+        }
+        updateMessageHistory();
+      } else {
+        if (msgStatus) msgStatus.textContent = "清空失败: " + (rep.error || "未知错误");
+      }
+    } catch (err) {
+      if (msgStatus) msgStatus.textContent = "清空异常: " + err.message;
+    }
+  };
+}
+
+if ($("msg-target-peer")) $("msg-target-peer").onchange = updateMessageHistory;
+if ($("msg-filter-unread")) $("msg-filter-unread").onchange = updateMessageHistory;
+
 async function tick() {
   try { render(await api("/api/state")); } catch (e) { /* node down */ }
   refreshPin();
@@ -2740,12 +2905,20 @@ function setupEventSource() {
 											            desc = "保活配置更新: 间隔=" + ev.interval_secs + "s, 失活=" + ev.deadline_secs + "s";
 											            updateLinkQuality();
 											          }
-											          else if (ev.kind === "audit_event_recorded") {
-											            const statusStr = ev.success ? "成功" : "失败";
-											            const targetStr = ev.target ? (" -> " + ev.target) : "";
-											            desc = "安全审计: [" + ev.severity + "] [" + ev.category + "] " + ev.action + targetStr + " (" + statusStr + ")";
-											            updateAuditLogs();
-											          }
+												          else if (ev.kind === "audit_event_recorded") {
+												            const statusStr = ev.success ? "成功" : "失败";
+												            const targetStr = ev.target ? (" -> " + ev.target) : "";
+												            desc = "安全审计: [" + ev.severity + "] [" + ev.category + "] " + ev.action + targetStr + " (" + statusStr + ")";
+												            updateAuditLogs();
+												          }
+												          else if (ev.kind === "message_received") {
+												            desc = "即时消息: 收到来自 " + ev.peer + " (长度: " + ev.len + " 字节)";
+												            updateMessageHistory();
+												          }
+												          else if (ev.kind === "message_sent") {
+												            desc = "即时消息: 发送至 " + ev.peer + " (长度: " + ev.len + " 字节)";
+												            updateMessageHistory();
+												          }
 			          $("ev-last").textContent = "[" + t + "] " + desc;
 		        }
 		      } catch (err) {
@@ -2800,8 +2973,10 @@ function setupEventSource() {
 									setInterval(updateSysMetrics, 3000);
 									updateLinkQuality();
 									setInterval(updateLinkQuality, 3000);
-									updateAuditLogs();
-									setInterval(updateAuditLogs, 3000);
+										updateAuditLogs();
+										setInterval(updateAuditLogs, 3000);
+										updateMessageHistory();
+										setInterval(updateMessageHistory, 3000);
 		</script>
 </body>
 </html>

@@ -970,4 +970,20 @@
 - Next: Git commit keeping working tree clean.
 - Blockers: None.
 
+## 2026-10-19
+- Task: Land Tetherly v1.67 (ADR-060) 跨端点对点安全文本/便签即时交互通道、离线消息缓冲、消息历史治理与双向全闭环.
+- Actions:
+  1. Defined inner frame type `TYPE_TEXT_MESSAGE: u16 = 0x0202` and `TextMessage` model in `crates/tetherly-core/src/frame.rs` and `lib.rs` with `TEXT_MESSAGE_MAX = 32 * 1024` (32 KiB) single-frame transport ceiling; added roundtrip and bounds tests in `crates/tetherly-core/tests/decoders.rs`;
+  2. Implemented `PeerMessage`, `MessageDirection` (`Inbound`, `Outbound`), bounded ring buffer `MessageEngine` (200 capacity), `send_message_to_peer` (with single-live-peer auto-targeting), `message_history` (multi-dimensional filter and atomic read marking), and `clear_messages` in `crates/tetherly-node/src/runtime.rs` and `lib.rs`; added inbound dispatch handler in `crates/tetherly-net/src/dispatch.rs`;
+  3. Extended `UiEvent` in `crates/tetherly-node/src/events.rs` with `MessageReceived` and `MessageSent` zero-plaintext event variants (only metadata, strictly omitting plaintext body);
+  4. Implemented loopback endpoints in `crates/tetherly-node/src/uihttp.rs`: `POST /api/message/send`, `GET /api/message/history`, `POST /api/message/query`, and `POST /api/message/clear` (with `/api/msg/*` aliases) with 127.0.0.1 physical binding and Host 403 Forbidden check;
+  5. Implemented isomorphic `message`/`msg` CLI subcommands (`send`, `history`/`list`, `clear`, `watch`) and real-time SSE event formatting in both `bins/tetherly-cli/src/main.rs` and `crates/tetherly-node/src/bin/tetherly.rs`;
+  6. Added "跨端即时消息与安全便签通道" control card in `ui/index.html` with target selector, unread filter, XSS-safe chat bubble streaming, quick multi-line send form, and SSE real-time sync;
+  7. Added comprehensive E2E integration test in `tests/phase1.rs`: `node_direct_secure_messaging_history_governance_and_zero_plaintext_via_loopback_api`, asserting two-way message exchanges, unread marking, circular buffer clearing, zero-plaintext SSE verification, and loopback 403 isolation;
+  8. Ran full workspace verification: `cargo fmt --all --check` (clean), `cargo clippy --workspace --all-targets -- -D warnings` (clean), `cargo check --target aarch64-unknown-linux-gnu` (clean), `cargo test --workspace` (all 349 tests pass), `cargo deny check` (advisories ok, bans ok, licenses ok, sources ok);
+  9. Updated SSOT `docs/DEVELOPMENT.md` to v1.67 (ADR-060), updated `.codex-memory/decisions.md` and `.codex-memory/project-state.md`.
+- Results: All 8 tasks for v1.67 completed and verified 100% green.
+- Next: Git commit and sync to Obsidian vault.
+- Blockers: None.
+
 

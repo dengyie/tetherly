@@ -477,6 +477,39 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Peer direct secure messaging, ephemeral notes, and chat history governance.
+    #[command(alias = "msg")]
+    Message {
+        #[command(subcommand)]
+        action: Option<MessageCmd>,
+        /// Target peer device ID (`tdev_...`) or advertised hostname.
+        #[arg(long, short)]
+        peer: Option<String>,
+        /// Text message content (or note) to send (convenience shorthand for `message send`).
+        #[arg(long, short)]
+        text: Option<String>,
+        /// Maximum number of messages to return (default: 50).
+        #[arg(long, short)]
+        limit: Option<usize>,
+        /// Filter only unread messages.
+        #[arg(long)]
+        unread: bool,
+        /// Automatically mark returned unread messages as read.
+        #[arg(long)]
+        mark_read: bool,
+        /// Clear messages matching peer or all messages.
+        #[arg(long)]
+        clear: bool,
+        /// Watch mode: continuously stream live message events.
+        #[arg(long, short)]
+        watch: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Manage native desktop notification banners and Do-Not-Disturb (DND) policy.
     Banner {
         #[command(subcommand)]
@@ -1075,6 +1108,74 @@ enum AuditCmd {
         #[arg(long, short)]
         severity: Option<String>,
         /// Maximum number of audit events to receive before exiting (0 for unlimited).
+        #[arg(long, default_value_t = 0)]
+        count: usize,
+        /// Output raw JSON per event line instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MessageCmd {
+    /// Send a direct secure text message to a connected peer.
+    Send {
+        /// Target peer device ID (`tdev_...`) or advertised hostname. Omit if exactly one peer is live.
+        #[arg(long, short)]
+        peer: Option<String>,
+        /// Text message content (or note) to send.
+        #[arg(required = true)]
+        text: String,
+        /// Output raw JSON response instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// List and query direct message history.
+    #[command(alias = "list")]
+    History {
+        /// Filter by peer device ID (`tdev_...`) or advertised hostname.
+        #[arg(long, short)]
+        peer: Option<String>,
+        /// Maximum number of messages to return (default: 50).
+        #[arg(long, short)]
+        limit: Option<usize>,
+        /// Filter only unread messages.
+        #[arg(long)]
+        unread: bool,
+        /// Automatically mark returned unread messages as read.
+        #[arg(long)]
+        mark_read: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Clear and purge message history from the in-memory ring buffer.
+    Clear {
+        /// Filter by peer to clear only messages with that peer, or omit to clear all.
+        #[arg(long, short)]
+        peer: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Watch live direct message events in real time via Server-Sent Events (SSE).
+    Watch {
+        /// Filter by peer device ID or hostname.
+        #[arg(long, short)]
+        peer: Option<String>,
+        /// Maximum number of events to receive before exiting (0 for unlimited).
         #[arg(long, default_value_t = 0)]
         count: usize,
         /// Output raw JSON per event line instead of formatted text.
@@ -3425,6 +3526,23 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Cmd::Message {
+            action,
+            peer,
+            text,
+            limit,
+            unread,
+            mark_read,
+            clear,
+            watch,
+            json,
+            ui_port,
+        } => {
+            handle_message_cmd(
+                action, peer, text, limit, unread, mark_read, clear, watch, json, ui_port,
+            )
+            .await?;
+        }
         Cmd::Banner { action } => match action {
             BannerCmd::Config {
                 banners,
@@ -5058,6 +5176,324 @@ fn print_audit_report(val: &serde_json::Value) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn handle_message_cmd(
+    action: Option<MessageCmd>,
+    default_peer: Option<String>,
+    default_text: Option<String>,
+    default_limit: Option<usize>,
+    default_unread: bool,
+    default_mark_read: bool,
+    default_clear: bool,
+    default_watch: bool,
+    default_json: bool,
+    default_ui_port: u16,
+) -> Result<()> {
+    if default_clear {
+        return handle_message_clear(default_peer, default_json, default_ui_port).await;
+    }
+    if default_watch {
+        return handle_message_watch(default_peer, 0, default_json, default_ui_port).await;
+    }
+    if let Some(txt) = default_text {
+        return handle_message_send(default_peer, &txt, default_json, default_ui_port).await;
+    }
+    match action {
+        None => {
+            handle_message_history(
+                default_peer,
+                default_limit,
+                default_unread,
+                default_mark_read,
+                default_json,
+                default_ui_port,
+            )
+            .await
+        }
+        Some(MessageCmd::Send {
+            peer,
+            text,
+            json,
+            ui_port,
+        }) => {
+            let p = peer.or(default_peer);
+            let j = json || default_json;
+            let port = if ui_port != 45716 {
+                ui_port
+            } else {
+                default_ui_port
+            };
+            handle_message_send(p, &text, j, port).await
+        }
+        Some(MessageCmd::History {
+            peer,
+            limit,
+            unread,
+            mark_read,
+            json,
+            ui_port,
+        }) => {
+            let p = peer.or(default_peer);
+            let lim = limit.or(default_limit);
+            let un = unread || default_unread;
+            let mr = mark_read || default_mark_read;
+            let j = json || default_json;
+            let port = if ui_port != 45716 {
+                ui_port
+            } else {
+                default_ui_port
+            };
+            handle_message_history(p, lim, un, mr, j, port).await
+        }
+        Some(MessageCmd::Clear {
+            peer,
+            json,
+            ui_port,
+        }) => {
+            let p = peer.or(default_peer);
+            let j = json || default_json;
+            let port = if ui_port != 45716 {
+                ui_port
+            } else {
+                default_ui_port
+            };
+            handle_message_clear(p, j, port).await
+        }
+        Some(MessageCmd::Watch {
+            peer,
+            count,
+            json,
+            ui_port,
+        }) => {
+            let p = peer.or(default_peer);
+            let j = json || default_json;
+            let port = if ui_port != 45716 {
+                ui_port
+            } else {
+                default_ui_port
+            };
+            handle_message_watch(p, count, j, port).await
+        }
+    }
+}
+
+async fn handle_message_send(
+    peer: Option<String>,
+    text: &str,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    let payload = serde_json::json!({
+        "peer": peer.unwrap_or_default(),
+        "text": text,
+    });
+    let bytes = serde_json::to_vec(&payload)?;
+    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/message/send", &bytes)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        anyhow::bail!(
+            "failed to send message (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&resp).trim());
+    } else {
+        let val: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+        let msg = &val["message"];
+        let id = msg["id"].as_str().unwrap_or("?");
+        let to = msg["peer"].as_str().unwrap_or("?");
+        let txt = msg["text"].as_str().unwrap_or("");
+        println!("Message sent successfully!");
+        println!("  ID:   {id}");
+        println!("  To:   {to}");
+        println!("  Text: {txt}");
+    }
+    Ok(())
+}
+
+async fn handle_message_history(
+    peer: Option<String>,
+    limit: Option<usize>,
+    unread_only: bool,
+    mark_read: bool,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    let mut query_params = Vec::new();
+    if let Some(p) = &peer {
+        query_params.push(format!("peer={p}"));
+    }
+    if let Some(l) = limit {
+        query_params.push(format!("limit={l}"));
+    }
+    if unread_only {
+        query_params.push("unread_only=true".to_string());
+    }
+    if mark_read {
+        query_params.push("mark_read=true".to_string());
+    }
+    let qs = if query_params.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query_params.join("&"))
+    };
+    let path = format!("/api/message/history{qs}");
+    let (code, resp) = tetherly_node::loopback_get(ui_port, &path)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        anyhow::bail!(
+            "failed to query message history (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&resp).trim());
+    } else {
+        let val: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+        print_message_history_report(&val);
+    }
+    Ok(())
+}
+
+fn print_message_history_report(val: &serde_json::Value) {
+    let total = val["total"].as_u64().unwrap_or(0);
+    let unread = val["unread"].as_u64().unwrap_or(0);
+    let returned = val["returned"].as_u64().unwrap_or(0);
+    println!("Direct Message History (total: {total}, unread: {unread}, showing: {returned}):");
+    let messages = match val["messages"].as_array() {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => {
+            println!("  (no messages found)");
+            return;
+        }
+    };
+    println!(
+        "  {:<16} {:<10} {:<10} {:<24} {:<6} {:<30}",
+        "ID", "DIR", "TIME", "PEER", "READ", "CONTENT"
+    );
+    println!("  {}", "-".repeat(100));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    for m in messages {
+        let id = m["id"].as_str().unwrap_or("-");
+        let dir = m["direction"].as_str().unwrap_or("in");
+        let ts = m["timestamp_ms"].as_u64().unwrap_or(0);
+        let ago_str = if now_ms >= ts {
+            let diff_s = (now_ms - ts) / 1000;
+            format!("{diff_s}s ago")
+        } else {
+            "just now".to_string()
+        };
+        let peer = m["peer"].as_str().unwrap_or("-");
+        let read = if m["read"].as_bool().unwrap_or(true) {
+            "yes"
+        } else {
+            "NO"
+        };
+        let text = m["text"].as_str().unwrap_or("");
+        let clean_text: String = text.chars().take(40).collect();
+        println!(
+            "  {:<16} {:<10} {:<10} {:<24} {:<6} {:<30}",
+            id, dir, ago_str, peer, read, clean_text
+        );
+    }
+}
+
+async fn handle_message_clear(peer: Option<String>, json: bool, ui_port: u16) -> Result<()> {
+    let payload = serde_json::json!({
+        "peer": peer,
+    });
+    let bytes = serde_json::to_vec(&payload)?;
+    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/message/clear", &bytes)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        anyhow::bail!(
+            "failed to clear messages (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&resp).trim());
+    } else {
+        let val: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+        let count = val["cleared_count"].as_u64().unwrap_or(0);
+        let target = val["target"].as_str().unwrap_or("all");
+        println!("Direct messages cleared: {count} messages purged (target: {target})");
+    }
+    Ok(())
+}
+
+async fn handle_message_watch(
+    peer: Option<String>,
+    count: usize,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    let mut sse = tetherly_node::loopback_events_connect(ui_port)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if !json {
+        let filter_info = match &peer {
+            Some(p) => format!(" (filter peer: {p})"),
+            None => String::new(),
+        };
+        println!("Streaming live direct message events on 127.0.0.1:{ui_port}{filter_info}...");
+    }
+    let mut received = 0usize;
+    while let Ok(Some(raw)) = sse.next_event().await {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let kind = val["kind"].as_str().unwrap_or("");
+            if kind == "message_received" || kind == "message_sent" {
+                if let Some(target_p) = &peer {
+                    let ev_p = val["peer"].as_str().unwrap_or("");
+                    if !ev_p.contains(target_p) {
+                        continue;
+                    }
+                }
+                received += 1;
+                if json {
+                    println!("{raw}");
+                } else {
+                    print_event(&val);
+                }
+                if count > 0 && received >= count {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn print_event(v: &serde_json::Value) {
     let kind = v["kind"].as_str().unwrap_or("unknown");
     match kind {
@@ -5359,6 +5795,18 @@ fn print_event(v: &serde_json::Value) {
             let success = v["success"].as_bool().unwrap_or(true);
             let status = if success { "ok" } else { "failed" };
             println!("[audit] #{id} [{sev}] [{cat}] {action}{target} -> {summary} ({status})");
+        }
+        "message_received" => {
+            let id = v["id"].as_str().unwrap_or("?");
+            let peer = v["peer"].as_str().unwrap_or("?");
+            let len = v["len"].as_u64().unwrap_or(0);
+            println!("[message_received] id={id} from={peer} (length: {len} bytes)");
+        }
+        "message_sent" => {
+            let id = v["id"].as_str().unwrap_or("?");
+            let peer = v["peer"].as_str().unwrap_or("?");
+            let len = v["len"].as_u64().unwrap_or(0);
+            println!("[message_sent] id={id} to={peer} (length: {len} bytes)");
         }
         other => {
             println!("[{other}] {v}");
