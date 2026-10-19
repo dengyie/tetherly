@@ -3,12 +3,106 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.60** |
+| 文档版本 | **1.61** |
 | 日期 | 2026-10-19 |
-| 状态 | **v1.60 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环（ADR-053）**——(1) **收件箱生命周期治理与强类型 DTO 抽象 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`)**：解决收件箱落盘后细粒度画像盲区与缺乏删除原语的痛点，设计 `InboxFileDto`、`InboxReport`、`InboxDeleteReport` 与 `InboxClearReport`，支持单遍扫描 `<data_dir>/inbox/` 目录，单文件尺寸提取、UNIX 时间戳、扩展名解析与合规安全性校验；(2) **安全单文件删除与批量审计清空原语**：实现 `Node::delete_inbox_file` 与 `Node::clear_inbox`，严格执行路径穿越红线守卫（坚决拦截 `..`、`/`、`\`、NUL、隐藏文件等恶意路径，返回 `CoreError::UnsafeFileName`），并支持按 `before_secs` 截断安全清除过期文件；(3) **事件总线生命周期闭环与零明文审计**：在 `UiEvent` 中扩展 `InboxFileDeleted` 与 `InboxCleared` 事件变体，严格践行 Zero-Plaintext 铁律（仅传输安全文件名、释放字节数与时间戳，严禁携带敏感正文与路径），实现 SSE 实时推送；(4) **回环控制面端点群全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET /api/file/inbox`（别名 `/api/inbox`）、`POST /api/file/inbox/delete`（别名 `DELETE /api/file/inbox`）与 `POST /api/file/inbox/clear`（别名 `DELETE /api/file/inbox/all`），全量执行 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强阻断校验；(5) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：增设 `inbox` 子命令族（`inbox list [--search] [--limit] [--json]`、`inbox delete <name>`、`inbox clear [--yes] [--before-secs]`），并增强 SSE 事件监听器高亮输出；(6) **Web UI 已收文件治理交互面板 (`ui/index.html`)**：新增「已接收文件与收件箱治理 (Inbox)」卡片，支持实时搜索过滤、单项删除、一键清空与 SSE 联动即时局部重绘；(7) **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 增设完整集成测试覆盖空收件箱查询、多文件排序、关键字过滤与 limit 截断、路径穿越攻击阻断、单项物理删除与 SSE 事件、批量清空与保留分块侧车、Host 403 恶意头阻断，全工作区 342+ 项测试、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 通过。+ v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.61 局域网设备自发现治理、信标可观测性与一键拨号配对闭环（ADR-054）**——(1) **网络层 mDNS 服务浏览与信标监听原语 (`crates/tetherly-net/src/mdns.rs` & `lib.rs`)**：彻底终结既有系统单向广播自身但从未浏览/监听对端信标的“监听黑盒”，封装 `browse` 与 `stop_browse` 原语接收 `ServiceEvent::ServiceResolved` 与 `ServiceRemoved`，并在非 `lan` 特性下提供安全无害桩函数；(2) **局域网发现强类型 DTO 抽象与运行时自发现画像 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`)**：设计 `DiscoveredPeerDto`、`DiscoveryReport` 与 `DiscoveryRescanReport`，维护线程安全自发现表 `discovered: Mutex<HashMap<String, DiscoveredPeerInfo>>`，支持自动过滤自身设备 ID、单遍汇总在线与受信任状态并按活跃时间倒序排布；(3) **动态重新探测与智能拨号寻址原语**：实现 `Node::rescan_discovery` 主动触发信标组播重探，并在 `Node::dial_peer` 中提供智能寻址引擎（按物理套接字地址、发现设备名/ID、路由表对端标识优先级链式解析，并配备 2s 单目标快速超时，彻底避免跨网段挂死）；(4) **事件总线零明文审计与即时分发 (`crates/tetherly-node/src/events.rs`)**：扩展 `UiEvent::PeerDiscovered` 与 `UiEvent::PeerExpired` 变体，严格践行 Zero-Plaintext 铁律（仅传输脱敏公开元数据、名称、地址与能力列表，严禁传输任何私钥或敏感负载），通过 SSE 实时分发；(5) **回环控制面端点全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET /api/discovery`（别名 `/api/peers/discovered`）、`POST /api/discovery/rescan`（别名 `/api/peers/discover`），增强 `POST /api/dial` 原生支持 `peer` 智能寻址，全量端点严格执行 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强阻断；(6) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：增设 `discover [--rescan] [--json]` 子命令、升级 `dial [--addr] [--peer <name|id>]` 智能拨号，并在 SSE `events` 监听器中提供高亮格式化输出；(7) **Web UI 局域网自发现交互面板 (`ui/index.html`)**：新增「局域网自动发现设备 (Discovered LAN Devices)」卡片，支持实时设备列表、能力特性徽标、一键地址填入、一键快捷拨号与 SSE 联动无感局部重绘；(8) **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 增设完整集成测试覆盖自发现初态、主动刷新探测、模拟对端广播、智能寻址解析与拨号、信标过期与 SSE 验证、Host 403 恶意阻断，全工作区 273+ 项测试、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 通过。+ v1.60 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环（ADR-053）+ v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.61 相对 1.60(局域网设备自发现治理、信标可观测性与一键拨号配对闭环)**
+
+- **动机(局域网发现监听黑盒与手动 IP 拨号摩擦痛点)**:
+  在 Tetherly 陆续完成跨端收件箱生命周期治理与安全删除 (v1.60 / ADR-053)、批量文件提议与断点续传可观测性画像 (v1.59 / ADR-052) 及全桌面 ANCS GATT 接入闭环 (v1.58 / ADR-051) 之后，核心数据面与传输面已高度可靠。然而，在**局域网设备自发现治理与拨号链路（LAN Discovery & Dial Governance）**层面，系统长期存在控制与用户体验盲区：
+  1. **单向广播与发现监听黑盒（One-Way Advertising without Browsing Blackout）**：
+     节点在启动后虽然能够通过 `crates/tetherly-net/src/mdns.rs` 注册 `_tetherly._tcp.local.` mDNS 服务向外广播本机控制端口、设备 ID、公钥指纹与能力集；但节点**从未启动 mDNS 服务浏览（Service Browser）**或监听局域网对端广播信标，导致同一局域网内的 Tetherly 设备完全无法感知彼此的存在；
+  2. **缺乏局域网设备发现画像与控制面查询端点（Discovery Observability Blackout）**：
+     控制面缺乏 `GET /api/discovery`（别名 `/api/peers/discovered`）与 `POST /api/discovery/rescan` 端点；调用方、CLI 与 Web UI 无法探查局域网内当前发现了哪些可用对端、其 IP 地址列表、控制端口、设备公钥指纹、能力特性以及在线/信任状态；
+  3. **拨号流程割裂与必须手动输入 IP:Port 痛点（Manual IP Dial Friction）**：
+     既有 `tetherly dial` 与 `/api/dial` 强制要求用户手动查询对端 IP 并输入 `--addr <ip:port>`；无法基于已发现的设备友好名称、别名或设备 ID 直接一键拨号配对；
+  4. **事件总线局域网发现事件断层（Event Bus Gap for Discovered Peers）**：
+     当局域网出现新设备广播或设备离线/过期时，事件总线未派发任何事件；Web UI 无法实现即时动态感知；必须严格恪守 Zero-Plaintext 铁律：事件载荷仅允许携带脱敏的公开元数据（`device_id`, `name`, `addr`, `caps`），严禁携带任何私密密钥；
+  5. **双端 CLI 与 Web UI 缺少自发现全同构支持**：
+     缺少双端同构的 `discover` 子命令；`dial` 子命令不支持 `--peer <name|id>` 智能寻址；Web UI 缺乏「局域网自动发现设备」面板与一键「填入/连接」操作。
+
+- **架构与协议设计(ADR-054 局域网设备自发现治理、信标可观测性与一键拨号配对闭环)**:
+  1. **网络层 mDNS 浏览与注销原语 (`crates/tetherly-net/src/mdns.rs` & `lib.rs`)**:
+     - 封装 `mdns_sd::ServiceDaemon` 的浏览能力：
+       ```rust
+       #[cfg(feature = "lan")]
+       pub fn browse(daemon: &ServiceDaemon) -> Result<MdnsReceiver<ServiceEvent>, NetError>;
+       #[cfg(feature = "lan")]
+       pub fn stop_browse(daemon: &ServiceDaemon) -> Result<(), NetError>;
+       ```
+     - 为非 `lan` 特性提供匹配的 safe stubs；并在 mDNS 注册时将 `("name", hostname)` 写入 TXT 记录，确保设备名可被直接解析。
+  2. **核心模型设计与 DTO 抽象 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`)**:
+     - 定义强类型画像 DTO：
+       ```rust
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+       pub struct DiscoveredPeerDto {
+           pub device_id: String,
+           pub name: String,
+           pub addrs: Vec<String>,
+           pub port: u16,
+           pub fp: Option<String>,
+           pub caps: Vec<String>,
+           pub is_trusted: bool,
+           pub is_online: bool,
+           pub last_seen_ms: u64,
+       }
+
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+       pub struct DiscoveryReport {
+           pub ok: bool,
+           pub count: usize,
+           pub peers: Vec<DiscoveredPeerDto>,
+       }
+
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+       pub struct DiscoveryRescanReport {
+           pub ok: bool,
+           pub message: String,
+       }
+       ```
+  3. **运行时自发现表维护与智能拨号寻址原语**:
+     - 在 `Shared` 中维护线程安全自发现表 `discovered: Mutex<HashMap<String, DiscoveredPeerInfo>>` 与 `rescan_trigger: broadcast::Sender<()>`；
+     - 自动过滤自身设备 ID（不向自发现表中记录自身）；
+     - `pub fn discovered_peers(&self) -> DiscoveryReport`：单遍汇总当前发现的所有局域网设备，计算 `is_trusted` 与 `is_online` 标记，按 `last_seen_ms` 倒序排序；
+     - `pub fn rescan_discovery(&self) -> DiscoveryRescanReport`：主动向组播网络发射信标重探请求；
+     - `pub async fn dial_peer(&self, target: &str) -> Result<SocketAddr, tetherly_net::NetError>`：智能寻址解析引擎，支持：
+       1. 直接物理 `SocketAddr` 解析（如 `192.168.1.50:45717`）；
+       2. 自发现表中设备名称或设备 ID 候选解析，并对候选 IP 列表按优先级链式拨号（配备 2s 单目标快速超时，避免无响应 IP 阻塞）；
+       3. 路由表缓存解析；
+  4. **事件总线扩展与零明文审计 (`crates/tetherly-node/src/events.rs`)**:
+     - 在 `UiEvent` 中扩展变体：
+       ```rust
+       PeerDiscovered {
+           device_id: String,
+           name: String,
+           addr: String,
+           caps: Vec<String>,
+       },
+       PeerExpired {
+           device_id: String,
+       },
+       ```
+     - 严格遵守 Zero-Plaintext 铁律，仅传输设备名称、脱敏 ID、主要地址与能力标签。
+  5. **回环控制面端点群全闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/discovery`（别名 `/api/peers/discovered`）：输出 `DiscoveryReport`；
+     - `POST /api/discovery/rescan`（别名 `/api/peers/discover`）：输出 `DiscoveryRescanReport`；
+     - 升级 `POST /api/dial`：除 `addr` 外支持可选 `peer` 参数，调用 `dial_peer` 智能寻址；
+     - 全量端点严格绑定 `127.0.0.1` 物理回环并强制校验 `Host: 127.0.0.1|localhost`（不匹配返回 403 Forbidden）。
+  6. **双端 CLI 全同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - 增设 `discover [--rescan] [--json]` 子命令；
+     - 升级 `dial [--addr <addr>] [--peer <name|id>] [--pin <pin>]`；
+     - `events` 监听器格式化输出 `[peer_discovered]` 与 `[peer_expired]`。
+  7. **Web UI 局域网自发现交互面板 (`ui/index.html`)**:
+     - 在配对区域增设「局域网自动发现设备」交互卡片；
+     - 展现设备名称、ID、IP:端口、配对/在线状态与功能特性徽标；
+     - 提供「填入」与「连接」一键操作以及「刷新探测」按钮；
+     - 深度接入 SSE 事件流实现实时无感重绘。
+  8. **端到端集成测试全覆盖 (`tests/phase1.rs`)**:
+     - `lan_discovery_and_beacon_governance_via_loopback_api` 全面覆盖空状态查询、主动重探、模拟设备发现、智能寻址解析与拨号拒绝、设备过期、Host 403 恶意攻击阻断。
 
 **1.60 相对 1.59(跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环)**
 

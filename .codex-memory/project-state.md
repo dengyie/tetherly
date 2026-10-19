@@ -345,7 +345,24 @@
   4. **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**：`screen status` 与 `input status` 支持高亮排版与 `--json` 原生管道输出，SSE `events` 监听器高亮 `[screen_state_changed]` 与 `[input_seat_changed]`；
   5. **Web UI 实时动态刷新与状态徽标 (`ui/index.html`)**：在 SSE 分发循环中挂载屏幕与键鼠状态变更监听，动态展示活动对端与遥测统计；
   6. **端到端集成测试全覆盖 (`tests/phase5.rs`)**：新增 `screen_and_input_lifecycle_governance_and_events_via_loopback_api` 完备验证。
-- **v1.53 (ADR-046)**: 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环已落地：
+- **v1.61 (ADR-054)**: 局域网设备自发现治理、信标可观测性与一键拨号配对闭环已落地：
+  1. **网络层 mDNS 浏览与注销原语 (`crates/tetherly-net/src/mdns.rs`)**：封装 `browse` 与 `stop_browse` 原语，解决此前节点仅单向广播而从未监听对端信标的“监听黑盒”；在非 `lan` 特性下提供安全 safe stub；mDNS 广播 TXT 记录增加 `("name", hostname)` 便于直接解析设备名；
+  2. **局域网自发现强类型 DTO 抽象与运行时画像 (`crates/tetherly-node/src/runtime.rs`, `lib.rs`)**：定义 `DiscoveredPeerDto`、`DiscoveryReport` 与 `DiscoveryRescanReport`，在 `Shared` 中维护线程安全自发现表 `discovered`，自动过滤自身设备 ID，单遍汇总在线与受信任状态并按活跃时间倒序排布；
+  3. **主动重新探测与智能拨号寻址原语**：实现 `Node::rescan_discovery` 主动触发信标组播重探；实现 `Node::dial_peer` 智能寻址引擎（按物理套接字地址、自发现设备名/ID、路由表对端标识优先级链式解析，并配备 2s 单目标快速超时，避免无响应 IP 阻塞）；
+  4. **事件总线零明文审计与即时分发 (`crates/tetherly-node/src/events.rs`)**：扩展 `UiEvent::PeerDiscovered` 与 `UiEvent::PeerExpired` 变体，严格践行 Zero-Plaintext 铁律（仅传输公开元数据与能力列表，严禁传输私钥），通过 SSE 实时分发；
+  5. **回环控制面端点全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET /api/discovery`（别名 `/api/peers/discovered`）、`POST /api/discovery/rescan`（别名 `/api/peers/discover`），增强 `POST /api/dial` 原生支持 `peer` 智能寻址，全量端点严格执行 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强阻断；
+  6. **双端 CLI 全同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：增设 `discover [--rescan] [--json]` 子命令、升级 `dial [--addr] [--peer <name|id>]` 智能拨号，并在 SSE `events` 监听器中提供高亮格式化输出；
+  7. **Web UI 局域网自发现交互面板 (`ui/index.html`)**：新增「局域网自动发现设备 (Discovered LAN Devices)」卡片，支持实时设备列表、能力特性徽标、一键地址填入、一键快捷拨号与 SSE 联动无感局部重绘；
+  8. **端到端集成测试全覆盖 (`tests/phase1.rs`)**：`lan_discovery_and_beacon_governance_via_loopback_api` 全面覆盖自发现初态、主动刷新探测、模拟对端广播、智能寻址解析与拨号、信标过期与 SSE 验证、Host 403 恶意阻断，全工作区 273+ 项测试、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 通过。
+- **v1.60 (ADR-053)**: 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环已落地：
+  1. **收件箱生命周期治理与强类型 DTO 抽象 (`crates/tetherly-node/src/runtime.rs`, `lib.rs`)**：定义 `InboxFileDto`、`InboxReport`、`InboxDeleteReport` 与 `InboxClearReport`；
+  2. **安全单文件删除与批量审计清空原语**：实现 `Node::delete_inbox_file` 与 `Node::clear_inbox`，严格执行路径穿越红线守卫（拦截 `..`、`/`、`\`、NUL 等）；
+  3. **事件总线零明文审计**：在 `UiEvent` 中扩展 `InboxFileDeleted` 与 `InboxCleared`，践行 Zero-Plaintext 铁律；
+  4. **回环控制面端点全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET /api/file/inbox`、`POST /api/file/inbox/delete` 与 `POST /api/file/inbox/clear`，严格 127.0.0.1 与 Host 403 校验；
+  5. **双端 CLI 完整同构升级**：增设 `inbox` 子命令族 (`list`, `delete`, `clear`)，增强 SSE 事件监听；
+  6. **Web UI 已收文件治理交互面板**：新增「已接收文件与收件箱治理 (Inbox)」卡片，支持实时搜索过滤、单项删除、一键清空与 SSE 联动；
+  7. **端到端集成测试全覆盖 (`tests/phase1.rs`)**：新增 `inbox_file_lifecycle_query_deletion_and_safe_purge_via_loopback_api` 完备验证。
+- **v1.59 (ADR-052)**: 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环已落地：
   1. 解耦重量级全节点快照 `GET /api/state`，新增专用的轻量级 `GET /api/file/offers`，支持按 `transfer_id` 的 $O(1)$ 精准透视与按 `peer` 的轻量过滤；
   2. 提议决策动作零明文结构化报告：定义 `FileOfferDto`、`FileOffersReport`、`FileDecisionReport`、`FileBatchDecisionReport` 与 `AutoAcceptReport`；
   3. 批量提议治理原语：支持面向单端或全域对端的一键接收（`--all`）与一键拒绝（`--all`）；

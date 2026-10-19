@@ -155,6 +155,15 @@ pub enum UiEvent {
         freed_bytes: u64,
         timestamp_ms: u64,
     },
+    PeerDiscovered {
+        device_id: String,
+        name: String,
+        addr: String,
+        caps: Vec<String>,
+    },
+    PeerExpired {
+        device_id: String,
+    },
 }
 
 impl UiEvent {

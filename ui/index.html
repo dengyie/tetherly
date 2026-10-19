@@ -365,6 +365,17 @@
       </div>
     </section>
     <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>局域网自动发现设备</h2>
+        <button id="rescandiscoverybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新探测</button>
+      </div>
+      <div class="hint">监听局域网 mDNS 信标广播，支持一键填入或快捷拨号配对。</div>
+      <div id="discoverymsg" class="hint" style="color:var(--accent,#64b5f6);margin-top:4px"></div>
+      <div id="discoverylist" style="margin-top:8px">
+        <div class="empty">扫描中…</div>
+      </div>
+    </section>
+    <section style="margin-top:16px">
       <h2>iPhone 通知（ANCS 苹果通知服务）</h2>
       <div class="hint">① 先在系统蓝牙设置里把 iPhone 连到本机（ANCS），再点连接。这一步与配对是两件事。</div>
       <div id="ancs" class="hint" style="margin-top:8px">状态：读取中…</div>
@@ -1618,6 +1629,98 @@ async function updateRoutes() {
     }
   } catch (e) {}
 }
+async function updateDiscovery() {
+  const container = $("discoverylist");
+  if (!container) return;
+  try {
+    const rep = await api("/api/discovery");
+    if (!rep || !rep.peers || !rep.peers.length) {
+      container.innerHTML = '<div class="empty">局域网暂未发现其他 Tetherly 设备</div>';
+      return;
+    }
+    container.innerHTML = "";
+    for (const p of rep.peers) {
+      const trustedBadge = p.is_trusted
+        ? '<span class="badge completed">已配对</span>'
+        : '<span class="badge offline">未配对</span>';
+      const onlineBadge = p.is_online
+        ? '<span class="badge online" style="margin-left:4px">在线</span>'
+        : '<span class="badge offline" style="margin-left:4px">待连接</span>';
+      const caps = (p.caps || []).map(c => '<span class="badge" style="font-size:10px;margin-right:2px">' + c + '</span>').join("");
+      const primaryAddr = (p.addrs && p.addrs.length > 0) ? (p.addrs[0] + ":" + p.port) : "";
+
+      const card = el('<div class="card" style="flex-direction:column;align-items:stretch;gap:6px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center">' +
+          '<div><strong class="peer-name"></strong> ' + trustedBadge + onlineBadge + '</div>' +
+          '<div style="display:flex;gap:4px">' +
+            '<button class="fill-addr-btn ghost" type="button" style="padding:2px 8px;font-size:11px">填入</button>' +
+            '<button class="dial-peer-btn" type="button" style="padding:2px 8px;font-size:11px">连接</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="meta" style="display:flex;justify-content:space-between;font-size:11px">' +
+          '<span class="peer-id" style="font-family:ui-monospace, Consolas, monospace"></span>' +
+          '<span class="peer-addr" style="font-family:ui-monospace, Consolas, monospace"></span>' +
+        '</div>' +
+        (caps ? ('<div style="margin-top:2px">' + caps + '</div>') : '') +
+      '</div>');
+
+      card.querySelector(".peer-name").textContent = p.name || "未命名设备";
+      card.querySelector(".peer-id").textContent = p.device_id;
+      card.querySelector(".peer-addr").textContent = primaryAddr || ("端口: " + p.port);
+
+      const fillBtn = card.querySelector(".fill-addr-btn");
+      if (fillBtn) {
+        fillBtn.onclick = () => {
+          if (primaryAddr) {
+            $("addr").value = primaryAddr;
+            $("peerpin").focus();
+          } else {
+            $("addr").value = p.device_id;
+          }
+        };
+      }
+
+      const dialBtn = card.querySelector(".dial-peer-btn");
+      if (dialBtn) {
+        dialBtn.onclick = async () => {
+          const msg = $("discoverymsg");
+          if (msg) msg.textContent = "正在发起连接到 " + (p.name || p.device_id) + "...";
+          const res = await api("/api/dial", {
+            peer: p.device_id,
+            addr: primaryAddr || undefined,
+            pin: $("peerpin").value || null,
+          });
+          if (msg) {
+            if (res && res.ok) {
+              msg.textContent = "拨号请求已发送 (" + (res.addr || p.device_id) + ")";
+            } else {
+              msg.textContent = "拨号失败: " + ((res && res.error) || "未知错误");
+            }
+            setTimeout(() => { if (msg) msg.textContent = ""; }, 4000);
+          }
+          updateDiscovery();
+          tick();
+        };
+      }
+
+      container.appendChild(card);
+    }
+  } catch (e) {}
+}
+
+const rescanDiscoveryBtn = $("rescandiscoverybtn");
+if (rescanDiscoveryBtn) {
+  rescanDiscoveryBtn.onclick = async () => {
+    const msg = $("discoverymsg");
+    if (msg) msg.textContent = "正在刷新局域网广播探测...";
+    await api("/api/discovery/rescan", {});
+    await updateDiscovery();
+    if (msg) {
+      msg.textContent = "已发送探测信标";
+      setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+    }
+  };
+}
 async function updateTraffic() {
   try {
     const t = await api("/api/metrics");
@@ -1972,10 +2075,18 @@ function setupEventSource() {
 						            desc = "ANCS 状态变更: " + ev.state + (ev.attached ? " (已挂载)" : " (未挂载)") + (ev.retry_at_ms ? (" · 重试于 " + ev.retry_at_ms + "ms") : "");
 						            updateAncsStatus();
 						          }
-						          else if (ev.kind === "ancs_rule_changed") {
-						            desc = "ANCS 规则变更: " + ev.action + (ev.app_id ? (" · " + ev.app_id) : "") + " (共 " + ev.rules_count + " 条)";
-						            updateAncsStatus();
-						          }
+							          else if (ev.kind === "ancs_rule_changed") {
+							            desc = "ANCS 规则变更: " + ev.action + (ev.app_id ? (" · " + ev.app_id) : "") + " (共 " + ev.rules_count + " 条)";
+							            updateAncsStatus();
+							          }
+							          else if (ev.kind === "peer_discovered") {
+							            desc = "发现局域网设备: " + (ev.name || ev.device_id) + " (" + ev.addr + ")";
+							            updateDiscovery();
+							          }
+							          else if (ev.kind === "peer_expired") {
+							            desc = "局域网设备信标过期: " + ev.device_id;
+							            updateDiscovery();
+							          }
 		          $("ev-last").textContent = "[" + t + "] " + desc;
 		        }
 		      } catch (err) {
@@ -2020,8 +2131,10 @@ function setupEventSource() {
 			setInterval(updateFileOffers, 3000);
 				updateAncsStatus();
 				setInterval(updateAncsStatus, 3000);
-				updateInbox();
-				setInterval(updateInbox, 3000);
+					updateInbox();
+					setInterval(updateInbox, 3000);
+					updateDiscovery();
+					setInterval(updateDiscovery, 3000);
 </script>
 </body>
 </html>

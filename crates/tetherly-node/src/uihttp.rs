@@ -473,7 +473,10 @@ struct FileSnap {
 
 #[derive(serde::Deserialize)]
 struct DialBody {
-    addr: String,
+    #[serde(default)]
+    addr: Option<String>,
+    #[serde(default)]
+    peer: Option<String>,
     pin: Option<String>,
 }
 
@@ -728,12 +731,21 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                         Err(e) => return err(400, &e.to_string()),
                     }
                 }
-                match d.addr.parse() {
-                    Ok(addr) => match node.dial(addr).await {
-                        Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
-                        Err(e) => err(400, &e.to_string()),
-                    },
-                    Err(_) => err(400, "bad addr"),
+                let target = d
+                    .addr
+                    .as_deref()
+                    .or(d.peer.as_deref())
+                    .filter(|s| !s.trim().is_empty());
+                let target = match target {
+                    Some(t) => t,
+                    None => return err(400, "missing addr or peer"),
+                };
+                match node.dial_peer(target).await {
+                    Ok(resolved_addr) => json_ok(&serde_json::json!({
+                        "ok": true,
+                        "addr": resolved_addr.to_string(),
+                    })),
+                    Err(e) => err(400, &e.to_string()),
                 }
             }
             Err(_) => err(400, "bad json"),
@@ -1007,6 +1019,12 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
                 "live": live_dtos,
                 "trusted": trusted_dtos,
             }))
+        }
+        ("GET", "/api/discovery") | ("GET", "/api/peers/discovered") => {
+            json_ok(&node.discovered_peers())
+        }
+        ("POST", "/api/discovery/rescan") | ("POST", "/api/peers/discover") => {
+            json_ok(&node.rescan_discovery())
         }
         ("GET", "/api/caps") => json_ok(&node.local_caps_report()),
         ("POST", "/api/caps") | ("PUT", "/api/caps") => {

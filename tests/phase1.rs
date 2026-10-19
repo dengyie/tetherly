@@ -5584,6 +5584,239 @@ async fn inbox_file_lifecycle_query_deletion_and_safe_purge_via_loopback_api() {
     node.shutdown();
 }
 
+/// ADR-054: LAN device discovery, beacon governance, smart dial resolution and loopback isolation.
+#[tokio::test(flavor = "multi_thread")]
+async fn lan_discovery_and_beacon_governance_via_loopback_api() {
+    let (data_dir, _guard) = temp_dir("discovery-test");
+    let node = Node::start(cfg(data_dir.clone(), "discovery-node", "macos")).unwrap();
+    let ui_port = node.spawn_ui().await.expect("spawn UI succeeds");
+
+    // Connect to loopback SSE event stream
+    let mut sse = tetherly_node::loopback_events_connect(ui_port)
+        .await
+        .expect("connect loopback sse");
+
+    // 1. Initial discovery report check via GET /api/discovery and /api/peers/discovered alias
+    let (c_init, b_init) = tetherly_node::loopback_get(ui_port, "/api/discovery")
+        .await
+        .unwrap();
+    assert_eq!(c_init, 200);
+    let init_rep: tetherly_node::DiscoveryReport = serde_json::from_slice(&b_init).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.count, 0);
+    assert!(init_rep.peers.is_empty());
+
+    let (c_alias, b_alias) = tetherly_node::loopback_get(ui_port, "/api/peers/discovered")
+        .await
+        .unwrap();
+    assert_eq!(c_alias, 200);
+    let alias_rep: tetherly_node::DiscoveryReport = serde_json::from_slice(&b_alias).unwrap();
+    assert!(alias_rep.ok);
+    assert_eq!(alias_rep.count, 0);
+
+    // 2. Trigger active rescan via POST /api/discovery/rescan and /api/peers/discover alias
+    let (c_rescan, b_rescan) =
+        tetherly_node::loopback_post(ui_port, "/api/discovery/rescan", b"{}")
+            .await
+            .unwrap();
+    assert_eq!(c_rescan, 200);
+    let rescan_rep: tetherly_node::DiscoveryRescanReport =
+        serde_json::from_slice(&b_rescan).unwrap();
+    assert!(rescan_rep.ok);
+    assert!(rescan_rep.message.contains("rescan initiated"));
+
+    let (c_rescan_alias, b_rescan_alias) =
+        tetherly_node::loopback_post(ui_port, "/api/peers/discover", b"{}")
+            .await
+            .unwrap();
+    assert_eq!(c_rescan_alias, 200);
+    let rescan_alias_rep: tetherly_node::DiscoveryRescanReport =
+        serde_json::from_slice(&b_rescan_alias).unwrap();
+    assert!(rescan_alias_rep.ok);
+
+    // 3. Simulate discovered peers and verify Zero-Plaintext SSE events
+    // Self device should be filtered out
+    let self_id = node.identity().device_id().to_string();
+    node.record_discovered_peer(
+        &self_id,
+        "self-node",
+        &["127.0.0.1"],
+        45717,
+        None,
+        &["file"],
+    );
+    assert_eq!(node.discovered_peers().count, 0);
+
+    // Peer 1: MacBook Pro
+    let dev1_id = "tdev_macbook_pro_16";
+    let dev1_name = "MacBook Pro M3";
+    let dev1_addrs = ["127.0.0.1"];
+    let dev1_port = 45999;
+    let dev1_fp = "fp_mbp16_abc";
+    let dev1_caps = ["file", "clipboard", "screen"];
+    node.record_discovered_peer(
+        dev1_id,
+        dev1_name,
+        &dev1_addrs,
+        dev1_port,
+        Some(dev1_fp),
+        &dev1_caps,
+    );
+
+    // Verify SSE receives PeerDiscovered event
+    let sse_ev1 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse peer discovered event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_ev1 {
+        tetherly_node::UiEvent::PeerDiscovered {
+            device_id,
+            name,
+            addr,
+            caps,
+        } => {
+            assert_eq!(device_id, dev1_id);
+            assert_eq!(name, dev1_name);
+            assert_eq!(addr, "127.0.0.1:45999");
+            assert_eq!(caps, vec!["file", "clipboard", "screen"]);
+        }
+        other => panic!("expected PeerDiscovered, got: {other:?}"),
+    }
+
+    // Peer 2: iPhone
+    let dev2_id = "tdev_iphone_15_pro";
+    let dev2_name = "iPhone 15 Pro";
+    let dev2_addrs = ["127.0.0.1"];
+    let dev2_port = 45998;
+    let dev2_caps = ["ancs", "notify"];
+    node.record_discovered_peer(dev2_id, dev2_name, &dev2_addrs, dev2_port, None, &dev2_caps);
+
+    let sse_ev2 = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse peer discovered event 2")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_ev2 {
+        tetherly_node::UiEvent::PeerDiscovered {
+            device_id,
+            name,
+            addr,
+            caps,
+        } => {
+            assert_eq!(device_id, dev2_id);
+            assert_eq!(name, dev2_name);
+            assert_eq!(addr, "127.0.0.1:45998");
+            assert_eq!(caps, vec!["ancs", "notify"]);
+        }
+        other => panic!("expected PeerDiscovered, got: {other:?}"),
+    }
+
+    // 4. Query GET /api/discovery and verify payload structure
+    let (c_list, b_list) = tetherly_node::loopback_get(ui_port, "/api/discovery")
+        .await
+        .unwrap();
+    assert_eq!(c_list, 200);
+    let list_rep: tetherly_node::DiscoveryReport = serde_json::from_slice(&b_list).unwrap();
+    assert!(list_rep.ok);
+    assert_eq!(list_rep.count, 2);
+    assert_eq!(list_rep.peers.len(), 2);
+
+    let p1 = list_rep
+        .peers
+        .iter()
+        .find(|p| p.device_id == dev1_id)
+        .expect("find p1");
+    assert_eq!(p1.name, dev1_name);
+    assert_eq!(p1.port, dev1_port);
+    assert_eq!(p1.fp.as_deref(), Some(dev1_fp));
+    assert_eq!(p1.addrs, vec!["127.0.0.1"]);
+    assert_eq!(p1.caps, vec!["file", "clipboard", "screen"]);
+    assert!(!p1.is_trusted);
+    assert!(!p1.is_online);
+
+    // 5. Smart dial resolution testing via POST /api/dial
+    // 5a. Bad json / missing both addr and peer -> 400
+    let (c_empty, b_empty) = tetherly_node::loopback_post(ui_port, "/api/dial", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c_empty, 400);
+    assert!(String::from_utf8_lossy(&b_empty).contains("missing addr or peer"));
+
+    // 5b. Unresolvable target peer name -> 400
+    let dial_bad = serde_json::json!({ "peer": "non_existent_device" });
+    let (c_bad, b_bad) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/dial",
+        &serde_json::to_vec(&dial_bad).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_bad, 400);
+    let err_msg = String::from_utf8_lossy(&b_bad);
+    assert!(
+        err_msg.contains("unable to resolve or reach peer target 'non_existent_device'"),
+        "unexpected error message: {err_msg}"
+    );
+
+    // 5c. Resolvable target by device_id or name (attempts dial to candidate IPs)
+    let dial_dev = serde_json::json!({ "peer": dev1_id });
+    let (c_dial_dev, b_dial_dev) = tetherly_node::loopback_post(
+        ui_port,
+        "/api/dial",
+        &serde_json::to_vec(&dial_dev).unwrap(),
+    )
+    .await
+    .unwrap();
+    // Since 192.168.1.105 is not listening in test environment, dial will return error from dial attempt
+    assert_eq!(c_dial_dev, 400);
+    let dial_err = String::from_utf8_lossy(&b_dial_dev);
+    assert!(
+        dial_err.contains("unable to resolve or reach peer target")
+            || dial_err.contains("connection")
+            || dial_err.contains("refused")
+            || dial_err.contains("unreachable"),
+        "expected reachability failure, got: {dial_err}"
+    );
+
+    // 6. Test beacon expiration and SSE event
+    let expired = node.expire_discovered_peer(dev2_id);
+    assert!(expired);
+
+    let sse_exp = tokio::time::timeout(Duration::from_secs(5), sse.next_ui_event())
+        .await
+        .expect("timeout waiting for sse peer expired event")
+        .expect("read sse event")
+        .expect("some ui event");
+    match sse_exp {
+        tetherly_node::UiEvent::PeerExpired { device_id } => {
+            assert_eq!(device_id, dev2_id);
+        }
+        other => panic!("expected PeerExpired, got: {other:?}"),
+    }
+
+    // Verify list count drops to 1
+    assert_eq!(node.discovered_peers().count, 1);
+
+    // 7. Security Red Line: Loopback Isolation Host 403 Forbidden check
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{ui_port}"))
+        .await
+        .expect("connect to ui port");
+    let evil_req = "GET /api/discovery HTTP/1.1\r\nHost: evil.attacker.com\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    node.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

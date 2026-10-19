@@ -54,9 +54,24 @@ enum Cmd {
     /// Ask the *running* node to dial a peer and pair or resume.
     Dial {
         #[arg(long)]
-        addr: SocketAddr,
+        addr: Option<SocketAddr>,
+        /// Peer device ID (`tdev_...`) or advertised hostname to dial via discovery/route table.
+        #[arg(long)]
+        peer: Option<String>,
         #[arg(long)]
         pin: Option<String>,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Discover available Tetherly peers on the local area network.
+    Discover {
+        /// Trigger an active rescan across network interfaces before reporting.
+        #[arg(long)]
+        rescan: bool,
+        /// Output raw JSON instead of human-readable table.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -1229,6 +1244,25 @@ fn print_event(v: &serde_json::Value) {
             let rules_count = v["rules_count"].as_u64().unwrap_or(0);
             println!("[ancs_rule_changed] action={action}{app_id}{url} rules_count={rules_count}");
         }
+        "peer_discovered" => {
+            let dev = v["device_id"].as_str().unwrap_or("?");
+            let name = v["name"].as_str().unwrap_or("?");
+            let addr = v["addr"].as_str().unwrap_or("?");
+            let caps = v["caps"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            println!("[peer_discovered] {name} ({dev}) at {addr} caps=[{caps}]");
+        }
+        "peer_expired" => {
+            let dev = v["device_id"].as_str().unwrap_or("?");
+            println!("[peer_expired] peer={dev}");
+        }
         other => {
             println!("[{other}] {v}");
         }
@@ -1361,8 +1395,20 @@ async fn main() -> Result<()> {
             info!(peer = %sess.peer_id, "paired; waiting for ping");
             serve_pong_once(&mut sess).await?;
         }
-        Cmd::Dial { addr, pin, ui_port } => {
-            let payload = serde_json::json!({ "addr": addr.to_string(), "pin": pin });
+        Cmd::Dial {
+            addr,
+            peer,
+            pin,
+            ui_port,
+        } => {
+            if addr.is_none() && peer.is_none() {
+                anyhow::bail!("either --addr <ip:port> or --peer <name|id> must be specified");
+            }
+            let payload = serde_json::json!({
+                "addr": addr.map(|a| a.to_string()),
+                "peer": peer,
+                "pin": pin,
+            });
             let body = serde_json::to_vec(&payload)?;
             let (code, resp) = loopback_post(ui_port, "/api/dial", &body)
                 .await
@@ -1378,7 +1424,95 @@ async fn main() -> Result<()> {
                     String::from_utf8_lossy(&resp)
                 );
             }
-            println!("dial dispatched to {addr}");
+            let target_desc = addr
+                .map(|a| a.to_string())
+                .or_else(|| peer.clone())
+                .unwrap_or_default();
+            println!("dial dispatched to {target_desc}");
+        }
+        Cmd::Discover {
+            rescan,
+            json,
+            ui_port,
+        } => {
+            if rescan {
+                let (code, resp) = loopback_post(ui_port, "/api/discovery/rescan", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "node refused discovery rescan (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+            }
+            let (code, resp) = loopback_get(ui_port, "/api/discovery").await.map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "node returned HTTP {code} on /api/discovery: {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+                return Ok(());
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            let count = rep["count"].as_u64().unwrap_or(0);
+            println!("Discovered LAN Peers ({count}):");
+            let peers = rep["peers"].as_array();
+            if peers.map(|p| p.is_empty()).unwrap_or(true) {
+                println!("  (no peers discovered on local network)");
+            } else if let Some(peers) = peers {
+                for p in peers {
+                    let name = p["name"].as_str().unwrap_or("unknown");
+                    let dev_id = p["device_id"].as_str().unwrap_or("unknown");
+                    let trusted_mark = if p["is_trusted"].as_bool().unwrap_or(false) {
+                        "[trusted]"
+                    } else {
+                        "[unpaired]"
+                    };
+                    let online_mark = if p["is_online"].as_bool().unwrap_or(false) {
+                        "[online]"
+                    } else {
+                        "[idle]"
+                    };
+                    let port = p["port"].as_u64().unwrap_or(0);
+                    let fp_str = p["fp"].as_str().unwrap_or("none");
+                    let caps_str = p["caps"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    let addrs_str = p["addrs"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    println!(
+                        "  * {} ({}) {} {} - port: {}, fp: {}, caps: [{}], addrs: [{}]",
+                        name, dev_id, trusted_mark, online_mark, port, fp_str, caps_str, addrs_str
+                    );
+                }
+            }
         }
         Cmd::Notify {
             title,

@@ -227,6 +227,46 @@ pub struct PeerCapsDto {
     pub online: bool,
 }
 
+/// Discovered peer representation on local network via mDNS beacons.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DiscoveredPeerDto {
+    pub device_id: String,
+    pub name: String,
+    pub addrs: Vec<String>,
+    pub port: u16,
+    pub fp: Option<String>,
+    pub caps: Vec<String>,
+    pub is_trusted: bool,
+    pub is_online: bool,
+    pub last_seen_ms: u64,
+}
+
+/// Summary report of discovered LAN peers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DiscoveryReport {
+    pub ok: bool,
+    pub count: usize,
+    pub peers: Vec<DiscoveredPeerDto>,
+}
+
+/// Report returned when initiating a fresh LAN discovery rescan.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DiscoveryRescanReport {
+    pub ok: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiscoveredPeerInfo {
+    pub device_id: String,
+    pub name: String,
+    pub addrs: Vec<String>,
+    pub port: u16,
+    pub fp: Option<String>,
+    pub caps: Vec<String>,
+    pub last_seen_ms: u64,
+}
+
 /// Report summarizing capabilities of peers.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PeersCapsReport {
@@ -1026,6 +1066,8 @@ struct Shared {
     blocked: Mutex<crate::store::BlockedTable>,
     auto_accept_trusted: AtomicBool,
     auto_accepted_count: AtomicU64,
+    discovered: Mutex<HashMap<String, DiscoveredPeerInfo>>,
+    rescan_trigger: broadcast::Sender<()>,
 }
 
 #[derive(Clone)]
@@ -1100,6 +1142,7 @@ impl Node {
         let trust = load_trust(&cfg.data_dir)?;
         let (events, _) = broadcast::channel(64);
         let (shutdown, _) = watch::channel(false);
+        let (rescan_trigger, _) = broadcast::channel(16);
         let clip: Arc<dyn Clip> = if cfg.memory_clip {
             Arc::new(MemoryClip::new())
         } else {
@@ -1225,6 +1268,8 @@ impl Node {
             blocked: Mutex::new(initial_blocked),
             auto_accept_trusted: AtomicBool::new(false),
             auto_accepted_count: AtomicU64::new(0),
+            discovered: Mutex::new(HashMap::new()),
+            rescan_trigger,
         });
         Ok(Self { shared })
     }
@@ -1863,6 +1908,289 @@ impl Node {
             addr: None,
             action: "removed".to_string(),
         })
+    }
+
+    pub fn discovered_peers(&self) -> DiscoveryReport {
+        let disc = self.shared.discovered.lock().expect("discovered").clone();
+        let trusted = self.trusted();
+        let live = self.live_peers();
+
+        let mut peers: Vec<DiscoveredPeerDto> = disc
+            .into_values()
+            .map(|p| {
+                let did = &p.device_id;
+                let is_trusted = trusted
+                    .iter()
+                    .any(|t| t.device_id.as_str() == did && !t.revoked);
+                let is_online = live.iter().any(|l| l.device_id.as_str() == did);
+                DiscoveredPeerDto {
+                    device_id: p.device_id,
+                    name: p.name,
+                    addrs: p.addrs,
+                    port: p.port,
+                    fp: p.fp,
+                    caps: p.caps,
+                    is_trusted,
+                    is_online,
+                    last_seen_ms: p.last_seen_ms,
+                }
+            })
+            .collect();
+
+        peers.sort_by_key(|a| std::cmp::Reverse(a.last_seen_ms));
+        let count = peers.len();
+        DiscoveryReport {
+            ok: true,
+            count,
+            peers,
+        }
+    }
+
+    pub fn rescan_discovery(&self) -> DiscoveryRescanReport {
+        let _ = self.shared.rescan_trigger.send(());
+        DiscoveryRescanReport {
+            ok: true,
+            message: "discovery rescan initiated".to_string(),
+        }
+    }
+
+    pub fn record_discovered_peer(
+        &self,
+        device_id: &str,
+        name: &str,
+        addrs: &[&str],
+        port: u16,
+        fp: Option<&str>,
+        caps: &[&str],
+    ) {
+        if device_id == self.shared.identity.device_id().as_str() {
+            return;
+        }
+        let now = self.shared.clock.unix_ms();
+        let is_new = !self
+            .shared
+            .discovered
+            .lock()
+            .expect("discovered")
+            .contains_key(device_id);
+        let info = DiscoveredPeerInfo {
+            device_id: device_id.to_string(),
+            name: name.to_string(),
+            addrs: addrs.iter().map(|s| s.to_string()).collect(),
+            port,
+            fp: fp.map(ToString::to_string),
+            caps: caps.iter().map(|s| s.to_string()).collect(),
+            last_seen_ms: now,
+        };
+        self.shared
+            .discovered
+            .lock()
+            .expect("discovered")
+            .insert(device_id.to_string(), info);
+
+        if is_new {
+            let primary_addr = addrs
+                .first()
+                .map(|ip| format!("{}:{}", ip, port))
+                .unwrap_or_else(|| format!("127.0.0.1:{}", port));
+            let _ = self.shared.events.send(UiEvent::PeerDiscovered {
+                device_id: device_id.to_string(),
+                name: name.to_string(),
+                addr: primary_addr,
+                caps: caps.iter().map(|s| s.to_string()).collect(),
+            });
+        }
+    }
+
+    pub fn expire_discovered_peer(&self, device_id: &str) -> bool {
+        let removed = self
+            .shared
+            .discovered
+            .lock()
+            .expect("discovered")
+            .remove(device_id)
+            .is_some();
+        if removed {
+            let _ = self.shared.events.send(UiEvent::PeerExpired {
+                device_id: device_id.to_string(),
+            });
+        }
+        removed
+    }
+
+    pub async fn dial_peer(&self, target: &str) -> Result<SocketAddr, tetherly_net::NetError> {
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            return Err(tetherly_net::NetError::Discovery(
+                "target address or peer identifier cannot be empty".to_string(),
+            ));
+        }
+
+        // 1. Direct SocketAddr parse
+        if let Ok(sa) = trimmed.parse::<SocketAddr>() {
+            self.dial(sa).await?;
+            return Ok(sa);
+        }
+
+        // 2. Discovered peers candidate lookup
+        let discovered_candidate = {
+            let disc = self.shared.discovered.lock().expect("discovered");
+            disc.values()
+                .find(|p| {
+                    p.device_id.eq_ignore_ascii_case(trimmed)
+                        || p.name.eq_ignore_ascii_case(trimmed)
+                })
+                .map(|p| (p.addrs.clone(), p.port))
+        };
+
+        if let Some((addrs, port)) = discovered_candidate {
+            for ip_str in &addrs {
+                if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                    let sa = SocketAddr::new(ip, port);
+                    if let Ok(Ok(())) =
+                        tokio::time::timeout(std::time::Duration::from_secs(2), self.dial(sa)).await
+                    {
+                        return Ok(sa);
+                    }
+                }
+            }
+        }
+
+        // 3. Route table candidate lookup
+        let route_candidate = {
+            let routes = self.routes();
+            routes
+                .into_iter()
+                .find(|r| r.device_id.eq_ignore_ascii_case(trimmed))
+        };
+
+        if let Some(r) = route_candidate {
+            if let Ok(sa) = r.addr.parse::<SocketAddr>() {
+                if let Ok(Ok(())) =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), self.dial(sa)).await
+                {
+                    return Ok(sa);
+                }
+            }
+        }
+
+        Err(tetherly_net::NetError::Discovery(format!(
+            "unable to resolve or reach peer target '{trimmed}'"
+        )))
+    }
+
+    fn spawn_discovery_browser(&self) {
+        if self.shared.cfg.loopback_only {
+            return;
+        }
+        let node = self.clone_handle();
+        tokio::task::spawn_blocking(move || {
+            let d = match tetherly_net::mdns::daemon() {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!(%e, "mdns daemon start for discovery failed");
+                    return;
+                }
+            };
+            let receiver = match tetherly_net::mdns::browse(&d) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(%e, "mdns browse start failed");
+                    return;
+                }
+            };
+            let handle = match tokio::runtime::Handle::try_current() {
+                Ok(h) => h,
+                Err(_) => return,
+            };
+            handle.block_on(async move {
+                let mut receiver = receiver;
+                let mut stop = node.shared.shutdown.subscribe();
+                let mut rescan_rx = node.shared.rescan_trigger.subscribe();
+
+                loop {
+                    tokio::select! {
+                        _ = stop.changed() => {
+                            if *stop.borrow() {
+                                let _ = tetherly_net::mdns::stop_browse(&d);
+                                break;
+                            }
+                        }
+                        Ok(_) = rescan_rx.recv() => {
+                            let _ = tetherly_net::mdns::stop_browse(&d);
+                            if let Ok(new_r) = tetherly_net::mdns::browse(&d) {
+                                receiver = new_r;
+                            }
+                        }
+                        event_res = receiver.recv_async() => {
+                            match event_res {
+                                Ok(tetherly_net::mdns::ServiceEvent::ServiceResolved(info)) => {
+                                    let port = info.get_port();
+                                    let mut addrs: Vec<String> = info
+                                        .get_addresses()
+                                        .iter()
+                                        .map(ToString::to_string)
+                                        .collect();
+                                    addrs.sort();
+
+                                    let dev_id = info
+                                        .get_property_val_str("id")
+                                        .map(ToString::to_string)
+                                        .unwrap_or_default();
+                                    if dev_id.is_empty() || dev_id == node.shared.identity.device_id().as_str() {
+                                        continue;
+                                    }
+
+                                    let name = info
+                                        .get_property_val_str("name")
+                                        .map(ToString::to_string)
+                                        .unwrap_or_else(|| {
+                                            info.get_hostname()
+                                                .trim_end_matches('.')
+                                                .trim_end_matches(".local")
+                                                .to_string()
+                                        });
+
+                                    let fp = info.get_property_val_str("fp").map(ToString::to_string);
+                                    let caps: Vec<String> = info
+                                        .get_property_val_str("caps")
+                                        .map(|c| c.split(',').filter(|s| !s.is_empty()).map(ToString::to_string).collect())
+                                        .unwrap_or_default();
+
+                                    let addr_refs: Vec<&str> = addrs.iter().map(AsRef::as_ref).collect();
+                                    let caps_refs: Vec<&str> = caps.iter().map(AsRef::as_ref).collect();
+                                    node.record_discovered_peer(
+                                        &dev_id,
+                                        &name,
+                                        &addr_refs,
+                                        port,
+                                        fp.as_deref(),
+                                        &caps_refs,
+                                    );
+                                }
+                                Ok(tetherly_net::mdns::ServiceEvent::ServiceRemoved(_stype, fullname)) => {
+                                    let mut to_remove = Vec::new();
+                                    {
+                                        let disc = node.shared.discovered.lock().expect("discovered");
+                                        for (id, p) in disc.iter() {
+                                            let inst = p.name.replace('.', "-");
+                                            if fullname.contains(&inst) {
+                                                to_remove.push(id.clone());
+                                            }
+                                        }
+                                    }
+                                    for id in to_remove {
+                                        node.expire_discovered_peer(&id);
+                                    }
+                                }
+                                Err(_) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            });
+        });
     }
 
     pub fn traffic_report(&self) -> TrafficReport {
@@ -3418,6 +3746,7 @@ impl Node {
         if self.is_advertise_enabled() {
             self.advertise_mdns();
         }
+        self.spawn_discovery_browser();
         if self.shared.cfg.overlay.enabled {
             self.spawn_overlay();
         }

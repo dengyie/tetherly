@@ -1,5 +1,33 @@
 # Session log
 
+## 2026-10-19 (59) - LAN device discovery & beacon governance, discovery observability & instant pairing parity (v1.61 / ADR-054)
+- Task: 实现局域网设备自发现治理、信标可观测性与一键拨号配对闭环 (LAN Device Discovery & Beacon Governance, Discovery Observability & Instant Pairing Parity)，终结既有系统单向广播自身但从未浏览/监听对端信标的“监听黑盒”，提供强类型 DTO 画像、动态重新探测、智能拨号寻址引擎、零明文事件即时分发、双端 CLI 完整同构与 Web UI 一键直连交互面板。
+- **背景与缺陷根因**:
+  在 Tetherly 陆续完成跨端收件箱生命周期治理与安全删除 (v1.60 / ADR-053)、批量文件提议与断点续传可观测性画像 (v1.59 / ADR-052) 及全桌面 ANCS GATT 接入闭环 (v1.58 / ADR-051) 之后，核心数据面与传输面已高度可靠。然而，在局域网设备自发现治理与拨号链路层面，系统长期存在控制与用户体验盲区：
+  1. 单向广播与发现监听黑盒（One-Way Advertising without Browsing Blackout）：节点虽然能通过 `crates/tetherly-net/src/mdns.rs` 广播自身，但从未启动服务浏览监听对端信标，导致同一局域网设备彼此无法感知；
+  2. 缺乏局域网设备发现画像与控制面查询端点（Discovery Observability Blackout）：缺乏 `GET /api/discovery` 与 `POST /api/discovery/rescan`，无法查询局域网设备列表、IP 候选集、端口、指纹与能力；
+  3. 拨号流程割裂与必须手动输入 IP:Port 痛点（Manual IP Dial Friction）：用户必须手动查询并输入 IP:Port，无法按设备名或 ID 智能寻址；
+  4. 事件总线局域网发现事件断层（Event Bus Gap for Discovered Peers）：设备上线或离线时缺乏事件广播；必须恪守 Zero-Plaintext 铁律（严禁泄露密钥）；
+  5. 双端 CLI 与 Web UI 缺少自发现全同构支持：缺少双端同构的 `discover` 子命令与智能 `dial --peer`；Web UI 缺少发现面板与一键直连。
+- **架构设计与落地 (ADR-054)**:
+  1. 网络层 mDNS 浏览与注销原语 (`crates/tetherly-net/src/mdns.rs` & `lib.rs`):
+     - 封装 `mdns_sd::ServiceDaemon` 的浏览能力：`browse` 与 `stop_browse` 原语，处理 `ServiceResolved` 与 `ServiceRemoved`；非 `lan` 特性提供安全桩；注册时 TXT 记录加入 `("name", hostname)`；
+  2. 核心模型设计与 DTO 抽象 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`):
+     - 定义结构化 DTO：`DiscoveredPeerDto`、`DiscoveryReport`、`DiscoveryRescanReport`；
+     - 维护线程安全 `discovered: Mutex<HashMap<String, DiscoveredPeerInfo>>`，过滤本机设备，计算在线与受信任状态，按活跃时间排序；
+     - 实现 `Node::discovered_peers` 与 `Node::rescan_discovery`；
+     - 实现 `Node::dial_peer` 智能寻址引擎（按物理地址、发现表、路由表优先级解析，配备 2s 单目标快速超时）；
+  3. 事件总线扩展与安全红线守卫 (`crates/tetherly-node/src/events.rs`):
+     - 新增 `UiEvent::PeerDiscovered` 与 `UiEvent::PeerExpired`，严格遵循 Zero-Plaintext 铁律；
+  4. 轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`):
+     - 新增 `GET /api/discovery`（别名 `/api/peers/discovered`）、`POST /api/discovery/rescan`（别名 `/api/peers/discover`），增强 `POST /api/dial` 原生支持 `peer` 智能寻址，严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 阻断；
+  5. CLI 双端全同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`):
+     - 增设 `discover [--rescan] [--json]` 子命令；升级 `dial [--addr] [--peer <name|id>]`；SSE `events` 监听器高亮 `[peer_discovered]` 与 `[peer_expired]`；
+  6. Web UI 局域网自发现交互面板 (`ui/index.html`):
+     - 新增「局域网自动发现设备 (Discovered LAN Devices)」卡片，支持实时设备列表、能力特性徽标、一键地址填入、一键快捷拨号与 SSE 联动无感局部重绘；
+  7. 端到端集成测试全覆盖 (`tests/phase1.rs`):
+     - 新增 `lan_discovery_and_beacon_governance_via_loopback_api` 完备验证单测/集成测试，全部 273+ 项测试 100% 全绿，确立 ADR-054，SSOT 升至 v1.61。
+
 ## 2026-10-19 (58) - Inbox file lifecycle, multi-dimensional query & safe purge governance (v1.60 / ADR-053)
 - Task: 实现跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环 (Inbox File Lifecycle, Multi-Dimensional Query & Safe Purge Governance)，解决收件箱落盘后细粒度画像盲区、缺乏单文件与批量销毁原语及事件总线断层痛点，确立严格路径穿越拦截与零明文审计红线，提供双端 CLI/Web UI 全同构控制面。
 - **背景与缺陷根因**:

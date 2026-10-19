@@ -10,7 +10,7 @@ use tetherly_core::DeviceId;
 pub const SERVICE_TYPE: &str = "_tetherly._tcp.local.";
 
 #[cfg(feature = "lan")]
-use mdns_sd::{ServiceDaemon, ServiceInfo};
+pub use mdns_sd::{Receiver as MdnsReceiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 
 #[cfg(feature = "lan")]
 pub fn advertise(
@@ -45,6 +45,7 @@ pub fn advertise(
         &[
             ("v", "1"),
             ("id", device_id.as_str()),
+            ("name", hostname),
             ("fp", fp12),
             ("caps", caps),
         ][..],
@@ -52,6 +53,20 @@ pub fn advertise(
     .map_err(|e| NetError::Discovery(e.to_string()))?;
     daemon
         .register(info)
+        .map_err(|e| NetError::Discovery(e.to_string()))
+}
+
+#[cfg(feature = "lan")]
+pub fn browse(daemon: &ServiceDaemon) -> Result<MdnsReceiver<ServiceEvent>, NetError> {
+    daemon
+        .browse(SERVICE_TYPE)
+        .map_err(|e| NetError::Discovery(e.to_string()))
+}
+
+#[cfg(feature = "lan")]
+pub fn stop_browse(daemon: &ServiceDaemon) -> Result<(), NetError> {
+    daemon
+        .stop_browse(SERVICE_TYPE)
         .map_err(|e| NetError::Discovery(e.to_string()))
 }
 
@@ -69,5 +84,10 @@ pub fn advertise(
     _caps: &str,
     _addrs: &[IpAddr],
 ) -> Result<(), NetError> {
+    Err(NetError::Discovery("lan feature disabled".into()))
+}
+
+#[cfg(not(feature = "lan"))]
+pub fn daemon() -> Result<(), NetError> {
     Err(NetError::Discovery("lan feature disabled".into()))
 }
