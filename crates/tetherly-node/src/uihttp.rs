@@ -2156,6 +2156,12 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             let rep = node.health_report();
             json_ok(&rep)
         }
+        ("GET", "/api/sys") | ("GET", "/api/system") | ("GET", "/api/process") => {
+            match node.system_report() {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &e.to_string()),
+            }
+        }
         ("POST", "/api/daemon/shutdown") | ("POST", "/api/daemon/stop") => {
             let n = node.clone_handle();
             tokio::spawn(async move {

@@ -66,6 +66,7 @@ fn cfg(dir: PathBuf, name: &str, overlay: OverlayConfig) -> NodeConfig {
         screen_port: 0,
         advertise: false,
         memory_clip: true,
+        memory_notifier: true,
         loopback_only: true,
         reconnect: false,
         ui_port: 0,

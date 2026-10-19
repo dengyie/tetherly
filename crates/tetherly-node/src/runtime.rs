@@ -74,6 +74,8 @@ pub struct NodeConfig {
     pub advertise: bool,
     /// Tests inject a clip. Production uses SystemClip.
     pub memory_clip: bool,
+    /// Tests inject an in-memory notifier. Production uses SystemNotifier.
+    pub memory_notifier: bool,
     /// Tests bind 127.0.0.1 only so two nodes can share a host.
     pub loopback_only: bool,
     /// Production reconnects trusted peers. Tests turn this off to avoid races.
@@ -113,6 +115,7 @@ impl Default for NodeConfig {
             screen_port: SCREEN_PORT,
             advertise: true,
             memory_clip: false,
+            memory_notifier: false,
             loopback_only: false,
             reconnect: true,
             ui_port: 45716,
@@ -442,6 +445,60 @@ pub struct NotifyTestRequest {
     pub app_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sound: Option<bool>,
+}
+
+/// Detailed process resource consumption metrics.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProcessMetrics {
+    pub pid: u32,
+    pub uptime_secs: u64,
+    pub rss_bytes: u64,
+    pub virt_bytes: u64,
+    pub thread_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_fds: Option<u32>,
+    pub cpu_time_ms: u64,
+    pub memory_rss_formatted: String,
+    pub memory_virt_formatted: String,
+}
+
+/// Host machine hardware and operating system profile.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct HostMetrics {
+    pub os: String,
+    pub arch: String,
+    pub num_cpus: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_memory_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_memory_formatted: Option<String>,
+}
+
+/// Comprehensive system health and resource telemetry report.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SystemReport {
+    pub ok: bool,
+    pub node_name: String,
+    pub device_id: String,
+    pub process: ProcessMetrics,
+    pub host: HostMetrics,
+    pub timestamp_ms: u64,
+}
+
+/// Format bytes into human-readable memory string (B, KiB, MiB, GiB).
+pub fn format_memory_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.2} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.2} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
@@ -891,6 +948,8 @@ pub struct NodeConfigReport {
     pub advertise: bool,
     pub reconnect: bool,
     pub memory_clip: bool,
+    #[serde(default)]
+    pub memory_notifier: bool,
     pub ui_port: u16,
     pub control_port: u16,
     pub file_port: u16,
@@ -1181,6 +1240,7 @@ struct Shared {
     notify_config: Mutex<NotifyBannerConfig>,
     notify_dispatched_count: AtomicU64,
     notify_suppressed_count: AtomicU64,
+    sys_probe: Mutex<Arc<dyn crate::platform::SysProbe>>,
 }
 
 #[derive(Clone)]
@@ -1260,6 +1320,11 @@ impl Node {
             Arc::new(MemoryClip::new())
         } else {
             Arc::new(SystemClip)
+        };
+        let notifier: Arc<dyn Notifier> = if cfg.memory_notifier || cfg.memory_clip {
+            Arc::new(crate::platform::MemoryNotifier::new())
+        } else {
+            Arc::new(crate::platform::SystemNotifier)
         };
         let bound_control = AtomicU16::new(cfg.control_port);
         let bound_file = AtomicU16::new(cfg.file_port);
@@ -1384,12 +1449,87 @@ impl Node {
             discovered: Mutex::new(HashMap::new()),
             rescan_trigger,
             opener: Mutex::new(Arc::new(crate::platform::SystemOpener)),
-            notifier: Mutex::new(Arc::new(crate::platform::SystemNotifier)),
+            notifier: Mutex::new(notifier),
             notify_config: Mutex::new(NotifyBannerConfig::default()),
             notify_dispatched_count: AtomicU64::new(0),
             notify_suppressed_count: AtomicU64::new(0),
+            sys_probe: Mutex::new(Arc::new(crate::platform::PlatformSysProbe)),
         });
         Ok(Self { shared })
+    }
+
+    pub fn set_sys_probe(&self, probe: Arc<dyn crate::platform::SysProbe>) {
+        *self.shared.sys_probe.lock().expect("set_sys_probe lock") = probe;
+    }
+
+    pub fn sys_probe(&self) -> Arc<dyn crate::platform::SysProbe> {
+        self.shared
+            .sys_probe
+            .lock()
+            .expect("sys_probe lock")
+            .clone()
+    }
+
+    pub fn system_report(&self) -> Result<SystemReport, CoreError> {
+        let pid = std::process::id();
+        let uptime_secs = self.shared.started_at.elapsed().as_secs();
+        let probe = self.sys_probe();
+        let proc_sample = probe.sample_process(pid)?;
+        let host_sample = probe.sample_host()?;
+
+        let process = ProcessMetrics {
+            pid,
+            uptime_secs,
+            rss_bytes: proc_sample.rss_bytes,
+            virt_bytes: proc_sample.virt_bytes,
+            thread_count: proc_sample.thread_count,
+            open_fds: proc_sample.open_fds,
+            cpu_time_ms: proc_sample.cpu_time_ms,
+            memory_rss_formatted: format_memory_bytes(proc_sample.rss_bytes),
+            memory_virt_formatted: format_memory_bytes(proc_sample.virt_bytes),
+        };
+
+        let num_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let host = HostMetrics {
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            num_cpus,
+            total_memory_bytes: host_sample.total_memory_bytes,
+            total_memory_formatted: host_sample.total_memory_bytes.map(format_memory_bytes),
+        };
+
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let node_name = self.shared.node_name.lock().expect("node_name lock").clone();
+        let device_id = self.shared.identity.device_id().to_string();
+
+        let report = SystemReport {
+            ok: true,
+            node_name,
+            device_id,
+            process: process.clone(),
+            host: host.clone(),
+            timestamp_ms,
+        };
+
+        let _ = self.shared.events.send(UiEvent::system_metrics_refreshed(
+            process.pid,
+            process.uptime_secs,
+            process.rss_bytes,
+            process.virt_bytes,
+            process.thread_count,
+            process.open_fds,
+            process.cpu_time_ms,
+            host.num_cpus,
+            host.total_memory_bytes,
+            timestamp_ms,
+        ));
+
+        Ok(report)
     }
 
     pub fn set_opener(&self, opener: Arc<dyn tetherly_core::Opener>) {
@@ -1918,6 +2058,7 @@ impl Node {
             advertise: self.is_advertise_enabled(),
             reconnect: self.is_reconnect_enabled(),
             memory_clip: self.shared.cfg.memory_clip,
+            memory_notifier: self.shared.cfg.memory_notifier,
             ui_port,
             control_port: ctrl_port,
             file_port,

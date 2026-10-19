@@ -115,13 +115,12 @@ objc2-core-bluetooth = { version = "0.3", default-features = false, features = [
 [target.'cfg(unix)'.dependencies]
 # D-Bus client for BlueZ GATT ANCS (src/ancs/bluez.rs). Reuses zbus 4.4.0 already in Cargo.lock.
 zbus = { version = "4", default-features = false, features = ["tokio"] }
+libc = "0.2"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # Secret Service (libsecret) storage over the session bus (src/cred/linux.rs).
 # `rt-tokio-crypto-rust` uses the pure-Rust crypto backend (no openssl).
 secret-service = { version = "4", default-features = false, features = ["rt-tokio-crypto-rust"] }
 # X11 capture/present for src/screen/x11.rs. `shm` enables MIT-SHM; without it
-# every frame would cross the socket via plain `GetImage`. `libc` is declared
-# here because x11rb's own libc sits behind its `allow-unsafe-code` feature.
+# every frame would cross the socket via plain `GetImage`.
 x11rb = { version = "0.13", features = ["shm"] }
-libc = "0.2"

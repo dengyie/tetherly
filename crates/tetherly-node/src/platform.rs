@@ -712,3 +712,199 @@ mod input_tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// System & Process Metrics Telemetry Probing (SysProbe)
+// ---------------------------------------------------------------------------
+
+/// Point-in-time process resource consumption sample.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessSample {
+    pub rss_bytes: u64,
+    pub virt_bytes: u64,
+    pub thread_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_fds: Option<u32>,
+    pub cpu_time_ms: u64,
+}
+
+/// Point-in-time host hardware resource sample.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostSample {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_memory_bytes: Option<u64>,
+}
+
+/// Abstract system and process resource telemetry probe.
+pub trait SysProbe: Send + Sync {
+    /// Sample resource consumption of the specified process.
+    fn sample_process(&self, pid: u32) -> Result<ProcessSample, CoreError>;
+
+    /// Sample host hardware statistics (such as total physical RAM).
+    fn sample_host(&self) -> Result<HostSample, CoreError>;
+}
+
+/// In-memory mock system telemetry probe for deterministic testing and CI.
+#[derive(Clone, Default)]
+pub struct MemorySysProbe {
+    process_sample: Arc<Mutex<ProcessSample>>,
+    host_sample: Arc<Mutex<HostSample>>,
+}
+
+impl MemorySysProbe {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_samples(process: ProcessSample, host: HostSample) -> Self {
+        Self {
+            process_sample: Arc::new(Mutex::new(process)),
+            host_sample: Arc::new(Mutex::new(host)),
+        }
+    }
+
+    pub fn set_process(&self, process: ProcessSample) {
+        *self.process_sample.lock().expect("sys probe") = process;
+    }
+
+    pub fn set_host(&self, host: HostSample) {
+        *self.host_sample.lock().expect("sys probe") = host;
+    }
+}
+
+impl SysProbe for MemorySysProbe {
+    fn sample_process(&self, _pid: u32) -> Result<ProcessSample, CoreError> {
+        Ok(self.process_sample.lock().expect("sys probe").clone())
+    }
+
+    fn sample_host(&self) -> Result<HostSample, CoreError> {
+        Ok(self.host_sample.lock().expect("sys probe").clone())
+    }
+}
+
+/// Live platform telemetry probe reading OS task statistics and kernel counters.
+#[derive(Clone, Copy, Default)]
+pub struct PlatformSysProbe;
+
+impl SysProbe for PlatformSysProbe {
+    fn sample_process(&self, _pid: u32) -> Result<ProcessSample, CoreError> {
+        let mut sample = ProcessSample::default();
+
+        #[cfg(unix)]
+        {
+            unsafe {
+                let mut rusage = std::mem::zeroed::<libc::rusage>();
+                if libc::getrusage(libc::RUSAGE_SELF, &mut rusage) == 0 {
+                    let u_ms = (rusage.ru_utime.tv_sec as u64)
+                        .saturating_mul(1000)
+                        .saturating_add((rusage.ru_utime.tv_usec as u64) / 1000);
+                    let s_ms = (rusage.ru_stime.tv_sec as u64)
+                        .saturating_mul(1000)
+                        .saturating_add((rusage.ru_stime.tv_usec as u64) / 1000);
+                    sample.cpu_time_ms = u_ms.saturating_add(s_ms);
+
+                    #[cfg(target_os = "macos")]
+                    {
+                        sample.rss_bytes = rusage.ru_maxrss as u64;
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        sample.rss_bytes = (rusage.ru_maxrss as u64).saturating_mul(1024);
+                    }
+                }
+            }
+
+            #[cfg(target_os = "macos")]
+            unsafe {
+                let mut info = std::mem::zeroed::<libc::mach_task_basic_info>();
+                let mut count = (std::mem::size_of::<libc::mach_task_basic_info>()
+                    / std::mem::size_of::<libc::natural_t>())
+                    as libc::mach_msg_type_number_t;
+                if libc::task_info(
+                    libc::mach_task_self(),
+                    libc::MACH_TASK_BASIC_INFO,
+                    &mut info as *mut _ as *mut libc::integer_t,
+                    &mut count,
+                ) == libc::KERN_SUCCESS
+                {
+                    sample.rss_bytes = info.resident_size;
+                    sample.virt_bytes = info.virtual_size;
+                }
+
+                let mut thread_list: libc::thread_act_array_t = std::ptr::null_mut();
+                let mut thread_count_mach: libc::mach_msg_type_number_t = 0;
+                if libc::task_threads(
+                    libc::mach_task_self(),
+                    &mut thread_list,
+                    &mut thread_count_mach,
+                ) == libc::KERN_SUCCESS
+                {
+                    sample.thread_count = thread_count_mach as u32;
+                    libc::vm_deallocate(
+                        libc::mach_task_self(),
+                        thread_list as libc::vm_address_t,
+                        (thread_count_mach as usize * std::mem::size_of::<libc::thread_act_t>())
+                            as libc::vm_size_t,
+                    );
+                }
+            }
+
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
+                    let mut parts = content.split_whitespace();
+                    if let (Some(v_pages), Some(r_pages)) = (parts.next(), parts.next()) {
+                        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+                        let page_size = if page_size > 0 {
+                            page_size as u64
+                        } else {
+                            4096
+                        };
+                        if let Ok(v) = v_pages.parse::<u64>() {
+                            sample.virt_bytes = v.saturating_mul(page_size);
+                        }
+                        if let Ok(r) = r_pages.parse::<u64>() {
+                            sample.rss_bytes = r.saturating_mul(page_size);
+                        }
+                    }
+                }
+                if let Ok(content) = std::fs::read_to_string("/proc/self/status") {
+                    for line in content.lines() {
+                        if let Some(rest) = line.strip_prefix("Threads:") {
+                            if let Ok(tc) = rest.trim().parse::<u32>() {
+                                sample.thread_count = tc;
+                            }
+                        }
+                    }
+                }
+            }
+
+            sample.open_fds = std::fs::read_dir("/dev/fd")
+                .or_else(|_| std::fs::read_dir("/proc/self/fd"))
+                .ok()
+                .map(|entries| entries.filter_map(Result::ok).count() as u32);
+        }
+
+        if sample.thread_count == 0 {
+            sample.thread_count = 1;
+        }
+
+        Ok(sample)
+    }
+
+    fn sample_host(&self) -> Result<HostSample, CoreError> {
+        let mut sample = HostSample::default();
+
+        #[cfg(unix)]
+        unsafe {
+            let pages = libc::sysconf(libc::_SC_PHYS_PAGES);
+            let page_size = libc::sysconf(libc::_SC_PAGESIZE);
+            if pages > 0 && page_size > 0 {
+                sample.total_memory_bytes = Some((pages as u64).saturating_mul(page_size as u64));
+            }
+        }
+
+        Ok(sample)
+    }
+}
+

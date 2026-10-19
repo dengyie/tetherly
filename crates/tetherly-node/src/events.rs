@@ -183,6 +183,20 @@ pub enum UiEvent {
     PeerExpired {
         device_id: String,
     },
+    SystemMetricsRefreshed {
+        pid: u32,
+        uptime_secs: u64,
+        rss_bytes: u64,
+        virt_bytes: u64,
+        thread_count: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        open_fds: Option<u32>,
+        cpu_time_ms: u64,
+        num_cpus: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total_memory_bytes: Option<u64>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -292,6 +306,33 @@ impl UiEvent {
         rules_count: usize,
     ) -> Self {
         ancs_rule_changed(action, app_id, url, rules_count)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn system_metrics_refreshed(
+        pid: u32,
+        uptime_secs: u64,
+        rss_bytes: u64,
+        virt_bytes: u64,
+        thread_count: u32,
+        open_fds: Option<u32>,
+        cpu_time_ms: u64,
+        num_cpus: usize,
+        total_memory_bytes: Option<u64>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::SystemMetricsRefreshed {
+            pid,
+            uptime_secs,
+            rss_bytes,
+            virt_bytes,
+            thread_count,
+            open_fds,
+            cpu_time_ms,
+            num_cpus,
+            total_memory_bytes,
+            timestamp_ms,
+        }
     }
 }
 

@@ -428,6 +428,21 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Query process memory, CPU time, threads, open FDs and host resource telemetry.
+    Sys {
+        /// Watch mode: continuously stream system metrics.
+        #[arg(long, short)]
+        watch: bool,
+        /// Refresh interval in seconds for --watch (default: 1).
+        #[arg(long, default_value_t = 1)]
+        interval: u64,
+        /// Output raw JSON system report instead of formatted tables.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Inspect or dynamically update the node's running configuration.
     Config {
         /// Update node friendly broadcast name.
@@ -1341,6 +1356,22 @@ fn print_event(v: &serde_json::Value) {
             let allow_otp = v["allow_otp_in_dnd"].as_bool().unwrap_or(true);
             println!(
                 "[notify_config_changed] banners={banners} dnd={dnd} sound={sound} mask_otp={mask} allow_otp_in_dnd={allow_otp}"
+            );
+        }
+        "system_metrics_refreshed" => {
+            let pid = v["pid"].as_u64().unwrap_or(0);
+            let rss = v["rss_bytes"].as_u64().unwrap_or(0);
+            let virt = v["virt_bytes"].as_u64().unwrap_or(0);
+            let threads = v["thread_count"].as_u64().unwrap_or(0);
+            let fds = v["open_fds"]
+                .as_u64()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "-".into());
+            let cpu_ms = v["cpu_time_ms"].as_u64().unwrap_or(0);
+            println!(
+                "[system_metrics_refreshed] pid={pid} rss={} virt={} threads={threads} fds={fds} cpu_time={cpu_ms}ms",
+                format_bytes(rss),
+                format_bytes(virt)
             );
         }
         other => {
@@ -3778,6 +3809,39 @@ async fn main() -> Result<()> {
                 println!("  Loopback Latency: {:.2}ms", rtt.as_secs_f64() * 1000.0);
             }
         }
+        Cmd::Sys {
+            watch,
+            interval,
+            json,
+            ui_port,
+        } => loop {
+            let (code, resp) = loopback_get(ui_port, "/api/sys").await.map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+            if code != 200 {
+                bail!(
+                    "node refused system telemetry query (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                if watch {
+                    print!("\x1b[2J\x1b[H");
+                }
+                print_system_report(&v);
+            }
+            if !watch {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
+        },
         Cmd::Config {
             name,
             advertise,

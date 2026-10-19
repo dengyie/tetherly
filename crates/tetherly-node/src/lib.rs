@@ -20,7 +20,8 @@ pub use events::{CandidateViewDto, UiEvent};
 #[cfg(windows)]
 pub use platform::{cursor_pos, screen_size, start_input_hooks, HookControl, RawInput};
 pub use platform::{
-    MemoryInsertor, MemoryNotifier, MemoryOpener, SystemInputSink, SystemNotifier, SystemOpener,
+    HostSample, MemoryInsertor, MemoryNotifier, MemoryOpener, MemorySysProbe, PlatformSysProbe,
+    ProcessSample, SysProbe, SystemInputSink, SystemNotifier, SystemOpener,
 };
 pub use runtime::{
     extract_features, mime_type_from_name, ActiveTransfer, AncsClearRulesReport, AncsConnectReport,
@@ -29,15 +30,15 @@ pub use runtime::{
     CandidateDismissReport, ClipClearReport, ClipHistoryReport, ClipMetaEntryDto, ClipStatusReport,
     DiscoveredPeerDto, DiscoveryReport, DiscoveryRescanReport, DismissFilter, DndMode,
     FileBatchDecisionReport, FileDecisionReport, FileOfferDto, FileOffersReport, HealthReport,
-    IfaceReportDto, InboxClearReport, InboxDeleteReport, InboxFileDto, InboxOpenReport,
-    InboxReport, InputControlReport, InputStatusReport, LivePeer, LocalCapsReport,
+    HostMetrics, IfaceReportDto, InboxClearReport, InboxDeleteReport, InboxFileDto,
+    InboxOpenReport, InboxReport, InputControlReport, InputStatusReport, LivePeer, LocalCapsReport,
     NetworkRefreshReport, NetworkReport, Node, NodeConfig, NodeConfigReport, NodePorts,
     NotifyBannerConfig, NotifyConfigReport, NotifyTestReport, NotifyTestRequest, OpenRuleDto,
     OverlayStatusReport, PeerBlockReport, PeerCapsDto, PeerConnectReport, PeerDisconnectReport,
-    PeerPingReport, PeerUnblockReport, PeersCapsReport, PinReport, ResumeMarkerDto,
+    PeerPingReport, PeerUnblockReport, PeersCapsReport, PinReport, ProcessMetrics, ResumeMarkerDto,
     ResumeMarkersReport, RouteEntryDto, RouteMutateReport, RoutesReport, ScreenControlReport,
-    ScreenStatusReport, StorageCleanReport, StorageReport, TransferDirection, TransferPhase,
-    TransferStats, TransfersReport, UserCommand,
+    ScreenStatusReport, StorageCleanReport, StorageReport, SystemReport, TransferDirection,
+    TransferPhase, TransferStats, TransfersReport, UserCommand, format_memory_bytes,
 };
 pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
 pub use telemetry::{ChannelTrafficDto, ProtocolMessagesDto, TrafficReport, TrafficTelemetry};

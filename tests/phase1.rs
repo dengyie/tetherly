@@ -54,6 +54,7 @@ fn cfg(dir: PathBuf, name: &str, platform: &str) -> NodeConfig {
         screen_port: 0,
         advertise: false,
         memory_clip: true,
+        memory_notifier: true,
         loopback_only: true,
         reconnect: false,
         ui_port: 0,
@@ -2779,6 +2780,7 @@ async fn node_config_inspection_and_dynamic_flags_via_loopback_api() {
     assert!(!init_rep.reconnect);
     assert!(init_rep.loopback_only);
     assert!(init_rep.memory_clip);
+    assert!(init_rep.memory_notifier);
     assert!(!init_rep.overlay_enabled);
     assert!(!init_rep.ancs_attached);
     assert_eq!(init_rep.ui_port, ui_port);
