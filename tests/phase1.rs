@@ -5158,6 +5158,210 @@ async fn file_offer_lifecycle_and_terminal_governance_via_loopback_api() {
     peer.shutdown();
 }
 
+/// ADR-052: Batch file offer pipeline, deep resume observability, and loopback Host 403 isolation.
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_file_offer_pipeline_and_resume_observability_via_loopback_api() {
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Prepare multiple distinct files on disk for batch offer
+    let (files_dir, _fg) = temp_dir("batch-send-files");
+    let file1 = files_dir.join("document.pdf");
+    let file2 = files_dir.join("photo.jpg");
+    let file3 = files_dir.join("dataset.csv");
+    std::fs::write(
+        &file1,
+        b"%PDF-1.4 sample document payload for tetherly batch transfer",
+    )
+    .unwrap();
+    std::fs::write(&file2, b"JPEG image binary stream payload bytes 1234567890").unwrap();
+    std::fs::write(
+        &file3,
+        b"id,name,value\n1,alpha,100\n2,beta,200\n3,gamma,300\n",
+    )
+    .unwrap();
+
+    let total_expected_bytes = (std::fs::metadata(&file1).unwrap().len()
+        + std::fs::metadata(&file2).unwrap().len()
+        + std::fs::metadata(&file3).unwrap().len()) as u64;
+
+    // 2. Submit batch send request via POST /api/file/send-batch
+    let batch_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "paths": [
+            file1.to_str().unwrap(),
+            file2.to_str().unwrap(),
+            file3.to_str().unwrap(),
+        ]
+    });
+    let (code_batch, body_batch) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/send-batch",
+        &serde_json::to_vec(&batch_req).unwrap(),
+    )
+    .await
+    .expect("batch send post succeeds");
+    assert_eq!(code_batch, 200);
+
+    let batch_rep: tetherly_node::BatchSendReport =
+        serde_json::from_slice(&body_batch).expect("valid BatchSendReport");
+    assert!(batch_rep.ok);
+    assert!(batch_rep.batch_id.starts_with("tbt_"));
+    assert_eq!(batch_rep.total_files, 3);
+    assert_eq!(batch_rep.successful_files, 3);
+    assert_eq!(batch_rep.failed_files, 0);
+    assert_eq!(batch_rep.total_bytes, total_expected_bytes);
+    assert_eq!(batch_rep.items.len(), 3);
+    for item in &batch_rep.items {
+        assert_eq!(item.status, "sent");
+        assert!(item.transfer_id.is_some());
+        assert!(item.size > 0);
+    }
+
+    // 3. Verify Peer receives the 3 incoming file offers via /api/file/offers
+    let start_offers = std::time::Instant::now();
+    let offers_list = loop {
+        let (code_off, body_off) = tetherly_node::loopback_get(peer_ui, "/api/file/offers")
+            .await
+            .expect("offers query succeeds");
+        assert_eq!(code_off, 200);
+        let rep: tetherly_node::FileOffersReport = serde_json::from_slice(&body_off).unwrap();
+        if rep.count >= 3 {
+            break rep.offers;
+        }
+        if start_offers.elapsed() > Duration::from_secs(10) {
+            panic!("peer did not receive 3 offers in time, got {}", rep.count);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(offers_list.len(), 3);
+    assert!(offers_list.iter().any(|o| o.filename == "document.pdf"));
+    assert!(offers_list.iter().any(|o| o.filename == "photo.jpg"));
+    assert!(offers_list.iter().any(|o| o.filename == "dataset.csv"));
+
+    // 4. Test Deep Resume Observability via GET /api/file/resume and /api/storage
+    let inbox = g2.path().join("inbox");
+    std::fs::create_dir_all(&inbox).unwrap();
+    let fake_tid = "tfl_resumetest_fake_001";
+    let part_file = inbox.join(format!("{fake_tid}.part"));
+    let resume_file = inbox.join(format!(".{fake_tid}.resume.json"));
+    let partial_data = vec![0x42u8; 131072]; // 128 KiB chunk-aligned
+    std::fs::write(&part_file, &partial_data).unwrap();
+
+    let marker_content = serde_json::json!({
+        "transfer_id": fake_tid,
+        "source": host_id.as_str(),
+        "offset": 131072,
+        "total_bytes": 262144,
+        "last_active": 1700000000,
+    });
+    std::fs::write(&resume_file, serde_json::to_vec(&marker_content).unwrap()).unwrap();
+
+    // Query GET /api/file/resume
+    let (code_res, body_res) = tetherly_node::loopback_get(peer_ui, "/api/file/resume")
+        .await
+        .expect("resume markers query succeeds");
+    assert_eq!(code_res, 200);
+    let res_rep: tetherly_node::ResumeMarkersReport =
+        serde_json::from_slice(&body_res).expect("valid ResumeMarkersReport");
+    assert!(res_rep.ok);
+    assert!(res_rep.count >= 1);
+    assert!(res_rep.total_partial_bytes >= 131072);
+
+    let marker = res_rep
+        .markers
+        .iter()
+        .find(|m| m.transfer_id == fake_tid)
+        .expect("fake resume marker found");
+    assert_eq!(marker.source, host_id.as_str());
+    assert_eq!(marker.offset_bytes, 131072);
+    assert_eq!(marker.total_bytes, 262144);
+    assert!((marker.progress_percent - 50.0).abs() < 0.1);
+    assert!(marker.chunk_aligned);
+    assert!(marker.part_file_exists);
+    assert_eq!(marker.part_file_bytes, 131072);
+
+    // Verify GET /api/storage also reflects resume markers count
+    let (code_st, body_st) = tetherly_node::loopback_get(peer_ui, "/api/storage")
+        .await
+        .expect("storage query succeeds");
+    assert_eq!(code_st, 200);
+    let st_rep: tetherly_node::StorageReport = serde_json::from_slice(&body_st).unwrap();
+    assert!(st_rep.resume_markers_count >= 1);
+
+    // 5. Test Loopback Isolation & Host 403 Guard
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{host_ui}"))
+        .await
+        .expect("connect to host ui port");
+    let evil_req = "POST /api/file/send-batch HTTP/1.1\r\nHost: evil.attacker.com\r\nContent-Length: 2\r\n\r\n{}".to_string();
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    // 6. Test Error Boundaries and Validation
+    eprintln!("[TEST] step 6: testing validation...");
+    // a. Empty items & empty paths returns 400 Bad Request
+    let empty_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "paths": [],
+        "items": []
+    });
+    let (code_empty, body_empty) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/send-batch",
+        &serde_json::to_vec(&empty_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_empty, 400);
+    assert!(String::from_utf8_lossy(&body_empty).contains("no files specified"));
+
+    // b. Disconnected peer returns 400 Bad Request
+    let disconnected_peer_id = tetherly_core::DeviceId::from_id_pk(&[0x99u8; 32]).to_string();
+    let fake_peer_payload = serde_json::json!({
+        "peer": disconnected_peer_id,
+        "paths": [file1.to_str().unwrap()]
+    });
+    let (code_fake, body_fake) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/send-batch",
+        &serde_json::to_vec(&fake_peer_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_fake, 400);
+    assert!(String::from_utf8_lossy(&body_fake).contains("peer is not connected"));
+
+    // c. Unresolvable peer identifier returns 400 Bad Request
+    let unknown_peer_payload = serde_json::json!({
+        "peer": "nonexistent_alias_9999",
+        "paths": [file1.to_str().unwrap()]
+    });
+    let (code_unknown, body_unknown) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/send-batch",
+        &serde_json::to_vec(&unknown_peer_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_unknown, 400);
+    assert!(String::from_utf8_lossy(&body_unknown).contains("bad peer id"));
+
+    // 7. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 mod tracing_capture {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};

@@ -293,6 +293,20 @@
 - Windows cross-desktop p95 measurement + OpenH264/rav1e + macOS/Linux screen loop + dual-desktop 100 physical input round-trips (Manual-required, Phases 3+5 narrowed). Cross-device (cloud-phone AdbSource) screen loop, single-machine key/mouse injection, and on-device Android pair/notify/resume are verified.
 
 ## Current Focus
+- **v1.59 (ADR-052)**: 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环已落地：
+  1. **批量文件提议管道与原子批次治理 (`crates/tetherly-node/src/runtime.rs`)**：解决此前传输仅能单文件逐个提议导致的对端弹窗洪泛与缺乏批次聚合统计的痛点，设计 `BatchSendRequest`、`BatchSendItem`、`BatchSendReport` 与 `BatchTransferItemReport`，引入全局唯一批次标识 `tbt_<hex12>`，支持物理路径与 Base64 内存缓冲混合提议，严格执行 $O(1)$ 内存流式分块哈希（64 KiB 增量 SHA-256 计算）与总字节数、成功/失败计数原子回报；
+  2. **深度断点续传可观测性画像 (`ResumeMarkerDto` & `ResumeMarkersReport`)**：打破分块断点续传标记此前仅在内存与磁盘 `.resume.json` 侧车文件中的黑盒盲区，实现 `Node::resume_markers_report`，双重检索内存 `ResumeTable` 与 `inbox/` 目录中的 `.<transfer_id>.resume.json` 与 `.part` 实体，计算块对齐特征、精确进度百分比（`progress_percent`）并反解对端友好别名，并入 `StorageReport`；
+  3. **存储治理与互斥锁安全解耦**：精准定位并修复 `storage_report` 中 `hubs` Mutex 跨函数调用引发的不可重入自死锁，通过严格局部作用域收敛锁生命周期，确保垃圾回收与断点画像零死锁、零竞态；
+  4. **回环控制面端点群全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `POST /api/file/send-batch`（与别名 `/api/file/batch`）与 `GET /api/file/resume`（与别名 `/api/storage/resume`），全量执行 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 严格白名单校验（不匹配时强行阻断并返回 403 Forbidden）；
+  5. **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：升级 `send` 子命令原生接收多个文件路径（`paths: Vec<PathBuf>`），以格式化表格展示批次发送成果与各子项 Transfer ID；新增 `resume` 命令支持 ASCII 进度表格排版与 `--json` 管道透传；
+  6. **Web UI 多文件提议与续传状态画像 (`ui/index.html`)**：`<input id="sendfile" multiple>` 升级原生支持批量文件选择与多任务 Base64 聚合提议，传输卡片增设断点续传绿色徽标（`Resumed`）画像；
+  7. **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 增设 `batch_file_offer_pipeline_and_resume_observability_via_loopback_api` 完备验证单测/集成测试，全部 341+ 项测试 100% 全绿，Clippy 零警告，Cargo Deny 审计通过。
+- **v1.58 (ADR-051)**: Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环已落地：
+  1. **零 Lockfile 扰动纯 Rust D-Bus 依赖架构 (`crates/tetherly-node/Cargo.toml`)**：在 `[target.'cfg(unix)'.dependencies]` 中配置 `zbus 4`，彻底复用 `Cargo.lock` 已锁定的 `zbus 4.4.0`，无额外 C/C++ 依赖与 AGPL 风险；
+  2. **前端契约与线程隔离架构 (`crates/tetherly-node/src/ancs/bluez.rs`)**：前端 `BluezAncsTransport` 满足 `Send + Sync` 契约，单次响应通道并在 10s 内同步等待，后台独立专用线程 `"tetherly-ancs-bluez"` 持有单线程 Tokio Runtime，避免与全局运行时死锁；
+  3. **BlueZ D-Bus 对象树拓扑与 48 位 MAC 寻址 (`dev_path_from_mac`)**：通过 `dev_path_from_mac` 将 48 位 MAC 映射为 `/org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX`，检索 `ObjectManager` 解析 ANCS 服务与 3 个特征；
+  4. **严格恪守 SSOT §9.4 硬约束**：先订阅 Data Source 再订阅 Notification Source，监听 `PropertiesChanged` 信号单向流式推送解包入 `AncsInbound`（严禁回调反向写入 Control Point），`WriteValue` 携带 `{"type": "request"}` 严格串行写入并等待 ATT 确认，监听 `Connected == false` 推入 `AncsInbound::Disconnected` 触发指数退避；
+  5. **跨平台三端 ANCS 全闭环 (`crates/tetherly-node/src/ancs.rs`)**：Linux 平台 (`#[cfg(all(unix, not(target_os = "macos")))]`) 正式路由至 `bluez::open`，达成 Windows WinRT、macOS CoreBluetooth 与 Linux BlueZ 三端 100% 同构全闭环。
 - **v1.57 (ADR-050)**: macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复已落地：
   1. **跨平台外设地址抽象与通用解析器 (`tetherly-core/src/ancs.rs` & `lib.rs`)**：确立强类型 `BleAddress` 枚举，桥接 Windows 48 位物理 MAC (`Mac([u8; 6])`) 与 macOS CoreBluetooth 128 位 RFC 4122 `NSUUID` (`Uuid([u8; 16])`)，实现通用解析器 `parse_ble_address` 与规范化字符串序列化 `to_canonical_string`；
   2. **守护进程启动链路与状态机所有权修复 (`crates/tetherly-node/src/bin/tetherly.rs`)**：彻底修复 CLI `--ancs <addr>` 参数解析后静默丢弃传输层的致命缺陷，在 `Node::start` 前将 `cfg.ancs = Some(transport)` 与 `cfg.ancs_peripheral = addr` 注入配置，确保内部状态机持有传输层所有权，打通 `spawn_ancs_pump` 与 `ancs_connect` 链路；

@@ -76,19 +76,36 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
-    /// Send a file to a live peer via the running daemon's loopback UI API.
+    /// Ask the *running* node to send one or more files to a live peer.
+    ///
+    /// The file is read from the local filesystem and offered over the live
+    /// session. Supports multiple paths for batch sending. With one live peer
+    /// the target is implied; with more than one, `--peer` is required.
     Send {
-        /// Path to the file to send.
-        path: std::path::PathBuf,
-        /// Optional filename override to declare to the peer.
+        /// Path(s) to the file(s) to send.
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<std::path::PathBuf>,
+        /// Optional filename override to declare to the peer (single file only).
         #[arg(long)]
         name: Option<String>,
         /// `tdev_…` of the peer. Omit only when exactly one peer is live.
         #[arg(long)]
         peer: Option<String>,
-        /// Watch transfer progress until completion.
+        /// Output response as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Watch transfer progress until completion (single file only).
         #[arg(long)]
         watch: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Inspect recoverable/interrupted transfer markers and sidecars.
+    Resume {
+        /// Output raw JSON instead of table.
+        #[arg(long)]
+        json: bool,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -1331,22 +1348,177 @@ async fn main() -> Result<()> {
             println!("notified {peer}");
         }
         Cmd::Send {
-            path,
+            paths,
             name,
             peer,
+            json,
             watch,
             ui_port,
         } => {
-            let path_str = path
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("path contains invalid UTF-8"))?;
-            let payload = serde_json::json!({
-                "path": path_str,
-                "name": name,
-                "peer": peer,
-            });
-            let bytes = serde_json::to_vec(&payload)?;
-            let (code, resp) = loopback_post(ui_port, "/api/file/send", &bytes)
+            if paths.is_empty() {
+                bail!("no file paths provided");
+            }
+            if paths.len() == 1 {
+                let path = &paths[0];
+                let path_str = path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("path contains invalid UTF-8"))?;
+                let payload = serde_json::json!({
+                    "path": path_str,
+                    "name": name,
+                    "peer": peer,
+                });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) = loopback_post(ui_port, "/api/file/send", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "node refused file send (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                    return Ok(());
+                }
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                let transfer_id = v.get("transfer_id").and_then(|p| p.as_str()).unwrap_or("?");
+                let target_peer = v.get("peer").and_then(|p| p.as_str()).unwrap_or("?");
+                let file_name = v.get("name").and_then(|p| p.as_str()).unwrap_or("?");
+                let size = v.get("size").and_then(|p| p.as_u64()).unwrap_or(0);
+                println!("offered {file_name} ({size} bytes) to {target_peer} [{transfer_id}]");
+
+                if watch {
+                    println!("watching transfer progress for [{transfer_id}]...");
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        let (status_code, state_resp) = loopback_get(ui_port, "/api/state").await?;
+                        if status_code != 200 {
+                            continue;
+                        }
+                        let state: serde_json::Value = match serde_json::from_slice(&state_resp) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+                        let transfers = state.get("transfers").and_then(|t| t.as_array());
+                        let current = transfers.and_then(|list| {
+                            list.iter().find(|t| {
+                                t.get("transfer_id").and_then(|id| id.as_str()) == Some(transfer_id)
+                            })
+                        });
+                        if let Some(t) = current {
+                            let transferred =
+                                t.get("transferred").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let total = t.get("total").and_then(|v| v.as_u64()).unwrap_or(size);
+                            let speed_bps =
+                                t.get("speed_bps").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let phase = t
+                                .get("phase")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("transferring");
+                            let pct = if total > 0 {
+                                (transferred as f64 / total as f64) * 100.0
+                            } else {
+                                0.0
+                            };
+                            print!(
+                                "\r[{:>5.1}%] {} / {} ({}) [{}]      ",
+                                pct,
+                                format_bytes(transferred),
+                                format_bytes(total),
+                                format_speed(speed_bps),
+                                phase
+                            );
+                            use std::io::Write;
+                            let _ = std::io::stdout().flush();
+
+                            if phase == "completed" {
+                                println!(
+                                    "\n✓ Transfer completed: {file_name} ({})",
+                                    format_bytes(total)
+                                );
+                                break;
+                            } else if phase == "failed" {
+                                let err_msg = t
+                                    .get("error")
+                                    .and_then(|e| e.as_str())
+                                    .unwrap_or("transfer failed");
+                                bail!("\n✗ Transfer failed: {err_msg}");
+                            }
+                        }
+                    }
+                }
+            } else {
+                if name.is_some() {
+                    bail!("--name cannot be specified when sending multiple files in batch");
+                }
+                let path_strs: Vec<String> = paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
+                let payload = serde_json::json!({
+                    "paths": path_strs,
+                    "peer": peer,
+                });
+                let bytes = serde_json::to_vec(&payload)?;
+                let (code, resp) = loopback_post(ui_port, "/api/file/send-batch", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "node refused batch file send (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp));
+                    return Ok(());
+                }
+                let rep: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                let batch_id = rep["batch_id"].as_str().unwrap_or("?");
+                let target = rep["peer_alias"]
+                    .as_str()
+                    .or_else(|| rep["peer"].as_str())
+                    .unwrap_or("?");
+                let succ = rep["successful_files"].as_u64().unwrap_or(0);
+                let total_f = rep["total_files"].as_u64().unwrap_or(0);
+                let failed_f = rep["failed_files"].as_u64().unwrap_or(0);
+                let total_bytes = rep["total_bytes"].as_u64().unwrap_or(0);
+                println!(
+                    "Batch [{batch_id}] to {target}: {succ}/{total_f} succeeded, {failed_f} failed ({} total)",
+                    format_bytes(total_bytes)
+                );
+                if let Some(items) = rep["items"].as_array() {
+                    for item in items {
+                        let iname = item["name"].as_str().unwrap_or("?");
+                        let isize = item["size"].as_u64().unwrap_or(0);
+                        let status = item["status"].as_str().unwrap_or("?");
+                        if status == "sent" || status == "queued" {
+                            let tid = item["transfer_id"].as_str().unwrap_or("?");
+                            println!("  ✓ {} ({}) -> [{tid}]", iname, format_bytes(isize));
+                        } else {
+                            let err = item["error"].as_str().unwrap_or("unknown error");
+                            println!("  ✗ {iname} -> failed: {err}");
+                        }
+                    }
+                }
+            }
+        }
+        Cmd::Resume { json, ui_port } => {
+            let (code, resp) = loopback_get(ui_port, "/api/file/resume")
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -1356,75 +1528,63 @@ async fn main() -> Result<()> {
                 })?;
             if code != 200 {
                 bail!(
-                    "node refused file send (HTTP {code}): {}",
+                    "node returned HTTP {code} querying resume markers: {}",
                     String::from_utf8_lossy(&resp)
                 );
             }
-            let v: serde_json::Value =
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp));
+                return Ok(());
+            }
+            let rep: serde_json::Value =
                 serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
-            let transfer_id = v.get("transfer_id").and_then(|p| p.as_str()).unwrap_or("?");
-            let target_peer = v.get("peer").and_then(|p| p.as_str()).unwrap_or("?");
-            let file_name = v.get("name").and_then(|p| p.as_str()).unwrap_or("?");
-            let size = v.get("size").and_then(|p| p.as_u64()).unwrap_or(0);
-            println!("offered {file_name} ({size} bytes) to {target_peer} [{transfer_id}]");
-
-            if watch {
-                println!("watching transfer progress for [{transfer_id}]...");
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    let (status_code, state_resp) = loopback_get(ui_port, "/api/state").await?;
-                    if status_code != 200 {
-                        continue;
-                    }
-                    let state: serde_json::Value = match serde_json::from_slice(&state_resp) {
-                        Ok(s) => s,
-                        Err(_) => continue,
+            let markers = rep["markers"].as_array();
+            let count = rep["count"].as_u64().unwrap_or(0);
+            let total_part = rep["total_partial_bytes"].as_u64().unwrap_or(0);
+            if count == 0 || markers.map(|m| m.is_empty()).unwrap_or(true) {
+                println!("No resumable transfer markers found in inbox.");
+                return Ok(());
+            }
+            println!(
+                "Found {} resumable marker(s) ({} total partial data):",
+                count,
+                format_bytes(total_part)
+            );
+            println!(
+                "{:<20} {:<24} {:<22} {:<10} {:<10} {:<10}",
+                "TRANSFER ID", "SOURCE", "OFFSET / TOTAL", "PROGRESS", "ALIGNED", ".PART FILE"
+            );
+            if let Some(list) = markers {
+                for m in list {
+                    let tid = m["transfer_id"].as_str().unwrap_or("?");
+                    let src = m["source_alias"]
+                        .as_str()
+                        .or_else(|| m["source"].as_str())
+                        .unwrap_or("?");
+                    let off = m["offset_bytes"].as_u64().unwrap_or(0);
+                    let tot = m["total_bytes"].as_u64().unwrap_or(0);
+                    let pct = m["progress_percent"].as_f64().unwrap_or(0.0);
+                    let aligned = if m["chunk_aligned"].as_bool().unwrap_or(false) {
+                        "yes"
+                    } else {
+                        "no"
                     };
-                    let transfers = state.get("transfers").and_then(|t| t.as_array());
-                    let current = transfers.and_then(|list| {
-                        list.iter().find(|t| {
-                            t.get("transfer_id").and_then(|id| id.as_str()) == Some(transfer_id)
-                        })
-                    });
-                    if let Some(t) = current {
-                        let transferred =
-                            t.get("transferred").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let total = t.get("total").and_then(|v| v.as_u64()).unwrap_or(size);
-                        let speed_bps = t.get("speed_bps").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let phase = t
-                            .get("phase")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("transferring");
-                        let pct = if total > 0 {
-                            (transferred as f64 / total as f64) * 100.0
-                        } else {
-                            0.0
-                        };
-                        print!(
-                            "\r[{:>5.1}%] {} / {} ({}) [{}]      ",
-                            pct,
-                            format_bytes(transferred),
-                            format_bytes(total),
-                            format_speed(speed_bps),
-                            phase
-                        );
-                        use std::io::Write;
-                        let _ = std::io::stdout().flush();
-
-                        if phase == "completed" {
-                            println!(
-                                "\n✓ Transfer completed: {file_name} ({})",
-                                format_bytes(total)
-                            );
-                            break;
-                        } else if phase == "failed" {
-                            let err_msg = t
-                                .get("error")
-                                .and_then(|e| e.as_str())
-                                .unwrap_or("transfer failed");
-                            bail!("\n✗ Transfer failed: {err_msg}");
-                        }
-                    }
+                    let part_exists = m["part_file_exists"].as_bool().unwrap_or(false);
+                    let part_bytes = m["part_file_bytes"].as_u64().unwrap_or(0);
+                    let part = if part_exists {
+                        format!("yes ({})", format_bytes(part_bytes))
+                    } else {
+                        "no".to_string()
+                    };
+                    println!(
+                        "{:<20} {:<24} {:<22} {:<10} {:<10} {:<10}",
+                        tid,
+                        src,
+                        format!("{} / {}", format_bytes(off), format_bytes(tot)),
+                        format!("{:.1}%", pct),
+                        aligned,
+                        part
+                    );
                 }
             }
         }

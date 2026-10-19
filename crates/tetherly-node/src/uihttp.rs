@@ -1721,6 +1721,55 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> (u16, &'st
             }
             Err(_) => err(400, "bad json"),
         },
+        ("POST", "/api/file/send-batch") | ("POST", "/api/file/batch") => {
+            match serde_json::from_slice::<crate::runtime::BatchSendRequest>(body) {
+                Ok(d) => {
+                    let mut peers = node.live_peers();
+                    peers.sort_by_key(|p| p.device_id.to_string());
+                    let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
+                        Some(raw) => match node.resolve_peer(raw) {
+                            Ok(id) => {
+                                if peers.iter().any(|p| p.device_id == id) {
+                                    id
+                                } else {
+                                    return err(400, "peer is not connected");
+                                }
+                            }
+                            Err(e) => return err(400, &format!("bad peer id: {e}")),
+                        },
+                        None => match peers.len() {
+                            0 => return err(400, "no connected peer"),
+                            1 => peers[0].device_id.clone(),
+                            _ => return err(400, "multiple peers connected; pass peer (tdev_…)"),
+                        },
+                    };
+
+                    let mut all_items = d.items;
+                    for p in d.paths {
+                        all_items.push(crate::runtime::BatchSendItem {
+                            path: Some(p),
+                            name: None,
+                            data_base64: None,
+                        });
+                    }
+                    if all_items.is_empty() {
+                        return err(400, "no files specified in paths or items");
+                    }
+                    match node.send_batch_items(&target, all_items).await {
+                        Ok(rep) => json_ok(&rep),
+                        Err(e) => err(400, &e.to_string()),
+                    }
+                }
+                Err(_) => err(
+                    400,
+                    "bad json, expected { peer?: string, paths?: string[], items?: [] }",
+                ),
+            }
+        }
+        ("GET", "/api/file/resume") | ("GET", "/api/storage/resume") => {
+            let rep = node.resume_markers_report();
+            json_ok(&rep)
+        }
         ("GET", "/api/ancs") => {
             let rep = node.ancs_report();
             json_ok(&rep)

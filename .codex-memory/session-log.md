@@ -1,5 +1,43 @@
 # Session log
 
+## 2026-10-19 (57) - Batch file offer lifecycle, multi-file pipeline & deep resume observability (v1.59 / ADR-052)
+- Task: 实现跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环 (Batch File Offer Lifecycle, Multi-File Pipeline & Deep Resume Observability)，解决此前单文件逐个提议导致的对端弹窗洪泛与缺乏批次聚合统计痛点，打破分块断点续传侧车黑盒，提供双端 CLI/Web UI 全同构控制面与互斥锁自死锁解耦。
+- **背景与缺陷根因**:
+  在 Tetherly 完成三大桌面平台 ANCS 硬件级接入闭环 (v1.58 / ADR-051) 后，跨端数据协同网络底层稳固。但在高频跨端文件分发与断点续传治理中暴露出三个核心痛点：
+  1. 批量文件提议体验缺失（Missing Batch File Offer Pipeline）：
+     - 现存文件发送控制端点仅支持单个物理路径或单个 Base64 载荷提议（`POST /api/file/send` 与 `tetherly send <path>`）；用户在向对端发送多个文件时，必须逐个调用，导致对端产生大量孤立的提议弹窗，无法一次性呈现批次文件清单（`files: Vec<FileDesc>`）与总尺寸累计；
+     - 缺乏全局唯一的批次标识符与聚合状态回报（`BatchSendReport`、`total_files`、`successful_files`、`failed_files`、`total_bytes`、各文件独立状态）；
+  2. 断点续传深度可观测性黑盒（Resume Markers Observability Blackout）：
+     - 节点虽然在底层实现了 64 KiB 分块流式加密与断点续传恢复（`ResumeTable`、`inbox/.<transfer_id>.resume.json` 与 `.{transfer_id}.part`），但上层控制面处于完全黑盒状态；
+     - 外部监控探针、CLI 与 Web UI 无法直观查询当前系统中存在哪些可续传分块、已就绪偏移量、块对齐特征（`chunk_aligned`）以及完成百分比（`progress_percent`）；
+  3. 存储统计与互斥锁潜在自死锁隐患（Mutex Self-Deadlock in `storage_report`）：
+     - `storage_report()` 在扫描收件箱与分块时持有了 `self.shared.hubs.lock()`，若在此锁作用域内直接调用 `self.resume_markers_report()`（后者同样需要获取 `hubs` 锁以反解对端友好别名），在不可重入的 `std::sync::Mutex` 下将直接引发致命的自死锁；
+  4. 回环端点、CLI 与 Web UI 缺乏规范化同构升级：
+     - 缺少 `POST /api/file/send-batch`（及别名 `/api/file/batch`）与 `GET /api/file/resume`（及别名 `/api/storage/resume`）；
+     - CLI `send` 子命令仅接受单路径，缺少原生多路径 `send <paths...>` 批次汇总；缺少 `resume` 续传分块查询子命令；
+     - Web UI（`ui/index.html`）`<input id="sendfile">` 缺少 `multiple` 批量多选支持与断点续传徽标画像。
+- **架构设计与落地 (ADR-052)**:
+  1. 批量文件提议核心模型与原子流式管道 (`crates/tetherly-node/src/runtime.rs`):
+     - 定义 `BatchSendRequest`、`BatchSendItem`、`BatchSendReport` 与 `BatchTransferItemReport`；
+     - 自动生成符合规范的全局唯一批次标识 `tbt_<hex12>`（tetherly batch transfer）；
+     - 实现 `Node::send_files_batch` 与 `Node::send_batch_items`，原生支持磁盘物理路径与 Base64 内存缓冲混合提议，严格执行 $O(1)$ 内存流式分块哈希（64 KiB 增量 SHA-256 计算）与总字节数、成功/失败计数原子回报；
+  2. 深度断点续传可观测性画像与互斥锁安全解耦 (`crates/tetherly-node/src/runtime.rs`):
+     - 定义 `ResumeMarkerDto` 与 `ResumeMarkersReport`，计算块对齐特征（`offset_bytes % 65536 == 0`）与精确完成百分比（`progress_percent`）；
+     - 实现 `Node::resume_markers_report`：双重检索内存 `ResumeTable` 与磁盘 `inbox/` 目录中的 `.<transfer_id>.resume.json` 与 `.part` 实体，反解对端友好别名；
+     - 解耦 `storage_report()` 互斥锁作用域，先在紧凑临界区内提取收件箱指标，锁释放后再检索断点画像，根除自死锁隐患；
+  3. 轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`):
+     - 新增 `POST /api/file/send-batch` 与 `POST /api/file/batch`；
+     - 新增 `GET /api/file/resume` 与 `GET /api/storage/resume`；
+     - 严格 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 403 校验；
+  4. CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs` 与 `crates/tetherly-node/src/bin/tetherly.rs`):
+     - 升级 `send` 子命令支持原生接收多个路径（`paths: Vec<PathBuf>`），以格式化表格展示批次聚合统计；
+     - 新增 `resume` 命令支持 ASCII 进度表格排版与 `--json` 原生管道输出；
+  5. Web UI 多文件提议与续传状态画像 (`ui/index.html`):
+     - `<input id="sendfile" multiple>` 升级原生支持批量文件选择与多任务 Base64 聚合提议；
+     - 传输卡片增设断点续传绿色徽标（`Resumed`）画像；
+  6. 端到端集成测试全覆盖 (`tests/phase1.rs`):
+     - 新增 `batch_file_offer_pipeline_and_resume_observability_via_loopback_api` 完备验证单测/集成测试，全部 341+ 项测试 100% 全绿，确立 ADR-052，SSOT 升至 v1.59。
+
 ## 2026-10-19 (56) - Linux BlueZ D-Bus GATT transport stack architecture & cross-platform tripartite ANCS parity (v1.58 / ADR-051)
 - Task: 实现 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)，终结 Linux 桌面与工作站平台此前硬编码返回 `Ok(None)` 的平台断层，达成三大桌面操作系统原生硬件级 ANCS 接入能力的 100% 同构全闭环。
 - **背景与缺陷根因**:

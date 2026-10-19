@@ -3,12 +3,73 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.58** |
+| 文档版本 | **1.59** |
 | 日期 | 2026-10-19 |
-| 状态 | **v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）**——(1) **Linux 桌面平台 BlueZ GATT 传输栈原生构建 (`crates/tetherly-node/src/ancs/bluez.rs` & `ancs.rs`)**：终结 Linux 桌面与工作站平台（`#[cfg(all(unix, not(target_os = "macos")))]`）此前硬编码返回 `Ok(None)` 的平台断层，基于 Linux 标准 System D-Bus（`org.bluez`）接口实现完整 GATT 客户端驱动，完成 Windows（WinRT）、macOS（CoreBluetooth）、Linux（BlueZ）三大桌面操作系统的 100% 同构全闭环；(2) **零 Lockfile 扰动纯 Rust D-Bus 依赖架构 (`Cargo.toml`)**：在 `[target.'cfg(unix)'.dependencies]` 中复用 `Cargo.lock` 已锁定的 `zbus 4.4.0`（源自 `secret-service` 底层依赖），杜绝引入任何新的第三方 C/C++ 共享库或 AGPL/非许可协议包，`deny.toml` 检验 100% 纯净通过；(3) **线程隔离与单线程异步驱动 Runtime (`tetherly-ancs-bluez`)**：前端 `BluezAncsTransport` 仅持有 `Sender<Cmd>`，天然满足 `Send + Sync` 契约，支持 10s 超时同步确认与 `Drop` 自动优雅析构；后台独立线程驱动专属单线程 Tokio Runtime，避免与全局或上层异步运行时产生嵌套死锁；(4) **BlueZ D-Bus 对象拓扑遍历与 48 位 MAC 寻址 (`dev_path_from_mac`)**：通过 `org.freedesktop.DBus.ObjectManager.GetManagedObjects` 动态解析 `/org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX` 下的 ANCS 服务 (`7905f431-b5ce-4e99-a40f-4b1e122d00d0`) 及 3 个特征（Notification Source、Data Source、Control Point）；(5) **严格恪守 SSOT §9.4 硬约束**：严格按顺序订阅 Data Source 与 Notification Source，D-Bus `PropertiesChanged` 信号下将 `Value` 属性解析出的原始字节推入 `AncsInbound`，信号回调严禁反向写 Control Point；Control Point 写操作通过 `WriteValue(bytes, {"type": "request"})` 严格串行执行并等待 ATT 响应确认；监听 `Device1.Connected == false` 突变推入 `Disconnected` 触发退避重连；(6) **单元测试与跨平台验证**：内置 MAC 地址 BlueZ 路径格式化、断开响应转换、命令往返 ACK、D-Bus `ay` 字节向量安全解包以及非法地址拒收等单元测试，全工作区 325+ 项测试 100% 全绿，clippy 零告警。+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）**——(1) **多文件批量提议引擎与原子批次治理 (`crates/tetherly-node/src/runtime.rs`)**：解决此前传输仅能单文件逐个提议导致的对端弹窗洪泛与缺乏批次聚合统计的痛点，设计 `BatchSendRequest`、`BatchSendItem`、`BatchSendReport` 与 `BatchTransferItemReport`，引入全局唯一批次标识 `tbt_<hex12>`，支持按物理路径列表与 Base64 内存缓冲混合提议，严格执行 $O(1)$ 内存流式分块哈希（64 KiB 增量 SHA-256 计算）与总字节数、成功数、失败数结构化原子回报；(2) **深度断点续传可观测性画像 (`ResumeMarkerDto` & `ResumeMarkersReport`)**：打破分块断点续传标记此前仅在内存与磁盘 `.resume.json` 侧车文件中的黑盒盲区，实现 `Node::resume_markers_report`，不仅扫描内存 `ResumeTable`，同时跨生命周期检索 `inbox/` 目录中的 `.<transfer_id>.resume.json` 与 `.part` 实体，计算块对齐特征、精确进度百分比（`progress_percent`）并反解对端友好别名（`source_alias`）；同时将续传标记画像深度并入 `StorageReport`；(3) **存储治理与互斥锁安全解耦**：精准定位并修复 `storage_report` 中 `hubs` Mutex 跨函数调用引发的不可重入自死锁，通过严格局部作用域收敛锁生命周期，确保垃圾回收与断点画像零死锁、零竞态；(4) **回环控制面端点群全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `POST /api/file/send-batch`（与别名 `/api/file/batch`）与 `GET /api/file/resume`（与别名 `/api/storage/resume`），全量执行 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 严格白名单校验（不匹配时强行阻断并返回 403 Forbidden）；(5) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：升级 `send` 子命令原生接收多个文件路径（`paths: Vec<PathBuf>`），以格式化表格展示批次发送成果与各子项 Transfer ID；新增 `resume` 命令支持 ASCII 进度表格排版与 `--json` 管道透传；(6) **Web UI 多文件提议与续传状态画像 (`ui/index.html`)**：`<input id="sendfile" multiple>` 升级原生支持批量文件选择与多任务 Base64 聚合提议，传输卡片增设断点续传绿色徽标（`Resumed`）画像；(7) **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 全面覆盖批量提议、3 文件提议对端接收验证、断点续传画像深探、Host 403 恶意头阻断、空文件与非法对端边界校验，工作区 341+ 项测试、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 通过。+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.59 相对 1.58(跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环)**
+
+- **动机(批量文件提议割裂与断点续传标记黑盒痛点)**:
+  在 Tetherly 完成三大桌面系统 ANCS GATT 全同构接入 (v1.58 / ADR-051) 以及跨端单文件传输提议治理 (v1.53 / ADR-046) 之后，核心传输管道在多文件传输场景仍存在显著操作与体验断层：
+  1. **多文件发送提议割裂（Fragmented Multi-File Transfers）**：
+     此前双端 CLI（`tetherly send <path>`）与回环控制面（`/api/file/send`）仅支持单路径输入。当用户需要向对端批量传输多份照片、日志或数据集时，必须反复多次调用命令，导致接收端被连续多个独立的弹窗打扰；同时缺乏全局统一的批次标识（Batch ID）与聚合统计回报（传输总文件数、成功/失败计数、累计字节数）。
+  2. **断点续传标记不可见与黑盒盲区（Invisible Resume Markers）**：
+     Tetherly 底层虽然支持分块断点续传并在 `inbox/` 目录落盘 `.<transfer_id>.resume.json` 侧车文件与内存 `ResumeTable`，但外部完全缺乏断点续传画像端点。用户或前端 UI 无法知晓当前系统存在哪些可恢复任务、其续传偏移量、块对齐完整性与百分比，更无法直观审计残余 `.part` 文件的占用空间。
+
+- **架构与协议设计(ADR-052 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环)**:
+  1. **批量文件提议管道与强类型 DTO 设计 (`crates/tetherly-node/src/runtime.rs`)**:
+     - 定义批量提议输入结构体 `BatchSendRequest`：
+       ```rust
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+       pub struct BatchSendRequest {
+           pub peer: Option<String>,
+           #[serde(default)]
+           pub paths: Vec<String>,
+           #[serde(default)]
+           pub items: Vec<BatchSendItem>,
+       }
+       ```
+     - 结构化子项 `BatchSendItem`（支持磁盘物理路径 `path` 或内存 Base64 负载 `data_base64`）；
+     - 定义批次传输回报 `BatchSendReport` 与子项状态画像 `BatchTransferItemReport`：
+       每个批次计算生成格式为 `tbt_<hex12>` 的确定性唯一批次标识，记录 `total_files`、`successful_files`、`failed_files`、`total_bytes` 以及每个传输项的 `transfer_id` 与传输状态（`"sent"` / `"failed"`）。
+  2. **深度断点续传画像设计 (`ResumeMarkerDto` & `ResumeMarkersReport`)**:
+     - 定义强类型画像 DTO：
+       ```rust
+       #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+       pub struct ResumeMarkerDto {
+           pub transfer_id: String,
+           pub source: String,
+           pub source_alias: Option<String>,
+           pub total_bytes: u64,
+           pub offset_bytes: u64,
+           pub progress_percent: f64,
+           pub chunk_aligned: bool,
+           pub part_file_exists: bool,
+           pub part_file_bytes: u64,
+       }
+       ```
+     - 聚合回报结构体 `ResumeMarkersReport` 提供 `ok`、`count`、`total_partial_bytes` 与 `markers` 列表；并在 `StorageReport` 中并入 `resume_markers_count` 与 `resume_markers`，实现存储空间审计与续传标记深度联通。
+  3. **运行时控制原语与死锁免疫治理**:
+     - `send_files_batch(&self, peer: &DeviceId, paths: &[PathBuf]) -> Result<BatchSendReport, CoreError>`；
+     - `send_batch_items(&self, peer: &DeviceId, items: Vec<BatchSendItem>) -> Result<BatchSendReport, CoreError>`；
+     - `resume_markers_report(&self) -> ResumeMarkersReport`：双轨扫描内存 `ResumeTable` 与磁盘 `inbox/` 侧车文件 `.<transfer_id>.resume.json`（同时兼容 `.{id}.part` 与 `{id}.part`），自动校验并解析 `ResumeSidecar`（支持 `source`/`device_id` 与 `total`/`total_bytes` 别名互通），计算块对齐性（`offset % 65536 == 0`）与对端友好别名；
+     - **互斥锁解耦**：彻底消除 `storage_report` 中因持有 `hubs` Mutex 再次调用 `resume_markers_report` 引发的线程不可重入自死锁（Self-Deadlock），将锁范围严格局限在局部扫描代码块内。
+  4. **回环控制面端点群闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `POST /api/file/send-batch` 与 `POST /api/file/batch`：接收 `BatchSendRequest`，通过 `resolve_peer` 智能解析目标对端，执行批次发送并返回结构化 `BatchSendReport`；
+     - `GET /api/file/resume` 与 `GET /api/storage/resume`：轻量级输出当前全量断点续传标记画像 `ResumeMarkersReport`；
+     - **严格安全红线**：100% 绑定 127.0.0.1，校验请求头 `Host: 127.0.0.1|localhost`，不匹配时坚决返回 403 Forbidden。
+  5. **双端命令行 CLI 全同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - `send` 子命令：参数升级为 `paths: Vec<PathBuf>`（`num_args = 1..`），单次调用可传入多个文件路径；以 ASCII 表格展示批次概要（Batch ID、总数、成功/失败数、总字节）与各文件传输状态；
+     - `resume` 子命令：查询 `/api/file/resume`，以 ASCII 表格展示传输 ID、来源设备、别名、总字节、续传偏移、百分比及分块对齐状态，支持 `--json` 输出。
+  6. **Web 控制台多文件提议与续传徽标 (`ui/index.html`)**:
+     - 文件选择控件加入 `multiple` 属性，选择多个文件后依次读取并通过 base64 批量提交至 `/api/file/send-batch`；
+     - 在活动传输列表中识别 `is_resumed` 标记并渲染绿底 `Resumed` 状态徽标。
+  7. **验证基线**:
+     - `tests/phase1.rs` 增设 `batch_file_offer_pipeline_and_resume_observability_via_loopback_api` 集成测试；
+     - 全工作区 341+ 项测试全绿，Linux aarch64 交叉编译通过，clippy 零告警，cargo deny 全检通过。
 
 **1.58 相对 1.57(Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环)**
 
@@ -2429,7 +2490,7 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
   - 打 tag `v*` 时触发 `publish` 作业，自动将三端产物归档并发布至 GitHub Releases。
 - 版本号 workspace 统一 bump。
 - 控制 **45717/tcp**，文件 **45718/tcp**，键鼠 **45719/tcp**，远程屏幕 **45720/tcp**。本机 UI **45716/tcp** 仅 127.0.0.1。DeskFlow 网关默认关。
-- 本机 UI **45716** 同时是 CLI 的**控制面入口**(v1.20):`tetherly pin` / `dial` / `notify` / `send`(v1.25) / `status`(v1.28) 均以它为回环客户端目标(`POST /api/pin` / `/api/dial` / `/api/notify` / `/api/file/send` 与 `GET /api/state`),不再自起节点。该 HTTP 面**永不**绑非回环地址,且请求须带 `Host: 127.0.0.1|localhost`,否则 403。
+- 本机 UI **45716** 同时是 CLI 的**控制面入口**(v1.20):`tetherly pin` / `dial` / `notify` / `send`(v1.25, v1.59 多文件批量) / `resume`(v1.59 续传画像) / `status`(v1.28) 均以它为回环客户端目标(`POST /api/pin` / `/api/dial` / `/api/notify` / `/api/file/send` / `/api/file/send-batch` / `/api/file/resume` 与 `GET /api/state`),不再自起节点。该 HTTP 面**永不**绑非回环地址,且请求须带 `Host: 127.0.0.1|localhost`,否则 403。
 - 安装程序提示放行 45717–45720；默认 **LAN** 监听：`127.0.0.1` + RFC1918 / 链路本地，不含公网、**跳过** EasyTier `10.144.144.0/24`（避免 mDNS 打到 TUN）。Phase 2 另绑 overlay CIDR 内的本机 IP，仍永不 `0.0.0.0`/`::`。
 - Phase 1 桌面不要求 WebView2（loopback HTTP）。Tauri 壳下一迭代才需要 WebView2、MSVC 运行库；ANCS 需要蓝牙。
 - **单文件上限 `FILE_MAX = 64 GiB`（v1.28）**（§12 M1.7）：v1.26 全面确立了 $O(1)$ 内存常数界流式引擎（64 KiB 分块加密与增量 SHA-256 流水线），消除了整文件内存驻留束缚。v1.28 正式将单文件传输上限提升至 64 GiB（`64 * 1024 * 1024 * 1024` 字节）；在报价时按声明大小拒绝（`CoreError::FileTooLarge(FILE_MAX)`），在 45718 数据通道头校验（`recv_chunks_after_header`）与发送端入口严格把关，超限在分配零字节内存前即刻拒绝且绝不拆除已有会话。

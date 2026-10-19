@@ -416,6 +416,10 @@ pub struct ActiveTransfer {
     pub error: Option<String>,
     pub started_ms: u64,
     pub updated_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_offset: Option<u64>,
+    #[serde(default)]
+    pub is_resumed: bool,
 }
 
 /// Comprehensive lightweight report of active and retained file transfers.
@@ -483,6 +487,81 @@ pub struct FileBatchDecisionReport {
     pub rejected_count: usize,
     pub total_evaluated: usize,
     pub decisions: Vec<FileDecisionReport>,
+}
+
+/// Single item within a batch send request.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BatchSendItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+}
+
+/// Request payload for batch file sending.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BatchSendRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<BatchSendItem>,
+}
+
+/// Result report for an individual file within a batch send operation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BatchTransferItemReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_id: Option<String>,
+    pub name: String,
+    pub size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Aggregate report returned after submitting a batch of files for sending.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BatchSendReport {
+    pub ok: bool,
+    pub batch_id: String,
+    pub peer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_alias: Option<String>,
+    pub total_files: usize,
+    pub successful_files: usize,
+    pub failed_files: usize,
+    pub total_bytes: u64,
+    pub items: Vec<BatchTransferItemReport>,
+}
+
+/// Detailed inspection of an in-progress or interrupted transfer capable of being resumed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ResumeMarkerDto {
+    pub transfer_id: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_alias: Option<String>,
+    pub total_bytes: u64,
+    pub offset_bytes: u64,
+    pub progress_percent: f64,
+    pub chunk_aligned: bool,
+    pub part_file_exists: bool,
+    pub part_file_bytes: u64,
+}
+
+/// Comprehensive lightweight report of all stored resume markers in memory and disk sidecars.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ResumeMarkersReport {
+    pub ok: bool,
+    pub count: usize,
+    pub total_partial_bytes: u64,
+    pub markers: Vec<ResumeMarkerDto>,
 }
 
 /// Status and configuration of auto-accept policy for trusted peers.
@@ -563,7 +642,7 @@ pub struct AncsClearRulesReport {
 }
 
 /// Lightweight status report for node data directory and storage consumption.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct StorageReport {
     pub ok: bool,
     pub data_dir: String,
@@ -575,6 +654,10 @@ pub struct StorageReport {
     pub orphaned_partial_count: usize,
     pub orphaned_partial_bytes: u64,
     pub meta_bytes: u64,
+    #[serde(default)]
+    pub resume_markers_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resume_markers: Vec<ResumeMarkerDto>,
 }
 
 /// Report returned by a storage cleanup operation.
@@ -778,7 +861,9 @@ struct OutboundFile {
 /// transfer resume after a process restart. No file content, only progress.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ResumeSidecar {
+    #[serde(alias = "source")]
     device_id: String,
+    #[serde(alias = "total_bytes")]
     total: u64,
     offset: u64,
 }
@@ -1508,6 +1593,16 @@ impl Node {
     pub fn is_trusted(&self, id: &DeviceId) -> bool {
         let store = self.shared.trust.lock().expect("trust");
         store.peers.get(id).is_some_and(|p| !p.revoked)
+    }
+
+    /// Retrieve the local friendly alias for a trusted peer device, if set and not revoked.
+    pub fn peer_alias(&self, device_id: &DeviceId) -> Option<String> {
+        let store = self.shared.trust.lock().expect("trust");
+        store
+            .peers
+            .get(device_id)
+            .filter(|p| !p.revoked && !p.alias.is_empty())
+            .map(|p| p.alias.clone())
     }
 
     /// Update the local friendly alias for a trusted peer device.
@@ -2511,39 +2606,41 @@ impl Node {
         let mut orphaned_partial_bytes: u64 = 0;
         let mut meta_bytes: u64 = 0;
 
-        let active = self.shared.active_transfers.lock().expect("transfers");
-        let hubs = self.shared.hubs.lock().expect("hubs");
+        {
+            let active = self.shared.active_transfers.lock().expect("transfers");
+            let hubs = self.shared.hubs.lock().expect("hubs");
 
-        if let Ok(entries) = std::fs::read_dir(&inbox_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let file_len = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.starts_with('.') && name.ends_with(".part") {
-                    let transfer_id = name
-                        .strip_prefix('.')
-                        .and_then(|s| s.strip_suffix(".part"))
-                        .unwrap_or("");
-                    partial_count += 1;
-                    partial_bytes += file_len;
-
-                    let is_active = active.get(transfer_id).is_some_and(|t| {
-                        t.phase == TransferPhase::Transferring
-                            || t.phase == TransferPhase::Verifying
-                    });
-                    let is_resumable = hubs.resume.get(transfer_id).is_some();
-                    if !is_active && !is_resumable {
-                        orphaned_partial_count += 1;
-                        orphaned_partial_bytes += file_len;
+            if let Ok(entries) = std::fs::read_dir(&inbox_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
                     }
-                } else if name.starts_with('.') && name.ends_with(".resume.json") {
-                    meta_bytes += file_len;
-                } else if !name.starts_with('.') {
-                    inbox_file_count += 1;
-                    inbox_total_bytes += file_len;
+                    let file_len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if name.starts_with('.') && name.ends_with(".part") {
+                        let transfer_id = name
+                            .strip_prefix('.')
+                            .and_then(|s| s.strip_suffix(".part"))
+                            .unwrap_or("");
+                        partial_count += 1;
+                        partial_bytes += file_len;
+
+                        let is_active = active.get(transfer_id).is_some_and(|t| {
+                            t.phase == TransferPhase::Transferring
+                                || t.phase == TransferPhase::Verifying
+                        });
+                        let is_resumable = hubs.resume.get(transfer_id).is_some();
+                        if !is_active && !is_resumable {
+                            orphaned_partial_count += 1;
+                            orphaned_partial_bytes += file_len;
+                        }
+                    } else if name.starts_with('.') && name.ends_with(".resume.json") {
+                        meta_bytes += file_len;
+                    } else if !name.starts_with('.') {
+                        inbox_file_count += 1;
+                        inbox_total_bytes += file_len;
+                    }
                 }
             }
         }
@@ -2560,6 +2657,8 @@ impl Node {
             }
         }
 
+        let markers_rep = self.resume_markers_report();
+
         StorageReport {
             ok: true,
             data_dir: data_dir.to_string_lossy().to_string(),
@@ -2571,6 +2670,115 @@ impl Node {
             orphaned_partial_count,
             orphaned_partial_bytes,
             meta_bytes,
+            resume_markers_count: markers_rep.count,
+            resume_markers: markers_rep.markers,
+        }
+    }
+
+    /// Inspect all active resume markers from memory (ResumeTable) and disk (.resume.json).
+    pub fn resume_markers_report(&self) -> ResumeMarkersReport {
+        let inbox_dir = self.shared.cfg.data_dir.join("inbox");
+        let states = self.shared.hubs.lock().expect("hubs").resume.all();
+        let mut markers = Vec::new();
+        let mut seen_tids = std::collections::HashSet::new();
+        let mut total_partial_bytes: u64 = 0;
+
+        for st in states {
+            seen_tids.insert(st.transfer_id.clone());
+            let part_path = inbox_dir.join(format!(".{}.part", st.transfer_id));
+            let fallback_path = inbox_dir.join(format!("{}.part", st.transfer_id));
+            let part_meta = std::fs::metadata(&part_path)
+                .or_else(|_| std::fs::metadata(&fallback_path))
+                .ok();
+            let part_file_exists = part_meta.is_some();
+            let part_file_bytes = part_meta.map(|m| m.len()).unwrap_or(0);
+            total_partial_bytes += part_file_bytes;
+
+            let progress_percent = if st.total > 0 {
+                (st.offset as f64 / st.total as f64) * 100.0
+            } else {
+                0.0
+            };
+            let chunk_aligned = st.offset % tetherly_core::FILE_CHUNK as u64 == 0;
+            let source_alias = self.peer_alias(&st.source);
+
+            markers.push(ResumeMarkerDto {
+                transfer_id: st.transfer_id,
+                source: st.source.to_string(),
+                source_alias,
+                total_bytes: st.total,
+                offset_bytes: st.offset,
+                progress_percent,
+                chunk_aligned,
+                part_file_exists,
+                part_file_bytes,
+            });
+        }
+
+        // Also discover any on-disk resume sidecars (.resume.json) not currently cached in memory
+        if let Ok(entries) = std::fs::read_dir(&inbox_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let stem = if name.starts_with('.') && name.ends_with(".resume.json") {
+                    name.strip_prefix('.')
+                        .and_then(|s| s.strip_suffix(".resume.json"))
+                        .map(|s| s.to_string())
+                } else if name.ends_with(".resume.json") {
+                    name.strip_suffix(".resume.json").map(|s| s.to_string())
+                } else {
+                    None
+                };
+
+                let Some(transfer_id) = stem else { continue };
+                if seen_tids.contains(&transfer_id) {
+                    continue;
+                }
+
+                if let Ok(bytes) = std::fs::read(entry.path()) {
+                    if let Ok(dto) = serde_json::from_slice::<ResumeSidecar>(&bytes) {
+                        seen_tids.insert(transfer_id.clone());
+                        let part_path = inbox_dir.join(format!(".{}.part", transfer_id));
+                        let fallback_path = inbox_dir.join(format!("{}.part", transfer_id));
+                        let part_meta = std::fs::metadata(&part_path)
+                            .or_else(|_| std::fs::metadata(&fallback_path))
+                            .ok();
+                        let part_file_exists = part_meta.is_some();
+                        let part_file_bytes = part_meta.map(|m| m.len()).unwrap_or(0);
+                        total_partial_bytes += part_file_bytes;
+
+                        let progress_percent = if dto.total > 0 {
+                            (dto.offset as f64 / dto.total as f64) * 100.0
+                        } else {
+                            0.0
+                        };
+                        let chunk_aligned = dto.offset % tetherly_core::FILE_CHUNK as u64 == 0;
+                        let source_alias = DeviceId::parse(&dto.device_id)
+                            .ok()
+                            .and_then(|dev| self.peer_alias(&dev));
+
+                        markers.push(ResumeMarkerDto {
+                            transfer_id,
+                            source: dto.device_id,
+                            source_alias,
+                            total_bytes: dto.total,
+                            offset_bytes: dto.offset,
+                            progress_percent,
+                            chunk_aligned,
+                            part_file_exists,
+                            part_file_bytes,
+                        });
+                    }
+                }
+            }
+        }
+
+        markers.sort_by(|a, b| a.transfer_id.cmp(&b.transfer_id));
+
+        ResumeMarkersReport {
+            ok: true,
+            count: markers.len(),
+            total_partial_bytes,
+            markers,
         }
     }
 
@@ -4302,6 +4510,10 @@ impl Node {
                     return Err(tetherly_net::NetError::File("cancelled by user".into()));
                 }
                 t.transferred = start;
+                if start > 0 {
+                    t.resume_offset = Some(start);
+                    t.is_resumed = true;
+                }
                 t.phase = TransferPhase::Transferring;
                 t.updated_ms = now;
             } else {
@@ -4319,6 +4531,8 @@ impl Node {
                         error: None,
                         started_ms: now,
                         updated_ms: now,
+                        resume_offset: if start > 0 { Some(start) } else { None },
+                        is_resumed: start > 0,
                     },
                 );
             }
@@ -4517,6 +4731,12 @@ impl Node {
                     error: None,
                     started_ms: now,
                     updated_ms: now,
+                    resume_offset: if resume_from > 0 {
+                        Some(resume_from)
+                    } else {
+                        None
+                    },
+                    is_resumed: resume_from > 0,
                 },
             );
         }
@@ -5059,6 +5279,8 @@ impl Node {
                     error: None,
                     started_ms: now,
                     updated_ms: now,
+                    resume_offset: None,
+                    is_resumed: false,
                 },
             );
         self.send_to(peer, offer.to_frame()?).await?;
@@ -5145,10 +5367,244 @@ impl Node {
                     error: None,
                     started_ms: now,
                     updated_ms: now,
+                    resume_offset: None,
+                    is_resumed: false,
                 },
             );
         self.send_to(peer, offer.to_frame()?).await?;
         Ok(transfer_id)
+    }
+
+    /// Offer and stream multiple files as a batch operation to a connected peer.
+    pub async fn send_files_batch(
+        &self,
+        peer: &DeviceId,
+        paths: &[std::path::PathBuf],
+    ) -> Result<BatchSendReport, CoreError> {
+        let items: Vec<BatchSendItem> = paths
+            .iter()
+            .map(|p| BatchSendItem {
+                path: Some(p.to_string_lossy().to_string()),
+                name: None,
+                data_base64: None,
+            })
+            .collect();
+        self.send_batch_items(peer, items).await
+    }
+
+    /// Submit a heterogeneous batch of file paths or in-memory base64 buffers to a peer.
+    pub async fn send_batch_items(
+        &self,
+        peer: &DeviceId,
+        items: Vec<BatchSendItem>,
+    ) -> Result<BatchSendReport, CoreError> {
+        let total_files = items.len();
+        if total_files == 0 {
+            return Err(CoreError::File("batch items list is empty".into()));
+        }
+        let batch_hex = tetherly_core::hex_sha256(
+            format!("{}:{}:{}", peer, self.shared.clock.unix_ms(), total_files).as_bytes(),
+        );
+        let batch_id = format!("tbt_{}", &batch_hex[..12]);
+        let mut reports = Vec::with_capacity(total_files);
+        let mut total_bytes: u64 = 0;
+        let mut successful_files = 0;
+        let mut failed_files = 0;
+
+        for item in items {
+            if let Some(ref path_str) = item.path {
+                let p = std::path::Path::new(path_str);
+                let fname = item.name.clone().unwrap_or_else(|| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("file.bin")
+                        .to_string()
+                });
+                let safe_name = match tetherly_core::sanitize_file_name(&fname) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        reports.push(BatchTransferItemReport {
+                            transfer_id: None,
+                            name: fname,
+                            size: 0,
+                            sha256: None,
+                            status: "failed".to_string(),
+                            error: Some(format!("invalid file name: {e}")),
+                        });
+                        failed_files += 1;
+                        continue;
+                    }
+                };
+                if !p.is_file() {
+                    reports.push(BatchTransferItemReport {
+                        transfer_id: None,
+                        name: safe_name,
+                        size: 0,
+                        sha256: None,
+                        status: "failed".to_string(),
+                        error: Some("not a regular file or file not found".into()),
+                    });
+                    failed_files += 1;
+                    continue;
+                }
+                let meta = match std::fs::metadata(p) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        reports.push(BatchTransferItemReport {
+                            transfer_id: None,
+                            name: safe_name,
+                            size: 0,
+                            sha256: None,
+                            status: "failed".to_string(),
+                            error: Some(format!("cannot read file metadata: {e}")),
+                        });
+                        failed_files += 1;
+                        continue;
+                    }
+                };
+                let size = meta.len();
+                if size > tetherly_core::FILE_MAX {
+                    reports.push(BatchTransferItemReport {
+                        transfer_id: None,
+                        name: safe_name,
+                        size,
+                        sha256: None,
+                        status: "failed".to_string(),
+                        error: Some("file exceeds FILE_MAX (64 GiB)".into()),
+                    });
+                    failed_files += 1;
+                    continue;
+                }
+                match self.offer_and_send_file(peer, p, Some(&safe_name)).await {
+                    Ok(transfer_id) => {
+                        let sha = transfer_id.strip_prefix("tr_").map(|s| s.to_string());
+                        reports.push(BatchTransferItemReport {
+                            transfer_id: Some(transfer_id),
+                            name: safe_name,
+                            size,
+                            sha256: sha,
+                            status: "sent".to_string(),
+                            error: None,
+                        });
+                        successful_files += 1;
+                        total_bytes += size;
+                    }
+                    Err(e) => {
+                        reports.push(BatchTransferItemReport {
+                            transfer_id: None,
+                            name: safe_name,
+                            size,
+                            sha256: None,
+                            status: "failed".to_string(),
+                            error: Some(e.to_string()),
+                        });
+                        failed_files += 1;
+                    }
+                }
+            } else if let Some(ref b64) = item.data_base64 {
+                use base64::Engine;
+                let decoded = match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())
+                {
+                    Ok(b) => b,
+                    Err(e) => {
+                        reports.push(BatchTransferItemReport {
+                            transfer_id: None,
+                            name: item.name.clone().unwrap_or_else(|| "payload.bin".into()),
+                            size: 0,
+                            sha256: None,
+                            status: "failed".to_string(),
+                            error: Some(format!("invalid base64: {e}")),
+                        });
+                        failed_files += 1;
+                        continue;
+                    }
+                };
+                let fname = item
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| "upload.bin".to_string());
+                let safe_name = match tetherly_core::sanitize_file_name(&fname) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        reports.push(BatchTransferItemReport {
+                            transfer_id: None,
+                            name: fname,
+                            size: 0,
+                            sha256: None,
+                            status: "failed".to_string(),
+                            error: Some(format!("invalid file name: {e}")),
+                        });
+                        failed_files += 1;
+                        continue;
+                    }
+                };
+                let size = decoded.len() as u64;
+                if size > tetherly_core::FILE_MAX {
+                    reports.push(BatchTransferItemReport {
+                        transfer_id: None,
+                        name: safe_name,
+                        size,
+                        sha256: None,
+                        status: "failed".to_string(),
+                        error: Some("file exceeds FILE_MAX (64 GiB)".into()),
+                    });
+                    failed_files += 1;
+                    continue;
+                }
+                let digest = tetherly_core::hex_sha256(&decoded);
+                match self
+                    .offer_and_send_bytes(peer, &safe_name, &decoded, false)
+                    .await
+                {
+                    Ok(transfer_id) => {
+                        reports.push(BatchTransferItemReport {
+                            transfer_id: Some(transfer_id),
+                            name: safe_name,
+                            size,
+                            sha256: Some(digest),
+                            status: "sent".to_string(),
+                            error: None,
+                        });
+                        successful_files += 1;
+                        total_bytes += size;
+                    }
+                    Err(e) => {
+                        reports.push(BatchTransferItemReport {
+                            transfer_id: None,
+                            name: safe_name,
+                            size,
+                            sha256: Some(digest),
+                            status: "failed".to_string(),
+                            error: Some(e.to_string()),
+                        });
+                        failed_files += 1;
+                    }
+                }
+            } else {
+                reports.push(BatchTransferItemReport {
+                    transfer_id: None,
+                    name: item.name.clone().unwrap_or_else(|| "unknown".into()),
+                    size: 0,
+                    sha256: None,
+                    status: "failed".to_string(),
+                    error: Some("either path or data_base64 must be provided".into()),
+                });
+                failed_files += 1;
+            }
+        }
+
+        let peer_alias = self.peer_alias(peer);
+        Ok(BatchSendReport {
+            ok: successful_files > 0 || total_files == 0,
+            batch_id,
+            peer: peer.to_string(),
+            peer_alias,
+            total_files,
+            successful_files,
+            failed_files,
+            total_bytes,
+            items: reports,
+        })
     }
 
     async fn on_peer_accepted_file(&self, decision: &tetherly_core::FileDecision) {
@@ -5182,6 +5638,10 @@ impl Node {
 
             let now = self.shared.clock.unix_ms();
             t.transferred = start;
+            if start > 0 {
+                t.resume_offset = Some(start);
+                t.is_resumed = true;
+            }
             t.phase = TransferPhase::Transferring;
             t.updated_ms = now;
 
@@ -6722,6 +7182,8 @@ mod tests {
                 error: None,
                 started_ms: 100,
                 updated_ms: 200,
+                resume_offset: None,
+                is_resumed: false,
             },
         );
 
@@ -6746,6 +7208,8 @@ mod tests {
                     error: None,
                     started_ms: (i as u64) * 10,
                     updated_ms: (i as u64) * 10 + 5,
+                    resume_offset: None,
+                    is_resumed: false,
                 },
             );
         }
