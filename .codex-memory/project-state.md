@@ -387,16 +387,24 @@
 		     - **双端 CLI 全同构升级**：`inbox get <name> [--dest <path>]`、`inbox open [<name>]`，SSE `events` 监听器高亮格式化；
 		     - **Web UI 收件箱提取与交互联动**：新增「打开目录」按钮，卡片行新增「打开」、「下载」及「预览」操作，实时联动 SSE；
 		     - **端到端集成测试**：`tests/phase1.rs` 增设 `inbox_file_download_raw_preview_and_native_open_via_loopback_api` 全绿。
-		  12. **v1.63 (ADR-056) 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环**：
-		     - **消除遗留悬空特质存根**：重构 `crates/tetherly-core/src/ports.rs` 的 `Notifier` trait 与强类型 `NotificationPayload`、`NotificationUrgency`（Low / Normal / Critical），补齐六大平台端口全闭环；
-		     - **跨平台原生横幅调度与测试适配器**：`SystemNotifier` 驱动（macOS `osascript` 唤起通知中心横幅与声音、Windows PowerShell 调起气泡/Toast、Linux `notify-send`）与 `MemoryNotifier` 内存捕获容器；
-		     - **集中式免打扰 (DND) 与调度策略引擎**：`NotifyBannerConfig` 支持总开关（`banners_enabled`）、三级免打扰模式（`dnd_mode`: `off` / `silent` / `all`）、音效开关（`sound_enabled`）、验证码隐私防窥掩码（`mask_otp`）与紧急验证码免打扰穿透（`allow_otp_in_dnd`）；
-		     - **核心通信与传输事件驱动**：手机推送通知摄入（`Node::ingest_local_push`）与大文件接收完成（`Node::receive_file_loop`）自动调度原生横幅；
-		     - **Zero-Plaintext 零明文安全红线**：扩展 `UiEvent::NotificationBannerSent` 与 `UiEvent::NotifyConfigChanged`，坚守严禁广播正文与明文验证码铁律；
-		     - **回环控制面端点全闭环**：新增 `GET/POST /api/notify/config`（别名 `/api/notify/banner`）与 `POST /api/notify/test`，坚守 127.0.0.1 物理绑定与 Host 403 强隔离；
-		     - **双端 CLI 全同构升级**：增设 `banner config` 与 `banner test` 子命令，SSE 事件监听高亮格式化；
-		     - **Web UI 桌面通知与免打扰控制台**：新增独立治理卡片、实时开关、DND 下拉选择与一键测试横幅；
-		     - **端到端集成测试**：`tests/phase2.rs` 增设 `desktop_notification_banners_dnd_governance_and_otp_masking_via_loopback_api` 全绿。
+			  12. **v1.63 (ADR-056) 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环**：
+			     - **消除遗留悬空特质存根**：重构 `crates/tetherly-core/src/ports.rs` 的 `Notifier` trait 与强类型 `NotificationPayload`、`NotificationUrgency`（Low / Normal / Critical），补齐六大平台端口全闭环；
+			     - **跨平台原生横幅调度与测试适配器**：`SystemNotifier` 驱动（macOS `osascript` 唤起通知中心横幅与声音、Windows PowerShell 调起气泡/Toast、Linux `notify-send`）与 `MemoryNotifier` 内存捕获容器；
+			     - **集中式免打扰 (DND) 与调度策略引擎**：`NotifyBannerConfig` 支持总开关（`banners_enabled`）、三级免打扰模式（`dnd_mode`: `off` / `silent` / `all`）、音效开关（`sound_enabled`）、验证码隐私防窥掩码（`mask_otp`）与紧急验证码免打扰穿透（`allow_otp_in_dnd`）；
+			     - **核心通信与传输事件驱动**：手机推送通知摄入（`Node::ingest_local_push`）与大文件接收完成（`Node::receive_file_loop`）自动调度原生横幅；
+			     - **Zero-Plaintext 零明文安全红线**：扩展 `UiEvent::NotificationBannerSent` 与 `UiEvent::NotifyConfigChanged`，坚守严禁广播正文与明文验证码铁律；
+			     - **回环控制面端点全闭环**：新增 `GET/POST /api/notify/config`（别名 `/api/notify/banner`）与 `POST /api/notify/test`，坚守 127.0.0.1 物理绑定与 Host 403 强隔离；
+			     - **双端 CLI 全同构升级**：增设 `banner config` 与 `banner test` 子命令，SSE 事件监听高亮格式化；
+			     - **Web UI 桌面通知与免打扰控制台**：新增独立治理卡片、实时开关、DND 下拉选择与一键测试横幅；
+			     - **端到端集成测试**：`tests/phase2.rs` 增设 `desktop_notification_banners_dnd_governance_and_otp_masking_via_loopback_api` 全绿。
+			  13. **v1.64 (ADR-057) 节点系统资源深度遥测、进程级性能画像与运行时健康度量闭环**：
+			     - **平台探测抽象与跨平台原生驱动**：实现 `SysProbe`、`PlatformSysProbe`（macOS Mach 内核系统调用、Linux `/proc/self/statm`、POSIX `getrusage` 与 `/dev/fd` 打开句柄统计，Zero-New-Crate 与 Zero-AGPL 铁律）与 `MemorySysProbe` 测试适配器；
+			     - **强类型度量模型与运行时采样原语**：`ProcessMetrics`、`HostMetrics` 与 `SystemReport`，提供 `Node::system_report()` 与探针注入原语；
+			     - **Zero-Plaintext 零明文安全红线**：新增 `UiEvent::SystemMetricsRefreshed`，仅广播资源指标，绝不泄露进程环境、命令行参数或私钥；
+			     - **回环端点与隔离铁律**：`GET /api/sys`（别名 `GET /api/system`、`GET /api/process`），127.0.0.1 物理绑定与 Host 403 强隔离；
+			     - **双端 CLI 全同构升级**：`sys [--watch] [--interval <secs>] [--json]`，SSE 事件监听高亮格式化；
+			     - **Web UI 节点系统资源与运行时画像专区**：新增性能画像卡片、实时可视化呈现硬件拓扑、RSS 物理内存、虚拟内存、活跃线程与 FDs，联动 SSE 与周期性自动刷新；
+			     - **端到端集成测试**：`tests/phase1.rs` 增设 `node_system_telemetry_probe_injection_and_metrics_via_loopback_api` 全绿。
 
 ## Current Branch
 - `main` @ `https://github.com/dengyie/tetherly`
@@ -406,7 +414,7 @@
   - `cargo fmt --all --check`：PASSED (0 diff)
   - `cargo clippy --workspace --all-targets -- -D warnings`：PASSED (0 warnings)
   - `cargo check --target aarch64-unknown-linux-gnu`：PASSED (0 errors)
-  - `cargo test --workspace`：PASSED (全量 282+ 项测试全部通过)
+  - `cargo test --workspace`：PASSED (全量 283+ 项测试全部通过)
   - `cargo deny check`（advisories, bans, licenses, sources）：PASSED (0 security/license violations)
 
 ## Key Artifacts

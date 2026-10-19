@@ -3,12 +3,57 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.63** |
+| 文档版本 | **1.64** |
 | 日期 | 2026-10-19 |
-| 状态 | **v1.63 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环（ADR-056）**——(1) **消除历史悬空存根特质并重构核心通知抽象 (`crates/tetherly-core/src/ports.rs`)**：彻底消除了 SSOT §2494 中长期悬空的遗留 `Notifier` 接口存根，将其升级为强类型 `NotificationPayload` 与 `NotificationUrgency`（Low / Normal / Critical），彻底贯通六大平台核心特质（`Clock`, `Rng`, `TrustStore`, `Insertor`, `Clip`, `Notifier`）的完整闭环；(2) **跨平台操作系统原生横幅适配器 (`crates/tetherly-node/src/platform.rs`)**：实现真正解耦且跨平台兼容的 `SystemNotifier` 驱动，在 macOS 上利用 `osascript` 唤起系统通知中心横幅并附带提示音，在 Windows 上利用 PowerShell 调起托盘气泡与 Toast 横幅，在 Linux 上接入 freedesktop `notify-send` 标准驱动；同时提供零外部进程依赖的 `MemoryNotifier` 测试容器供自动化测试与断言验证；(3) **集中式通知治理与免打扰模式 (DND) 策略引擎 (`crates/tetherly-node/src/runtime.rs`)**：引入强类型 `NotifyBannerConfig`，支持桌面横幅总开关（`banners_enabled`）、三级免打扰模式（`dnd_mode`: `off` / `silent` / `all`）、音效开关（`sound_enabled`）、验证码隐私防窥掩码（`mask_otp`）与紧急验证码免打扰穿透（`allow_otp_in_dnd`）；(4) **传输与通信核心事件流深度接入与自动化触发 (`crates/tetherly-node/src/runtime.rs`)**：在跨端手机推送通知摄入（`Node::ingest_local_push`）与跨端文件流式接收落盘完成（`Node::receive_file_loop`）处接入自动调度，在后台静默收到文件或对端来信时，第一秒弹出宿主原生横幅；(5) **Zero-Plaintext 零明文安全红线与事件总线可观测性 (`crates/tetherly-node/src/events.rs`)**：新增 `UiEvent::NotificationBannerSent` 与 `UiEvent::NotifyConfigChanged`，坚守严禁在公网日志或 SSE 广播中泄露短信正文或明文验证码的铁律（仅传输脱敏标题、应用源、是否验证码标记及时间戳）；(6) **回环控制面端点全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET/POST /api/notify/config`（别名 `/api/notify/banner`，查询与动态更新通知策略）与 `POST /api/notify/test`（别名 `/api/notify/banner/test`，发送测试横幅），严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离；(7) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：增设 `banner config` 与 `banner test` 子命令（避免与对端对推 `notify` 冲突），并在 SSE `events` 监听器中提供高亮格式化输出；(8) **Web UI 桌面通知与免打扰控制台 (`ui/index.html`)**：在控制台中增设「桌面原生系统级通知与免打扰 (Desktop Banners & DND)」专区，提供开关、模式下拉框、即时指标与一键测试按钮，实时监听 SSE 动态；(9) **端到端集成测试与全量安全基线全绿**：`tests/phase2.rs` 增设完整集成测试覆盖测试横幅派发、内存捕获、Zero-Plaintext 校验、OTP 掩码与高危提升、静音模式、全部免打扰模式过滤与白名单放行、总开关禁用与 Host 403 恶意阻断，全工作区 282+ 项测试、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 达标。+ v1.62 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环（ADR-055）+ v1.61 局域网设备自发现治理、信标可观测性与一键拨号配对闭环（ADR-054）+ v1.60 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环（ADR-053）+ v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.64 节点系统资源深度遥测、进程级性能画像与运行时健康度量闭环（ADR-057）**——(1) **节点守护进程资源与硬件拓扑探针抽象 (`crates/tetherly-node/src/platform.rs`)**：实现零新依赖、零外部命令进程的跨平台 `SysProbe` 特质与 `PlatformSysProbe` 驱动，在 macOS 上利用 Mach 内核原生系统调用（`mach_task_self`, `task_info(MACH_TASK_BASIC_INFO)`, `task_threads` 与 `vm_deallocate`）精准获取物理常驻内存（RSS）、虚拟内存占用与活跃线程数；在 Linux 上解析 `/proc/self/statm` 与 `/proc/self/status` 计算页基内存；在 POSIX 平台统一调用 `getrusage` 获取 CPU 用户+系统总毫秒数与峰值内存，并遍历 `/dev/fd`（或 `/proc/self/fd`）安全统计打开文件描述符数量（FDs）；在多核宿主机上利用 `available_parallelism` 与 `sysconf` 获取 CPU 核心数与宿主物理总内存；同时提供线程安全的 `MemorySysProbe` 适配器供单元与集成测试注入；(2) **强类型度量模型与运行时采样原语 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`)**：定义 `ProcessMetrics`、`HostMetrics` 与 `SystemReport` 数据传输对象（DTO），提供 `Node::system_report()` 核心原语与 `Node::set_sys_probe()` 探针注入机制，内置友好内存格式化输出；(3) **Zero-Plaintext 零明文安全红线与事件总线可观测性 (`crates/tetherly-node/src/events.rs`)**：新增 `UiEvent::SystemMetricsRefreshed`，仅广播资源数值与采样时间戳，严禁携带进程环境、命令行参数或私钥/验证码等敏感信息；(4) **回环控制面端点全闭环 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET /api/sys`（及其别名 `/api/system`、`/api/process`），以毫秒级响应返回系统遥测报告，严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离；(5) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：增设 `tetherly sys` 与 `tetherly-cli sys` 命令，支持 `--watch` 周期性刷新、`--interval` 调节与 `--json` 原始流输出，并在 SSE `events` 监听器中提供高亮格式化输出；(6) **Web UI 节点系统资源与运行时画像专区 (`ui/index.html`)**：在控制台中增设「节点系统资源与运行时画像」专区，实时呈现宿主平台拓扑、物理常驻内存（RSS）、虚拟内存、活跃线程数、打开文件描述符与 CPU 消耗，支持手动与定时刷新联动；(7) **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 增设完整集成测试覆盖平台原生采样、MemorySysProbe 注入断言、回环 HTTP 访问、别名校验、SSE 事件捕获与 Host 403 恶意阻断，全工作区测试全绿、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 达标。+ v1.63 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环（ADR-056）+ v1.62 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环（ADR-055）+ v1.61 局域网设备自发现治理、信标可观测性与一键拨号配对闭环（ADR-054）+ v1.60 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环（ADR-053）+ v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.64 相对 1.63(节点系统资源深度遥测、进程级性能画像与运行时健康度量闭环)**
+
+- **动机(系统资源可观测性缺失、进程健康盲区与零新依赖诉求)**:
+  在 Tetherly 陆续完成跨端桌面系统级通知推送与免打扰治理 (v1.63 / ADR-056)、收件箱文件内容流式下载与系统直开 (v1.62 / ADR-055)、局域网自发现治理 (v1.61 / ADR-054) 与收件箱生命周期管理 (v1.60 / ADR-053) 后，节点在处理长连接会话、大文件分块流式传输、蓝牙/网络事件监听时，由于涉及多线程并发与大文件 I/O 句柄流转，其**运行时物理资源消耗（Resident Set Size / Virtual Memory / Active Threads / Open File Descriptors / CPU Execution Time）**在生产环境下存在严重的可观测性盲区：
+  1. **守护进程资源消耗黑盒**：
+     此前系统仅提供基础的 `/api/health` 检查（仅返回节点运行版本、PID、启动时长与端口），完全无法感知守护进程是否存在内存泄露、句柄未关闭（FD leak）或线程失控堆积；
+  2. **跨平台原生探测与零新依赖（Zero-New-Crate & Zero-AGPL Invariant）严苛红线**：
+     主流系统信息库（如 `sysinfo` 等第三方 crate）往往体积庞大、依赖多、编译缓慢，或存在潜在许可污染（AGPL 依赖绝对禁止）。必须通过 Rust 标准库与已有操作系统底层底层调用（macOS Mach 内核 API、Linux `/proc`、POSIX `getrusage` / `/dev/fd`），实现零外部新 crate 的轻量高效探测；
+  3. **单元与集成测试的确定性注入（Deterministic Test Mocking）**：
+     依赖真实宿主状态的测试在 CI 或无特权容器中容易抖动，必须提供可测试的 `MemorySysProbe` 探针注入机制，以便在端到端集成测试中确定性断言各项度量指标与异常场景；
+  4. **零明文安全铁律（Zero-Plaintext Telemetry Invariant）**：
+     系统指标遥测严禁扫描或导出任何环境变量、命令行参数或进程上下文机密，仅允许传输纯粹的物理资源计数值与时间戳；
+  5. **回环控制面与双端 CLI 全同构治理**：
+     控制面需暴露 `GET /api/sys`（及其别名 `/api/system`、`/api/process`），双端 CLI 提供 `sys [--watch] [--interval <secs>] [--json]`，Web UI 实时展示资源画像卡片并接入 SSE 事件总线。
+
+- **架构与协议设计(ADR-057 节点系统资源深度遥测、进程级性能画像与运行时健康度量闭环)**:
+  1. **跨平台底层探测抽象与原生驱动 (`crates/tetherly-node/src/platform.rs`)**:
+     - 定义强类型采样 DTO：`ProcessSample`（`rss_bytes`, `virt_bytes`, `thread_count`, `open_fds`, `cpu_time_ms`）与 `HostSample`（`total_memory_bytes`）；
+     - 定义抽象特质：`pub trait SysProbe: Send + Sync { fn sample_process(&self, pid: u32) -> Result<ProcessSample, CoreError>; fn sample_host(&self) -> Result<HostSample, CoreError>; }`；
+     - 原生跨平台实现 `PlatformSysProbe`：
+       - **macOS**: 采用 Mach 内核原生接口：`mach_task_self()`，`task_info(..., MACH_TASK_BASIC_INFO, ...)` 提取 `resident_size` 与 `virtual_size`；调用 `task_threads(...)` 获得线程列表与线程数，并立即调用 `vm_deallocate` 避免 Mach port 泄漏；
+       - **Linux**: 读取 `/proc/self/statm`（获取常驻与虚拟页数）与 `/proc/self/status`（获取 `Threads` 字段），结合 `sysconf(_SC_PAGESIZE)` 计算真实字节数；
+       - **POSIX 通用 (Unix)**: 调用 `getrusage(RUSAGE_SELF, ...)` 获取 CPU 用户态与内核态微秒时间累计（转换为毫秒），并利用 `sysconf(_SC_PHYS_PAGES)` 计算宿主机总内存；
+       - **打开文件描述符统计**: 遍历 `/dev/fd`（或 `/proc/self/fd`）安全统计打开句柄数，无需任何外部进程子调用；
+     - 测试专用驱动 `MemorySysProbe`：提供线程安全 mock 适配器（`set_process`, `set_host`），实现完全确定性的自动化测试注入；
+  2. **强类型数据传输模型与运行时控制原语 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`)**:
+     - `ProcessMetrics`：包含 PID、启动时长、RSS、Virt、线程数、FD 计数、CPU 耗时及友好格式化字符串（`42.00 MiB`）；
+     - `HostMetrics`：包含操作系统类型、架构、CPU 核心数、物理总内存及格式化字符串；
+     - `SystemReport`：聚合节点名称、设备 ID、进程画像、主机画像与时间戳；
+     - 运行时原语 `Node::system_report(&self) -> Result<SystemReport, CoreError>` 与注入器 `Node::set_sys_probe(&self, probe: Arc<dyn SysProbe>)`；
+  3. **Zero-Plaintext 零明文事件总线可观测性 (`crates/tetherly-node/src/events.rs`)**:
+     - 新增 `UiEvent::SystemMetricsRefreshed`，仅广播资源指标数值，严格遵循零明文铁律；
+  4. **回环控制面端点全闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/sys`（别名 `GET /api/system`、`GET /api/process`）：调用 `Node::system_report()` 返回 JSON 报告；
+     - 严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离防御；
+  5. **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - 增设 `tetherly sys` 与 `tetherly-cli sys` 命令，支持 `--watch`、`--interval <secs>` 与 `--json`；
+     - SSE `events` 监听器中提供 `[system_metrics_refreshed]` 高亮格式化输出；
+  6. **Web UI 节点系统资源与运行时画像专区 (`ui/index.html`)**:
+     - 增设「节点系统资源与运行时画像」监控面板，展示宿主平台、内存总量、RSS、虚拟内存、线程数、FD 计数与 CPU 耗时；
+     - 接入 SSE `system_metrics_refreshed` 动态刷新与周期性自动同步；
+  7. **端到端集成测试与全量安全基线全绿 (`tests/phase1.rs`)**:
+     - 增设 `node_system_telemetry_probe_injection_and_metrics_via_loopback_api` 集成测试；
+     - 验证原生采样、MemorySysProbe 注入断言、回环 HTTP 访问、别名校验、SSE 事件捕获与 Host 403 恶意阻断。
 
 **1.63 相对 1.62(跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环)**
 

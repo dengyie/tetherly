@@ -398,6 +398,15 @@
 - Rollback trigger: None.
 - Related files: `crates/tetherly-core/src/ports.rs`, `crates/tetherly-node/src/{platform.rs,runtime.rs,events.rs,uihttp.rs,lib.rs}`, `bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `ui/index.html`, `tests/phase2.rs`, `docs/DEVELOPMENT.md`
 
+## 2026-10-19 - 节点系统资源深度遥测、进程级性能画像与运行时健康度量闭环 (ADR-057)
+- Decision: 彻底解决长连接、大文件流式传输与后台守护进程中系统资源黑盒与性能画像盲区。(1) 平台层设计抽象特质 `SysProbe` 与跨平台原生实现 `PlatformSysProbe`，在 macOS 上利用 Mach 内核原生接口（`mach_task_self`、`task_info(MACH_TASK_BASIC_INFO)`、`task_threads` 与 `vm_deallocate`）精准获取常驻内存 (RSS)、虚拟内存 (Virt) 与活跃线程数；在 Linux 上通过 `/proc/self/statm` 与 `/proc/self/status` 解析物理页并结合 `sysconf(_SC_PAGESIZE)` 计算真实内存；在 POSIX 平台统一调用 `getrusage(RUSAGE_SELF)` 获取 CPU 用户+系统总毫秒数与峰值内存，并遍历 `/dev/fd`（或 `/proc/self/fd`）安全统计打开文件描述符数量（FDs）；在多核宿主机上利用 `available_parallelism` 与 `sysconf(_SC_PHYS_PAGES)` 计算 CPU 核心数与宿主物理总内存；同时提供可测试的 `MemorySysProbe` 内存探针供自动化测试确定性注入；(2) 强类型度量模型与运行时控制原语：定义 `ProcessMetrics`、`HostMetrics` 与 `SystemReport` DTO，提供 `Node::system_report()` 核心原语与 `Node::set_sys_probe()` 注入器，内置友好内存格式化输出；(3) 恪守 Zero-Plaintext 零明文安全铁律：扩展 `UiEvent::SystemMetricsRefreshed`，仅广播资源指标与采样时间戳，严禁携带进程环境、命令行参数或私钥/验证码等机密数据；(4) 回环控制面端点全闭环：新增 `GET /api/sys`（及其别名 `/api/system`、`/api/process`），以毫秒级响应返回系统遥测报告，严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离防御；(5) 双端 CLI 命令行全同构升级：增设 `tetherly sys` 与 `tetherly-cli sys` 命令，支持 `--watch` 周期性刷新、`--interval <secs>` 调节与 `--json` 原始流输出，并在 SSE `events` 监听器中提供高亮格式化输出；(6) Web UI 节点系统资源与运行时画像专区：在控制台中增设「节点系统资源与运行时画像」监控面板，展示宿主平台拓扑、物理常驻内存（RSS）、虚拟内存、活跃线程数、打开文件描述符与 CPU 消耗，支持手动与定时刷新联动；(7) 端到端集成测试全覆盖：`tests/phase1.rs` 增设完整测试，验证原生采样、MemorySysProbe 注入断言、回环 HTTP 访问、别名校验、SSE 事件捕获与 Host 403 恶意阻断。
+- Rationale: 长连接与大文件流式传输过程中的内存占用、线程堆积及文件描述符泄漏是守护进程稳定性隐患。引入重型第三方库如 `sysinfo` 会引入海量依赖及潜在许可合规风险，必须通过轻量底层系统调用与 Rust 标准库在 Zero-New-Crate 与 Zero-AGPL 铁律下实现完全自主可控。
+- Alternatives considered: (a) 引入 `sysinfo` 等外部 crate：依赖树庞大、编译缓慢、且存在非 MIT/Apache 许可风险；(b) 通过执行子进程（如 `ps`, `lsof`, `top`）：严重增加系统开销，在受限沙盒或非特权容器下不可用；(c) 在系统遥测中暴露环境变量与命令行参数：严重违反 Zero-Plaintext 铁律，可能导致 API 密钥或敏感路径泄露。
+- Impact: 形成对守护进程自身资源健康度量与宿主硬件拓扑的全链路可观测闭环，支撑生产环境长时间运行与故障诊断。全工作区测试全绿，全端构建与 Clippy/Deny 100% 达标。
+- Rollback trigger: None.
+- Related files: `crates/tetherly-node/src/{platform.rs,runtime.rs,events.rs,uihttp.rs,lib.rs}`, `bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `ui/index.html`, `tests/phase1.rs`, `docs/DEVELOPMENT.md`
+
+
 
 
 
