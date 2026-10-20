@@ -710,6 +710,26 @@ struct ClipSyncBody {
 }
 
 #[derive(serde::Deserialize, Default)]
+struct ClipPolicyBody {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    sensitive_guard: Option<bool>,
+    #[serde(default)]
+    allowed_groups: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_tags: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_types: Option<Vec<String>>,
+    #[serde(default)]
+    max_payload_bytes: Option<usize>,
+    #[serde(default)]
+    auto_clear_timeout_secs: Option<u64>,
+    #[serde(default)]
+    clear_filters: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
 struct AuditQueryBody {
     #[serde(default)]
     category: Option<String>,
@@ -1599,6 +1619,143 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 "timestamp_ms": node_clock_ms()
             }))
         }
+        ("GET", "/api/clip/policy") => json_ok(&node.clipboard_policy_report()),
+        ("POST", "/api/clip/policy") | ("PUT", "/api/clip/policy") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<ClipPolicyBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<ClipPolicyBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected clipboard policy fields"),
+                }
+            };
+            let mut policy = node.clipboard_policy();
+
+            if let Some(ref b) = parsed_body {
+                if let Some(ref m) = b.mode {
+                    match m.parse::<tetherly_core::ClipSyncMode>() {
+                        Ok(mode) => policy.mode = mode,
+                        Err(e) => return err(400, &format!("invalid clip sync mode '{m}': {e}")),
+                    }
+                }
+                if let Some(sg) = b.sensitive_guard {
+                    policy.sensitive_guard = sg;
+                }
+                if let Some(ref grps) = b.allowed_groups {
+                    policy.allowed_groups = grps.clone();
+                }
+                if let Some(ref tags) = b.allowed_tags {
+                    policy.allowed_tags = tags.clone();
+                }
+                if let Some(ref types) = b.allowed_types {
+                    let mut dtypes = Vec::new();
+                    for t in types {
+                        match t.parse::<crate::store::DeviceType>() {
+                            Ok(dt) => dtypes.push(dt),
+                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
+                        }
+                    }
+                    policy.allowed_types = dtypes;
+                }
+                if let Some(bytes) = b.max_payload_bytes {
+                    policy.max_payload_bytes = bytes;
+                }
+                if let Some(secs) = b.auto_clear_timeout_secs {
+                    policy.auto_clear_timeout_secs = if secs == 0 { None } else { Some(secs) };
+                }
+                if b.clear_filters == Some(true) {
+                    policy.allowed_groups.clear();
+                    policy.allowed_tags.clear();
+                    policy.allowed_types.clear();
+                }
+            }
+
+            if let Some(m_str) = qmap.get("mode") {
+                match m_str.parse::<tetherly_core::ClipSyncMode>() {
+                    Ok(mode) => policy.mode = mode,
+                    Err(e) => return err(400, &format!("invalid clip sync mode '{m_str}': {e}")),
+                }
+            }
+            if let Some(sg_str) = qmap.get("sensitive_guard") {
+                policy.sensitive_guard = sg_str == "true" || sg_str == "1";
+            }
+            if let Some(grp_str) = qmap.get("group").or_else(|| qmap.get("groups")) {
+                policy.allowed_groups = grp_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+            if let Some(tag_str) = qmap.get("tag").or_else(|| qmap.get("tags")) {
+                policy.allowed_tags = tag_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+            if let Some(type_str) = qmap.get("type").or_else(|| qmap.get("types")) {
+                let mut dtypes = Vec::new();
+                for t in type_str.split(',') {
+                    let trimmed = t.trim();
+                    if !trimmed.is_empty() {
+                        match trimmed.parse::<crate::store::DeviceType>() {
+                            Ok(dt) => dtypes.push(dt),
+                            Err(e) => {
+                                return err(400, &format!("invalid device type '{trimmed}': {e}"))
+                            }
+                        }
+                    }
+                }
+                policy.allowed_types = dtypes;
+            }
+            if let Some(sz_str) = qmap
+                .get("max_payload_bytes")
+                .or_else(|| qmap.get("max_bytes"))
+            {
+                if let Ok(sz) = sz_str.parse::<usize>() {
+                    policy.max_payload_bytes = sz;
+                }
+            }
+            if let Some(ac_str) = qmap
+                .get("auto_clear_timeout_secs")
+                .or_else(|| qmap.get("auto_clear"))
+            {
+                if let Ok(secs) = ac_str.parse::<u64>() {
+                    policy.auto_clear_timeout_secs = if secs == 0 { None } else { Some(secs) };
+                }
+            }
+            if qmap
+                .get("clear_filters")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false)
+            {
+                policy.allowed_groups.clear();
+                policy.allowed_tags.clear();
+                policy.allowed_types.clear();
+            }
+
+            match node.set_clipboard_policy(policy) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &e.to_string()),
+            }
+        }
+        ("POST", "/api/clip/auto-sync/poll") => match node.poll_clipboard_auto_sync().await {
+            Ok(dispatched_peers) => {
+                let rep = node.clipboard_policy_report();
+                json_ok(&serde_json::json!({
+                    "ok": true,
+                    "dispatched_peers": dispatched_peers,
+                    "policy": rep.policy,
+                    "stats": {
+                        "auto_synced_out_count": rep.auto_synced_out_count,
+                        "auto_synced_in_count": rep.auto_synced_in_count,
+                        "sensitive_blocked_count": rep.sensitive_blocked_count,
+                    }
+                }))
+            }
+            Err(e) => err(500, &e.to_string()),
+        },
         ("GET", "/api/clip/status") => match node.clipboard_status() {
             Ok(rep) => json_ok(&rep),
             Err(e) => err(500, &e.to_string()),

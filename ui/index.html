@@ -186,7 +186,10 @@
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <h2>剪贴板同步与生命周期</h2>
-        <button id="clipclearbtn" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--text);border-radius:4px;cursor:pointer">清空剪贴板</button>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button id="toggle-clip-policy-btn" class="ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">策略治理</button>
+          <button id="clipclearbtn" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--text);border-radius:4px;cursor:pointer">清空剪贴板</button>
+        </div>
       </div>
       <div class="hint">安全同步跨端剪贴板（零明文审计，仅记录元数据哈希与大小）。</div>
       <div id="clipmetastatus" style="margin-top:8px;font-size:12px">
@@ -201,6 +204,57 @@
         <div style="display:flex;justify-content:space-between;margin-bottom:4px">
           <span style="color:var(--muted)">累计流向遥测：</span>
           <span id="clip-counts" style="font-family:ui-monospace, Consolas, monospace">-</span>
+        </div>
+      </div>
+      <div id="clip-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div style="font-size:12px;font-weight:600;color:var(--text)">剪贴板自动同步策略与敏感泄露防护 (Clipboard Auto-Sync & Guard)</div>
+          <button id="clip-poll-now-btn" type="button" style="padding:2px 8px;font-size:11px;background:none;border:1px solid var(--line);color:var(--dim);border-radius:4px;cursor:pointer">立即探测同步</button>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">运行模式 (Operating Mode):</label>
+            <select id="clip-policy-mode" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="manual">manual (仅手动，安全默认)</option>
+              <option value="bidirectional_auto">bidirectional_auto (双向全自动)</option>
+              <option value="send_only">send_only (仅自动发送)</option>
+              <option value="receive_only">receive_only (仅自动接收)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">敏感隐私阻断 (Sensitive Guard):</label>
+            <div style="margin-top:4px;display:flex;align-items:center;gap:6px">
+              <input type="checkbox" id="clip-policy-guard" checked style="cursor:pointer"/>
+              <span style="font-size:11px;color:var(--text)">拦截私钥/API Token/JWT/密码 (Fail-Closed)</span>
+            </div>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许分组 (Allowed Groups):</label>
+            <input id="clip-policy-groups" placeholder="如: dev, office (逗号分隔，留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许标签 (Allowed Tags):</label>
+            <input id="clip-policy-tags" placeholder="如: workstation (逗号分隔，留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许形态 (Allowed Types):</label>
+            <input id="clip-policy-types" placeholder="如: desktop, laptop (逗号分隔，留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">自动同步上限 (Max Payload Bytes):</label>
+            <input id="clip-policy-max-bytes" type="number" placeholder="默认 65536 (64 KiB)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+          <div style="display:flex;gap:8px">
+            <button id="clip-policy-save-btn" type="button" style="padding:4px 12px;font-size:12px;background:#1f6feb;border:none;color:#fff;border-radius:4px;cursor:pointer">保存策略</button>
+            <button id="clip-policy-clear-btn" class="ghost" type="button" style="padding:4px 10px;font-size:12px;cursor:pointer">清空过滤器</button>
+          </div>
+          <div id="clip-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+        <div style="margin-top:8px;padding-top:6px;border-top:1px dashed var(--line);font-size:11px;display:flex;justify-content:space-between;color:var(--muted)">
+          <span>自动出站: <strong id="clip-auto-out" style="color:var(--text)">0</strong> 次 · 自动入站: <strong id="clip-auto-in" style="color:var(--text)">0</strong> 次</span>
+          <span style="color:var(--bad)">敏感拦截阻断: <strong id="clip-sensitive-blocked" style="color:var(--bad)">0</strong> 次</span>
         </div>
       </div>
       <div class="row" style="margin-top:8px">
@@ -1784,6 +1838,116 @@ async function updateClipboard() {
           list.appendChild(row);
         }
       }
+    }
+  } catch (e) {}
+
+  updateClipboardPolicy();
+}
+const toggleClipPolicyBtn = $("toggle-clip-policy-btn");
+if (toggleClipPolicyBtn) {
+  toggleClipPolicyBtn.onclick = () => {
+    const p = $("clip-policy-panel");
+    if (p) p.style.display = (p.style.display === "none" ? "block" : "none");
+  };
+}
+const clipPolicySaveBtn = $("clip-policy-save-btn");
+if (clipPolicySaveBtn) {
+  clipPolicySaveBtn.onclick = async () => {
+    const msg = $("clip-policy-msg");
+    if (msg) msg.textContent = "正在保存剪贴板策略…";
+    const mode = $("clip-policy-mode") ? $("clip-policy-mode").value : "manual";
+    const sensitiveGuard = $("clip-policy-guard") ? $("clip-policy-guard").checked : true;
+    const grps = $("clip-policy-groups") ? $("clip-policy-groups").value.split(",").map(s => s.trim()).filter(Boolean) : [];
+    const tags = $("clip-policy-tags") ? $("clip-policy-tags").value.split(",").map(s => s.trim()).filter(Boolean) : [];
+    const types = $("clip-policy-types") ? $("clip-policy-types").value.split(",").map(s => s.trim()).filter(Boolean) : [];
+    const maxBytesRaw = $("clip-policy-max-bytes") ? parseInt($("clip-policy-max-bytes").value.trim(), 10) : null;
+    const maxPayloadBytes = (maxBytesRaw && maxBytesRaw > 0) ? maxBytesRaw : 65536;
+    try {
+      const rep = await api("/api/clip/policy", {
+        mode: mode,
+        sensitive_guard: sensitiveGuard,
+        allowed_groups: grps,
+        allowed_tags: tags,
+        allowed_types: types,
+        max_payload_bytes: maxPayloadBytes,
+      });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "策略已更新！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateClipboardPolicy();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep && rep.error ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "保存异常: " + e;
+    }
+  };
+}
+const clipPolicyClearBtn = $("clip-policy-clear-btn");
+if (clipPolicyClearBtn) {
+  clipPolicyClearBtn.onclick = async () => {
+    const msg = $("clip-policy-msg");
+    try {
+      const rep = await api("/api/clip/policy", { clear_filters: true });
+      if (rep && rep.ok) {
+        if ($("clip-policy-groups")) $("clip-policy-groups").value = "";
+        if ($("clip-policy-tags")) $("clip-policy-tags").value = "";
+        if ($("clip-policy-types")) $("clip-policy-types").value = "";
+        if (msg) msg.textContent = "所有范围过滤器已清空！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateClipboardPolicy();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "清空异常: " + e;
+    }
+  };
+}
+const clipPollNowBtn = $("clip-poll-now-btn");
+if (clipPollNowBtn) {
+  clipPollNowBtn.onclick = async () => {
+    const msg = $("clip-policy-msg");
+    if (msg) msg.textContent = "正在探测剪贴板…";
+    try {
+      const rep = await api("/api/clip/auto-sync/poll", {});
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "探测完成: 派发 " + rep.dispatched_peers + " 节点";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateClipboardPolicy();
+        updateClipboard();
+      } else {
+        if (msg) msg.textContent = "探测失败: " + (rep && rep.error ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "探测异常: " + e;
+    }
+  };
+}
+async function updateClipboardPolicy() {
+  try {
+    const rep = await api("/api/clip/policy");
+    if (rep && rep.ok && rep.policy) {
+      const p = rep.policy;
+      if ($("clip-policy-mode") && document.activeElement !== $("clip-policy-mode")) {
+        $("clip-policy-mode").value = p.mode || "manual";
+      }
+      if ($("clip-policy-guard") && document.activeElement !== $("clip-policy-guard")) {
+        $("clip-policy-guard").checked = p.sensitive_guard !== false;
+      }
+      if ($("clip-policy-groups") && document.activeElement !== $("clip-policy-groups")) {
+        $("clip-policy-groups").value = (p.allowed_groups || []).join(", ");
+      }
+      if ($("clip-policy-tags") && document.activeElement !== $("clip-policy-tags")) {
+        $("clip-policy-tags").value = (p.allowed_tags || []).join(", ");
+      }
+      if ($("clip-policy-types") && document.activeElement !== $("clip-policy-types")) {
+        $("clip-policy-types").value = (p.allowed_types || []).join(", ");
+      }
+      if ($("clip-policy-max-bytes") && document.activeElement !== $("clip-policy-max-bytes")) {
+        $("clip-policy-max-bytes").value = p.max_payload_bytes || 65536;
+      }
+      if ($("clip-auto-out")) $("clip-auto-out").textContent = rep.auto_synced_out_count || 0;
+      if ($("clip-auto-in")) $("clip-auto-in").textContent = rep.auto_synced_in_count || 0;
+      if ($("clip-sensitive-blocked")) $("clip-sensitive-blocked").textContent = rep.sensitive_blocked_count || 0;
     }
   } catch (e) {}
 }
@@ -3474,14 +3638,23 @@ function setupEventSource() {
 			          else if (ev.kind === "candidate_dismissed") {
 			            desc = "通知已消除: " + ev.id + (ev.app_id ? (" (" + ev.app_id + ")") : "");
 			          }
-			          else if (ev.kind === "clipboard_synced") {
-			            desc = "剪贴板同步: " + ev.direction + " (#" + ev.seq + ", " + formatBytes(ev.bytes) + ")";
-			            updateClipboard();
-			          }
-				          else if (ev.kind === "clipboard_cleared") {
-				            desc = "剪贴板已清空";
+				          else if (ev.kind === "clipboard_synced") {
+				            desc = "剪贴板同步: " + ev.direction + " (#" + ev.seq + ", " + formatBytes(ev.bytes) + ")";
 				            updateClipboard();
 				          }
+				          else if (ev.kind === "clipboard_policy_changed") {
+				            desc = "剪贴板策略更新: 模式=" + ev.mode + ", 防护=" + (ev.sensitive_guard ? "开启" : "关闭") + ", 上限=" + formatBytes(ev.max_payload_bytes);
+				            updateClipboardPolicy();
+				          }
+				          else if (ev.kind === "clipboard_sync_blocked") {
+				            const shortHash = ev.hash ? (ev.hash.slice(0, 10) + "…") : "-";
+				            desc = "剪贴板阻断: 拦截 " + ev.reason + " (" + formatBytes(ev.bytes) + ", sha256:" + shortHash + ")";
+				            updateClipboardPolicy();
+				          }
+					          else if (ev.kind === "clipboard_cleared") {
+					            desc = "剪贴板已清空";
+					            updateClipboard();
+					          }
 					          else if (ev.kind === "screen_state_changed") {
 					            desc = "屏幕状态: " + ev.state + " (授权:" + (ev.allowed ? "是" : "否") + ")" + (ev.peer ? (" · 对端:" + ev.peer) : "");
 					            updateScreenStatus();

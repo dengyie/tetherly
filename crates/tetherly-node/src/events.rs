@@ -283,6 +283,23 @@ pub enum UiEvent {
         max_file_size: Option<u64>,
         timestamp_ms: u64,
     },
+    ClipboardPolicyChanged {
+        mode: String,
+        sensitive_guard: bool,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        max_payload_bytes: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auto_clear_timeout_secs: Option<u64>,
+        timestamp_ms: u64,
+    },
+    ClipboardSyncBlocked {
+        reason: String,
+        bytes: usize,
+        hash: String,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -320,6 +337,43 @@ impl UiEvent {
             allowed_tags,
             allowed_types,
             max_file_size,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn clipboard_policy_changed(
+        mode: impl Into<String>,
+        sensitive_guard: bool,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        max_payload_bytes: usize,
+        auto_clear_timeout_secs: Option<u64>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::ClipboardPolicyChanged {
+            mode: mode.into(),
+            sensitive_guard,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            max_payload_bytes,
+            auto_clear_timeout_secs,
+            timestamp_ms,
+        }
+    }
+
+    pub fn clipboard_sync_blocked(
+        reason: impl Into<String>,
+        bytes: usize,
+        hash: impl Into<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::ClipboardSyncBlocked {
+            reason: reason.into(),
+            bytes,
+            hash: hash.into(),
             timestamp_ms,
         }
     }
@@ -713,5 +767,39 @@ pub fn ancs_rule_changed(
         app_id,
         url,
         rules_count,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clipboard_events_serialization_and_zero_plaintext() {
+        let ev1 = UiEvent::clipboard_policy_changed(
+            "bidirectional_auto",
+            true,
+            vec!["engineering".into()],
+            vec!["secure".into()],
+            vec!["laptop".into()],
+            65536,
+            Some(60),
+            123456789,
+        );
+        let json1 = serde_json::to_string(&ev1).unwrap();
+        assert!(json1.contains("\"kind\":\"clipboard_policy_changed\""));
+        assert!(json1.contains("\"mode\":\"bidirectional_auto\""));
+        assert!(json1.contains("\"sensitive_guard\":true"));
+        assert!(json1.contains("\"allowed_groups\":[\"engineering\"]"));
+
+        let ev2 = UiEvent::clipboard_sync_blocked("private_key", 1024, "abcdef123456", 123456790);
+        let json2 = serde_json::to_string(&ev2).unwrap();
+        assert!(json2.contains("\"kind\":\"clipboard_sync_blocked\""));
+        assert!(json2.contains("\"reason\":\"private_key\""));
+        assert!(json2.contains("\"bytes\":1024"));
+        assert!(json2.contains("\"hash\":\"abcdef123456\""));
+        // Confirm no plaintext leaked
+        assert!(!json2.contains("BEGIN"));
+        assert!(!json2.contains("PRIVATE"));
     }
 }

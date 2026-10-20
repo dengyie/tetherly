@@ -5,7 +5,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tetherly_core::{MemoryTrustStore, TrustFile};
+use tetherly_core::{ClipSyncMode, MemoryTrustStore, TrustFile};
 use tetherly_crypto::Identity;
 use tracing::info;
 
@@ -473,6 +473,118 @@ pub fn save_auto_accept_policy(
     Ok(())
 }
 
+pub const CLIPBOARD_POLICY_FILE: &str = "clipboard_policy.json";
+pub const DEFAULT_MAX_CLIP_AUTO_SYNC_BYTES: usize = 65536; // 64 KiB
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_clip_auto_sync_bytes() -> usize {
+    DEFAULT_MAX_CLIP_AUTO_SYNC_BYTES
+}
+
+/// Granular scoped auto-sync policy for cross-device clipboard distribution.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ClipboardPolicy {
+    /// Operating synchronization mode (Manual, BidirectionalAuto, SendOnly, ReceiveOnly).
+    #[serde(default)]
+    pub mode: ClipSyncMode,
+    /// Whether the Zero-Plaintext sensitive leak guard is enabled (rejecting private keys, API tokens, JWTs, etc.).
+    #[serde(default = "default_true")]
+    pub sensitive_guard: bool,
+    /// List of organizational group names whose members are permitted for automatic sync (empty = all trusted).
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    /// List of peer profile tags whose members are permitted for automatic sync (empty = all trusted).
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    /// List of device form factors allowed for automatic sync (empty = all trusted).
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+    /// Maximum payload size in bytes permitted for automatic synchronization (default: 64 KiB).
+    #[serde(default = "default_max_clip_auto_sync_bytes")]
+    pub max_payload_bytes: usize,
+    /// Optional auto-clear countdown in seconds for local clipboard after receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_clear_timeout_secs: Option<u64>,
+}
+
+impl Default for ClipboardPolicy {
+    fn default() -> Self {
+        Self {
+            mode: ClipSyncMode::Manual,
+            sensitive_guard: true,
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+            max_payload_bytes: DEFAULT_MAX_CLIP_AUTO_SYNC_BYTES,
+            auto_clear_timeout_secs: None,
+        }
+    }
+}
+
+impl ClipboardPolicy {
+    /// Evaluates whether an outbound or inbound clipboard synchronization is permitted for the given peer profile.
+    pub fn is_peer_eligible(&self, profile: &PeerProfile) -> bool {
+        // If no specific group/tag/type filters are configured, policy applies to all trusted peers
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        // Match group
+        if let Some(ref grp) = profile.group {
+            let grp_lower = grp.to_ascii_lowercase();
+            if self
+                .allowed_groups
+                .iter()
+                .any(|g| g.to_ascii_lowercase() == grp_lower)
+            {
+                return true;
+            }
+        }
+
+        // Match tags
+        for t in &profile.tags {
+            let t_lower = t.to_ascii_lowercase();
+            if self
+                .allowed_tags
+                .iter()
+                .any(|rule_tag| rule_tag.to_ascii_lowercase() == t_lower)
+            {
+                return true;
+            }
+        }
+
+        // Match device type
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+}
+
+pub fn load_clipboard_policy(dir: &Path) -> ClipboardPolicy {
+    let path = dir.join(CLIPBOARD_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_clipboard_policy(dir: &Path, policy: &ClipboardPolicy) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(CLIPBOARD_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -696,5 +808,93 @@ mod tests {
             TargetSelector::Peer("tdev_p1".into())
         );
         assert!(TargetSelector::from_query(None, None, None, None, false).is_err());
+    }
+
+    #[test]
+    fn clipboard_policy_roundtrip_and_matching() {
+        let dir = std::env::temp_dir().join(format!("tetherly-clippol-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Default policy check
+        let def = load_clipboard_policy(&dir);
+        assert_eq!(def.mode, ClipSyncMode::Manual);
+        assert!(def.sensitive_guard);
+        assert_eq!(def.max_payload_bytes, DEFAULT_MAX_CLIP_AUTO_SYNC_BYTES);
+        assert!(def.allowed_groups.is_empty());
+        assert!(def.allowed_tags.is_empty());
+        assert!(def.allowed_types.is_empty());
+
+        let prof_any = PeerProfile {
+            device_id: "dev_any".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec!["office".into()],
+            group: Some("engineering".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        // Empty filters allow all trusted peers
+        assert!(def.is_peer_eligible(&prof_any));
+
+        // 2. Custom policy and atomic persistence
+        let custom = ClipboardPolicy {
+            mode: ClipSyncMode::BidirectionalAuto,
+            sensitive_guard: true,
+            allowed_groups: vec!["engineering".into()],
+            allowed_tags: vec!["secure".into()],
+            allowed_types: vec![DeviceType::Laptop, DeviceType::Tablet],
+            max_payload_bytes: 32 * 1024,
+            auto_clear_timeout_secs: Some(30),
+        };
+
+        save_clipboard_policy(&dir, &custom).unwrap();
+        let loaded = load_clipboard_policy(&dir);
+        assert_eq!(loaded, custom);
+
+        // Group match
+        let prof_eng = PeerProfile {
+            device_id: "dev_eng".into(),
+            device_type: DeviceType::Other,
+            tags: vec![],
+            group: Some("ENGINEERING".into()), // case-insensitive
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_eng));
+
+        // Tag match
+        let prof_tag = PeerProfile {
+            device_id: "dev_tag".into(),
+            device_type: DeviceType::Phone,
+            tags: vec!["SECURE".into()], // case-insensitive
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_tag));
+
+        // Device type match
+        let prof_type = PeerProfile {
+            device_id: "dev_type".into(),
+            device_type: DeviceType::Tablet,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_type));
+
+        // Unmatched peer
+        let prof_unmatched = PeerProfile {
+            device_id: "dev_unmatched".into(),
+            device_type: DeviceType::Server,
+            tags: vec!["cloud".into()],
+            group: Some("marketing".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded.is_peer_eligible(&prof_unmatched));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

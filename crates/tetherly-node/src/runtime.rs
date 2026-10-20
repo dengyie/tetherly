@@ -7,8 +7,9 @@ use crate::lan::{bind_many, bind_many_optional, bind_overlay, control_bind_addrs
 use crate::platform::{insert_foreground, MemoryClip, SystemClip};
 use crate::sidecar::{self, OverlayConfig, OverlaySource, OverlayStatus};
 use crate::store::{
-    load_trust, remember_route, save_trust, AutoAcceptPolicy, DeviceType, PeerProfile,
-    ProfileTable, RouteTable, TargetSelector,
+    load_clipboard_policy, load_trust, remember_route, save_clipboard_policy, save_trust,
+    AutoAcceptPolicy, ClipboardPolicy, DeviceType, PeerProfile, ProfileTable, RouteTable,
+    TargetSelector,
 };
 use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::{HashMap, VecDeque};
@@ -33,7 +34,7 @@ use tetherly_core::{
     MemoryScreenSink, MemorySink, MemoryTrustStore, NotificationPayload, NotificationUrgency,
     Notifier, NotifyHub, OpenAllowlist, PathKind, ReplyView, ScreenAssembler, ScreenCodec,
     ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats,
-    TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
+    SensitiveContentGuard, TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -1354,6 +1355,17 @@ pub struct AutoAcceptPolicyReport {
     pub message: String,
 }
 
+/// Comprehensive status and configuration report for granular clipboard auto-sync policy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClipboardPolicyReport {
+    pub ok: bool,
+    pub policy: ClipboardPolicy,
+    pub auto_synced_out_count: u64,
+    pub auto_synced_in_count: u64,
+    pub sensitive_blocked_count: u64,
+    pub message: String,
+}
+
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ClipStatusReport {
@@ -2101,6 +2113,11 @@ struct Shared {
     outbox_engine: Mutex<OutboxEngine>,
     profiles: Mutex<ProfileTable>,
     auto_accept_policy: Mutex<AutoAcceptPolicy>,
+    clipboard_policy: Mutex<ClipboardPolicy>,
+    clip_auto_synced_out_count: AtomicU64,
+    clip_auto_synced_in_count: AtomicU64,
+    clip_sensitive_blocked_count: AtomicU64,
+    last_auto_sync_hash: Mutex<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -2241,6 +2258,7 @@ impl Node {
         let initial_blocked = crate::store::load_blocked(&cfg.data_dir);
         let initial_profiles = crate::store::load_profiles(&cfg.data_dir);
         let initial_auto_accept = crate::store::load_auto_accept_policy(&cfg.data_dir);
+        let initial_clipboard_policy = load_clipboard_policy(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -2323,6 +2341,11 @@ impl Node {
             outbox_engine: Mutex::new(OutboxEngine::new(200)),
             profiles: Mutex::new(initial_profiles),
             auto_accept_policy: Mutex::new(initial_auto_accept),
+            clipboard_policy: Mutex::new(initial_clipboard_policy),
+            clip_auto_synced_out_count: AtomicU64::new(0),
+            clip_auto_synced_in_count: AtomicU64::new(0),
+            clip_sensitive_blocked_count: AtomicU64::new(0),
+            last_auto_sync_hash: Mutex::new(None),
         });
         Ok(Self { shared })
     }
@@ -6537,6 +6560,7 @@ impl Node {
             self.spawn_overlay();
         }
         self.spawn_reconnect();
+        self.spawn_clipboard_auto_sync();
 
         for l in listeners {
             node_accept_loop(self.clone_handle(), l, "control", |node, s, a| async move {
@@ -7838,6 +7862,28 @@ impl Node {
     }
 
     fn apply_clip(&self, peer: &DeviceId, clip: ClipSet) -> Result<(), tetherly_net::NetError> {
+        let policy = self.clipboard_policy();
+        if !policy.mode.can_receive() {
+            debug!(peer = %peer, "clipboard sync ignored due to receive_only/manual mode policy");
+            return Ok(());
+        }
+        let profile = self.peer_profile(peer);
+        if !policy.is_peer_eligible(&profile) {
+            debug!(peer = %peer, "clipboard sync rejected: sender profile not eligible under clipboard policy");
+            self.record_audit(
+                AuditCategory::Clipboard,
+                AuditSeverity::Warning,
+                "clipboard_inbound_ineligible",
+                Some(peer.to_string()),
+                format!(
+                    "Ignored inbound clipboard sync from {} due to profile scope policy",
+                    peer
+                ),
+                false,
+            );
+            return Ok(());
+        }
+
         let now = self.shared.clock.unix_ms();
         let bytes = clip.text.as_ref().map_or(0, |s| s.len());
         let hash = clip.hash.clone();
@@ -7849,6 +7895,14 @@ impl Node {
         match apply {
             ClipApply::Apply(text) => {
                 self.shared.clip.set_text(&text)?;
+                *self
+                    .shared
+                    .last_auto_sync_hash
+                    .lock()
+                    .expect("last_auto_sync_hash") = Some(hash.clone());
+                self.shared
+                    .clip_auto_synced_in_count
+                    .fetch_add(1, Ordering::Relaxed);
                 {
                     let mut hubs = self.shared.hubs.lock().expect("hubs");
                     hubs.clip.record_entry(ClipMetaEntry {
@@ -7869,6 +7923,20 @@ impl Node {
                     timestamp_ms: now,
                     sent_peers: 0,
                 });
+                if let Some(secs) = policy.auto_clear_timeout_secs {
+                    if secs > 0 {
+                        let clip = self.shared.clip.clone();
+                        let expected_text = text.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(secs)).await;
+                            if let Ok(Some(cur)) = clip.get_text() {
+                                if cur == expected_text {
+                                    let _ = clip.set_text("");
+                                }
+                            }
+                        });
+                    }
+                }
             }
             ClipApply::Echo | ClipApply::RateLimited => {}
         }
@@ -8556,6 +8624,317 @@ impl Node {
         self.auto_accept_status()
     }
 
+    pub fn clipboard_policy(&self) -> ClipboardPolicy {
+        self.shared
+            .clipboard_policy
+            .lock()
+            .expect("clipboard_policy")
+            .clone()
+    }
+
+    /// Comprehensive status and configuration report for granular clipboard auto-sync policy.
+    pub fn clipboard_policy_report(&self) -> ClipboardPolicyReport {
+        ClipboardPolicyReport {
+            ok: true,
+            policy: self.clipboard_policy(),
+            auto_synced_out_count: self
+                .shared
+                .clip_auto_synced_out_count
+                .load(Ordering::Relaxed),
+            auto_synced_in_count: self
+                .shared
+                .clip_auto_synced_in_count
+                .load(Ordering::Relaxed),
+            sensitive_blocked_count: self
+                .shared
+                .clip_sensitive_blocked_count
+                .load(Ordering::Relaxed),
+            message: "clipboard policy report".to_string(),
+        }
+    }
+
+    /// Update the granular clipboard policy and persist to disk atomically.
+    pub fn set_clipboard_policy(
+        &self,
+        policy: ClipboardPolicy,
+    ) -> Result<ClipboardPolicyReport, CoreError> {
+        let now = self.shared.clock.unix_ms();
+        save_clipboard_policy(&self.shared.cfg.data_dir, &policy)
+            .map_err(|e| CoreError::File(format!("failed to save clipboard_policy.json: {e}")))?;
+        *self
+            .shared
+            .clipboard_policy
+            .lock()
+            .expect("clipboard_policy") = policy.clone();
+
+        self.emit(UiEvent::clipboard_policy_changed(
+            policy.mode.as_str(),
+            policy.sensitive_guard,
+            policy.allowed_groups.clone(),
+            policy.allowed_tags.clone(),
+            policy
+                .allowed_types
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect(),
+            policy.max_payload_bytes,
+            policy.auto_clear_timeout_secs,
+            now,
+        ));
+
+        self.record_audit(
+            AuditCategory::Clipboard,
+            AuditSeverity::Info,
+            "clipboard_policy_changed",
+            None::<String>,
+            format!(
+                "Updated clipboard policy: mode={}, sensitive_guard={}, groups={:?}, tags={:?}, types={:?}, max_bytes={}, auto_clear={:?}",
+                policy.mode.as_str(),
+                policy.sensitive_guard,
+                policy.allowed_groups,
+                policy.allowed_tags,
+                policy.allowed_types,
+                policy.max_payload_bytes,
+                policy.auto_clear_timeout_secs
+            ),
+            true,
+        );
+
+        Ok(ClipboardPolicyReport {
+            ok: true,
+            policy,
+            auto_synced_out_count: self
+                .shared
+                .clip_auto_synced_out_count
+                .load(Ordering::Relaxed),
+            auto_synced_in_count: self
+                .shared
+                .clip_auto_synced_in_count
+                .load(Ordering::Relaxed),
+            sensitive_blocked_count: self
+                .shared
+                .clip_sensitive_blocked_count
+                .load(Ordering::Relaxed),
+            message: "clipboard policy updated successfully".to_string(),
+        })
+    }
+
+    /// Polls system clipboard for automatic outbound synchronization.
+    /// Checks mode, changes, size constraints, sensitive content guard, and profile scoping.
+    /// Returns the number of eligible peers to which the clipboard text was broadcast.
+    pub async fn poll_clipboard_auto_sync(&self) -> Result<usize, CoreError> {
+        let policy = self.clipboard_policy();
+        if !policy.mode.can_send() {
+            return Ok(0);
+        }
+
+        let text = match self.shared.clip.get_text()? {
+            Some(t) if !t.is_empty() => t,
+            _ => return Ok(0),
+        };
+
+        let hash = tetherly_core::hex_sha256(text.as_bytes());
+
+        // Check against last synced hash
+        {
+            let last = self
+                .shared
+                .last_auto_sync_hash
+                .lock()
+                .expect("last_auto_sync_hash");
+            if last.as_deref() == Some(&hash) {
+                return Ok(0);
+            }
+        }
+
+        // Also check if hub already knows this hash as the latest
+        {
+            let hubs = self.shared.hubs.lock().expect("hubs");
+            if hubs.clip.last_hash() == Some(&hash) {
+                *self
+                    .shared
+                    .last_auto_sync_hash
+                    .lock()
+                    .expect("last_auto_sync_hash") = Some(hash.clone());
+                return Ok(0);
+            }
+        }
+
+        let now = self.shared.clock.unix_ms();
+
+        // 1. Max payload ceiling guard
+        if text.len() > policy.max_payload_bytes {
+            *self
+                .shared
+                .last_auto_sync_hash
+                .lock()
+                .expect("last_auto_sync_hash") = Some(hash.clone());
+            self.shared
+                .clip_sensitive_blocked_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.emit(UiEvent::clipboard_sync_blocked(
+                "payload_too_large",
+                text.len(),
+                &hash,
+                now,
+            ));
+            self.record_audit(
+                AuditCategory::Clipboard,
+                AuditSeverity::Warning,
+                "clipboard_payload_too_large",
+                None::<String>,
+                format!(
+                    "Blocked auto-sync of large clipboard payload ({} bytes exceeds limit {})",
+                    text.len(),
+                    policy.max_payload_bytes
+                ),
+                false,
+            );
+            return Ok(0);
+        }
+
+        // 2. Sensitive content leak guard
+        if policy.sensitive_guard {
+            if let Some(reason) = SensitiveContentGuard::inspect(&text) {
+                *self
+                    .shared
+                    .last_auto_sync_hash
+                    .lock()
+                    .expect("last_auto_sync_hash") = Some(hash.clone());
+                self.shared
+                    .clip_sensitive_blocked_count
+                    .fetch_add(1, Ordering::Relaxed);
+                let reason_str = reason.as_str();
+                self.emit(UiEvent::clipboard_sync_blocked(
+                    reason_str,
+                    text.len(),
+                    &hash,
+                    now,
+                ));
+                self.record_audit(
+                    AuditCategory::Clipboard,
+                    AuditSeverity::Warning,
+                    "sensitive_clipboard_blocked",
+                    None::<String>,
+                    format!(
+                        "Blocked auto-sync of sensitive {} ({} bytes, sha256={})",
+                        reason_str,
+                        text.len(),
+                        hash
+                    ),
+                    false,
+                );
+                return Ok(0);
+            }
+        }
+
+        // 3. Resolve eligible peers based on profile rules
+        let live_peers = self.live_peers();
+        let eligible_peers: Vec<DeviceId> = live_peers
+            .into_iter()
+            .map(|p| p.device_id)
+            .filter(|peer_id| {
+                let profile = self.peer_profile(peer_id);
+                policy.is_peer_eligible(&profile)
+            })
+            .collect();
+
+        // Mark current hash as observed so we don't re-process
+        *self
+            .shared
+            .last_auto_sync_hash
+            .lock()
+            .expect("last_auto_sync_hash") = Some(hash.clone());
+
+        if eligible_peers.is_empty() {
+            return Ok(0);
+        }
+
+        // Prepare frame
+        let set = {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.clip.prepare_local(&text)?
+        };
+        let Some(set) = set else {
+            return Ok(0);
+        };
+
+        let seq = set.clip_seq;
+        let bytes = text.len();
+        let frame = set.to_frame()?;
+        let count = eligible_peers.len();
+
+        for peer in &eligible_peers {
+            let _ = self.send_to(peer, frame.clone()).await;
+        }
+
+        {
+            let mut hubs = self.shared.hubs.lock().expect("hubs");
+            hubs.clip.record_entry(ClipMetaEntry {
+                seq,
+                source: None,
+                direction: ClipDirection::Outbound,
+                bytes,
+                hash: hash.clone(),
+                timestamp_ms: now,
+            });
+        }
+
+        self.shared
+            .clip_auto_synced_out_count
+            .fetch_add(1, Ordering::Relaxed);
+
+        self.emit(UiEvent::ClipboardSynced {
+            seq,
+            source: "local".to_string(),
+            direction: "outbound".to_string(),
+            bytes,
+            hash,
+            timestamp_ms: now,
+            sent_peers: count,
+        });
+
+        // Auto clear local clipboard if requested by policy
+        if let Some(secs) = policy.auto_clear_timeout_secs {
+            if secs > 0 {
+                let clip = self.shared.clip.clone();
+                let expected_text = text.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                    if let Ok(Some(cur)) = clip.get_text() {
+                        if cur == expected_text {
+                            let _ = clip.set_text("");
+                        }
+                    }
+                });
+            }
+        }
+
+        Ok(count)
+    }
+
+    fn spawn_clipboard_auto_sync(&self) {
+        let node = self.clone_handle();
+        tokio::spawn(async move {
+            let mut stop = node.shared.shutdown.subscribe();
+            loop {
+                if *stop.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    _ = stop.changed() => {
+                        if *stop.borrow() {
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(800)) => {
+                        let _ = node.poll_clipboard_auto_sync().await;
+                    }
+                }
+            }
+        });
+    }
+
     /// Syncs local clipboard to a specific peer or all connected peers.
     /// Returns the number of peers that were sent the frame (0 if unchanged/echo or no peers).
     pub async fn send_clipboard_to(
@@ -8598,6 +8977,11 @@ impl Node {
                 timestamp_ms: now,
             });
         }
+        *self
+            .shared
+            .last_auto_sync_hash
+            .lock()
+            .expect("last_auto_sync_hash") = Some(hash.clone());
         self.emit(UiEvent::ClipboardSynced {
             seq,
             source: "local".to_string(),
@@ -8651,6 +9035,11 @@ impl Node {
                 timestamp_ms: now,
             });
         }
+        *self
+            .shared
+            .last_auto_sync_hash
+            .lock()
+            .expect("last_auto_sync_hash") = Some(hash.clone());
         self.emit(UiEvent::ClipboardSynced {
             seq,
             source: "local".to_string(),
@@ -11555,5 +11944,137 @@ mod resume_scan_tests {
         let _ = std::fs::remove_dir_all(&dir);
         let table = load_resume_table(&dir);
         assert_eq!(table.all().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod clipboard_policy_tests {
+    use super::*;
+    use tetherly_core::{ClipSyncMode, ManualClock};
+
+    fn temp_test_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-clip-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.clone(),
+            control_port: 0,
+            file_port: 0,
+            input_port: 0,
+            screen_port: 0,
+            ui_port: 0,
+            name: "test-node".into(),
+            platform: "test".into(),
+            memory_clip: true,
+            memory_notifier: true,
+            loopback_only: true,
+            advertise: false,
+            reconnect: false,
+            overlay: OverlayConfig::default(),
+            ancs: None,
+            ancs_peripheral: "test".into(),
+            screen_source: None,
+            screen_codec: None,
+            screen_sink: None,
+            input_sink: None,
+        };
+        let clock = Arc::new(ManualClock::new(1000));
+        let node = Node::start_with_clock(cfg, clock).unwrap();
+        (node, dir)
+    }
+
+    #[tokio::test]
+    async fn test_clipboard_policy_defaults_and_mutation() {
+        let (node, dir) = temp_test_node("defaults");
+        let report = node.clipboard_policy_report();
+        assert!(report.ok);
+        assert_eq!(report.policy.mode, ClipSyncMode::Manual);
+        assert!(report.policy.sensitive_guard);
+        assert_eq!(report.policy.max_payload_bytes, 65536);
+        assert_eq!(report.auto_synced_out_count, 0);
+        assert_eq!(report.sensitive_blocked_count, 0);
+
+        let mut updated = report.policy.clone();
+        updated.mode = ClipSyncMode::BidirectionalAuto;
+        updated.allowed_groups = vec!["office".into()];
+        updated.allowed_tags = vec!["secure".into()];
+        updated.max_payload_bytes = 1024;
+        let update_report = node.set_clipboard_policy(updated.clone()).unwrap();
+        assert!(update_report.ok);
+        assert_eq!(update_report.policy.mode, ClipSyncMode::BidirectionalAuto);
+        assert_eq!(update_report.policy.max_payload_bytes, 1024);
+
+        // Verify loaded from disk matches
+        let from_disk = crate::store::load_clipboard_policy(&dir);
+        assert_eq!(from_disk.mode, ClipSyncMode::BidirectionalAuto);
+        assert_eq!(from_disk.allowed_groups, vec!["office".to_string()]);
+        assert_eq!(from_disk.max_payload_bytes, 1024);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_poll_clipboard_auto_sync_sensitive_guard_blocks() {
+        let (node, dir) = temp_test_node("guard");
+        let mut policy = node.clipboard_policy();
+        policy.mode = ClipSyncMode::BidirectionalAuto;
+        policy.sensitive_guard = true;
+        node.set_clipboard_policy(policy).unwrap();
+
+        // 1. Write an SSH private key to memory clipboard
+        let priv_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA\n-----END OPENSSH PRIVATE KEY-----";
+        node.shared.clip.set_text(priv_key).unwrap();
+
+        // 2. Poll auto-sync: should block and return 0
+        let dispatched = node.poll_clipboard_auto_sync().await.unwrap();
+        assert_eq!(dispatched, 0);
+
+        // 3. Sensitive blocked count should be incremented
+        let report = node.clipboard_policy_report();
+        assert_eq!(report.sensitive_blocked_count, 1);
+        assert_eq!(report.auto_synced_out_count, 0);
+
+        // 4. Repeated poll should not re-trigger block count because hash is already recorded
+        let dispatched2 = node.poll_clipboard_auto_sync().await.unwrap();
+        assert_eq!(dispatched2, 0);
+        let report2 = node.clipboard_policy_report();
+        assert_eq!(report2.sensitive_blocked_count, 1);
+
+        // 5. Normal safe text should proceed without blocking
+        node.shared
+            .clip
+            .set_text("Hello safe mesh network!")
+            .unwrap();
+        let _ = node.poll_clipboard_auto_sync().await.unwrap();
+        let report3 = node.clipboard_policy_report();
+        assert_eq!(report3.sensitive_blocked_count, 1); // unchaged
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_poll_clipboard_auto_sync_payload_size_ceiling() {
+        let (node, dir) = temp_test_node("ceiling");
+        let mut policy = node.clipboard_policy();
+        policy.mode = ClipSyncMode::BidirectionalAuto;
+        policy.max_payload_bytes = 100;
+        node.set_clipboard_policy(policy).unwrap();
+
+        // Write 150 bytes text
+        let large_text = "A".repeat(150);
+        node.shared.clip.set_text(&large_text).unwrap();
+
+        let dispatched = node.poll_clipboard_auto_sync().await.unwrap();
+        assert_eq!(dispatched, 0);
+        let report = node.clipboard_policy_report();
+        assert_eq!(report.sensitive_blocked_count, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

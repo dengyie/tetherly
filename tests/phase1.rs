@@ -8311,6 +8311,378 @@ async fn policy_based_tag_and_group_targeted_multi_dispatch_via_loopback_api() {
     peer2.shutdown();
 }
 
+/// ADR-064: Policy-based clipboard auto-sync, fail-closed sensitive content leak guard,
+/// multi-dimensional scope governance, Zero-Plaintext observability, and Host 403 isolation.
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_based_clipboard_auto_sync_and_sensitive_leak_guard_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI succeeds");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI succeeds");
+
+    // Connect to host loopback SSE stream
+    let mut host_sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect host sse");
+
+    // 1. Initial Default Policy Check via GET /api/clip/policy
+    let (code_h, body_h) = tetherly_node::loopback_get(host_ui, "/api/clip/policy")
+        .await
+        .unwrap();
+    assert_eq!(code_h, 200);
+    let h_rep: tetherly_node::ClipboardPolicyReport = serde_json::from_slice(&body_h).unwrap();
+    assert!(h_rep.ok);
+    assert_eq!(h_rep.policy.mode, tetherly_core::ClipSyncMode::Manual);
+    assert!(h_rep.policy.sensitive_guard);
+    assert_eq!(h_rep.policy.max_payload_bytes, 65536);
+    assert!(h_rep.policy.allowed_groups.is_empty());
+    assert!(h_rep.policy.allowed_tags.is_empty());
+    assert!(h_rep.policy.allowed_types.is_empty());
+    assert_eq!(h_rep.auto_synced_out_count, 0);
+    assert_eq!(h_rep.auto_synced_in_count, 0);
+    assert_eq!(h_rep.sensitive_blocked_count, 0);
+
+    // 2. Configure Peer and Host:
+    // a. Peer: set mode to bidirectional_auto, allow only peers with tag "workstation"
+    let peer_policy_update = serde_json::json!({
+        "mode": "bidirectional_auto",
+        "sensitive_guard": true,
+        "allowed_tags": ["workstation"]
+    });
+    let (code_p_set, body_p_set) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/clip/policy",
+        &serde_json::to_vec(&peer_policy_update).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_p_set, 200);
+    let p_set_rep: tetherly_node::ClipboardPolicyReport =
+        serde_json::from_slice(&body_p_set).unwrap();
+    assert_eq!(
+        p_set_rep.policy.mode,
+        tetherly_core::ClipSyncMode::BidirectionalAuto
+    );
+    assert_eq!(p_set_rep.policy.allowed_tags, vec!["workstation"]);
+
+    // b. On Peer, label Host as having tag "workstation"
+    let host_dev = host.identity().device_id().to_string();
+    let add_tag_body = serde_json::json!({
+        "peer": host_dev,
+        "tag": "workstation"
+    });
+    let (code_tag, _) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/peers/tags/add",
+        &serde_json::to_vec(&add_tag_body).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_tag, 200);
+
+    // c. Host: set mode to bidirectional_auto with sensitive guard enabled
+    let host_policy_update = serde_json::json!({
+        "mode": "bidirectional_auto",
+        "sensitive_guard": true
+    });
+    let (code_h_set, body_h_set) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/clip/policy",
+        &serde_json::to_vec(&host_policy_update).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_h_set, 200);
+    let h_set_rep: tetherly_node::ClipboardPolicyReport =
+        serde_json::from_slice(&body_h_set).unwrap();
+    assert_eq!(
+        h_set_rep.policy.mode,
+        tetherly_core::ClipSyncMode::BidirectionalAuto
+    );
+    assert!(h_set_rep.policy.sensitive_guard);
+
+    // d. Check SSE receives ClipboardPolicyChanged
+    let mut got_policy_ev = false;
+    let t_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < t_deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), host_sse.next_event()).await
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if v.get("kind").and_then(|k| k.as_str()) == Some("clipboard_policy_changed") {
+                    assert_eq!(
+                        v.get("mode").and_then(|m| m.as_str()),
+                        Some("bidirectional_auto")
+                    );
+                    assert_eq!(
+                        v.get("sensitive_guard").and_then(|b| b.as_bool()),
+                        Some(true)
+                    );
+                    got_policy_ev = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        got_policy_ev,
+        "host SSE must receive clipboard_policy_changed"
+    );
+
+    // 3. Sensitive Content Guard Interception (Fail-Closed) & Zero-Plaintext Invariant
+    // a. OpenSSH Private Key
+    let ssh_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABlwAAAAdzc2gtcn\n-----END OPENSSH PRIVATE KEY-----";
+    host.clip().set_text(ssh_key).expect("set host clipboard");
+
+    let (code_poll1, body_poll1) =
+        tetherly_node::loopback_post(host_ui, "/api/clip/auto-sync/poll", b"{}")
+            .await
+            .unwrap();
+    assert_eq!(code_poll1, 200);
+    let poll1_rep: serde_json::Value = serde_json::from_slice(&body_poll1).unwrap();
+    assert_eq!(poll1_rep["dispatched_peers"].as_u64().unwrap_or(999), 0);
+    assert_eq!(
+        poll1_rep["stats"]["sensitive_blocked_count"]
+            .as_u64()
+            .unwrap_or(0),
+        1
+    );
+
+    // Verify SSE received clipboard_sync_blocked with ZERO PLAINTEXT
+    let mut got_block_ev = false;
+    let t_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < t_deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), host_sse.next_event()).await
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if v.get("kind").and_then(|k| k.as_str()) == Some("clipboard_sync_blocked") {
+                    assert_eq!(
+                        v.get("reason").and_then(|r| r.as_str()),
+                        Some("private_key")
+                    );
+                    assert_eq!(
+                        v.get("hash").and_then(|h| h.as_str()),
+                        Some(tetherly_core::hex_sha256(ssh_key.as_bytes()).as_str())
+                    );
+                    // ZERO-PLAINTEXT INVARIANT: raw json must NEVER contain any segment of the secret
+                    assert!(!raw.contains("OPENSSH PRIVATE KEY"));
+                    assert!(!raw.contains("b3BlbnNzaC1rZXk"));
+                    got_block_ev = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        got_block_ev,
+        "host SSE must receive clipboard_sync_blocked for private_key"
+    );
+
+    // Peer clipboard must remain unaffected
+    let (code_p_clip, body_p_clip) = tetherly_node::loopback_get(peer_ui, "/api/clip")
+        .await
+        .unwrap();
+    assert_eq!(code_p_clip, 200);
+    let p_clip_rep: serde_json::Value = serde_json::from_slice(&body_p_clip).unwrap();
+    assert!(p_clip_rep["text"].is_null());
+
+    // b. API Token: AWS Access Key
+    let aws_token = "AKIAIOSFODNN7EXAMPLE";
+    host.clip().set_text(aws_token).expect("set host clipboard");
+    let (code_poll2, body_poll2) =
+        tetherly_node::loopback_post(host_ui, "/api/clip/auto-sync/poll", b"{}")
+            .await
+            .unwrap();
+    assert_eq!(code_poll2, 200);
+    let poll2_rep: serde_json::Value = serde_json::from_slice(&body_poll2).unwrap();
+    assert_eq!(poll2_rep["dispatched_peers"].as_u64().unwrap_or(999), 0);
+    assert_eq!(
+        poll2_rep["stats"]["sensitive_blocked_count"]
+            .as_u64()
+            .unwrap_or(0),
+        2
+    );
+
+    // c. Bearer JWT
+    let jwt_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    host.clip().set_text(jwt_token).expect("set host clipboard");
+    let (code_poll3, body_poll3) =
+        tetherly_node::loopback_post(host_ui, "/api/clip/auto-sync/poll", b"{}")
+            .await
+            .unwrap();
+    assert_eq!(code_poll3, 200);
+    let poll3_rep: serde_json::Value = serde_json::from_slice(&body_poll3).unwrap();
+    assert_eq!(poll3_rep["dispatched_peers"].as_u64().unwrap_or(999), 0);
+    assert_eq!(
+        poll3_rep["stats"]["sensitive_blocked_count"]
+            .as_u64()
+            .unwrap_or(0),
+        3
+    );
+
+    // 4. Compliant Everyday Text Auto-Sync
+    let clean_text = "Tetherly LAN mesh automated cross-device clipboard sync v1.71";
+    host.clip()
+        .set_text(clean_text)
+        .expect("set host clipboard");
+
+    let (code_poll4, body_poll4) =
+        tetherly_node::loopback_post(host_ui, "/api/clip/auto-sync/poll", b"{}")
+            .await
+            .unwrap();
+    assert_eq!(code_poll4, 200);
+    let poll4_rep: serde_json::Value = serde_json::from_slice(&body_poll4).unwrap();
+    assert_eq!(poll4_rep["dispatched_peers"].as_u64().unwrap_or(0), 1);
+    assert_eq!(
+        poll4_rep["stats"]["auto_synced_out_count"]
+            .as_u64()
+            .unwrap_or(0),
+        1
+    );
+
+    // Wait for Peer to receive and apply clipboard frame
+    let t_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut peer_received = false;
+    while std::time::Instant::now() < t_deadline {
+        let (c, b) = tetherly_node::loopback_get(peer_ui, "/api/clip")
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if v.get("text").and_then(|t| t.as_str()) == Some(clean_text) {
+                    peer_received = true;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        peer_received,
+        "peer must receive compliant auto-synced clipboard text"
+    );
+
+    // Check Peer stats: auto_synced_in_count == 1
+    let (code_p_stat, body_p_stat) = tetherly_node::loopback_get(peer_ui, "/api/clip/policy")
+        .await
+        .unwrap();
+    assert_eq!(code_p_stat, 200);
+    let p_stat_rep: tetherly_node::ClipboardPolicyReport =
+        serde_json::from_slice(&body_p_stat).unwrap();
+    assert_eq!(p_stat_rep.auto_synced_in_count, 1);
+
+    // 5. Max Payload Size Ceiling Enforcement
+    let ceiling_policy = serde_json::json!({
+        "max_payload_bytes": 30
+    });
+    let (code_ceil, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/clip/policy",
+        &serde_json::to_vec(&ceiling_policy).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_ceil, 200);
+
+    let oversized_text = "This string definitely exceeds thirty bytes of length ceiling";
+    host.clip()
+        .set_text(oversized_text)
+        .expect("set oversized clipboard");
+
+    let (code_poll5, body_poll5) =
+        tetherly_node::loopback_post(host_ui, "/api/clip/auto-sync/poll", b"{}")
+            .await
+            .unwrap();
+    assert_eq!(code_poll5, 200);
+    let poll5_rep: serde_json::Value = serde_json::from_slice(&body_poll5).unwrap();
+    assert_eq!(poll5_rep["dispatched_peers"].as_u64().unwrap_or(999), 0);
+
+    // 6. Inbound Scope Governance Filtering:
+    // Update peer policy to allow only peers with tag "restricted_tag_only"
+    let scope_policy = serde_json::json!({
+        "mode": "bidirectional_auto",
+        "allowed_tags": ["restricted_tag_only"]
+    });
+    let (code_scope, _) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/clip/policy",
+        &serde_json::to_vec(&scope_policy).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_scope, 200);
+
+    // Reset host policy max_payload_bytes
+    let reset_host_pol = serde_json::json!({
+        "max_payload_bytes": 65536
+    });
+    let (code_reset, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/clip/policy",
+        &serde_json::to_vec(&reset_host_pol).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_reset, 200);
+
+    // Host sends a new text; since Host is not tagged with "restricted_tag_only" on peer,
+    // peer should reject it in apply_clip!
+    let scoped_text = "New text that should be rejected by peer scope policy";
+    host.clip()
+        .set_text(scoped_text)
+        .expect("set host clipboard");
+    let (code_poll6, _) = tetherly_node::loopback_post(host_ui, "/api/clip/auto-sync/poll", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(code_poll6, 200);
+
+    // Wait and verify peer clipboard was NOT updated to scoped_text (remains clean_text)
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (_, b_clip_check) = tetherly_node::loopback_get(peer_ui, "/api/clip")
+        .await
+        .unwrap();
+    let clip_check: serde_json::Value = serde_json::from_slice(&b_clip_check).unwrap();
+    assert_eq!(
+        clip_check.get("text").and_then(|t| t.as_str()),
+        Some(clean_text),
+        "peer must not accept clipboard text from peer not matching allowed_tags"
+    );
+
+    // 7. Atomic Persistence Permissions Verification (POSIX 0o600)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let host_pol_file = _g1.path().join("clipboard_policy.json");
+        assert!(host_pol_file.exists());
+        let meta = std::fs::metadata(&host_pol_file).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "clipboard_policy.json must be persisted with 0o600 permissions"
+        );
+    }
+
+    // 8. Security Red Line: Host 403 Forbidden Isolation Check
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{host_ui}"))
+        .await
+        .expect("connect to host ui port");
+    let evil_req = "GET /api/clip/policy HTTP/1.1\r\nHost: malicious.hacker.internal\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header on /api/clip/policy must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    // 9. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

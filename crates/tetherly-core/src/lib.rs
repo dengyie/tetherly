@@ -38,7 +38,10 @@ pub use ancs::{
 pub use bind::{
     classify, classify_v4, is_unspecified_bind, should_listen, should_listen_v4, BindClass,
 };
-pub use clip::{ClipApply, ClipDirection, ClipHub, ClipMetaEntry, MAX_CLIP_HISTORY};
+pub use clip::{
+    ClipApply, ClipDirection, ClipHub, ClipMetaEntry, ClipSyncMode, SensitiveContentGuard,
+    SensitiveLeakReason, MAX_CLIP_HISTORY,
+};
 pub use dedup::{ClipLimiter, NotifyLimiter, TcpLimiter, TokenBucket};
 pub use device_id::DeviceId;
 pub use error::CoreError;

@@ -11,6 +11,258 @@ use crate::frame::{hex_sha256, ClipSet, CLIP_TEXT_MAX};
 
 pub const MAX_CLIP_HISTORY: usize = 32;
 
+/// Clipboard synchronization operating mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipSyncMode {
+    /// Only synchronize on explicit manual user request (default secure state).
+    #[default]
+    Manual,
+    /// Automatically synchronize local clipboard changes to peers and apply remote updates.
+    BidirectionalAuto,
+    /// Automatically synchronize local clipboard changes out, but never overwrite local clipboard from remote.
+    SendOnly,
+    /// Accept remote clipboard updates, but never automatically broadcast local clipboard.
+    ReceiveOnly,
+}
+
+impl ClipSyncMode {
+    /// Whether this mode permits automatically broadcasting local clipboard changes.
+    pub fn can_send(&self) -> bool {
+        matches!(self, Self::BidirectionalAuto | Self::SendOnly)
+    }
+
+    /// Whether this mode permits applying incoming remote clipboard frames.
+    pub fn can_receive(&self) -> bool {
+        !matches!(self, Self::SendOnly)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::BidirectionalAuto => "bidirectional_auto",
+            Self::SendOnly => "send_only",
+            Self::ReceiveOnly => "receive_only",
+        }
+    }
+}
+
+impl std::str::FromStr for ClipSyncMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "manual" | "off" | "disabled" => Ok(Self::Manual),
+            "bidirectional" | "bidirectional_auto" | "auto" | "both" => Ok(Self::BidirectionalAuto),
+            "send_only" | "send" | "sender" => Ok(Self::SendOnly),
+            "receive_only" | "recv_only" | "receive" | "recv" | "receiver" => Ok(Self::ReceiveOnly),
+            other => Err(format!(
+                "invalid clip sync mode '{other}', expected: manual, bidirectional_auto, send_only, receive_only"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ClipSyncMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Categorized reason why a clipboard content was blocked by the sensitive leak guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensitiveLeakReason {
+    /// Asymmetric or symmetric private keys (e.g. RSA, EC, OpenSSH, PGP).
+    PrivateKey,
+    /// Cloud provider or platform API access tokens (e.g. AWS, GitHub, OpenAI, Slack).
+    ApiToken,
+    /// JSON Web Tokens (JWT) or Bearer authentication headers.
+    BearerJwt,
+    /// Password manager exports or structured password records.
+    PasswordManagerPayload,
+}
+
+impl SensitiveLeakReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PrivateKey => "private_key",
+            Self::ApiToken => "api_token",
+            Self::BearerJwt => "bearer_jwt",
+            Self::PasswordManagerPayload => "password_manager_payload",
+        }
+    }
+}
+
+impl std::fmt::Display for SensitiveLeakReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Zero-Plaintext safety guard to prevent accidental network broadcast of sensitive secrets.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SensitiveContentGuard;
+
+impl SensitiveContentGuard {
+    /// Inspects text content for high-risk secrets and private credentials.
+    /// Returns `Some(reason)` if the text matches a sensitive pattern that must not be broadcast.
+    pub fn inspect(text: &str) -> Option<SensitiveLeakReason> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        // 1. Private Keys: PEM / OpenSSH / PGP / PKCS
+        if trimmed.contains("-----BEGIN") {
+            let upper = trimmed.to_ascii_uppercase();
+            if upper.contains("PRIVATE KEY")
+                || upper.contains("RSA PRIVATE KEY")
+                || upper.contains("EC PRIVATE KEY")
+                || upper.contains("DSA PRIVATE KEY")
+                || upper.contains("OPENSSH PRIVATE KEY")
+                || upper.contains("PGP PRIVATE KEY BLOCK")
+            {
+                return Some(SensitiveLeakReason::PrivateKey);
+            }
+        }
+
+        // 2. Cloud and Platform API Tokens
+        // AWS Access Key ID: AKIA or ASIA followed by 16 alphanumeric characters
+        if let Some(pos) = trimmed.find("AKIA") {
+            if Self::is_aws_key_at(trimmed, pos) {
+                return Some(SensitiveLeakReason::ApiToken);
+            }
+        }
+        if let Some(pos) = trimmed.find("ASIA") {
+            if Self::is_aws_key_at(trimmed, pos) {
+                return Some(SensitiveLeakReason::ApiToken);
+            }
+        }
+
+        // GitHub tokens: ghp_ (personal), gho_ (oauth), ghu_ (user-to-server), ghs_ (server-to-server), github_pat_
+        if trimmed.contains("ghp_")
+            || trimmed.contains("gho_")
+            || trimmed.contains("ghu_")
+            || trimmed.contains("ghs_")
+            || trimmed.contains("github_pat_")
+        {
+            return Some(SensitiveLeakReason::ApiToken);
+        }
+
+        // OpenAI API keys / Stripe live keys: sk- or sk-proj- or sk_live_
+        if (trimmed.contains("sk-") || trimmed.contains("sk_live_") || trimmed.contains("sk_test_"))
+            && Self::has_openai_or_stripe_key(trimmed)
+        {
+            return Some(SensitiveLeakReason::ApiToken);
+        }
+
+        // Slack tokens: xoxb-, xoxp-, xoxa-, xoxr-
+        if trimmed.contains("xoxb-")
+            || trimmed.contains("xoxp-")
+            || trimmed.contains("xoxa-")
+            || trimmed.contains("xoxr-")
+        {
+            return Some(SensitiveLeakReason::ApiToken);
+        }
+
+        // 3. Bearer JWT Tokens: standard 3-part base64url separated by dots (e.g. eyJhbGci... . eyJ... . ...)
+        if Self::is_jwt_bearer_token(trimmed) {
+            return Some(SensitiveLeakReason::BearerJwt);
+        }
+
+        // 4. Password Manager Payload / Structured Export
+        if Self::is_password_manager_payload(trimmed) {
+            return Some(SensitiveLeakReason::PasswordManagerPayload);
+        }
+
+        None
+    }
+
+    fn is_aws_key_at(text: &str, pos: usize) -> bool {
+        let remainder = &text[pos..];
+        if remainder.len() >= 20 {
+            let key_candidate = &remainder[..20];
+            let rest = &key_candidate[4..20];
+            if rest
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+            {
+                let before_ok = pos == 0
+                    || !text[..pos]
+                        .chars()
+                        .last()
+                        .map(|c| c.is_ascii_alphanumeric())
+                        .unwrap_or(false);
+                let after_ok = remainder.len() == 20
+                    || !remainder[20..]
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_alphanumeric())
+                        .unwrap_or(false);
+                return before_ok && after_ok;
+            }
+        }
+        false
+    }
+
+    fn has_openai_or_stripe_key(text: &str) -> bool {
+        for segment in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
+            if (segment.starts_with("sk-")
+                || segment.starts_with("sk_live_")
+                || segment.starts_with("sk_test_"))
+                && segment.len() >= 24
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_jwt_bearer_token(text: &str) -> bool {
+        let clean = text.strip_prefix("Bearer ").unwrap_or(text).trim();
+        if clean.starts_with("eyJ") {
+            let parts: Vec<&str> = clean.split('.').collect();
+            if parts.len() == 3 {
+                let is_b64url = |p: &str| {
+                    !p.is_empty()
+                        && p.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                };
+                if is_b64url(parts[0]) && is_b64url(parts[1]) && is_b64url(parts[2]) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn is_password_manager_payload(text: &str) -> bool {
+        let lower = text.to_ascii_lowercase();
+        if lower.contains("bitwarden")
+            && (lower.contains("password")
+                || lower.contains("\"encrypted\"")
+                || lower.contains("folderid"))
+        {
+            return true;
+        }
+        if lower.contains("op://")
+            || (lower.contains("1password")
+                && (lower.contains("password") || lower.contains("vault")))
+        {
+            return true;
+        }
+        if lower.contains("keepass")
+            && (lower.contains("<key>")
+                || lower.contains("<keepassfile>")
+                || lower.contains("<pwentry>"))
+        {
+            return true;
+        }
+        false
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClipDirection {
@@ -274,5 +526,112 @@ mod tests {
         hub.reset_state();
         assert!(hub.last_hash().is_none());
         assert_eq!(hub.history_count(), 0);
+    }
+
+    #[test]
+    fn test_clip_sync_mode_parsing_and_directionality() {
+        use std::str::FromStr;
+
+        let m1 = ClipSyncMode::from_str("manual").unwrap();
+        assert_eq!(m1, ClipSyncMode::Manual);
+        assert!(!m1.can_send());
+        assert!(m1.can_receive());
+
+        let m2 = ClipSyncMode::from_str("bidirectional_auto").unwrap();
+        assert_eq!(m2, ClipSyncMode::BidirectionalAuto);
+        assert!(m2.can_send());
+        assert!(m2.can_receive());
+
+        let m3 = ClipSyncMode::from_str("send_only").unwrap();
+        assert_eq!(m3, ClipSyncMode::SendOnly);
+        assert!(m3.can_send());
+        assert!(!m3.can_receive());
+
+        let m4 = ClipSyncMode::from_str("receive_only").unwrap();
+        assert_eq!(m4, ClipSyncMode::ReceiveOnly);
+        assert!(!m4.can_send());
+        assert!(m4.can_receive());
+
+        assert!(ClipSyncMode::from_str("invalid_mode").is_err());
+    }
+
+    #[test]
+    fn test_sensitive_content_guard_detection() {
+        // Safe normal text
+        assert_eq!(
+            SensitiveContentGuard::inspect("Hello world from Tetherly!"),
+            None
+        );
+        assert_eq!(
+            SensitiveContentGuard::inspect("https://github.com/tetherly/tetherly"),
+            None
+        );
+        assert_eq!(SensitiveContentGuard::inspect("let mut x = 42;"), None);
+
+        // 1. Private keys
+        let rsa_key =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAz5...\n-----END RSA PRIVATE KEY-----";
+        assert_eq!(
+            SensitiveContentGuard::inspect(rsa_key),
+            Some(SensitiveLeakReason::PrivateKey)
+        );
+
+        let ssh_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE...\n-----END OPENSSH PRIVATE KEY-----";
+        assert_eq!(
+            SensitiveContentGuard::inspect(ssh_key),
+            Some(SensitiveLeakReason::PrivateKey)
+        );
+
+        let ec_key = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEI...\n-----END EC PRIVATE KEY-----";
+        assert_eq!(
+            SensitiveContentGuard::inspect(ec_key),
+            Some(SensitiveLeakReason::PrivateKey)
+        );
+
+        // 2. Cloud and Platform API Tokens
+        let aws_key = "AccessKeyId: AKIAIOSFODNN7EXAMPLE in config";
+        assert_eq!(
+            SensitiveContentGuard::inspect(aws_key),
+            Some(SensitiveLeakReason::ApiToken)
+        );
+
+        let gh_token = "export GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz";
+        assert_eq!(
+            SensitiveContentGuard::inspect(gh_token),
+            Some(SensitiveLeakReason::ApiToken)
+        );
+
+        let openai_key = "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF";
+        assert_eq!(
+            SensitiveContentGuard::inspect(openai_key),
+            Some(SensitiveLeakReason::ApiToken)
+        );
+
+        let slack_token = "Slack bot token: xoxb-123456789012-abcdefghijklmnop";
+        assert_eq!(
+            SensitiveContentGuard::inspect(slack_token),
+            Some(SensitiveLeakReason::ApiToken)
+        );
+
+        // 3. JWT Bearer Tokens
+        let jwt = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        assert_eq!(
+            SensitiveContentGuard::inspect(jwt),
+            Some(SensitiveLeakReason::BearerJwt)
+        );
+
+        // 4. Password Manager Payloads
+        let bitwarden_export =
+            "{\"bitwarden\": true, \"password\": \"secret123\", \"encrypted\": true}";
+        assert_eq!(
+            SensitiveContentGuard::inspect(bitwarden_export),
+            Some(SensitiveLeakReason::PasswordManagerPayload)
+        );
+
+        let op_ref = "op://vault-id/item-id/password";
+        assert_eq!(
+            SensitiveContentGuard::inspect(op_ref),
+            Some(SensitiveLeakReason::PasswordManagerPayload)
+        );
     }
 }

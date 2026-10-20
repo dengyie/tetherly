@@ -29,12 +29,12 @@ pub use runtime::{
     AuditCategory, AuditClearReport, AuditEngine, AuditEntry, AuditLogReport, AuditSeverity,
     AutoAcceptPolicyReport, AutoAcceptReport, BatchDismissReport, BatchSendItem, BatchSendReport,
     BatchSendRequest, BatchTransferItemReport, BlockedPeersReport, CandidateDismissReport,
-    ClipClearReport, ClipHistoryReport, ClipMetaEntryDto, ClipStatusReport, DiscoveredPeerDto,
-    DiscoveryReport, DiscoveryRescanReport, DismissFilter, DndMode, FileBatchDecisionReport,
-    FileDecisionReport, FileOfferDto, FileOffersReport, HealthReport, HeartbeatConfig, HostMetrics,
-    IfaceReportDto, InboxClearReport, InboxDeleteReport, InboxFileDto, InboxOpenReport,
-    InboxReport, InputControlReport, InputStatusReport, LinkGrade, LinkProbeReport,
-    LinkQualityReport, LivePeer, LocalCapsReport, MessageDirection, MessageEngine,
+    ClipClearReport, ClipHistoryReport, ClipMetaEntryDto, ClipStatusReport, ClipboardPolicyReport,
+    DiscoveredPeerDto, DiscoveryReport, DiscoveryRescanReport, DismissFilter, DndMode,
+    FileBatchDecisionReport, FileDecisionReport, FileOfferDto, FileOffersReport, HealthReport,
+    HeartbeatConfig, HostMetrics, IfaceReportDto, InboxClearReport, InboxDeleteReport,
+    InboxFileDto, InboxOpenReport, InboxReport, InputControlReport, InputStatusReport, LinkGrade,
+    LinkProbeReport, LinkQualityReport, LivePeer, LocalCapsReport, MessageDirection, MessageEngine,
     MultiFileSendReport, MultiMessageSendReport, NetworkRefreshReport, NetworkReport, Node,
     NodeConfig, NodeConfigReport, NodePorts, NotifyBannerConfig, NotifyConfigReport,
     NotifyTestReport, NotifyTestRequest, OpenRuleDto, OutboxClearReport, OutboxEngine, OutboxEntry,
@@ -59,9 +59,11 @@ pub use screen::MacSource;
 pub use screen::X11Source;
 pub use sidecar::{parse_overlay_cidrs, OverlayConfig, OverlaySource, OverlayStatus};
 pub use store::{
-    default_data_dir, load_auto_accept_policy, load_profiles, save_auto_accept_policy,
-    save_profiles, AutoAcceptPolicy, BlockedPeer, BlockedTable, DeviceType, PeerProfile,
-    ProfileTable, TargetSelector, AUTO_ACCEPT_FILE, BLOCKED_FILE, PROFILES_FILE,
+    default_data_dir, load_auto_accept_policy, load_clipboard_policy, load_profiles,
+    save_auto_accept_policy, save_clipboard_policy, save_profiles, AutoAcceptPolicy, BlockedPeer,
+    BlockedTable, ClipboardPolicy, DeviceType, PeerProfile, ProfileTable, TargetSelector,
+    AUTO_ACCEPT_FILE, BLOCKED_FILE, CLIPBOARD_POLICY_FILE, DEFAULT_MAX_CLIP_AUTO_SYNC_BYTES,
+    PROFILES_FILE,
 };
 pub use uihttp::{
     loopback_delete, loopback_events_connect, loopback_get, loopback_post, loopback_put, SseStream,
