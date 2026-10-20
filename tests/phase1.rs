@@ -7139,6 +7139,333 @@ async fn node_direct_secure_messaging_history_governance_and_zero_plaintext_via_
     peer.shutdown();
 }
 
+#[tokio::test]
+async fn node_outbox_file_lifecycle_query_clearing_resend_and_zero_plaintext_via_loopback_api() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let _peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let _host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to SSE stream on host UI
+    let mut sse_host = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("host SSE connects");
+
+    // 2. Query initial outbox history via GET /api/file/outbox
+    let (code_init, body_init) = tetherly_node::loopback_get(host_ui, "/api/file/outbox")
+        .await
+        .unwrap();
+    assert_eq!(code_init, 200);
+    let init_rep: tetherly_node::OutboxReport = serde_json::from_slice(&body_init).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.total, 0);
+    assert_eq!(init_rep.returned, 0);
+    assert!(init_rep.entries.is_empty());
+
+    // 3. Create a temporary local file to send
+    let (temp_dir, _guard) = temp_dir("outbox");
+    let file_path = temp_dir.join("outbox_spec_sample.bin");
+    let sample_payload = vec![0x42u8; 128 * 1024];
+    std::fs::write(&file_path, &sample_payload).unwrap();
+
+    // 4. Offer and send file from host to peer
+    let tr_id = host
+        .offer_and_send_file(&peer_id, &file_path, None)
+        .await
+        .expect("offer_and_send_file succeeds");
+
+    // Verify immediate SSE event UiEvent::OutboxUpdated with InFlight status
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut saw_inflight_ev = false;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(UiEvent::OutboxUpdated {
+            transfer_id,
+            peer,
+            filename,
+            size,
+            status,
+            ..
+        }))) = tokio::time::timeout(Duration::from_millis(500), sse_host.next_ui_event()).await
+        {
+            if transfer_id == tr_id && status == tetherly_node::OutboxStatus::InFlight.as_str() {
+                assert_eq!(peer, peer_id.to_string());
+                assert_eq!(filename, "outbox_spec_sample.bin");
+                assert_eq!(size, sample_payload.len() as u64);
+                saw_inflight_ev = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_inflight_ev,
+        "host must emit OutboxUpdated InFlight event"
+    );
+
+    // Check outbox query: 1 entry in flight
+    let (code_inflight, body_inflight) = tetherly_node::loopback_get(host_ui, "/api/file/outbox")
+        .await
+        .unwrap();
+    assert_eq!(code_inflight, 200);
+    let inflight_rep: tetherly_node::OutboxReport = serde_json::from_slice(&body_inflight).unwrap();
+    assert_eq!(inflight_rep.total, 1);
+    assert_eq!(
+        inflight_rep.entries[0].status,
+        tetherly_node::OutboxStatus::InFlight
+    );
+    assert_eq!(
+        inflight_rep.entries[0].source_path.as_deref(),
+        Some(file_path.to_str().unwrap())
+    );
+
+    // 5. Peer accepts file and transfer completes
+    wait_offered(&peer, Duration::from_secs(3)).await;
+    peer.user_accept_file(&tr_id).await.unwrap();
+
+    // Verify SSE event UiEvent::OutboxUpdated with Completed status
+    let deadline_comp = tokio::time::Instant::now() + Duration::from_secs(6);
+    let mut saw_completed_ev = false;
+    while tokio::time::Instant::now() < deadline_comp {
+        if let Ok(Ok(Some(UiEvent::OutboxUpdated {
+            transfer_id,
+            status,
+            ..
+        }))) = tokio::time::timeout(Duration::from_millis(500), sse_host.next_ui_event()).await
+        {
+            if transfer_id == tr_id && status == tetherly_node::OutboxStatus::Completed.as_str() {
+                saw_completed_ev = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_completed_ev,
+        "host must emit OutboxUpdated Completed event"
+    );
+
+    // Verify outbox entry is now Completed
+    let (code_comp, body_comp) = tetherly_node::loopback_get(host_ui, "/api/file/outbox")
+        .await
+        .unwrap();
+    assert_eq!(code_comp, 200);
+    let comp_rep: tetherly_node::OutboxReport = serde_json::from_slice(&body_comp).unwrap();
+    assert_eq!(comp_rep.total, 1);
+    let entry1 = &comp_rep.entries[0];
+    assert_eq!(entry1.status, tetherly_node::OutboxStatus::Completed);
+    assert!(entry1.completed_ms.is_some());
+
+    // 6. Test Rejection flow: offer and reject
+    let reject_payload = b"declined payload data";
+    let tr_reject_id = host
+        .offer_and_send_bytes(&peer_id, "sensitive_decline.txt", reject_payload, false)
+        .await
+        .unwrap();
+    wait_offered(&peer, Duration::from_secs(3)).await;
+    peer.user_reject_file(&tr_reject_id).await.unwrap();
+
+    // Verify SSE event UiEvent::OutboxUpdated with Rejected status
+    let deadline_rej = tokio::time::Instant::now() + Duration::from_secs(6);
+    let mut saw_rejected_ev = false;
+    while tokio::time::Instant::now() < deadline_rej {
+        if let Ok(Ok(Some(UiEvent::OutboxUpdated {
+            transfer_id,
+            status,
+            ..
+        }))) = tokio::time::timeout(Duration::from_millis(500), sse_host.next_ui_event()).await
+        {
+            if transfer_id == tr_reject_id
+                && status == tetherly_node::OutboxStatus::Rejected.as_str()
+            {
+                saw_rejected_ev = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_rejected_ev,
+        "host must emit OutboxUpdated Rejected event"
+    );
+
+    // Verify outbox has 2 entries (1 completed, 1 rejected)
+    let (code_both, body_both) = tetherly_node::loopback_get(host_ui, "/api/file/outbox")
+        .await
+        .unwrap();
+    assert_eq!(code_both, 200);
+    let both_rep: tetherly_node::OutboxReport = serde_json::from_slice(&body_both).unwrap();
+    assert_eq!(both_rep.total, 2);
+
+    // 7. Multi-dimensional filtering and query:
+    // a. Query by status=completed
+    let (code_filt_comp, body_filt_comp) =
+        tetherly_node::loopback_get(host_ui, "/api/file/outbox?status=completed")
+            .await
+            .unwrap();
+    assert_eq!(code_filt_comp, 200);
+    let filt_comp_rep: tetherly_node::OutboxReport =
+        serde_json::from_slice(&body_filt_comp).unwrap();
+    assert_eq!(filt_comp_rep.returned, 1);
+    assert_eq!(
+        filt_comp_rep.entries[0].status,
+        tetherly_node::OutboxStatus::Completed
+    );
+
+    // b. Query by status=rejected
+    let (code_filt_rej, body_filt_rej) =
+        tetherly_node::loopback_get(host_ui, "/api/file/outbox?status=rejected")
+            .await
+            .unwrap();
+    assert_eq!(code_filt_rej, 200);
+    let filt_rej_rep: tetherly_node::OutboxReport = serde_json::from_slice(&body_filt_rej).unwrap();
+    assert_eq!(filt_rej_rep.returned, 1);
+    assert_eq!(
+        filt_rej_rep.entries[0].status,
+        tetherly_node::OutboxStatus::Rejected
+    );
+
+    // c. Query by limit=1
+    let (code_lim, body_lim) = tetherly_node::loopback_get(host_ui, "/api/file/outbox?limit=1")
+        .await
+        .unwrap();
+    assert_eq!(code_lim, 200);
+    let lim_rep: tetherly_node::OutboxReport = serde_json::from_slice(&body_lim).unwrap();
+    assert_eq!(lim_rep.total, 2);
+    assert_eq!(lim_rep.returned, 1);
+
+    // d. Advanced query via POST /api/file/outbox/query
+    let query_payload = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "status": "completed",
+        "limit": 5,
+    });
+    let (code_qpost, body_qpost) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/outbox/query",
+        &serde_json::to_vec(&query_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_qpost, 200);
+    let qpost_rep: tetherly_node::OutboxReport = serde_json::from_slice(&body_qpost).unwrap();
+    assert_eq!(qpost_rep.returned, 1);
+
+    // 8. One-Key Resend Pipeline via POST /api/file/outbox/resend
+    let resend_payload = serde_json::json!({
+        "id": entry1.id,
+    });
+    let (code_resend, body_resend) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/outbox/resend",
+        &serde_json::to_vec(&resend_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_resend, 200);
+    let resend_rep: tetherly_node::OutboxResendReport =
+        serde_json::from_slice(&body_resend).unwrap();
+    assert!(resend_rep.ok);
+    assert_eq!(resend_rep.original_id, entry1.id);
+    assert!(resend_rep.new_transfer_id.starts_with("tr_"));
+
+    // Host outbox now has 3 entries
+    let (code_after_resend, body_after_resend) =
+        tetherly_node::loopback_get(host_ui, "/api/file/outbox")
+            .await
+            .unwrap();
+    assert_eq!(code_after_resend, 200);
+    let after_resend_rep: tetherly_node::OutboxReport =
+        serde_json::from_slice(&body_after_resend).unwrap();
+    assert_eq!(after_resend_rep.total, 3);
+
+    // 9. Negative validation:
+    // a. Resend non-existent ID -> 404
+    let bad_resend_payload = serde_json::json!({
+        "id": "out_tr_non_existent_fake_id",
+    });
+    let (code_bad_resend, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/outbox/resend",
+        &serde_json::to_vec(&bad_resend_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_bad_resend, 404);
+
+    // 10. Outbox clearing governance:
+    // a. Partial clear: clear only rejected
+    let clear_rej_payload = serde_json::json!({
+        "status": "rejected",
+    });
+    let (code_clear_rej, body_clear_rej) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/outbox/clear",
+        &serde_json::to_vec(&clear_rej_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_clear_rej, 200);
+    let clear_rej_rep: tetherly_node::OutboxClearReport =
+        serde_json::from_slice(&body_clear_rej).unwrap();
+    assert!(clear_rej_rep.ok);
+    assert_eq!(clear_rej_rep.cleared_count, 1);
+
+    // Check SSE event UiEvent::OutboxCleared
+    let deadline_clr = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_cleared_ev = false;
+    while tokio::time::Instant::now() < deadline_clr {
+        if let Ok(Ok(Some(UiEvent::OutboxCleared { count, status, .. }))) =
+            tokio::time::timeout(Duration::from_millis(500), sse_host.next_ui_event()).await
+        {
+            if count == 1
+                && status.as_deref() == Some(tetherly_node::OutboxStatus::Rejected.as_str())
+            {
+                saw_cleared_ev = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_cleared_ev, "host must emit OutboxCleared event");
+
+    // b. Full clear: clear everything remaining
+    let (code_clear_all, body_clear_all) =
+        tetherly_node::loopback_post(host_ui, "/api/file/outbox/clear", b"{}")
+            .await
+            .unwrap();
+    assert_eq!(code_clear_all, 200);
+    let clear_all_rep: tetherly_node::OutboxClearReport =
+        serde_json::from_slice(&body_clear_all).unwrap();
+    assert!(clear_all_rep.ok);
+    assert_eq!(clear_all_rep.cleared_count, 2);
+
+    // Outbox history must now be empty
+    let (_, body_final_empty) = tetherly_node::loopback_get(host_ui, "/api/file/outbox")
+        .await
+        .unwrap();
+    let final_empty_rep: tetherly_node::OutboxReport =
+        serde_json::from_slice(&body_final_empty).unwrap();
+    assert_eq!(final_empty_rep.total, 0);
+    assert!(final_empty_rep.entries.is_empty());
+
+    // 11. Security Red Line: Loopback Isolation Host 403 Forbidden check
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{host_ui}"))
+        .await
+        .expect("connect to ui port");
+    let evil_req = "GET /api/file/outbox HTTP/1.1\r\nHost: malicious.domain.com\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    // 12. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

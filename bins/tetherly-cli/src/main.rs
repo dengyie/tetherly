@@ -475,6 +475,36 @@ enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Sent files lifecycle governance, outbox inspection, resend pipeline, and purge closed loop.
+    #[command(alias = "out")]
+    Outbox {
+        #[command(subcommand)]
+        action: Option<OutboxCmd>,
+        /// Target peer device ID (`tdev_...`) or alias.
+        #[arg(long, short)]
+        peer: Option<String>,
+        /// Filter by transfer status: in_flight, completed, rejected, failed, cancelled.
+        #[arg(long, short)]
+        status: Option<String>,
+        /// Maximum number of outbox entries to return (default: 50).
+        #[arg(long, short)]
+        limit: Option<usize>,
+        /// Clear outbox records matching filter.
+        #[arg(long)]
+        clear: bool,
+        /// One-key resend outbox file by id or transfer_id.
+        #[arg(long)]
+        resend: Option<String>,
+        /// Watch mode: continuously stream live outbox events via SSE.
+        #[arg(long, short)]
+        watch: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Manage native desktop notification banners and Do-Not-Disturb (DND) policy.
     Banner {
         #[command(subcommand)]
@@ -1146,6 +1176,64 @@ enum MessageCmd {
         /// Output raw JSON per event line instead of formatted text.
         #[arg(long)]
         json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum OutboxCmd {
+    /// List outbox records with optional peer, status and limit filtering.
+    #[command(alias = "ls")]
+    List {
+        /// Target peer device ID (`tdev_...`) or alias.
+        #[arg(long, short)]
+        peer: Option<String>,
+        /// Filter by transfer status: in_flight, completed, rejected, failed, cancelled.
+        #[arg(long, short)]
+        status: Option<String>,
+        /// Maximum number of outbox entries to return (default: 50).
+        #[arg(long, short)]
+        limit: Option<usize>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Clear and purge outbox transmission records.
+    Clear {
+        /// Target peer filter to selectively clear.
+        #[arg(long, short)]
+        peer: Option<String>,
+        /// Status filter to selectively clear.
+        #[arg(long, short)]
+        status: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// One-key resend and re-offer an outbox file.
+    Resend {
+        /// Outbox entry ID (`out_tr_...`) or transfer ID (`tr_...`).
+        id: String,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Stream real-time outbox events over SSE.
+    Watch {
+        /// Target peer filter for events.
+        #[arg(long, short)]
+        peer: Option<String>,
         /// UI API port of the running node (loopback only).
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
@@ -2271,6 +2359,301 @@ async fn handle_message_watch(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn handle_outbox_cmd(
+    action: Option<OutboxCmd>,
+    default_peer: Option<String>,
+    default_status: Option<String>,
+    default_limit: Option<usize>,
+    default_clear: bool,
+    default_resend: Option<String>,
+    default_watch: bool,
+    default_json: bool,
+    default_ui_port: u16,
+) -> Result<()> {
+    if default_clear {
+        return handle_outbox_clear(default_peer, default_status, default_json, default_ui_port)
+            .await;
+    }
+    if let Some(resend_id) = default_resend {
+        return handle_outbox_resend(&resend_id, default_json, default_ui_port).await;
+    }
+    if default_watch {
+        return handle_outbox_watch(default_peer, default_json, default_ui_port).await;
+    }
+    match action {
+        None => {
+            handle_outbox_list(
+                default_peer,
+                default_status,
+                default_limit,
+                default_json,
+                default_ui_port,
+            )
+            .await
+        }
+        Some(OutboxCmd::List {
+            peer,
+            status,
+            limit,
+            json,
+            ui_port,
+        }) => {
+            let p = peer.or(default_peer);
+            let s = status.or(default_status);
+            let lim = limit.or(default_limit);
+            let j = json || default_json;
+            let port = if ui_port != 45716 {
+                ui_port
+            } else {
+                default_ui_port
+            };
+            handle_outbox_list(p, s, lim, j, port).await
+        }
+        Some(OutboxCmd::Clear {
+            peer,
+            status,
+            json,
+            ui_port,
+        }) => {
+            let p = peer.or(default_peer);
+            let s = status.or(default_status);
+            let j = json || default_json;
+            let port = if ui_port != 45716 {
+                ui_port
+            } else {
+                default_ui_port
+            };
+            handle_outbox_clear(p, s, j, port).await
+        }
+        Some(OutboxCmd::Resend { id, json, ui_port }) => {
+            let j = json || default_json;
+            let port = if ui_port != 45716 {
+                ui_port
+            } else {
+                default_ui_port
+            };
+            handle_outbox_resend(&id, j, port).await
+        }
+        Some(OutboxCmd::Watch { peer, ui_port }) => {
+            let p = peer.or(default_peer);
+            let port = if ui_port != 45716 {
+                ui_port
+            } else {
+                default_ui_port
+            };
+            handle_outbox_watch(p, default_json, port).await
+        }
+    }
+}
+
+async fn handle_outbox_list(
+    peer: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    let mut query_params = Vec::new();
+    if let Some(p) = &peer {
+        query_params.push(format!("peer={p}"));
+    }
+    if let Some(s) = &status {
+        query_params.push(format!("status={s}"));
+    }
+    if let Some(l) = limit {
+        query_params.push(format!("limit={l}"));
+    }
+    let qs = if query_params.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query_params.join("&"))
+    };
+    let path = format!("/api/file/outbox{qs}");
+    let (code, resp) = loopback_get(ui_port, &path).await.map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
+    if code != 200 {
+        bail!(
+            "failed to query outbox history (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&resp).trim());
+    } else {
+        let val: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+        print_outbox_report(&val);
+    }
+    Ok(())
+}
+
+fn print_outbox_report(val: &serde_json::Value) {
+    let total = val["total"].as_u64().unwrap_or(0);
+    let returned = val["returned"].as_u64().unwrap_or(0);
+    println!("Outbox & Sent Files History (total: {total}, showing: {returned}):");
+    let entries = match val["entries"].as_array() {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => {
+            println!("  (no outbox entries found)");
+            return;
+        }
+    };
+    println!(
+        "  {:<20} {:<24} {:<12} {:<12} {:<12} {:<12} {:<24}",
+        "ID", "FILENAME", "SIZE", "PEER", "STATUS", "SPEED", "STARTED"
+    );
+    println!("  {}", "-".repeat(110));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    for e in entries {
+        let id = e["id"].as_str().unwrap_or("-");
+        let filename = e["filename"].as_str().unwrap_or("-");
+        let clean_filename: String = filename.chars().take(22).collect();
+        let size = e["size"].as_u64().unwrap_or(0);
+        let peer = e["peer"].as_str().unwrap_or("-");
+        let short_peer = if peer.len() > 10 { &peer[..10] } else { peer };
+        let status = e["status"].as_str().unwrap_or("unknown");
+        let speed = e["speed_bps"].as_u64().unwrap_or(0);
+        let speed_str = if speed > 0 {
+            format!("{}/s", format_bytes(speed))
+        } else {
+            "-".to_string()
+        };
+        let ts = e["started_ms"].as_u64().unwrap_or(0);
+        let ago_str = if now_ms >= ts {
+            let diff_s = (now_ms - ts) / 1000;
+            format!("{diff_s}s ago")
+        } else {
+            "just now".to_string()
+        };
+        println!(
+            "  {:<20} {:<24} {:<12} {:<12} {:<12} {:<12} {:<24}",
+            id,
+            clean_filename,
+            format_bytes(size),
+            short_peer,
+            status,
+            speed_str,
+            ago_str
+        );
+    }
+}
+
+async fn handle_outbox_clear(
+    peer: Option<String>,
+    status: Option<String>,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    let payload = serde_json::json!({
+        "peer": peer,
+        "status": status,
+    });
+    let bytes = serde_json::to_vec(&payload)?;
+    let (code, resp) = loopback_post(ui_port, "/api/file/outbox/clear", &bytes)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        bail!(
+            "failed to clear outbox records (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&resp).trim());
+    } else {
+        let val: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+        let count = val["cleared_count"].as_u64().unwrap_or(0);
+        let target_p = val["target_peer"].as_str().unwrap_or("all");
+        let target_s = val["target_status"].as_str().unwrap_or("all");
+        println!("Outbox purged: {count} entries cleared (peer: {target_p}, status: {target_s})");
+    }
+    Ok(())
+}
+
+async fn handle_outbox_resend(id: &str, json: bool, ui_port: u16) -> Result<()> {
+    let payload = serde_json::json!({
+        "id": id,
+    });
+    let bytes = serde_json::to_vec(&payload)?;
+    let (code, resp) = loopback_post(ui_port, "/api/file/outbox/resend", &bytes)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        bail!(
+            "failed to resend outbox file (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&resp).trim());
+    } else {
+        let val: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+        let orig = val["original_id"].as_str().unwrap_or(id);
+        let new_id = val["new_transfer_id"].as_str().unwrap_or("?");
+        let msg = val["message"].as_str().unwrap_or("success");
+        println!("File re-offered successfully!");
+        println!("  Original: {orig}");
+        println!("  New TxID: {new_id}");
+        println!("  Status:   {msg}");
+    }
+    Ok(())
+}
+
+async fn handle_outbox_watch(peer: Option<String>, json: bool, ui_port: u16) -> Result<()> {
+    let mut sse = loopback_events_connect(ui_port).await.map_err(|e| {
+        anyhow::anyhow!(
+            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+             start one with `tetherly --data-dir <dir> run` first"
+        )
+    })?;
+    if !json {
+        let filter_info = match &peer {
+            Some(p) => format!(" (filter peer: {p})"),
+            None => String::new(),
+        };
+        println!("Streaming live outbox events on 127.0.0.1:{ui_port}{filter_info}...");
+    }
+    while let Ok(Some(raw)) = sse.next_event().await {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let kind = val["kind"].as_str().unwrap_or("");
+            if kind == "outbox_updated" || kind == "outbox_cleared" {
+                if let Some(target_p) = &peer {
+                    let ev_p = val["peer"].as_str().unwrap_or("");
+                    if !ev_p.contains(target_p) {
+                        continue;
+                    }
+                }
+                if json {
+                    println!("{raw}");
+                } else {
+                    print_event(&val);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn print_event(v: &serde_json::Value) {
     let kind = v["kind"].as_str().unwrap_or("unknown");
     match kind {
@@ -2588,6 +2971,30 @@ fn print_event(v: &serde_json::Value) {
             let peer = v["peer"].as_str().unwrap_or("?");
             let len = v["len"].as_u64().unwrap_or(0);
             println!("[message_sent] id={id} to={peer} (length: {len} bytes)");
+        }
+        "outbox_updated" => {
+            let id = v["id"].as_str().unwrap_or("?");
+            let tid = v["transfer_id"].as_str().unwrap_or("?");
+            let peer = v["peer"].as_str().unwrap_or("?");
+            let fname = v["filename"].as_str().unwrap_or("?");
+            let sz = v["size"].as_u64().unwrap_or(0);
+            let status = v["status"].as_str().unwrap_or("?");
+            println!(
+                "[outbox_updated] id={id} transfer={tid} peer={peer} file=\"{fname}\" ({}) status={status}",
+                format_bytes(sz)
+            );
+        }
+        "outbox_cleared" => {
+            let count = v["count"].as_u64().unwrap_or(0);
+            let peer = v["peer"]
+                .as_str()
+                .map(|p| format!(" peer={p}"))
+                .unwrap_or_default();
+            let status = v["status"]
+                .as_str()
+                .map(|s| format!(" status={s}"))
+                .unwrap_or_default();
+            println!("[outbox_cleared] purged={count} entries{peer}{status}");
         }
         other => {
             println!("[{other}] {v}");
@@ -4845,6 +5252,22 @@ async fn main() -> Result<()> {
         } => {
             handle_message_cmd(
                 action, peer, text, limit, unread, mark_read, clear, watch, json, ui_port,
+            )
+            .await?;
+        }
+        Cmd::Outbox {
+            action,
+            peer,
+            status,
+            limit,
+            clear,
+            resend,
+            watch,
+            json,
+            ui_port,
+        } => {
+            handle_outbox_cmd(
+                action, peer, status, limit, clear, resend, watch, json, ui_port,
             )
             .await?;
         }

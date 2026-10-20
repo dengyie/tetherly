@@ -8,7 +8,7 @@ use crate::platform::{insert_foreground, MemoryClip, SystemClip};
 use crate::sidecar::{self, OverlayConfig, OverlaySource, OverlayStatus};
 use crate::store::{load_trust, remember_route, save_trust, RouteTable};
 use crate::telemetry::{TrafficReport, TrafficTelemetry};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
@@ -1045,6 +1045,213 @@ pub struct PeerMessageClearReport {
     pub message: String,
 }
 
+/// Status of an outbound file transfer in the node's outbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboxStatus {
+    InFlight,
+    Completed,
+    Rejected,
+    Failed,
+    Cancelled,
+}
+
+impl OutboxStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InFlight => "in_flight",
+            Self::Completed => "completed",
+            Self::Rejected => "rejected",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl std::str::FromStr for OutboxStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "in_flight" | "inflight" | "sending" => Ok(Self::InFlight),
+            "completed" | "complete" | "done" => Ok(Self::Completed),
+            "rejected" | "reject" => Ok(Self::Rejected),
+            "failed" | "fail" | "error" => Ok(Self::Failed),
+            "cancelled" | "cancel" | "canceled" => Ok(Self::Cancelled),
+            other => Err(format!("unknown outbox status '{other}'")),
+        }
+    }
+}
+
+/// A structured outbox record tracking a sent file transfer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OutboxEntry {
+    pub id: String,
+    pub transfer_id: String,
+    pub peer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_alias: Option<String>,
+    pub filename: String,
+    pub size: u64,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    pub status: OutboxStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub started_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_ms: Option<u64>,
+    #[serde(default)]
+    pub speed_bps: u64,
+}
+
+/// Bounded in-memory circular ring buffer for outbox records.
+pub struct OutboxEngine {
+    pub capacity: usize,
+    pub entries: VecDeque<OutboxEntry>,
+}
+
+impl Default for OutboxEngine {
+    fn default() -> Self {
+        Self::new(200)
+    }
+}
+
+impl OutboxEngine {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.clamp(10, 1000),
+            entries: VecDeque::with_capacity(capacity.min(200)),
+        }
+    }
+
+    pub fn push(&mut self, entry: OutboxEntry) {
+        if self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(entry);
+    }
+
+    pub fn update_status(
+        &mut self,
+        transfer_id: &str,
+        status: OutboxStatus,
+        error: Option<String>,
+        completed_ms: Option<u64>,
+        speed_bps: Option<u64>,
+    ) -> bool {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|e| e.transfer_id == transfer_id)
+        {
+            entry.status = status;
+            if let Some(err) = error {
+                entry.error = Some(err);
+            }
+            if let Some(cm) = completed_ms {
+                entry.completed_ms = Some(cm);
+            }
+            if let Some(spd) = speed_bps {
+                entry.speed_bps = spd;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn query(
+        &self,
+        peer: Option<&str>,
+        status: Option<OutboxStatus>,
+        limit: Option<usize>,
+    ) -> (usize, Vec<OutboxEntry>) {
+        let total = self.entries.len();
+        let lim = limit.unwrap_or(50).clamp(1, 500);
+        let mut list: Vec<OutboxEntry> = self
+            .entries
+            .iter()
+            .rev()
+            .filter(|e| {
+                if let Some(p) = peer {
+                    if e.peer != p && e.peer_alias.as_deref() != Some(p) {
+                        return false;
+                    }
+                }
+                if let Some(st) = status {
+                    if e.status != st {
+                        return false;
+                    }
+                }
+                true
+            })
+            .take(lim)
+            .cloned()
+            .collect();
+        list.reverse();
+        (total, list)
+    }
+
+    pub fn clear(&mut self, peer: Option<&str>, status: Option<OutboxStatus>) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|e| {
+            if let Some(p) = peer {
+                if e.peer == p || e.peer_alias.as_deref() == Some(p) {
+                    if let Some(st) = status {
+                        return e.status != st;
+                    }
+                    return false;
+                }
+            } else if let Some(st) = status {
+                return e.status != st;
+            } else {
+                return false;
+            }
+            true
+        });
+        before - self.entries.len()
+    }
+
+    pub fn get_by_id(&self, id_or_transfer_id: &str) -> Option<OutboxEntry> {
+        let needle = id_or_transfer_id.trim();
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| e.id == needle || e.transfer_id == needle || e.id.starts_with(needle))
+            .cloned()
+    }
+}
+
+/// Outbox query response report.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OutboxReport {
+    pub ok: bool,
+    pub total: usize,
+    pub returned: usize,
+    pub entries: Vec<OutboxEntry>,
+}
+
+/// Report after clearing outbox records.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OutboxClearReport {
+    pub ok: bool,
+    pub cleared_count: usize,
+    pub target_peer: Option<String>,
+    pub target_status: Option<OutboxStatus>,
+    pub message: String,
+}
+
+/// Report after re-offering a sent file from outbox.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OutboxResendReport {
+    pub ok: bool,
+    pub original_id: String,
+    pub new_transfer_id: String,
+    pub message: String,
+}
+
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ClipStatusReport {
@@ -1789,6 +1996,7 @@ struct Shared {
     link_trackers: Mutex<HashMap<DeviceId, PeerLinkTracker>>,
     audit_engine: Mutex<AuditEngine>,
     message_engine: Mutex<MessageEngine>,
+    outbox_engine: Mutex<OutboxEngine>,
 }
 
 #[derive(Clone)]
@@ -2006,6 +2214,7 @@ impl Node {
             link_trackers: Mutex::new(HashMap::new()),
             audit_engine: Mutex::new(AuditEngine::new(500)),
             message_engine: Mutex::new(MessageEngine::new(200)),
+            outbox_engine: Mutex::new(OutboxEngine::new(200)),
         });
         Ok(Self { shared })
     }
@@ -5393,6 +5602,148 @@ impl Node {
         })
     }
 
+    /// Query and filter outbox transmission history, with optional peer, status and limit filtering.
+    pub fn outbox_history(
+        &self,
+        peer_target: Option<&str>,
+        status: Option<OutboxStatus>,
+        limit: Option<usize>,
+    ) -> Result<OutboxReport, CoreError> {
+        let resolved_peer = if let Some(target) = peer_target {
+            if target.trim().is_empty() {
+                None
+            } else {
+                Some(self.resolve_peer(target)?.to_string())
+            }
+        } else {
+            None
+        };
+
+        let engine = self
+            .shared
+            .outbox_engine
+            .lock()
+            .expect("outbox_engine lock");
+        let (total, entries) = engine.query(resolved_peer.as_deref(), status, limit);
+
+        Ok(OutboxReport {
+            ok: true,
+            total,
+            returned: entries.len(),
+            entries,
+        })
+    }
+
+    /// Clear outbox transmission records, optionally filtered by peer and status.
+    pub fn clear_outbox(
+        &self,
+        peer_target: Option<&str>,
+        status: Option<OutboxStatus>,
+    ) -> Result<OutboxClearReport, CoreError> {
+        let resolved_peer = if let Some(target) = peer_target {
+            if target.trim().is_empty() {
+                None
+            } else {
+                Some(self.resolve_peer(target)?.to_string())
+            }
+        } else {
+            None
+        };
+
+        let cleared_count = {
+            let mut engine = self
+                .shared
+                .outbox_engine
+                .lock()
+                .expect("outbox_engine lock");
+            engine.clear(resolved_peer.as_deref(), status)
+        };
+
+        let target_label = resolved_peer.clone().unwrap_or_else(|| "all".to_string());
+        let status_label = status
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_else(|| "all".to_string());
+        self.record_audit(
+            AuditCategory::File,
+            AuditSeverity::Notice,
+            "outbox_cleared",
+            resolved_peer.clone(),
+            format!("Cleared {cleared_count} outbox entries for peer: {target_label}, status: {status_label}"),
+            true,
+        );
+
+        self.emit(UiEvent::outbox_cleared(
+            cleared_count,
+            resolved_peer.clone(),
+            status.map(|s| s.as_str()),
+            self.shared.clock.unix_ms(),
+        ));
+
+        Ok(OutboxClearReport {
+            ok: true,
+            cleared_count,
+            target_peer: resolved_peer,
+            target_status: status,
+            message: format!("successfully cleared {cleared_count} outbox entries"),
+        })
+    }
+
+    /// Resend an outbox file by original entry id or transfer id.
+    pub async fn resend_outbox_file(
+        &self,
+        id_or_transfer_id: &str,
+    ) -> Result<OutboxResendReport, CoreError> {
+        let entry = {
+            let engine = self
+                .shared
+                .outbox_engine
+                .lock()
+                .expect("outbox_engine lock");
+            engine
+                .get_by_id(id_or_transfer_id)
+                .ok_or(CoreError::UnknownTransfer)?
+        };
+
+        let peer_id = self.resolve_peer(&entry.peer)?;
+
+        let new_transfer_id = if let Some(ref path_str) = entry.source_path {
+            let p = std::path::Path::new(path_str);
+            if !p.exists() || !p.is_file() {
+                return Err(CoreError::File(format!(
+                    "source file '{path_str}' no longer exists on disk"
+                )));
+            }
+            self.offer_and_send_file(&peer_id, p, Some(&entry.filename))
+                .await?
+        } else {
+            return Err(CoreError::File(
+                "cannot resend memory-only file transfer without local source file path".into(),
+            ));
+        };
+
+        self.record_audit(
+            AuditCategory::File,
+            AuditSeverity::Notice,
+            "outbox_resent",
+            Some(peer_id.to_string()),
+            format!(
+                "Resent outbox file '{}' (original: {}, new: {})",
+                entry.filename, entry.id, new_transfer_id
+            ),
+            true,
+        );
+
+        Ok(OutboxResendReport {
+            ok: true,
+            original_id: entry.id,
+            new_transfer_id: new_transfer_id.clone(),
+            message: format!(
+                "successfully re-offered file '{}' to peer {}",
+                entry.filename, entry.peer
+            ),
+        })
+    }
+
     pub fn clone_handle(&self) -> Self {
         Self {
             shared: self.shared.clone(),
@@ -7643,7 +7994,7 @@ impl Node {
             files: vec![tetherly_core::FileMeta {
                 name: name.into(),
                 size: data.len() as u64,
-                sha256: digest,
+                sha256: digest.clone(),
             }],
         };
         self.shared.pending_out.lock().expect("pending").insert(
@@ -7678,6 +8029,36 @@ impl Node {
                     is_resumed: false,
                 },
             );
+        let outbox_id = format!("out_{transfer_id}_{now}");
+        let alias = self.peer_alias(peer);
+        self.shared
+            .outbox_engine
+            .lock()
+            .expect("outbox_engine")
+            .push(OutboxEntry {
+                id: outbox_id.clone(),
+                transfer_id: transfer_id.clone(),
+                peer: peer.to_string(),
+                peer_alias: alias,
+                filename: name.to_string(),
+                size: data.len() as u64,
+                sha256: digest,
+                source_path: None,
+                status: OutboxStatus::InFlight,
+                error: None,
+                started_ms: now,
+                completed_ms: None,
+                speed_bps: 0,
+            });
+        self.emit(UiEvent::outbox_updated(
+            outbox_id,
+            &transfer_id,
+            peer.to_string(),
+            name,
+            data.len() as u64,
+            OutboxStatus::InFlight.as_str(),
+            now,
+        ));
         self.send_to(peer, offer.to_frame()?).await?;
         let _ = _wait_accept;
         Ok(transfer_id)
@@ -7731,7 +8112,7 @@ impl Node {
             files: vec![tetherly_core::FileMeta {
                 name: safe_name.clone(),
                 size,
-                sha256: digest,
+                sha256: digest.clone(),
             }],
         };
         self.shared.pending_out.lock().expect("pending").insert(
@@ -7754,7 +8135,7 @@ impl Node {
                     transfer_id: transfer_id.clone(),
                     peer: peer.clone(),
                     direction: TransferDirection::Outbound,
-                    filename: safe_name,
+                    filename: safe_name.clone(),
                     total: size,
                     transferred: 0,
                     speed_bps: 0,
@@ -7766,6 +8147,36 @@ impl Node {
                     is_resumed: false,
                 },
             );
+        let outbox_id = format!("out_{transfer_id}_{now}");
+        let alias = self.peer_alias(peer);
+        self.shared
+            .outbox_engine
+            .lock()
+            .expect("outbox_engine")
+            .push(OutboxEntry {
+                id: outbox_id.clone(),
+                transfer_id: transfer_id.clone(),
+                peer: peer.to_string(),
+                peer_alias: alias,
+                filename: safe_name.clone(),
+                size,
+                sha256: digest,
+                source_path: Some(path.to_string_lossy().to_string()),
+                status: OutboxStatus::InFlight,
+                error: None,
+                started_ms: now,
+                completed_ms: None,
+                speed_bps: 0,
+            });
+        self.emit(UiEvent::outbox_updated(
+            outbox_id,
+            &transfer_id,
+            peer.to_string(),
+            &safe_name,
+            size,
+            OutboxStatus::InFlight.as_str(),
+            now,
+        ));
         self.send_to(peer, offer.to_frame()?).await?;
         Ok(transfer_id)
     }
@@ -9397,42 +9808,106 @@ impl Node {
         error: Option<String>,
     ) {
         let now = self.shared.clock.unix_ms();
-        let mut transfers = self.shared.active_transfers.lock().expect("transfers");
-        if let Some(t) = transfers.get_mut(transfer_id) {
-            if t.phase == TransferPhase::Failed && phase != TransferPhase::Failed {
-                return;
-            }
-            let was_in_flight =
-                t.phase == TransferPhase::Transferring || t.phase == TransferPhase::Verifying;
-            if was_in_flight {
-                let mut stats = self.shared.transfer_stats.lock().expect("transfer_stats");
-                match phase {
-                    TransferPhase::Completed => {
-                        match t.direction {
-                            TransferDirection::Outbound => {
-                                stats.bytes_sent = stats.bytes_sent.saturating_add(t.total);
-                            }
-                            TransferDirection::Inbound => {
-                                stats.bytes_received = stats.bytes_received.saturating_add(t.total);
-                            }
-                        }
-                        stats.completed_count = stats.completed_count.saturating_add(1);
-                    }
-                    TransferPhase::Failed => {
-                        stats.failed_count = stats.failed_count.saturating_add(1);
-                    }
-                    _ => {}
+        let outbox_info = {
+            let mut transfers = self.shared.active_transfers.lock().expect("transfers");
+            if let Some(t) = transfers.get_mut(transfer_id) {
+                if t.phase == TransferPhase::Failed && phase != TransferPhase::Failed {
+                    return;
                 }
-            }
-            if phase == TransferPhase::Completed || phase == TransferPhase::Failed {
-                t.speed_bps = 0;
-            }
-            t.phase = phase;
-            t.error = error;
-            t.updated_ms = now;
+                let was_in_flight =
+                    t.phase == TransferPhase::Transferring || t.phase == TransferPhase::Verifying;
+                if was_in_flight {
+                    let mut stats = self.shared.transfer_stats.lock().expect("transfer_stats");
+                    match phase {
+                        TransferPhase::Completed => {
+                            match t.direction {
+                                TransferDirection::Outbound => {
+                                    stats.bytes_sent = stats.bytes_sent.saturating_add(t.total);
+                                }
+                                TransferDirection::Inbound => {
+                                    stats.bytes_received =
+                                        stats.bytes_received.saturating_add(t.total);
+                                }
+                            }
+                            stats.completed_count = stats.completed_count.saturating_add(1);
+                        }
+                        TransferPhase::Failed => {
+                            stats.failed_count = stats.failed_count.saturating_add(1);
+                        }
+                        _ => {}
+                    }
+                }
+                let speed = if phase == TransferPhase::Completed || phase == TransferPhase::Failed {
+                    let dur = now.saturating_sub(t.started_ms);
+                    if dur > 0 && t.transferred > 0 {
+                        (t.transferred * 1000) / dur
+                    } else {
+                        0
+                    }
+                } else {
+                    t.speed_bps
+                };
+                if phase == TransferPhase::Completed || phase == TransferPhase::Failed {
+                    t.speed_bps = 0;
+                }
+                t.phase = phase;
+                t.error = error.clone();
+                t.updated_ms = now;
 
-            if t.phase == TransferPhase::Completed || t.phase == TransferPhase::Failed {
-                Self::prune_terminal_transfers_locked(&mut transfers);
+                let is_outbound = t.direction == TransferDirection::Outbound;
+                let peer_str = t.peer.to_string();
+                let filename = t.filename.clone();
+                let size = t.total;
+
+                if t.phase == TransferPhase::Completed || t.phase == TransferPhase::Failed {
+                    Self::prune_terminal_transfers_locked(&mut transfers);
+                }
+
+                if is_outbound {
+                    Some((peer_str, filename, size, speed))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some((peer_str, filename, size, speed)) = outbox_info {
+            let outbox_status = match phase {
+                TransferPhase::Completed => Some(OutboxStatus::Completed),
+                TransferPhase::Failed => {
+                    if error.as_deref() == Some("rejected by peer") {
+                        Some(OutboxStatus::Rejected)
+                    } else if error.as_deref() == Some("cancelled by user") {
+                        Some(OutboxStatus::Cancelled)
+                    } else {
+                        Some(OutboxStatus::Failed)
+                    }
+                }
+                _ => None,
+            };
+            if let Some(status) = outbox_status {
+                let outbox_id = format!("out_{}", transfer_id);
+                {
+                    let mut outbox = self.shared.outbox_engine.lock().expect("outbox_engine");
+                    outbox.update_status(
+                        transfer_id,
+                        status,
+                        error.clone(),
+                        Some(now),
+                        Some(speed),
+                    );
+                }
+                self.emit(UiEvent::outbox_updated(
+                    outbox_id,
+                    transfer_id,
+                    peer_str,
+                    filename,
+                    size,
+                    status.as_str(),
+                    now,
+                ));
             }
         }
     }
@@ -9494,7 +9969,7 @@ impl Node {
 
     /// Cancel an active in-flight transfer (inbound or outbound).
     pub async fn cancel_transfer(&self, transfer_id: &str) -> Result<(), CoreError> {
-        let (cancel_tx, peer_to_notify) = {
+        let (cancel_tx, peer_to_notify, is_outbound, filename, size) = {
             let mut cancels = self.shared.transfer_cancels.lock().expect("cancels");
             let mut pending = self.shared.pending_out.lock().expect("pending");
             let mut transfers = self.shared.active_transfers.lock().expect("transfers");
@@ -9514,14 +9989,47 @@ impl Node {
             t.speed_bps = 0;
             t.updated_ms = self.shared.clock.unix_ms();
 
+            let is_outbound = t.direction == TransferDirection::Outbound;
+            let filename = t.filename.clone();
+            let size = t.total;
             let peer = t.peer.clone();
             pending.remove(transfer_id);
             Self::prune_terminal_transfers_locked(&mut transfers);
-            (cancels.remove(transfer_id), peer)
+            (
+                cancels.remove(transfer_id),
+                peer,
+                is_outbound,
+                filename,
+                size,
+            )
         };
 
         if let Some(tx) = cancel_tx {
             let _ = tx.send(());
+        }
+
+        let now = self.shared.clock.unix_ms();
+        if is_outbound {
+            let outbox_id = format!("out_{}", transfer_id);
+            {
+                let mut outbox = self.shared.outbox_engine.lock().expect("outbox_engine");
+                outbox.update_status(
+                    transfer_id,
+                    OutboxStatus::Cancelled,
+                    Some("cancelled by user".into()),
+                    Some(now),
+                    Some(0),
+                );
+            }
+            self.emit(UiEvent::outbox_updated(
+                outbox_id,
+                transfer_id,
+                peer_to_notify.to_string(),
+                filename,
+                size,
+                OutboxStatus::Cancelled.as_str(),
+                now,
+            ));
         }
 
         let reject_decision = tetherly_core::FileDecision {

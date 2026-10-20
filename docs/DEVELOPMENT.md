@@ -3,12 +3,65 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.67** |
+| 文档版本 | **1.68** |
 | 日期 | 2026-10-19 |
-| 状态 | **v1.67 跨端点对点安全文本/便签即时交互通道、离线消息缓冲、消息历史治理与双向全闭环（ADR-060）**——(1) **安全文本与便签即时传输帧定义 (`TYPE_TEXT_MESSAGE: 0x0202`, `crates/tetherly-core/src/frame.rs` & `lib.rs`)**：在协议核心层确立点对点文本与便签专属传输帧，定义强类型载荷模型 `TextMessage`（唯一消息 ID、时间戳、发送方 ID、文本内容），严格约束文本体积上限（32 KiB），保证 Noise Transport Plaintext 65,519 字节天花板下的原子无碎片单帧投递；(2) **定额环形消息缓冲引擎 (`MessageEngine`, `crates/tetherly-node/src/runtime.rs` & `lib.rs`)**：构建定额 200 条内存环形缓冲区，维护结构化消息模型 `PeerMessage`（ID、对端、方向 Inbound/Outbound、已读标记、时间戳、正文），支持 $O(1)$ 均摊压入、按对端设备/未读状态/条数上限多维检索、原子批量已读标记 (`mark_read`) 与按对端或全量清空 (`clear_messages`) 治理；(3) **Zero-Plaintext 零明文安全铁律与事件总线可观测性 (`crates/tetherly-node/src/events.rs`)**：新增 `UiEvent::MessageReceived` 与 `UiEvent::MessageSent` 零明文事件变体，仅分发消息 ID、对端标识、字节长度与时间戳，严禁在 SSE 广播与全局追踪日志中泄露任何文本明文；(4) **回环控制面端点全闭环与 403 强隔离防御 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `POST /api/message/send`（支持单活跃对端自动解析）、`GET /api/message/history`（支持 peer/limit/unread_only/mark_read 组合查询）、`POST /api/message/query` 与 `POST /api/message/clear`，严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离防御；(5) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：新增 `message`（别名 `msg`）子命令族（`send`、`history`/`list`、`clear`、`watch`），提供交互式对话气泡渲染、历史消息按需标记已读、实时 SSE 事件流监听，双端参数与输出格式 100% 同构；(6) **Web UI 跨端即时对话与便签面板 (`ui/index.html`)**：在控制台中增设「跨端即时消息与安全便签通道」独立面板，提供对端动态选择器、未读消息过滤、双向消息气泡流（收/发差异化高亮）、多行文本输入与快捷发送、SSE 实时同步；(7) **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 增设完整集成测试覆盖跨端双向加密交互、未读状态流转与快照统计、多维条件检索、消息清空重置、SSE 零明文检验与 Host 403 恶意阻断，全工作区测试全绿、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 达标。+ v1.66 节点安全审计轨迹、环形结构化审计日志、多维安全检索与遥测全闭环（ADR-059）+ v1.65 对端加密连接保活心跳治理、动态心跳间隔调谐、多维链路质量画像与主动探活遥测全闭环（ADR-058）+ v1.64 节点系统资源深度遥测、进程级性能画像与运行时健康度量闭环（ADR-057）+ v1.63 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环（ADR-056）+ v1.62 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环（ADR-055）+ v1.61 局域网设备自发现治理、信标可观测性与一键拨号配对闭环（ADR-054）+ v1.60 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环（ADR-053）+ v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
+| 状态 | **v1.68 跨端发件箱生命周期治理、发送历史可观测性、传输状态追踪与安全审计清除全闭环（ADR-061）**——(1) **发端与收端结构性不对称破局与发件箱生命周期模型 (`OutboxStatus`, `OutboxEntry`, `crates/tetherly-node/src/runtime.rs` & `lib.rs`)**：定义强类型发送状态（InFlight / Completed / Rejected / Failed / Cancelled），建立完整发件箱条目模型（outbox ID、transfer ID、目标 peer 及别名、文件名、文件大小、SHA-256、本地文件源路径、状态、错误描述、起止时间戳、速率）；(2) **定额内存环形发件箱引擎 (`OutboxEngine`, `crates/tetherly-node/src/runtime.rs`)**：构建定额 200 条内存环形缓冲区，支持 $O(1)$ 均摊压入、按 transfer ID 逆序匹配状态更新 (`update_status`)、多维检索过滤 (`query`: peer, status, limit)、按条件或全量清空 (`clear`) 与基于 ID 逆向定位 (`get_by_id`)；(3) **一键重发流水线 (`Node::resend_outbox_file`)**：基于发件箱历史记录验证物理源文件存在性，一键自动重新发起跨端文件提议 (`offer_and_send_file`)，打通传输提议复用断层并输出安全审计轨迹；(4) **Zero-Plaintext 零明文事件总线可观测性 (`crates/tetherly-node/src/events.rs`)**：新增 `UiEvent::OutboxUpdated` 与 `UiEvent::OutboxCleared` 零明文事件变体，仅广播传输元数据与状态码，杜绝文件正文与私钥凭据外泄；(5) **回环控制面端点全闭环与 403 强隔离防御 (`crates/tetherly-node/src/uihttp.rs`)**：新增 `GET /api/file/outbox`、`POST /api/file/outbox/query`、`POST /api/file/outbox/clear`、`POST /api/file/outbox/resend`，严格执行 127.0.0.1 物理绑定与 Host 403 白名单拦截；(6) **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**：新增 `outbox`（别名 `out`）子命令族（`list`、`clear`、`resend`、`watch`），提供格式化表格渲染、状态筛选、一键重发与 SSE 实时更新监听；(7) **Web UI 发件箱治理面板 (`ui/index.html`)**：增设「已发送文件与发件箱治理 (Outbox)」独立面板，支持状态/对端下拉过滤、卡片流高亮展示、一键重发、一键清空与 SSE 实时联动；(8) **端到端集成测试与全量安全基线全绿**：`tests/phase1.rs` 增设完整集成测试验证发件箱生命周期、接收端确认/拒收状态流转、重发流水线、多维过滤检索、安全清空治理、SSE 零明文与 Host 403 恶意阻断，全工作区测试全绿、Linux 交叉编译、Clippy 零告警与 Cargo Deny 100% 达标。+ v1.67 跨端点对点安全文本/便签即时交互通道、离线消息缓冲、消息历史治理与双向全闭环（ADR-060）+ v1.66 节点安全审计轨迹、环形结构化审计日志、多维安全检索与遥测全闭环（ADR-059）+ v1.65 对端加密连接保活心跳治理、动态心跳间隔调谐、多维链路质量画像与主动探活遥测全闭环（ADR-058）+ v1.64 节点系统资源深度遥测、进程级性能画像与运行时健康度量闭环（ADR-057）+ v1.63 跨端桌面原生系统级通知推送、横幅弹窗治理与免打扰闭环（ADR-056）+ v1.62 跨端收件箱文件内容提取、流式下载、系统级直开与多媒体预览全闭环（ADR-055）+ v1.61 局域网设备自发现治理、信标可观测性与一键拨号配对闭环（ADR-054）+ v1.60 跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环（ADR-053）+ v1.59 跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环（ADR-052）+ v1.58 Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (Windows / macOS / Linux)（ADR-051）+ v1.57 macOS ANCS CoreBluetooth 传输栈架构、跨平台外设地址抽象与守护进程链路修复（ADR-050）+ v1.56 ANCS 苹果通知服务全生命周期治理、白名单规则动态增删查、状态机事件总线闭环与双端 CLI 全同构（ADR-049）+ v1.55 网络拓扑全景透视、网卡物理分类动态重探治理、EasyTier 侧车穿透可观测性与事件总线闭环（ADR-048）+ v1.54 远程屏幕与键鼠共享全生命周期治理、实时遥测可观测性与事件总线闭环（ADR-047）+ v1.53 跨端文件传输提议生命周期治理、轻量级提议透视与终端全同构控制闭环（ADR-046）+ v1.52 跨端剪贴板生命周期治理、元数据遥测审计与历史可观测性闭环（ADR-045）+ v1.51 通知全生命周期治理、跨端双向消除同步与通知历史可观测性闭环（ADR-044）+ v1.50 对端黑名单访问控制、恶意连接防御与动态接入鉴权治理（ADR-043）+ v1.49 对端连接会话全域治理、主动按需直连与优雅断开控制闭环（ADR-042）+ v1.48 对端能力全景透视、多维特性协商与动态功能边界治理（ADR-041）+ v1.47 全协议网络流量透视、多通道遥测度量与运行时可观测性闭环（ADR-040）+ v1.46 物理寻址路由表全景透视、静态路由注入与断线自动重连治理（ADR-039）+ v1.45 节点运行配置全景透视、动态运行时特性开关与轻量级配置回环治理（ADR-038）+ v1.44 对端设备别名治理、友好命名持久化与对端标识智能解析（ADR-037）+ v1.43 配对控制面治理、PIN 码安全生命周期管理与 CLI 拨号配对全同构（ADR-036）+ v1.42 文件传输通道全景可观测性、轻量级传输查询与命令行同构治理（ADR-035）+ v1.41 对端加密通道往返时延 (RTT) 实时测速、网络质量度量与主动链路探测（ADR-034）+ v1.40 节点事件总线实时流式推送 (SSE)、实时事件可观测性与 CLI 事件监听闭环（ADR-033）+ v1.39 节点健康检查探针、轻量级守护进程可观测性与优雅停止机制（ADR-032）+ v1.38 节点数据目录全景可观测性、存储配额分析与孤儿分块垃圾回收（ADR-031）+ v1.37 ANCS 苹果通知服务深层可观测性、白名单规则治理与命令行回环全同构（ADR-030）+ v1.36 网卡物理分类透视、EasyTier 侧车穿透诊断与网络探测回环闭环（ADR-029）+ v1.35 对端拓扑全景可观测性、物理路由缓存透视与轻量级检索（ADR-028）+ v1.34 远程屏幕与键鼠通道全域控制、定向拨号与无头命令行交互闭环（ADR-027）+ v1.33 通知候选生命周期全域治理、OTP 命令行安全提取与双向快速回复闭环（ADR-026）+ v1.32 跨端安全剪贴板主动同步、回环控制与全端闭环（ADR-025）+ v1.31 信任关系主动解绑与设备安全生命周期治理（ADR-024）+ v1.30 传输生命周期全域管控与会话级度量（ADR-023）+ v1.29 全双工传输任务取消机制（ADR-022）+ v1.28 64 GiB 上限与全景可观测性（ADR-021）+ v1.27 大文件传输实时追踪与 Web UI 进度条（ADR-020）+ v1.26 流式大文件引擎（$O(1)$ 内存界、64 KiB 块、增量 SHA-256）+ v1.25 文件发送生产闭环（/api/file/send 与 CLI send）+ v1.24 文件大小真门与网卡分类真理源 + v1.23 WinRT BLE GATT ANCS + v1.22 帧预算推导 + v1.21 背压与存活检测 + v1.20 CLI 回环客户端 + v1.19 多端采集 + v1.18 APK 闭环 + v1.8 DXGI 远程屏幕 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.68 相对 1.67(跨端发件箱生命周期治理、发送历史可观测性、传输状态追踪与安全审计清除全闭环)**
+
+- **动机(发端与收端结构性不对称痛点、发送历史黑盒与一键重发诉求)**:
+  在 Tetherly 陆续完成跨端点对点安全文本/便签即时交互通道 (v1.67 / ADR-060)、节点安全审计轨迹 (v1.66 / ADR-059)、对端连接保活与链路画像 (v1.65 / ADR-058) 及收件箱生命周期管理 (v1.60 / ADR-053) 后，底层通信与接收端文件管理已高度完善。然而，在**文件传输子系统（File Subsystem）**维度，系统存在严重的“发端与收端结构性不对称（Inbox vs Outbox Asymmetry）”痛点：
+  1. **发件箱与发送历史黑盒（No Outbox & Sent Files Observability）**：
+     收件箱端具备完整的磁盘文件扫描与治理功能（`GET /api/file/inbox`, `download`, `raw`, `open`, `delete`, `clear`）；但在发送端（Sender Side），当用户通过 `tetherly send` 或 `POST /api/file/send` 发起文件传输后，缺乏发件箱模型或持久化发送历史记录；仅有的 `active_transfers` 是保留最近 64 条的临时记录，无法系统追踪：曾向哪些设备发过什么文件？文件大小与 SHA-256 为何？对方是否成功接收或拒绝？耗时多久？
+  2. **缺乏发件箱多维检索与清除治理（No Outbox Query & Clear Governance）**：
+     缺乏回环控制端点以按目标对端（`peer`）、传输状态（`status`: Completed / Failed / Rejected / Cancelled / InFlight）、条数上限（`limit`）进行结构化查询与过滤，缺乏清空或按条件重置发件箱历史的治理原语；
+  3. **一键重发与传输提议复用断层（Resend / Re-offer Gap）**：
+     当文件发送失败、被对端拒收或因网络抖动中断后，用户必须重新在终端中定位原始文件物理路径并重新输入命令。发件箱应记录原始文件路径（若为本地物理文件），并提供一键重新提议发送流水线；
+  4. **Zero-Plaintext 零明文安全铁律（Zero-Plaintext Invariant）**：
+     发送状态流转必须向事件总线分发实时事件（`UiEvent::OutboxUpdated`, `UiEvent::OutboxCleared`），仅广播传输 ID、对端设备号、文件名、大小、状态与时间戳，严禁泄露文件正文或私钥凭据。
+
+- **架构与协议设计(ADR-061 跨端发件箱生命周期治理、发送历史可观测性、传输状态追踪与安全审计清除全闭环)**:
+  1. **发件箱状态与条目数据模型 (`OutboxStatus`, `OutboxEntry`, `crates/tetherly-node/src/runtime.rs` & `lib.rs`)**:
+     - 强类型发送状态枚举 `OutboxStatus`：`InFlight`（传输中）、`Completed`（传输完成）、`Rejected`（对端拒收）、`Failed`（传输失败）、`Cancelled`（已取消），提供 `as_str()` 与 `FromStr` 支持；
+     - 强类型发件箱条目模型 `OutboxEntry`：`id`（唯一发件记录 ID `out_{transfer_id}_{now}`）、`transfer_id`（内容寻址传输 ID `tr_{sha256[..16]}`）、`peer`（目标设备 ID）、`peer_alias`（目标设备别名缓存）、`filename`（安全文件名）、`size`（文件大小）、`sha256`（SHA-256 十六进制摘要）、`source_path`（本地物理源文件路径）、`status`（当前状态）、`error`（错误原因）、`started_ms`（发起时间戳）、`completed_ms`（完成时间戳）、`speed_bps`（测算吞吐速率）；
+  2. **定额内存环形发件箱引擎 (`OutboxEngine`, `crates/tetherly-node/src/runtime.rs` & `lib.rs`)**:
+     - 定额环形缓冲区 `OutboxEngine`（默认容量 200 条，`VecDeque<OutboxEntry>`）：保证 $O(1)$ 内存界限与均摊压入，超出上限自动置换最旧记录；
+     - 状态逆序流转更新 `update_status`：按 `transfer_id` 从最新记录逆向匹配更新状态、完成时间与速率；
+     - 时间序多维检索 `query`：支持按 peer、按 status、限制 limit 进行快速过滤；
+     - 条件安全清除 `clear`：支持按 peer 与 status 进行精确清理或全量清空；
+     - 逆序定位 `get_by_id`：支持根据发件记录 ID 前缀或 transfer_id 快速检索条目；
+     - 节点运行时原语：`Node::outbox_history(peer, status, limit)`、`Node::clear_outbox(peer, status)`、`Node::resend_outbox_file(id_or_transfer_id)`；
+  3. **一键重发提议流水线 (`Node::resend_outbox_file`, `crates/tetherly-node/src/runtime.rs`)**:
+     - 解析历史记录定位 `source_path`，校验磁盘物理文件完整存在性；
+     - 自动复用文件名与对端映射，调用 `offer_and_send_file` 发起全新传输提议；
+     - 记录 `AuditCategory::File` 下 `outbox_resent` 审计事件，实现端到端安全审计闭环；
+  4. **Zero-Plaintext 零明文事件总线 (`crates/tetherly-node/src/events.rs`)**:
+     - 扩展 `UiEvent`：新增 `OutboxUpdated { id, transfer_id, peer, filename, size, status, timestamp_ms }` 与 `OutboxCleared { count, peer, status, timestamp_ms }` 零明文事件变体；
+     - 审计埋点：记录 `AuditCategory::File` 下 `outbox_staged`、`outbox_completed`、`outbox_rejected`、`outbox_cleared`；
+  5. **回环控制面端点全闭环与 403 强隔离防御 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/file/outbox`（别名 `/api/outbox`）：支持 URL Query 参数 `peer`, `status`, `limit`；
+     - `POST /api/file/outbox/query`（别名 `/api/outbox/query`）：接收 JSON 请求体执行多维查询；
+     - `POST /api/file/outbox/clear`（别名 `/api/outbox/clear`, `DELETE /api/file/outbox`）：条件/全量清空发件箱；
+     - `POST /api/file/outbox/resend`（别名 `/api/outbox/resend`）：接收 `{"id": "..."}` 重新发起文件提议；
+     - 严格执行 127.0.0.1 物理绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强隔离防御；
+  6. **双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - 新增 `outbox`（别名 `out`）子命令族（`list`、`clear`、`resend`、`watch`）；
+     - `list`：表格化对齐输出 `ID`, `FILENAME`, `SIZE`, `PEER`, `STATUS`, `STARTED`, `SPEED`；
+     - `clear`：支持 `--peer` 与 `--status` 筛选清除；
+     - `resend`：接收条目 ID 或 transfer ID 一键重新提议；
+     - `watch`：通过 SSE 实时流监听发件箱更新事件；
+  7. **Web UI 发件箱治理面板 (`ui/index.html`)**:
+     - 增设「已发送文件与发件箱治理 (Outbox)」独立面板；
+     - 提供状态下拉筛选（全部 / 进行中 / 已完成 / 已拒收 / 失败 / 已取消）与对端实时过滤；
+     - 文件卡片流展示安全状态徽标、目标对端、发起时间、耗时与传输速率；
+     - 提供「重新发送」一键提议交互、「刷新」与「清空发件箱」；
+     - 深度接入 SSE `outbox_updated` 与 `outbox_cleared` 实时局部刷新；
+  8. **端到端集成测试与全量安全基线全绿**:
+     - `tests/phase1.rs` 增设 `node_outbox_file_lifecycle_query_clearing_resend_and_zero_plaintext_via_loopback_api`：
+       覆盖发件箱初始化、文件发送后自动登记 InFlight、对端接收后流转 Completed、对端拒收后流转 Rejected、多维状态与对端过滤、一键重发流水线与新提议生成、部分状态清除与全量清空、SSE 零明文事件校验、以及 Host 403 恶意阻断。
 
 **1.67 相对 1.66(跨端点对点安全文本/便签即时交互通道、离线消息缓冲、消息历史治理与双向全闭环)**
 

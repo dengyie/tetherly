@@ -2,7 +2,7 @@
 //! Loopback-only desktop shell. Never bind 0.0.0.0. Bodies/OTP/PIN are not
 //! written to logs. Full Tauri packaging is the next desktop-shell iteration.
 
-use crate::runtime::Node;
+use crate::runtime::{Node, OutboxStatus};
 use serde::Serialize;
 use std::net::SocketAddr;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
@@ -779,6 +779,32 @@ struct MessageQueryBody {
 struct MessageClearBody {
     #[serde(default)]
     peer: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct OutboxQueryBody {
+    #[serde(default)]
+    peer: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct OutboxClearBody {
+    #[serde(default)]
+    peer: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct OutboxResendBody {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    transfer_id: Option<String>,
 }
 
 fn percent_decode(s: &str) -> String {
@@ -2297,6 +2323,139 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 Err(tetherly_core::CoreError::UnsafeFileName) => err(400, "unsafe file name"),
                 Err(tetherly_core::CoreError::File(ref msg)) if msg.contains("not found") => {
                     err(404, "file not found in inbox")
+                }
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/file/outbox")
+        | ("GET", "/api/outbox")
+        | ("POST", "/api/file/outbox/query")
+        | ("POST", "/api/outbox/query") => {
+            let mut q_peer: Option<String> = None;
+            let mut q_status: Option<OutboxStatus> = None;
+            let mut q_limit: Option<usize> = None;
+
+            if let Some(q) = query_str {
+                let map = parse_query_map(q);
+                if let Some(p) = map
+                    .get("peer")
+                    .or_else(|| map.get("to"))
+                    .or_else(|| map.get("target"))
+                {
+                    q_peer = Some(p.clone());
+                }
+                if let Some(s) = map.get("status") {
+                    match s.parse::<OutboxStatus>() {
+                        Ok(st) => q_status = Some(st),
+                        Err(e) => return err(400, &e),
+                    }
+                }
+                if let Some(l) = map.get("limit").and_then(|s| s.parse::<usize>().ok()) {
+                    q_limit = Some(l);
+                }
+            }
+
+            if !body.is_empty() {
+                match serde_json::from_slice::<OutboxQueryBody>(body) {
+                    Ok(b) => {
+                        if b.peer.is_some() {
+                            q_peer = b.peer;
+                        }
+                        if let Some(ref st_str) = b.status {
+                            match st_str.parse::<OutboxStatus>() {
+                                Ok(st) => q_status = Some(st),
+                                Err(e) => return err(400, &e),
+                            }
+                        }
+                        if b.limit.is_some() {
+                            q_limit = b.limit;
+                        }
+                    }
+                    Err(_) => return err(400, "bad json"),
+                }
+            }
+
+            match node.outbox_history(q_peer.as_deref(), q_status, q_limit) {
+                Ok(report) => json_ok(&report),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/file/outbox/clear")
+        | ("POST", "/api/outbox/clear")
+        | ("DELETE", "/api/file/outbox")
+        | ("DELETE", "/api/outbox") => {
+            let mut q_peer: Option<String> = None;
+            let mut q_status: Option<OutboxStatus> = None;
+
+            if let Some(q) = query_str {
+                let map = parse_query_map(q);
+                if let Some(p) = map
+                    .get("peer")
+                    .or_else(|| map.get("to"))
+                    .or_else(|| map.get("target"))
+                {
+                    q_peer = Some(p.clone());
+                }
+                if let Some(s) = map.get("status") {
+                    match s.parse::<OutboxStatus>() {
+                        Ok(st) => q_status = Some(st),
+                        Err(e) => return err(400, &e),
+                    }
+                }
+            }
+
+            if !body.is_empty() {
+                match serde_json::from_slice::<OutboxClearBody>(body) {
+                    Ok(b) => {
+                        if b.peer.is_some() {
+                            q_peer = b.peer;
+                        }
+                        if let Some(ref st_str) = b.status {
+                            match st_str.parse::<OutboxStatus>() {
+                                Ok(st) => q_status = Some(st),
+                                Err(e) => return err(400, &e),
+                            }
+                        }
+                    }
+                    Err(_) => return err(400, "bad json"),
+                }
+            }
+
+            match node.clear_outbox(q_peer.as_deref(), q_status) {
+                Ok(report) => json_ok(&report),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/file/outbox/resend") | ("POST", "/api/outbox/resend") => {
+            let mut target_id: Option<String> = None;
+            if let Some(q) = query_str {
+                let map = parse_query_map(q);
+                if let Some(id) = map.get("id").or_else(|| map.get("transfer_id")) {
+                    target_id = Some(id.clone());
+                }
+            }
+
+            if !body.is_empty() {
+                match serde_json::from_slice::<OutboxResendBody>(body) {
+                    Ok(b) => {
+                        if b.id.is_some() {
+                            target_id = b.id;
+                        } else if b.transfer_id.is_some() {
+                            target_id = b.transfer_id;
+                        }
+                    }
+                    Err(_) => return err(400, "bad json"),
+                }
+            }
+
+            let Some(id) = target_id else {
+                return err(400, "missing required transfer or outbox id");
+            };
+
+            match node.resend_outbox_file(&id).await {
+                Ok(report) => json_ok(&report),
+                Err(tetherly_core::CoreError::UnknownTransfer) => {
+                    err(404, "outbox entry not found")
                 }
                 Err(e) => err(400, &e.to_string()),
             }

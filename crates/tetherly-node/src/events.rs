@@ -240,9 +240,59 @@ pub enum UiEvent {
         len: usize,
         timestamp_ms: u64,
     },
+    OutboxUpdated {
+        id: String,
+        transfer_id: String,
+        peer: String,
+        filename: String,
+        size: u64,
+        status: String,
+        timestamp_ms: u64,
+    },
+    OutboxCleared {
+        count: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        peer: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
+    pub fn outbox_updated(
+        id: impl Into<String>,
+        transfer_id: impl Into<String>,
+        peer: impl Into<String>,
+        filename: impl Into<String>,
+        size: u64,
+        status: impl Into<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::OutboxUpdated {
+            id: id.into(),
+            transfer_id: transfer_id.into(),
+            peer: peer.into(),
+            filename: filename.into(),
+            size,
+            status: status.into(),
+            timestamp_ms,
+        }
+    }
+
+    pub fn outbox_cleared(
+        count: usize,
+        peer: Option<impl Into<String>>,
+        status: Option<impl Into<String>>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::OutboxCleared {
+            count,
+            peer: peer.map(Into::into),
+            status: status.map(Into::into),
+            timestamp_ms,
+        }
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn audit_event_recorded(
         id: u64,

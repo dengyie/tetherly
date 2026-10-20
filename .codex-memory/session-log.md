@@ -986,4 +986,21 @@
 - Next: Git commit and sync to Obsidian vault.
 - Blockers: None.
 
+## 2026-10-19
+- Task: Land Tetherly v1.68 (ADR-061) 跨端发件箱生命周期治理、发送历史可观测性、传输状态追踪与安全审计清除全闭环.
+- Actions:
+  1. Defined strongly-typed send state enum `OutboxStatus` (`InFlight`, `Completed`, `Rejected`, `Failed`, `Cancelled`) and record model `OutboxEntry` in `crates/tetherly-node/src/runtime.rs` and `lib.rs`;
+  2. Implemented bounded ring buffer engine `OutboxEngine` (200 capacity) in `runtime.rs` with $O(1)$ amortized push, reverse transfer ID status update `update_status`, multi-dimensional querying `query` (peer, status, limit), conditional clear `clear`, and entry resolution `get_by_id`;
+  3. Wired outbox tracking into `offer_and_send_bytes`, `offer_and_send_file`, `set_transfer_phase`, `cancel_transfer`, and `SessionEvent::FileReject`; implemented one-key resend pipeline `Node::resend_outbox_file` verifying source disk files and recording `AuditCategory::File` audit traces;
+  4. Extended `UiEvent` in `crates/tetherly-node/src/events.rs` with `OutboxUpdated` and `OutboxCleared` zero-plaintext variants, strictly enforcing privacy by broadcasting only transfer metadata without file payloads or private keys;
+  5. Implemented loopback endpoints in `crates/tetherly-node/src/uihttp.rs`: `GET /api/file/outbox`, `POST /api/file/outbox/query`, `POST /api/file/outbox/clear`, and `POST /api/file/outbox/resend` (with `/api/outbox/*` aliases) guarded by 127.0.0.1 binding and Host 403 Forbidden checks;
+  6. Implemented isomorphic `outbox`/`out` CLI subcommands (`list`, `clear`, `resend`, `watch`) and real-time SSE event formatting in both `bins/tetherly-cli/src/main.rs` and `crates/tetherly-node/src/bin/tetherly.rs`;
+  7. Added "已发送文件与发件箱治理 (Outbox & Sent Files)" control card in `ui/index.html` with target/status filter dropdowns, file card streaming, one-key resend action, clear action, and SSE `outbox_updated`/`outbox_cleared` real-time sync;
+  8. Added comprehensive E2E integration test in `tests/phase1.rs`: `node_outbox_file_lifecycle_query_clearing_resend_and_zero_plaintext_via_loopback_api`, validating outbox initialization, InFlight staging, Completed on accept, Rejected on reject, multi-dimensional query, resend pipeline, partial clear, full clear, SSE zero-plaintext, and Host 403 isolation;
+  9. Ran full workspace verification: `cargo fmt --all --check` (clean), `cargo clippy --workspace --all-targets -- -D warnings` (clean), `cargo check --target aarch64-unknown-linux-gnu` (clean), `cargo test --workspace` (all 350 tests pass), `cargo deny check` (advisories ok, bans ok, licenses ok, sources ok);
+  10. Updated SSOT `docs/DEVELOPMENT.md` to v1.68 (ADR-061), updated `.codex-memory/decisions.md`, `.codex-memory/project-state.md`, and synchronized to Obsidian vault (`Note/Project/tetherly/tetherly 开发文档.md`).
+- Results: All 8 tasks for v1.68 completed and verified 100% green.
+- Next: Git commit keeping working tree clean, followed by v1.69 feature planning and execution.
+- Blockers: None.
+
 

@@ -191,6 +191,28 @@
       <div id="inboxmsg" class="hint" style="margin-top:6px"></div>
     </section>
     <section style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2>已发送文件与发件箱治理 (Outbox)</h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <select id="outboxstatusfilter" style="padding:2px 8px;font-size:12px;border:1px solid var(--line);border-radius:4px;background:#0d1218;color:var(--text)">
+            <option value="">全部状态</option>
+            <option value="in_flight">传输中 (InFlight)</option>
+            <option value="completed">已完成 (Completed)</option>
+            <option value="rejected">已拒收 (Rejected)</option>
+            <option value="failed">失败 (Failed)</option>
+            <option value="cancelled">已取消 (Cancelled)</option>
+          </select>
+          <input id="outboxpeerfilter" placeholder="按对端过滤…" style="padding:2px 8px;font-size:12px;border:1px solid var(--line);border-radius:4px;background:#0d1218;color:var(--text);width:110px"/>
+          <button id="refreshoutboxbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">刷新</button>
+          <button id="clearoutboxbtn" class="bad ghost" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">清空发件箱</button>
+        </div>
+      </div>
+      <div class="hint">全生命周期监控已发送文件历史，追踪传输完成、对端拒收与失败状态，支持一键重发与安全审计清空。</div>
+      <div id="outbox-status" class="hint" style="margin:6px 0"></div>
+      <div id="outboxfiles"><div class="empty">发件箱为空。</div></div>
+      <div id="outboxmsg" class="hint" style="margin-top:6px"></div>
+    </section>
+    <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <h2>存储与数据目录</h2>
         <button id="cleanstoragebtn" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--text);border-radius:4px;cursor:pointer">清理孤儿分块</button>
@@ -1693,6 +1715,166 @@ if (clearInboxBtn) {
     }
   };
 }
+
+let currentOutboxPeerFilter = "";
+let currentOutboxStatusFilter = "";
+
+async function updateOutbox() {
+  try {
+    let url = "/api/file/outbox?limit=50";
+    if (currentOutboxPeerFilter && currentOutboxPeerFilter.trim()) {
+      url += "&peer=" + encodeURIComponent(currentOutboxPeerFilter.trim());
+    }
+    if (currentOutboxStatusFilter && currentOutboxStatusFilter.trim()) {
+      url += "&status=" + encodeURIComponent(currentOutboxStatusFilter.trim());
+    }
+    const rep = await api(url);
+    if (!rep || !rep.ok) return;
+    const st = $("outbox-status");
+    if (st) {
+      let filterDesc = [];
+      if (currentOutboxPeerFilter && currentOutboxPeerFilter.trim()) filterDesc.push("对端: " + currentOutboxPeerFilter.trim());
+      if (currentOutboxStatusFilter && currentOutboxStatusFilter.trim()) filterDesc.push("状态: " + currentOutboxStatusFilter.trim());
+      st.innerHTML = '共 <b>' + rep.total + '</b> 条记录 · 显示 <b>' + rep.returned + '</b> 条' +
+        (filterDesc.length ? ' (' + filterDesc.join(", ") + ')' : '');
+    }
+    const box = $("outboxfiles");
+    if (!box) return;
+    box.innerHTML = "";
+    const entries = rep.entries || [];
+    if (!entries.length) {
+      box.appendChild(el('<div class="empty">发件箱为空' + ((currentOutboxPeerFilter || currentOutboxStatusFilter) ? '（无匹配记录）' : '') + '。</div>'));
+      return;
+    }
+    for (const entry of entries) {
+      let statusBadge = '';
+      if (entry.status === 'in_flight') {
+        statusBadge = '<span class="badge outbound" style="font-size:10px;margin-right:4px">传输中</span>';
+      } else if (entry.status === 'completed') {
+        statusBadge = '<span class="badge completed" style="font-size:10px;margin-right:4px">已完成</span>';
+      } else if (entry.status === 'rejected') {
+        statusBadge = '<span class="badge verifying" style="font-size:10px;margin-right:4px">已拒收</span>';
+      } else if (entry.status === 'failed') {
+        statusBadge = '<span class="badge failed" style="font-size:10px;margin-right:4px">失败</span>';
+      } else if (entry.status === 'cancelled') {
+        statusBadge = '<span class="badge offline" style="font-size:10px;margin-right:4px">已取消</span>';
+      } else {
+        statusBadge = '<span class="badge offline" style="font-size:10px;margin-right:4px">' + entry.status + '</span>';
+      }
+
+      const startedStr = entry.started_ms ? new Date(entry.started_ms).toLocaleString() : "-";
+      let durationStr = "";
+      if (entry.completed_ms && entry.started_ms && entry.completed_ms >= entry.started_ms) {
+        const diffSecs = ((entry.completed_ms - entry.started_ms) / 1000).toFixed(1);
+        durationStr = ' · 耗时: ' + diffSecs + 's';
+      }
+      let speedStr = "";
+      if (entry.speed_bps && entry.speed_bps > 0) {
+        speedStr = ' · 速率: ' + formatBytes(entry.speed_bps) + '/s';
+      }
+      const peerDisplay = entry.peer_alias ? (entry.peer_alias + ' (' + entry.peer + ')') : entry.peer;
+
+      const card = el('<div class="card" style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px">' +
+        '<div style="flex:1;min-width:0;margin-right:12px">' +
+          '<div class="title" style="display:flex;align-items:center;gap:4px">' +
+            statusBadge +
+            '<span class="filename-text" style="word-break:break-all;font-size:13px;font-weight:600"></span>' +
+          '</div>' +
+          '<div class="meta" style="margin-top:2px;font-size:11px;color:var(--muted)">' +
+            formatBytes(entry.size) + ' · 目标: ' + peerDisplay + ' · 发起: ' + startedStr + durationStr + speedStr +
+          '</div>' +
+          (entry.error ? ('<div style="margin-top:2px;font-size:11px;color:var(--bad)">错误: ' + entry.error + '</div>') : '') +
+          (entry.source_path ? ('<div style="margin-top:2px;font-size:10px;color:var(--dim);font-family:ui-monospace, Consolas, monospace">路径: ' + entry.source_path + '</div>') : '') +
+        '</div>' +
+        '<div class="row" style="display:flex;gap:6px;align-items:center">' +
+          '<button class="ghost resend-btn" type="button" style="padding:2px 8px;font-size:12px;cursor:pointer">重新发送</button>' +
+        '</div>' +
+      '</div>');
+
+      card.querySelector(".filename-text").textContent = entry.filename;
+      const resendBtn = card.querySelector(".resend-btn");
+      resendBtn.onclick = async () => {
+        resendBtn.disabled = true;
+        resendBtn.textContent = "提议中…";
+        const msg = $("outboxmsg");
+        if (msg) msg.textContent = "正在重新发送 \"" + entry.filename + "\"…";
+        try {
+          const res = await api("/api/file/outbox/resend", { id: entry.id });
+          if (res && res.ok) {
+            if (msg) msg.textContent = "重发成功: 提议 ID " + res.new_transfer_id;
+            updateOutbox();
+            refreshTransfers();
+            setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+          } else {
+            alert("重发失败: " + (res && res.error ? res.error : "未知错误"));
+            if (msg) msg.textContent = "";
+            resendBtn.disabled = false;
+            resendBtn.textContent = "重新发送";
+          }
+        } catch (err) {
+          alert("重发异常: " + err);
+          if (msg) msg.textContent = "";
+          resendBtn.disabled = false;
+          resendBtn.textContent = "重新发送";
+        }
+      };
+      box.appendChild(card);
+    }
+  } catch (e) {
+    console.error("updateOutbox error", e);
+  }
+}
+
+const refreshOutboxBtn = $("refreshoutboxbtn");
+if (refreshOutboxBtn) {
+  refreshOutboxBtn.onclick = () => updateOutbox();
+}
+const searchOutboxPeerInput = $("outboxpeerfilter");
+if (searchOutboxPeerInput) {
+  let peerTimer = null;
+  searchOutboxPeerInput.oninput = () => {
+    clearTimeout(peerTimer);
+    peerTimer = setTimeout(() => {
+      currentOutboxPeerFilter = searchOutboxPeerInput.value.trim();
+      updateOutbox();
+    }, 250);
+  };
+}
+const statusOutboxSelect = $("outboxstatusfilter");
+if (statusOutboxSelect) {
+  statusOutboxSelect.onchange = () => {
+    currentOutboxStatusFilter = statusOutboxSelect.value;
+    updateOutbox();
+  };
+}
+const clearOutboxBtn = $("clearoutboxbtn");
+if (clearOutboxBtn) {
+  clearOutboxBtn.onclick = async () => {
+    let confirmMsg = "确定要清空发件箱记录吗？";
+    if (currentOutboxPeerFilter || currentOutboxStatusFilter) {
+      confirmMsg = "确定要清空符合当前过滤条件的发件箱记录吗？";
+    }
+    if (!confirm(confirmMsg)) return;
+    const msg = $("outboxmsg");
+    if (msg) msg.textContent = "正在清空发件箱记录…";
+    try {
+      const body = {};
+      if (currentOutboxPeerFilter) body.peer = currentOutboxPeerFilter;
+      if (currentOutboxStatusFilter) body.status = currentOutboxStatusFilter;
+      const res = await api("/api/file/outbox/clear", body);
+      if (res && res.ok) {
+        if (msg) msg.textContent = "清空完成：已清除 " + res.cleared_count + " 条发件箱记录";
+        updateOutbox();
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 4000);
+      } else {
+        if (msg) msg.textContent = "清空失败: " + (res && res.error ? res.error : "未知错误");
+      }
+    } catch (err) {
+      if (msg) msg.textContent = "清空异常: " + err;
+    }
+  };
+}
+
 function formatUptime(secs) {
   if (secs == null || isNaN(secs)) return "-";
   const d = Math.floor(secs / 86400);
@@ -2915,11 +3097,20 @@ function setupEventSource() {
 												            desc = "即时消息: 收到来自 " + ev.peer + " (长度: " + ev.len + " 字节)";
 												            updateMessageHistory();
 												          }
-												          else if (ev.kind === "message_sent") {
-												            desc = "即时消息: 发送至 " + ev.peer + " (长度: " + ev.len + " 字节)";
-												            updateMessageHistory();
-												          }
-			          $("ev-last").textContent = "[" + t + "] " + desc;
+													          else if (ev.kind === "message_sent") {
+													            desc = "即时消息: 发送至 " + ev.peer + " (长度: " + ev.len + " 字节)";
+													            updateMessageHistory();
+													          }
+													          else if (ev.kind === "outbox_updated") {
+													            desc = "发件箱更新: " + ev.filename + " -> " + ev.peer + " [" + ev.status + "]";
+													            updateOutbox();
+													            refreshTransfers();
+													          }
+													          else if (ev.kind === "outbox_cleared") {
+													            desc = "发件箱已清除: 清除 " + ev.count + " 条记录";
+													            updateOutbox();
+													          }
+				          $("ev-last").textContent = "[" + t + "] " + desc;
 		        }
 		      } catch (err) {
 		        if ($("ev-last")) $("ev-last").textContent = e.data;
@@ -2963,9 +3154,11 @@ function setupEventSource() {
 			setInterval(updateFileOffers, 3000);
 				updateAncsStatus();
 				setInterval(updateAncsStatus, 3000);
-					updateInbox();
-					setInterval(updateInbox, 3000);
-						updateDiscovery();
+						updateInbox();
+						setInterval(updateInbox, 3000);
+						updateOutbox();
+						setInterval(updateOutbox, 3000);
+							updateDiscovery();
 						setInterval(updateDiscovery, 3000);
 							updateNotifyBanner();
 							setInterval(updateNotifyBanner, 3000);

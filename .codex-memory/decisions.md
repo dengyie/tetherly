@@ -446,6 +446,14 @@
 - Rollback trigger: None.
 - Related files: `crates/tetherly-core/src/{frame.rs,lib.rs}`, `crates/tetherly-net/src/dispatch.rs`, `crates/tetherly-node/src/{runtime.rs,events.rs,uihttp.rs,lib.rs}`, `bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `ui/index.html`, `tests/phase1.rs`, `docs/DEVELOPMENT.md`
 
+## 2026-10-19 - 跨端发件箱生命周期治理、发送历史可观测性、传输状态追踪与安全审计清除全闭环 (ADR-061)
+- Decision: 彻底解决文件传输发端与收端结构性不对称、发送历史黑盒、传输提议复用断层与发件箱可观测性盲区。(1) 抽象强类型发送状态 `OutboxStatus`（InFlight / Completed / Rejected / Failed / Cancelled）与发件箱条目模型 `OutboxEntry`（唯一 outbox ID、内容寻址 transfer ID、目标 peer 及别名、安全文件名、大小、SHA-256、本地文件源路径、状态、错误描述、起止时间戳、速率）；(2) 构建定额 200 条内存环形缓冲区 `OutboxEngine`，提供 $O(1)$ 均摊压入、按 transfer ID 逆序匹配更新状态与吞吐速率 (`update_status`)、多维检索 (`query`: peer, status, limit)、精确/全量条件清空 (`clear`) 与基于 ID 逆向定位 (`get_by_id`)；(3) 打通一键重发流水线 (`Node::resend_outbox_file`)：基于发件历史校验本地物理文件存在性，一键自动重新发起 `offer_and_send_file` 并输出 `AuditCategory::File` 审计轨迹；(4) 严格恪守 Zero-Plaintext 零明文铁律：扩展 `UiEvent::OutboxUpdated` 与 `UiEvent::OutboxCleared`，仅分发传输元数据与状态码，杜绝文件正文与私钥凭据外泄；(5) 回环控制面端点全闭环：新增 `GET /api/file/outbox`、`POST /api/file/outbox/query`、`POST /api/file/outbox/clear`、`POST /api/file/outbox/resend`，严格执行 127.0.0.1 物理绑定与 Host 403 强隔离；(6) 双端 CLI 命令行全同构升级：新增 `outbox`（别名 `out`）子命令族（`list`、`clear`、`resend`、`watch`），提供格式化表格渲染、状态筛选、一键重发与 SSE 实时更新监听；(7) Web UI 发件箱治理面板：在控制台新增「已发送文件与发件箱治理 (Outbox)」独立面板，支持状态/对端下拉过滤、卡片流高亮展示、一键重发、一键清空与 SSE 实时联动；(8) 端到端集成测试全覆盖：`tests/phase1.rs` 增设完整测试验证发件箱生命周期、接收端确认/拒收状态流转、重发流水线、多维过滤检索、安全清空治理、SSE 零明文与 Host 403 恶意阻断。
+- Rationale: 收件箱已具备完整的生命周期与落盘治理，但发送端缺乏持久发件模型导致发送状态黑盒、无法追溯发送历史且重发代价高。通过定额环形缓冲区与零明文脱敏，在零引入 AGPL/新重型依赖前提下实现发收两端架构完全对称闭环。
+- Alternatives considered: (a) 依赖临时活跃传输表 `active_transfers`：生命周期短暂且未落入发件箱模型，无法满足条件过滤、重发与历史治理诉求；(b) 允许在 SSE 广播中携带文件正文：严重破坏 Zero-Plaintext 铁律。
+- Impact: 彻底消除了文件传输子系统发送端与接收端的结构不对称性，发件历史具备完整可观测性、多维检索治理与一键重发能力。全工作区测试全绿，全端构建与 Clippy/Deny 100% 达标。
+- Rollback trigger: None.
+- Related files: `crates/tetherly-node/src/{runtime.rs,events.rs,uihttp.rs,lib.rs}`, `bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `ui/index.html`, `tests/phase1.rs`, `docs/DEVELOPMENT.md`
+
 
 
 

@@ -401,6 +401,32 @@
 			     - **双端 CLI 全同构升级**：`sys [--watch] [--interval <secs>] [--json]`，SSE 事件监听高亮格式化；
 			     - **Web UI 节点系统资源与运行时画像专区**：新增性能画像卡片、实时可视化呈现硬件拓扑、RSS 物理内存、虚拟内存、活跃线程与 FDs，联动 SSE 与周期性自动刷新；
 			     - **端到端集成测试**：`tests/phase1.rs` 增设 `node_system_telemetry_probe_injection_and_metrics_via_loopback_api` 全绿。
+			  14. **v1.65 (ADR-058) 对端加密连接保活心跳治理、动态心跳间隔调谐、多维链路质量画像与主动探活遥测全闭环**：
+			     - **保活时钟热调谐与链路质量画像**：核心保活机 `Liveness::set_deadline`，运行时动态调谐 `HeartbeatConfig`；构建 32 样本滑动窗口 `PeerLinkTracker`，实时统计 min/max/avg RTT、jitter 抖动、丢包率与五级评级 `LinkGrade`；
+			     - **主动连续脉冲探活**：`Node::probe_peer_link` 与 `LinkProbeReport`；
+			     - **回环端点与隔离铁律**：`GET/POST /api/peer/heartbeat`、`GET /api/peer/quality`、`POST /api/peer/probe`，127.0.0.1 物理绑定与 Host 403 强阻断；
+			     - **双端 CLI 全同构升级**：`peer heartbeat`、`peer quality`、`peer probe`；
+			     - **Web UI 与端到端集成测试**：链路画像监控卡片与 `tests/phase1.rs` 测试全绿。
+			  15. **v1.66 (ADR-059) 节点安全审计轨迹、环形结构化审计日志、多维安全检索与遥测全闭环**：
+			     - **结构化安全审计模型与定额环形引擎**：强类型 `AuditCategory`（Security / Peer / File / Clipboard / Notify / Route / Config）与 `AuditSeverity`（Info / Notice / Warning / Alert）；定额 500 条内存环形缓冲区 `AuditEngine`；
+			     - **全安全关键链路埋点与零明文脱敏**：配对认证、黑名单拦截、文件生命周期、剪贴板、通知、路由与心跳调优深度埋点；`UiEvent::AuditEventRecorded` 绝不泄露私钥、OTP 或敏感正文；
+			     - **回环端点与隔离铁律**：`GET /api/audit`、`POST /api/audit/query`、`POST /api/audit/clear`，127.0.0.1 物理绑定与 Host 403 强阻断；
+			     - **双端 CLI 全同构与 Web UI 面板**：`audit list`、`audit clear`、`audit watch` 与 UI 审计看板全绿。
+			  16. **v1.67 (ADR-060) 跨端点对点安全文本/便签即时交互通道、离线消息缓冲、消息历史治理与双向全闭环**：
+			     - **专属传输帧与强类型模型**：`TYPE_TEXT_MESSAGE: 0x0202`，载荷 `TextMessage`（32 KiB 单帧上限）；
+			     - **定额环形消息缓冲引擎**：定额 200 条内存环形缓冲区 `MessageEngine`，`PeerMessage` 支持未读状态流转、原子批量已读 `mark_read`、多维检索 `query` 与清空 `clear_messages`；
+			     - **Zero-Plaintext 零明文安全铁律**：`UiEvent::MessageReceived` 与 `MessageSent` 仅广播元数据，严禁泄露文本正文；
+			     - **回环端点与双端 CLI 全同构**：`POST /api/message/send`、`GET /api/message/history`、`POST /api/message/query`、`POST /api/message/clear`；`message send/history/clear/watch`；
+			     - **Web UI 跨端即时对话卡片与端到端集成测试**：双向对话流与 `tests/phase1.rs` 测试全绿。
+			  17. **v1.68 (ADR-061) 跨端发件箱生命周期治理、发送历史可观测性、传输状态追踪与安全审计清除全闭环**：
+			     - **发件箱生命周期模型与状态流转**：强类型 `OutboxStatus`（InFlight / Completed / Rejected / Failed / Cancelled）与发件箱条目 `OutboxEntry`（唯一 outbox ID、内容寻址 transfer ID、目标 peer 及别名、安全文件名、大小、SHA-256、本地文件源路径、状态、错误描述、起止时间戳、速率）；
+			     - **定额内存环形发件箱引擎**：定额 200 条内存环形缓冲区 `OutboxEngine`，支持 $O(1)$ 均摊压入、按 transfer ID 逆序匹配状态更新 (`update_status`)、多维过滤检索 (`query`: peer, status, limit)、条件或全量清空 (`clear`) 与基于 ID 逆向定位 (`get_by_id`)；
+			     - **一键重发流水线**：`Node::resend_outbox_file` 校验物理源文件完整性，自动重新发起跨端文件提议 (`offer_and_send_file`) 并记录 `AuditCategory::File` 审计轨迹；
+			     - **Zero-Plaintext 零明文事件总线**：`UiEvent::OutboxUpdated` 与 `UiEvent::OutboxCleared` 仅广播传输元数据与状态码，杜绝文件正文与私钥凭据外泄；
+			     - **回环控制面端点全闭环**：`GET /api/file/outbox`、`POST /api/file/outbox/query`、`POST /api/file/outbox/clear`、`POST /api/file/outbox/resend`，严格执行 127.0.0.1 物理绑定与 Host 403 强隔离；
+			     - **双端 CLI 全同构升级**：`outbox`（别名 `out`）子命令族（`list`、`clear`、`resend`、`watch`），表格化排版、状态筛选、一键重发与 SSE 实时更新监听；
+			     - **Web UI 发件箱治理面板**：已发送文件卡片流、状态/对端下拉过滤、一键重发、一键清空与 SSE 实时联动；
+			     - **端到端集成测试全覆盖**：`tests/phase1.rs` 增设完整集成测试全绿。
 
 ## Current Branch
 - `main` @ `https://github.com/dengyie/tetherly`
@@ -410,11 +436,11 @@
   - `cargo fmt --all --check`：PASSED (0 diff)
   - `cargo clippy --workspace --all-targets -- -D warnings`：PASSED (0 warnings)
   - `cargo check --target aarch64-unknown-linux-gnu`：PASSED (0 errors)
-  - `cargo test --workspace`：PASSED (全量 283+ 项测试全部通过)
+  - `cargo test --workspace`：PASSED (全量 350+ 项测试全部通过)
   - `cargo deny check`（advisories, bans, licenses, sources）：PASSED (0 security/license violations)
 
 ## Key Artifacts
-- `docs/DEVELOPMENT.md` (SSOT v1.63)
+- `docs/DEVELOPMENT.md` (SSOT v1.68)
 - `crates/tetherly-{core,crypto,net,node,android}`
 - `bins/tetherly-cli`, `crates/tetherly-node/src/bin/tetherly.rs`
 - `crates/tetherly-net/src/codec.rs` (`TaggedReader`), `crates/tetherly-net/src/session.rs`
