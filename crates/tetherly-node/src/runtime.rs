@@ -7,11 +7,11 @@ use crate::lan::{bind_many, bind_many_optional, bind_overlay, control_bind_addrs
 use crate::platform::{insert_foreground, MemoryClip, SystemClip};
 use crate::sidecar::{self, OverlayConfig, OverlaySource, OverlayStatus};
 use crate::store::{
-    load_clipboard_policy, load_handoff_inbox, load_handoff_policy, load_media_policy, load_trust,
-    remember_route, save_clipboard_policy, save_handoff_inbox, save_handoff_policy,
-    save_media_policy, save_trust, AutoAcceptPolicy, ClipboardPolicy, DeviceType,
-    HandoffInboxTable, HandoffPolicy, MediaControlPolicy, PeerProfile, ProfileTable, RouteTable,
-    TargetSelector,
+    load_battery_policy, load_clipboard_policy, load_handoff_inbox, load_handoff_policy,
+    load_media_policy, load_trust, remember_route, save_battery_policy, save_clipboard_policy,
+    save_handoff_inbox, save_handoff_policy, save_media_policy, save_trust, AutoAcceptPolicy,
+    BatteryPolicy, ClipboardPolicy, DeviceType, HandoffInboxTable, HandoffPolicy,
+    MediaControlPolicy, PeerProfile, ProfileTable, RouteTable, TargetSelector,
 };
 use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::{HashMap, VecDeque};
@@ -31,14 +31,15 @@ use tetherly_core::session::LockoutTable;
 use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
     ancs_actions, ancs_source_id, path_kind, AncsEvent, AncsIngress, AncsState, AncsTransport,
-    ClipApply, ClipDirection, ClipHub, ClipMetaEntry, ConnectOutcome, ControlMsg, CoreError,
-    CursorSeat, DeviceId, FileHub, HandoffEntry, HandoffStatus, IngestOutcome, InputClient,
-    InputEvent, InputServer, InputSink, MediaCommand, MediaCommandFrame, MediaStateFrame,
-    MediaValidator, MemoryScreenSink, MemorySink, MemoryTrustStore, NotificationPayload,
-    NotificationUrgency, Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, ReplyView,
-    ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenFrame, ScreenReceiver,
-    ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats, SensitiveContentGuard,
-    TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
+    BatteryStateFrame, BatteryValidator, ClipApply, ClipDirection, ClipHub, ClipMetaEntry,
+    ConnectOutcome, ControlMsg, CoreError, CursorSeat, DeviceId, FileHub, HandoffEntry,
+    HandoffStatus, IngestOutcome, InputClient, InputEvent, InputServer, InputSink, MediaCommand,
+    MediaCommandFrame, MediaStateFrame, MediaValidator, MemoryScreenSink, MemorySink,
+    MemoryTrustStore, NotificationPayload, NotificationUrgency, Notifier, NotifyHub, OpenAllowlist,
+    PathKind, PlaybackState, PowerSource, ReplyView, ResourceHandoffValidator, ScreenAssembler,
+    ScreenCodec, ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState,
+    ScreenStats, SensitiveContentGuard, TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS,
+    OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -1475,6 +1476,32 @@ pub struct MediaStatusReport {
     pub state: Option<MediaStateFrame>,
 }
 
+/// Status report for current local or peer battery and power state.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BatteryStatusReport {
+    pub ok: bool,
+    pub peer: Option<String>,
+    pub state: Option<BatteryStateFrame>,
+}
+
+/// Status and configuration report for battery and power policy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BatteryPolicyReport {
+    pub ok: bool,
+    pub policy: BatteryPolicy,
+    pub message: String,
+}
+
+/// Status report for local battery state broadcast to online mesh peers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BatteryBroadcastReport {
+    pub ok: bool,
+    pub state: BatteryStateFrame,
+    #[serde(alias = "sent_count")]
+    pub broadcast_count: usize,
+    pub message: String,
+}
+
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ClipStatusReport {
@@ -2234,6 +2261,9 @@ struct Shared {
     local_media_state: Mutex<MediaStateFrame>,
     peer_media_states: Mutex<HashMap<String, MediaStateFrame>>,
     media_cmd_seq: AtomicU64,
+    battery_policy: Mutex<BatteryPolicy>,
+    local_battery_state: Mutex<BatteryStateFrame>,
+    peer_battery_states: Mutex<HashMap<String, BatteryStateFrame>>,
 }
 
 #[derive(Clone)]
@@ -2378,6 +2408,7 @@ impl Node {
         let initial_handoff_policy = load_handoff_policy(&cfg.data_dir);
         let initial_handoff_inbox = load_handoff_inbox(&cfg.data_dir);
         let initial_media_policy = load_media_policy(&cfg.data_dir);
+        let initial_battery_policy = load_battery_policy(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -2442,6 +2473,7 @@ impl Node {
                 s.insert("screen".to_string());
                 s.insert("handoff".to_string());
                 s.insert("media".to_string());
+                s.insert("power".to_string());
                 s
             }),
             blocked: Mutex::new(initial_blocked),
@@ -2490,6 +2522,16 @@ impl Node {
             }),
             peer_media_states: Mutex::new(HashMap::new()),
             media_cmd_seq: AtomicU64::new(0),
+            battery_policy: Mutex::new(initial_battery_policy),
+            local_battery_state: Mutex::new(BatteryStateFrame {
+                battery_level: 100,
+                is_charging: false,
+                power_source: PowerSource::Battery,
+                battery_saver: false,
+                health_percent: None,
+                timestamp_ms: 0,
+            }),
+            peer_battery_states: Mutex::new(HashMap::new()),
         });
         Ok(Self { shared })
     }
@@ -7764,6 +7806,7 @@ impl Node {
                 (s.title.len() + s.artist.len() + s.album.len() + 48) as u64,
                 tetherly_core::frame::TYPE_MEDIA_STATE,
             ),
+            SessionEvent::BatteryState(_) => (48u64, tetherly_core::frame::TYPE_BATTERY_STATE),
             SessionEvent::FileOffer(f) => (
                 (f.transfer_id.len()
                     + f.files.iter().map(|item| item.name.len()).sum::<usize>()
@@ -8020,6 +8063,9 @@ impl Node {
             }
             SessionEvent::MediaState(st) => {
                 self.receive_media_state(peer, st);
+            }
+            SessionEvent::BatteryState(st) => {
+                self.receive_battery_state(peer, st);
             }
             SessionEvent::Unknown(_) => {}
         }
@@ -9948,6 +9994,252 @@ impl Node {
             frame.muted,
             now_ms,
         ));
+    }
+
+    /// Read the currently active battery and power management policy.
+    pub fn battery_policy(&self) -> BatteryPolicy {
+        self.shared
+            .battery_policy
+            .lock()
+            .expect("battery_policy")
+            .clone()
+    }
+
+    /// Status and configuration report for battery policy.
+    pub fn battery_policy_report(&self) -> BatteryPolicyReport {
+        BatteryPolicyReport {
+            ok: true,
+            policy: self.battery_policy(),
+            message: "current battery policy".to_string(),
+        }
+    }
+
+    /// Update and persist battery management policy with POSIX 0o600 permissions and atomic consistency.
+    pub fn set_battery_policy(
+        &self,
+        mut policy: BatteryPolicy,
+    ) -> Result<BatteryPolicyReport, CoreError> {
+        policy.sanitize();
+        save_battery_policy(&self.shared.cfg.data_dir, &policy)
+            .map_err(|e| CoreError::File(format!("failed to save battery_policy.json: {e}")))?;
+        {
+            let mut p = self.shared.battery_policy.lock().expect("battery_policy");
+            *p = policy.clone();
+        }
+
+        let now = self.shared.clock.unix_ms();
+        self.emit(UiEvent::battery_policy_changed(
+            policy.low_battery_threshold,
+            policy.critical_battery_threshold,
+            policy.alert_on_low_battery,
+            policy.auto_throttle_on_battery_saver,
+            policy.allowed_groups.clone(),
+            policy.allowed_tags.clone(),
+            policy
+                .allowed_types
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect(),
+            now,
+        ));
+
+        self.record_audit(
+            AuditCategory::Config,
+            AuditSeverity::Info,
+            "battery_policy_changed",
+            None::<String>,
+            format!(
+                "Updated battery policy: low_threshold={}, critical_threshold={}, alert={}, throttle={}, groups={:?}, tags={:?}, types={:?}",
+                policy.low_battery_threshold,
+                policy.critical_battery_threshold,
+                policy.alert_on_low_battery,
+                policy.auto_throttle_on_battery_saver,
+                policy.allowed_groups,
+                policy.allowed_tags,
+                policy.allowed_types,
+            ),
+            true,
+        );
+
+        Ok(BatteryPolicyReport {
+            ok: true,
+            policy,
+            message: "battery policy updated successfully".to_string(),
+        })
+    }
+
+    /// Query current battery and power state for local device or a remote peer.
+    pub fn battery_get_state(
+        &self,
+        peer_target: Option<&str>,
+    ) -> Result<BatteryStatusReport, CoreError> {
+        let resolved_peer = if let Some(target) = peer_target {
+            let t = target.trim();
+            if t.is_empty() || t == "local" || t == self.shared.identity.device_id().as_str() {
+                None
+            } else {
+                Some(self.resolve_peer(t)?.to_string())
+            }
+        } else {
+            None
+        };
+
+        let state = match resolved_peer.as_deref() {
+            Some(peer_id) => {
+                let states = self
+                    .shared
+                    .peer_battery_states
+                    .lock()
+                    .expect("peer_battery_states");
+                states.get(peer_id).cloned()
+            }
+            None => {
+                let st = self
+                    .shared
+                    .local_battery_state
+                    .lock()
+                    .expect("local_battery_state");
+                Some(st.clone())
+            }
+        };
+
+        Ok(BatteryStatusReport {
+            ok: true,
+            peer: resolved_peer,
+            state,
+        })
+    }
+
+    /// Update local battery state, clamp bounds, and broadcast TYPE_BATTERY_STATE to all online mesh peers.
+    pub async fn battery_update_local_state(
+        &self,
+        mut state: BatteryStateFrame,
+    ) -> Result<BatteryBroadcastReport, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        state.battery_level = BatteryValidator::clamp_level(state.battery_level);
+        state.health_percent = BatteryValidator::clamp_health(state.health_percent);
+        state.timestamp_ms = now_ms;
+
+        {
+            let mut local = self
+                .shared
+                .local_battery_state
+                .lock()
+                .expect("local_battery_state");
+            *local = state.clone();
+        }
+
+        let local_id = self.shared.identity.device_id().to_string();
+        let name = self.name();
+
+        self.emit(UiEvent::battery_state_changed(
+            &local_id,
+            &name,
+            state.battery_level,
+            state.is_charging,
+            state.power_source.as_str(),
+            state.battery_saver,
+            state.health_percent,
+            now_ms,
+        ));
+
+        let frame = state.to_inner_frame()?;
+        let live = self.live_peers();
+        let mut sent_count = 0;
+        for peer in live {
+            if self.send_to(&peer.device_id, frame.clone()).await.is_ok() {
+                sent_count += 1;
+            }
+        }
+
+        Ok(BatteryBroadcastReport {
+            ok: true,
+            state,
+            broadcast_count: sent_count,
+            message: format!("battery state updated and broadcasted to {sent_count} peers"),
+        })
+    }
+
+    /// Ingest and cache an inbound battery state frame from a connected peer, triggering low/critical battery alerts.
+    pub fn receive_battery_state(&self, peer: &DeviceId, mut frame: BatteryStateFrame) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        frame.battery_level = BatteryValidator::clamp_level(frame.battery_level);
+        frame.health_percent = BatteryValidator::clamp_health(frame.health_percent);
+        frame.timestamp_ms = now_ms;
+
+        let policy = self.battery_policy();
+        let profile = self.peer_profile(peer);
+
+        if !policy.is_peer_eligible(&profile) {
+            debug!(peer = %peer, "inbound battery update ignored: sender profile not eligible under battery policy");
+            return;
+        }
+
+        {
+            let mut states = self
+                .shared
+                .peer_battery_states
+                .lock()
+                .expect("peer_battery_states");
+            states.insert(peer_str.clone(), frame.clone());
+        }
+
+        self.emit(UiEvent::battery_state_changed(
+            &peer_str,
+            &alias,
+            frame.battery_level,
+            frame.is_charging,
+            frame.power_source.as_str(),
+            frame.battery_saver,
+            frame.health_percent,
+            now_ms,
+        ));
+
+        // Low / Critical battery alert checking when discharging
+        if policy.alert_on_low_battery && !frame.is_charging {
+            if frame.battery_level <= policy.critical_battery_threshold {
+                self.emit(UiEvent::battery_low_alert(
+                    &peer_str,
+                    &alias,
+                    frame.battery_level,
+                    true,
+                    now_ms,
+                ));
+                self.record_audit(
+                    AuditCategory::Peer,
+                    AuditSeverity::Alert,
+                    "battery_critical_alert",
+                    Some(peer_str.clone()),
+                    format!(
+                        "CRITICAL battery alert for {}: level at {}% (threshold: {}%)",
+                        alias, frame.battery_level, policy.critical_battery_threshold
+                    ),
+                    true,
+                );
+            } else if frame.battery_level <= policy.low_battery_threshold {
+                self.emit(UiEvent::battery_low_alert(
+                    &peer_str,
+                    &alias,
+                    frame.battery_level,
+                    false,
+                    now_ms,
+                ));
+                self.record_audit(
+                    AuditCategory::Peer,
+                    AuditSeverity::Warning,
+                    "battery_low_alert",
+                    Some(peer_str.clone()),
+                    format!(
+                        "Low battery alert for {}: level at {}% (threshold: {}%)",
+                        alias, frame.battery_level, policy.low_battery_threshold
+                    ),
+                    true,
+                );
+            }
+        }
     }
 
     /// Polls system clipboard for automatic outbound synchronization.

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::error::NetError;
+use tetherly_core::battery::BatteryStateFrame;
 use tetherly_core::frame::{
     decode_unix_ms, CapsUpdate, ClipSet, FileDecision, FileDone, FileOffer, InnerFrame,
-    NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame, TextMessage, TYPE_CAPS_UPDATE,
-    TYPE_CLIP_SET, TYPE_FILE_ACCEPT, TYPE_FILE_DONE, TYPE_FILE_OFFER, TYPE_FILE_REJECT,
-    TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY,
-    TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
+    NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame, TextMessage, TYPE_BATTERY_STATE,
+    TYPE_CAPS_UPDATE, TYPE_CLIP_SET, TYPE_FILE_ACCEPT, TYPE_FILE_DONE, TYPE_FILE_OFFER,
+    TYPE_FILE_REJECT, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH,
+    TYPE_NOTIFY_REPLY, TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
 };
 use tetherly_core::media::{MediaCommandFrame, MediaStateFrame};
 
@@ -22,6 +23,7 @@ pub enum SessionEvent {
     ResourceHandoff(ResourceHandoffFrame),
     MediaCommand(MediaCommandFrame),
     MediaState(MediaStateFrame),
+    BatteryState(BatteryStateFrame),
     FileOffer(FileOffer),
     FileAccept(FileDecision),
     FileReject(FileDecision),
@@ -56,6 +58,9 @@ impl SessionEvent {
             }
             TYPE_MEDIA_STATE => {
                 SessionEvent::MediaState(MediaStateFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_BATTERY_STATE => {
+                SessionEvent::BatteryState(BatteryStateFrame::from_payload(&frame.payload)?)
             }
             TYPE_FILE_OFFER => SessionEvent::FileOffer(FileOffer::from_payload(&frame.payload)?),
             TYPE_FILE_ACCEPT => {

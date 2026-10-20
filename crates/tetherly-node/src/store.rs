@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+pub use tetherly_core::battery::{BatteryStateFrame, BatteryValidator, PowerSource};
 pub use tetherly_core::media::{MediaCommand, MediaControlMode, MediaStateFrame, PlaybackState};
 use tetherly_core::{ClipSyncMode, MemoryTrustStore, TrustFile};
 pub use tetherly_core::{HandoffAction, HandoffEntry, HandoffStatus};
@@ -22,6 +23,7 @@ pub const CLIPBOARD_POLICY_FILE: &str = "clipboard_policy.json";
 pub const HANDOFF_POLICY_FILE: &str = "handoff_policy.json";
 pub const HANDOFF_INBOX_FILE: &str = "handoff_inbox.json";
 pub const MEDIA_POLICY_FILE: &str = "media_policy.json";
+pub const BATTERY_POLICY_FILE: &str = "battery_policy.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -857,6 +859,101 @@ pub fn save_media_policy(dir: &Path, policy: &MediaControlPolicy) -> Result<(), 
     Ok(())
 }
 
+fn default_low_battery_threshold() -> u8 {
+    20
+}
+
+fn default_critical_battery_threshold() -> u8 {
+    10
+}
+
+/// Node policy governing cross-device battery monitoring and low-power alerting.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BatteryPolicy {
+    #[serde(default = "default_low_battery_threshold")]
+    pub low_battery_threshold: u8,
+    #[serde(default = "default_critical_battery_threshold")]
+    pub critical_battery_threshold: u8,
+    #[serde(default = "default_true")]
+    pub alert_on_low_battery: bool,
+    #[serde(default)]
+    pub auto_throttle_on_battery_saver: bool,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+}
+
+impl Default for BatteryPolicy {
+    fn default() -> Self {
+        Self {
+            low_battery_threshold: 20,
+            critical_battery_threshold: 10,
+            alert_on_low_battery: true,
+            auto_throttle_on_battery_saver: false,
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+        }
+    }
+}
+
+impl BatteryPolicy {
+    /// Checks whether an inbound battery update is eligible to be processed/alerted based on peer profile.
+    pub fn is_peer_eligible(&self, profile: &PeerProfile) -> bool {
+        // If no filter is configured, all trusted peers are eligible
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        if let Some(group) = &profile.group {
+            if self.allowed_groups.iter().any(|g| g == group) {
+                return true;
+            }
+        }
+
+        if profile.tags.iter().any(|t| self.allowed_tags.contains(t)) {
+            return true;
+        }
+
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+
+    /// Sanitizes thresholds to valid ranges.
+    pub fn sanitize(&mut self) {
+        self.low_battery_threshold = self.low_battery_threshold.min(100);
+        self.critical_battery_threshold = self
+            .critical_battery_threshold
+            .min(self.low_battery_threshold);
+    }
+}
+
+pub fn load_battery_policy(dir: &Path) -> BatteryPolicy {
+    let path = dir.join(BATTERY_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_battery_policy(dir: &Path, policy: &BatteryPolicy) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(BATTERY_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -1340,6 +1437,88 @@ mod tests {
         // 4. Clamping
         assert_eq!(loaded.clamp_volume(95), 80);
         assert_eq!(loaded.clamp_volume(60), 60);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn battery_policy_roundtrip_and_matching() {
+        let dir = std::env::temp_dir().join(format!("tetherly-bat-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Defaults
+        let def = load_battery_policy(&dir);
+        assert_eq!(def.low_battery_threshold, 20);
+        assert_eq!(def.critical_battery_threshold, 10);
+        assert!(def.alert_on_low_battery);
+        assert!(!def.auto_throttle_on_battery_saver);
+
+        // 2. Custom policy persistence
+        let mut custom = BatteryPolicy {
+            low_battery_threshold: 30,
+            critical_battery_threshold: 15,
+            alert_on_low_battery: true,
+            auto_throttle_on_battery_saver: true,
+            allowed_groups: vec!["office".into()],
+            allowed_tags: vec!["mobile".into()],
+            allowed_types: vec![DeviceType::Phone],
+        };
+        custom.sanitize();
+        save_battery_policy(&dir, &custom).unwrap();
+        let loaded = load_battery_policy(&dir);
+        assert_eq!(loaded, custom);
+
+        // 3. Matching
+        let prof_ok = PeerProfile {
+            device_id: "phone_1".into(),
+            device_type: DeviceType::Phone,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_ok));
+
+        let prof_group = PeerProfile {
+            device_id: "pc_1".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec![],
+            group: Some("office".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_group));
+
+        let prof_tag = PeerProfile {
+            device_id: "tab_1".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["mobile".into()],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_tag));
+
+        let prof_unmatched = PeerProfile {
+            device_id: "pc_2".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec!["server".into()],
+            group: Some("datacenter".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded.is_peer_eligible(&prof_unmatched));
+
+        // 4. Sanitize invalid threshold clamp
+        let mut invalid = BatteryPolicy {
+            low_battery_threshold: 150,
+            critical_battery_threshold: 80,
+            ..Default::default()
+        };
+        invalid.sanitize();
+        assert_eq!(invalid.low_battery_threshold, 100);
+        assert_eq!(invalid.critical_battery_threshold, 80);
 
         let _ = fs::remove_dir_all(&dir);
     }

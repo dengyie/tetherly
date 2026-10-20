@@ -5,7 +5,7 @@
 use crate::runtime::{Node, OutboxStatus};
 use serde::Serialize;
 use std::net::SocketAddr;
-use tetherly_core::{MediaCommand, PlaybackState};
+use tetherly_core::{MediaCommand, PlaybackState, PowerSource};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
@@ -467,6 +467,11 @@ struct Snapshot {
     media_state: Option<tetherly_core::MediaStateFrame>,
     /// Media ingress control mode string.
     media_mode: String,
+    /// Local battery state if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    battery_state: Option<tetherly_core::BatteryStateFrame>,
+    /// Low battery threshold percentage.
+    battery_low_threshold: u8,
 }
 
 #[derive(Serialize)]
@@ -859,6 +864,40 @@ struct MediaPolicyBody {
     max_volume_limit: Option<u8>,
     #[serde(default)]
     allow_seek: Option<bool>,
+    #[serde(default)]
+    clear_filters: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct BatteryStateUpdateBody {
+    #[serde(default, alias = "level", alias = "battery_percent", alias = "percent")]
+    battery_level: Option<u8>,
+    #[serde(default, alias = "charging")]
+    is_charging: Option<bool>,
+    #[serde(default, alias = "source", alias = "source_type")]
+    power_source: Option<String>,
+    #[serde(default, alias = "saver", alias = "low_power_mode")]
+    battery_saver: Option<bool>,
+    #[serde(default, alias = "health")]
+    health_percent: Option<u8>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct BatteryPolicyBody {
+    #[serde(default, alias = "low_threshold", alias = "low")]
+    low_battery_threshold: Option<u8>,
+    #[serde(default, alias = "critical_threshold", alias = "critical")]
+    critical_battery_threshold: Option<u8>,
+    #[serde(default, alias = "alert")]
+    alert_on_low_battery: Option<bool>,
+    #[serde(default, alias = "throttle", alias = "auto_throttle")]
+    auto_throttle_on_battery_saver: Option<bool>,
+    #[serde(default)]
+    allowed_groups: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_tags: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_types: Option<Vec<String>>,
     #[serde(default)]
     clear_filters: Option<bool>,
 }
@@ -4325,6 +4364,218 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 Err(e) => err(400, &e.to_string()),
             }
         }
+        ("GET", "/api/battery/state")
+        | ("GET", "/api/battery/status")
+        | ("GET", "/api/power/state")
+        | ("GET", "/api/power/status") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let peer = qmap
+                .get("peer")
+                .or_else(|| qmap.get("target"))
+                .map(String::as_str);
+            match node.battery_get_state(peer) {
+                Ok(report) => json_ok(&report),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/battery/state")
+        | ("PUT", "/api/battery/state")
+        | ("POST", "/api/power/state")
+        | ("PUT", "/api/power/state") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<BatteryStateUpdateBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<BatteryStateUpdateBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected BatteryStateUpdateBody"),
+                }
+            };
+            let mut current = match node.battery_get_state(None) {
+                Ok(rep) => rep.state.unwrap_or_default(),
+                Err(e) => return err(400, &e.to_string()),
+            };
+
+            if let Some(ref b) = parsed_body {
+                if let Some(lvl) = b.battery_level {
+                    current.battery_level = lvl.min(100);
+                }
+                if let Some(chg) = b.is_charging {
+                    current.is_charging = chg;
+                }
+                if let Some(ref src_str) = b.power_source {
+                    match src_str.parse::<PowerSource>() {
+                        Ok(ps) => current.power_source = ps,
+                        Err(e) => return err(400, &e),
+                    }
+                }
+                if let Some(saver) = b.battery_saver {
+                    current.battery_saver = saver;
+                }
+                if let Some(hp) = b.health_percent {
+                    current.health_percent = Some(hp.min(100));
+                }
+            }
+
+            if let Some(lvl_str) = qmap
+                .get("level")
+                .or_else(|| qmap.get("battery_level"))
+                .or_else(|| qmap.get("percent"))
+            {
+                if let Ok(lvl) = lvl_str.parse::<u8>() {
+                    current.battery_level = lvl.min(100);
+                }
+            }
+            if let Some(chg_str) = qmap.get("charging").or_else(|| qmap.get("is_charging")) {
+                if let Ok(chg) = chg_str.parse::<bool>() {
+                    current.is_charging = chg;
+                }
+            }
+            if let Some(src_str) = qmap.get("source").or_else(|| qmap.get("power_source")) {
+                match src_str.parse::<PowerSource>() {
+                    Ok(ps) => current.power_source = ps,
+                    Err(e) => return err(400, &e),
+                }
+            }
+            if let Some(saver_str) = qmap.get("saver").or_else(|| qmap.get("battery_saver")) {
+                if let Ok(saver) = saver_str.parse::<bool>() {
+                    current.battery_saver = saver;
+                }
+            }
+            if let Some(health_str) = qmap.get("health").or_else(|| qmap.get("health_percent")) {
+                if let Ok(hp) = health_str.parse::<u8>() {
+                    current.health_percent = Some(hp.min(100));
+                }
+            }
+
+            match node.battery_update_local_state(current).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/battery/policy") | ("GET", "/api/power/policy") => {
+            json_ok(&node.battery_policy_report())
+        }
+        ("POST", "/api/battery/policy")
+        | ("PUT", "/api/battery/policy")
+        | ("POST", "/api/power/policy")
+        | ("PUT", "/api/power/policy") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<BatteryPolicyBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<BatteryPolicyBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected BatteryPolicyBody"),
+                }
+            };
+            let mut policy = node.battery_policy();
+
+            if let Some(ref b) = parsed_body {
+                if let Some(low) = b.low_battery_threshold {
+                    policy.low_battery_threshold = low.min(100);
+                }
+                if let Some(crit) = b.critical_battery_threshold {
+                    policy.critical_battery_threshold = crit.min(100);
+                }
+                if let Some(alert) = b.alert_on_low_battery {
+                    policy.alert_on_low_battery = alert;
+                }
+                if let Some(throttle) = b.auto_throttle_on_battery_saver {
+                    policy.auto_throttle_on_battery_saver = throttle;
+                }
+                if let Some(ref grps) = b.allowed_groups {
+                    policy.allowed_groups = grps.clone();
+                }
+                if let Some(ref tags) = b.allowed_tags {
+                    policy.allowed_tags = tags.clone();
+                }
+                if let Some(ref types) = b.allowed_types {
+                    let mut dtypes = Vec::new();
+                    for t in types {
+                        match t.parse::<crate::store::DeviceType>() {
+                            Ok(dt) => dtypes.push(dt),
+                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
+                        }
+                    }
+                    policy.allowed_types = dtypes;
+                }
+                if b.clear_filters == Some(true) {
+                    policy.allowed_groups.clear();
+                    policy.allowed_tags.clear();
+                    policy.allowed_types.clear();
+                }
+            }
+
+            if let Some(low_str) = qmap
+                .get("low_battery_threshold")
+                .or_else(|| qmap.get("low_threshold"))
+                .or_else(|| qmap.get("low"))
+            {
+                if let Ok(l) = low_str.parse::<u8>() {
+                    policy.low_battery_threshold = l.min(100);
+                }
+            }
+            if let Some(crit_str) = qmap
+                .get("critical_battery_threshold")
+                .or_else(|| qmap.get("critical_threshold"))
+                .or_else(|| qmap.get("critical"))
+            {
+                if let Ok(c) = crit_str.parse::<u8>() {
+                    policy.critical_battery_threshold = c.min(100);
+                }
+            }
+            if let Some(alert_str) = qmap
+                .get("alert_on_low_battery")
+                .or_else(|| qmap.get("alert"))
+            {
+                if let Ok(a) = alert_str.parse::<bool>() {
+                    policy.alert_on_low_battery = a;
+                }
+            }
+            if let Some(throttle_str) = qmap
+                .get("auto_throttle_on_battery_saver")
+                .or_else(|| qmap.get("throttle"))
+            {
+                if let Ok(t) = throttle_str.parse::<bool>() {
+                    policy.auto_throttle_on_battery_saver = t;
+                }
+            }
+            if let Some(g) = qmap.get("group") {
+                if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
+                    policy.allowed_groups.push(g.clone());
+                }
+            }
+            if let Some(t) = qmap.get("tag") {
+                if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
+                    policy.allowed_tags.push(t.clone());
+                }
+            }
+            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
+                match dt_str.parse::<crate::store::DeviceType>() {
+                    Ok(dt) => {
+                        if !policy.allowed_types.contains(&dt) {
+                            policy.allowed_types.push(dt);
+                        }
+                    }
+                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
+                }
+            }
+            if qmap
+                .get("clear_filters")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false)
+            {
+                policy.allowed_groups.clear();
+                policy.allowed_tags.clear();
+                policy.allowed_types.clear();
+            }
+
+            match node.set_battery_policy(policy) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         (_, "/api/events" | "/api/events/stream") => err(405, "method not allowed"),
         _ => UiResponse::new(404, "text/plain; charset=utf-8", b"not found".to_vec()),
     }
@@ -4456,6 +4707,8 @@ async fn snapshot(node: &Node) -> Snapshot {
         handoff_action: node.handoff_policy().action.as_str().to_string(),
         media_state: node.media_get_state(None).ok().and_then(|r| r.state),
         media_mode: node.media_policy().mode.as_str().to_string(),
+        battery_state: node.battery_get_state(None).ok().and_then(|r| r.state),
+        battery_low_threshold: node.battery_policy().low_battery_threshold,
     }
 }
 
@@ -4590,6 +4843,97 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/media/state HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_battery_policy_and_state_endpoints() {
+        let (node, dir) = temp_test_node("battery");
+        let port = bind_and_spawn(node.clone(), 0).await.unwrap();
+
+        // 1. GET /api/battery/policy (default)
+        let (code, body) = loopback_get(port, "/api/battery/policy").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["low_battery_threshold"], 20);
+        assert_eq!(rep["policy"]["critical_battery_threshold"], 10);
+        assert_eq!(rep["policy"]["alert_on_low_battery"], true);
+        assert_eq!(rep["policy"]["auto_throttle_on_battery_saver"], false);
+
+        // 2. POST /api/battery/policy (update)
+        let update_req = serde_json::json!({
+            "low_battery_threshold": 25,
+            "critical_battery_threshold": 12,
+            "alert_on_low_battery": true,
+            "auto_throttle_on_battery_saver": true,
+            "allowed_groups": ["family"],
+            "allowed_tags": ["mobile"]
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/battery/policy",
+            &serde_json::to_vec(&update_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["low_battery_threshold"], 25);
+        assert_eq!(rep["policy"]["critical_battery_threshold"], 12);
+        assert_eq!(rep["policy"]["auto_throttle_on_battery_saver"], true);
+        assert_eq!(
+            rep["policy"]["allowed_groups"],
+            serde_json::json!(["family"])
+        );
+        assert_eq!(rep["policy"]["allowed_tags"], serde_json::json!(["mobile"]));
+
+        // 3. POST /api/battery/state
+        let state_req = serde_json::json!({
+            "battery_level": 78,
+            "is_charging": true,
+            "power_source": "ac",
+            "battery_saver": false,
+            "health_percent": 95
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/battery/state",
+            &serde_json::to_vec(&state_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["state"]["battery_level"], 78);
+        assert_eq!(rep["state"]["is_charging"], true);
+        assert_eq!(rep["state"]["power_source"], "ac");
+        assert_eq!(rep["state"]["battery_saver"], false);
+        assert_eq!(rep["state"]["health_percent"], 95);
+
+        // 4. GET /api/battery/state
+        let (code, body) = loopback_get(port, "/api/battery/state").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["state"]["battery_level"], 78);
+        assert_eq!(rep["state"]["is_charging"], true);
+        assert_eq!(rep["state"]["power_source"], "ac");
+
+        // 5. Host header 403 test on /api/battery/state
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/battery/state HTTP/1.1\r\nHost: malicious.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();

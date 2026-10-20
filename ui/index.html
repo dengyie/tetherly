@@ -487,6 +487,167 @@
         <div id="media-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
       </div>
     </section>
+    <!-- Cross-device Battery State & Energy Governance Section (v1.74 / ADR-067) -->
+    <section style="margin-top:16px" id="battery-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">跨端电池电量、低电量预警与能耗协同 (Battery & Energy Governance)</h2>
+        <div style="display:flex;gap:6px">
+          <button id="togglebatterypolicybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">预警策略</button>
+          <button id="togglebatteryreportbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">上报本机电量</button>
+          <button id="refreshbatterybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新状态</button>
+        </div>
+      </div>
+      <div class="hint">感知局域网 Mesh 设备的电池电量、供电方式与节电模式，提供基于策略画像的低电量/危急预警推送。</div>
+
+      <!-- Low Battery Alert Banner -->
+      <div id="battery-alert-banner" style="display:none;background:#2a1114;border:1px solid #d32f2f;color:#ff8a80;padding:10px 14px;border-radius:6px;margin-top:8px;font-size:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:16px">⚠️</span>
+            <span id="battery-alert-text" style="font-weight:600">电量告警</span>
+          </div>
+          <button id="battery-alert-dismiss" class="ghost" type="button" style="padding:2px 8px;font-size:11px;color:#ff8a80;border-color:#ff8a80">关闭</button>
+        </div>
+      </div>
+
+      <!-- Battery Governance Policy Panel -->
+      <div id="battery-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div style="font-size:12px;font-weight:600;color:var(--text)">电池监控与低电量预警策略 (Battery & Energy Policy)</div>
+          <span id="battery-policy-badge" class="badge completed" style="font-size:11px">Alert: On</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">低电量预警阈值 (%):</label>
+            <input id="battery-policy-low-thresh" type="number" min="1" max="100" placeholder="20" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">危急电量警报阈值 (%):</label>
+            <input id="battery-policy-crit-thresh" type="number" min="1" max="100" placeholder="10" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">低电量警报广播:</label>
+            <select id="battery-policy-alert-switch" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">开启 (启用预警推送)</option>
+              <option value="false">关闭 (禁用推送)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">省电模式自动节流 (Throttle):</label>
+            <select id="battery-policy-throttle-switch" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="false">关闭 (正常传输)</option>
+              <option value="true">开启 (节流降耗)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">限定允许分组 (逗号分隔):</label>
+            <input id="battery-policy-groups" placeholder="留空表示不限制分组" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">限定允许标签 (逗号分隔):</label>
+            <input id="battery-policy-tags" placeholder="留空表示不限制标签" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">限定允许设备形态 (phone, tablet...):</label>
+            <input id="battery-policy-types" placeholder="留空表示不限制形态" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+          <div style="display:flex;gap:6px">
+            <button id="battery-policy-save-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px">保存策略 (Save)</button>
+            <button id="battery-policy-clear-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">重置限制 (Reset)</button>
+          </div>
+          <div id="battery-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Local Battery Report Panel -->
+      <div id="battery-report-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:8px">上报与广播本机电量状态 (Report Local Battery State)</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">电量百分比 (%):</label>
+            <input id="battery-report-level" type="number" min="0" max="100" value="85" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">充电状态:</label>
+            <select id="battery-report-charging" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">正在充电 (Charging)</option>
+              <option value="false">放电中 / 未连接 (Discharging)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">电源类型 (Power Source):</label>
+            <select id="battery-report-source" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="ac">交流电 (AC Adapter)</option>
+              <option value="battery">内置电池 (Battery)</option>
+              <option value="wireless">无线充电 (Wireless)</option>
+              <option value="unknown">未知 (Unknown)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">系统省电模式:</label>
+            <select id="battery-report-saver" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="false">关闭 (Standard)</option>
+              <option value="true">开启 (Battery Saver)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">电池健康度 (%):</label>
+            <input id="battery-report-health" type="number" min="0" max="100" value="95" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+          <button id="battery-report-submit-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px;font-weight:600">广播本机状态 (Broadcast)</button>
+          <div id="battery-report-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Battery Status Dashboard -->
+      <div style="margin-top:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px">
+        <!-- Target Device Selector -->
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+          <label style="font-size:12px;color:var(--muted)">查看设备:
+            <select id="battery-target-peer" style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="">(本机设备 / Local Device)</option>
+            </select>
+          </label>
+        </div>
+
+        <!-- Battery State Display Card -->
+        <div class="card" style="padding:14px;margin:0;background:#131a22;border:1px solid var(--line);border-radius:6px;flex-direction:column;align-items:stretch;gap:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span id="battery-icon" style="font-size:24px">🔋</span>
+              <div>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span id="battery-percent-text" style="font-size:20px;font-weight:700;color:var(--text)">--%</span>
+                  <span id="battery-status-badge" class="badge completed" style="font-size:11px">正常</span>
+                  <span id="battery-charging-badge" class="badge outbound" style="font-size:11px">放电中</span>
+                </div>
+                <div id="battery-device-title" style="font-size:12px;color:var(--muted)">本机设备</div>
+              </div>
+            </div>
+            <div style="text-align:right">
+              <div id="battery-source-text" style="font-size:12px;color:var(--text);font-weight:600">电源: Battery</div>
+              <div id="battery-health-text" style="font-size:11px;color:var(--muted)">健康度: --%</div>
+            </div>
+          </div>
+
+          <!-- Progress Bar -->
+          <div style="background:#0d1218;border:1px solid var(--line);border-radius:8px;height:14px;overflow:hidden;position:relative">
+            <div id="battery-progress-bar" style="width:0%;height:100%;background:#4caf50;transition:width 0.3s ease, background 0.3s ease"></div>
+          </div>
+
+          <!-- Bottom Indicators -->
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted)">
+            <span id="battery-saver-indicator">省电模式: 关闭</span>
+            <span id="battery-updated-indicator" style="font-family:ui-monospace, Consolas, monospace">更新于: 刚刚</span>
+          </div>
+        </div>
+        <div id="battery-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
+      </div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
@@ -1341,6 +1502,11 @@ function render(s) {
   if (medp) {
     medp.innerHTML = '<option value="">(本机播放器 / Local Player)</option>';
   }
+  const bp = $("battery-target-peer");
+  const prevBatPeer = bp ? bp.value : "";
+  if (bp) {
+    bp.innerHTML = '<option value="">(本机设备 / Local Device)</option>';
+  }
   for (const x of s.peers) {
     let rttBadge = '<span class="badge offline" style="margin-left:6px">RTT 未测</span>';
     if (x.rtt_ms != null) {
@@ -1457,6 +1623,13 @@ function render(s) {
       opt.textContent = displayName + " (" + (x.path || "lan") + ")";
       if (opt.value === prevMedPeer) opt.selected = true;
       medp.appendChild(opt);
+    }
+    if (bp) {
+      const opt = document.createElement("option");
+      opt.value = x.device_id;
+      opt.textContent = displayName + " (" + (x.path || "lan") + ")";
+      if (opt.value === prevBatPeer) opt.selected = true;
+      bp.appendChild(opt);
     }
   }
   const tr = $("trusted");
@@ -2746,6 +2919,268 @@ if (mediaPolicyClearBtn) {
         if (msg) msg.textContent = "过滤器已重置为不限！";
         setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
         updateMediaPolicy();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "清空异常: " + e.message;
+    }
+  };
+}
+
+async function updateBatteryStatus() {
+  const targetPeer = $("battery-target-peer") ? $("battery-target-peer").value : "";
+  let url = "/api/battery/state";
+  if (targetPeer) {
+    url += "?peer=" + encodeURIComponent(targetPeer);
+  }
+  try {
+    const rep = await api(url);
+    if (!rep || !rep.ok) return;
+    const st = rep.state;
+    const percentEl = $("battery-percent-text");
+    const statusBadge = $("battery-status-badge");
+    const chargingBadge = $("battery-charging-badge");
+    const deviceTitle = $("battery-device-title");
+    const sourceText = $("battery-source-text");
+    const healthText = $("battery-health-text");
+    const progressBar = $("battery-progress-bar");
+    const saverInd = $("battery-saver-indicator");
+    const updatedInd = $("battery-updated-indicator");
+    const iconEl = $("battery-icon");
+
+    if (deviceTitle) {
+      if (rep.peer) {
+        deviceTitle.textContent = rep.peer_alias ? (rep.peer_alias + " (" + rep.peer + ")") : rep.peer;
+      } else {
+        deviceTitle.textContent = "本机设备 (Local Device)";
+      }
+    }
+
+    if (st) {
+      const lvl = Math.min(100, Math.max(0, st.battery_level || 0));
+      if (percentEl) percentEl.textContent = lvl + "%";
+      if (progressBar) {
+        progressBar.style.width = lvl + "%";
+        if (lvl > 50) {
+          progressBar.style.background = "#4caf50";
+        } else if (lvl > 20) {
+          progressBar.style.background = "#ff9800";
+        } else {
+          progressBar.style.background = "#f44336";
+        }
+      }
+      if (chargingBadge) {
+        if (st.is_charging) {
+          chargingBadge.textContent = "⚡ 正在充电";
+          chargingBadge.className = "badge completed";
+          if (iconEl) iconEl.textContent = "⚡";
+        } else {
+          chargingBadge.textContent = "🔋 电池放电";
+          chargingBadge.className = "badge outbound";
+          if (iconEl) iconEl.textContent = "🔋";
+        }
+      }
+      if (statusBadge) {
+        if (lvl <= 10) {
+          statusBadge.textContent = "危急电量";
+          statusBadge.className = "badge bad";
+        } else if (lvl <= 20) {
+          statusBadge.textContent = "低电量警告";
+          statusBadge.className = "badge verifying";
+        } else {
+          statusBadge.textContent = "正常";
+          statusBadge.className = "badge completed";
+        }
+      }
+      if (sourceText) {
+        sourceText.textContent = "电源: " + (st.power_source || "battery").toUpperCase();
+      }
+      if (healthText) {
+        healthText.textContent = st.health_percent != null ? ("健康度: " + st.health_percent + "%") : "健康度: --%";
+      }
+      if (saverInd) {
+        saverInd.textContent = "省电模式: " + (st.battery_saver ? "已开启" : "关闭");
+      }
+      if (updatedInd) {
+        updatedInd.textContent = "更新于: " + (st.timestamp_ms ? new Date(st.timestamp_ms).toLocaleTimeString() : "刚刚");
+      }
+    } else {
+      if (percentEl) percentEl.textContent = "--%";
+      if (progressBar) progressBar.style.width = "0%";
+      if (sourceText) sourceText.textContent = "电源: --";
+      if (healthText) healthText.textContent = "健康度: --%";
+      if (statusBadge) {
+        statusBadge.textContent = "无数据";
+        statusBadge.className = "badge offline";
+      }
+      if (chargingBadge) {
+        chargingBadge.textContent = "未获取";
+        chargingBadge.className = "badge offline";
+      }
+    }
+  } catch (e) {}
+}
+
+async function updateBatteryPolicy() {
+  try {
+    const rep = await api("/api/battery/policy");
+    if (!rep || !rep.ok) return;
+    const p = rep.policy;
+    if (!p) return;
+    if ($("battery-policy-badge")) {
+      $("battery-policy-badge").textContent = p.alert_on_low_battery ? "Alert: On" : "Alert: Off";
+      $("battery-policy-badge").className = p.alert_on_low_battery ? "badge completed" : "badge offline";
+    }
+    if ($("battery-policy-low-thresh") && document.activeElement !== $("battery-policy-low-thresh")) {
+      $("battery-policy-low-thresh").value = p.low_battery_threshold;
+    }
+    if ($("battery-policy-crit-thresh") && document.activeElement !== $("battery-policy-crit-thresh")) {
+      $("battery-policy-crit-thresh").value = p.critical_battery_threshold;
+    }
+    if ($("battery-policy-alert-switch") && document.activeElement !== $("battery-policy-alert-switch")) {
+      $("battery-policy-alert-switch").value = p.alert_on_low_battery ? "true" : "false";
+    }
+    if ($("battery-policy-throttle-switch") && document.activeElement !== $("battery-policy-throttle-switch")) {
+      $("battery-policy-throttle-switch").value = p.auto_throttle_on_battery_saver ? "true" : "false";
+    }
+    if ($("battery-policy-groups") && document.activeElement !== $("battery-policy-groups")) {
+      $("battery-policy-groups").value = (p.allowed_groups || []).join(", ");
+    }
+    if ($("battery-policy-tags") && document.activeElement !== $("battery-policy-tags")) {
+      $("battery-policy-tags").value = (p.allowed_tags || []).join(", ");
+    }
+    if ($("battery-policy-types") && document.activeElement !== $("battery-policy-types")) {
+      $("battery-policy-types").value = (p.allowed_types || []).join(", ");
+    }
+  } catch (e) {}
+}
+
+const toggleBatteryPolicyBtn = $("togglebatterypolicybtn");
+if (toggleBatteryPolicyBtn) {
+  toggleBatteryPolicyBtn.onclick = () => {
+    const p = $("battery-policy-panel");
+    if (!p) return;
+    p.style.display = p.style.display === "none" ? "block" : "none";
+    if (p.style.display !== "none") updateBatteryPolicy();
+  };
+}
+
+const toggleBatteryReportBtn = $("togglebatteryreportbtn");
+if (toggleBatteryReportBtn) {
+  toggleBatteryReportBtn.onclick = () => {
+    const p = $("battery-report-panel");
+    if (!p) return;
+    p.style.display = p.style.display === "none" ? "block" : "none";
+  };
+}
+
+const refreshBatteryBtn = $("refreshbatterybtn");
+if (refreshBatteryBtn) {
+  refreshBatteryBtn.onclick = () => {
+    updateBatteryStatus();
+    updateBatteryPolicy();
+  };
+}
+
+if ($("battery-target-peer")) $("battery-target-peer").onchange = updateBatteryStatus;
+
+const batteryAlertDismiss = $("battery-alert-dismiss");
+if (batteryAlertDismiss) {
+  batteryAlertDismiss.onclick = () => {
+    const banner = $("battery-alert-banner");
+    if (banner) banner.style.display = "none";
+  };
+}
+
+const batteryReportSubmitBtn = $("battery-report-submit-btn");
+if (batteryReportSubmitBtn) {
+  batteryReportSubmitBtn.onclick = async () => {
+    const lvlVal = parseInt($("battery-report-level").value, 10);
+    const chgVal = $("battery-report-charging").value === "true";
+    const srcVal = $("battery-report-source").value;
+    const saverVal = $("battery-report-saver").value === "true";
+    const healthVal = parseInt($("battery-report-health").value, 10);
+    const msg = $("battery-report-msg");
+
+    if (isNaN(lvlVal) || lvlVal < 0 || lvlVal > 100) {
+      if (msg) msg.textContent = "电量数值须为 0-100";
+      return;
+    }
+    if (msg) msg.textContent = "正在广播本机状态…";
+    try {
+      const rep = await api("/api/battery/state", {
+        battery_level: lvlVal,
+        is_charging: chgVal,
+        power_source: srcVal,
+        battery_saver: saverVal,
+        health_percent: isNaN(healthVal) ? undefined : healthVal
+      });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "已向 " + rep.broadcast_count + " 个在线节点广播电量状态！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateBatteryStatus();
+      } else {
+        if (msg) msg.textContent = "上报失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "上报异常: " + e.message;
+    }
+  };
+}
+
+const batteryPolicySaveBtn = $("battery-policy-save-btn");
+if (batteryPolicySaveBtn) {
+  batteryPolicySaveBtn.onclick = async () => {
+    const lowVal = $("battery-policy-low-thresh") ? parseInt($("battery-policy-low-thresh").value, 10) : undefined;
+    const critVal = $("battery-policy-crit-thresh") ? parseInt($("battery-policy-crit-thresh").value, 10) : undefined;
+    const alertVal = $("battery-policy-alert-switch") ? $("battery-policy-alert-switch").value === "true" : undefined;
+    const throttleVal = $("battery-policy-throttle-switch") ? $("battery-policy-throttle-switch").value === "true" : undefined;
+    const groupsVal = $("battery-policy-groups") ? $("battery-policy-groups").value.trim() : "";
+    const tagsVal = $("battery-policy-tags") ? $("battery-policy-tags").value.trim() : "";
+    const typesVal = $("battery-policy-types") ? $("battery-policy-types").value.trim() : "";
+    const msg = $("battery-policy-msg");
+
+    const payload = {};
+    if (!isNaN(lowVal)) payload.low_battery_threshold = lowVal;
+    if (!isNaN(critVal)) payload.critical_battery_threshold = critVal;
+    if (alertVal != null) payload.alert_on_low_battery = alertVal;
+    if (throttleVal != null) payload.auto_throttle_on_battery_saver = throttleVal;
+    if (groupsVal) {
+      payload.allowed_groups = groupsVal.split(",").map(s => s.trim()).filter(Boolean);
+    }
+    if (tagsVal) {
+      payload.allowed_tags = tagsVal.split(",").map(s => s.trim().replace(/^#/, "")).filter(Boolean);
+    }
+    if (typesVal) {
+      payload.allowed_types = typesVal.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+    }
+
+    if (msg) msg.textContent = "正在保存电量策略…";
+    try {
+      const rep = await api("/api/battery/policy", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "策略已更新保存！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateBatteryPolicy();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "保存异常: " + e.message;
+    }
+  };
+}
+
+const batteryPolicyClearBtn = $("battery-policy-clear-btn");
+if (batteryPolicyClearBtn) {
+  batteryPolicyClearBtn.onclick = async () => {
+    const msg = $("battery-policy-msg");
+    if (msg) msg.textContent = "正在清空过滤器…";
+    try {
+      const rep = await api("/api/battery/policy", { clear_filters: true });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "过滤器已重置为不限！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateBatteryPolicy();
       }
     } catch (e) {
       if (msg) msg.textContent = "清空异常: " + e.message;
@@ -4480,14 +4915,32 @@ function setupEventSource() {
 							            desc = "媒体指令派发: " + ev.command + " -> " + ev.target_peer + (ev.success ? "" : " (失败)");
 							            updateMediaStatus();
 							          }
-							          else if (ev.kind === "media_state_changed") {
-							            desc = "播放状态变更: " + ev.peer_alias + " [" + ev.state + "] " + (ev.title || "");
-							            updateMediaStatus();
-							          }
-							          else if (ev.kind === "media_policy_changed") {
-							            desc = "媒体准入策略更新: " + ev.mode + " (上限 " + ev.max_volume_limit + "%)";
-							            updateMediaPolicy();
-							          }
+								          else if (ev.kind === "media_state_changed") {
+								            desc = "播放状态变更: " + ev.peer_alias + " [" + ev.state + "] " + (ev.title || "");
+								            updateMediaStatus();
+								          }
+								          else if (ev.kind === "media_policy_changed") {
+								            desc = "媒体准入策略更新: " + ev.mode + " (上限 " + ev.max_volume_limit + "%)";
+								            updateMediaPolicy();
+								          }
+								          else if (ev.kind === "battery_state_changed") {
+								            desc = "电量状态变更: " + ev.peer_alias + " [" + ev.battery_level + "%]" + (ev.is_charging ? " (充电中)" : "") + " 电源:" + ev.power_source;
+								            updateBatteryStatus();
+								          }
+								          else if (ev.kind === "battery_low_alert") {
+								            desc = "⚠️ 电量告警: " + ev.peer_alias + " 当前电量仅剩 " + ev.battery_level + "% (" + (ev.is_critical ? "危急" : "警告") + ")！";
+								            const banner = $("battery-alert-banner");
+								            const alertText = $("battery-alert-text");
+								            if (banner && alertText) {
+								              alertText.textContent = "设备 " + ev.peer_alias + " 当前电量仅剩 " + ev.battery_level + "% (" + (ev.is_critical ? "危急" : "警告") + ")，请及时连接电源！";
+								              banner.style.display = "block";
+								            }
+								            updateBatteryStatus();
+								          }
+								          else if (ev.kind === "battery_policy_changed") {
+								            desc = "电量预警策略更新: 低电量 " + ev.low_battery_threshold + "% · 危急 " + ev.critical_battery_threshold + "% · 警报:" + (ev.alert_on_low_battery ? "开启" : "关闭");
+								            updateBatteryPolicy();
+								          }
 						          else if (ev.kind === "screen_state_changed") {
 					            desc = "屏幕状态: " + ev.state + " (授权:" + (ev.allowed ? "是" : "否") + ")" + (ev.peer ? (" · 对端:" + ev.peer) : "");
 					            updateScreenStatus();
@@ -4643,10 +5096,14 @@ function setupEventSource() {
 												setInterval(updateHandoffInbox, 3000);
 													updateHandoffPolicy();
 													setInterval(updateHandoffPolicy, 3000);
-													updateMediaStatus();
-													setInterval(updateMediaStatus, 3000);
-													updateMediaPolicy();
-													setInterval(updateMediaPolicy, 3000);
+														updateMediaStatus();
+														setInterval(updateMediaStatus, 3000);
+														updateMediaPolicy();
+														setInterval(updateMediaPolicy, 3000);
+														updateBatteryStatus();
+														setInterval(updateBatteryStatus, 3000);
+														updateBatteryPolicy();
+														setInterval(updateBatteryPolicy, 3000);
 				</script>
 </body>
 </html>

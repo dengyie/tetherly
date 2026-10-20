@@ -368,6 +368,34 @@ pub enum UiEvent {
         allow_seek: bool,
         timestamp_ms: u64,
     },
+    BatteryStateChanged {
+        peer_id: String,
+        peer_alias: String,
+        battery_level: u8,
+        is_charging: bool,
+        power_source: String,
+        battery_saver: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        health_percent: Option<u8>,
+        timestamp_ms: u64,
+    },
+    BatteryLowAlert {
+        peer_id: String,
+        peer_alias: String,
+        battery_level: u8,
+        is_critical: bool,
+        timestamp_ms: u64,
+    },
+    BatteryPolicyChanged {
+        low_battery_threshold: u8,
+        critical_battery_threshold: u8,
+        alert_on_low_battery: bool,
+        auto_throttle_on_battery_saver: bool,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -595,6 +623,69 @@ impl UiEvent {
             timestamp_ms,
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn battery_state_changed(
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        battery_level: u8,
+        is_charging: bool,
+        power_source: impl Into<String>,
+        battery_saver: bool,
+        health_percent: Option<u8>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::BatteryStateChanged {
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            battery_level,
+            is_charging,
+            power_source: power_source.into(),
+            battery_saver,
+            health_percent,
+            timestamp_ms,
+        }
+    }
+
+    pub fn battery_low_alert(
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        battery_level: u8,
+        is_critical: bool,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::BatteryLowAlert {
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            battery_level,
+            is_critical,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn battery_policy_changed(
+        low_battery_threshold: u8,
+        critical_battery_threshold: u8,
+        alert_on_low_battery: bool,
+        auto_throttle_on_battery_saver: bool,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::BatteryPolicyChanged {
+            low_battery_threshold,
+            critical_battery_threshold,
+            alert_on_low_battery,
+            auto_throttle_on_battery_saver,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            timestamp_ms,
+        }
+    }
+
     pub fn peer_profile_updated(
         device_id: impl Into<String>,
         device_type: impl Into<String>,
@@ -1059,5 +1150,48 @@ mod tests {
         assert!(json3.contains("\"kind\":\"handoff_policy_changed\""));
         assert!(json3.contains("\"action\":\"auto_open\""));
         assert!(json3.contains("\"allowed_groups\":[\"office\"]"));
+    }
+
+    #[test]
+    fn test_battery_events_serialization() {
+        let ev1 = UiEvent::battery_state_changed(
+            "peer_123",
+            "iPhone 15",
+            85,
+            true,
+            "ac",
+            false,
+            Some(95),
+            123456794,
+        );
+        let json1 = serde_json::to_string(&ev1).unwrap();
+        assert!(json1.contains("\"kind\":\"battery_state_changed\""));
+        assert!(json1.contains("\"peer_id\":\"peer_123\""));
+        assert!(json1.contains("\"battery_level\":85"));
+        assert!(json1.contains("\"is_charging\":true"));
+        assert!(json1.contains("\"power_source\":\"ac\""));
+        assert!(json1.contains("\"health_percent\":95"));
+
+        let ev2 = UiEvent::battery_low_alert("peer_123", "iPhone 15", 15, false, 123456795);
+        let json2 = serde_json::to_string(&ev2).unwrap();
+        assert!(json2.contains("\"kind\":\"battery_low_alert\""));
+        assert!(json2.contains("\"battery_level\":15"));
+        assert!(json2.contains("\"is_critical\":false"));
+
+        let ev3 = UiEvent::battery_policy_changed(
+            20,
+            10,
+            true,
+            false,
+            vec!["mobile".into()],
+            vec!["work".into()],
+            vec!["phone".into()],
+            123456796,
+        );
+        let json3 = serde_json::to_string(&ev3).unwrap();
+        assert!(json3.contains("\"kind\":\"battery_policy_changed\""));
+        assert!(json3.contains("\"low_battery_threshold\":20"));
+        assert!(json3.contains("\"critical_battery_threshold\":10"));
+        assert!(json3.contains("\"alert_on_low_battery\":true"));
     }
 }

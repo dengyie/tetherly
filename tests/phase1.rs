@@ -9557,6 +9557,245 @@ async fn media_playback_control_pipeline_and_state_sync_via_loopback_api() {
     peer.shutdown();
 }
 
+#[tokio::test]
+async fn battery_power_state_sync_and_low_battery_alert_via_loopback_api() {
+    let (host, peer, g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let _host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to Host SSE Event Stream to monitor real-time alerts
+    let mut host_sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect to host sse stream");
+
+    // 2. Initial Battery Policy Check on Host
+    let (code_pol, body_pol) = tetherly_node::loopback_get(host_ui, "/api/battery/policy")
+        .await
+        .unwrap();
+    assert_eq!(code_pol, 200);
+    let pol_init: serde_json::Value = serde_json::from_slice(&body_pol).unwrap();
+    assert_eq!(pol_init["policy"]["low_battery_threshold"], 20);
+    assert_eq!(pol_init["policy"]["critical_battery_threshold"], 10);
+    assert_eq!(pol_init["policy"]["alert_on_low_battery"], true);
+    assert_eq!(pol_init["policy"]["auto_throttle_on_battery_saver"], false);
+
+    // 3. Peer Updates Local Healthy Battery State (85%, charging, AC)
+    let state_healthy = serde_json::json!({
+        "battery_level": 85,
+        "is_charging": true,
+        "power_source": "ac",
+        "battery_saver": false,
+        "health_percent": 96
+    });
+    let (code_st, body_st) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/battery/state",
+        &serde_json::to_vec(&state_healthy).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_st, 200);
+    let st_rep: serde_json::Value = serde_json::from_slice(&body_st).unwrap();
+    assert!(st_rep["ok"].as_bool().unwrap_or(false));
+    assert_eq!(st_rep["state"]["battery_level"], 85);
+    assert_eq!(st_rep["state"]["is_charging"], true);
+    assert_eq!(st_rep["state"]["power_source"], "ac");
+    assert_eq!(st_rep["state"]["battery_saver"], false);
+    assert_eq!(st_rep["state"]["health_percent"], 96);
+    assert!(st_rep["broadcast_count"].as_u64().unwrap_or(0) >= 1);
+
+    // 4. Host Queries Peer's Synchronized Battery State
+    let t_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut remote_state_synced = false;
+    while tokio::time::Instant::now() < t_deadline {
+        let (c, b) =
+            tetherly_node::loopback_get(host_ui, &format!("/api/battery/state?peer={}", peer_id))
+                .await
+                .unwrap();
+        if c == 200 {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if let Some(st) = val.get("state").filter(|s| !s.is_null()) {
+                    if st["battery_level"] == 85
+                        && st["is_charging"] == true
+                        && st["power_source"] == "ac"
+                    {
+                        remote_state_synced = true;
+                        break;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        remote_state_synced,
+        "host must receive peer's published battery state via TYPE_BATTERY_STATE frame"
+    );
+
+    // 5. Peer Updates Battery State to Low (16%, discharging, Battery)
+    let state_low = serde_json::json!({
+        "battery_level": 16,
+        "is_charging": false,
+        "power_source": "battery",
+        "battery_saver": true,
+        "health_percent": 96
+    });
+    let (code_low, _) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/battery/state",
+        &serde_json::to_vec(&state_low).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_low, 200);
+
+    // 6. Verify Host Triggers Low Battery Alert (is_critical: false)
+    let sse_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut saw_low_alert = false;
+    let mut saw_state_changed = false;
+    while tokio::time::Instant::now() < sse_deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), host_sse.next_event()).await
+        {
+            if raw.contains("battery_state_changed") {
+                saw_state_changed = true;
+            }
+            if raw.contains("battery_low_alert") {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if val["battery_level"] == 16 && val["is_critical"] == false {
+                        saw_low_alert = true;
+                    }
+                }
+            }
+            if saw_state_changed && saw_low_alert {
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_state_changed,
+        "host must receive battery_state_changed event"
+    );
+    assert!(
+        saw_low_alert,
+        "host must receive battery_low_alert event with is_critical: false"
+    );
+
+    // 7. Peer Updates Battery State to Critical (8%, discharging)
+    let state_crit = serde_json::json!({
+        "battery_level": 8,
+        "is_charging": false,
+        "power_source": "battery",
+        "battery_saver": true,
+        "health_percent": 96
+    });
+    let (code_crit, _) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/battery/state",
+        &serde_json::to_vec(&state_crit).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_crit, 200);
+
+    // 8. Verify Host Triggers Critical Alert (is_critical: true)
+    let crit_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut saw_crit_alert = false;
+    while tokio::time::Instant::now() < crit_deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), host_sse.next_event()).await
+        {
+            if raw.contains("battery_low_alert") {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if val["battery_level"] == 8 && val["is_critical"] == true {
+                        saw_crit_alert = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        saw_crit_alert,
+        "host must receive battery_low_alert event with is_critical: true"
+    );
+
+    // 9. Host Policy Mutation & Scoped Filtering
+    let update_policy = serde_json::json!({
+        "low_battery_threshold": 30,
+        "critical_battery_threshold": 15,
+        "alert_on_low_battery": true,
+        "auto_throttle_on_battery_saver": true,
+        "allowed_groups": ["trusted-mesh"],
+        "allowed_tags": ["mobile"]
+    });
+    let (code_pol_up, body_pol_up) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/battery/policy",
+        &serde_json::to_vec(&update_policy).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_pol_up, 200);
+    let pol_updated: serde_json::Value = serde_json::from_slice(&body_pol_up).unwrap();
+    assert_eq!(pol_updated["policy"]["low_battery_threshold"], 30);
+    assert_eq!(pol_updated["policy"]["critical_battery_threshold"], 15);
+    assert_eq!(
+        pol_updated["policy"]["auto_throttle_on_battery_saver"],
+        true
+    );
+    assert_eq!(
+        pol_updated["policy"]["allowed_groups"],
+        serde_json::json!(["trusted-mesh"])
+    );
+    assert_eq!(
+        pol_updated["policy"]["allowed_tags"],
+        serde_json::json!(["mobile"])
+    );
+
+    // 10. File persistence check on host data_dir
+    let policy_path = g1.path().join("battery_policy.json");
+    assert!(
+        policy_path.exists(),
+        "battery_policy.json must be persisted"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(&policy_path).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "battery_policy.json must have 0o600 permissions"
+        );
+    }
+
+    // 11. Security Guard: Host header 403 Forbidden attack defense
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], host_ui));
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let evil_req =
+        "GET /api/battery/state HTTP/1.1\r\nHost: malicious-attacker.com\r\nConnection: close\r\n\r\n";
+    tokio::io::AsyncWriteExt::write_all(&mut stream, evil_req.as_bytes())
+        .await
+        .unwrap();
+    tokio::io::AsyncWriteExt::flush(&mut stream).await.unwrap();
+    let mut raw_resp = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut raw_resp)
+        .await
+        .unwrap();
+    let resp_str = String::from_utf8_lossy(&raw_resp);
+    assert!(
+        resp_str.starts_with("HTTP/1.1 403") || resp_str.starts_with("HTTP/1.0 403"),
+        "Host header attack must be rejected with 403 Forbidden"
+    );
+
+    // 12. Clean Shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

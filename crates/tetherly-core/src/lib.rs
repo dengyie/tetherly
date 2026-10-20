@@ -6,6 +6,7 @@
 
 pub mod allowlist;
 pub mod ancs;
+pub mod battery;
 pub mod bind;
 pub mod clip;
 pub mod dedup;
@@ -37,6 +38,7 @@ pub use ancs::{
     NotificationEvent, APP_NAME_WAIT_MS, ATTR_MESSAGE, ATTR_TITLE, NOTIF_ATTR_REQUEST,
     UUID_ANCS_SERVICE, UUID_CONTROL_POINT, UUID_DATA_SOURCE, UUID_NOTIFICATION_SOURCE,
 };
+pub use battery::{BatteryStateFrame, BatteryValidator, PowerSource};
 pub use bind::{
     classify, classify_v4, is_unspecified_bind, should_listen, should_listen_v4, BindClass,
 };
@@ -53,8 +55,8 @@ pub use frame::{
     IncrementalSha256, InnerFrame, NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame,
     TextMessage, CANDIDATE_TTL_MS, CLIPBOARD_OTP_CLEAR_MS, CLIP_TEXT_MAX, FILE_CHUNK,
     FILE_TOKEN_TTL_MS, HANDOFF_TITLE_MAX, HANDOFF_URL_MAX, NOTIFY_TEXT_MAX, TEXT_MESSAGE_MAX,
-    TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF,
-    TYPE_TEXT_MESSAGE,
+    TYPE_BATTERY_STATE, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_PING, TYPE_PONG,
+    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
 };
 pub use handoff::{
     HandoffAction, HandoffEntry, HandoffStatus, ResourceHandoffValidator, SanitizedHandoffUrl,
