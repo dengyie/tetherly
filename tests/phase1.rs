@@ -7835,6 +7835,482 @@ async fn peer_device_profiling_tag_and_group_governance_via_loopback_api() {
     peer.shutdown();
 }
 
+/// ADR-063: Policy-based tag & group targeted dispatch, multi-peer fan-out,
+/// single-pass hash streaming, granular auto-accept policy, SSE Zero-Plaintext, and Host 403 isolation.
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_based_tag_and_group_targeted_multi_dispatch_via_loopback_api() {
+    let (h_dir, _gh) = temp_dir("host");
+    let (p1_dir, _gp1) = temp_dir("peer1");
+    let (p2_dir, _gp2) = temp_dir("peer2");
+    let host = Node::start(cfg(h_dir, "host", "linux")).unwrap();
+    let peer1 = Node::start(cfg(p1_dir.clone(), "peer1", "linux")).unwrap();
+    let peer2 = Node::start(cfg(p2_dir, "peer2", "linux")).unwrap();
+    host.spawn_listeners().await.unwrap();
+    peer1.spawn_listeners().await.unwrap();
+    peer2.spawn_listeners().await.unwrap();
+
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    host.set_pin(pin);
+    peer1.set_pin(pin);
+    peer2.set_pin(pin);
+
+    host.dial(peer1.control_addr()).await.unwrap();
+    host.dial(peer2.control_addr()).await.unwrap();
+
+    let start = std::time::Instant::now();
+    loop {
+        let peers = host.live_peers();
+        if peers.len() >= 2 && peers.iter().all(|p| p.file_port.is_some()) {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(45) {
+            panic!("host did not see 2 live peers with file_port");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    wait_live(&peer1, Duration::from_secs(45)).await;
+    wait_live(&peer2, Duration::from_secs(45)).await;
+
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer1_ui = peer1.spawn_ui().await.expect("peer1 UI spawns");
+    let _peer2_ui = peer2.spawn_ui().await.expect("peer2 UI spawns");
+
+    let host_id = host.identity().device_id().clone();
+    let peer1_id = peer1.identity().device_id().clone();
+    let peer2_id = peer2.identity().device_id().clone();
+
+    // 1. Connect to SSE event streams on host UI and peer1 UI
+    let mut sse_host = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("host SSE connects");
+    let mut sse_peer1 = tetherly_node::loopback_events_connect(peer1_ui)
+        .await
+        .expect("peer1 SSE connects");
+
+    // 2. Configure peer profiles on Host:
+    // Peer1: device_type="laptop", group="dev", tags=["lab", "frontend"]
+    let p1_prof_req = serde_json::json!({
+        "peer": peer1_id.as_str(),
+        "device_type": "laptop",
+        "group": "dev",
+        "tags": ["lab", "frontend"],
+    });
+    let (code_p1, body_p1) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/profile",
+        &serde_json::to_vec(&p1_prof_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        code_p1,
+        200,
+        "peer1 profile update failed: {}",
+        String::from_utf8_lossy(&body_p1)
+    );
+
+    // Peer2: device_type="server", group="ops", tags=["lab", "backend"]
+    let p2_prof_req = serde_json::json!({
+        "peer": peer2_id.as_str(),
+        "device_type": "server",
+        "group": "ops",
+        "tags": ["lab", "backend"],
+    });
+    let (code_p2, body_p2) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/profile",
+        &serde_json::to_vec(&p2_prof_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        code_p2,
+        200,
+        "peer2 profile update failed: {}",
+        String::from_utf8_lossy(&body_p2)
+    );
+
+    // 3. Test Multi-Target Message Dispatch via POST /api/message/send-multi:
+    // A. Dispatch by Tag: tag="lab" (matches both peer1 and peer2)
+    let secret_msg = "Confidential cluster deployment instructions";
+    let msg_lab_req = serde_json::json!({
+        "tag": "lab",
+        "text": secret_msg,
+    });
+    let (code_msg_lab, body_msg_lab) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/message/send-multi",
+        &serde_json::to_vec(&msg_lab_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_msg_lab, 200);
+    let lab_msg_rep: tetherly_node::MultiMessageSendReport =
+        serde_json::from_slice(&body_msg_lab).unwrap();
+    assert!(lab_msg_rep.ok);
+    assert_eq!(
+        lab_msg_rep.selector,
+        tetherly_node::TargetSelector::Tag("lab".to_string())
+    );
+    assert_eq!(lab_msg_rep.target_count, 2);
+    assert_eq!(lab_msg_rep.success_count, 2);
+    assert_eq!(lab_msg_rep.failed_count, 0);
+    assert_eq!(lab_msg_rep.dispatches.len(), 2);
+    assert!(lab_msg_rep
+        .dispatches
+        .iter()
+        .any(|d| d.peer == peer1_id.as_str() && d.success));
+    assert!(lab_msg_rep
+        .dispatches
+        .iter()
+        .any(|d| d.peer == peer2_id.as_str() && d.success));
+
+    // SSE Verification & Zero-Plaintext Invariant on Host:
+    // Listen for UiEvent::MultiDispatchCompleted
+    let mut saw_msg_dispatch_sse = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(raw_str))) =
+            tokio::time::timeout(Duration::from_millis(500), sse_host.next_event()).await
+        {
+            if let Ok(ev) = serde_json::from_str::<serde_json::Value>(&raw_str) {
+                if ev["kind"] == "multi_dispatch_completed" && ev["dispatch_kind"] == "message" {
+                    assert_eq!(ev["selector"], "tag:lab");
+                    assert_eq!(ev["target_count"], 2);
+                    assert_eq!(ev["success_count"], 2);
+                    assert_eq!(ev["failed_count"], 0);
+                    assert!(ev["timestamp_ms"].as_u64().unwrap_or(0) > 0);
+
+                    // ZERO-PLAINTEXT CHECK: Raw SSE event text must NOT leak message plaintext!
+                    assert!(
+                        !raw_str.contains("Confidential"),
+                        "Zero-Plaintext Invariant: raw SSE must NOT contain secret message text!"
+                    );
+                    assert!(
+                        ev.get("text").is_none() && ev.get("message").is_none(),
+                        "Zero-Plaintext Invariant: event payload must omit text bodies!"
+                    );
+                    saw_msg_dispatch_sse = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_msg_dispatch_sse,
+        "must emit multi_dispatch_completed for message"
+    );
+
+    // B. Dispatch by Group: group="ops" (matches only peer2) via alias /api/msg/send-multi
+    let msg_ops_req = serde_json::json!({
+        "group": "ops",
+        "text": "Ops emergency alert",
+    });
+    let (code_msg_ops, body_msg_ops) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/msg/send-multi",
+        &serde_json::to_vec(&msg_ops_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_msg_ops, 200);
+    let ops_msg_rep: tetherly_node::MultiMessageSendReport =
+        serde_json::from_slice(&body_msg_ops).unwrap();
+    assert!(ops_msg_rep.ok);
+    assert_eq!(
+        ops_msg_rep.selector,
+        tetherly_node::TargetSelector::Group("ops".to_string())
+    );
+    assert_eq!(ops_msg_rep.target_count, 1);
+    assert_eq!(ops_msg_rep.success_count, 1);
+    assert_eq!(ops_msg_rep.dispatches[0].peer, peer2_id.as_str());
+
+    // C. Dispatch by Type: type="laptop" via single-peer /api/message/send fallback
+    let msg_type_req = serde_json::json!({
+        "type": "laptop",
+        "text": "Laptop maintenance announcement",
+    });
+    let (code_msg_type, body_msg_type) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/message/send",
+        &serde_json::to_vec(&msg_type_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_msg_type, 200);
+    let type_msg_rep: serde_json::Value = serde_json::from_slice(&body_msg_type).unwrap();
+    assert_eq!(type_msg_rep["ok"], true);
+    assert_eq!(type_msg_rep["target_count"], 1);
+    assert_eq!(type_msg_rep["success_count"], 1);
+
+    // 4. Test Multi-Target File Transfer Dispatch via POST /api/file/send-multi:
+    // A. Single-target group dispatch (group="dev", matches only peer1)
+    use base64::Engine;
+    let b64_dev_data =
+        base64::engine::general_purpose::STANDARD.encode(b"dev_config_payload_12345");
+    let file_dev_req = serde_json::json!({
+        "group": "dev",
+        "filename": "dev_config.json",
+        "data": b64_dev_data,
+    });
+    let (code_file_dev, body_file_dev) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/send-multi",
+        &serde_json::to_vec(&file_dev_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_file_dev, 200);
+    let dev_file_rep: tetherly_node::MultiFileSendReport =
+        serde_json::from_slice(&body_file_dev).unwrap();
+    assert!(dev_file_rep.ok);
+    assert_eq!(dev_file_rep.filename, "dev_config.json");
+    assert_eq!(
+        dev_file_rep.selector,
+        tetherly_node::TargetSelector::Group("dev".to_string())
+    );
+    assert_eq!(dev_file_rep.target_count, 1);
+    assert_eq!(dev_file_rep.success_count, 1);
+    assert_eq!(dev_file_rep.failed_count, 0);
+    assert_eq!(dev_file_rep.dispatches[0].peer, peer1_id.as_str());
+    assert!(dev_file_rep.dispatches[0].transfer_id.is_some());
+    assert!(dev_file_rep.dispatches[0].outbox_id.is_some());
+
+    // Verify Outbox on Host contains dev_config.json
+    let (code_outbox, body_outbox) = tetherly_node::loopback_get(host_ui, "/api/file/outbox")
+        .await
+        .unwrap();
+    assert_eq!(code_outbox, 200);
+    let outbox_rep: tetherly_node::OutboxReport = serde_json::from_slice(&body_outbox).unwrap();
+    assert!(outbox_rep
+        .entries
+        .iter()
+        .any(|e| e.filename == "dev_config.json" && e.peer == peer1_id.as_str()));
+
+    // B. Multi-target tag fan-out with single-pass hash (tag="lab", matches peer1 and peer2)
+    let payload_bytes = b"shared_stream_optimized_asset_data_bytes_987654321";
+    let b64_lab_data = base64::engine::general_purpose::STANDARD.encode(payload_bytes);
+    let file_lab_req = serde_json::json!({
+        "tag": "lab",
+        "filename": "shared_asset.bin",
+        "data": b64_lab_data,
+    });
+    let (code_file_lab, body_file_lab) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/send-multi",
+        &serde_json::to_vec(&file_lab_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_file_lab, 200);
+    let lab_file_rep: tetherly_node::MultiFileSendReport =
+        serde_json::from_slice(&body_file_lab).unwrap();
+    assert!(lab_file_rep.ok);
+    assert_eq!(lab_file_rep.filename, "shared_asset.bin");
+    assert_eq!(
+        lab_file_rep.selector,
+        tetherly_node::TargetSelector::Tag("lab".to_string())
+    );
+    assert_eq!(lab_file_rep.target_count, 2);
+    assert_eq!(lab_file_rep.success_count, 2);
+    assert_eq!(lab_file_rep.failed_count, 0);
+    assert_eq!(lab_file_rep.dispatches.len(), 2);
+
+    // Verify peer unique transfer IDs were generated to prevent collisions
+    let tid1 = lab_file_rep
+        .dispatches
+        .iter()
+        .find(|d| d.peer == peer1_id.as_str())
+        .unwrap()
+        .transfer_id
+        .as_ref()
+        .unwrap();
+    let tid2 = lab_file_rep
+        .dispatches
+        .iter()
+        .find(|d| d.peer == peer2_id.as_str())
+        .unwrap()
+        .transfer_id
+        .as_ref()
+        .unwrap();
+    assert_ne!(tid1, tid2, "transfer IDs across peers must be unique");
+
+    // SSE Verification on Host for MultiDispatchCompleted (file)
+    let mut saw_file_dispatch_sse = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(raw_str))) =
+            tokio::time::timeout(Duration::from_millis(500), sse_host.next_event()).await
+        {
+            if let Ok(ev) = serde_json::from_str::<serde_json::Value>(&raw_str) {
+                if ev["kind"] == "multi_dispatch_completed"
+                    && ev["dispatch_kind"] == "file"
+                    && ev["selector"] == "tag:lab"
+                {
+                    assert_eq!(ev["target_count"], 2);
+                    assert_eq!(ev["success_count"], 2);
+                    assert_eq!(ev["failed_count"], 0);
+                    assert!(ev["timestamp_ms"].as_u64().unwrap_or(0) > 0);
+                    saw_file_dispatch_sse = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_file_dispatch_sse,
+        "must emit multi_dispatch_completed for file"
+    );
+
+    // 5. Test Granular Auto-Accept Policy on Peer1 (/api/file/auto-accept/policy & alias /api/auto-accept):
+    // A. Query initial policy: default disabled
+    let (code_pol_init, body_pol_init) =
+        tetherly_node::loopback_get(peer1_ui, "/api/file/auto-accept/policy")
+            .await
+            .unwrap();
+    assert_eq!(code_pol_init, 200);
+    let init_pol_rep: tetherly_node::AutoAcceptPolicyReport =
+        serde_json::from_slice(&body_pol_init).unwrap();
+    assert!(init_pol_rep.ok);
+    assert!(!init_pol_rep.policy.enabled);
+
+    // B. Peer1 tags Host as "trusted-ci"
+    let host_tag_req = serde_json::json!({
+        "peer": host_id.as_str(),
+        "tags": ["trusted-ci"],
+    });
+    let (code_tag_host, _) = tetherly_node::loopback_post(
+        peer1_ui,
+        "/api/peers/profile",
+        &serde_json::to_vec(&host_tag_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_tag_host, 200);
+
+    // C. Update AutoAcceptPolicy on Peer1 to allow tag "trusted-ci" up to 10 MiB
+    let update_pol_req = serde_json::json!({
+        "enabled": true,
+        "allowed_tags": ["trusted-ci"],
+        "max_file_size": 10_485_760,
+    });
+    let (code_up_pol, body_up_pol) = tetherly_node::loopback_post(
+        peer1_ui,
+        "/api/file/auto-accept/policy",
+        &serde_json::to_vec(&update_pol_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_up_pol, 200);
+    let up_pol_rep: tetherly_node::AutoAcceptPolicyReport =
+        serde_json::from_slice(&body_up_pol).unwrap();
+    assert!(up_pol_rep.ok);
+    assert!(up_pol_rep.policy.enabled);
+    assert_eq!(up_pol_rep.policy.allowed_tags, vec!["trusted-ci"]);
+    assert_eq!(up_pol_rep.policy.max_file_size, Some(10_485_760));
+
+    // SSE Verification on Peer1: AutoAcceptPolicyChanged
+    let mut saw_policy_sse = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(raw_str))) =
+            tokio::time::timeout(Duration::from_millis(500), sse_peer1.next_event()).await
+        {
+            if let Ok(ev) = serde_json::from_str::<serde_json::Value>(&raw_str) {
+                if ev["kind"] == "auto_accept_policy_changed" {
+                    assert_eq!(ev["enabled"], true);
+                    let tags = ev["allowed_tags"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_str().unwrap())
+                        .collect::<Vec<_>>();
+                    assert_eq!(tags, vec!["trusted-ci"]);
+                    assert!(ev["timestamp_ms"].as_u64().unwrap_or(0) > 0);
+                    saw_policy_sse = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_policy_sse,
+        "must emit auto_accept_policy_changed SSE event"
+    );
+
+    // Verify atomic disk persistence of auto_accept.json
+    let auto_accept_path = p1_dir.join(tetherly_node::AUTO_ACCEPT_FILE);
+    assert!(
+        auto_accept_path.exists(),
+        "auto_accept.json must be persisted to disk"
+    );
+
+    // D. Test Policy-Triggered Auto-Accept:
+    // Host sends a file "ci_artifact.tar" directly to Peer1
+    let ci_data = base64::engine::general_purpose::STANDARD.encode(b"automated_ci_build_payload");
+    let send_ci_req = serde_json::json!({
+        "peer": peer1_id.as_str(),
+        "filename": "ci_artifact.tar",
+        "data": ci_data,
+    });
+    let (code_send_ci, body_send_ci) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/file/send",
+        &serde_json::to_vec(&send_ci_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        code_send_ci,
+        200,
+        "file send failed: {}",
+        String::from_utf8_lossy(&body_send_ci)
+    );
+
+    // Wait briefly and verify Peer1 auto-accepted the transfer
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut auto_accepted = false;
+    while tokio::time::Instant::now() < deadline {
+        let (c, b) = tetherly_node::loopback_get(peer1_ui, "/api/file/auto-accept/policy")
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(rep) = serde_json::from_slice::<tetherly_node::AutoAcceptPolicyReport>(&b) {
+                if rep.auto_accepted_count >= 1 {
+                    auto_accepted = true;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        auto_accepted,
+        "peer1 must automatically accept file matching policy"
+    );
+
+    // 6. Security Red Line: Loopback Isolation Host 403 Forbidden check on multi endpoints
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{host_ui}"))
+        .await
+        .expect("connect to host ui port");
+    let evil_req = "POST /api/message/send-multi HTTP/1.1\r\nHost: evil.attacker.domain\r\nContent-Length: 2\r\n\r\n{}";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    // 7. Clean shutdown
+    host.shutdown();
+    peer1.shutdown();
+    peer2.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

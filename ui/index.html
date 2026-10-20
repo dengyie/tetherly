@@ -109,14 +109,41 @@
         <div style="display:flex;gap:8px;align-items:center">
           <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px;cursor:pointer">
             <input type="checkbox" id="autoaccepttoggle" style="cursor:pointer"/>
-            自动接收受信任对端
+            自动接收
           </label>
+          <button id="toggle-autoaccept-policy-btn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">策略配置</button>
           <button id="refreshfileoffers" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--line);color:var(--dim);border-radius:4px;cursor:pointer">刷新提议</button>
           <button id="acceptallfiles" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--ok);color:var(--ok);border-radius:4px;cursor:pointer">全部接收</button>
           <button id="rejectallfiles" type="button" style="padding:2px 8px;font-size:12px;background:none;border:1px solid var(--bad);color:var(--bad);border-radius:4px;cursor:pointer">全部拒绝</button>
         </div>
       </div>
       <div id="fileoffers-status" class="hint" style="margin-bottom:6px"></div>
+      <div id="autoaccept-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-bottom:10px">
+        <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:var(--text)">细粒度文件自动接收策略配置 (Auto-Accept Policy)</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">免确认分组 (Allowed Groups):</label>
+            <input id="aa-groups" placeholder="如: dev, homelab (逗号分隔，留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">免确认标签 (Allowed Tags):</label>
+            <input id="aa-tags" placeholder="如: backup, lab (逗号分隔，留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">免确认形态 (Allowed Types):</label>
+            <input id="aa-types" placeholder="如: desktop, server (逗号分隔，留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">单文件最大字节 (Max Size bytes):</label>
+            <input id="aa-max-size" type="number" placeholder="如: 104857600 (0 或留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px">
+          <button id="aa-clear-filters-btn" class="ghost" type="button" style="padding:3px 10px;font-size:12px">清空所有过滤器</button>
+          <button id="aa-save-policy-btn" class="primary" type="button" style="padding:3px 12px;font-size:12px">保存策略</button>
+        </div>
+        <div id="aa-policy-msg" class="hint" style="margin-top:4px"></div>
+      </div>
       <div id="files"><div class="empty">没有待接收文件。</div></div>
     </section>
     <section style="margin-top:16px">
@@ -132,15 +159,29 @@
     </section>
     <section style="margin-top:16px">
       <h2>发送文件</h2>
-      <div class="hint">选择要发送给对端的文件（支持多选批量发送，单文件限制 64 GiB 以内）。</div>
-      <div class="row" style="margin-top:8px">
-        <select id="sendpeer" style="background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%"></select>
+      <div class="hint">选择要发送给对端的文件（支持多选批量发送；支持按标签、分组、形态定向扇出或全网在线广播）。</div>
+      <div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap;align-items:center">
+        <label style="font-size:12px;color:var(--muted)">目标模式:
+          <select id="send-target-mode" style="margin-left:4px;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+            <option value="peer">指定单个节点</option>
+            <option value="group">按分组 (Group)</option>
+            <option value="tag">按标签 (Tag)</option>
+            <option value="type">按形态 (Device Type)</option>
+            <option value="all">全网在线节点 (All Online)</option>
+          </select>
+        </label>
+        <div id="send-peer-wrap" style="flex:1;min-width:180px">
+          <select id="sendpeer" style="background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%"></select>
+        </div>
+        <div id="send-target-input-wrap" style="display:none;flex:1;min-width:180px">
+          <input id="send-target-val" placeholder="输入分组名、标签名或设备形态 (如 server)…" style="box-sizing:border-box;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%"/>
+        </div>
       </div>
-      <div class="row">
+      <div class="row" style="margin-top:8px">
         <input id="sendfile" type="file" multiple/>
         <button id="sendbtn" type="button">发送</button>
       </div>
-      <div id="sendstatus" class="hint"></div>
+      <div id="sendstatus" class="hint" style="margin-top:4px"></div>
     </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center">
@@ -618,13 +659,27 @@
           <button id="refreshmessagesbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新消息</button>
         </div>
       </div>
-      <div class="hint">通过既有 Noise IK 加密隧道即时点对点交换文本与便签，完全隔离系统剪贴板与桌面弹窗横幅（零明文 SSE 广播保证）。</div>
+      <div class="hint">通过既有 Noise IK 加密隧道即时点对点交换文本与便签，完全隔离系统剪贴板与桌面弹窗横幅（支持定向组播与零明文广播）。</div>
       <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">
-        <label style="font-size:12px;color:var(--muted)">目标节点:
-          <select id="msg-target-peer" style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px">
-            <option value="">(自动选择首个在线节点)</option>
+        <label style="font-size:12px;color:var(--muted)">目标模式:
+          <select id="msg-target-mode" style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px">
+            <option value="peer">单个节点</option>
+            <option value="group">按分组 (Group)</option>
+            <option value="tag">按标签 (Tag)</option>
+            <option value="type">按形态 (Type)</option>
+            <option value="all">全网在线节点 (All)</option>
           </select>
         </label>
+        <div id="msg-peer-wrap">
+          <label style="font-size:12px;color:var(--muted)">目标节点:
+            <select id="msg-target-peer" style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="">(自动选择首个在线节点)</option>
+            </select>
+          </label>
+        </div>
+        <div id="msg-target-input-wrap" style="display:none">
+          <input id="msg-target-val" placeholder="输入分组/标签/形态…" style="padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+        </div>
         <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px">
           <input type="checkbox" id="msg-filter-unread"> 仅看未读
         </label>
@@ -810,15 +865,34 @@ async function updateFileOffers() {
   try {
     const [offersRep, autoRep] = await Promise.all([
       api("/api/file/offers"),
-      api("/api/file/auto-accept")
+      api("/api/file/auto-accept/policy")
     ]);
-    if (autoRep && $("autoaccepttoggle")) {
-      $("autoaccepttoggle").checked = !!autoRep.enabled;
+    const pol = autoRep && autoRep.policy ? autoRep.policy : (autoRep || {});
+    const enabled = !!pol.enabled;
+    const count = autoRep ? (autoRep.cumulative_auto_accepted_count || autoRep.auto_accepted_count || 0) : 0;
+    if ($("autoaccepttoggle")) {
+      $("autoaccepttoggle").checked = enabled;
     }
     const st = $("fileoffers-status");
     if (st && autoRep) {
-      st.innerHTML = '自动接收策略: <b style="color:' + (autoRep.enabled ? 'var(--ok)' : 'var(--muted)') + '">' +
-        (autoRep.enabled ? '已启用 (仅限受信任对端)' : '已停用') + '</b> · 累计自动接收: <b>' + (autoRep.auto_accepted_count || 0) + '</b> 次';
+      const grps = (pol.allowed_groups && pol.allowed_groups.length) ? ('组: [' + pol.allowed_groups.join(", ") + ']') : '全部组';
+      const tags = (pol.allowed_tags && pol.allowed_tags.length) ? ('标签: [' + pol.allowed_tags.join(", ") + ']') : '全部标签';
+      const types = (pol.allowed_types && pol.allowed_types.length) ? ('形态: [' + pol.allowed_types.join(", ") + ']') : '全部形态';
+      const maxSz = pol.max_file_size ? ('上限: ' + formatBytes(pol.max_file_size)) : '体积不限';
+      st.innerHTML = '自动接收策略: <b style="color:' + (enabled ? 'var(--ok)' : 'var(--muted)') + '">' +
+        (enabled ? '已启用' : '已停用') + '</b> (' + grps + ' · ' + tags + ' · ' + types + ' · ' + maxSz + ') · 累计自动接收: <b>' + count + '</b> 次';
+    }
+    if ($("aa-groups") && document.activeElement !== $("aa-groups")) {
+      $("aa-groups").value = (pol.allowed_groups || []).join(", ");
+    }
+    if ($("aa-tags") && document.activeElement !== $("aa-tags")) {
+      $("aa-tags").value = (pol.allowed_tags || []).join(", ");
+    }
+    if ($("aa-types") && document.activeElement !== $("aa-types")) {
+      $("aa-types").value = (pol.allowed_types || []).join(", ");
+    }
+    if ($("aa-max-size") && document.activeElement !== $("aa-max-size")) {
+      $("aa-max-size").value = pol.max_file_size || "";
     }
     if (offersRep && offersRep.ok) {
       const f = $("files");
@@ -1403,9 +1477,91 @@ if (rejectAllFilesBtn) rejectAllFilesBtn.onclick = async () => {
 };
 const autoAcceptToggle = $("autoaccepttoggle");
 if (autoAcceptToggle) autoAcceptToggle.onchange = async () => {
-  await api("/api/file/auto-accept", { enabled: autoAcceptToggle.checked });
+  await api("/api/file/auto-accept/policy", { enabled: autoAcceptToggle.checked });
   updateFileOffers();
 };
+const togglePolicyBtn = $("toggle-autoaccept-policy-btn");
+if (togglePolicyBtn) {
+  togglePolicyBtn.onclick = () => {
+    const p = $("autoaccept-policy-panel");
+    if (p) p.style.display = (p.style.display === "none" ? "block" : "none");
+  };
+}
+const savePolicyBtn = $("aa-save-policy-btn");
+if (savePolicyBtn) {
+  savePolicyBtn.onclick = async () => {
+    const msg = $("aa-policy-msg");
+    if (msg) msg.textContent = "正在保存策略…";
+    const grps = $("aa-groups") ? $("aa-groups").value.split(",").map(s => s.trim()).filter(Boolean) : [];
+    const tags = $("aa-tags") ? $("aa-tags").value.split(",").map(s => s.trim()).filter(Boolean) : [];
+    const types = $("aa-types") ? $("aa-types").value.split(",").map(s => s.trim()).filter(Boolean) : [];
+    const maxSzRaw = $("aa-max-size") ? parseInt($("aa-max-size").value.trim(), 10) : null;
+    const maxSize = (maxSzRaw && maxSzRaw > 0) ? maxSzRaw : null;
+    const enabled = $("autoaccepttoggle") ? $("autoaccepttoggle").checked : true;
+    try {
+      const rep = await api("/api/file/auto-accept/policy", {
+        enabled,
+        allowed_groups: grps,
+        allowed_tags: tags,
+        allowed_types: types,
+        max_file_size: maxSize,
+      });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "策略已更新！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateFileOffers();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "保存异常: " + e;
+    }
+  };
+}
+const clearPolicyBtn = $("aa-clear-filters-btn");
+if (clearPolicyBtn) {
+  clearPolicyBtn.onclick = async () => {
+    const msg = $("aa-policy-msg");
+    try {
+      const rep = await api("/api/file/auto-accept/policy", { clear_filters: true });
+      if (rep && rep.ok) {
+        if ($("aa-groups")) $("aa-groups").value = "";
+        if ($("aa-tags")) $("aa-tags").value = "";
+        if ($("aa-types")) $("aa-types").value = "";
+        if ($("aa-max-size")) $("aa-max-size").value = "";
+        if (msg) msg.textContent = "所有过滤器已清空！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateFileOffers();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "清空异常: " + e;
+    }
+  };
+}
+const sendTargetMode = $("send-target-mode");
+if (sendTargetMode) {
+  sendTargetMode.onchange = () => {
+    const mode = sendTargetMode.value;
+    const peerWrap = $("send-peer-wrap");
+    const inputWrap = $("send-target-input-wrap");
+    const input = $("send-target-val");
+    if (mode === "peer") {
+      if (peerWrap) peerWrap.style.display = "block";
+      if (inputWrap) inputWrap.style.display = "none";
+    } else if (mode === "all") {
+      if (peerWrap) peerWrap.style.display = "none";
+      if (inputWrap) inputWrap.style.display = "none";
+    } else {
+      if (peerWrap) peerWrap.style.display = "none";
+      if (inputWrap) inputWrap.style.display = "block";
+      if (input) {
+        if (mode === "group") input.placeholder = "输入目标业务分组 (如 homelab, office)…";
+        else if (mode === "tag") input.placeholder = "输入目标业务标签 (如 backup, lab, sync)…";
+        else if (mode === "type") input.placeholder = "输入目标设备形态 (desktop, laptop, phone, tablet, server, cloud)…";
+      }
+    }
+  };
+}
 const refreshTransfersBtn = $("refreshtransfers");
 if (refreshTransfersBtn) refreshTransfersBtn.onclick = () => refreshTransfers();
 const clearBtn = $("cleartransfers");
@@ -1421,7 +1577,51 @@ $("sendbtn").onclick = async () => {
     if (st) st.textContent = "请先选择文件";
     return;
   }
+  const mode = sendTargetMode ? sendTargetMode.value : "peer";
+  const targetVal = $("send-target-val") ? $("send-target-val").value.trim() : "";
   const peer = $("sendpeer") ? $("sendpeer").value : "";
+
+  if (mode !== "peer") {
+    const readFile = (f) => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve({ name: f.name, data_base64: reader.result.split(",")[1] });
+      reader.onerror = reject;
+      reader.readAsDataURL(f);
+    });
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        if (st) st.textContent = "正在读取文件 (" + (i + 1) + "/" + files.length + "): " + file.name + "…";
+        const item = await readFile(file);
+        const payload = {
+          name: item.name,
+          data_base64: item.data_base64,
+        };
+        if (mode === "all") {
+          payload.all = true;
+        } else if (mode === "group") {
+          payload.group = targetVal;
+        } else if (mode === "tag") {
+          payload.tag = targetVal;
+        } else if (mode === "type") {
+          payload.type = targetVal;
+        }
+        if (st) st.textContent = "正在扇出投递文件: " + item.name + "…";
+        const r = await api("/api/file/send-multi", payload);
+        if (r && r.ok) {
+          if (st) st.textContent = "已扇出 [" + r.filename + "] 至 [" + r.selector + "]: " + r.success_count + "/" + r.target_count + " 成功, " + r.skipped_offline_count + " 离线跳过, " + r.failed_count + " 失败";
+        } else {
+          if (st) st.textContent = "扇出失败: " + (r ? (r.error || JSON.stringify(r)) : "未知错误");
+        }
+      }
+      fileInput.value = "";
+      refreshTransfers();
+    } catch (e) {
+      if (st) st.textContent = "扇出发起异常: " + e;
+    }
+    return;
+  }
+
   if (files.length === 1) {
     const file = files[0];
     if (st) st.textContent = "读取文件并准备发送中…";
@@ -3001,15 +3201,72 @@ async function updateMessageHistory() {
   }
 }
 
+const msgTargetMode = $("msg-target-mode");
+if (msgTargetMode) {
+  msgTargetMode.onchange = () => {
+    const mode = msgTargetMode.value;
+    const peerWrap = $("msg-peer-wrap");
+    const inputWrap = $("msg-target-input-wrap");
+    const input = $("msg-target-val");
+    if (mode === "peer") {
+      if (peerWrap) peerWrap.style.display = "block";
+      if (inputWrap) inputWrap.style.display = "none";
+    } else if (mode === "all") {
+      if (peerWrap) peerWrap.style.display = "none";
+      if (inputWrap) inputWrap.style.display = "none";
+    } else {
+      if (peerWrap) peerWrap.style.display = "none";
+      if (inputWrap) inputWrap.style.display = "block";
+      if (input) {
+        if (mode === "group") input.placeholder = "输入目标业务分组 (如 homelab)…";
+        else if (mode === "tag") input.placeholder = "输入目标业务标签 (如 lab, sync)…";
+        else if (mode === "type") input.placeholder = "输入目标设备形态 (server, laptop)…";
+      }
+    }
+  };
+}
+
 const sendMsgForm = $("msg-send-form");
 if (sendMsgForm) {
   sendMsgForm.onsubmit = async (e) => {
     e.preventDefault();
     const input = $("msg-input-text");
+    const mode = msgTargetMode ? msgTargetMode.value : "peer";
     const targetPeer = $("msg-target-peer") ? $("msg-target-peer").value : "";
+    const targetVal = $("msg-target-val") ? $("msg-target-val").value.trim() : "";
     const msgStatus = $("msgstatus");
     if (!input || !input.value.trim()) return;
     const text = input.value.trim();
+
+    if (mode !== "peer") {
+      if (msgStatus) msgStatus.textContent = "正在扇出定向消息…";
+      const payload = { text };
+      if (mode === "all") payload.all = true;
+      else if (mode === "group") payload.group = targetVal;
+      else if (mode === "tag") payload.tag = targetVal;
+      else if (mode === "type") payload.type = targetVal;
+      try {
+        const rep = await fetch("/api/message/send-multi", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }).then(r => r.json());
+        if (rep && rep.ok) {
+          input.value = "";
+          if (msgStatus) {
+            msgStatus.textContent = "消息已扇出 [" + rep.selector + "]: " + rep.success_count + "/" + rep.target_count + " 成功, " + rep.skipped_offline_count + " 离线跳过, " + rep.failed_count + " 失败";
+            setTimeout(() => { if (msgStatus) msgStatus.textContent = ""; }, 4000);
+          }
+          updateMessageHistory();
+        } else {
+          if (msgStatus) msgStatus.textContent = "扇出失败: " + (rep ? (rep.error || JSON.stringify(rep)) : "未知错误");
+        }
+      } catch (err) {
+        if (msgStatus) msgStatus.textContent = "扇出异常: " + err.message;
+      }
+      return;
+    }
+
     if (msgStatus) msgStatus.textContent = "正在发送消息…";
     try {
       const rep = await fetch("/api/message/send", {
@@ -3300,10 +3557,20 @@ function setupEventSource() {
 														            desc = "发件箱已清除: 清除 " + ev.count + " 条记录";
 														            updateOutbox();
 														          }
-														          else if (ev.kind === "peer_profile_updated") {
-														            desc = "设备画像更新: " + ev.device_id + " [" + ev.device_type + "]" + (ev.group ? (" · 组:" + ev.group) : "") + " tags=[" + (ev.tags || []).join(", ") + "]";
-														            updateProfiles();
-														          }
+															          else if (ev.kind === "peer_profile_updated") {
+															            desc = "设备画像更新: " + ev.device_id + " [" + ev.device_type + "]" + (ev.group ? (" · 组:" + ev.group) : "") + " tags=[" + (ev.tags || []).join(", ") + "]";
+															            updateProfiles();
+															          }
+															          else if (ev.kind === "multi_dispatch_completed") {
+															            const kind = ev.dispatch_kind || "dispatch";
+															            desc = "多端定向扇出完成: [" + kind + "] 目标=" + ev.selector + " (成功 " + ev.success_count + "/" + ev.target_count + ", 跳过 " + ev.skipped_offline_count + ", 失败 " + ev.failed_count + ")";
+															            updateMessageHistory();
+															            refreshTransfers();
+															          }
+															          else if (ev.kind === "auto_accept_policy_changed") {
+															            desc = "自动接收策略更新: 启用=" + ev.enabled + ", 组=[" + (ev.allowed_groups || []).join(",") + "], 标签=[" + (ev.allowed_tags || []).join(",") + "]";
+															            updateFileOffers();
+															          }
 				          $("ev-last").textContent = "[" + t + "] " + desc;
 		        }
 		      } catch (err) {

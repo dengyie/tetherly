@@ -7,7 +7,8 @@ use crate::lan::{bind_many, bind_many_optional, bind_overlay, control_bind_addrs
 use crate::platform::{insert_foreground, MemoryClip, SystemClip};
 use crate::sidecar::{self, OverlayConfig, OverlaySource, OverlayStatus};
 use crate::store::{
-    load_trust, remember_route, save_trust, DeviceType, PeerProfile, ProfileTable, RouteTable,
+    load_trust, remember_route, save_trust, AutoAcceptPolicy, DeviceType, PeerProfile,
+    ProfileTable, RouteTable, TargetSelector,
 };
 use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::{HashMap, VecDeque};
@@ -1289,6 +1290,70 @@ pub struct PeerGroupReport {
     pub message: String,
 }
 
+/// Single target dispatch outcome for multi-peer message fan-out.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeerMessageSendItem {
+    pub peer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Comprehensive aggregated report for multi-peer targeted message dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MultiMessageSendReport {
+    pub ok: bool,
+    pub selector: TargetSelector,
+    pub target_count: usize,
+    pub success_count: usize,
+    pub skipped_offline_count: usize,
+    pub failed_count: usize,
+    pub dispatches: Vec<PeerMessageSendItem>,
+}
+
+/// Single target dispatch outcome for multi-peer file offer fan-out.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeerFileSendItem {
+    pub peer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbox_id: Option<String>,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Comprehensive aggregated report for single-hash multi-peer file offer dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MultiFileSendReport {
+    pub ok: bool,
+    pub selector: TargetSelector,
+    pub filename: String,
+    pub size: u64,
+    pub sha256: String,
+    pub target_count: usize,
+    pub success_count: usize,
+    pub skipped_offline_count: usize,
+    pub failed_count: usize,
+    pub dispatches: Vec<PeerFileSendItem>,
+}
+
+/// Detailed status and configuration report for granular file auto-accept policy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AutoAcceptPolicyReport {
+    pub ok: bool,
+    pub policy: AutoAcceptPolicy,
+    pub auto_accepted_count: u64,
+    pub message: String,
+}
+
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ClipStatusReport {
@@ -2035,6 +2100,7 @@ struct Shared {
     message_engine: Mutex<MessageEngine>,
     outbox_engine: Mutex<OutboxEngine>,
     profiles: Mutex<ProfileTable>,
+    auto_accept_policy: Mutex<AutoAcceptPolicy>,
 }
 
 #[derive(Clone)]
@@ -2174,6 +2240,7 @@ impl Node {
         let reconnect = AtomicBool::new(cfg.reconnect);
         let initial_blocked = crate::store::load_blocked(&cfg.data_dir);
         let initial_profiles = crate::store::load_profiles(&cfg.data_dir);
+        let initial_auto_accept = crate::store::load_auto_accept_policy(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -2239,7 +2306,7 @@ impl Node {
                 s
             }),
             blocked: Mutex::new(initial_blocked),
-            auto_accept_trusted: AtomicBool::new(false),
+            auto_accept_trusted: AtomicBool::new(initial_auto_accept.enabled),
             auto_accepted_count: AtomicU64::new(0),
             discovered: Mutex::new(HashMap::new()),
             rescan_trigger,
@@ -2255,6 +2322,7 @@ impl Node {
             message_engine: Mutex::new(MessageEngine::new(200)),
             outbox_engine: Mutex::new(OutboxEngine::new(200)),
             profiles: Mutex::new(initial_profiles),
+            auto_accept_policy: Mutex::new(initial_auto_accept),
         });
         Ok(Self { shared })
     }
@@ -3486,6 +3554,40 @@ impl Node {
             .filter(|p| p.device_type == device_type)
             .filter_map(|p| DeviceId::parse(&p.device_id).ok())
             .collect()
+    }
+
+    /// Resolve all candidate target peer device IDs matched by a `TargetSelector`.
+    /// Preserves deduplication order and ensures at least one target candidate was found.
+    pub fn resolve_dispatch_targets(
+        &self,
+        selector: &TargetSelector,
+    ) -> Result<Vec<DeviceId>, CoreError> {
+        let targets = match selector {
+            TargetSelector::Peer(p) => {
+                let id = self.resolve_peer(p)?;
+                vec![id]
+            }
+            TargetSelector::Tag(t) => self.resolve_peers_by_tag(t),
+            TargetSelector::Group(g) => self.resolve_peers_by_group(g),
+            TargetSelector::Type(dt) => self.resolve_peers_by_type(*dt),
+            TargetSelector::AllOnline => {
+                let live = self.live_peers();
+                live.into_iter().map(|p| p.device_id).collect()
+            }
+        };
+
+        let mut unique = Vec::new();
+        for id in targets {
+            if !unique.contains(&id) {
+                unique.push(id);
+            }
+        }
+
+        if unique.is_empty() {
+            return Err(CoreError::NoTargetsMatched(selector.as_label()));
+        }
+
+        Ok(unique)
     }
 
     pub fn routes(&self) -> Vec<crate::store::Route> {
@@ -5925,6 +6027,143 @@ impl Node {
         })
     }
 
+    /// Send a direct secure text or note message to multiple targets specified by a TargetSelector.
+    /// Fans out message delivery to each online peer, records Outbound messages in MessageEngine,
+    /// logs audit trails and emits UiEvent::MultiDispatchCompleted without leaking plaintext.
+    pub async fn send_message_multi(
+        &self,
+        selector: &TargetSelector,
+        text: &str,
+    ) -> Result<MultiMessageSendReport, CoreError> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::Json("message text cannot be empty".to_string()));
+        }
+        if trimmed.len() > tetherly_core::frame::TEXT_MESSAGE_MAX {
+            return Err(CoreError::PayloadTooLarge);
+        }
+
+        let targets = self.resolve_dispatch_targets(selector)?;
+        let live = self.live_peers();
+        let live_map: std::collections::HashSet<DeviceId> =
+            live.into_iter().map(|p| p.device_id).collect();
+
+        static MSG_OUT_COUNTER: AtomicU64 = AtomicU64::new(1);
+        let now_ms = self.shared.clock.unix_ms();
+
+        let mut dispatches = Vec::with_capacity(targets.len());
+        let mut success_count = 0;
+        let mut skipped_offline_count = 0;
+        let mut failed_count = 0;
+
+        for peer_id in &targets {
+            let peer_str = peer_id.to_string();
+            let alias = self.peer_alias(peer_id);
+
+            if !live_map.contains(peer_id) {
+                skipped_offline_count += 1;
+                dispatches.push(PeerMessageSendItem {
+                    peer: peer_str,
+                    peer_alias: alias,
+                    message_id: None,
+                    success: false,
+                    error: Some("peer is offline".to_string()),
+                });
+                continue;
+            }
+
+            let msg_id = format!(
+                "msg_{}_{}",
+                now_ms,
+                MSG_OUT_COUNTER.fetch_add(1, Ordering::Relaxed)
+            );
+            let wire_msg = TextMessage::new(&msg_id, trimmed, now_ms)?;
+            let frame = wire_msg.to_frame()?;
+
+            match self.send_to(peer_id, frame).await {
+                Ok(_) => {
+                    let msg = PeerMessage {
+                        id: msg_id.clone(),
+                        peer: peer_str.clone(),
+                        direction: MessageDirection::Outbound,
+                        text: trimmed.to_string(),
+                        timestamp_ms: now_ms,
+                        read: true,
+                    };
+                    {
+                        let mut engine = self
+                            .shared
+                            .message_engine
+                            .lock()
+                            .expect("message_engine lock");
+                        engine.push(msg);
+                    }
+                    self.emit(UiEvent::MessageSent {
+                        id: msg_id.clone(),
+                        peer: peer_str.clone(),
+                        len: trimmed.len(),
+                        timestamp_ms: now_ms,
+                    });
+                    success_count += 1;
+                    dispatches.push(PeerMessageSendItem {
+                        peer: peer_str,
+                        peer_alias: alias,
+                        message_id: Some(msg_id),
+                        success: true,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    failed_count += 1;
+                    dispatches.push(PeerMessageSendItem {
+                        peer: peer_str,
+                        peer_alias: alias,
+                        message_id: Some(msg_id),
+                        success: false,
+                        error: Some(e.to_string()),
+                    });
+                }
+            }
+        }
+
+        self.record_audit(
+            AuditCategory::Peer,
+            AuditSeverity::Info,
+            "message_multi_sent",
+            None::<String>,
+            format!(
+                "Multicast message (length: {} bytes) via {} (targets: {}, success: {}, skipped: {}, failed: {})",
+                trimmed.len(),
+                selector.as_label(),
+                targets.len(),
+                success_count,
+                skipped_offline_count,
+                failed_count
+            ),
+            failed_count == 0,
+        );
+
+        self.emit(UiEvent::multi_dispatch_completed(
+            "message",
+            selector.as_label(),
+            targets.len(),
+            success_count,
+            skipped_offline_count,
+            failed_count,
+            now_ms,
+        ));
+
+        Ok(MultiMessageSendReport {
+            ok: success_count > 0 || (targets.is_empty() && skipped_offline_count == 0),
+            selector: selector.clone(),
+            target_count: targets.len(),
+            success_count,
+            skipped_offline_count,
+            failed_count,
+            dispatches,
+        })
+    }
+
     /// Ingest a direct message received over the Noise connection from a peer.
     pub fn receive_message(&self, peer_str: &str, wire_msg: TextMessage) {
         let now_ms = self.shared.clock.unix_ms();
@@ -7489,16 +7728,30 @@ impl Node {
                 match offered {
                     Ok(t) => {
                         self.emit(file_offered(&t));
-                        if self.shared.auto_accept_trusted.load(Ordering::Relaxed)
-                            && self.is_trusted(peer)
-                        {
+                        let is_auto_accept = {
+                            let policy = self
+                                .shared
+                                .auto_accept_policy
+                                .lock()
+                                .expect("auto_accept_policy");
+                            if policy.enabled && self.is_trusted(peer) {
+                                let profile = self.peer_profile(peer);
+                                policy.is_eligible(&profile, total)
+                            } else {
+                                false
+                            }
+                        };
+                        if is_auto_accept {
                             if let Err(e) = self.user_accept_file(&tid).await {
                                 warn!(%e, transfer = %tid, "auto-accept failed");
                             } else {
                                 self.shared
                                     .auto_accepted_count
                                     .fetch_add(1, Ordering::Relaxed);
-                                info!(transfer = %tid, "auto-accepted file from trusted peer");
+                                info!(
+                                    transfer = %tid,
+                                    "auto-accepted file from trusted peer based on policy"
+                                );
                             }
                         }
                     }
@@ -8221,11 +8474,84 @@ impl Node {
         }
     }
 
-    /// Configures the auto-accept policy for trusted peers and emits `UiEvent::FileAutoAcceptChanged`.
-    pub fn set_auto_accept(&self, enabled: bool) -> AutoAcceptReport {
+    /// Read the current granular auto-accept policy.
+    pub fn auto_accept_policy(&self) -> AutoAcceptPolicy {
+        self.shared
+            .auto_accept_policy
+            .lock()
+            .expect("auto_accept_policy")
+            .clone()
+    }
+
+    /// Comprehensive status and configuration report for granular file auto-accept policy.
+    pub fn auto_accept_policy_report(&self) -> AutoAcceptPolicyReport {
+        AutoAcceptPolicyReport {
+            ok: true,
+            policy: self.auto_accept_policy(),
+            auto_accepted_count: self.shared.auto_accepted_count.load(Ordering::Relaxed),
+            message: "auto-accept policy report".to_string(),
+        }
+    }
+
+    /// Update the granular auto-accept policy and persist to disk atomically.
+    pub fn set_auto_accept_policy(
+        &self,
+        policy: AutoAcceptPolicy,
+    ) -> Result<AutoAcceptPolicyReport, CoreError> {
+        let now = self.shared.clock.unix_ms();
+        crate::store::save_auto_accept_policy(&self.shared.cfg.data_dir, &policy)
+            .map_err(|e| CoreError::File(format!("failed to save auto_accept.json: {e}")))?;
         self.shared
             .auto_accept_trusted
-            .store(enabled, Ordering::Relaxed);
+            .store(policy.enabled, Ordering::Relaxed);
+        *self
+            .shared
+            .auto_accept_policy
+            .lock()
+            .expect("auto_accept_policy") = policy.clone();
+
+        self.emit(UiEvent::auto_accept_policy_changed(
+            policy.enabled,
+            policy.allowed_groups.clone(),
+            policy.allowed_tags.clone(),
+            policy
+                .allowed_types
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect(),
+            policy.max_file_size,
+            now,
+        ));
+
+        self.record_audit(
+            AuditCategory::File,
+            AuditSeverity::Info,
+            "auto_accept_policy_changed",
+            None::<String>,
+            format!(
+                "Updated file auto-accept policy: enabled={}, groups={:?}, tags={:?}, types={:?}, max_size={:?}",
+                policy.enabled,
+                policy.allowed_groups,
+                policy.allowed_tags,
+                policy.allowed_types,
+                policy.max_file_size
+            ),
+            true,
+        );
+
+        Ok(AutoAcceptPolicyReport {
+            ok: true,
+            policy,
+            auto_accepted_count: self.shared.auto_accepted_count.load(Ordering::Relaxed),
+            message: "auto-accept policy updated successfully".to_string(),
+        })
+    }
+
+    /// Configures the auto-accept policy for trusted peers and emits `UiEvent::FileAutoAcceptChanged`.
+    pub fn set_auto_accept(&self, enabled: bool) -> AutoAcceptReport {
+        let mut policy = self.auto_accept_policy();
+        policy.enabled = enabled;
+        let _ = self.set_auto_accept_policy(policy);
         self.emit(UiEvent::FileAutoAcceptChanged { enabled });
         self.auto_accept_status()
     }
@@ -8634,6 +8960,465 @@ impl Node {
         ));
         self.send_to(peer, offer.to_frame()?).await?;
         Ok(transfer_id)
+    }
+
+    /// Offer and stream a file to multiple targets matched by a `TargetSelector`.
+    /// Performs single-pass file reading and SHA-256 calculation (O(1) memory bound),
+    /// generates unique transfer IDs and Outbox entries for each online peer,
+    /// sends FileOffer frames concurrently, and produces an aggregated MultiFileSendReport.
+    pub async fn offer_and_send_file_multi(
+        &self,
+        selector: &TargetSelector,
+        path: &std::path::Path,
+        name: Option<&str>,
+    ) -> Result<MultiFileSendReport, CoreError> {
+        if !path.is_file() {
+            return Err(CoreError::File("not a regular file".into()));
+        }
+        let meta = std::fs::metadata(path)?;
+        let size = meta.len();
+        if size > tetherly_core::FILE_MAX {
+            return Err(CoreError::FileTooLarge(tetherly_core::FILE_MAX));
+        }
+        let filename = name
+            .map(|s| s.to_string())
+            .or_else(|| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "file.bin".to_string());
+        let safe_name = tetherly_core::sanitize_file_name(&filename)?;
+
+        // Single-pass stream in 64 KiB chunks to compute SHA-256 with O(1) memory bound
+        let mut hasher = tetherly_core::IncrementalSha256::new();
+        {
+            use std::io::Read;
+            let mut f = std::fs::File::open(path)?;
+            let mut buf = [0u8; tetherly_core::FILE_CHUNK];
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+        }
+        let digest = hasher.finalize_hex();
+
+        let targets = self.resolve_dispatch_targets(selector)?;
+        let live = self.live_peers();
+        let live_map: std::collections::HashSet<DeviceId> =
+            live.into_iter().map(|p| p.device_id).collect();
+
+        let now = self.shared.clock.unix_ms();
+        static MULTI_TRANSFER_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+        let mut dispatches = Vec::with_capacity(targets.len());
+        let mut success_count = 0;
+        let mut skipped_offline_count = 0;
+        let mut failed_count = 0;
+
+        for peer_id in &targets {
+            let peer_str = peer_id.to_string();
+            let alias = self.peer_alias(peer_id);
+
+            if !live_map.contains(peer_id) {
+                skipped_offline_count += 1;
+                dispatches.push(PeerFileSendItem {
+                    peer: peer_str,
+                    peer_alias: alias,
+                    transfer_id: None,
+                    outbox_id: None,
+                    success: false,
+                    error: Some("peer is offline".to_string()),
+                });
+                continue;
+            }
+
+            let seq = MULTI_TRANSFER_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let peer_short = &peer_id.as_str()[..8.min(peer_id.as_str().len())];
+            let transfer_id = format!("tr_{}_{}_{seq}", &digest[..10], peer_short);
+            let offer = FileOffer {
+                transfer_id: transfer_id.clone(),
+                files: vec![tetherly_core::FileMeta {
+                    name: safe_name.clone(),
+                    size,
+                    sha256: digest.clone(),
+                }],
+            };
+
+            self.shared.pending_out.lock().expect("pending").insert(
+                transfer_id.clone(),
+                OutboundFile {
+                    peer: peer_id.clone(),
+                    name: safe_name.clone(),
+                    source: OutboundSource::Path(path.to_path_buf()),
+                    size,
+                },
+            );
+
+            self.shared
+                .active_transfers
+                .lock()
+                .expect("transfers")
+                .insert(
+                    transfer_id.clone(),
+                    ActiveTransfer {
+                        transfer_id: transfer_id.clone(),
+                        peer: peer_id.clone(),
+                        direction: TransferDirection::Outbound,
+                        filename: safe_name.clone(),
+                        total: size,
+                        transferred: 0,
+                        speed_bps: 0,
+                        phase: TransferPhase::Transferring,
+                        error: None,
+                        started_ms: now,
+                        updated_ms: now,
+                        resume_offset: None,
+                        is_resumed: false,
+                    },
+                );
+
+            let outbox_id = format!("out_{transfer_id}_{now}");
+            self.shared
+                .outbox_engine
+                .lock()
+                .expect("outbox_engine")
+                .push(OutboxEntry {
+                    id: outbox_id.clone(),
+                    transfer_id: transfer_id.clone(),
+                    peer: peer_str.clone(),
+                    peer_alias: alias.clone(),
+                    filename: safe_name.clone(),
+                    size,
+                    sha256: digest.clone(),
+                    source_path: Some(path.to_string_lossy().to_string()),
+                    status: OutboxStatus::InFlight,
+                    error: None,
+                    started_ms: now,
+                    completed_ms: None,
+                    speed_bps: 0,
+                });
+
+            self.emit(UiEvent::outbox_updated(
+                outbox_id.clone(),
+                &transfer_id,
+                peer_id.to_string(),
+                &safe_name,
+                size,
+                OutboxStatus::InFlight.as_str(),
+                now,
+            ));
+
+            let frame_res = offer.to_frame();
+            let send_res = match frame_res {
+                Ok(frame) => self.send_to(peer_id, frame).await,
+                Err(e) => Err(e),
+            };
+
+            match send_res {
+                Ok(_) => {
+                    success_count += 1;
+                    dispatches.push(PeerFileSendItem {
+                        peer: peer_str,
+                        peer_alias: alias,
+                        transfer_id: Some(transfer_id),
+                        outbox_id: Some(outbox_id),
+                        success: true,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    failed_count += 1;
+                    let err_str = e.to_string();
+                    self.shared
+                        .pending_out
+                        .lock()
+                        .expect("pending")
+                        .remove(&transfer_id);
+                    if let Ok(mut engine) = self.shared.outbox_engine.lock() {
+                        engine.update_status(
+                            &transfer_id,
+                            OutboxStatus::Failed,
+                            Some(err_str.clone()),
+                            Some(now),
+                            Some(0),
+                        );
+                    }
+                    if let Ok(mut transfers) = self.shared.active_transfers.lock() {
+                        if let Some(t) = transfers.get_mut(&transfer_id) {
+                            t.phase = TransferPhase::Failed;
+                            t.error = Some(err_str.clone());
+                            t.updated_ms = now;
+                        }
+                    }
+                    dispatches.push(PeerFileSendItem {
+                        peer: peer_str,
+                        peer_alias: alias,
+                        transfer_id: Some(transfer_id),
+                        outbox_id: Some(outbox_id),
+                        success: false,
+                        error: Some(err_str),
+                    });
+                }
+            }
+        }
+
+        self.record_audit(
+            AuditCategory::File,
+            AuditSeverity::Info,
+            "file_multi_sent",
+            None::<String>,
+            format!(
+                "Multicast file '{}' ({size} bytes) via {} (targets: {}, success: {}, skipped: {}, failed: {})",
+                safe_name,
+                selector.as_label(),
+                targets.len(),
+                success_count,
+                skipped_offline_count,
+                failed_count
+            ),
+            failed_count == 0,
+        );
+
+        self.emit(UiEvent::multi_dispatch_completed(
+            "file",
+            selector.as_label(),
+            targets.len(),
+            success_count,
+            skipped_offline_count,
+            failed_count,
+            now,
+        ));
+
+        Ok(MultiFileSendReport {
+            ok: success_count > 0 || (targets.is_empty() && skipped_offline_count == 0),
+            selector: selector.clone(),
+            filename: safe_name,
+            size,
+            sha256: digest,
+            target_count: targets.len(),
+            success_count,
+            skipped_offline_count,
+            failed_count,
+            dispatches,
+        })
+    }
+
+    pub async fn offer_and_send_bytes_multi(
+        &self,
+        selector: &TargetSelector,
+        name: &str,
+        data: &[u8],
+    ) -> Result<MultiFileSendReport, CoreError> {
+        let size = data.len() as u64;
+        if size > tetherly_core::FILE_MAX {
+            return Err(CoreError::FileTooLarge(tetherly_core::FILE_MAX));
+        }
+        let safe_name = tetherly_core::sanitize_file_name(name)?;
+        let digest = tetherly_core::hex_sha256(data);
+
+        let targets = self.resolve_dispatch_targets(selector)?;
+        let live = self.live_peers();
+        let live_map: std::collections::HashSet<DeviceId> =
+            live.into_iter().map(|p| p.device_id).collect();
+
+        let now = self.shared.clock.unix_ms();
+        static MULTI_BYTES_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+        let mut dispatches = Vec::with_capacity(targets.len());
+        let mut success_count = 0;
+        let mut skipped_offline_count = 0;
+        let mut failed_count = 0;
+
+        for peer_id in &targets {
+            let peer_str = peer_id.to_string();
+            let alias = self.peer_alias(peer_id);
+
+            if !live_map.contains(peer_id) {
+                skipped_offline_count += 1;
+                dispatches.push(PeerFileSendItem {
+                    peer: peer_str,
+                    peer_alias: alias,
+                    transfer_id: None,
+                    outbox_id: None,
+                    success: false,
+                    error: Some("peer is offline".to_string()),
+                });
+                continue;
+            }
+
+            let seq = MULTI_BYTES_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let peer_short = &peer_id.as_str()[..8.min(peer_id.as_str().len())];
+            let transfer_id = format!("tr_{}_{}_{seq}", &digest[..10], peer_short);
+            let offer = FileOffer {
+                transfer_id: transfer_id.clone(),
+                files: vec![tetherly_core::FileMeta {
+                    name: safe_name.clone(),
+                    size,
+                    sha256: digest.clone(),
+                }],
+            };
+
+            self.shared.pending_out.lock().expect("pending").insert(
+                transfer_id.clone(),
+                OutboundFile {
+                    peer: peer_id.clone(),
+                    name: safe_name.clone(),
+                    source: OutboundSource::Bytes(data.to_vec()),
+                    size,
+                },
+            );
+
+            self.shared
+                .active_transfers
+                .lock()
+                .expect("transfers")
+                .insert(
+                    transfer_id.clone(),
+                    ActiveTransfer {
+                        transfer_id: transfer_id.clone(),
+                        peer: peer_id.clone(),
+                        direction: TransferDirection::Outbound,
+                        filename: safe_name.clone(),
+                        total: size,
+                        transferred: 0,
+                        speed_bps: 0,
+                        phase: TransferPhase::Transferring,
+                        error: None,
+                        started_ms: now,
+                        updated_ms: now,
+                        resume_offset: None,
+                        is_resumed: false,
+                    },
+                );
+
+            let outbox_id = format!("out_{transfer_id}_{now}");
+            self.shared
+                .outbox_engine
+                .lock()
+                .expect("outbox_engine")
+                .push(OutboxEntry {
+                    id: outbox_id.clone(),
+                    transfer_id: transfer_id.clone(),
+                    peer: peer_str.clone(),
+                    peer_alias: alias.clone(),
+                    filename: safe_name.clone(),
+                    size,
+                    sha256: digest.clone(),
+                    source_path: None,
+                    status: OutboxStatus::InFlight,
+                    error: None,
+                    started_ms: now,
+                    completed_ms: None,
+                    speed_bps: 0,
+                });
+
+            self.emit(UiEvent::outbox_updated(
+                outbox_id.clone(),
+                &transfer_id,
+                peer_id.to_string(),
+                &safe_name,
+                size,
+                OutboxStatus::InFlight.as_str(),
+                now,
+            ));
+
+            let frame_res = offer.to_frame();
+            let send_res = match frame_res {
+                Ok(frame) => self.send_to(peer_id, frame).await,
+                Err(e) => Err(e),
+            };
+
+            match send_res {
+                Ok(_) => {
+                    success_count += 1;
+                    dispatches.push(PeerFileSendItem {
+                        peer: peer_str,
+                        peer_alias: alias,
+                        transfer_id: Some(transfer_id),
+                        outbox_id: Some(outbox_id),
+                        success: true,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    failed_count += 1;
+                    let err_str = e.to_string();
+                    self.shared
+                        .pending_out
+                        .lock()
+                        .expect("pending")
+                        .remove(&transfer_id);
+                    if let Ok(mut engine) = self.shared.outbox_engine.lock() {
+                        engine.update_status(
+                            &transfer_id,
+                            OutboxStatus::Failed,
+                            Some(err_str.clone()),
+                            Some(now),
+                            Some(0),
+                        );
+                    }
+                    if let Ok(mut transfers) = self.shared.active_transfers.lock() {
+                        if let Some(t) = transfers.get_mut(&transfer_id) {
+                            t.phase = TransferPhase::Failed;
+                            t.error = Some(err_str.clone());
+                            t.updated_ms = now;
+                        }
+                    }
+                    dispatches.push(PeerFileSendItem {
+                        peer: peer_str,
+                        peer_alias: alias,
+                        transfer_id: Some(transfer_id),
+                        outbox_id: Some(outbox_id),
+                        success: false,
+                        error: Some(err_str),
+                    });
+                }
+            }
+        }
+
+        self.record_audit(
+            AuditCategory::File,
+            AuditSeverity::Info,
+            "file_multi_sent",
+            None::<String>,
+            format!(
+                "Multicast in-memory file '{}' ({size} bytes) via {} (targets: {}, success: {}, skipped: {}, failed: {})",
+                safe_name,
+                selector.as_label(),
+                targets.len(),
+                success_count,
+                skipped_offline_count,
+                failed_count
+            ),
+            failed_count == 0,
+        );
+
+        self.emit(UiEvent::multi_dispatch_completed(
+            "file",
+            selector.as_label(),
+            targets.len(),
+            success_count,
+            skipped_offline_count,
+            failed_count,
+            now,
+        ));
+
+        Ok(MultiFileSendReport {
+            ok: success_count > 0 || (targets.is_empty() && skipped_offline_count == 0),
+            selector: selector.clone(),
+            filename: safe_name,
+            size,
+            sha256: digest,
+            target_count: targets.len(),
+            success_count,
+            skipped_offline_count,
+            failed_count,
+            dispatches,
+        })
     }
 
     /// Offer and stream multiple files as a batch operation to a connected peer.

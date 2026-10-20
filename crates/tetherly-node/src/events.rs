@@ -265,9 +265,64 @@ pub enum UiEvent {
         group: Option<String>,
         timestamp_ms: u64,
     },
+    MultiDispatchCompleted {
+        dispatch_kind: String,
+        selector: String,
+        target_count: usize,
+        success_count: usize,
+        skipped_offline_count: usize,
+        failed_count: usize,
+        timestamp_ms: u64,
+    },
+    AutoAcceptPolicyChanged {
+        enabled: bool,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_file_size: Option<u64>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
+    pub fn multi_dispatch_completed(
+        kind: impl Into<String>,
+        selector: impl Into<String>,
+        target_count: usize,
+        success_count: usize,
+        skipped_offline_count: usize,
+        failed_count: usize,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::MultiDispatchCompleted {
+            dispatch_kind: kind.into(),
+            selector: selector.into(),
+            target_count,
+            success_count,
+            skipped_offline_count,
+            failed_count,
+            timestamp_ms,
+        }
+    }
+
+    pub fn auto_accept_policy_changed(
+        enabled: bool,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        max_file_size: Option<u64>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::AutoAcceptPolicyChanged {
+            enabled,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            max_file_size,
+            timestamp_ms,
+        }
+    }
     pub fn peer_profile_updated(
         device_id: impl Into<String>,
         device_type: impl Into<String>,

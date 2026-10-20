@@ -27,24 +27,26 @@ pub use runtime::{
     extract_features, format_memory_bytes, mime_type_from_name, ActiveTransfer,
     AncsClearRulesReport, AncsConnectReport, AncsDisconnectReport, AncsReport, AncsRuleReport,
     AuditCategory, AuditClearReport, AuditEngine, AuditEntry, AuditLogReport, AuditSeverity,
-    AutoAcceptReport, BatchDismissReport, BatchSendItem, BatchSendReport, BatchSendRequest,
-    BatchTransferItemReport, BlockedPeersReport, CandidateDismissReport, ClipClearReport,
-    ClipHistoryReport, ClipMetaEntryDto, ClipStatusReport, DiscoveredPeerDto, DiscoveryReport,
-    DiscoveryRescanReport, DismissFilter, DndMode, FileBatchDecisionReport, FileDecisionReport,
-    FileOfferDto, FileOffersReport, HealthReport, HeartbeatConfig, HostMetrics, IfaceReportDto,
-    InboxClearReport, InboxDeleteReport, InboxFileDto, InboxOpenReport, InboxReport,
-    InputControlReport, InputStatusReport, LinkGrade, LinkProbeReport, LinkQualityReport, LivePeer,
-    LocalCapsReport, MessageDirection, MessageEngine, NetworkRefreshReport, NetworkReport, Node,
+    AutoAcceptPolicyReport, AutoAcceptReport, BatchDismissReport, BatchSendItem, BatchSendReport,
+    BatchSendRequest, BatchTransferItemReport, BlockedPeersReport, CandidateDismissReport,
+    ClipClearReport, ClipHistoryReport, ClipMetaEntryDto, ClipStatusReport, DiscoveredPeerDto,
+    DiscoveryReport, DiscoveryRescanReport, DismissFilter, DndMode, FileBatchDecisionReport,
+    FileDecisionReport, FileOfferDto, FileOffersReport, HealthReport, HeartbeatConfig, HostMetrics,
+    IfaceReportDto, InboxClearReport, InboxDeleteReport, InboxFileDto, InboxOpenReport,
+    InboxReport, InputControlReport, InputStatusReport, LinkGrade, LinkProbeReport,
+    LinkQualityReport, LivePeer, LocalCapsReport, MessageDirection, MessageEngine,
+    MultiFileSendReport, MultiMessageSendReport, NetworkRefreshReport, NetworkReport, Node,
     NodeConfig, NodeConfigReport, NodePorts, NotifyBannerConfig, NotifyConfigReport,
     NotifyTestReport, NotifyTestRequest, OpenRuleDto, OutboxClearReport, OutboxEngine, OutboxEntry,
     OutboxReport, OutboxResendReport, OutboxStatus, OverlayStatusReport, PeerBlockReport,
-    PeerCapsDto, PeerConnectReport, PeerDisconnectReport, PeerGroupReport, PeerLinkQualityDto,
-    PeerLinkTracker, PeerMessage, PeerMessageClearReport, PeerMessageHistoryReport,
-    PeerMessageSendReport, PeerPingReport, PeerProfileUpdateReport, PeerProfilesReport,
-    PeerTagsReport, PeerUnblockReport, PeersCapsReport, PinReport, ProcessMetrics, ResumeMarkerDto,
-    ResumeMarkersReport, RouteEntryDto, RouteMutateReport, RoutesReport, ScreenControlReport,
-    ScreenStatusReport, StorageCleanReport, StorageReport, SystemReport, TransferDirection,
-    TransferPhase, TransferStats, TransfersReport, UserCommand,
+    PeerCapsDto, PeerConnectReport, PeerDisconnectReport, PeerFileSendItem, PeerGroupReport,
+    PeerLinkQualityDto, PeerLinkTracker, PeerMessage, PeerMessageClearReport,
+    PeerMessageHistoryReport, PeerMessageSendItem, PeerMessageSendReport, PeerPingReport,
+    PeerProfileUpdateReport, PeerProfilesReport, PeerTagsReport, PeerUnblockReport,
+    PeersCapsReport, PinReport, ProcessMetrics, ResumeMarkerDto, ResumeMarkersReport,
+    RouteEntryDto, RouteMutateReport, RoutesReport, ScreenControlReport, ScreenStatusReport,
+    StorageCleanReport, StorageReport, SystemReport, TransferDirection, TransferPhase,
+    TransferStats, TransfersReport, UserCommand,
 };
 pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
 pub use telemetry::{ChannelTrafficDto, ProtocolMessagesDto, TrafficReport, TrafficTelemetry};
@@ -57,8 +59,9 @@ pub use screen::MacSource;
 pub use screen::X11Source;
 pub use sidecar::{parse_overlay_cidrs, OverlayConfig, OverlaySource, OverlayStatus};
 pub use store::{
-    default_data_dir, load_profiles, save_profiles, BlockedPeer, BlockedTable, DeviceType,
-    PeerProfile, ProfileTable, BLOCKED_FILE, PROFILES_FILE,
+    default_data_dir, load_auto_accept_policy, load_profiles, save_auto_accept_policy,
+    save_profiles, AutoAcceptPolicy, BlockedPeer, BlockedTable, DeviceType, PeerProfile,
+    ProfileTable, TargetSelector, AUTO_ACCEPT_FILE, BLOCKED_FILE, PROFILES_FILE,
 };
 pub use uihttp::{
     loopback_delete, loopback_events_connect, loopback_get, loopback_post, loopback_put, SseStream,

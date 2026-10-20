@@ -325,6 +325,154 @@ pub fn save_profiles(dir: &Path, table: &ProfileTable) -> Result<(), NodeStoreEr
     Ok(())
 }
 
+/// Routing destination selector for targeted dispatch (single peer, tag multicast, group multicast, device-type fan-out, or all online peers).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetSelector {
+    /// Direct single peer target by device ID, hex prefix, or alias.
+    Peer(String),
+    /// Multicast to all peers matching a specific tag (e.g., "lab", "backup").
+    Tag(String),
+    /// Multicast to all peers belonging to an organizational group (e.g., "office", "homelab").
+    Group(String),
+    /// Fan-out to all peers matching a device form-factor type (e.g., Server, Desktop).
+    Type(DeviceType),
+    /// Broadcast to all currently connected/online live peers.
+    AllOnline,
+}
+
+impl TargetSelector {
+    pub fn as_label(&self) -> String {
+        match self {
+            Self::Peer(p) => format!("peer:{p}"),
+            Self::Tag(t) => format!("tag:{t}"),
+            Self::Group(g) => format!("group:{g}"),
+            Self::Type(dt) => format!("type:{}", dt.as_str()),
+            Self::AllOnline => "all_online".to_string(),
+        }
+    }
+
+    pub fn from_query(
+        peer: Option<&str>,
+        tag: Option<&str>,
+        group: Option<&str>,
+        dev_type: Option<&str>,
+        all: bool,
+    ) -> Result<Self, String> {
+        if all {
+            return Ok(Self::AllOnline);
+        }
+        if let Some(t) = tag.filter(|s| !s.trim().is_empty()) {
+            return Ok(Self::Tag(t.trim().to_string()));
+        }
+        if let Some(g) = group.filter(|s| !s.trim().is_empty()) {
+            return Ok(Self::Group(g.trim().to_string()));
+        }
+        if let Some(dt_str) = dev_type.filter(|s| !s.trim().is_empty()) {
+            let dt = dt_str.parse::<DeviceType>()?;
+            return Ok(Self::Type(dt));
+        }
+        if let Some(p) = peer.filter(|s| !s.trim().is_empty()) {
+            return Ok(Self::Peer(p.trim().to_string()));
+        }
+        Err("missing target destination: specify peer, tag, group, type, or all".to_string())
+    }
+}
+
+pub const AUTO_ACCEPT_FILE: &str = "auto_accept.json";
+
+/// Granular scoped auto-accept policy for inbound file transfer offers.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AutoAcceptPolicy {
+    /// Global master toggle for auto-accepting file transfers.
+    pub enabled: bool,
+    /// List of organizational group names whose members are permitted to auto-accept without interactive confirmation.
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    /// List of peer profile tags whose members are permitted to auto-accept.
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    /// List of device form factors allowed to auto-accept.
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+    /// Optional maximum file size in bytes eligible for automatic acceptance (None = no size limit up to FILE_MAX).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_file_size: Option<u64>,
+}
+
+impl AutoAcceptPolicy {
+    /// Evaluates whether an incoming file offer from a peer matching `profile` and of size `file_size`
+    /// should be automatically accepted according to policy rules.
+    pub fn is_eligible(&self, profile: &PeerProfile, file_size: u64) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if let Some(max_sz) = self.max_file_size {
+            if file_size > max_sz {
+                return false;
+            }
+        }
+        // If no specific group/tag/type filters are configured, policy applies to all trusted peers
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        // Match group
+        if let Some(ref grp) = profile.group {
+            let grp_lower = grp.to_ascii_lowercase();
+            if self
+                .allowed_groups
+                .iter()
+                .any(|g| g.to_ascii_lowercase() == grp_lower)
+            {
+                return true;
+            }
+        }
+
+        // Match tags
+        for t in &profile.tags {
+            let t_lower = t.to_ascii_lowercase();
+            if self
+                .allowed_tags
+                .iter()
+                .any(|rule_tag| rule_tag.to_ascii_lowercase() == t_lower)
+            {
+                return true;
+            }
+        }
+
+        // Match device type
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+}
+
+pub fn load_auto_accept_policy(dir: &Path) -> AutoAcceptPolicy {
+    let path = dir.join(AUTO_ACCEPT_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_auto_accept_policy(
+    dir: &Path,
+    policy: &AutoAcceptPolicy,
+) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(AUTO_ACCEPT_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -453,5 +601,100 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_accept_policy_roundtrip_and_matching() {
+        let dir = std::env::temp_dir().join(format!("tetherly-autoacc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        let policy = AutoAcceptPolicy {
+            enabled: true,
+            allowed_groups: vec!["homelab".into()],
+            allowed_tags: vec!["backup".into()],
+            allowed_types: vec![DeviceType::Server],
+            max_file_size: Some(10 * 1024 * 1024), // 10 MiB
+        };
+
+        save_auto_accept_policy(&dir, &policy).unwrap();
+        let loaded = load_auto_accept_policy(&dir);
+        assert_eq!(loaded, policy);
+
+        // Test matching:
+        let prof_server = PeerProfile {
+            device_id: "dev1".into(),
+            device_type: DeviceType::Server,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_eligible(&prof_server, 1024));
+        assert!(!loaded.is_eligible(&prof_server, 20 * 1024 * 1024)); // oversized
+
+        let prof_homelab = PeerProfile {
+            device_id: "dev2".into(),
+            device_type: DeviceType::Laptop,
+            tags: vec![],
+            group: Some("homelab".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_eligible(&prof_homelab, 1024));
+
+        let prof_backup_tag = PeerProfile {
+            device_id: "dev3".into(),
+            device_type: DeviceType::Phone,
+            tags: vec!["backup".into()],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_eligible(&prof_backup_tag, 1024));
+
+        let prof_unmatched = PeerProfile {
+            device_id: "dev4".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["work".into()],
+            group: Some("stranger".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded.is_eligible(&prof_unmatched, 1024));
+
+        // Disabled policy test
+        let disabled_policy = AutoAcceptPolicy {
+            enabled: false,
+            ..policy
+        };
+        assert!(!disabled_policy.is_eligible(&prof_server, 1024));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn target_selector_query_parsing() {
+        assert_eq!(
+            TargetSelector::from_query(None, None, None, None, true).unwrap(),
+            TargetSelector::AllOnline
+        );
+        assert_eq!(
+            TargetSelector::from_query(None, Some("lab"), None, None, false).unwrap(),
+            TargetSelector::Tag("lab".into())
+        );
+        assert_eq!(
+            TargetSelector::from_query(None, None, Some("ops"), None, false).unwrap(),
+            TargetSelector::Group("ops".into())
+        );
+        assert_eq!(
+            TargetSelector::from_query(None, None, None, Some("server"), false).unwrap(),
+            TargetSelector::Type(DeviceType::Server)
+        );
+        assert_eq!(
+            TargetSelector::from_query(Some("tdev_p1"), None, None, None, false).unwrap(),
+            TargetSelector::Peer("tdev_p1".into())
+        );
+        assert!(TargetSelector::from_query(None, None, None, None, false).is_err());
     }
 }

@@ -598,6 +598,14 @@ struct FileDecisionBody {
 struct AutoAcceptBody {
     enabled: Option<bool>,
     auto_accept_trusted: Option<bool>,
+    #[serde(default)]
+    allowed_groups: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_tags: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_types: Option<Vec<String>>,
+    #[serde(default)]
+    max_file_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -678,10 +686,21 @@ fn default_open_url() -> String {
 #[derive(serde::Deserialize)]
 struct SendFileBody {
     path: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "data")]
     data_base64: Option<String>,
     peer: Option<String>,
+    #[serde(default, alias = "filename")]
     name: Option<String>,
+    #[serde(default)]
+    tag: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    device_type: Option<String>,
+    #[serde(default)]
+    r#type: Option<String>,
+    #[serde(default)]
+    all: Option<bool>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -804,7 +823,17 @@ struct HeartbeatConfigBody {
 #[derive(serde::Deserialize, Default)]
 struct MessageSendBody {
     #[serde(default)]
-    peer: String,
+    peer: Option<String>,
+    #[serde(default)]
+    tag: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    device_type: Option<String>,
+    #[serde(default)]
+    r#type: Option<String>,
+    #[serde(default)]
+    all: Option<bool>,
     #[serde(default)]
     text: String,
 }
@@ -2140,8 +2169,85 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 err(400, "missing required 'id', 'all', or 'peer' parameter")
             }
         }
+        ("GET", "/api/file/auto-accept/policy") | ("GET", "/api/auto-accept/policy") => {
+            json_ok(&node.auto_accept_policy_report())
+        }
+        ("POST", "/api/file/auto-accept/policy")
+        | ("PUT", "/api/file/auto-accept/policy")
+        | ("POST", "/api/auto-accept/policy") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<AutoAcceptBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<AutoAcceptBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected auto-accept policy fields"),
+                }
+            };
+            let mut policy = node.auto_accept_policy();
+            if let Some(ref b) = parsed_body {
+                if let Some(en) = b.enabled.or(b.auto_accept_trusted) {
+                    policy.enabled = en;
+                }
+                if let Some(ref grps) = b.allowed_groups {
+                    policy.allowed_groups = grps.clone();
+                }
+                if let Some(ref tags) = b.allowed_tags {
+                    policy.allowed_tags = tags.clone();
+                }
+                if let Some(ref types) = b.allowed_types {
+                    let mut dtypes = Vec::new();
+                    for t in types {
+                        match t.parse::<crate::store::DeviceType>() {
+                            Ok(dt) => dtypes.push(dt),
+                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
+                        }
+                    }
+                    policy.allowed_types = dtypes;
+                }
+                if let Some(sz) = b.max_file_size {
+                    policy.max_file_size = Some(sz);
+                }
+            }
+            if let Some(en_str) = qmap
+                .get("enabled")
+                .or_else(|| qmap.get("auto_accept_trusted"))
+            {
+                if let Ok(en) = en_str.parse::<bool>() {
+                    policy.enabled = en;
+                }
+            }
+            if let Some(g) = qmap.get("group") {
+                if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
+                    policy.allowed_groups.push(g.clone());
+                }
+            }
+            if let Some(t) = qmap.get("tag") {
+                if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
+                    policy.allowed_tags.push(t.clone());
+                }
+            }
+            if let Some(sz_str) = qmap.get("max_size").or_else(|| qmap.get("max_file_size")) {
+                if let Ok(sz) = sz_str.parse::<u64>() {
+                    policy.max_file_size = Some(sz);
+                }
+            }
+            match node.set_auto_accept_policy(policy) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         ("GET", "/api/file/auto-accept") | ("GET", "/api/auto-accept") => {
-            json_ok(&node.auto_accept_status())
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            if qmap
+                .get("policy")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false)
+            {
+                json_ok(&node.auto_accept_policy_report())
+            } else {
+                json_ok(&node.auto_accept_status())
+            }
         }
         ("POST", "/api/file/auto-accept")
         | ("PUT", "/api/file/auto-accept")
@@ -2155,15 +2261,85 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                     Err(_) => return err(400, "bad json, expected { enabled?: bool }"),
                 }
             };
-            let enabled = parsed_body
-                .and_then(|b| b.enabled.or(b.auto_accept_trusted))
-                .or_else(|| {
-                    qmap.get("enabled")
-                        .or_else(|| qmap.get("auto_accept_trusted"))
-                        .and_then(|v| v.parse::<bool>().ok())
+            let has_policy_fields = parsed_body
+                .as_ref()
+                .map(|b| {
+                    b.allowed_groups.is_some()
+                        || b.allowed_tags.is_some()
+                        || b.allowed_types.is_some()
+                        || b.max_file_size.is_some()
                 })
-                .unwrap_or(true);
-            json_ok(&node.set_auto_accept(enabled))
+                .unwrap_or(false)
+                || qmap.contains_key("group")
+                || qmap.contains_key("tag")
+                || qmap.contains_key("max_size");
+
+            if has_policy_fields {
+                let mut policy = node.auto_accept_policy();
+                if let Some(ref b) = parsed_body {
+                    if let Some(en) = b.enabled.or(b.auto_accept_trusted) {
+                        policy.enabled = en;
+                    }
+                    if let Some(ref grps) = b.allowed_groups {
+                        policy.allowed_groups = grps.clone();
+                    }
+                    if let Some(ref tags) = b.allowed_tags {
+                        policy.allowed_tags = tags.clone();
+                    }
+                    if let Some(ref types) = b.allowed_types {
+                        let mut dtypes = Vec::new();
+                        for t in types {
+                            match t.parse::<crate::store::DeviceType>() {
+                                Ok(dt) => dtypes.push(dt),
+                                Err(e) => {
+                                    return err(400, &format!("invalid device type '{t}': {e}"))
+                                }
+                            }
+                        }
+                        policy.allowed_types = dtypes;
+                    }
+                    if let Some(sz) = b.max_file_size {
+                        policy.max_file_size = Some(sz);
+                    }
+                }
+                if let Some(en_str) = qmap
+                    .get("enabled")
+                    .or_else(|| qmap.get("auto_accept_trusted"))
+                {
+                    if let Ok(en) = en_str.parse::<bool>() {
+                        policy.enabled = en;
+                    }
+                }
+                if let Some(g) = qmap.get("group") {
+                    if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
+                        policy.allowed_groups.push(g.clone());
+                    }
+                }
+                if let Some(t) = qmap.get("tag") {
+                    if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
+                        policy.allowed_tags.push(t.clone());
+                    }
+                }
+                if let Some(sz_str) = qmap.get("max_size").or_else(|| qmap.get("max_file_size")) {
+                    if let Ok(sz) = sz_str.parse::<u64>() {
+                        policy.max_file_size = Some(sz);
+                    }
+                }
+                match node.set_auto_accept_policy(policy) {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(400, &e.to_string()),
+                }
+            } else {
+                let enabled = parsed_body
+                    .and_then(|b| b.enabled.or(b.auto_accept_trusted))
+                    .or_else(|| {
+                        qmap.get("enabled")
+                            .or_else(|| qmap.get("auto_accept_trusted"))
+                            .and_then(|v| v.parse::<bool>().ok())
+                    })
+                    .unwrap_or(true);
+                json_ok(&node.set_auto_accept(enabled))
+            }
         }
         ("POST", "/api/file/cancel") => match serde_json::from_slice::<IdBody>(body) {
             Ok(d) => match node.cancel_transfer(&d.id).await {
@@ -2176,8 +2352,177 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             let cleared = node.clear_terminal_transfers();
             json_ok(&serde_json::json!({ "ok": true, "cleared": cleared }))
         }
+        ("POST", "/api/file/send-multi") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let d: SendFileBody = if body.is_empty() {
+                SendFileBody {
+                    path: qmap.get("path").cloned(),
+                    data_base64: None,
+                    peer: qmap.get("peer").cloned(),
+                    name: qmap.get("name").cloned(),
+                    tag: qmap.get("tag").cloned(),
+                    group: qmap.get("group").cloned(),
+                    device_type: qmap
+                        .get("type")
+                        .or_else(|| qmap.get("device_type"))
+                        .cloned(),
+                    r#type: None,
+                    all: qmap.get("all").map(|s| s == "true" || s == "1"),
+                }
+            } else {
+                match serde_json::from_slice::<SendFileBody>(body) {
+                    Ok(b) => b,
+                    Err(_) => return err(400, "bad json, expected SendFileBody"),
+                }
+            };
+            let is_all = d.all.unwrap_or(false)
+                || qmap
+                    .get("all")
+                    .map(|s| s == "true" || s == "1")
+                    .unwrap_or(false)
+                || qmap.contains_key("all");
+            let tag = d
+                .tag
+                .as_deref()
+                .or_else(|| qmap.get("tag").map(String::as_str));
+            let group = d
+                .group
+                .as_deref()
+                .or_else(|| qmap.get("group").map(String::as_str));
+            let dev_type = d
+                .device_type
+                .as_deref()
+                .or(d.r#type.as_deref())
+                .or_else(|| {
+                    qmap.get("type")
+                        .or_else(|| qmap.get("device_type"))
+                        .map(String::as_str)
+                });
+            let peer = d
+                .peer
+                .as_deref()
+                .or_else(|| qmap.get("peer").map(String::as_str));
+
+            let selector = match crate::store::TargetSelector::from_query(
+                peer, tag, group, dev_type, is_all,
+            ) {
+                Ok(s) => s,
+                Err(e) => return err(400, &e),
+            };
+
+            if let Some(b64) = d.data_base64 {
+                use base64::Engine;
+                let bytes = match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                    Ok(b) => b,
+                    Err(_) => return err(400, "bad base64 in data_base64"),
+                };
+                let filename = d.name.as_deref().unwrap_or("uploaded_file");
+                match node
+                    .offer_and_send_bytes_multi(&selector, filename, &bytes)
+                    .await
+                {
+                    Ok(report) => return json_ok(&report),
+                    Err(e) => return err(400, &e.to_string()),
+                }
+            }
+
+            let path_opt = d
+                .path
+                .as_deref()
+                .or_else(|| qmap.get("path").map(String::as_str));
+            let Some(path_str) = path_opt else {
+                return err(400, "missing required 'path' or 'data_base64' parameter");
+            };
+            let p = std::path::Path::new(path_str);
+            if !p.is_file() {
+                return err(400, "file not found or not a regular file");
+            }
+
+            let name_opt = d
+                .name
+                .as_deref()
+                .or_else(|| qmap.get("name").map(String::as_str));
+            match node.offer_and_send_file_multi(&selector, p, name_opt).await {
+                Ok(report) => json_ok(&report),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         ("POST", "/api/file/send") => match serde_json::from_slice::<SendFileBody>(body) {
             Ok(d) => {
+                let qmap = query_str.map(parse_query_map).unwrap_or_default();
+                let is_all = d.all.unwrap_or(false)
+                    || qmap
+                        .get("all")
+                        .map(|s| s == "true" || s == "1")
+                        .unwrap_or(false)
+                    || qmap.contains_key("all");
+                let tag = d
+                    .tag
+                    .as_deref()
+                    .or_else(|| qmap.get("tag").map(String::as_str));
+                let group = d
+                    .group
+                    .as_deref()
+                    .or_else(|| qmap.get("group").map(String::as_str));
+                let dev_type = d
+                    .device_type
+                    .as_deref()
+                    .or(d.r#type.as_deref())
+                    .or_else(|| {
+                        qmap.get("type")
+                            .or_else(|| qmap.get("device_type"))
+                            .map(String::as_str)
+                    });
+
+                if is_all || tag.is_some() || group.is_some() || dev_type.is_some() {
+                    let peer = d
+                        .peer
+                        .as_deref()
+                        .or_else(|| qmap.get("peer").map(String::as_str));
+                    let selector = match crate::store::TargetSelector::from_query(
+                        peer, tag, group, dev_type, is_all,
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => return err(400, &e),
+                    };
+                    if let Some(b64) = d.data_base64 {
+                        use base64::Engine;
+                        let bytes = match base64::engine::general_purpose::STANDARD
+                            .decode(b64.as_bytes())
+                        {
+                            Ok(b) => b,
+                            Err(_) => return err(400, "bad base64 in data_base64"),
+                        };
+                        let filename = d.name.as_deref().unwrap_or("uploaded_file");
+                        match node
+                            .offer_and_send_bytes_multi(&selector, filename, &bytes)
+                            .await
+                        {
+                            Ok(report) => return json_ok(&report),
+                            Err(e) => return err(400, &e.to_string()),
+                        }
+                    }
+                    let path_opt = d
+                        .path
+                        .as_deref()
+                        .or_else(|| qmap.get("path").map(String::as_str));
+                    let Some(path_str) = path_opt else {
+                        return err(400, "missing required 'path' or 'data_base64' parameter for targeted dispatch");
+                    };
+                    let p = std::path::Path::new(path_str);
+                    if !p.is_file() {
+                        return err(400, "file not found or not a regular file");
+                    }
+                    let name_opt = d
+                        .name
+                        .as_deref()
+                        .or_else(|| qmap.get("name").map(String::as_str));
+                    match node.offer_and_send_file_multi(&selector, p, name_opt).await {
+                        Ok(report) => return json_ok(&report),
+                        Err(e) => return err(400, &e.to_string()),
+                    }
+                }
+
                 let mut peers = node.live_peers();
                 peers.sort_by_key(|p| p.device_id.to_string());
                 let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
@@ -2798,14 +3143,130 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             let report = node.clear_audit_log();
             json_ok(&report)
         }
+        ("POST", "/api/message/send-multi")
+        | ("POST", "/api/msg/send-multi")
+        | ("POST", "/api/messages/send-multi") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let req: MessageSendBody = if body.is_empty() {
+                MessageSendBody {
+                    peer: qmap.get("peer").cloned(),
+                    tag: qmap.get("tag").cloned(),
+                    group: qmap.get("group").cloned(),
+                    device_type: qmap
+                        .get("type")
+                        .or_else(|| qmap.get("device_type"))
+                        .cloned(),
+                    r#type: None,
+                    all: qmap.get("all").map(|s| s == "true" || s == "1"),
+                    text: qmap.get("text").cloned().unwrap_or_default(),
+                }
+            } else {
+                match serde_json::from_slice::<MessageSendBody>(body) {
+                    Ok(b) => b,
+                    Err(_) => return err(400, "bad json"),
+                }
+            };
+            let text = if !req.text.trim().is_empty() {
+                req.text.trim()
+            } else if let Some(t) = qmap.get("text") {
+                t.trim()
+            } else {
+                return err(400, "message text cannot be empty");
+            };
+
+            let is_all = req.all.unwrap_or(false)
+                || qmap
+                    .get("all")
+                    .map(|s| s == "true" || s == "1")
+                    .unwrap_or(false)
+                || qmap.contains_key("all");
+            let tag = req
+                .tag
+                .as_deref()
+                .or_else(|| qmap.get("tag").map(String::as_str));
+            let group = req
+                .group
+                .as_deref()
+                .or_else(|| qmap.get("group").map(String::as_str));
+            let dev_type = req
+                .device_type
+                .as_deref()
+                .or(req.r#type.as_deref())
+                .or_else(|| {
+                    qmap.get("type")
+                        .or_else(|| qmap.get("device_type"))
+                        .map(String::as_str)
+                });
+            let peer = req
+                .peer
+                .as_deref()
+                .or_else(|| qmap.get("peer").map(String::as_str));
+
+            let selector = match crate::store::TargetSelector::from_query(
+                peer, tag, group, dev_type, is_all,
+            ) {
+                Ok(s) => s,
+                Err(e) => return err(400, &e),
+            };
+
+            match node.send_message_multi(&selector, text).await {
+                Ok(report) => json_ok(&report),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         ("POST", "/api/message/send")
         | ("POST", "/api/msg/send")
         | ("POST", "/api/messages/send") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
             let req: MessageSendBody = match serde_json::from_slice(body) {
                 Ok(b) => b,
                 Err(_) => return err(400, "bad json"),
             };
-            match node.send_message_to_peer(&req.peer, &req.text).await {
+            let is_all = req.all.unwrap_or(false)
+                || qmap
+                    .get("all")
+                    .map(|s| s == "true" || s == "1")
+                    .unwrap_or(false)
+                || qmap.contains_key("all");
+            let tag = req
+                .tag
+                .as_deref()
+                .or_else(|| qmap.get("tag").map(String::as_str));
+            let group = req
+                .group
+                .as_deref()
+                .or_else(|| qmap.get("group").map(String::as_str));
+            let dev_type = req
+                .device_type
+                .as_deref()
+                .or(req.r#type.as_deref())
+                .or_else(|| {
+                    qmap.get("type")
+                        .or_else(|| qmap.get("device_type"))
+                        .map(String::as_str)
+                });
+
+            if is_all || tag.is_some() || group.is_some() || dev_type.is_some() {
+                let peer = req
+                    .peer
+                    .as_deref()
+                    .or_else(|| qmap.get("peer").map(String::as_str));
+                let selector = match crate::store::TargetSelector::from_query(
+                    peer, tag, group, dev_type, is_all,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => return err(400, &e),
+                };
+                match node.send_message_multi(&selector, &req.text).await {
+                    Ok(report) => return json_ok(&report),
+                    Err(e) => return err(400, &e.to_string()),
+                }
+            }
+
+            match node
+                .send_message_to_peer(req.peer.as_deref().unwrap_or(""), &req.text)
+                .await
+            {
                 Ok(report) => json_ok(&report),
                 Err(e) => err(400, &e.to_string()),
             }

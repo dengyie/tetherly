@@ -108,6 +108,8 @@ pub enum CoreError {
     PeerBlocked(String),
     #[error("invalid profile: {0}")]
     InvalidProfile(String),
+    #[error("no targets matched: {0}")]
+    NoTargetsMatched(String),
 }
 
 impl From<serde_json::Error> for CoreError {

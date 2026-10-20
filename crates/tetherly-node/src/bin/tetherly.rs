@@ -142,6 +142,18 @@ enum Cmd {
         /// `tdev_…` of the peer. Omit only when exactly one peer is live.
         #[arg(long)]
         peer: Option<String>,
+        /// Target peers having the specified tag.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Target peers in the specified group.
+        #[arg(long)]
+        group: Option<String>,
+        /// Target peers of the specified device type (desktop, laptop, phone, tablet, server, cloud).
+        #[arg(long, name = "type")]
+        device_type: Option<String>,
+        /// Broadcast to all online peers.
+        #[arg(long)]
+        all: bool,
         /// Output response as JSON.
         #[arg(long)]
         json: bool,
@@ -247,12 +259,27 @@ enum Cmd {
     },
     /// Query or configure automatic acceptance of files from trusted peers.
     AutoAccept {
-        /// Enable auto-accepting files from trusted peers.
+        /// Enable auto-accepting files from trusted peers according to policy.
         #[arg(long)]
         enable: bool,
         /// Disable auto-accepting files from trusted peers.
         #[arg(long)]
         disable: bool,
+        /// Allowed peer group(s) for auto-accept (e.g. --group dev --group homelab).
+        #[arg(long = "group")]
+        group: Option<Vec<String>>,
+        /// Allowed peer tag(s) for auto-accept (e.g. --tag backup --tag lab).
+        #[arg(long = "tag")]
+        tag: Option<Vec<String>>,
+        /// Allowed peer device type(s) for auto-accept (e.g. --type desktop --type server).
+        #[arg(long = "type")]
+        device_type: Option<Vec<String>>,
+        /// Maximum allowed file size in bytes for auto-accept (0 to clear).
+        #[arg(long)]
+        max_size: Option<u64>,
+        /// Clear all group, tag, type and size filters.
+        #[arg(long)]
+        clear_filters: bool,
         /// Output raw JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -485,6 +512,18 @@ enum Cmd {
         /// Target peer device ID (`tdev_...`) or advertised hostname.
         #[arg(long, short)]
         peer: Option<String>,
+        /// Target peers having the specified tag.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Target peers in the specified group.
+        #[arg(long)]
+        group: Option<String>,
+        /// Target peers of the specified device type (desktop, laptop, phone, tablet, server, cloud).
+        #[arg(long, name = "type")]
+        device_type: Option<String>,
+        /// Broadcast to all online peers.
+        #[arg(long)]
+        all: bool,
         /// Text message content (or note) to send (convenience shorthand for `message send`).
         #[arg(long, short)]
         text: Option<String>,
@@ -1182,11 +1221,23 @@ enum AuditCmd {
 
 #[derive(Subcommand, Debug)]
 enum MessageCmd {
-    /// Send a direct secure text message to a connected peer.
+    /// Send a direct secure text message to a connected peer or target group/tag.
     Send {
         /// Target peer device ID (`tdev_...`) or advertised hostname. Omit if exactly one peer is live.
         #[arg(long, short)]
         peer: Option<String>,
+        /// Target peers having the specified tag.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Target peers in the specified group.
+        #[arg(long)]
+        group: Option<String>,
+        /// Target peers of the specified device type (desktop, laptop, phone, tablet, server, cloud).
+        #[arg(long, name = "type")]
+        device_type: Option<String>,
+        /// Broadcast to all online peers.
+        #[arg(long)]
+        all: bool,
         /// Text message content (or note) to send.
         #[arg(required = true)]
         text: String,
@@ -1861,12 +1912,118 @@ async fn main() -> Result<()> {
             paths,
             name,
             peer,
+            tag,
+            group,
+            device_type,
+            all,
             json,
             watch,
             ui_port,
         } => {
             if paths.is_empty() {
                 anyhow::bail!("no file paths provided");
+            }
+            let is_multi = all || tag.is_some() || group.is_some() || device_type.is_some();
+            if is_multi {
+                for path in &paths {
+                    let path_str = path
+                        .to_str()
+                        .ok_or_else(|| anyhow::anyhow!("path contains invalid UTF-8"))?;
+                    let payload = serde_json::json!({
+                        "path": path_str,
+                        "name": name,
+                        "peer": peer,
+                        "tag": tag,
+                        "group": group,
+                        "type": device_type,
+                        "all": all,
+                    });
+                    let bytes = serde_json::to_vec(&payload)?;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(ui_port, "/api/file/send-multi", &bytes)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "node refused targeted file send (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        let fname = rep["filename"].as_str().unwrap_or("file");
+                        let fsize = rep["size"].as_u64().unwrap_or(0);
+                        let fhash = rep["sha256"].as_str().unwrap_or("");
+                        let short_hash = if fhash.len() > 12 {
+                            &fhash[..12]
+                        } else {
+                            fhash
+                        };
+                        let selector = rep["selector"].as_str().unwrap_or("target");
+                        let total = rep["target_count"].as_u64().unwrap_or(0);
+                        let succ = rep["success_count"].as_u64().unwrap_or(0);
+                        let skipped = rep["skipped_offline_count"].as_u64().unwrap_or(0);
+                        let failed = rep["failed_count"].as_u64().unwrap_or(0);
+                        println!(
+                            "Multi-Dispatch File [{fname}] ({}, sha256:{short_hash}...) to [{selector}]: {succ}/{total} offered, {skipped} skipped offline, {failed} failed",
+                            format_bytes(fsize)
+                        );
+                        if let Some(dispatches) = rep["dispatches"].as_array() {
+                            if !dispatches.is_empty() {
+                                println!(
+                                    "  {:<20} {:<16} {:<10} {:<20} {:<20} {:<20}",
+                                    "TARGET",
+                                    "ALIAS",
+                                    "STATUS",
+                                    "TRANSFER ID",
+                                    "OUTBOX ID",
+                                    "ERROR"
+                                );
+                                println!("  {}", "-".repeat(108));
+                                for d in dispatches {
+                                    let dev = d["peer"].as_str().unwrap_or("?");
+                                    let dev_short = if dev.len() > 18 { &dev[..18] } else { dev };
+                                    let alias = d["peer_alias"].as_str().unwrap_or("-");
+                                    let alias_short = if alias.len() > 14 {
+                                        &alias[..14]
+                                    } else {
+                                        alias
+                                    };
+                                    let status = if d["success"].as_bool().unwrap_or(false) {
+                                        "offered"
+                                    } else {
+                                        "failed"
+                                    };
+                                    let tid = d["transfer_id"].as_str().unwrap_or("-");
+                                    let tid_short = if tid.len() > 18 { &tid[..18] } else { tid };
+                                    let obid = d["outbox_id"].as_str().unwrap_or("-");
+                                    let obid_short =
+                                        if obid.len() > 18 { &obid[..18] } else { obid };
+                                    let err = d["error"].as_str().unwrap_or("-");
+                                    let err_short = if err.len() > 18 { &err[..18] } else { err };
+                                    println!(
+                                        "  {:<20} {:<16} {:<10} {:<20} {:<20} {:<20}",
+                                        dev_short,
+                                        alias_short,
+                                        status,
+                                        tid_short,
+                                        obid_short,
+                                        err_short
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(());
             }
             if paths.len() == 1 {
                 let path = &paths[0];
@@ -2154,10 +2311,26 @@ async fn main() -> Result<()> {
         Cmd::AutoAccept {
             enable,
             disable,
+            group,
+            tag,
+            device_type,
+            max_size,
+            clear_filters,
             json,
             ui_port,
         } => {
-            do_file_auto_accept(ui_port, enable, disable, json).await?;
+            do_file_auto_accept(
+                ui_port,
+                enable,
+                disable,
+                group,
+                tag,
+                device_type,
+                max_size,
+                clear_filters,
+                json,
+            )
+            .await?;
         }
         Cmd::Unpair { device_id, ui_port } => {
             let payload = serde_json::json!({ "device_id": device_id });
@@ -3772,6 +3945,10 @@ async fn main() -> Result<()> {
         Cmd::Message {
             action,
             peer,
+            tag,
+            group,
+            device_type,
+            all,
             text,
             limit,
             unread,
@@ -3782,7 +3959,20 @@ async fn main() -> Result<()> {
             ui_port,
         } => {
             handle_message_cmd(
-                action, peer, text, limit, unread, mark_read, clear, watch, json, ui_port,
+                action,
+                peer,
+                tag,
+                group,
+                device_type,
+                all,
+                text,
+                limit,
+                unread,
+                mark_read,
+                clear,
+                watch,
+                json,
+                ui_port,
             )
             .await?;
         }
@@ -5517,6 +5707,10 @@ fn print_audit_report(val: &serde_json::Value) {
 async fn handle_message_cmd(
     action: Option<MessageCmd>,
     default_peer: Option<String>,
+    default_tag: Option<String>,
+    default_group: Option<String>,
+    default_type: Option<String>,
+    default_all: bool,
     default_text: Option<String>,
     default_limit: Option<usize>,
     default_unread: bool,
@@ -5533,7 +5727,17 @@ async fn handle_message_cmd(
         return handle_message_watch(default_peer, 0, default_json, default_ui_port).await;
     }
     if let Some(txt) = default_text {
-        return handle_message_send(default_peer, &txt, default_json, default_ui_port).await;
+        return handle_message_send(
+            default_peer,
+            default_tag,
+            default_group,
+            default_type,
+            default_all,
+            &txt,
+            default_json,
+            default_ui_port,
+        )
+        .await;
     }
     match action {
         None => {
@@ -5549,18 +5753,26 @@ async fn handle_message_cmd(
         }
         Some(MessageCmd::Send {
             peer,
+            tag,
+            group,
+            device_type,
+            all,
             text,
             json,
             ui_port,
         }) => {
             let p = peer.or(default_peer);
+            let tg = tag.or(default_tag);
+            let grp = group.or(default_group);
+            let dt = device_type.or(default_type);
+            let is_all = all || default_all;
             let j = json || default_json;
             let port = if ui_port != 45716 {
                 ui_port
             } else {
                 default_ui_port
             };
-            handle_message_send(p, &text, j, port).await
+            handle_message_send(p, tg, grp, dt, is_all, &text, j, port).await
         }
         Some(MessageCmd::History {
             peer,
@@ -5614,12 +5826,95 @@ async fn handle_message_cmd(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_message_send(
     peer: Option<String>,
+    tag: Option<String>,
+    group: Option<String>,
+    device_type: Option<String>,
+    all: bool,
     text: &str,
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
+    let is_multi = all || tag.is_some() || group.is_some() || device_type.is_some();
+    if is_multi {
+        let payload = serde_json::json!({
+            "peer": peer,
+            "tag": tag,
+            "group": group,
+            "type": device_type,
+            "all": all,
+            "text": text,
+        });
+        let bytes = serde_json::to_vec(&payload)?;
+        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/message/send-multi", &bytes)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                )
+            })?;
+        if code != 200 {
+            anyhow::bail!(
+                "failed to send targeted message (HTTP {code}): {}",
+                String::from_utf8_lossy(&resp)
+            );
+        }
+        if json {
+            println!("{}", String::from_utf8_lossy(&resp).trim());
+        } else {
+            let val: serde_json::Value = serde_json::from_slice(&resp)
+                .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+            let selector = val["selector"].as_str().unwrap_or("target");
+            let total = val["target_count"].as_u64().unwrap_or(0);
+            let succ = val["success_count"].as_u64().unwrap_or(0);
+            let skipped = val["skipped_offline_count"].as_u64().unwrap_or(0);
+            let failed = val["failed_count"].as_u64().unwrap_or(0);
+            println!(
+                "Multi-Dispatch Message Report [{selector}]: {succ}/{total} sent, {skipped} skipped offline, {failed} failed"
+            );
+            if let Some(dispatches) = val["dispatches"].as_array() {
+                if !dispatches.is_empty() {
+                    println!(
+                        "  {:<20} {:<16} {:<10} {:<20} {:<20}",
+                        "TARGET", "ALIAS", "STATUS", "MESSAGE ID", "ERROR"
+                    );
+                    println!("  {}", "-".repeat(88));
+                    for d in dispatches {
+                        let dev = d["peer"].as_str().unwrap_or("?");
+                        let dev_short = if dev.len() > 18 { &dev[..18] } else { dev };
+                        let alias = d["peer_alias"].as_str().unwrap_or("-");
+                        let alias_short = if alias.len() > 14 {
+                            &alias[..14]
+                        } else {
+                            alias
+                        };
+                        let status = if d["success"].as_bool().unwrap_or(false) {
+                            "sent"
+                        } else {
+                            "failed"
+                        };
+                        let msg_id = d["message_id"].as_str().unwrap_or("-");
+                        let msg_id_short = if msg_id.len() > 18 {
+                            &msg_id[..18]
+                        } else {
+                            msg_id
+                        };
+                        let err = d["error"].as_str().unwrap_or("-");
+                        let err_short = if err.len() > 18 { &err[..18] } else { err };
+                        println!(
+                            "  {:<20} {:<16} {:<10} {:<20} {:<20}",
+                            dev_short, alias_short, status, msg_id_short, err_short
+                        );
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
     let payload = serde_json::json!({
         "peer": peer.unwrap_or_default(),
         "text": text,
@@ -6483,6 +6778,41 @@ fn print_event(v: &serde_json::Value) {
                 .unwrap_or_default();
             println!("[peer_profile_updated] peer={dev} type={dev_type} group={grp} tags=[{tags}]");
         }
+        "multi_dispatch_completed" => {
+            let kind = v["kind"].as_str().unwrap_or("?");
+            let selector = v["selector"].as_str().unwrap_or("?");
+            let total = v["target_count"].as_u64().unwrap_or(0);
+            let success = v["success_count"].as_u64().unwrap_or(0);
+            let skipped = v["skipped_offline_count"].as_u64().unwrap_or(0);
+            let failed = v["failed_count"].as_u64().unwrap_or(0);
+            println!(
+                "[multi_dispatch_completed] kind={kind} selector={selector} targets={total} (success={success}, skipped={skipped}, failed={failed})"
+            );
+        }
+        "auto_accept_policy_changed" => {
+            let enabled = v["enabled"].as_bool().unwrap_or(false);
+            let grps = v["allowed_groups"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            let tags = v["allowed_tags"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            println!(
+                "[auto_accept_policy_changed] enabled={enabled} groups=[{grps}] tags=[{tags}]"
+            );
+        }
         other => {
             println!("[{other}] {v}");
         }
@@ -7158,26 +7488,72 @@ async fn do_file_reject(
     Ok(())
 }
 
-async fn do_file_auto_accept(ui_port: u16, enable: bool, disable: bool, json: bool) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+async fn do_file_auto_accept(
+    ui_port: u16,
+    enable: bool,
+    disable: bool,
+    group: Option<Vec<String>>,
+    tag: Option<Vec<String>>,
+    device_type: Option<Vec<String>>,
+    max_size: Option<u64>,
+    clear_filters: bool,
+    json: bool,
+) -> Result<()> {
     if enable && disable {
         anyhow::bail!("cannot specify both --enable and --disable");
     }
-    if enable || disable {
-        let body_json = serde_json::json!({
-            "enabled": enable,
-        });
-        let body = serde_json::to_vec(&body_json)?;
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/file/auto-accept", &body)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+    let has_update = enable
+        || disable
+        || group.is_some()
+        || tag.is_some()
+        || device_type.is_some()
+        || max_size.is_some()
+        || clear_filters;
+
+    if has_update {
+        let mut body_map = serde_json::Map::new();
+        if enable {
+            body_map.insert("enabled".to_string(), serde_json::json!(true));
+        } else if disable {
+            body_map.insert("enabled".to_string(), serde_json::json!(false));
+        }
+        if clear_filters {
+            body_map.insert("allowed_groups".to_string(), serde_json::json!([]));
+            body_map.insert("allowed_tags".to_string(), serde_json::json!([]));
+            body_map.insert("allowed_types".to_string(), serde_json::json!([]));
+            body_map.insert("max_file_size".to_string(), serde_json::Value::Null);
+        } else {
+            if let Some(g) = group {
+                body_map.insert("allowed_groups".to_string(), serde_json::json!(g));
+            }
+            if let Some(t) = tag {
+                body_map.insert("allowed_tags".to_string(), serde_json::json!(t));
+            }
+            if let Some(dt) = device_type {
+                body_map.insert("allowed_types".to_string(), serde_json::json!(dt));
+            }
+            if let Some(ms) = max_size {
+                if ms == 0 {
+                    body_map.insert("max_file_size".to_string(), serde_json::Value::Null);
+                } else {
+                    body_map.insert("max_file_size".to_string(), serde_json::json!(ms));
+                }
+            }
+        }
+        let body = serde_json::to_vec(&serde_json::Value::Object(body_map))?;
+        let (code, resp) =
+            tetherly_node::loopback_post(ui_port, "/api/file/auto-accept/policy", &body)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                      start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+                    )
+                })?;
         if code != 200 {
             anyhow::bail!(
-                "configure auto-accept failed (HTTP {code}): {}",
+                "configure auto-accept policy failed (HTTP {code}): {}",
                 String::from_utf8_lossy(&resp)
             );
         }
@@ -7186,20 +7562,55 @@ async fn do_file_auto_accept(ui_port: u16, enable: bool, disable: bool, json: bo
         if json {
             println!("{}", serde_json::to_string_pretty(&v)?);
         } else {
-            let enabled = v.get("enabled").and_then(|b| b.as_bool()).unwrap_or(false);
+            let pol = &v["policy"];
+            let enabled = pol["enabled"].as_bool().unwrap_or(false);
             let count = v
-                .get("auto_accepted_count")
+                .get("cumulative_auto_accepted_count")
                 .and_then(|c| c.as_u64())
                 .unwrap_or(0);
-            println!(
-                "File auto-accept policy updated: enabled={} (trusted peers only, cumulative auto-accepted: {})",
-                enabled, count
-            );
+            let grps = pol["allowed_groups"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let tags = pol["allowed_tags"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let types = pol["allowed_types"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let max_sz = pol["max_file_size"]
+                .as_u64()
+                .map(format_bytes)
+                .unwrap_or_else(|| "unlimited".to_string());
+            println!("File auto-accept policy updated:");
+            println!("  Master Enabled:      {enabled}");
+            println!("  Allowed Groups:      [{grps}] (empty = all trusted)");
+            println!("  Allowed Tags:        [{tags}] (empty = all trusted)");
+            println!("  Allowed Types:       [{types}] (empty = all trusted)");
+            println!("  Max File Size:       {max_sz}");
+            println!("  Cumulative Accepted: {count} file(s)");
         }
         return Ok(());
     }
 
-    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/file/auto-accept")
+    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/file/auto-accept/policy")
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -7209,7 +7620,7 @@ async fn do_file_auto_accept(ui_port: u16, enable: bool, disable: bool, json: bo
         })?;
     if code != 200 {
         anyhow::bail!(
-            "query auto-accept status failed (HTTP {code}): {}",
+            "query auto-accept policy failed (HTTP {code}): {}",
             String::from_utf8_lossy(&resp)
         );
     }
@@ -7218,15 +7629,51 @@ async fn do_file_auto_accept(ui_port: u16, enable: bool, disable: bool, json: bo
     if json {
         println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
-        let enabled = v.get("enabled").and_then(|b| b.as_bool()).unwrap_or(false);
+        let pol = &v["policy"];
+        let enabled = pol["enabled"].as_bool().unwrap_or(false);
         let count = v
-            .get("auto_accepted_count")
+            .get("cumulative_auto_accepted_count")
             .and_then(|c| c.as_u64())
             .unwrap_or(0);
+        let grps = pol["allowed_groups"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let tags = pol["allowed_tags"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let types = pol["allowed_types"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let max_sz = pol["max_file_size"]
+            .as_u64()
+            .map(format_bytes)
+            .unwrap_or_else(|| "unlimited".to_string());
         println!("File Auto-Accept Policy:");
-        println!("  Enabled:             {enabled}");
-        println!("  Auto-Accepted Count: {count}");
-        println!("  Target:              Trusted Noise-authenticated peers only");
+        println!("  Master Enabled:      {enabled}");
+        println!("  Allowed Groups:      [{grps}] (empty = all trusted)");
+        println!("  Allowed Tags:        [{tags}] (empty = all trusted)");
+        println!("  Allowed Types:       [{types}] (empty = all trusted)");
+        println!("  Max File Size:       {max_sz}");
+        println!("  Cumulative Accepted: {count} file(s)");
+        println!("  Target:              Trusted Noise-authenticated peers matching policy");
     }
     Ok(())
 }
