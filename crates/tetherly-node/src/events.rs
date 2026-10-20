@@ -332,6 +332,42 @@ pub enum UiEvent {
         count: usize,
         timestamp_ms: u64,
     },
+    MediaCommandReceived {
+        id: String,
+        sender_id: String,
+        sender_alias: String,
+        command: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_player: Option<String>,
+        timestamp_ms: u64,
+    },
+    MediaCommandDispatched {
+        id: String,
+        target_peer: String,
+        command: String,
+        success: bool,
+        timestamp_ms: u64,
+    },
+    MediaStateChanged {
+        peer_id: String,
+        peer_alias: String,
+        player_id: String,
+        state: String,
+        title: String,
+        artist: String,
+        volume_percent: u8,
+        muted: bool,
+        timestamp_ms: u64,
+    },
+    MediaPolicyChanged {
+        mode: String,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        max_volume_limit: u8,
+        allow_seek: bool,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -477,6 +513,85 @@ impl UiEvent {
             action: action.into(),
             id: id.map(Into::into),
             count,
+            timestamp_ms,
+        }
+    }
+
+    pub fn media_command_received(
+        id: impl Into<String>,
+        sender_id: impl Into<String>,
+        sender_alias: impl Into<String>,
+        command: impl Into<String>,
+        target_player: Option<impl Into<String>>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::MediaCommandReceived {
+            id: id.into(),
+            sender_id: sender_id.into(),
+            sender_alias: sender_alias.into(),
+            command: command.into(),
+            target_player: target_player.map(Into::into),
+            timestamp_ms,
+        }
+    }
+
+    pub fn media_command_dispatched(
+        id: impl Into<String>,
+        target_peer: impl Into<String>,
+        command: impl Into<String>,
+        success: bool,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::MediaCommandDispatched {
+            id: id.into(),
+            target_peer: target_peer.into(),
+            command: command.into(),
+            success,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn media_state_changed(
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        player_id: impl Into<String>,
+        state: impl Into<String>,
+        title: impl Into<String>,
+        artist: impl Into<String>,
+        volume_percent: u8,
+        muted: bool,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::MediaStateChanged {
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            player_id: player_id.into(),
+            state: state.into(),
+            title: title.into(),
+            artist: artist.into(),
+            volume_percent,
+            muted,
+            timestamp_ms,
+        }
+    }
+
+    pub fn media_policy_changed(
+        mode: impl Into<String>,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        max_volume_limit: u8,
+        allow_seek: bool,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::MediaPolicyChanged {
+            mode: mode.into(),
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            max_volume_limit,
+            allow_seek,
             timestamp_ms,
         }
     }

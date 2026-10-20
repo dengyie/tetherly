@@ -371,6 +371,122 @@
         <div id="handoff-inbox-msg" class="hint" style="margin-top:4px"></div>
       </div>
     </section>
+    <section style="margin-top:16px" id="media-control-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">跨端多媒体播放控制与状态同步 (Media Playback & Control)</h2>
+        <div style="display:flex;gap:6px">
+          <button id="togglemediapolicybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">准入策略</button>
+          <button id="refreshmediabtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新状态</button>
+        </div>
+      </div>
+      <div class="hint">跨端控制局域网内设备音频/视频播放状态，支持播放/暂停/切曲/寻轨、音量双向同步与安全限幅治理。</div>
+
+      <!-- Media Ingress Policy Panel -->
+      <div id="media-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div style="font-size:12px;font-weight:600;color:var(--text)">媒体远程控制准入策略 (Ingress Media Control Policy)</div>
+          <span id="media-policy-badge" class="badge outbound" style="font-size:11px">allow</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">准入模式 (Control Mode):</label>
+            <select id="media-policy-mode" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="allow">allow (允许白名单或所有可信设备远程控制)</option>
+              <option value="prompt_only">prompt_only (仅提示，需确认)</option>
+              <option value="disabled">disabled (完全拒绝远程媒体控制)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">音量限幅保护上限 (Max Volume %):</label>
+            <input id="media-policy-max-vol" type="number" min="0" max="100" placeholder="默认 100%" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许远程寻轨 (Allow Remote Seek):</label>
+            <select id="media-policy-allow-seek" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许 (True)</option>
+              <option value="false">禁止 (False)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许控制分组 (Allowed Groups):</label>
+            <input id="media-policy-groups" placeholder="如: living-room, dev (留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许控制标签 (Allowed Tags):</label>
+            <input id="media-policy-tags" placeholder="如: trusted-phone (留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许控制形态 (Allowed Types):</label>
+            <input id="media-policy-types" placeholder="如: phone, tablet (留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+          <div style="display:flex;gap:8px">
+            <button id="media-policy-save-btn" type="button" style="padding:4px 12px;font-size:12px;background:#1f6feb;border:none;color:#fff;border-radius:4px;cursor:pointer">保存控制策略</button>
+            <button id="media-policy-clear-btn" class="ghost" type="button" style="padding:4px 10px;font-size:12px;cursor:pointer">清空过滤器</button>
+          </div>
+          <div id="media-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Media Control Dashboard -->
+      <div style="margin-top:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px">
+        <!-- Target Selector -->
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+          <label style="font-size:12px;color:var(--muted)">控制目标:
+            <select id="media-target-mode" style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="peer">单个节点</option>
+              <option value="group">按分组 (Group)</option>
+              <option value="tag">按标签 (Tag)</option>
+              <option value="type">按形态 (Type)</option>
+              <option value="all">全网在线节点 (All)</option>
+            </select>
+          </label>
+          <div id="media-peer-wrap">
+            <label style="font-size:12px;color:var(--muted)">目标设备:
+              <select id="media-target-peer" style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="">(本机播放器 / Local Player)</option>
+              </select>
+            </label>
+          </div>
+          <div id="media-target-input-wrap" style="display:none">
+            <input id="media-target-val" placeholder="输入分组/标签/形态…" style="padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+
+        <!-- Now Playing Card -->
+        <div class="card" style="padding:12px;margin:0;background:#131a22;border:1px solid var(--line);border-radius:6px;flex-direction:column;align-items:stretch;gap:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span id="media-playback-badge" class="badge offline" style="font-size:11px">Stopped</span>
+              <span id="media-title" style="font-weight:600;font-size:14px;color:var(--text)">暂无活动曲目</span>
+            </div>
+            <div id="media-player-id" style="font-size:11px;color:var(--muted);font-family:ui-monospace, Consolas, monospace">player: default</div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted)">
+            <span id="media-artist-album">艺术家 - 专辑</span>
+            <span id="media-time-pos" style="font-family:ui-monospace, Consolas, monospace">00:00 / 00:00</span>
+          </div>
+
+          <!-- Playback Controls -->
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;flex-wrap:wrap;gap:8px">
+            <div style="display:flex;gap:6px">
+              <button id="media-btn-prev" class="ghost" type="button" style="padding:4px 10px;font-size:12px">⏮ 上一曲</button>
+              <button id="media-btn-toggle" class="ghost" type="button" style="padding:4px 14px;font-size:12px;font-weight:700">⏯ 播放/暂停</button>
+              <button id="media-btn-stop" class="ghost" type="button" style="padding:4px 10px;font-size:12px">⏹ 停止</button>
+              <button id="media-btn-next" class="ghost" type="button" style="padding:4px 10px;font-size:12px">⏭ 下一曲</button>
+            </div>
+            <!-- Volume Slider & Mute -->
+            <div style="display:flex;align-items:center;gap:8px">
+              <button id="media-btn-mute" class="ghost" type="button" style="padding:4px 8px;font-size:12px">🔊 静音</button>
+              <input id="media-vol-slider" type="range" min="0" max="100" value="70" style="width:100px;cursor:pointer"/>
+              <span id="media-vol-text" style="font-size:12px;color:var(--text);font-family:ui-monospace, Consolas, monospace;min-width:36px">70%</span>
+            </div>
+          </div>
+        </div>
+        <div id="media-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
+      </div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
@@ -1220,6 +1336,11 @@ function render(s) {
   if (hp) {
     hp.innerHTML = '<option value="">(选择目标节点)</option>';
   }
+  const medp = $("media-target-peer");
+  const prevMedPeer = medp ? medp.value : "";
+  if (medp) {
+    medp.innerHTML = '<option value="">(本机播放器 / Local Player)</option>';
+  }
   for (const x of s.peers) {
     let rttBadge = '<span class="badge offline" style="margin-left:6px">RTT 未测</span>';
     if (x.rtt_ms != null) {
@@ -1329,6 +1450,13 @@ function render(s) {
       opt.textContent = displayName + " (" + (x.path || "lan") + ")";
       if (opt.value === prevHandoffPeer) opt.selected = true;
       hp.appendChild(opt);
+    }
+    if (medp) {
+      const opt = document.createElement("option");
+      opt.value = x.device_id;
+      opt.textContent = displayName + " (" + (x.path || "lan") + ")";
+      if (opt.value === prevMedPeer) opt.selected = true;
+      medp.appendChild(opt);
     }
   }
   const tr = $("trusted");
@@ -2347,6 +2475,281 @@ if (refreshHandoffBtn) {
   refreshHandoffBtn.onclick = () => {
     updateHandoffInbox();
     updateHandoffPolicy();
+  };
+}
+
+let currentMediaPolicy = null;
+
+async function updateMediaPolicy() {
+  try {
+    const rep = await api("/api/media/policy");
+    if (rep && rep.ok && rep.policy) {
+      currentMediaPolicy = rep.policy;
+      const p = rep.policy;
+      if ($("media-policy-mode") && document.activeElement !== $("media-policy-mode")) {
+        $("media-policy-mode").value = p.mode || "allow";
+      }
+      if ($("media-policy-badge")) {
+        $("media-policy-badge").textContent = p.mode || "allow";
+      }
+      if ($("media-policy-max-vol") && document.activeElement !== $("media-policy-max-vol")) {
+        $("media-policy-max-vol").value = p.max_volume_limit != null ? p.max_volume_limit : 100;
+      }
+      if ($("media-policy-allow-seek") && document.activeElement !== $("media-policy-allow-seek")) {
+        $("media-policy-allow-seek").value = p.allow_seek ? "true" : "false";
+      }
+      if ($("media-policy-groups") && document.activeElement !== $("media-policy-groups")) {
+        $("media-policy-groups").value = (p.allowed_groups || []).join(", ");
+      }
+      if ($("media-policy-tags") && document.activeElement !== $("media-policy-tags")) {
+        $("media-policy-tags").value = (p.allowed_tags || []).join(", ");
+      }
+      if ($("media-policy-types") && document.activeElement !== $("media-policy-types")) {
+        $("media-policy-types").value = (p.allowed_types || []).join(", ");
+      }
+    }
+  } catch (e) {}
+}
+
+async function updateMediaStatus() {
+  const targetPeer = $("media-target-peer") ? $("media-target-peer").value : "";
+  let url = "/api/media/state";
+  if (targetPeer) {
+    url += "?peer=" + encodeURIComponent(targetPeer);
+  }
+  try {
+    const rep = await api(url);
+    if (!rep || !rep.ok) return;
+    const st = rep.state;
+    const badge = $("media-playback-badge");
+    const titleEl = $("media-title");
+    const playerEl = $("media-player-id");
+    const metaEl = $("media-artist-album");
+    const timeEl = $("media-time-pos");
+    const volSlider = $("media-vol-slider");
+    const volText = $("media-vol-text");
+    const muteBtn = $("media-btn-mute");
+
+    if (st) {
+      if (badge) {
+        badge.textContent = st.state;
+        if (st.state === "Playing") {
+          badge.className = "badge completed";
+        } else if (st.state === "Paused") {
+          badge.className = "badge outbound";
+        } else {
+          badge.className = "badge offline";
+        }
+      }
+      if (titleEl) {
+        titleEl.textContent = st.title || "(未提供曲目名称)";
+      }
+      if (playerEl) {
+        playerEl.textContent = "player: " + (st.player_id || "default");
+      }
+      if (metaEl) {
+        const parts = [st.artist, st.album].filter(Boolean);
+        metaEl.textContent = parts.length ? parts.join(" - ") : "(未知艺术家)";
+      }
+      if (timeEl) {
+        const posSec = Math.floor((st.position_ms || 0) / 1000);
+        const durSec = Math.floor((st.duration_ms || 0) / 1000);
+        const posStr = String(Math.floor(posSec / 60)).padStart(2, "0") + ":" + String(posSec % 60).padStart(2, "0");
+        const durStr = durSec > 0 ? (String(Math.floor(durSec / 60)).padStart(2, "0") + ":" + String(durSec % 60).padStart(2, "0")) : "--:--";
+        timeEl.textContent = posStr + " / " + durStr;
+      }
+      if (volSlider && document.activeElement !== volSlider) {
+        volSlider.value = st.volume_percent != null ? st.volume_percent : 70;
+      }
+      if (volText) {
+        volText.textContent = (st.volume_percent != null ? st.volume_percent : 70) + "%" + (st.muted ? " (静音)" : "");
+      }
+      if (muteBtn) {
+        muteBtn.textContent = st.muted ? "🔇 已静音" : "🔊 静音";
+      }
+    } else {
+      if (badge) {
+        badge.textContent = "Stopped";
+        badge.className = "badge offline";
+      }
+      if (titleEl) titleEl.textContent = "暂无活动曲目";
+      if (metaEl) metaEl.textContent = "艺术家 - 专辑";
+      if (timeEl) timeEl.textContent = "00:00 / 00:00";
+    }
+  } catch (e) {}
+}
+
+async function sendMediaCommand(cmd, extra = {}) {
+  const mode = $("media-target-mode") ? $("media-target-mode").value : "peer";
+  const targetPeer = $("media-target-peer") ? $("media-target-peer").value : "";
+  const targetVal = $("media-target-val") ? $("media-target-val").value.trim() : "";
+  const statusEl = $("media-status-msg");
+
+  const payload = {
+    command: cmd,
+    ...extra,
+  };
+
+  if (mode === "peer") {
+    if (targetPeer) {
+      payload.peer = targetPeer;
+    }
+  } else if (mode === "all") {
+    payload.all = true;
+  } else if (mode === "group") {
+    if (!targetVal) {
+      if (statusEl) statusEl.textContent = "请输入目标分组名称";
+      return;
+    }
+    payload.group = targetVal;
+  } else if (mode === "tag") {
+    if (!targetVal) {
+      if (statusEl) statusEl.textContent = "请输入目标标签名称";
+      return;
+    }
+    payload.tag = targetVal;
+  } else if (mode === "type") {
+    if (!targetVal) {
+      if (statusEl) statusEl.textContent = "请输入目标设备形态";
+      return;
+    }
+    payload.device_type = targetVal;
+  }
+
+  if (statusEl) statusEl.textContent = "正在发送指令 [" + cmd + "]…";
+  try {
+    const rep = await api("/api/media/command", payload);
+    if (rep && rep.ok) {
+      if (rep.selector) {
+        if (statusEl) statusEl.textContent = "已向 [" + rep.selector + "] 扇出指令: " + rep.success_count + "/" + rep.target_count + " 成功";
+      } else {
+        const pDisp = rep.peer_alias ? (rep.peer_alias + " (" + rep.peer + ")") : (rep.peer || "local");
+        if (statusEl) statusEl.textContent = "指令已投递至 " + pDisp + (rep.success ? "" : " (失败)");
+      }
+      setTimeout(() => { if (statusEl) statusEl.textContent = ""; }, 3000);
+      updateMediaStatus();
+    } else {
+      if (statusEl) statusEl.textContent = "发送失败: " + (rep ? (rep.error || "未知错误") : "未知错误");
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = "发送异常: " + e.message;
+  }
+}
+
+const toggleMediaPolicyBtn = $("togglemediapolicybtn");
+if (toggleMediaPolicyBtn) {
+  toggleMediaPolicyBtn.onclick = () => {
+    const p = $("media-policy-panel");
+    if (!p) return;
+    p.style.display = p.style.display === "none" ? "block" : "none";
+    if (p.style.display !== "none") updateMediaPolicy();
+  };
+}
+
+const refreshMediaBtn = $("refreshmediabtn");
+if (refreshMediaBtn) {
+  refreshMediaBtn.onclick = () => {
+    updateMediaStatus();
+    updateMediaPolicy();
+  };
+}
+
+const mediaTargetMode = $("media-target-mode");
+if (mediaTargetMode) {
+  mediaTargetMode.onchange = () => {
+    const mode = mediaTargetMode.value;
+    const peerWrap = $("media-peer-wrap");
+    const inputWrap = $("media-target-input-wrap");
+    const input = $("media-target-val");
+    if (mode === "peer") {
+      if (peerWrap) peerWrap.style.display = "block";
+      if (inputWrap) inputWrap.style.display = "none";
+    } else if (mode === "all") {
+      if (peerWrap) peerWrap.style.display = "none";
+      if (inputWrap) inputWrap.style.display = "none";
+    } else {
+      if (peerWrap) peerWrap.style.display = "none";
+      if (inputWrap) inputWrap.style.display = "block";
+      if (input) {
+        if (mode === "group") input.placeholder = "输入目标业务分组 (如 living-room)…";
+        else if (mode === "tag") input.placeholder = "输入目标业务标签 (如 trusted-phone)…";
+        else if (mode === "type") input.placeholder = "输入目标设备形态 (如 phone, tablet)…";
+      }
+    }
+  };
+}
+
+if ($("media-target-peer")) $("media-target-peer").onchange = updateMediaStatus;
+
+if ($("media-btn-prev")) $("media-btn-prev").onclick = () => sendMediaCommand("prev");
+if ($("media-btn-toggle")) $("media-btn-toggle").onclick = () => sendMediaCommand("toggle");
+if ($("media-btn-stop")) $("media-btn-stop").onclick = () => sendMediaCommand("stop");
+if ($("media-btn-next")) $("media-btn-next").onclick = () => sendMediaCommand("next");
+if ($("media-btn-mute")) $("media-btn-mute").onclick = () => sendMediaCommand("mute");
+
+const mediaVolSlider = $("media-vol-slider");
+if (mediaVolSlider) {
+  mediaVolSlider.onchange = () => {
+    const vol = parseInt(mediaVolSlider.value, 10);
+    sendMediaCommand("volume", { volume: vol });
+  };
+  mediaVolSlider.oninput = () => {
+    if ($("media-vol-text")) $("media-vol-text").textContent = mediaVolSlider.value + "%";
+  };
+}
+
+const mediaPolicySaveBtn = $("media-policy-save-btn");
+if (mediaPolicySaveBtn) {
+  mediaPolicySaveBtn.onclick = async () => {
+    const mode = $("media-policy-mode") ? $("media-policy-mode").value : "allow";
+    const maxVolVal = $("media-policy-max-vol") ? $("media-policy-max-vol").value.trim() : "";
+    const allowSeek = $("media-policy-allow-seek") ? $("media-policy-allow-seek").value === "true" : true;
+    const groupsVal = $("media-policy-groups") ? $("media-policy-groups").value.trim() : "";
+    const tagsVal = $("media-policy-tags") ? $("media-policy-tags").value.trim() : "";
+    const typesVal = $("media-policy-types") ? $("media-policy-types").value.trim() : "";
+    const msg = $("media-policy-msg");
+
+    const payload = {
+      mode: mode,
+      allow_seek: allowSeek,
+      allowed_groups: groupsVal ? groupsVal.split(",").map(s => s.trim()).filter(Boolean) : [],
+      allowed_tags: tagsVal ? tagsVal.split(",").map(s => s.trim()).filter(Boolean) : [],
+      allowed_types: typesVal ? typesVal.split(",").map(s => s.trim()).filter(Boolean) : [],
+    };
+    if (maxVolVal) {
+      payload.max_volume_limit = parseInt(maxVolVal, 10);
+    }
+    if (msg) msg.textContent = "正在保存媒体准入策略…";
+    try {
+      const rep = await api("/api/media/policy", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "策略已更新保存！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateMediaPolicy();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "保存异常: " + e.message;
+    }
+  };
+}
+
+const mediaPolicyClearBtn = $("media-policy-clear-btn");
+if (mediaPolicyClearBtn) {
+  mediaPolicyClearBtn.onclick = async () => {
+    const msg = $("media-policy-msg");
+    if (msg) msg.textContent = "正在清空过滤器…";
+    try {
+      const rep = await api("/api/media/policy", { clear_filters: true });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "过滤器已重置为不限！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateMediaPolicy();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "清空异常: " + e.message;
+    }
   };
 }
 
@@ -4065,11 +4468,27 @@ function setupEventSource() {
 						            desc = "流转准入策略更新: " + ev.action;
 						            updateHandoffPolicy();
 						          }
-						          else if (ev.kind === "handoff_inbox_updated") {
-						            desc = "流转收件箱变更: 共 " + ev.total_entries + " 条 (待处理 " + ev.pending_count + " 条)";
-						            updateHandoffInbox();
-						          }
-					          else if (ev.kind === "screen_state_changed") {
+							          else if (ev.kind === "handoff_inbox_updated") {
+							            desc = "流转收件箱变更: 共 " + ev.total_entries + " 条 (待处理 " + ev.pending_count + " 条)";
+							            updateHandoffInbox();
+							          }
+							          else if (ev.kind === "media_command_received") {
+							            desc = "收到媒体控制: " + ev.command + " 来自 " + ev.sender_alias;
+							            updateMediaStatus();
+							          }
+							          else if (ev.kind === "media_command_dispatched") {
+							            desc = "媒体指令派发: " + ev.command + " -> " + ev.target_peer + (ev.success ? "" : " (失败)");
+							            updateMediaStatus();
+							          }
+							          else if (ev.kind === "media_state_changed") {
+							            desc = "播放状态变更: " + ev.peer_alias + " [" + ev.state + "] " + (ev.title || "");
+							            updateMediaStatus();
+							          }
+							          else if (ev.kind === "media_policy_changed") {
+							            desc = "媒体准入策略更新: " + ev.mode + " (上限 " + ev.max_volume_limit + "%)";
+							            updateMediaPolicy();
+							          }
+						          else if (ev.kind === "screen_state_changed") {
 					            desc = "屏幕状态: " + ev.state + " (授权:" + (ev.allowed ? "是" : "否") + ")" + (ev.peer ? (" · 对端:" + ev.peer) : "");
 					            updateScreenStatus();
 					          }
@@ -4222,8 +4641,12 @@ function setupEventSource() {
 												setInterval(updateProfiles, 3000);
 												updateHandoffInbox();
 												setInterval(updateHandoffInbox, 3000);
-												updateHandoffPolicy();
-												setInterval(updateHandoffPolicy, 3000);
-			</script>
+													updateHandoffPolicy();
+													setInterval(updateHandoffPolicy, 3000);
+													updateMediaStatus();
+													setInterval(updateMediaStatus, 3000);
+													updateMediaPolicy();
+													setInterval(updateMediaPolicy, 3000);
+				</script>
 </body>
 </html>

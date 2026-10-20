@@ -30,6 +30,8 @@ pub const TYPE_NOTIFY_REPLY: u16 = 0x0103;
 pub const TYPE_CLIP_SET: u16 = 0x0201;
 pub const TYPE_TEXT_MESSAGE: u16 = 0x0202;
 pub const TYPE_RESOURCE_HANDOFF: u16 = 0x0203;
+pub const TYPE_MEDIA_COMMAND: u16 = 0x0204;
+pub const TYPE_MEDIA_STATE: u16 = 0x0205;
 pub const TYPE_FILE_OFFER: u16 = 0x0301;
 pub const TYPE_FILE_ACCEPT: u16 = 0x0302;
 pub const TYPE_FILE_REJECT: u16 = 0x0303;
@@ -112,6 +114,8 @@ pub fn is_known_type(ty: u16) -> bool {
             | TYPE_CLIP_SET
             | TYPE_TEXT_MESSAGE
             | TYPE_RESOURCE_HANDOFF
+            | TYPE_MEDIA_COMMAND
+            | TYPE_MEDIA_STATE
             | TYPE_FILE_OFFER
             | TYPE_FILE_ACCEPT
             | TYPE_FILE_REJECT

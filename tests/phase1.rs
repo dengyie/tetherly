@@ -9171,6 +9171,392 @@ async fn resource_and_url_handoff_pipeline_and_governance_via_loopback_api() {
     peer.shutdown();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn media_playback_control_pipeline_and_state_sync_via_loopback_api() {
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 3. Connect to Peer SSE Event Stream:
+    let mut peer_sse = tetherly_node::loopback_events_connect(peer_ui)
+        .await
+        .expect("connect to peer sse stream");
+
+    // 4. Initial Policy & State Check:
+    let (code_pol, body_pol) = tetherly_node::loopback_get(peer_ui, "/api/media/policy")
+        .await
+        .unwrap();
+    assert_eq!(code_pol, 200);
+    let pol_init: serde_json::Value = serde_json::from_slice(&body_pol).unwrap();
+    assert_eq!(pol_init["policy"]["mode"], "allow");
+    assert_eq!(pol_init["policy"]["max_volume_limit"], 100);
+    assert_eq!(pol_init["policy"]["allow_seek"], true);
+
+    // 5. Peer Updates Local Player Playback State:
+    let state_update_req = serde_json::json!({
+        "title": "Rustacean Symphony No. 9",
+        "artist": "Ferris & The Crabs",
+        "album": "Memory Safety",
+        "state": "Playing",
+        "volume": 75,
+        "position_ms": 30000,
+        "duration_ms": 240000,
+        "can_play": false,
+        "can_pause": true
+    });
+    let (code_st, body_st) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/media/state",
+        &serde_json::to_vec(&state_update_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_st, 200);
+    let st_rep: serde_json::Value = serde_json::from_slice(&body_st).unwrap();
+    assert!(st_rep["ok"].as_bool().unwrap_or(false));
+    assert_eq!(st_rep["state"]["title"], "Rustacean Symphony No. 9");
+    assert_eq!(st_rep["state"]["artist"], "Ferris & The Crabs");
+    assert_eq!(st_rep["state"]["state"], "playing");
+    assert_eq!(st_rep["state"]["volume_percent"], 75);
+
+    // Host queries Peer's remote playback state:
+    let t_remote_st = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut remote_state_synced = false;
+    while tokio::time::Instant::now() < t_remote_st {
+        let (c, b) =
+            tetherly_node::loopback_get(host_ui, &format!("/api/media/state?peer={}", peer_id))
+                .await
+                .unwrap();
+        if c == 200 {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if let Some(st) = val.get("state").filter(|s| !s.is_null()) {
+                    if st["title"] == "Rustacean Symphony No. 9" && st["state"] == "playing" {
+                        remote_state_synced = true;
+                        break;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        remote_state_synced,
+        "host must receive peer's published media state via TYPE_MEDIA_STATE wire broadcast"
+    );
+
+    // 6. Host Sends Remote 'pause' Command:
+    let pause_cmd_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "command": "pause"
+    });
+    let (code_cmd1, body_cmd1) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/media/command",
+        &serde_json::to_vec(&pause_cmd_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_cmd1, 200);
+    let cmd1_rep: serde_json::Value = serde_json::from_slice(&body_cmd1).unwrap();
+    assert!(cmd1_rep["ok"].as_bool().unwrap_or(false));
+    assert_eq!(cmd1_rep["command"], "pause");
+    assert_eq!(cmd1_rep["peer"], peer_id.as_str());
+
+    // Verify Peer receives command and updates player state to Paused:
+    let t_pause = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut pause_verified = false;
+    while tokio::time::Instant::now() < t_pause {
+        let (c, b) = tetherly_node::loopback_get(peer_ui, "/api/media/state")
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if let Some(st) = val.get("state").filter(|s| !s.is_null()) {
+                    if st["state"] == "paused" && st["can_play"] == true && st["can_pause"] == false
+                    {
+                        pause_verified = true;
+                        break;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        pause_verified,
+        "peer player state machine must transition to Paused upon receiving Pause command"
+    );
+
+    // 7. Host Sends 'seek' Command (offset_ms: 15000):
+    let seek_cmd_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "command": "seek",
+        "offset_ms": 15000
+    });
+    let (code_seek, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/media/command",
+        &serde_json::to_vec(&seek_cmd_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_seek, 200);
+
+    // Verify position advanced from 30000 to 45000 ms:
+    let t_seek = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut seek_verified = false;
+    while tokio::time::Instant::now() < t_seek {
+        let (c, b) = tetherly_node::loopback_get(peer_ui, "/api/media/state")
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if let Some(st) = val.get("state").filter(|s| !s.is_null()) {
+                    if st["position_ms"] == 45000 {
+                        seek_verified = true;
+                        break;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        seek_verified,
+        "peer player position must advance by 15000ms upon receiving Seek command"
+    );
+
+    // 8. Volume Safety Clamping & Policy Ceiling:
+    // Peer updates policy with max_volume_limit = 60:
+    let pol_update_req = serde_json::json!({
+        "max_volume_limit": 60
+    });
+    let (c_pup, b_pup) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/media/policy",
+        &serde_json::to_vec(&pol_update_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_pup, 200);
+    let pup_rep: serde_json::Value = serde_json::from_slice(&b_pup).unwrap();
+    assert_eq!(pup_rep["policy"]["max_volume_limit"], 60);
+
+    // Host attempts to set volume to 95%:
+    let vol_cmd_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "command": "volume",
+        "volume": 95
+    });
+    let (code_vol, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/media/command",
+        &serde_json::to_vec(&vol_cmd_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_vol, 200);
+
+    // Verify Peer player volume was clamped to 60%:
+    let t_vol = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut vol_clamped = false;
+    while tokio::time::Instant::now() < t_vol {
+        let (c, b) = tetherly_node::loopback_get(peer_ui, "/api/media/state")
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if let Some(st) = val.get("state").filter(|s| !s.is_null()) {
+                    if st["volume_percent"] == 60 {
+                        vol_clamped = true;
+                        break;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        vol_clamped,
+        "peer must clamp requested 95% volume down to max_volume_limit of 60%"
+    );
+
+    // 9. Profile Scoping: Group-based Ingress Access Control:
+    // Peer configures policy to only allow members of group "living-room":
+    let group_pol_req = serde_json::json!({
+        "allowed_groups": ["living-room"]
+    });
+    let (c_gpol, _) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/media/policy",
+        &serde_json::to_vec(&group_pol_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_gpol, 200);
+
+    // Host is currently NOT in "living-room" group on Peer.
+    // Host sends 'toggle' command:
+    let toggle_cmd_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "command": "toggle"
+    });
+    let (c_tog1, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/media/command",
+        &serde_json::to_vec(&toggle_cmd_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_tog1, 200);
+
+    // Sleep briefly to ensure packet arrived and was processed:
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Verify Peer state is still Paused (command was blocked by policy):
+    let (_, b_unauth) = tetherly_node::loopback_get(peer_ui, "/api/media/state")
+        .await
+        .unwrap();
+    let unauth_rep: serde_json::Value = serde_json::from_slice(&b_unauth).unwrap();
+    assert_eq!(
+        unauth_rep["state"]["state"], "paused",
+        "command from unauthorized group must be blocked, playback remaining Paused"
+    );
+
+    // Now group Host under "living-room" on Peer:
+    let set_grp_req = serde_json::json!({
+        "peer": host_id.as_str(),
+        "group": "living-room"
+    });
+    let (c_setgrp, _) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/peers/group",
+        &serde_json::to_vec(&set_grp_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_setgrp, 200);
+
+    // Host sends 'toggle' command again. Now Host IS authorized!
+    let (c_tog2, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/media/command",
+        &serde_json::to_vec(&toggle_cmd_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_tog2, 200);
+
+    // Verify Peer state transitioned to Playing:
+    let t_tog = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut toggle_verified = false;
+    while tokio::time::Instant::now() < t_tog {
+        let (c, b) = tetherly_node::loopback_get(peer_ui, "/api/media/state")
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if let Some(st) = val.get("state").filter(|s| !s.is_null()) {
+                    if st["state"] == "playing" {
+                        toggle_verified = true;
+                        break;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        toggle_verified,
+        "peer player state must transition to Playing when authorized group peer sends Toggle"
+    );
+
+    // 10. Multi-cast Command Dispatch (all: true):
+    let multi_cmd_req = serde_json::json!({
+        "all": true,
+        "command": "pause"
+    });
+    let (c_multi, b_multi) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/media/command",
+        &serde_json::to_vec(&multi_cmd_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_multi, 200);
+    let multi_rep: serde_json::Value = serde_json::from_slice(&b_multi).unwrap();
+    assert!(multi_rep["ok"].as_bool().unwrap_or(false));
+    assert!(multi_rep["target_count"].as_u64().unwrap_or(0) >= 1);
+    assert!(multi_rep["success_count"].as_u64().unwrap_or(0) >= 1);
+
+    // 11. Atomic Persistence & POSIX 0o600 Permissions:
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let peer_policy_file = g2.path().join("media_policy.json");
+        assert!(
+            peer_policy_file.exists(),
+            "media_policy.json must exist on disk"
+        );
+        let meta_pol = std::fs::metadata(&peer_policy_file).unwrap();
+        assert_eq!(
+            meta_pol.permissions().mode() & 0o777,
+            0o600,
+            "media_policy.json must have 0o600 permissions"
+        );
+    }
+
+    // 12. Host 403 Forbidden Isolation Verification:
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{peer_ui}"))
+        .await
+        .expect("connect to peer ui port");
+    let evil_req = "GET /api/media/state HTTP/1.1\r\nHost: evil.attacker.domain\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header on /api/media/state must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    // 13. Verify Peer SSE Events Received:
+    let sse_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_media_cmd_sse = false;
+    let mut saw_media_state_sse = false;
+    while tokio::time::Instant::now() < sse_deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), peer_sse.next_event()).await
+        {
+            if raw.contains("media_command_received") {
+                saw_media_cmd_sse = true;
+            }
+            if raw.contains("media_state_changed") {
+                saw_media_state_sse = true;
+            }
+            if saw_media_cmd_sse && saw_media_state_sse {
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_media_cmd_sse,
+        "peer must emit media_command_received SSE event"
+    );
+    assert!(
+        saw_media_state_sse,
+        "peer must emit media_state_changed SSE event"
+    );
+
+    // 14. Clean Shutdown:
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

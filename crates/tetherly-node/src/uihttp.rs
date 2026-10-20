@@ -5,6 +5,7 @@
 use crate::runtime::{Node, OutboxStatus};
 use serde::Serialize;
 use std::net::SocketAddr;
+use tetherly_core::{MediaCommand, PlaybackState};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
@@ -461,6 +462,11 @@ struct Snapshot {
     handoff_inbox_count: usize,
     /// Current handoff action policy string.
     handoff_action: String,
+    /// Local media playback state if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_state: Option<tetherly_core::MediaStateFrame>,
+    /// Media ingress control mode string.
+    media_mode: String,
 }
 
 #[derive(Serialize)]
@@ -773,6 +779,86 @@ struct HandoffPolicyBody {
     allowed_types: Option<Vec<String>>,
     #[serde(default)]
     max_inbox_entries: Option<usize>,
+    #[serde(default)]
+    clear_filters: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MediaCommandBody {
+    #[serde(default)]
+    peer: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    volume: Option<u8>,
+    #[serde(default, alias = "volume_percent")]
+    volume_percent: Option<u8>,
+    #[serde(default)]
+    offset_ms: Option<i64>,
+    #[serde(default)]
+    target_player: Option<String>,
+    #[serde(default)]
+    tag: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    device_type: Option<String>,
+    #[serde(default)]
+    r#type: Option<String>,
+    #[serde(default)]
+    all: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MediaStateUpdateBody {
+    #[serde(default)]
+    player_id: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    artist: Option<String>,
+    #[serde(default)]
+    album: Option<String>,
+    #[serde(default, alias = "position", alias = "pos")]
+    position_ms: Option<u64>,
+    #[serde(default, alias = "duration", alias = "dur")]
+    duration_ms: Option<u64>,
+    #[serde(default, alias = "volume", alias = "vol")]
+    volume_percent: Option<u8>,
+    #[serde(default)]
+    muted: Option<bool>,
+    #[serde(default)]
+    can_play: Option<bool>,
+    #[serde(default)]
+    can_pause: Option<bool>,
+    #[serde(default)]
+    can_go_next: Option<bool>,
+    #[serde(default)]
+    can_go_previous: Option<bool>,
+    #[serde(default)]
+    can_seek: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MediaPolicyBody {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    allowed_groups: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_tags: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_types: Option<Vec<String>>,
+    #[serde(default)]
+    max_volume_limit: Option<u8>,
+    #[serde(default)]
+    allow_seek: Option<bool>,
     #[serde(default)]
     clear_filters: Option<bool>,
 }
@@ -3907,6 +3993,338 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 Err(e) => err(400, &e.to_string()),
             }
         }
+        ("POST", "/api/media/command")
+        | ("POST", "/api/media/cmd")
+        | ("POST", "/api/media/send") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let req: MediaCommandBody = if body.is_empty() {
+                MediaCommandBody {
+                    peer: qmap.get("peer").cloned(),
+                    target: qmap.get("target").cloned(),
+                    command: qmap.get("command").or_else(|| qmap.get("cmd")).cloned(),
+                    action: qmap.get("action").cloned(),
+                    volume: qmap
+                        .get("volume")
+                        .or_else(|| qmap.get("volume_percent"))
+                        .and_then(|v| v.parse::<u8>().ok()),
+                    volume_percent: None,
+                    offset_ms: qmap
+                        .get("offset_ms")
+                        .or_else(|| qmap.get("offset"))
+                        .and_then(|v| v.parse::<i64>().ok()),
+                    target_player: qmap
+                        .get("target_player")
+                        .or_else(|| qmap.get("player"))
+                        .cloned(),
+                    tag: qmap.get("tag").cloned(),
+                    group: qmap.get("group").cloned(),
+                    device_type: qmap
+                        .get("type")
+                        .or_else(|| qmap.get("device_type"))
+                        .cloned(),
+                    r#type: None,
+                    all: qmap.get("all").map(|s| s == "true" || s == "1"),
+                }
+            } else {
+                match serde_json::from_slice::<MediaCommandBody>(body) {
+                    Ok(b) => b,
+                    Err(_) => return err(400, "bad json, expected MediaCommandBody"),
+                }
+            };
+
+            let cmd_str = req
+                .command
+                .or(req.action)
+                .or_else(|| {
+                    qmap.get("command")
+                        .or_else(|| qmap.get("cmd"))
+                        .or_else(|| qmap.get("action"))
+                        .cloned()
+                })
+                .unwrap_or_default();
+            let cmd_str = cmd_str.trim().to_ascii_lowercase();
+            if cmd_str.is_empty() {
+                return err(400, "missing required 'command' or 'action'");
+            }
+
+            let command = match cmd_str.as_str() {
+                "play" => MediaCommand::Play,
+                "pause" => MediaCommand::Pause,
+                "play_pause" | "playpause" | "toggle" => MediaCommand::PlayPause,
+                "stop" => MediaCommand::Stop,
+                "next" => MediaCommand::Next,
+                "prev" | "previous" => MediaCommand::Previous,
+                "seek" => {
+                    let offset = req
+                        .offset_ms
+                        .or_else(|| {
+                            qmap.get("offset_ms")
+                                .or_else(|| qmap.get("offset"))
+                                .and_then(|s| s.parse::<i64>().ok())
+                        })
+                        .unwrap_or(0);
+                    MediaCommand::Seek { offset_ms: offset }
+                }
+                "volume" | "set_volume" => {
+                    let vol = req
+                        .volume
+                        .or(req.volume_percent)
+                        .or_else(|| {
+                            qmap.get("volume")
+                                .or_else(|| qmap.get("volume_percent"))
+                                .and_then(|s| s.parse::<u8>().ok())
+                        })
+                        .unwrap_or(0);
+                    MediaCommand::SetVolume {
+                        volume_percent: vol,
+                    }
+                }
+                "toggle_mute" | "mute" => MediaCommand::ToggleMute,
+                other => return err(400, &format!("unsupported media command: '{other}'")),
+            };
+
+            let target_player = req.target_player.or_else(|| {
+                qmap.get("target_player")
+                    .or_else(|| qmap.get("player"))
+                    .cloned()
+            });
+
+            let is_all = req.all.unwrap_or(false)
+                || qmap
+                    .get("all")
+                    .map(|s| s == "true" || s == "1")
+                    .unwrap_or(false)
+                || qmap.contains_key("all");
+            let tag = req
+                .tag
+                .as_deref()
+                .or_else(|| qmap.get("tag").map(String::as_str));
+            let group = req
+                .group
+                .as_deref()
+                .or_else(|| qmap.get("group").map(String::as_str));
+            let dev_type = req
+                .device_type
+                .as_deref()
+                .or(req.r#type.as_deref())
+                .or_else(|| {
+                    qmap.get("type")
+                        .or_else(|| qmap.get("device_type"))
+                        .map(String::as_str)
+                });
+            let peer = req.peer.as_deref().or(req.target.as_deref()).or_else(|| {
+                qmap.get("peer")
+                    .or_else(|| qmap.get("target"))
+                    .map(String::as_str)
+            });
+
+            if is_all || tag.is_some() || group.is_some() || dev_type.is_some() {
+                let selector = match crate::store::TargetSelector::from_query(
+                    peer, tag, group, dev_type, is_all,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => return err(400, &e),
+                };
+                match node
+                    .media_send_command_multi(&selector, command, target_player)
+                    .await
+                {
+                    Ok(report) => return json_ok(&report),
+                    Err(e) => return err(400, &e.to_string()),
+                }
+            }
+
+            let target_peer = peer.unwrap_or("");
+            match node
+                .media_send_command(target_peer, command, target_player)
+                .await
+            {
+                Ok(res) => json_ok(&res),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/media/state") | ("GET", "/api/media/status") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let peer = qmap
+                .get("peer")
+                .or_else(|| qmap.get("target"))
+                .map(String::as_str);
+            match node.media_get_state(peer) {
+                Ok(report) => json_ok(&report),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/media/state") | ("PUT", "/api/media/state") => {
+            let parsed_body = match serde_json::from_slice::<MediaStateUpdateBody>(body) {
+                Ok(b) => b,
+                Err(_) => return err(400, "bad json, expected MediaStateUpdateBody"),
+            };
+            let mut current = match node.media_get_state(None) {
+                Ok(rep) => rep.state.unwrap_or_default(),
+                Err(e) => return err(400, &e.to_string()),
+            };
+
+            if let Some(pid) = parsed_body.player_id {
+                current.player_id = pid;
+            }
+            if let Some(ref st_str) = parsed_body.state {
+                match st_str.parse::<PlaybackState>() {
+                    Ok(ps) => current.state = ps,
+                    Err(e) => return err(400, &e),
+                }
+            }
+            if let Some(title) = parsed_body.title {
+                current.title = title;
+            }
+            if let Some(artist) = parsed_body.artist {
+                current.artist = artist;
+            }
+            if let Some(album) = parsed_body.album {
+                current.album = album;
+            }
+            if let Some(pos) = parsed_body.position_ms {
+                current.position_ms = pos;
+            }
+            if let Some(dur) = parsed_body.duration_ms {
+                current.duration_ms = dur;
+            }
+            if let Some(vol) = parsed_body.volume_percent {
+                current.volume_percent = vol;
+            }
+            if let Some(muted) = parsed_body.muted {
+                current.muted = muted;
+            }
+            if let Some(cp) = parsed_body.can_play {
+                current.can_play = cp;
+            }
+            if let Some(cp) = parsed_body.can_pause {
+                current.can_pause = cp;
+            }
+            if let Some(cgn) = parsed_body.can_go_next {
+                current.can_go_next = cgn;
+            }
+            if let Some(cgp) = parsed_body.can_go_previous {
+                current.can_go_previous = cgp;
+            }
+            if let Some(cs) = parsed_body.can_seek {
+                current.can_seek = cs;
+            }
+
+            match node.media_update_local_state(current) {
+                Ok(st) => json_ok(&serde_json::json!({
+                    "ok": true,
+                    "state": st,
+                })),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/media/policy") => json_ok(&node.media_policy_report()),
+        ("POST", "/api/media/policy") | ("PUT", "/api/media/policy") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<MediaPolicyBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<MediaPolicyBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected MediaPolicyBody"),
+                }
+            };
+            let mut policy = node.media_policy();
+
+            if let Some(ref b) = parsed_body {
+                if let Some(ref m) = b.mode {
+                    match m.parse::<tetherly_core::MediaControlMode>() {
+                        Ok(mode) => policy.mode = mode,
+                        Err(e) => {
+                            return err(400, &format!("invalid media control mode '{m}': {e}"))
+                        }
+                    }
+                }
+                if let Some(ref grps) = b.allowed_groups {
+                    policy.allowed_groups = grps.clone();
+                }
+                if let Some(ref tags) = b.allowed_tags {
+                    policy.allowed_tags = tags.clone();
+                }
+                if let Some(ref types) = b.allowed_types {
+                    let mut dtypes = Vec::new();
+                    for t in types {
+                        match t.parse::<crate::store::DeviceType>() {
+                            Ok(dt) => dtypes.push(dt),
+                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
+                        }
+                    }
+                    policy.allowed_types = dtypes;
+                }
+                if let Some(limit) = b.max_volume_limit {
+                    policy.max_volume_limit = limit.min(100);
+                }
+                if let Some(seek) = b.allow_seek {
+                    policy.allow_seek = seek;
+                }
+                if b.clear_filters == Some(true) {
+                    policy.allowed_groups.clear();
+                    policy.allowed_tags.clear();
+                    policy.allowed_types.clear();
+                }
+            }
+
+            if let Some(m_str) = qmap.get("mode") {
+                match m_str.parse::<tetherly_core::MediaControlMode>() {
+                    Ok(mode) => policy.mode = mode,
+                    Err(e) => {
+                        return err(400, &format!("invalid media control mode '{m_str}': {e}"))
+                    }
+                }
+            }
+            if let Some(g) = qmap.get("group") {
+                if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
+                    policy.allowed_groups.push(g.clone());
+                }
+            }
+            if let Some(t) = qmap.get("tag") {
+                if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
+                    policy.allowed_tags.push(t.clone());
+                }
+            }
+            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
+                match dt_str.parse::<crate::store::DeviceType>() {
+                    Ok(dt) => {
+                        if !policy.allowed_types.contains(&dt) {
+                            policy.allowed_types.push(dt);
+                        }
+                    }
+                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
+                }
+            }
+            if let Some(lim_str) = qmap
+                .get("max_volume_limit")
+                .or_else(|| qmap.get("max_volume"))
+            {
+                if let Ok(l) = lim_str.parse::<u8>() {
+                    policy.max_volume_limit = l.min(100);
+                }
+            }
+            if let Some(seek_str) = qmap.get("allow_seek") {
+                if let Ok(s) = seek_str.parse::<bool>() {
+                    policy.allow_seek = s;
+                }
+            }
+            if qmap
+                .get("clear_filters")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false)
+            {
+                policy.allowed_groups.clear();
+                policy.allowed_tags.clear();
+                policy.allowed_types.clear();
+            }
+
+            match node.set_media_policy(policy) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         (_, "/api/events" | "/api/events/stream") => err(405, "method not allowed"),
         _ => UiResponse::new(404, "text/plain; charset=utf-8", b"not found".to_vec()),
     }
@@ -4036,6 +4454,8 @@ async fn snapshot(node: &Node) -> Snapshot {
             .unwrap_or(0),
         handoff_inbox_count: node.handoff_inbox_list(None).len(),
         handoff_action: node.handoff_policy().action.as_str().to_string(),
+        media_state: node.media_get_state(None).ok().and_then(|r| r.state),
+        media_mode: node.media_policy().mode.as_str().to_string(),
     }
 }
 
@@ -4052,4 +4472,131 @@ fn err(code: u16, msg: &str) -> UiResponse {
         "application/json; charset=utf-8",
         serde_json::to_vec(&serde_json::json!({ "error": msg })).unwrap_or_default(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{Node, NodeConfig};
+    use crate::sidecar::OverlayConfig;
+    use std::sync::Arc;
+    use tetherly_core::ports::ManualClock;
+
+    fn temp_test_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-uihttp-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.clone(),
+            control_port: 0,
+            file_port: 0,
+            input_port: 0,
+            screen_port: 0,
+            ui_port: 0,
+            name: "uihttp-test-node".into(),
+            platform: "test".into(),
+            memory_clip: true,
+            memory_notifier: true,
+            loopback_only: true,
+            advertise: false,
+            reconnect: false,
+            overlay: OverlayConfig::default(),
+            ancs: None,
+            ancs_peripheral: "test".into(),
+            screen_source: None,
+            screen_codec: None,
+            screen_sink: None,
+            input_sink: None,
+        };
+        let clock = Arc::new(ManualClock::new(5000));
+        let node = Node::start_with_clock(cfg, clock).unwrap();
+        (node, dir)
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_media_policy_and_state_endpoints() {
+        let (node, dir) = temp_test_node("media_endpoints");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/media/policy
+        let (code, body) = loopback_get(port, "/api/media/policy").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["mode"], "allow");
+        assert_eq!(rep["policy"]["max_volume_limit"], 100);
+        assert_eq!(rep["policy"]["allow_seek"], true);
+
+        // 2. POST /api/media/policy (mutate policy)
+        let update_req = serde_json::json!({
+            "mode": "allow",
+            "allowed_groups": ["living_room"],
+            "max_volume_limit": 80,
+            "allow_seek": false
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/media/policy",
+            &serde_json::to_vec(&update_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["max_volume_limit"], 80);
+        assert_eq!(rep["policy"]["allow_seek"], false);
+        assert_eq!(rep["policy"]["allowed_groups"][0], "living_room");
+
+        // 3. POST /api/media/state (update local state)
+        let state_req = serde_json::json!({
+            "title": "Bohemian Rhapsody",
+            "artist": "Queen",
+            "album": "A Night at the Opera",
+            "volume_percent": 75,
+            "state": "playing"
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/media/state",
+            &serde_json::to_vec(&state_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["state"]["title"], "Bohemian Rhapsody");
+        assert_eq!(rep["state"]["artist"], "Queen");
+        assert_eq!(rep["state"]["state"], "playing");
+        assert_eq!(rep["state"]["volume_percent"], 75);
+
+        // 4. GET /api/media/state
+        let (code, body) = loopback_get(port, "/api/media/state").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["state"]["title"], "Bohemian Rhapsody");
+        assert_eq!(rep["state"]["artist"], "Queen");
+
+        // 5. Host header 403 test: attack with external host
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/media/state HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

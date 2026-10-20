@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+pub use tetherly_core::media::{MediaCommand, MediaControlMode, MediaStateFrame, PlaybackState};
 use tetherly_core::{ClipSyncMode, MemoryTrustStore, TrustFile};
 pub use tetherly_core::{HandoffAction, HandoffEntry, HandoffStatus};
 use tetherly_crypto::Identity;
@@ -20,6 +21,7 @@ pub const AUTO_ACCEPT_POLICY_FILE: &str = "auto_accept.json";
 pub const CLIPBOARD_POLICY_FILE: &str = "clipboard_policy.json";
 pub const HANDOFF_POLICY_FILE: &str = "handoff_policy.json";
 pub const HANDOFF_INBOX_FILE: &str = "handoff_inbox.json";
+pub const MEDIA_POLICY_FILE: &str = "media_policy.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -747,6 +749,114 @@ pub fn save_handoff_inbox(dir: &Path, table: &HandoffInboxTable) -> Result<(), N
     Ok(())
 }
 
+fn default_media_control_mode() -> MediaControlMode {
+    MediaControlMode::Allow
+}
+
+fn default_max_volume_limit() -> u8 {
+    100
+}
+
+/// Node policy governing inbound media control commands and profile scoping.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaControlPolicy {
+    #[serde(default = "default_media_control_mode")]
+    pub mode: MediaControlMode,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+    #[serde(default = "default_max_volume_limit")]
+    pub max_volume_limit: u8,
+    #[serde(default = "default_true")]
+    pub allow_seek: bool,
+}
+
+impl Default for MediaControlPolicy {
+    fn default() -> Self {
+        Self {
+            mode: MediaControlMode::Allow,
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+            max_volume_limit: 100,
+            allow_seek: true,
+        }
+    }
+}
+
+impl MediaControlPolicy {
+    /// Checks whether an inbound media command is eligible to be processed based on peer profile.
+    pub fn is_peer_eligible(&self, profile: &PeerProfile) -> bool {
+        if self.mode == MediaControlMode::Disabled {
+            return false;
+        }
+
+        // If no filter is configured, all trusted peers are eligible
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        // Match group
+        if let Some(ref grp) = profile.group {
+            let grp_lower = grp.to_ascii_lowercase();
+            if self
+                .allowed_groups
+                .iter()
+                .any(|g| g.to_ascii_lowercase() == grp_lower)
+            {
+                return true;
+            }
+        }
+
+        // Match tags
+        for t in &profile.tags {
+            let t_lower = t.to_ascii_lowercase();
+            if self
+                .allowed_tags
+                .iter()
+                .any(|at| at.to_ascii_lowercase() == t_lower)
+            {
+                return true;
+            }
+        }
+
+        // Match device type
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+
+    /// Clamps command volume to policy limit.
+    pub fn clamp_volume(&self, requested_vol: u8) -> u8 {
+        requested_vol.min(self.max_volume_limit).min(100)
+    }
+}
+
+pub fn load_media_policy(dir: &Path) -> MediaControlPolicy {
+    let path = dir.join(MEDIA_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_media_policy(dir: &Path, policy: &MediaControlPolicy) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(MEDIA_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -1157,6 +1267,79 @@ mod tests {
         }
         assert_eq!(bounded.entries.len(), 3);
         assert_eq!(bounded.entries[0].id, "ho_4");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn media_policy_roundtrip_and_matching() {
+        let dir = std::env::temp_dir().join(format!("tetherly-media-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Defaults
+        let def = load_media_policy(&dir);
+        assert_eq!(def.mode, MediaControlMode::Allow);
+        assert_eq!(def.max_volume_limit, 100);
+        assert!(def.allow_seek);
+
+        // 2. Custom policy persistence
+        let custom = MediaControlPolicy {
+            mode: MediaControlMode::Allow,
+            allowed_groups: vec!["living-room".into()],
+            allowed_tags: vec!["speaker".into()],
+            allowed_types: vec![DeviceType::Phone],
+            max_volume_limit: 80,
+            allow_seek: false,
+        };
+        save_media_policy(&dir, &custom).unwrap();
+        let loaded = load_media_policy(&dir);
+        assert_eq!(loaded, custom);
+
+        // 3. Matching
+        let prof_ok = PeerProfile {
+            device_id: "phone_1".into(),
+            device_type: DeviceType::Phone,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_ok));
+
+        let prof_group = PeerProfile {
+            device_id: "pc_1".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec![],
+            group: Some("LIVING-ROOM".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_group));
+
+        let prof_tag = PeerProfile {
+            device_id: "spk_1".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["SPEAKER".into()],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_tag));
+
+        let prof_unmatched = PeerProfile {
+            device_id: "pc_2".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec!["gaming".into()],
+            group: Some("bedroom".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded.is_peer_eligible(&prof_unmatched));
+
+        // 4. Clamping
+        assert_eq!(loaded.clamp_volume(95), 80);
+        assert_eq!(loaded.clamp_volume(60), 60);
 
         let _ = fs::remove_dir_all(&dir);
     }
