@@ -539,6 +539,38 @@
       <h3 style="font-size:13px;color:var(--text-dim);margin:14px 0 6px 0">已受信任设备（全景）</h3>
       <div id="trusted"><div class="empty">无已配对设备</div></div>
     </section>
+    <section style="margin-top:16px" id="peer-profiles-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">设备分类画像与标签组治理 (Peer Profiles & Tags)</h2>
+        <div style="display:flex;gap:6px">
+          <button id="refreshprofilesbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新画像</button>
+        </div>
+      </div>
+      <div class="hint">强类型设备形态分类（桌面/笔记本/移动端/服务器/云主机）、多标签画像与组织分组治理，元数据原子持久化。</div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">
+        <label style="font-size:12px;color:var(--muted)">形态过滤:
+          <select id="profile-filter-type" style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px">
+            <option value="">全部形态</option>
+            <option value="desktop">🖥️ 桌面台式机 (desktop)</option>
+            <option value="laptop">💻 便携笔记本 (laptop)</option>
+            <option value="phone">📱 智能手机 (phone)</option>
+            <option value="tablet">📟 平板设备 (tablet)</option>
+            <option value="server">🖲️ 服务器主机 (server)</option>
+            <option value="cloud">☁️ 云实例/VPS (cloud)</option>
+            <option value="other">🔌 其它形态 (other)</option>
+          </select>
+        </label>
+        <label style="font-size:12px;color:var(--muted)">分组过滤:
+          <input type="text" id="profile-filter-group" placeholder="输入分组名..." style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px;width:110px">
+        </label>
+        <label style="font-size:12px;color:var(--muted)">标签过滤:
+          <input type="text" id="profile-filter-tag" placeholder="输入标签名..." style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px;width:110px">
+        </label>
+        <span id="profiles-stat-badge" class="badge outbound" style="font-size:11px">画像 0 个</span>
+      </div>
+      <div id="profiles-table" style="margin-top:8px"><div class="empty">无设备画像数据</div></div>
+      <div id="profilemsg" class="hint" style="margin-top:6px"></div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2 style="margin:0">对端链路质量画像与保活调谐 (Peer Link Quality & Keep-Alive Tuning)</h2>
@@ -689,6 +721,17 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+function getDeviceTypeIcon(dt) {
+  switch ((dt || '').toLowerCase()) {
+    case 'desktop': return '🖥️';
+    case 'laptop': return '💻';
+    case 'phone': return '📱';
+    case 'tablet': return '📟';
+    case 'server': return '🖲️';
+    case 'cloud': return '☁️';
+    default: return '🔌';
+  }
 }
 function renderTransfers(list, stats) {
   const tstat = $("transferstats");
@@ -963,10 +1006,19 @@ function render(s) {
         return '<span class="badge" style="background:var(--card-bg);border:1px solid var(--border);color:var(--text);font-size:11px;margin-right:3px">[' + label + ']</span>';
       }).join('') + '</span>';
     }
-    const card = el('<div class="card"><div style="flex:1"><div class="title"><span></span>' + pathBadge + rttBadge + capsBadges + '</div><div class="meta"></div></div><div class="row"><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost ping-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">测速</button><button class="ghost disconnect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">断开</button><button class="bad ghost block-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">屏蔽</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
+    const devTypeIcon = getDeviceTypeIcon(x.device_type);
+    const devTypeBadge = '<span class="badge" style="margin-left:6px" title="形态: ' + (x.device_type || 'other') + '">' + devTypeIcon + ' ' + (x.device_type || 'other') + '</span>';
+    const groupBadge = (x.group && x.group.trim()) ? ('<span class="badge outbound" style="margin-left:6px">群组: ' + escapeHtml(x.group) + '</span>') : '';
+    let tagsBadges = '';
+    if (x.tags && x.tags.length > 0) {
+      tagsBadges = '<span style="margin-left:6px">' + x.tags.map(t => '<span class="badge" style="font-size:11px;margin-right:3px;background:var(--card-bg);border:1px solid var(--border)">#' + escapeHtml(t) + '</span>').join('') + '</span>';
+    }
+    const card = el('<div class="card"><div style="flex:1"><div class="title"><span></span>' + pathBadge + rttBadge + devTypeBadge + groupBadge + tagsBadges + capsBadges + '</div><div class="meta"></div></div><div class="row"><button class="ghost prof-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">画像</button><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost ping-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">测速</button><button class="ghost disconnect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">断开</button><button class="bad ghost block-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">屏蔽</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button></div></div>');
     const displayName = (x.alias && x.alias !== x.name) ? (x.name + ' ("' + x.alias + '")') : x.name;
     card.querySelector(".title span").textContent = displayName;
     card.querySelector(".meta").textContent = x.platform + " · " + (x.path || "lan") + " · " + x.device_id;
+    const profBtn = card.querySelector(".prof-btn");
+    profBtn.onclick = () => openEditProfileModal(x.device_id, x.device_type, x.group, x.tags);
     const aliasBtn = card.querySelector(".alias-btn");
     aliasBtn.onclick = async () => {
       const current = x.alias || x.name;
@@ -1049,12 +1101,23 @@ function render(s) {
         const badge = t.online
           ? '<span class="badge completed" style="margin-right:6px">在线</span>'
           : '<span class="badge offline" style="margin-right:6px">离线</span>';
+        const devTypeIcon = getDeviceTypeIcon(t.device_type);
+        const devTypeBadge = '<span class="badge" style="margin-right:6px" title="形态: ' + (t.device_type || 'other') + '">' + devTypeIcon + ' ' + (t.device_type || 'other') + '</span>';
+        const groupBadge = (t.group && t.group.trim()) ? ('<span class="badge outbound" style="margin-right:6px">群组: ' + escapeHtml(t.group) + '</span>') : '';
+        let tagsBadges = '';
+        if (t.tags && t.tags.length > 0) {
+          tagsBadges = '<span style="margin-right:6px">' + t.tags.map(tag => '<span class="badge" style="font-size:11px;margin-right:3px;background:var(--card-bg);border:1px solid var(--border)">#' + escapeHtml(tag) + '</span>').join('') + '</span>';
+        }
         const actionBtns = t.online
-          ? '<button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost disconnect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">断开</button><button class="bad ghost block-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">屏蔽</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button>'
-          : '<button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost connect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">连接</button><button class="bad ghost block-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">屏蔽</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button>';
-        const card = el('<div class="card"><div style="flex:1"><div class="title">' + badge + '<span></span></div><div class="meta"></div></div><div class="row">' + actionBtns + '</div></div>');
+          ? '<button class="ghost prof-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">画像</button><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost disconnect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">断开</button><button class="bad ghost block-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">屏蔽</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button>'
+          : '<button class="ghost prof-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">画像</button><button class="ghost alias-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">别名</button><button class="ghost connect-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">连接</button><button class="bad ghost block-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">屏蔽</button><button class="bad ghost unpair-btn" type="button" style="padding:2px 8px;font-size:12px">解除配对</button>';
+        const card = el('<div class="card"><div style="flex:1"><div class="title">' + badge + devTypeBadge + groupBadge + tagsBadges + '<span></span></div><div class="meta"></div></div><div class="row">' + actionBtns + '</div></div>');
         card.querySelector(".title span").textContent = t.alias || t.device_id;
         card.querySelector(".meta").textContent = t.device_id;
+        const profBtn = card.querySelector(".prof-btn");
+        if (profBtn) {
+          profBtn.onclick = () => openEditProfileModal(t.device_id, t.device_type, t.group, t.tags);
+        }
         const aliasBtn = card.querySelector(".alias-btn");
         aliasBtn.onclick = async () => {
           const newAlias = prompt("修改受信任设备别名 (1-64 字符):", t.alias || "");
@@ -2538,6 +2601,133 @@ if (addBlockBtn) {
     }
   };
 }
+
+async function openEditProfileModal(deviceId, currentType, currentGroup, currentTags) {
+  const chosenType = prompt("修改设备形态分类 (desktop, laptop, phone, tablet, server, cloud, other):", currentType || "other");
+  if (chosenType === null) return;
+  const chosenGroup = prompt("修改设备所属群组（留空保留，输入 - 清空群组）:", currentGroup || "");
+  if (chosenGroup === null) return;
+  const tagAction = prompt("标签治理：输入要添加的标签（如 work），或输入 -tag 移除标签（如 -work），留空跳过：", "");
+
+  let groupVal = undefined;
+  if (chosenGroup.trim() === "-") {
+    groupVal = null;
+  } else if (chosenGroup.trim()) {
+    groupVal = chosenGroup.trim();
+  }
+
+  const payload = {
+    peer: deviceId,
+    device_type: chosenType.trim() ? chosenType.trim().toLowerCase() : undefined,
+    group: groupVal,
+  };
+  try {
+    await api("/api/peers/profile", payload);
+    if (tagAction && tagAction.trim()) {
+      const act = tagAction.trim();
+      if (act.startsWith("-")) {
+        await api("/api/peers/tags/remove", { peer: deviceId, tag: act.slice(1).trim() });
+      } else {
+        await api("/api/peers/tags/add", { peer: deviceId, tag: act });
+      }
+    }
+    updateProfiles();
+    tick();
+  } catch (e) {
+    alert("更新设备画像失败: " + e.message);
+  }
+}
+
+async function updateProfiles() {
+  const table = $("profiles-table");
+  if (!table) return;
+  const typeFilter = $("profile-filter-type") ? $("profile-filter-type").value : "";
+  const groupFilter = $("profile-filter-group") ? $("profile-filter-group").value.trim() : "";
+  const tagFilter = $("profile-filter-tag") ? $("profile-filter-tag").value.trim() : "";
+
+  const q = [];
+  if (typeFilter) q.push("type=" + encodeURIComponent(typeFilter));
+  if (groupFilter) q.push("group=" + encodeURIComponent(groupFilter));
+  if (tagFilter) q.push("tag=" + encodeURIComponent(tagFilter));
+  const qs = q.length ? ("?" + q.join("&")) : "";
+
+  try {
+    const res = await fetch("/api/peers/profiles" + qs);
+    if (!res.ok) return;
+    const data = await res.json();
+    const profiles = data.profiles || [];
+    if ($("profiles-stat-badge")) {
+      $("profiles-stat-badge").textContent = "画像 " + (data.total || profiles.length) + " 个";
+    }
+    table.innerHTML = "";
+    if (!profiles.length) {
+      table.appendChild(el('<div class="empty">无匹配的设备画像数据</div>'));
+      return;
+    }
+    for (const p of profiles) {
+      const icon = getDeviceTypeIcon(p.device_type);
+      const grp = p.group ? ('<span class="badge outbound" style="margin-right:6px">组: ' + escapeHtml(p.group) + '</span>') : '<span class="badge" style="margin-right:6px;opacity:0.6">无分组</span>';
+      const tagsHtml = (p.tags && p.tags.length)
+        ? p.tags.map(t => '<span class="badge" style="font-size:11px;margin-right:4px;background:var(--card-bg);border:1px solid var(--border)">#' + escapeHtml(t) + ' <a href="#" class="rm-tag" data-peer="' + p.device_id + '" data-tag="' + escapeHtml(t) + '" style="color:var(--bad);text-decoration:none;margin-left:2px">×</a></span>').join('')
+        : '<span class="badge" style="font-size:11px;opacity:0.6;margin-right:4px">无标签</span>';
+
+      const card = el('<div class="card" style="margin-bottom:6px"><div style="flex:1"><div class="title"><span class="badge" style="margin-right:6px">' + icon + ' ' + (p.device_type || 'other') + '</span>' + grp + tagsHtml + '<span style="font-weight:600">' + escapeHtml(p.device_id) + '</span></div><div class="meta" style="margin-top:4px">更新时间: ' + (p.updated_ms ? new Date(p.updated_ms).toLocaleTimeString() : "-") + (p.notes ? (' · 备注: ' + escapeHtml(p.notes)) : "") + '</div></div><div class="row"><button class="ghost edit-prof-btn" type="button" style="padding:2px 8px;font-size:12px;margin-right:4px">编辑</button><button class="ghost add-tag-btn" type="button" style="padding:2px 8px;font-size:12px">+ 标签</button></div></div>');
+
+      const editBtn = card.querySelector(".edit-prof-btn");
+      editBtn.onclick = () => openEditProfileModal(p.device_id, p.device_type, p.group, p.tags);
+
+      const addTagBtn = card.querySelector(".add-tag-btn");
+      addTagBtn.onclick = async () => {
+        const t = prompt("输入要添加到 " + p.device_id + " 的标签 (字母/数字/中划线/下划线, 1-32 字符):");
+        if (t && t.trim()) {
+          try {
+            await api("/api/peers/tags/add", { peer: p.device_id, tag: t.trim() });
+            updateProfiles();
+            tick();
+          } catch (err) {
+            alert("添加标签失败: " + err.message);
+          }
+        }
+      };
+
+      card.querySelectorAll(".rm-tag").forEach(link => {
+        link.onclick = async (ev) => {
+          ev.preventDefault();
+          const targetPeer = link.getAttribute("data-peer");
+          const targetTag = link.getAttribute("data-tag");
+          if (confirm("确定移除标签 #" + targetTag + " 吗？")) {
+            try {
+              await api("/api/peers/tags/remove", { peer: targetPeer, tag: targetTag });
+              updateProfiles();
+              tick();
+            } catch (err) {
+              alert("移除标签失败: " + err.message);
+            }
+          }
+        };
+      });
+
+      table.appendChild(card);
+    }
+  } catch (e) {
+    table.innerHTML = '<div class="hint" style="color:var(--bad)">读取设备画像失败: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+const refreshProfilesBtn = $("refreshprofilesbtn");
+if (refreshProfilesBtn) {
+  refreshProfilesBtn.onclick = updateProfiles;
+}
+if ($("profile-filter-type")) {
+  $("profile-filter-type").onchange = updateProfiles;
+}
+if ($("profile-filter-group")) {
+  $("profile-filter-group").oninput = updateProfiles;
+}
+if ($("profile-filter-tag")) {
+  $("profile-filter-tag").oninput = updateProfiles;
+}
+
 async function updateLinkQuality() {
   const box = $("link-quality-list");
   const hbSummary = $("heartbeat-summary");
@@ -3106,10 +3296,14 @@ function setupEventSource() {
 													            updateOutbox();
 													            refreshTransfers();
 													          }
-													          else if (ev.kind === "outbox_cleared") {
-													            desc = "发件箱已清除: 清除 " + ev.count + " 条记录";
-													            updateOutbox();
-													          }
+														          else if (ev.kind === "outbox_cleared") {
+														            desc = "发件箱已清除: 清除 " + ev.count + " 条记录";
+														            updateOutbox();
+														          }
+														          else if (ev.kind === "peer_profile_updated") {
+														            desc = "设备画像更新: " + ev.device_id + " [" + ev.device_type + "]" + (ev.group ? (" · 组:" + ev.group) : "") + " tags=[" + (ev.tags || []).join(", ") + "]";
+														            updateProfiles();
+														          }
 				          $("ev-last").textContent = "[" + t + "] " + desc;
 		        }
 		      } catch (err) {
@@ -3166,10 +3360,12 @@ function setupEventSource() {
 									setInterval(updateSysMetrics, 3000);
 									updateLinkQuality();
 									setInterval(updateLinkQuality, 3000);
-										updateAuditLogs();
-										setInterval(updateAuditLogs, 3000);
-										updateMessageHistory();
-										setInterval(updateMessageHistory, 3000);
-		</script>
+											updateAuditLogs();
+											setInterval(updateAuditLogs, 3000);
+											updateMessageHistory();
+											setInterval(updateMessageHistory, 3000);
+											updateProfiles();
+											setInterval(updateProfiles, 3000);
+			</script>
 </body>
 </html>

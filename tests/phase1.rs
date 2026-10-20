@@ -7466,6 +7466,375 @@ async fn node_outbox_file_lifecycle_query_clearing_resend_and_zero_plaintext_via
     peer.shutdown();
 }
 
+/// ADR-062: Peer device profiling, tag & group governance, multi-dimensional scoping,
+/// and Zero-Plaintext SSE broadcasting via loopback API.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_device_profiling_tag_and_group_governance_via_loopback_api() {
+    let (host, peer, g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let _host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to SSE event stream on host UI
+    let mut sse_host = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("host SSE connects");
+
+    // 2. Query initial profiles report: initially empty table
+    let (code_init, body_init) = tetherly_node::loopback_get(host_ui, "/api/peers/profiles")
+        .await
+        .unwrap();
+    assert_eq!(code_init, 200);
+    let init_rep: tetherly_node::PeerProfilesReport = serde_json::from_slice(&body_init).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.total, 0);
+    assert!(init_rep.profiles.is_empty());
+
+    // Verify alias /api/profiles
+    let (code_alias, body_alias) = tetherly_node::loopback_get(host_ui, "/api/profiles")
+        .await
+        .unwrap();
+    assert_eq!(code_alias, 200);
+    assert_eq!(body_init, body_alias);
+
+    // 3. Query profile of peer: returns default synthesized profile
+    let (code_get_peer, body_get_peer) = tetherly_node::loopback_get(
+        host_ui,
+        &format!("/api/peers/profile?peer={}", peer_id.as_str()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_get_peer, 200);
+    let peer_prof_default: tetherly_node::PeerProfile =
+        serde_json::from_slice(&body_get_peer).unwrap();
+    assert_eq!(peer_prof_default.device_id, peer_id.as_str());
+    assert_eq!(
+        peer_prof_default.device_type,
+        tetherly_node::DeviceType::Other
+    ); // default unclassified
+    assert!(peer_prof_default.tags.is_empty());
+    assert_eq!(peer_prof_default.group, None);
+    assert_eq!(peer_prof_default.notes, None);
+
+    // 4. Update peer profile via POST /api/peers/profile:
+    // Set device_type = "laptop", group = "lab-cluster", notes = "Confidential test note", tags = ["work", "dev"]
+    let private_note = "Confidential test note - must never leak in SSE or logs";
+    let update_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "device_type": "laptop",
+        "group": "lab-cluster",
+        "notes": private_note,
+        "tags": ["work", "dev"],
+    });
+    let (code_up, body_up) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/profile",
+        &serde_json::to_vec(&update_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_up, 200);
+    let up_rep: tetherly_node::PeerProfileUpdateReport = serde_json::from_slice(&body_up).unwrap();
+    assert!(up_rep.ok);
+    assert_eq!(up_rep.device_id, peer_id.as_str());
+    assert_eq!(
+        up_rep.profile.device_type,
+        tetherly_node::DeviceType::Laptop
+    );
+    assert_eq!(up_rep.profile.group.as_deref(), Some("lab-cluster"));
+    assert_eq!(up_rep.profile.notes.as_deref(), Some(private_note));
+    assert_eq!(up_rep.profile.tags, vec!["work", "dev"]);
+
+    // 5. Zero-Plaintext Invariant & SSE Event verification:
+    // Listen for UiEvent::PeerProfileUpdated on host SSE
+    let mut saw_profile_sse = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(raw_str))) =
+            tokio::time::timeout(Duration::from_millis(500), sse_host.next_event()).await
+        {
+            if let Ok(ev) = serde_json::from_str::<serde_json::Value>(&raw_str) {
+                if ev["kind"] == "peer_profile_updated" && ev["device_id"] == peer_id.as_str() {
+                    assert_eq!(ev["device_type"], "laptop");
+                    assert_eq!(ev["group"], "lab-cluster");
+                    let sse_tags = ev["tags"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_str().unwrap())
+                        .collect::<Vec<_>>();
+                    assert_eq!(sse_tags, vec!["work", "dev"]);
+                    assert!(ev["timestamp_ms"].as_u64().unwrap_or(0) > 0);
+
+                    // ZERO-PLAINTEXT CHECK: Verify 'notes' is strictly absent from SSE event payload!
+                    assert!(
+                        ev.get("notes").is_none(),
+                        "Zero-Plaintext Invariant: sensitive profile notes must NOT be emitted in SSE!"
+                    );
+                    assert!(
+                        !raw_str.contains("Confidential"),
+                        "Zero-Plaintext Invariant: raw event text must not contain note plaintext!"
+                    );
+                    saw_profile_sse = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(saw_profile_sse, "must emit peer_profile_updated SSE event");
+
+    // 6. Test Tag governance endpoints:
+    // a. Add tag "nas" via POST /api/peers/tags/add
+    let tag_add_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "tag": "nas",
+    });
+    let (code_tag_add, body_tag_add) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/tags/add",
+        &serde_json::to_vec(&tag_add_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_tag_add, 200);
+    let tag_add_rep: tetherly_node::PeerTagsReport = serde_json::from_slice(&body_tag_add).unwrap();
+    assert!(tag_add_rep.ok);
+    assert_eq!(tag_add_rep.tags, vec!["work", "dev", "nas"]);
+
+    // b. Idempotent tag add: adding "nas" again doesn't duplicate
+    let (code_tag_dup, body_tag_dup) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/tags/add",
+        &serde_json::to_vec(&tag_add_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_tag_dup, 200);
+    let tag_dup_rep: tetherly_node::PeerTagsReport = serde_json::from_slice(&body_tag_dup).unwrap();
+    assert_eq!(tag_dup_rep.tags, vec!["work", "dev", "nas"]);
+
+    // c. Remove tag "dev" via POST /api/peers/tags/remove
+    let tag_rm_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "tag": "dev",
+    });
+    let (code_tag_rm, body_tag_rm) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/tags/remove",
+        &serde_json::to_vec(&tag_rm_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_tag_rm, 200);
+    let tag_rm_rep: tetherly_node::PeerTagsReport = serde_json::from_slice(&body_tag_rm).unwrap();
+    assert_eq!(tag_rm_rep.tags, vec!["work", "nas"]);
+
+    // 7. Test Group governance endpoints:
+    // a. Update group to "production" via POST /api/peers/group
+    let grp_set_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "group": "production",
+    });
+    let (code_grp_set, body_grp_set) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/group",
+        &serde_json::to_vec(&grp_set_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_grp_set, 200);
+    let grp_set_rep: tetherly_node::PeerGroupReport =
+        serde_json::from_slice(&body_grp_set).unwrap();
+    assert!(grp_set_rep.ok);
+    assert_eq!(grp_set_rep.group.as_deref(), Some("production"));
+
+    // b. Clear group via setting group: null
+    let grp_clr_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "group": serde_json::Value::Null,
+    });
+    let (code_grp_clr, body_grp_clr) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/group",
+        &serde_json::to_vec(&grp_clr_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_grp_clr, 200);
+    let grp_clr_rep: tetherly_node::PeerGroupReport =
+        serde_json::from_slice(&body_grp_clr).unwrap();
+    assert!(grp_clr_rep.ok);
+    assert_eq!(grp_clr_rep.group, None);
+
+    // Set group back to "production" for multi-dimensional filtering tests
+    let _ = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/group",
+        &serde_json::to_vec(&grp_set_req).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    // 8. Multi-dimensional scoping & query filtering:
+    // a. Filter by tag=work
+    let (c1, b1) = tetherly_node::loopback_get(host_ui, "/api/peers/profiles?tag=work")
+        .await
+        .unwrap();
+    assert_eq!(c1, 200);
+    let r1: tetherly_node::PeerProfilesReport = serde_json::from_slice(&b1).unwrap();
+    assert_eq!(r1.total, 1);
+    assert_eq!(r1.profiles[0].device_id, peer_id.as_str());
+
+    // b. Filter by non-existent tag
+    let (c2, b2) = tetherly_node::loopback_get(host_ui, "/api/peers/profiles?tag=nonexistent")
+        .await
+        .unwrap();
+    assert_eq!(c2, 200);
+    let r2: tetherly_node::PeerProfilesReport = serde_json::from_slice(&b2).unwrap();
+    assert_eq!(r2.total, 0);
+
+    // c. Filter by group=production
+    let (c3, b3) = tetherly_node::loopback_get(host_ui, "/api/peers/profiles?group=production")
+        .await
+        .unwrap();
+    assert_eq!(c3, 200);
+    let r3: tetherly_node::PeerProfilesReport = serde_json::from_slice(&b3).unwrap();
+    assert_eq!(r3.total, 1);
+
+    // d. Filter by type=laptop
+    let (c4, b4) = tetherly_node::loopback_get(host_ui, "/api/peers/profiles?type=laptop")
+        .await
+        .unwrap();
+    assert_eq!(c4, 200);
+    let r4: tetherly_node::PeerProfilesReport = serde_json::from_slice(&b4).unwrap();
+    assert_eq!(r4.total, 1);
+
+    // e. Filter by type=server (no match)
+    let (c5, b5) = tetherly_node::loopback_get(host_ui, "/api/peers/profiles?type=server")
+        .await
+        .unwrap();
+    assert_eq!(c5, 200);
+    let r5: tetherly_node::PeerProfilesReport = serde_json::from_slice(&b5).unwrap();
+    assert_eq!(r5.total, 0);
+
+    // 9. PeerView & State enrichment check:
+    // GET /api/peers and GET /api/state must automatically fuse peer profile metadata
+    let (c_peers, b_peers) = tetherly_node::loopback_get(host_ui, "/api/peers")
+        .await
+        .unwrap();
+    assert_eq!(c_peers, 200);
+    let peers_val: serde_json::Value = serde_json::from_slice(&b_peers).unwrap();
+    let live_peers = peers_val["live"].as_array().unwrap();
+    let peer_in_live = live_peers
+        .iter()
+        .find(|p| p["device_id"] == peer_id.as_str())
+        .expect("peer in live list");
+    assert_eq!(peer_in_live["device_type"], "laptop");
+    assert_eq!(peer_in_live["group"], "production");
+    let live_tags = peer_in_live["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(live_tags, vec!["work", "nas"]);
+
+    let trusted_peers = peers_val["trusted"].as_array().unwrap();
+    let peer_in_trusted = trusted_peers
+        .iter()
+        .find(|p| p["device_id"] == peer_id.as_str())
+        .expect("peer in trusted list");
+    assert_eq!(peer_in_trusted["device_type"], "laptop");
+    assert_eq!(peer_in_trusted["group"], "production");
+
+    // 10. Crash consistency & atomic disk persistence verification:
+    // Verify profiles.json was written to disk with POSIX 0o600 permissions
+    let profiles_path = g1.path().join("profiles.json");
+    assert!(profiles_path.exists(), "profiles.json must exist on disk");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(&profiles_path).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "profiles.json permissions must be 0600"
+        );
+    }
+    // Read and verify disk content contains updated profile
+    let disk_table = tetherly_node::load_profiles(g1.path());
+    let disk_prof = disk_table
+        .profiles
+        .iter()
+        .find(|p| p.device_id == peer_id.as_str())
+        .expect("persisted profile in table");
+    assert_eq!(disk_prof.device_type, tetherly_node::DeviceType::Laptop);
+    assert_eq!(disk_prof.group.as_deref(), Some("production"));
+    assert_eq!(disk_prof.tags, vec!["work", "nas"]);
+
+    // 11. Negative testing & validation boundaries:
+    // a. Invalid tag with spaces -> 400
+    let invalid_tag_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "tag": "invalid tag with spaces",
+    });
+    let (code_inv_tag, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/tags/add",
+        &serde_json::to_vec(&invalid_tag_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_inv_tag, 400);
+
+    // b. Invalid device type string -> 400
+    let invalid_type_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "device_type": "alien_spaceship",
+    });
+    let (code_inv_type, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/profile",
+        &serde_json::to_vec(&invalid_type_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_inv_type, 400);
+
+    // c. Empty peer ID in profile request -> 400
+    let empty_peer_req = serde_json::json!({
+        "device_type": "laptop",
+    });
+    let (code_no_peer, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/peers/profile",
+        &serde_json::to_vec(&empty_peer_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_no_peer, 400);
+
+    // 12. Security Red Line: Loopback Isolation Host 403 Forbidden check
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{host_ui}"))
+        .await
+        .expect("connect to ui port");
+    let evil_req = "GET /api/peers/profiles HTTP/1.1\r\nHost: malicious.domain.com\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    // 13. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

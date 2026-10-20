@@ -257,9 +257,32 @@ pub enum UiEvent {
         status: Option<String>,
         timestamp_ms: u64,
     },
+    PeerProfileUpdated {
+        device_id: String,
+        device_type: String,
+        tags: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
+    pub fn peer_profile_updated(
+        device_id: impl Into<String>,
+        device_type: impl Into<String>,
+        tags: Vec<String>,
+        group: Option<impl Into<String>>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::PeerProfileUpdated {
+            device_id: device_id.into(),
+            device_type: device_type.into(),
+            tags,
+            group: group.map(Into::into),
+            timestamp_ms,
+        }
+    }
     pub fn outbox_updated(
         id: impl Into<String>,
         transfer_id: impl Into<String>,

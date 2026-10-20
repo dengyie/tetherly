@@ -13,6 +13,7 @@ pub const IDENTITY_FILE: &str = "identity.bin";
 pub const TRUST_FILE: &str = "trusted.json";
 pub const ROUTES_FILE: &str = "routes.json";
 pub const BLOCKED_FILE: &str = "blocked.json";
+pub const PROFILES_FILE: &str = "profiles.json";
 
 pub fn default_data_dir() -> PathBuf {
     if let Ok(p) = std::env::var("TETHERLY_DATA_DIR") {
@@ -227,6 +228,103 @@ pub fn is_peer_blocked(dir: &Path, device_id: &str) -> bool {
     table.peers.iter().any(|p| p.device_id == device_id)
 }
 
+/// Device classification / form-factor enumeration.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceType {
+    Desktop,
+    Laptop,
+    Phone,
+    Tablet,
+    Server,
+    Cloud,
+    #[default]
+    Other,
+}
+
+impl DeviceType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::Laptop => "laptop",
+            Self::Phone => "phone",
+            Self::Tablet => "tablet",
+            Self::Server => "server",
+            Self::Cloud => "cloud",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Self::Desktop => "💻",
+            Self::Laptop => "💻",
+            Self::Phone => "📱",
+            Self::Tablet => "📱",
+            Self::Server => "🖥️",
+            Self::Cloud => "☁️",
+            Self::Other => "📟",
+        }
+    }
+}
+
+impl std::str::FromStr for DeviceType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "desktop" => Ok(Self::Desktop),
+            "laptop" => Ok(Self::Laptop),
+            "phone" | "mobile" => Ok(Self::Phone),
+            "tablet" | "pad" => Ok(Self::Tablet),
+            "server" | "nas" => Ok(Self::Server),
+            "cloud" | "vps" => Ok(Self::Cloud),
+            "other" | "" => Ok(Self::Other),
+            unknown => Err(format!(
+                "invalid device type '{unknown}': expected desktop, laptop, phone, tablet, server, cloud, or other"
+            )),
+        }
+    }
+}
+
+/// Rich metadata profile for a mesh peer device.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeerProfile {
+    pub device_id: String,
+    #[serde(default)]
+    pub device_type: DeviceType,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    pub updated_ms: u64,
+}
+
+/// Persistent table containing all known peer profiles.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+pub struct ProfileTable {
+    #[serde(default)]
+    pub profiles: Vec<PeerProfile>,
+}
+
+pub fn load_profiles(dir: &Path) -> ProfileTable {
+    let path = dir.join(PROFILES_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_profiles(dir: &Path, table: &ProfileTable) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(&dir.join(PROFILES_FILE), &serde_json::to_vec_pretty(table)?)?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -323,6 +421,36 @@ mod tests {
         let routes2 = load_routes(&dir);
         assert_eq!(routes2.routes.len(), 1);
         assert_eq!(routes2.routes[0].device_id, "tdev_peer2");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_persistence_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("tetherly-prof-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        let mut table = ProfileTable::default();
+        table.profiles.push(PeerProfile {
+            device_id: "tdev_test_1".into(),
+            device_type: DeviceType::Server,
+            tags: vec!["backup".into(), "nas".into()],
+            group: Some("homelab".into()),
+            notes: Some("Primary storage node".into()),
+            updated_ms: 123456,
+        });
+
+        save_profiles(&dir, &table).unwrap();
+        let loaded = load_profiles(&dir);
+        assert_eq!(loaded.profiles.len(), 1);
+        assert_eq!(loaded.profiles[0].device_type, DeviceType::Server);
+        assert_eq!(loaded.profiles[0].tags, vec!["backup", "nas"]);
+        assert_eq!(loaded.profiles[0].group.as_deref(), Some("homelab"));
+        assert_eq!(
+            loaded.profiles[0].notes.as_deref(),
+            Some("Primary storage node")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -478,6 +478,11 @@ struct PeerView {
     #[serde(skip_serializing_if = "Option::is_none")]
     alias: Option<String>,
     platform: String,
+    device_type: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
     path: String,
     caps: Vec<String>,
     features: Vec<String>,
@@ -492,6 +497,11 @@ struct PeerView {
 pub struct TrustedPeerView {
     pub device_id: String,
     pub alias: String,
+    pub device_type: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub paired_at: u64,
     pub revoked: bool,
     pub online: bool,
@@ -503,6 +513,42 @@ struct FileSnap {
     source: String,
     name: String,
     size: u64,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ProfileUpdateBody {
+    #[serde(default)]
+    peer: Option<String>,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    device_type: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    group: Option<Option<String>>,
+    #[serde(default)]
+    notes: Option<Option<String>>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct PeerTagBody {
+    #[serde(default)]
+    peer: Option<String>,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    tag: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct PeerGroupBody {
+    #[serde(default)]
+    peer: Option<String>,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1232,11 +1278,15 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                     };
                     let alias_opt = trusted_map.get(&p.device_id).cloned();
                     let features = crate::runtime::extract_features(&p.caps);
+                    let profile = node.peer_profile(&p.device_id);
                     serde_json::json!({
                         "device_id": p.device_id.to_string(),
                         "name": p.name,
                         "alias": alias_opt,
                         "platform": p.platform,
+                        "device_type": profile.device_type.as_str(),
+                        "tags": profile.tags,
+                        "group": profile.group,
                         "addr": p.addr.to_string(),
                         "path": path_str,
                         "file_port": p.file_port,
@@ -1255,9 +1305,13 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 .into_iter()
                 .map(|tp| {
                     let online = live_ids.contains(&tp.device_id);
+                    let profile = node.peer_profile(&tp.device_id);
                     serde_json::json!({
                         "device_id": tp.device_id.to_string(),
                         "alias": tp.alias,
+                        "device_type": profile.device_type.as_str(),
+                        "tags": profile.tags,
+                        "group": profile.group,
                         "paired_at": tp.paired_at,
                         "revoked": tp.revoked,
                         "online": online,
@@ -1274,6 +1328,139 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 "trusted": trusted_dtos,
             }))
         }
+        ("GET", "/api/peers/profiles") | ("GET", "/api/profiles") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let tag = qmap.get("tag").map(|s| s.as_str());
+            let group = qmap.get("group").map(|s| s.as_str());
+            let dev_type = qmap
+                .get("type")
+                .and_then(|t| t.parse::<crate::store::DeviceType>().ok());
+            json_ok(&node.peer_profiles(tag, group, dev_type))
+        }
+        ("GET", "/api/peers/profile") | ("GET", "/api/profile") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let target = qmap
+                .get("peer")
+                .or_else(|| qmap.get("id"))
+                .or_else(|| qmap.get("device_id"))
+                .map(|s| s.as_str())
+                .unwrap_or_default();
+            if target.trim().is_empty() {
+                return err(400, "peer parameter required");
+            }
+            match node.resolve_peer(target.trim()) {
+                Ok(id) => json_ok(&node.peer_profile(&id)),
+                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
+                    err(404, &format!("peer not found: {e}"))
+                }
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/peers/profile")
+        | ("POST", "/api/profile")
+        | ("PUT", "/api/peers/profile")
+        | ("PUT", "/api/profile") => match serde_json::from_slice::<ProfileUpdateBody>(body) {
+            Ok(d) => {
+                let target = d.peer.or(d.device_id).filter(|s| !s.trim().is_empty());
+                let target = match target {
+                    Some(t) => t,
+                    None => return err(400, "missing peer or device_id"),
+                };
+                let dev_type = match d.device_type {
+                    Some(ref s) => match s.parse::<crate::store::DeviceType>() {
+                        Ok(dt) => Some(dt),
+                        Err(e) => return err(400, &e),
+                    },
+                    None => None,
+                };
+                match node.update_peer_profile(&target, dev_type, d.tags, d.group, d.notes) {
+                    Ok(rep) => json_ok(&rep),
+                    Err(tetherly_core::CoreError::PeerNotFound(e)) => {
+                        err(404, &format!("peer not found: {e}"))
+                    }
+                    Err(e) => err(400, &e.to_string()),
+                }
+            }
+            Err(_) => err(400, "bad json"),
+        },
+        ("POST", "/api/peers/tags/add") | ("POST", "/api/tags/add") => {
+            match serde_json::from_slice::<PeerTagBody>(body) {
+                Ok(d) => {
+                    let target = d.peer.or(d.device_id).filter(|s| !s.trim().is_empty());
+                    let target = match target {
+                        Some(t) => t,
+                        None => return err(400, "missing peer or device_id"),
+                    };
+                    let tag = match d.tag.filter(|s| !s.trim().is_empty()) {
+                        Some(t) => t,
+                        None => return err(400, "tag required"),
+                    };
+                    match node.add_peer_tag(&target, &tag) {
+                        Ok(rep) => json_ok(&rep),
+                        Err(tetherly_core::CoreError::PeerNotFound(e)) => {
+                            err(404, &format!("peer not found: {e}"))
+                        }
+                        Err(e) => err(400, &e.to_string()),
+                    }
+                }
+                Err(_) => err(400, "bad json"),
+            }
+        }
+        ("POST", "/api/peers/tags/remove")
+        | ("POST", "/api/tags/remove")
+        | ("DELETE", "/api/peers/tags") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<PeerTagBody> = if body.is_empty() {
+                None
+            } else {
+                serde_json::from_slice::<PeerTagBody>(body).ok()
+            };
+            let target = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone().or_else(|| b.device_id.clone()))
+                .or_else(|| qmap.get("peer").cloned())
+                .or_else(|| qmap.get("device_id").cloned())
+                .filter(|s| !s.trim().is_empty());
+            let target = match target {
+                Some(t) => t,
+                None => return err(400, "missing peer or device_id"),
+            };
+            let tag = parsed_body
+                .and_then(|b| b.tag)
+                .or_else(|| qmap.get("tag").cloned())
+                .filter(|s| !s.trim().is_empty());
+            let tag = match tag {
+                Some(t) => t,
+                None => return err(400, "tag required"),
+            };
+            match node.remove_peer_tag(&target, &tag) {
+                Ok(rep) => json_ok(&rep),
+                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
+                    err(404, &format!("peer not found: {e}"))
+                }
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/peers/group")
+        | ("POST", "/api/group")
+        | ("PUT", "/api/peers/group")
+        | ("PUT", "/api/group") => match serde_json::from_slice::<PeerGroupBody>(body) {
+            Ok(d) => {
+                let target = d.peer.or(d.device_id).filter(|s| !s.trim().is_empty());
+                let target = match target {
+                    Some(t) => t,
+                    None => return err(400, "missing peer or device_id"),
+                };
+                match node.set_peer_group(&target, d.group.as_deref()) {
+                    Ok(rep) => json_ok(&rep),
+                    Err(tetherly_core::CoreError::PeerNotFound(e)) => {
+                        err(404, &format!("peer not found: {e}"))
+                    }
+                    Err(e) => err(400, &e.to_string()),
+                }
+            }
+            Err(_) => err(400, "bad json"),
+        },
         ("GET", "/api/discovery") | ("GET", "/api/peers/discovered") => {
             json_ok(&node.discovered_peers())
         }
@@ -2738,9 +2925,13 @@ async fn snapshot(node: &Node) -> Snapshot {
         .into_iter()
         .map(|tp| {
             let online = live_ids.contains(&tp.device_id);
+            let profile = node.peer_profile(&tp.device_id);
             TrustedPeerView {
                 device_id: tp.device_id.to_string(),
                 alias: tp.alias,
+                device_type: profile.device_type.as_str().to_string(),
+                tags: profile.tags,
+                group: profile.group,
                 paired_at: tp.paired_at,
                 revoked: tp.revoked,
                 online,
@@ -2774,11 +2965,15 @@ async fn snapshot(node: &Node) -> Snapshot {
             .map(|p| {
                 let alias = trusted_map.get(&p.device_id).cloned();
                 let features = crate::runtime::extract_features(&p.caps);
+                let profile = node.peer_profile(&p.device_id);
                 PeerView {
                     device_id: p.device_id.to_string(),
                     name: p.name,
                     alias,
                     platform: p.platform,
+                    device_type: profile.device_type.as_str().to_string(),
+                    tags: profile.tags,
+                    group: profile.group,
                     path: match p.path {
                         tetherly_core::PathKind::Lan => "lan".into(),
                         tetherly_core::PathKind::Overlay => "overlay".into(),

@@ -106,6 +106,8 @@ pub enum CoreError {
     InvalidPayload(String),
     #[error("peer is blocked: {0}")]
     PeerBlocked(String),
+    #[error("invalid profile: {0}")]
+    InvalidProfile(String),
 }
 
 impl From<serde_json::Error> for CoreError {

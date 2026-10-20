@@ -38,9 +38,10 @@ pub use runtime::{
     NodeConfig, NodeConfigReport, NodePorts, NotifyBannerConfig, NotifyConfigReport,
     NotifyTestReport, NotifyTestRequest, OpenRuleDto, OutboxClearReport, OutboxEngine, OutboxEntry,
     OutboxReport, OutboxResendReport, OutboxStatus, OverlayStatusReport, PeerBlockReport,
-    PeerCapsDto, PeerConnectReport, PeerDisconnectReport, PeerLinkQualityDto, PeerLinkTracker,
-    PeerMessage, PeerMessageClearReport, PeerMessageHistoryReport, PeerMessageSendReport,
-    PeerPingReport, PeerUnblockReport, PeersCapsReport, PinReport, ProcessMetrics, ResumeMarkerDto,
+    PeerCapsDto, PeerConnectReport, PeerDisconnectReport, PeerGroupReport, PeerLinkQualityDto,
+    PeerLinkTracker, PeerMessage, PeerMessageClearReport, PeerMessageHistoryReport,
+    PeerMessageSendReport, PeerPingReport, PeerProfileUpdateReport, PeerProfilesReport,
+    PeerTagsReport, PeerUnblockReport, PeersCapsReport, PinReport, ProcessMetrics, ResumeMarkerDto,
     ResumeMarkersReport, RouteEntryDto, RouteMutateReport, RoutesReport, ScreenControlReport,
     ScreenStatusReport, StorageCleanReport, StorageReport, SystemReport, TransferDirection,
     TransferPhase, TransferStats, TransfersReport, UserCommand,
@@ -55,7 +56,10 @@ pub use screen::MacSource;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use screen::X11Source;
 pub use sidecar::{parse_overlay_cidrs, OverlayConfig, OverlaySource, OverlayStatus};
-pub use store::{default_data_dir, BlockedPeer, BlockedTable, BLOCKED_FILE};
+pub use store::{
+    default_data_dir, load_profiles, save_profiles, BlockedPeer, BlockedTable, DeviceType,
+    PeerProfile, ProfileTable, BLOCKED_FILE, PROFILES_FILE,
+};
 pub use uihttp::{
     loopback_delete, loopback_events_connect, loopback_get, loopback_post, loopback_put, SseStream,
     UiResponse,
