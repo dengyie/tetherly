@@ -3,9 +3,10 @@
 use crate::error::NetError;
 use tetherly_core::frame::{
     decode_unix_ms, CapsUpdate, ClipSet, FileDecision, FileDone, FileOffer, InnerFrame,
-    NotifyDismiss, NotifyPush, NotifyReply, TextMessage, TYPE_CAPS_UPDATE, TYPE_CLIP_SET,
-    TYPE_FILE_ACCEPT, TYPE_FILE_DONE, TYPE_FILE_OFFER, TYPE_FILE_REJECT, TYPE_NOTIFY_DISMISS,
-    TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY, TYPE_PING, TYPE_PONG, TYPE_TEXT_MESSAGE,
+    NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame, TextMessage, TYPE_CAPS_UPDATE,
+    TYPE_CLIP_SET, TYPE_FILE_ACCEPT, TYPE_FILE_DONE, TYPE_FILE_OFFER, TYPE_FILE_REJECT,
+    TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY, TYPE_PING, TYPE_PONG,
+    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
 };
 
 #[derive(Debug)]
@@ -17,6 +18,7 @@ pub enum SessionEvent {
     Reply(NotifyReply),
     Clip(ClipSet),
     TextMessage(TextMessage),
+    ResourceHandoff(ResourceHandoffFrame),
     FileOffer(FileOffer),
     FileAccept(FileDecision),
     FileReject(FileDecision),
@@ -42,6 +44,9 @@ impl SessionEvent {
             TYPE_CLIP_SET => SessionEvent::Clip(ClipSet::from_payload(&frame.payload)?),
             TYPE_TEXT_MESSAGE => {
                 SessionEvent::TextMessage(TextMessage::from_payload(&frame.payload)?)
+            }
+            TYPE_RESOURCE_HANDOFF => {
+                SessionEvent::ResourceHandoff(ResourceHandoffFrame::from_payload(&frame.payload)?)
             }
             TYPE_FILE_OFFER => SessionEvent::FileOffer(FileOffer::from_payload(&frame.payload)?),
             TYPE_FILE_ACCEPT => {

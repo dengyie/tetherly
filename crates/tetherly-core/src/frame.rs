@@ -29,6 +29,7 @@ pub const TYPE_NOTIFY_DISMISS: u16 = 0x0102;
 pub const TYPE_NOTIFY_REPLY: u16 = 0x0103;
 pub const TYPE_CLIP_SET: u16 = 0x0201;
 pub const TYPE_TEXT_MESSAGE: u16 = 0x0202;
+pub const TYPE_RESOURCE_HANDOFF: u16 = 0x0203;
 pub const TYPE_FILE_OFFER: u16 = 0x0301;
 pub const TYPE_FILE_ACCEPT: u16 = 0x0302;
 pub const TYPE_FILE_REJECT: u16 = 0x0303;
@@ -110,6 +111,7 @@ pub fn is_known_type(ty: u16) -> bool {
             | TYPE_NOTIFY_REPLY
             | TYPE_CLIP_SET
             | TYPE_TEXT_MESSAGE
+            | TYPE_RESOURCE_HANDOFF
             | TYPE_FILE_OFFER
             | TYPE_FILE_ACCEPT
             | TYPE_FILE_REJECT
@@ -298,6 +300,57 @@ impl TextMessage {
     pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
         let parsed: Self = serde_json::from_slice(payload)?;
         if parsed.text.len() > TEXT_MESSAGE_MAX {
+            return Err(CoreError::PayloadTooLarge);
+        }
+        Ok(parsed)
+    }
+}
+
+pub const HANDOFF_URL_MAX: usize = 4096;
+pub const HANDOFF_TITLE_MAX: usize = 256;
+
+/// A cross-device resource or URL handoff frame sent to a peer for controlled opening or caching.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceHandoffFrame {
+    pub id: String,
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub auto_open_requested: bool,
+    #[serde(default)]
+    pub timestamp_ms: u64,
+}
+
+impl ResourceHandoffFrame {
+    pub fn new(
+        id: impl Into<String>,
+        url: impl Into<String>,
+        title: impl Into<String>,
+        auto_open_requested: bool,
+        timestamp_ms: u64,
+    ) -> Result<Self, CoreError> {
+        let url = url.into();
+        let title = title.into();
+        if url.len() > HANDOFF_URL_MAX || title.len() > HANDOFF_TITLE_MAX {
+            return Err(CoreError::PayloadTooLarge);
+        }
+        Ok(Self {
+            id: id.into(),
+            url,
+            title,
+            auto_open_requested,
+            timestamp_ms,
+        })
+    }
+
+    pub fn to_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_RESOURCE_HANDOFF, serde_json::to_vec(self)?)
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
+        let parsed: Self = serde_json::from_slice(payload)?;
+        if parsed.url.len() > HANDOFF_URL_MAX || parsed.title.len() > HANDOFF_TITLE_MAX {
             return Err(CoreError::PayloadTooLarge);
         }
         Ok(parsed)

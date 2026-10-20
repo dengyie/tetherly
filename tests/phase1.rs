@@ -8683,6 +8683,494 @@ async fn policy_based_clipboard_auto_sync_and_sensitive_leak_guard_via_loopback_
     peer.shutdown();
 }
 
+/// ADR-065: Cross-Device Secure Resource & URL Handoff Pipeline, Controlled Open Governance,
+/// Ingress Policy Scoping, Handoff Inbox Lifecycle, Zero-Plaintext SSE, and Host 403 Isolation.
+#[tokio::test(flavor = "multi_thread")]
+async fn resource_and_url_handoff_pipeline_and_governance_via_loopback_api() {
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect SSE event streams on both nodes
+    let mut sse_host = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("host SSE connects");
+    let mut sse_peer = tetherly_node::loopback_events_connect(peer_ui)
+        .await
+        .expect("peer SSE connects");
+
+    // 2. Query initial handoff policy on Peer: default is prompt_only, empty filters, max 100 entries
+    let (code_pol, body_pol) = tetherly_node::loopback_get(peer_ui, "/api/handoff/policy")
+        .await
+        .unwrap();
+    assert_eq!(code_pol, 200);
+    let pol_rep: serde_json::Value = serde_json::from_slice(&body_pol).unwrap();
+    assert!(pol_rep["ok"].as_bool().unwrap_or(false));
+    assert_eq!(pol_rep["policy"]["action"], "prompt_only");
+    assert_eq!(pol_rep["policy"]["max_inbox_entries"], 100);
+
+    // Initial inbox on Peer must be empty
+    let (code_inbox, body_inbox) = tetherly_node::loopback_get(peer_ui, "/api/handoff/inbox")
+        .await
+        .unwrap();
+    assert_eq!(code_inbox, 200);
+    let inbox_rep: serde_json::Value = serde_json::from_slice(&body_inbox).unwrap();
+    assert!(inbox_rep["ok"].as_bool().unwrap_or(false));
+    assert_eq!(inbox_rep["total"], 0);
+    assert_eq!(inbox_rep["entries"].as_array().unwrap().len(), 0);
+
+    // 3. Test Compliant URL Handoff Dispatch under default prompt_only policy:
+    // Host sends URL to Peer
+    let handoff_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "url": "https://docs.tetherly.mesh/v1.72/handoff-guide",
+        "title": "Tetherly Handoff Guide",
+        "auto_open": true
+    });
+    let (code_send, body_send) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/handoff/send",
+        &serde_json::to_vec(&handoff_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_send, 200);
+    let send_rep: serde_json::Value = serde_json::from_slice(&body_send).unwrap();
+    assert!(send_rep["ok"].as_bool().unwrap_or(false));
+    let handoff_id = send_rep["id"].as_str().unwrap().to_string();
+    assert!(handoff_id.starts_with("ho_"));
+    assert_eq!(send_rep["peer"], peer_id.as_str());
+    assert_eq!(
+        send_rep["url"],
+        "https://docs.tetherly.mesh/v1.72/handoff-guide"
+    );
+    assert_eq!(send_rep["title"], "Tetherly Handoff Guide");
+
+    // SSE Verification on Host: resource_handoff_dispatched
+    let mut saw_dispatched_sse = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(raw_str))) =
+            tokio::time::timeout(Duration::from_millis(500), sse_host.next_event()).await
+        {
+            if let Ok(ev) = serde_json::from_str::<serde_json::Value>(&raw_str) {
+                if ev["kind"] == "resource_handoff_dispatched" {
+                    assert_eq!(ev["host"], "docs.tetherly.mesh");
+                    assert_eq!(ev["target_count"], 1);
+                    assert_eq!(ev["success_count"], 1);
+                    assert!(ev["timestamp_ms"].as_u64().unwrap_or(0) > 0);
+                    saw_dispatched_sse = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_dispatched_sse,
+        "host must emit resource_handoff_dispatched SSE event"
+    );
+
+    // SSE Verification on Peer: resource_handoff_received with Zero-Plaintext check
+    let mut saw_received_sse = false;
+    let deadline_peer = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline_peer {
+        if let Ok(Ok(Some(raw_str))) =
+            tokio::time::timeout(Duration::from_millis(500), sse_peer.next_event()).await
+        {
+            if let Ok(ev) = serde_json::from_str::<serde_json::Value>(&raw_str) {
+                if ev["kind"] == "resource_handoff_received" {
+                    assert_eq!(ev["id"], handoff_id);
+                    assert_eq!(ev["host"], "docs.tetherly.mesh");
+                    assert_eq!(ev["title"], "Tetherly Handoff Guide");
+                    assert_eq!(ev["status"], "pending");
+                    assert_eq!(ev["auto_opened"], false);
+
+                    // ZERO-PLAINTEXT INVARIANT: Raw SSE event must only expose host and title,
+                    // not arbitrary URL paths/queries that could contain credentials or confidential tokens!
+                    assert!(
+                        !raw_str.contains("/v1.72/handoff-guide"),
+                        "Zero-Plaintext Invariant: raw SSE must NOT expose full URL path or query params"
+                    );
+                    assert!(
+                        ev.get("url").is_none(),
+                        "Zero-Plaintext Invariant: event payload must omit raw URL"
+                    );
+                    saw_received_sse = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_received_sse,
+        "peer must emit resource_handoff_received SSE event"
+    );
+
+    // 4. Verify Entry Stored in Peer Inbox:
+    let (code_inbox1, body_inbox1) = tetherly_node::loopback_get(peer_ui, "/api/handoff/inbox")
+        .await
+        .unwrap();
+    assert_eq!(code_inbox1, 200);
+    let inbox1: serde_json::Value = serde_json::from_slice(&body_inbox1).unwrap();
+    assert_eq!(inbox1["total"], 1);
+    let entry1 = &inbox1["entries"][0];
+    assert_eq!(entry1["id"], handoff_id);
+    assert_eq!(
+        entry1["url"],
+        "https://docs.tetherly.mesh/v1.72/handoff-guide"
+    );
+    assert_eq!(entry1["title"], "Tetherly Handoff Guide");
+    assert_eq!(entry1["status"], "pending");
+
+    // 5. Test Controlled Open via POST /api/handoff/inbox/open:
+    let open_req = serde_json::json!({
+        "id": handoff_id
+    });
+    let (code_open, body_open) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/handoff/inbox/open",
+        &serde_json::to_vec(&open_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_open, 200);
+    let open_rep: serde_json::Value = serde_json::from_slice(&body_open).unwrap();
+    assert!(open_rep["ok"].as_bool().unwrap_or(false));
+    assert_eq!(open_rep["id"], handoff_id);
+    assert_eq!(open_rep["status"], "opened");
+    assert!(open_rep["opened_ms"].as_u64().unwrap_or(0) > 0);
+
+    // Verify inbox status updated to "opened"
+    let (_, body_inbox_op) =
+        tetherly_node::loopback_get(peer_ui, "/api/handoff/inbox?status=opened")
+            .await
+            .unwrap();
+    let inbox_op: serde_json::Value = serde_json::from_slice(&body_inbox_op).unwrap();
+    assert_eq!(inbox_op["total"], 1);
+    assert_eq!(inbox_op["entries"][0]["status"], "opened");
+
+    // 6. Security Firewall: ResourceHandoffValidator Negative Injections Testing
+    // a. Local file traversal & sensitive access: file:///etc/passwd
+    let bad_file_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "url": "file:///etc/passwd"
+    });
+    let (c_bf, b_bf) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/handoff/send",
+        &serde_json::to_vec(&bad_file_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_bf, 400);
+    assert!(String::from_utf8_lossy(&b_bf).contains("forbidden dangerous url scheme: 'file'"));
+
+    // b. Script injection: javascript:alert(document.cookie)
+    let bad_js_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "url": "javascript:alert(document.cookie)"
+    });
+    let (c_js, b_js) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/handoff/send",
+        &serde_json::to_vec(&bad_js_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_js, 400);
+    assert!(String::from_utf8_lossy(&b_js).contains("forbidden dangerous url scheme: 'javascript'"));
+
+    // c. Credential injection: http://admin:secret@evil.com/admin
+    let bad_cred_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "url": "http://admin:secret@evil.com/admin"
+    });
+    let (c_cr, b_cr) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/handoff/send",
+        &serde_json::to_vec(&bad_cred_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_cr, 400);
+    assert!(String::from_utf8_lossy(&b_cr)
+        .contains("userinfo credentials not permitted in handoff url"));
+
+    // d. Cloud metadata probe: http://169.254.169.254/latest/meta-data/
+    let bad_meta_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "url": "http://169.254.169.254/latest/meta-data/"
+    });
+    let (c_mt, b_mt) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/handoff/send",
+        &serde_json::to_vec(&bad_meta_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_mt, 400);
+    assert!(String::from_utf8_lossy(&b_mt).contains("forbidden access to cloud metadata address"));
+
+    // e. CRLF / Control char injection: https://example.com/test\r\nX-Injected:evil
+    let bad_crlf_req = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "url": "https://example.com/test\r\nX-Injected:evil"
+    });
+    let (c_cl, b_cl) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/handoff/send",
+        &serde_json::to_vec(&bad_crlf_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_cl, 400);
+    assert!(String::from_utf8_lossy(&b_cl)
+        .contains("handoff url contains invalid control or whitespace characters"));
+
+    // 7. Policy Scoping & AutoOpen Ingress Mode:
+    // Peer configures policy: action = "auto_open", allowed_groups = ["dev-ops"]
+    let pol_update_req = serde_json::json!({
+        "action": "auto_open",
+        "allowed_groups": ["dev-ops"]
+    });
+    let (c_p_up, b_p_up) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/handoff/policy",
+        &serde_json::to_vec(&pol_update_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_p_up, 200);
+    let p_up_rep: serde_json::Value = serde_json::from_slice(&b_p_up).unwrap();
+    assert_eq!(p_up_rep["policy"]["action"], "auto_open");
+    assert_eq!(
+        p_up_rep["policy"]["allowed_groups"],
+        serde_json::json!(["dev-ops"])
+    );
+
+    // First attempt: Host is not in "dev-ops" group on Peer.
+    // Host sends URL with auto_open: true.
+    let auto_req1 = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "url": "https://crates.io/crates/tokio",
+        "title": "Tokio Crate",
+        "auto_open": true
+    });
+    let (c_ar1, b_ar1) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/handoff/send",
+        &serde_json::to_vec(&auto_req1).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_ar1, 200);
+    let ar1_rep: serde_json::Value = serde_json::from_slice(&b_ar1).unwrap();
+    let ho_id_unscoped = ar1_rep["id"].as_str().unwrap().to_string();
+
+    // Wait and verify Peer stored it as pending (NOT auto-opened because Host is not in dev-ops group)
+    let t_check = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_unscoped = false;
+    while tokio::time::Instant::now() < t_check {
+        let (c, b) = tetherly_node::loopback_get(peer_ui, "/api/handoff/inbox?status=pending")
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if val["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["id"] == ho_id_unscoped)
+                {
+                    saw_unscoped = true;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        saw_unscoped,
+        "unscoped peer handoff must be saved as pending without auto-open"
+    );
+
+    // Second attempt: Group Host under "dev-ops" on Peer
+    let set_host_grp = serde_json::json!({
+        "peer": host_id.as_str(),
+        "group": "dev-ops"
+    });
+    let (c_grp, _) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/peers/group",
+        &serde_json::to_vec(&set_host_grp).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_grp, 200);
+
+    // Host sends URL again with auto_open: true. Now Host IS in "dev-ops" group!
+    let auto_req2 = serde_json::json!({
+        "peer": peer_id.as_str(),
+        "url": "https://rust-lang.org",
+        "title": "Rust Language Official",
+        "auto_open": true
+    });
+    let (c_ar2, b_ar2) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/handoff/send",
+        &serde_json::to_vec(&auto_req2).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_ar2, 200);
+    let ar2_rep: serde_json::Value = serde_json::from_slice(&b_ar2).unwrap();
+    let ho_id_scoped = ar2_rep["id"].as_str().unwrap().to_string();
+
+    // Verify Peer receives and automatically opens it!
+    let t_scoped = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut saw_auto_opened = false;
+    while tokio::time::Instant::now() < t_scoped {
+        let (c, b) = tetherly_node::loopback_get(peer_ui, "/api/handoff/inbox?status=opened")
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if val["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["id"] == ho_id_scoped)
+                {
+                    saw_auto_opened = true;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        saw_auto_opened,
+        "scoped peer matching group must be automatically opened"
+    );
+
+    // 8. Multi-cast Handoff Dispatch via POST /api/handoff/send with all: true
+    let multi_req = serde_json::json!({
+        "all": true,
+        "url": "https://github.com/tetherly/tetherly",
+        "title": "Tetherly Repo",
+        "auto_open": false
+    });
+    let (c_multi, b_multi) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/handoff/send",
+        &serde_json::to_vec(&multi_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_multi, 200);
+    let multi_rep: serde_json::Value = serde_json::from_slice(&b_multi).unwrap();
+    assert!(multi_rep["ok"].as_bool().unwrap_or(false));
+    assert!(multi_rep["target_count"].as_u64().unwrap_or(0) >= 1);
+    assert!(multi_rep["success_count"].as_u64().unwrap_or(0) >= 1);
+
+    // 9. Inbox Dismiss & Clear Lifecycle:
+    // Dismiss unscoped entry
+    let dis_req = serde_json::json!({
+        "id": ho_id_unscoped
+    });
+    let (c_dis, b_dis) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/handoff/inbox/dismiss",
+        &serde_json::to_vec(&dis_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_dis, 200);
+    let dis_rep: serde_json::Value = serde_json::from_slice(&b_dis).unwrap();
+    assert_eq!(dis_rep["status"], "dismissed");
+
+    // Query dismissed entries
+    let (c_inbox_dis, b_inbox_dis) =
+        tetherly_node::loopback_get(peer_ui, "/api/handoff/inbox?status=dismissed")
+            .await
+            .unwrap();
+    assert_eq!(c_inbox_dis, 200);
+    let inbox_dis: serde_json::Value = serde_json::from_slice(&b_inbox_dis).unwrap();
+    assert!(inbox_dis["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["id"] == ho_id_unscoped));
+
+    // Clear inbox
+    let (c_clr, b_clr) = tetherly_node::loopback_post(peer_ui, "/api/handoff/inbox/clear", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c_clr, 200);
+    let clr_rep: serde_json::Value = serde_json::from_slice(&b_clr).unwrap();
+    assert!(clr_rep["ok"].as_bool().unwrap_or(false));
+    assert!(clr_rep["cleared"].as_u64().unwrap_or(0) >= 1);
+
+    // After clear, total entries in inbox is 0
+    let (_, b_empty) = tetherly_node::loopback_get(peer_ui, "/api/handoff/inbox")
+        .await
+        .unwrap();
+    let empty_rep: serde_json::Value = serde_json::from_slice(&b_empty).unwrap();
+    assert_eq!(empty_rep["total"], 0);
+    assert!(empty_rep["entries"].as_array().unwrap().is_empty());
+
+    // 10. Atomic Persistence & POSIX 0o600 Permissions Check
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let peer_pol_file = g2.path().join("handoff_policy.json");
+        assert!(
+            peer_pol_file.exists(),
+            "handoff_policy.json must exist on disk"
+        );
+        let meta_pol = std::fs::metadata(&peer_pol_file).unwrap();
+        assert_eq!(
+            meta_pol.permissions().mode() & 0o777,
+            0o600,
+            "handoff_policy.json must have 0o600 permissions"
+        );
+
+        let peer_inbox_file = g2.path().join("handoff_inbox.json");
+        assert!(
+            peer_inbox_file.exists(),
+            "handoff_inbox.json must exist on disk"
+        );
+        let meta_inbox = std::fs::metadata(&peer_inbox_file).unwrap();
+        assert_eq!(
+            meta_inbox.permissions().mode() & 0o777,
+            0o600,
+            "handoff_inbox.json must have 0o600 permissions"
+        );
+    }
+
+    // 11. Security Red Line: Host 403 Forbidden Isolation Check
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut evil_stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{peer_ui}"))
+        .await
+        .expect("connect to peer ui port");
+    let evil_req = "GET /api/handoff/inbox HTTP/1.1\r\nHost: evil.attacker.domain\r\n\r\n";
+    evil_stream.write_all(evil_req.as_bytes()).await.unwrap();
+    evil_stream.flush().await.unwrap();
+    let mut evil_buf = vec![0u8; 1024];
+    let n = evil_stream.read(&mut evil_buf).await.unwrap();
+    let evil_resp = String::from_utf8_lossy(&evil_buf[..n]);
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403 Forbidden"),
+        "mismatched Host header on /api/handoff/inbox must be rejected with 403 Forbidden, got: {evil_resp}"
+    );
+
+    // 12. Clean shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

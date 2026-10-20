@@ -2,10 +2,12 @@
 //! Identity and trust persistence. Temp file + rename. Unix 0600; Windows
 //! lives under %LOCALAPPDATA% (user ACL). Never logs secret bytes.
 
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tetherly_core::{ClipSyncMode, MemoryTrustStore, TrustFile};
+pub use tetherly_core::{HandoffAction, HandoffEntry, HandoffStatus};
 use tetherly_crypto::Identity;
 use tracing::info;
 
@@ -14,6 +16,11 @@ pub const TRUST_FILE: &str = "trusted.json";
 pub const ROUTES_FILE: &str = "routes.json";
 pub const BLOCKED_FILE: &str = "blocked.json";
 pub const PROFILES_FILE: &str = "profiles.json";
+pub const AUTO_ACCEPT_POLICY_FILE: &str = "auto_accept.json";
+pub const CLIPBOARD_POLICY_FILE: &str = "clipboard_policy.json";
+pub const HANDOFF_POLICY_FILE: &str = "handoff_policy.json";
+pub const HANDOFF_INBOX_FILE: &str = "handoff_inbox.json";
+pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
     if let Ok(p) = std::env::var("TETHERLY_DATA_DIR") {
@@ -473,7 +480,6 @@ pub fn save_auto_accept_policy(
     Ok(())
 }
 
-pub const CLIPBOARD_POLICY_FILE: &str = "clipboard_policy.json";
 pub const DEFAULT_MAX_CLIP_AUTO_SYNC_BYTES: usize = 65536; // 64 KiB
 
 fn default_true() -> bool {
@@ -581,6 +587,162 @@ pub fn save_clipboard_policy(dir: &Path, policy: &ClipboardPolicy) -> Result<(),
     atomic_write(
         &dir.join(CLIPBOARD_POLICY_FILE),
         &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
+fn default_handoff_action() -> HandoffAction {
+    HandoffAction::PromptOnly
+}
+
+fn default_max_handoff_inbox_entries() -> usize {
+    DEFAULT_MAX_HANDOFF_INBOX_ENTRIES
+}
+
+/// Node policy governing inbound resource and URL handoff execution and profile scoping.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandoffPolicy {
+    #[serde(default = "default_handoff_action")]
+    pub action: HandoffAction,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+    #[serde(default = "default_max_handoff_inbox_entries")]
+    pub max_inbox_entries: usize,
+}
+
+impl Default for HandoffPolicy {
+    fn default() -> Self {
+        Self {
+            action: HandoffAction::PromptOnly,
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+            max_inbox_entries: DEFAULT_MAX_HANDOFF_INBOX_ENTRIES,
+        }
+    }
+}
+
+impl HandoffPolicy {
+    /// Checks whether an inbound handoff is permitted to automatically open based on peer profile.
+    pub fn is_peer_eligible_for_auto_open(&self, profile: &PeerProfile) -> bool {
+        if !self.action.allows_auto_open() {
+            return false;
+        }
+
+        // If no filter is configured, all trusted peers with AutoOpen policy are eligible
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        // Match group
+        if let Some(ref grp) = profile.group {
+            let grp_lower = grp.to_ascii_lowercase();
+            if self
+                .allowed_groups
+                .iter()
+                .any(|g| g.to_ascii_lowercase() == grp_lower)
+            {
+                return true;
+            }
+        }
+
+        // Match tags
+        for t in &profile.tags {
+            let t_lower = t.to_ascii_lowercase();
+            if self
+                .allowed_tags
+                .iter()
+                .any(|rule_tag| rule_tag.to_ascii_lowercase() == t_lower)
+            {
+                return true;
+            }
+        }
+
+        // Match device type
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+}
+
+pub fn load_handoff_policy(dir: &Path) -> HandoffPolicy {
+    let path = dir.join(HANDOFF_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_handoff_policy(dir: &Path, policy: &HandoffPolicy) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(HANDOFF_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
+/// In-memory and persisted handoff inbox table.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct HandoffInboxTable {
+    #[serde(default)]
+    pub entries: Vec<HandoffEntry>,
+}
+
+impl HandoffInboxTable {
+    pub fn add(&mut self, entry: HandoffEntry, max_entries: usize) {
+        // Prepend new entry
+        self.entries.insert(0, entry);
+        if max_entries > 0 && self.entries.len() > max_entries {
+            self.entries.truncate(max_entries);
+        }
+    }
+
+    pub fn find(&self, id: &str) -> Option<&HandoffEntry> {
+        self.entries.iter().find(|e| e.id == id)
+    }
+
+    pub fn find_mut(&mut self, id: &str) -> Option<&mut HandoffEntry> {
+        self.entries.iter_mut().find(|e| e.id == id)
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<HandoffEntry> {
+        if let Some(pos) = self.entries.iter().position(|e| e.id == id) {
+            Some(self.entries.remove(pos))
+        } else {
+            None
+        }
+    }
+
+    pub fn clear(&mut self) -> usize {
+        let count = self.entries.len();
+        self.entries.clear();
+        count
+    }
+}
+
+pub fn load_handoff_inbox(dir: &Path) -> HandoffInboxTable {
+    let path = dir.join(HANDOFF_INBOX_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_handoff_inbox(dir: &Path, table: &HandoffInboxTable) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(HANDOFF_INBOX_FILE),
+        &serde_json::to_vec_pretty(table)?,
     )?;
     Ok(())
 }
@@ -894,6 +1056,107 @@ mod tests {
             updated_ms: 0,
         };
         assert!(!loaded.is_peer_eligible(&prof_unmatched));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn handoff_policy_and_inbox_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("tetherly-handoff-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Policy test
+        let def = load_handoff_policy(&dir);
+        assert_eq!(def.action, HandoffAction::PromptOnly);
+        assert_eq!(def.max_inbox_entries, DEFAULT_MAX_HANDOFF_INBOX_ENTRIES);
+
+        let custom_policy = HandoffPolicy {
+            action: HandoffAction::AutoOpen,
+            allowed_groups: vec!["office".into()],
+            allowed_tags: vec!["trusted".into()],
+            allowed_types: vec![DeviceType::Phone],
+            max_inbox_entries: 50,
+        };
+        save_handoff_policy(&dir, &custom_policy).unwrap();
+        let loaded_pol = load_handoff_policy(&dir);
+        assert_eq!(loaded_pol, custom_policy);
+
+        let prof_phone = PeerProfile {
+            device_id: "phone1".into(),
+            device_type: DeviceType::Phone,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded_pol.is_peer_eligible_for_auto_open(&prof_phone));
+
+        let prof_server = PeerProfile {
+            device_id: "srv1".into(),
+            device_type: DeviceType::Server,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded_pol.is_peer_eligible_for_auto_open(&prof_server));
+
+        // 2. Inbox table test
+        let mut inbox = load_handoff_inbox(&dir);
+        assert!(inbox.entries.is_empty());
+
+        let e1 = HandoffEntry {
+            id: "ho_1".into(),
+            sender_id: "peer_a".into(),
+            sender_alias: "Laptop".into(),
+            url: "https://example.com/a".into(),
+            title: "Example A".into(),
+            status: HandoffStatus::Pending,
+            received_ms: 1000,
+            opened_ms: None,
+        };
+        let e2 = HandoffEntry {
+            id: "ho_2".into(),
+            sender_id: "peer_b".into(),
+            sender_alias: "Phone".into(),
+            url: "https://example.com/b".into(),
+            title: "Example B".into(),
+            status: HandoffStatus::Opened,
+            received_ms: 2000,
+            opened_ms: Some(2100),
+        };
+
+        inbox.add(e1, 10);
+        inbox.add(e2, 10);
+        assert_eq!(inbox.entries.len(), 2);
+        assert_eq!(inbox.entries[0].id, "ho_2"); // latest prepended
+
+        save_handoff_inbox(&dir, &inbox).unwrap();
+        let loaded_inbox = load_handoff_inbox(&dir);
+        assert_eq!(loaded_inbox.entries.len(), 2);
+        assert_eq!(loaded_inbox.entries[0].id, "ho_2");
+        assert_eq!(loaded_inbox.entries[1].id, "ho_1");
+
+        // Truncation check
+        let mut bounded = HandoffInboxTable::default();
+        for i in 0..5 {
+            bounded.add(
+                HandoffEntry {
+                    id: format!("ho_{i}"),
+                    sender_id: "p".into(),
+                    sender_alias: "P".into(),
+                    url: format!("https://example.com/{i}"),
+                    title: "".into(),
+                    status: HandoffStatus::Pending,
+                    received_ms: 0,
+                    opened_ms: None,
+                },
+                3,
+            );
+        }
+        assert_eq!(bounded.entries.len(), 3);
+        assert_eq!(bounded.entries[0].id, "ho_4");
 
         let _ = fs::remove_dir_all(&dir);
     }

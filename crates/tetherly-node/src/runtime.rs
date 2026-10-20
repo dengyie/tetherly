@@ -7,9 +7,10 @@ use crate::lan::{bind_many, bind_many_optional, bind_overlay, control_bind_addrs
 use crate::platform::{insert_foreground, MemoryClip, SystemClip};
 use crate::sidecar::{self, OverlayConfig, OverlaySource, OverlayStatus};
 use crate::store::{
-    load_clipboard_policy, load_trust, remember_route, save_clipboard_policy, save_trust,
-    AutoAcceptPolicy, ClipboardPolicy, DeviceType, PeerProfile, ProfileTable, RouteTable,
-    TargetSelector,
+    load_clipboard_policy, load_handoff_inbox, load_handoff_policy, load_trust, remember_route,
+    save_clipboard_policy, save_handoff_inbox, save_handoff_policy, save_trust, AutoAcceptPolicy,
+    ClipboardPolicy, DeviceType, HandoffInboxTable, HandoffPolicy, PeerProfile, ProfileTable,
+    RouteTable, TargetSelector,
 };
 use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::{HashMap, VecDeque};
@@ -20,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tetherly_core::frame::{
     ping, pong, CapsUpdate, ClipSet, FileDone, FileOffer, InnerFrame, NotifyPush, NotifyReply,
-    TextMessage,
+    ResourceHandoffFrame, TextMessage,
 };
 use tetherly_core::liveness::Liveness;
 use tetherly_core::pin::{format_pin, generate_pin};
@@ -30,11 +31,12 @@ use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
     ancs_actions, ancs_source_id, path_kind, AncsEvent, AncsIngress, AncsState, AncsTransport,
     ClipApply, ClipDirection, ClipHub, ClipMetaEntry, ConnectOutcome, ControlMsg, CoreError,
-    CursorSeat, DeviceId, FileHub, IngestOutcome, InputClient, InputEvent, InputServer, InputSink,
-    MemoryScreenSink, MemorySink, MemoryTrustStore, NotificationPayload, NotificationUrgency,
-    Notifier, NotifyHub, OpenAllowlist, PathKind, ReplyView, ScreenAssembler, ScreenCodec,
-    ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats,
-    SensitiveContentGuard, TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
+    CursorSeat, DeviceId, FileHub, HandoffEntry, HandoffStatus, IngestOutcome, InputClient,
+    InputEvent, InputServer, InputSink, MemoryScreenSink, MemorySink, MemoryTrustStore,
+    NotificationPayload, NotificationUrgency, Notifier, NotifyHub, OpenAllowlist, PathKind,
+    ReplyView, ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenFrame, ScreenReceiver,
+    ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats, SensitiveContentGuard,
+    TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -1366,6 +1368,55 @@ pub struct ClipboardPolicyReport {
     pub message: String,
 }
 
+/// Single target dispatch outcome for multi-peer resource handoff.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeerHandoffSendItem {
+    pub peer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff_id: Option<String>,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Comprehensive aggregated report for multi-peer targeted resource handoff dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MultiHandoffSendReport {
+    pub ok: bool,
+    pub selector: TargetSelector,
+    pub url: String,
+    pub title: String,
+    pub target_count: usize,
+    pub success_count: usize,
+    pub skipped_offline_count: usize,
+    pub failed_count: usize,
+    pub dispatches: Vec<PeerHandoffSendItem>,
+}
+
+/// Single peer handoff send result.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HandoffSendResult {
+    pub ok: bool,
+    pub id: String,
+    pub peer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_alias: Option<String>,
+    pub url: String,
+    pub title: String,
+    pub auto_open_requested: bool,
+    pub timestamp_ms: u64,
+}
+
+/// Status and configuration report for resource handoff policy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HandoffPolicyReport {
+    pub ok: bool,
+    pub policy: HandoffPolicy,
+    pub message: String,
+}
+
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ClipStatusReport {
@@ -2118,6 +2169,9 @@ struct Shared {
     clip_auto_synced_in_count: AtomicU64,
     clip_sensitive_blocked_count: AtomicU64,
     last_auto_sync_hash: Mutex<Option<String>>,
+    handoff_policy: Mutex<HandoffPolicy>,
+    handoff_inbox: Mutex<HandoffInboxTable>,
+    handoff_seq: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -2259,6 +2313,8 @@ impl Node {
         let initial_profiles = crate::store::load_profiles(&cfg.data_dir);
         let initial_auto_accept = crate::store::load_auto_accept_policy(&cfg.data_dir);
         let initial_clipboard_policy = load_clipboard_policy(&cfg.data_dir);
+        let initial_handoff_policy = load_handoff_policy(&cfg.data_dir);
+        let initial_handoff_inbox = load_handoff_inbox(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -2321,6 +2377,7 @@ impl Node {
                 s.insert("file".to_string());
                 s.insert("input".to_string());
                 s.insert("screen".to_string());
+                s.insert("handoff".to_string());
                 s
             }),
             blocked: Mutex::new(initial_blocked),
@@ -2346,6 +2403,9 @@ impl Node {
             clip_auto_synced_in_count: AtomicU64::new(0),
             clip_sensitive_blocked_count: AtomicU64::new(0),
             last_auto_sync_hash: Mutex::new(None),
+            handoff_policy: Mutex::new(initial_handoff_policy),
+            handoff_inbox: Mutex::new(initial_handoff_inbox),
+            handoff_seq: AtomicU64::new(0),
         });
         Ok(Self { shared })
     }
@@ -7608,6 +7668,10 @@ impl Node {
                 (m.text.len() + 32) as u64,
                 tetherly_core::frame::TYPE_TEXT_MESSAGE,
             ),
+            SessionEvent::ResourceHandoff(h) => (
+                (h.url.len() + h.title.len() + 32) as u64,
+                tetherly_core::frame::TYPE_RESOURCE_HANDOFF,
+            ),
             SessionEvent::FileOffer(f) => (
                 (f.transfer_id.len()
                     + f.files.iter().map(|item| item.name.len()).sum::<usize>()
@@ -7855,6 +7919,9 @@ impl Node {
                     caps: update.caps,
                     features,
                 });
+            }
+            SessionEvent::ResourceHandoff(h) => {
+                self.receive_resource_handoff(peer, h);
             }
             SessionEvent::Unknown(_) => {}
         }
@@ -8717,6 +8784,515 @@ impl Node {
                 .load(Ordering::Relaxed),
             message: "clipboard policy updated successfully".to_string(),
         })
+    }
+
+    /// Read the current inbound resource handoff policy.
+    pub fn handoff_policy(&self) -> HandoffPolicy {
+        self.shared
+            .handoff_policy
+            .lock()
+            .expect("handoff_policy")
+            .clone()
+    }
+
+    /// Comprehensive status and configuration report for resource handoff policy.
+    pub fn handoff_policy_report(&self) -> HandoffPolicyReport {
+        HandoffPolicyReport {
+            ok: true,
+            policy: self.handoff_policy(),
+            message: "handoff policy retrieved successfully".to_string(),
+        }
+    }
+
+    /// Update the resource handoff policy and persist to disk atomically.
+    pub fn set_handoff_policy(
+        &self,
+        policy: HandoffPolicy,
+    ) -> Result<HandoffPolicyReport, CoreError> {
+        let now = self.shared.clock.unix_ms();
+        save_handoff_policy(&self.shared.cfg.data_dir, &policy)
+            .map_err(|e| CoreError::File(format!("failed to save handoff_policy.json: {e}")))?;
+        *self.shared.handoff_policy.lock().expect("handoff_policy") = policy.clone();
+
+        self.emit(UiEvent::handoff_policy_changed(
+            policy.action.as_str(),
+            policy.allowed_groups.clone(),
+            policy.allowed_tags.clone(),
+            policy
+                .allowed_types
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect(),
+            policy.max_inbox_entries,
+            now,
+        ));
+
+        self.record_audit(
+            AuditCategory::Peer,
+            AuditSeverity::Info,
+            "handoff_policy_changed",
+            None::<String>,
+            format!(
+                "Updated handoff policy: action={}, groups={:?}, tags={:?}, types={:?}, max_inbox_entries={}",
+                policy.action.as_str(),
+                policy.allowed_groups,
+                policy.allowed_tags,
+                policy.allowed_types,
+                policy.max_inbox_entries,
+            ),
+            true,
+        );
+
+        Ok(HandoffPolicyReport {
+            ok: true,
+            policy,
+            message: "handoff policy updated successfully".to_string(),
+        })
+    }
+
+    /// Dispatch a resource or URL handoff to a specific peer over the Noise session.
+    pub async fn handoff_send(
+        &self,
+        peer_target: &str,
+        raw_url: &str,
+        title: Option<&str>,
+        auto_open: bool,
+    ) -> Result<HandoffSendResult, CoreError> {
+        let peer_id = self.resolve_peer(peer_target)?;
+        let sanitized = {
+            let allowlist = self.shared.allowlist.lock().expect("allowlist");
+            ResourceHandoffValidator::validate(raw_url, Some(&allowlist))?
+        };
+        let now_ms = self.shared.clock.unix_ms();
+        let seq = self.shared.handoff_seq.fetch_add(1, Ordering::Relaxed);
+        let handoff_id = format!("ho_{}_{}", now_ms, seq);
+        let title_str = title.unwrap_or("").trim().to_string();
+
+        let frame = ResourceHandoffFrame {
+            id: handoff_id.clone(),
+            url: sanitized.url.clone(),
+            title: title_str.clone(),
+            auto_open_requested: auto_open,
+            timestamp_ms: now_ms,
+        };
+
+        self.send_to(&peer_id, frame.to_frame()?).await?;
+
+        let peer_str = peer_id.to_string();
+        let alias = self.peer_alias(&peer_id);
+
+        self.record_audit(
+            AuditCategory::Peer,
+            AuditSeverity::Info,
+            "handoff_sent",
+            Some(peer_str.clone()),
+            format!(
+                "Sent resource handoff '{}' (host: {}) to peer '{}'",
+                if title_str.is_empty() {
+                    &sanitized.host
+                } else {
+                    &title_str
+                },
+                sanitized.host,
+                peer_str
+            ),
+            true,
+        );
+
+        self.emit(UiEvent::resource_handoff_dispatched(
+            &handoff_id,
+            1,
+            1,
+            &sanitized.host,
+            now_ms,
+        ));
+
+        Ok(HandoffSendResult {
+            ok: true,
+            id: handoff_id,
+            peer: peer_str,
+            peer_alias: alias,
+            url: sanitized.url,
+            title: title_str,
+            auto_open_requested: auto_open,
+            timestamp_ms: now_ms,
+        })
+    }
+
+    /// Fan out a resource or URL handoff to multiple peers matching a target selector.
+    pub async fn handoff_send_multi(
+        &self,
+        selector: &TargetSelector,
+        raw_url: &str,
+        title: Option<&str>,
+        auto_open: bool,
+    ) -> Result<MultiHandoffSendReport, CoreError> {
+        let sanitized = {
+            let allowlist = self.shared.allowlist.lock().expect("allowlist");
+            ResourceHandoffValidator::validate(raw_url, Some(&allowlist))?
+        };
+        let targets = self.resolve_dispatch_targets(selector)?;
+        let live = self.live_peers();
+        let live_map: std::collections::HashSet<DeviceId> =
+            live.into_iter().map(|p| p.device_id).collect();
+
+        let now_ms = self.shared.clock.unix_ms();
+        let title_str = title.unwrap_or("").trim().to_string();
+        let mut dispatches = Vec::with_capacity(targets.len());
+        let mut success_count = 0;
+        let mut skipped_offline_count = 0;
+        let mut failed_count = 0;
+
+        for peer_id in &targets {
+            let peer_str = peer_id.to_string();
+            let alias = self.peer_alias(peer_id);
+
+            if !live_map.contains(peer_id) {
+                skipped_offline_count += 1;
+                dispatches.push(PeerHandoffSendItem {
+                    peer: peer_str,
+                    peer_alias: alias,
+                    handoff_id: None,
+                    success: false,
+                    error: Some("peer is offline".to_string()),
+                });
+                continue;
+            }
+
+            let seq = self.shared.handoff_seq.fetch_add(1, Ordering::Relaxed);
+            let handoff_id = format!("ho_{}_{}", now_ms, seq);
+            let frame = ResourceHandoffFrame {
+                id: handoff_id.clone(),
+                url: sanitized.url.clone(),
+                title: title_str.clone(),
+                auto_open_requested: auto_open,
+                timestamp_ms: now_ms,
+            };
+
+            match frame.to_frame() {
+                Ok(inner_frame) => match self.send_to(peer_id, inner_frame).await {
+                    Ok(_) => {
+                        success_count += 1;
+                        dispatches.push(PeerHandoffSendItem {
+                            peer: peer_str,
+                            peer_alias: alias,
+                            handoff_id: Some(handoff_id),
+                            success: true,
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        failed_count += 1;
+                        dispatches.push(PeerHandoffSendItem {
+                            peer: peer_str,
+                            peer_alias: alias,
+                            handoff_id: Some(handoff_id),
+                            success: false,
+                            error: Some(e.to_string()),
+                        });
+                    }
+                },
+                Err(e) => {
+                    failed_count += 1;
+                    dispatches.push(PeerHandoffSendItem {
+                        peer: peer_str,
+                        peer_alias: alias,
+                        handoff_id: Some(handoff_id),
+                        success: false,
+                        error: Some(e.to_string()),
+                    });
+                }
+            }
+        }
+
+        self.record_audit(
+            AuditCategory::Peer,
+            AuditSeverity::Info,
+            "handoff_multi_sent",
+            None::<String>,
+            format!(
+                "Multicast resource handoff '{}' (host: {}) via {} (targets: {}, success: {}, skipped: {}, failed: {})",
+                if title_str.is_empty() { &sanitized.host } else { &title_str },
+                sanitized.host,
+                selector.as_label(),
+                targets.len(),
+                success_count,
+                skipped_offline_count,
+                failed_count
+            ),
+            failed_count == 0,
+        );
+
+        let batch_id = format!("ho_multi_{now_ms}");
+        self.emit(UiEvent::resource_handoff_dispatched(
+            &batch_id,
+            targets.len(),
+            success_count,
+            &sanitized.host,
+            now_ms,
+        ));
+
+        self.emit(UiEvent::multi_dispatch_completed(
+            "handoff",
+            selector.as_label(),
+            targets.len(),
+            success_count,
+            skipped_offline_count,
+            failed_count,
+            now_ms,
+        ));
+
+        Ok(MultiHandoffSendReport {
+            ok: success_count > 0 || (targets.is_empty() && skipped_offline_count == 0),
+            selector: selector.clone(),
+            url: sanitized.url,
+            title: title_str,
+            target_count: targets.len(),
+            success_count,
+            skipped_offline_count,
+            failed_count,
+            dispatches,
+        })
+    }
+
+    /// Ingest and process an inbound resource handoff frame from a connected peer.
+    pub fn receive_resource_handoff(&self, peer: &DeviceId, frame: ResourceHandoffFrame) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        // 1. Strict URL validator firewall check
+        let sanitized = {
+            let allowlist = self.shared.allowlist.lock().expect("allowlist");
+            match ResourceHandoffValidator::validate(&frame.url, Some(&allowlist)) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(peer = %peer, error = %e, "rejected invalid inbound resource handoff URL");
+                    self.record_audit(
+                        AuditCategory::Peer,
+                        AuditSeverity::Warning,
+                        "handoff_rejected_invalid_url",
+                        Some(peer_str.clone()),
+                        format!("Blocked inbound handoff URL from {peer}: {e}"),
+                        false,
+                    );
+                    return;
+                }
+            }
+        };
+
+        // 2. Evaluate ingress policy
+        let policy = self.handoff_policy();
+        if !policy.action.is_enabled() {
+            debug!(peer = %peer, "inbound handoff ignored: policy is disabled");
+            self.record_audit(
+                AuditCategory::Peer,
+                AuditSeverity::Notice,
+                "handoff_disabled_rejected",
+                Some(peer_str.clone()),
+                format!("Rejected inbound handoff from {peer} due to disabled policy"),
+                false,
+            );
+            return;
+        }
+
+        // 3. Check auto-open eligibility
+        let profile = self.peer_profile(peer);
+        let auto_open_eligible = policy.is_peer_eligible_for_auto_open(&profile);
+        let should_auto_open =
+            frame.auto_open_requested && policy.action.allows_auto_open() && auto_open_eligible;
+
+        let (status, opened_ms) = if should_auto_open {
+            let opener = self.shared.opener.lock().expect("opener");
+            match opener.open(&sanitized.url) {
+                Ok(()) => {
+                    info!(peer = %peer, host = %sanitized.host, "auto-opened inbound resource handoff");
+                    (HandoffStatus::Opened, Some(now_ms))
+                }
+                Err(e) => {
+                    warn!(peer = %peer, host = %sanitized.host, error = %e, "failed to auto-open URL, saving as pending");
+                    (HandoffStatus::Pending, None)
+                }
+            }
+        } else {
+            (HandoffStatus::Pending, None)
+        };
+
+        let title = if frame.title.trim().is_empty() {
+            sanitized.host.clone()
+        } else {
+            frame.title.trim().to_string()
+        };
+
+        let entry = HandoffEntry {
+            id: frame.id.clone(),
+            sender_id: peer_str.clone(),
+            sender_alias: alias.clone(),
+            url: sanitized.url.clone(),
+            title: title.clone(),
+            status,
+            received_ms: now_ms,
+            opened_ms,
+        };
+
+        // 4. Atomic persistence in bounded inbox
+        let total_count = {
+            let mut inbox = self.shared.handoff_inbox.lock().expect("handoff_inbox");
+            inbox.add(entry.clone(), policy.max_inbox_entries);
+            let _ = save_handoff_inbox(&self.shared.cfg.data_dir, &inbox);
+            inbox.entries.len()
+        };
+
+        // 5. Zero-plaintext observability emission
+        self.emit(UiEvent::resource_handoff_received(
+            &entry.id,
+            &peer_str,
+            &alias,
+            &sanitized.host,
+            &title,
+            status.as_str(),
+            should_auto_open,
+            now_ms,
+        ));
+
+        self.emit(UiEvent::handoff_inbox_updated(
+            "received",
+            Some(&entry.id),
+            total_count,
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Peer,
+            AuditSeverity::Info,
+            if status == HandoffStatus::Opened {
+                "handoff_received_auto_opened"
+            } else {
+                "handoff_received"
+            },
+            Some(peer_str),
+            format!(
+                "Received resource handoff '{}' (host: {}) from {} [status={}]",
+                title,
+                sanitized.host,
+                alias,
+                status.as_str()
+            ),
+            true,
+        );
+    }
+
+    /// Query items from the resource handoff inbox, with optional status filter.
+    pub fn handoff_inbox_list(&self, status_filter: Option<HandoffStatus>) -> Vec<HandoffEntry> {
+        let inbox = self.shared.handoff_inbox.lock().expect("handoff_inbox");
+        match status_filter {
+            Some(st) => inbox
+                .entries
+                .iter()
+                .filter(|e| e.status == st)
+                .cloned()
+                .collect(),
+            None => inbox.entries.clone(),
+        }
+    }
+
+    /// Explicitly open a pending resource handoff from the inbox using the system opener.
+    pub fn handoff_inbox_open(&self, id: &str) -> Result<HandoffEntry, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let (entry_to_open, total_count) = {
+            let mut inbox = self.shared.handoff_inbox.lock().expect("handoff_inbox");
+            let entry = inbox
+                .find_mut(id)
+                .ok_or_else(|| CoreError::Json(format!("handoff entry '{id}' not found")))?;
+            entry.status = HandoffStatus::Opened;
+            entry.opened_ms = Some(now_ms);
+            let cloned = entry.clone();
+            let _ = save_handoff_inbox(&self.shared.cfg.data_dir, &inbox);
+            (cloned, inbox.entries.len())
+        };
+
+        let opener = self.shared.opener.lock().expect("opener");
+        opener.open(&entry_to_open.url)?;
+
+        self.emit(UiEvent::handoff_inbox_updated(
+            "opened",
+            Some(id),
+            total_count,
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Peer,
+            AuditSeverity::Info,
+            "handoff_opened",
+            Some(entry_to_open.sender_id.clone()),
+            format!("Opened resource handoff '{}' ({})", entry_to_open.title, id),
+            true,
+        );
+
+        Ok(entry_to_open)
+    }
+
+    /// Mark a pending resource handoff entry as dismissed/ignored.
+    pub fn handoff_inbox_dismiss(&self, id: &str) -> Result<HandoffEntry, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let (entry, total_count) = {
+            let mut inbox = self.shared.handoff_inbox.lock().expect("handoff_inbox");
+            let entry = inbox
+                .find_mut(id)
+                .ok_or_else(|| CoreError::Json(format!("handoff entry '{id}' not found")))?;
+            entry.status = HandoffStatus::Dismissed;
+            let cloned = entry.clone();
+            let _ = save_handoff_inbox(&self.shared.cfg.data_dir, &inbox);
+            (cloned, inbox.entries.len())
+        };
+
+        self.emit(UiEvent::handoff_inbox_updated(
+            "dismissed",
+            Some(id),
+            total_count,
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Peer,
+            AuditSeverity::Info,
+            "handoff_dismissed",
+            Some(entry.sender_id.clone()),
+            format!("Dismissed resource handoff '{}' ({})", entry.title, id),
+            true,
+        );
+
+        Ok(entry)
+    }
+
+    /// Clear all records in the resource handoff inbox.
+    pub fn handoff_inbox_clear(&self) -> Result<usize, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let cleared = {
+            let mut inbox = self.shared.handoff_inbox.lock().expect("handoff_inbox");
+            let count = inbox.clear();
+            let _ = save_handoff_inbox(&self.shared.cfg.data_dir, &inbox);
+            count
+        };
+
+        self.emit(UiEvent::handoff_inbox_updated(
+            "cleared",
+            None::<String>,
+            0,
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Peer,
+            AuditSeverity::Info,
+            "handoff_inbox_cleared",
+            None::<String>,
+            format!("Cleared {cleared} entries from handoff inbox"),
+            true,
+        );
+
+        Ok(cleared)
     }
 
     /// Polls system clipboard for automatic outbound synchronization.
@@ -12074,6 +12650,160 @@ mod clipboard_policy_tests {
         assert_eq!(dispatched, 0);
         let report = node.clipboard_policy_report();
         assert_eq!(report.sensitive_blocked_count, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod handoff_engine_tests {
+    use super::*;
+    use tetherly_core::ManualClock;
+
+    fn temp_handoff_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-handoff-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.clone(),
+            control_port: 0,
+            file_port: 0,
+            input_port: 0,
+            screen_port: 0,
+            ui_port: 0,
+            name: "handoff-test-node".into(),
+            platform: "test".into(),
+            memory_clip: true,
+            memory_notifier: true,
+            loopback_only: true,
+            advertise: false,
+            reconnect: false,
+            overlay: OverlayConfig::default(),
+            ancs: None,
+            ancs_peripheral: "test".into(),
+            screen_source: None,
+            screen_codec: None,
+            screen_sink: None,
+            input_sink: None,
+        };
+        let clock = Arc::new(ManualClock::new(5000));
+        let node = Node::start_with_clock(cfg, clock).unwrap();
+        (node, dir)
+    }
+
+    #[test]
+    fn test_handoff_policy_defaults_and_mutation() {
+        use tetherly_core::HandoffAction;
+        let (node, dir) = temp_handoff_node("policy");
+        let report = node.handoff_policy_report();
+        assert!(report.ok);
+        assert_eq!(report.policy.action, HandoffAction::PromptOnly);
+        assert_eq!(report.policy.max_inbox_entries, 100);
+
+        let mut updated = report.policy.clone();
+        updated.action = HandoffAction::AutoOpen;
+        updated.allowed_groups = vec!["engineering".into()];
+        updated.allowed_tags = vec!["workstation".into()];
+        updated.max_inbox_entries = 50;
+
+        let res = node.set_handoff_policy(updated).unwrap();
+        assert!(res.ok);
+        assert_eq!(res.policy.action, HandoffAction::AutoOpen);
+        assert_eq!(res.policy.max_inbox_entries, 50);
+
+        // Check persisted on disk
+        let on_disk = crate::store::load_handoff_policy(&dir);
+        assert_eq!(on_disk.action, HandoffAction::AutoOpen);
+        assert_eq!(on_disk.allowed_groups, vec!["engineering".to_string()]);
+        assert_eq!(on_disk.max_inbox_entries, 50);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_handoff_receive_prompt_only_and_inbox_lifecycle() {
+        let (node, dir) = temp_handoff_node("inbox");
+        let peer = DeviceId::from_id_pk(&[9u8; 32]);
+
+        // 1. Receive valid URL with default PromptOnly policy
+        let frame = ResourceHandoffFrame {
+            id: "ho_test_1".to_string(),
+            url: "https://example.com/docs/api?q=rust".to_string(),
+            title: "API Docs".to_string(),
+            auto_open_requested: false,
+            timestamp_ms: 5000,
+        };
+        node.receive_resource_handoff(&peer, frame);
+
+        // 2. Query inbox
+        let list = node.handoff_inbox_list(None);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "ho_test_1");
+        assert_eq!(list[0].url, "https://example.com/docs/api?q=rust");
+        assert_eq!(list[0].title, "API Docs");
+        assert_eq!(list[0].status, HandoffStatus::Pending);
+        assert!(list[0].opened_ms.is_none());
+
+        // 3. Open entry
+        let opened = node.handoff_inbox_open("ho_test_1").unwrap();
+        assert_eq!(opened.status, HandoffStatus::Opened);
+        assert!(opened.opened_ms.is_some());
+
+        // 4. Dismiss entry
+        let dismissed = node.handoff_inbox_dismiss("ho_test_1").unwrap();
+        assert_eq!(dismissed.status, HandoffStatus::Dismissed);
+
+        // 5. Clear inbox
+        let cleared = node.handoff_inbox_clear().unwrap();
+        assert_eq!(cleared, 1);
+        assert_eq!(node.handoff_inbox_list(None).len(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_handoff_receive_firewall_rejects_malicious_urls() {
+        let (node, dir) = temp_handoff_node("reject");
+        let peer = DeviceId::from_id_pk(&[9u8; 32]);
+
+        // Attempt to hand off file:// URL
+        let file_frame = ResourceHandoffFrame {
+            id: "ho_malicious_1".to_string(),
+            url: "file:///etc/shadow".to_string(),
+            title: "passwd".to_string(),
+            auto_open_requested: true,
+            timestamp_ms: 5000,
+        };
+        node.receive_resource_handoff(&peer, file_frame);
+        assert_eq!(node.handoff_inbox_list(None).len(), 0);
+
+        // Attempt to hand off javascript:
+        let js_frame = ResourceHandoffFrame {
+            id: "ho_malicious_2".to_string(),
+            url: "javascript:alert(1)".to_string(),
+            title: "pwn".to_string(),
+            auto_open_requested: true,
+            timestamp_ms: 5000,
+        };
+        node.receive_resource_handoff(&peer, js_frame);
+        assert_eq!(node.handoff_inbox_list(None).len(), 0);
+
+        // Attempt to hand off metadata IP
+        let meta_frame = ResourceHandoffFrame {
+            id: "ho_malicious_3".to_string(),
+            url: "http://169.254.169.254/latest/meta-data/".to_string(),
+            title: "aws".to_string(),
+            auto_open_requested: true,
+            timestamp_ms: 5000,
+        };
+        node.receive_resource_handoff(&peer, meta_frame);
+        assert_eq!(node.handoff_inbox_list(None).len(), 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

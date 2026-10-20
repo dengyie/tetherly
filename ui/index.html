@@ -270,6 +270,107 @@
         <div id="cliphistorylist" style="font-size:11px;font-family:ui-monospace, Consolas, monospace;display:flex;flex-direction:column;gap:4px"></div>
       </div>
     </section>
+    <section style="margin-top:16px" id="resource-handoff-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">跨端安全资源与网址流转 (Resource & URL Handoff)</h2>
+        <div style="display:flex;gap:6px">
+          <button id="togglehandoffpolicybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">准入策略</button>
+          <button id="refreshhandoffbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新收件箱</button>
+          <button id="clearhandoffbtn" class="bad ghost" type="button" style="padding:2px 8px;font-size:12px">清空收件箱</button>
+        </div>
+      </div>
+      <div class="hint">安全校验与跨端流转 Web 链接/受控 Scheme（Fail-Closed 过滤高危协议与注入），支持准入策略控制与受控打开。</div>
+      <div id="handoff-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div style="font-size:12px;font-weight:600;color:var(--text)">流转准入策略控制 (Ingress Handoff Policy)</div>
+          <span id="handoff-policy-badge" class="badge outbound" style="font-size:11px">prompt_only</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">准入模式 (Action Mode):</label>
+            <select id="handoff-policy-action" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="prompt_only">prompt_only (仅提示/入收件箱，默认安全态)</option>
+              <option value="auto_open">auto_open (白名单内设备自动打开)</option>
+              <option value="save_only">save_only (仅静默存储入收件箱)</option>
+              <option value="disabled">disabled (完全拒绝接收流转)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许自动打开分组 (Allowed Groups):</label>
+            <input id="handoff-policy-groups" placeholder="如: office, dev (逗号分隔，留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许自动打开标签 (Allowed Tags):</label>
+            <input id="handoff-policy-tags" placeholder="如: trusted-phone (逗号分隔，留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许自动打开形态 (Allowed Types):</label>
+            <input id="handoff-policy-types" placeholder="如: phone, tablet (逗号分隔，留空不限)" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">收件箱容量上限 (Max Inbox Entries):</label>
+            <input id="handoff-policy-max-entries" type="number" placeholder="默认 100" style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+          <div style="display:flex;gap:8px">
+            <button id="handoff-policy-save-btn" type="button" style="padding:4px 12px;font-size:12px;background:#1f6feb;border:none;color:#fff;border-radius:4px;cursor:pointer">保存准入策略</button>
+            <button id="handoff-policy-clear-btn" class="ghost" type="button" style="padding:4px 10px;font-size:12px;cursor:pointer">清空过滤器</button>
+          </div>
+          <div id="handoff-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+      <div style="margin-top:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+          <label style="font-size:12px;color:var(--muted)">目标模式:
+            <select id="handoff-target-mode" style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="peer">单个节点</option>
+              <option value="group">按分组 (Group)</option>
+              <option value="tag">按标签 (Tag)</option>
+              <option value="type">按形态 (Type)</option>
+              <option value="all">全网在线节点 (All)</option>
+            </select>
+          </label>
+          <div id="handoff-peer-wrap">
+            <label style="font-size:12px;color:var(--muted)">目标节点:
+              <select id="handoff-target-peer" style="margin-left:4px;padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="">(选择目标节点)</option>
+              </select>
+            </label>
+          </div>
+          <div id="handoff-target-input-wrap" style="display:none">
+            <input id="handoff-target-val" placeholder="输入分组/标签/形态…" style="padding:2px 6px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px">
+            <input type="checkbox" id="handoff-auto-open-req" checked> 请求对端自动打开
+          </label>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:6px">
+          <input id="handoff-url-input" type="text" placeholder="输入流转网址或受控 Scheme (如 https://example.com/docs)…" style="flex:2;padding:6px 10px;font-size:12px;background:var(--card-bg);color:var(--text);border:1px solid var(--line);border-radius:4px" required/>
+          <input id="handoff-title-input" type="text" placeholder="可选标题/页面描述…" style="flex:1;padding:6px 10px;font-size:12px;background:var(--card-bg);color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          <button id="handoff-send-btn" class="primary" type="button" style="padding:6px 14px;font-size:12px;cursor:pointer">发送流转</button>
+        </div>
+        <div id="handoff-send-status" class="hint" style="font-size:11px"></div>
+      </div>
+      <div style="margin-top:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <div style="font-size:12px;color:var(--muted)">流转收件箱 (Handoff Inbox)：</div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select id="handoff-inbox-filter-status" style="padding:1px 6px;font-size:11px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="">全部状态</option>
+              <option value="pending">待处理 (Pending)</option>
+              <option value="opened">已打开 (Opened)</option>
+              <option value="dismissed">已忽略 (Dismissed)</option>
+            </select>
+            <span id="handoff-inbox-stat-badge" class="badge outbound" style="font-size:11px">共 0 条</span>
+          </div>
+        </div>
+        <div id="handoff-inbox-list" style="max-height:280px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:6px;background:var(--bg);display:flex;flex-direction:column;gap:6px">
+          <div class="empty">流转收件箱为空</div>
+        </div>
+        <div id="handoff-inbox-msg" class="hint" style="margin-top:4px"></div>
+      </div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
@@ -1114,6 +1215,11 @@ function render(s) {
   if (mp) {
     mp.innerHTML = '<option value="">(自动选择首个在线节点)</option>';
   }
+  const hp = $("handoff-target-peer");
+  const prevHandoffPeer = hp ? hp.value : "";
+  if (hp) {
+    hp.innerHTML = '<option value="">(选择目标节点)</option>';
+  }
   for (const x of s.peers) {
     let rttBadge = '<span class="badge offline" style="margin-left:6px">RTT 未测</span>';
     if (x.rtt_ms != null) {
@@ -1216,6 +1322,13 @@ function render(s) {
       opt.textContent = displayName + " (" + (x.path || "lan") + ")";
       if (opt.value === prevMsgPeer) opt.selected = true;
       mp.appendChild(opt);
+    }
+    if (hp) {
+      const opt = document.createElement("option");
+      opt.value = x.device_id;
+      opt.textContent = displayName + " (" + (x.path || "lan") + ")";
+      if (opt.value === prevHandoffPeer) opt.selected = true;
+      hp.appendChild(opt);
     }
   }
   const tr = $("trusted");
@@ -1951,6 +2064,292 @@ async function updateClipboardPolicy() {
     }
   } catch (e) {}
 }
+
+let currentHandoffInboxFilter = "";
+
+async function updateHandoffPolicy() {
+  try {
+    const rep = await api("/api/handoff/policy");
+    if (rep && rep.ok && rep.policy) {
+      const p = rep.policy;
+      if ($("handoff-policy-action") && document.activeElement !== $("handoff-policy-action")) {
+        $("handoff-policy-action").value = p.action || "prompt_only";
+      }
+      if ($("handoff-policy-badge")) {
+        $("handoff-policy-badge").textContent = p.action || "prompt_only";
+      }
+      if ($("handoff-policy-groups") && document.activeElement !== $("handoff-policy-groups")) {
+        $("handoff-policy-groups").value = (p.allowed_groups || []).join(", ");
+      }
+      if ($("handoff-policy-tags") && document.activeElement !== $("handoff-policy-tags")) {
+        $("handoff-policy-tags").value = (p.allowed_tags || []).join(", ");
+      }
+      if ($("handoff-policy-types") && document.activeElement !== $("handoff-policy-types")) {
+        $("handoff-policy-types").value = (p.allowed_types || []).join(", ");
+      }
+      if ($("handoff-policy-max-entries") && document.activeElement !== $("handoff-policy-max-entries")) {
+        $("handoff-policy-max-entries").value = p.max_inbox_entries || 100;
+      }
+    }
+  } catch (e) {}
+}
+
+async function updateHandoffInbox() {
+  const box = $("handoff-inbox-list");
+  const badge = $("handoff-inbox-stat-badge");
+  if (!box) return;
+  try {
+    let url = "/api/handoff/inbox";
+    if (currentHandoffInboxFilter) {
+      url += "?status=" + encodeURIComponent(currentHandoffInboxFilter);
+    }
+    const rep = await api(url);
+    if (!rep || !rep.ok) return;
+    const entries = rep.entries || [];
+    if (badge) {
+      badge.textContent = "共 " + (rep.total != null ? rep.total : entries.length) + " 条";
+    }
+    if (!entries.length) {
+      box.innerHTML = '<div class="empty">流转收件箱为空</div>';
+      return;
+    }
+    box.innerHTML = "";
+    for (const item of entries) {
+      let stBadge = '<span class="badge outbound" style="font-size:10px">待处理</span>';
+      if (item.status === "opened") {
+        stBadge = '<span class="badge completed" style="font-size:10px">已打开</span>';
+      } else if (item.status === "dismissed") {
+        stBadge = '<span class="badge offline" style="font-size:10px">已忽略</span>';
+      } else if (item.status === "rejected") {
+        stBadge = '<span class="badge bad" style="font-size:10px">已拒绝</span>';
+      }
+      const timeStr = item.received_ms ? new Date(item.received_ms).toLocaleTimeString() : "";
+      const card = el(
+        '<div class="card" style="padding:6px 10px;margin:0;font-size:12px">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div class="title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+              stBadge +
+              '<span style="font-weight:600">' + escapeHtml(item.title || item.url) + '</span>' +
+              '<span style="color:var(--muted);font-size:11px">来自: ' + escapeHtml(item.sender_alias || item.sender_id) + '</span>' +
+              '<span style="color:var(--muted);font-size:10px">' + timeStr + '</span>' +
+            '</div>' +
+            '<div class="meta" style="font-family:ui-monospace, Consolas, monospace;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(item.url) + '">' +
+              escapeHtml(item.url) +
+            '</div>' +
+          '</div>' +
+          '<div class="row" style="margin-left:8px;flex-shrink:0;gap:4px">' +
+            '<button class="ghost open-btn" type="button" style="padding:2px 8px;font-size:11px">打开</button>' +
+            '<button class="bad ghost dismiss-btn" type="button" style="padding:2px 8px;font-size:11px">忽略</button>' +
+          '</div>' +
+        '</div>'
+      );
+      const openBtn = card.querySelector(".open-btn");
+      if (openBtn) {
+        if (item.status === "opened") {
+          openBtn.textContent = "再次打开";
+        }
+        openBtn.onclick = async () => {
+          const msg = $("handoff-inbox-msg");
+          if (msg) msg.textContent = "正在调用系统默认程序打开…";
+          try {
+            const res = await api("/api/handoff/inbox/open", { id: item.id });
+            if (res && res.ok) {
+              if (msg) msg.textContent = "已打开: " + (res.url || item.url);
+              setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+              updateHandoffInbox();
+            } else {
+              if (msg) msg.textContent = "打开失败: " + (res && res.error ? res.error : "未知错误");
+            }
+          } catch (e) {
+            if (msg) msg.textContent = "请求异常: " + e;
+          }
+        };
+      }
+      const disBtn = card.querySelector(".dismiss-btn");
+      if (disBtn) {
+        if (item.status === "dismissed") {
+          disBtn.style.display = "none";
+        }
+        disBtn.onclick = async () => {
+          try {
+            const res = await api("/api/handoff/inbox/dismiss", { id: item.id });
+            if (res && res.ok) {
+              updateHandoffInbox();
+            }
+          } catch (e) {}
+        };
+      }
+      box.appendChild(card);
+    }
+  } catch (e) {}
+}
+
+const toggleHandoffPolicyBtn = $("togglehandoffpolicybtn");
+if (toggleHandoffPolicyBtn) {
+  toggleHandoffPolicyBtn.onclick = () => {
+    const p = $("handoff-policy-panel");
+    if (p) p.style.display = (p.style.display === "none" || !p.style.display) ? "block" : "none";
+  };
+}
+
+const handoffTargetMode = $("handoff-target-mode");
+if (handoffTargetMode) {
+  handoffTargetMode.onchange = () => {
+    const mode = handoffTargetMode.value;
+    const peerWrap = $("handoff-peer-wrap");
+    const inputWrap = $("handoff-target-input-wrap");
+    const targetInput = $("handoff-target-val");
+    if (mode === "peer") {
+      if (peerWrap) peerWrap.style.display = "";
+      if (inputWrap) inputWrap.style.display = "none";
+    } else if (mode === "all") {
+      if (peerWrap) peerWrap.style.display = "none";
+      if (inputWrap) inputWrap.style.display = "none";
+    } else {
+      if (peerWrap) peerWrap.style.display = "none";
+      if (inputWrap) inputWrap.style.display = "";
+      if (targetInput) {
+        targetInput.placeholder = "输入目标" + (mode === "group" ? "分组名" : (mode === "tag" ? "标签名" : "设备形态")) + "…";
+      }
+    }
+  };
+}
+
+const sendHandoffBtn = $("handoff-send-btn");
+if (sendHandoffBtn) {
+  sendHandoffBtn.onclick = async () => {
+    const urlInput = $("handoff-url-input");
+    const titleInput = $("handoff-title-input");
+    const autoOpenReq = $("handoff-auto-open-req") ? $("handoff-auto-open-req").checked : true;
+    const mode = $("handoff-target-mode") ? $("handoff-target-mode").value : "peer";
+    const targetPeer = $("handoff-target-peer") ? $("handoff-target-peer").value : "";
+    const targetVal = $("handoff-target-val") ? $("handoff-target-val").value.trim() : "";
+    const stat = $("handoff-send-status");
+    if (!urlInput || !urlInput.value.trim()) return;
+    const url = urlInput.value.trim();
+    const title = titleInput ? titleInput.value.trim() : "";
+    if (stat) stat.textContent = "正在校验并流转资源/网址…";
+    const payload = {
+      url,
+      title: title || undefined,
+      auto_open: autoOpenReq,
+    };
+    if (mode === "peer") {
+      if (targetPeer) payload.peer = targetPeer;
+    } else if (mode === "all") {
+      payload.all = true;
+    } else if (mode === "group") {
+      payload.group = targetVal;
+    } else if (mode === "tag") {
+      payload.tag = targetVal;
+    } else if (mode === "type") {
+      payload.type = targetVal;
+    }
+    try {
+      const res = await api("/api/handoff/send", payload);
+      if (res && res.ok) {
+        urlInput.value = "";
+        if (titleInput) titleInput.value = "";
+        if (stat) {
+          if (res.target_count != null) {
+            stat.textContent = "已扇出流转 [" + res.selector + "]: " + res.success_count + "/" + res.target_count + " 成功";
+          } else {
+            stat.textContent = "已流转至对端 " + (res.peer_alias || res.peer || "");
+          }
+          setTimeout(() => { if (stat) stat.textContent = ""; }, 4000);
+        }
+      } else {
+        if (stat) stat.textContent = "流转失败: " + (res && res.error ? res.error : "未知错误");
+      }
+    } catch (err) {
+      if (stat) stat.textContent = "流转请求异常: " + err;
+    }
+  };
+}
+
+const saveHandoffPolicyBtn = $("handoff-policy-save-btn");
+if (saveHandoffPolicyBtn) {
+  saveHandoffPolicyBtn.onclick = async () => {
+    const action = $("handoff-policy-action") ? $("handoff-policy-action").value : "prompt_only";
+    const groups = $("handoff-policy-groups") ? $("handoff-policy-groups").value.split(",").map(s => s.trim()).filter(Boolean) : [];
+    const tags = $("handoff-policy-tags") ? $("handoff-policy-tags").value.split(",").map(s => s.trim()).filter(Boolean) : [];
+    const types = $("handoff-policy-types") ? $("handoff-policy-types").value.split(",").map(s => s.trim()).filter(Boolean) : [];
+    const maxEntries = $("handoff-policy-max-entries") ? parseInt($("handoff-policy-max-entries").value, 10) : 100;
+    const msg = $("handoff-policy-msg");
+    if (msg) msg.textContent = "正在保存准入策略…";
+    try {
+      const res = await api("/api/handoff/policy", {
+        action,
+        allowed_groups: groups,
+        allowed_tags: tags,
+        allowed_types: types,
+        max_inbox_entries: isNaN(maxEntries) ? 100 : maxEntries,
+      });
+      if (res && res.ok) {
+        if (msg) msg.textContent = "策略已更新";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateHandoffPolicy();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (res && res.error ? res.error : "未知错误");
+      }
+    } catch (err) {
+      if (msg) msg.textContent = "保存异常: " + err;
+    }
+  };
+}
+
+const clearHandoffPolicyBtn = $("handoff-policy-clear-btn");
+if (clearHandoffPolicyBtn) {
+  clearHandoffPolicyBtn.onclick = async () => {
+    const msg = $("handoff-policy-msg");
+    try {
+      const res = await api("/api/handoff/policy", { clear_filters: true });
+      if (res && res.ok) {
+        if (msg) msg.textContent = "准入过滤器已清空";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateHandoffPolicy();
+      }
+    } catch (e) {}
+  };
+}
+
+const clearHandoffBtn = $("clearhandoffbtn");
+if (clearHandoffBtn) {
+  clearHandoffBtn.onclick = async () => {
+    if (!confirm("确定清空流转收件箱中的全部条目吗？")) return;
+    const msg = $("handoff-inbox-msg");
+    if (msg) msg.textContent = "正在清空流转收件箱…";
+    try {
+      const res = await fetch("/api/handoff/inbox/clear", { method: "POST" }).then(r => r.json());
+      if (res && res.ok) {
+        if (msg) msg.textContent = "已清空 " + res.cleared + " 条流转记录";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateHandoffInbox();
+      } else {
+        if (msg) msg.textContent = "清空失败";
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "清空异常: " + e;
+    }
+  };
+}
+
+const handoffInboxFilter = $("handoff-inbox-filter-status");
+if (handoffInboxFilter) {
+  handoffInboxFilter.onchange = () => {
+    currentHandoffInboxFilter = handoffInboxFilter.value;
+    updateHandoffInbox();
+  };
+}
+
+const refreshHandoffBtn = $("refreshhandoffbtn");
+if (refreshHandoffBtn) {
+  refreshHandoffBtn.onclick = () => {
+    updateHandoffInbox();
+    updateHandoffPolicy();
+  };
+}
+
 async function updateStorage() {
   try {
     const s = await api("/api/storage");
@@ -3651,10 +4050,25 @@ function setupEventSource() {
 				            desc = "剪贴板阻断: 拦截 " + ev.reason + " (" + formatBytes(ev.bytes) + ", sha256:" + shortHash + ")";
 				            updateClipboardPolicy();
 				          }
-					          else if (ev.kind === "clipboard_cleared") {
-					            desc = "剪贴板已清空";
-					            updateClipboard();
-					          }
+						          else if (ev.kind === "clipboard_cleared") {
+						            desc = "剪贴板已清空";
+						            updateClipboard();
+						          }
+						          else if (ev.kind === "resource_handoff_received") {
+						            desc = "收到资源流转: " + (ev.title || ev.host) + " 来自 " + ev.sender_alias + (ev.auto_opened ? " [已自动打开]" : "");
+						            updateHandoffInbox();
+						          }
+						          else if (ev.kind === "resource_handoff_dispatched") {
+						            desc = "资源流转已派发: " + ev.host + " (" + ev.success_count + "/" + ev.target_count + " 成功)";
+						          }
+						          else if (ev.kind === "handoff_policy_changed") {
+						            desc = "流转准入策略更新: " + ev.action;
+						            updateHandoffPolicy();
+						          }
+						          else if (ev.kind === "handoff_inbox_updated") {
+						            desc = "流转收件箱变更: 共 " + ev.total_entries + " 条 (待处理 " + ev.pending_count + " 条)";
+						            updateHandoffInbox();
+						          }
 					          else if (ev.kind === "screen_state_changed") {
 					            desc = "屏幕状态: " + ev.state + " (授权:" + (ev.allowed ? "是" : "否") + ")" + (ev.peer ? (" · 对端:" + ev.peer) : "");
 					            updateScreenStatus();
@@ -3804,8 +4218,12 @@ function setupEventSource() {
 											setInterval(updateAuditLogs, 3000);
 											updateMessageHistory();
 											setInterval(updateMessageHistory, 3000);
-											updateProfiles();
-											setInterval(updateProfiles, 3000);
+												updateProfiles();
+												setInterval(updateProfiles, 3000);
+												updateHandoffInbox();
+												setInterval(updateHandoffInbox, 3000);
+												updateHandoffPolicy();
+												setInterval(updateHandoffPolicy, 3000);
 			</script>
 </body>
 </html>

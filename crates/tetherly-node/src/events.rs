@@ -300,6 +300,38 @@ pub enum UiEvent {
         hash: String,
         timestamp_ms: u64,
     },
+    ResourceHandoffReceived {
+        id: String,
+        sender_id: String,
+        sender_alias: String,
+        host: String,
+        title: String,
+        status: String,
+        auto_opened: bool,
+        timestamp_ms: u64,
+    },
+    ResourceHandoffDispatched {
+        id: String,
+        target_count: usize,
+        success_count: usize,
+        host: String,
+        timestamp_ms: u64,
+    },
+    HandoffPolicyChanged {
+        action: String,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        max_inbox_entries: usize,
+        timestamp_ms: u64,
+    },
+    HandoffInboxUpdated {
+        action: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        count: usize,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -374,6 +406,77 @@ impl UiEvent {
             reason: reason.into(),
             bytes,
             hash: hash.into(),
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn resource_handoff_received(
+        id: impl Into<String>,
+        sender_id: impl Into<String>,
+        sender_alias: impl Into<String>,
+        host: impl Into<String>,
+        title: impl Into<String>,
+        status: impl Into<String>,
+        auto_opened: bool,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::ResourceHandoffReceived {
+            id: id.into(),
+            sender_id: sender_id.into(),
+            sender_alias: sender_alias.into(),
+            host: host.into(),
+            title: title.into(),
+            status: status.into(),
+            auto_opened,
+            timestamp_ms,
+        }
+    }
+
+    pub fn resource_handoff_dispatched(
+        id: impl Into<String>,
+        target_count: usize,
+        success_count: usize,
+        host: impl Into<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::ResourceHandoffDispatched {
+            id: id.into(),
+            target_count,
+            success_count,
+            host: host.into(),
+            timestamp_ms,
+        }
+    }
+
+    pub fn handoff_policy_changed(
+        action: impl Into<String>,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        max_inbox_entries: usize,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::HandoffPolicyChanged {
+            action: action.into(),
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            max_inbox_entries,
+            timestamp_ms,
+        }
+    }
+
+    pub fn handoff_inbox_updated(
+        action: impl Into<String>,
+        id: Option<impl Into<String>>,
+        count: usize,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::HandoffInboxUpdated {
+            action: action.into(),
+            id: id.map(Into::into),
+            count,
             timestamp_ms,
         }
     }
@@ -801,5 +904,45 @@ mod tests {
         // Confirm no plaintext leaked
         assert!(!json2.contains("BEGIN"));
         assert!(!json2.contains("PRIVATE"));
+    }
+
+    #[test]
+    fn test_resource_handoff_events_serialization_and_zero_plaintext() {
+        let ev1 = UiEvent::resource_handoff_received(
+            "ho_123",
+            "peer_dev_1",
+            "MacBook",
+            "github.com",
+            "Rust PR #1234",
+            "pending",
+            false,
+            123456791,
+        );
+        let json1 = serde_json::to_string(&ev1).unwrap();
+        assert!(json1.contains("\"kind\":\"resource_handoff_received\""));
+        assert!(json1.contains("\"id\":\"ho_123\""));
+        assert!(json1.contains("\"host\":\"github.com\""));
+        assert!(json1.contains("\"auto_opened\":false"));
+        // Assert no URL path or parameters leaked in event
+        assert!(!json1.contains("token="));
+
+        let ev2 = UiEvent::resource_handoff_dispatched("ho_123", 3, 2, "example.com", 123456792);
+        let json2 = serde_json::to_string(&ev2).unwrap();
+        assert!(json2.contains("\"kind\":\"resource_handoff_dispatched\""));
+        assert!(json2.contains("\"target_count\":3"));
+        assert!(json2.contains("\"success_count\":2"));
+
+        let ev3 = UiEvent::handoff_policy_changed(
+            "auto_open",
+            vec!["office".into()],
+            vec!["trusted".into()],
+            vec!["phone".into()],
+            100,
+            123456793,
+        );
+        let json3 = serde_json::to_string(&ev3).unwrap();
+        assert!(json3.contains("\"kind\":\"handoff_policy_changed\""));
+        assert!(json3.contains("\"action\":\"auto_open\""));
+        assert!(json3.contains("\"allowed_groups\":[\"office\"]"));
     }
 }
