@@ -33,6 +33,8 @@ pub const TYPE_RESOURCE_HANDOFF: u16 = 0x0203;
 pub const TYPE_MEDIA_COMMAND: u16 = 0x0204;
 pub const TYPE_MEDIA_STATE: u16 = 0x0205;
 pub const TYPE_BATTERY_STATE: u16 = 0x0206;
+pub const TYPE_LOCATE_REQUEST: u16 = 0x0207;
+pub const TYPE_LOCATE_STOP: u16 = 0x0208;
 pub const TYPE_FILE_OFFER: u16 = 0x0301;
 pub const TYPE_FILE_ACCEPT: u16 = 0x0302;
 pub const TYPE_FILE_REJECT: u16 = 0x0303;
@@ -118,6 +120,8 @@ pub fn is_known_type(ty: u16) -> bool {
             | TYPE_MEDIA_COMMAND
             | TYPE_MEDIA_STATE
             | TYPE_BATTERY_STATE
+            | TYPE_LOCATE_REQUEST
+            | TYPE_LOCATE_STOP
             | TYPE_FILE_OFFER
             | TYPE_FILE_ACCEPT
             | TYPE_FILE_REJECT

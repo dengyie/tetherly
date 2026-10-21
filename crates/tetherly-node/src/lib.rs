@@ -59,11 +59,12 @@ pub use screen::MacSource;
 pub use screen::X11Source;
 pub use sidecar::{parse_overlay_cidrs, OverlayConfig, OverlaySource, OverlayStatus};
 pub use store::{
-    default_data_dir, load_auto_accept_policy, load_clipboard_policy, load_profiles,
-    save_auto_accept_policy, save_clipboard_policy, save_profiles, AutoAcceptPolicy, BlockedPeer,
-    BlockedTable, ClipboardPolicy, DeviceType, PeerProfile, ProfileTable, TargetSelector,
-    AUTO_ACCEPT_FILE, BLOCKED_FILE, CLIPBOARD_POLICY_FILE, DEFAULT_MAX_CLIP_AUTO_SYNC_BYTES,
-    PROFILES_FILE,
+    default_data_dir, load_auto_accept_policy, load_battery_policy, load_clipboard_policy,
+    load_locator_policy, load_profiles, save_auto_accept_policy, save_battery_policy,
+    save_clipboard_policy, save_locator_policy, save_profiles, AutoAcceptPolicy, BatteryPolicy,
+    BlockedPeer, BlockedTable, ClipboardPolicy, DeviceType, LocatorPolicy, PeerProfile,
+    ProfileTable, TargetSelector, AUTO_ACCEPT_FILE, BATTERY_POLICY_FILE, BLOCKED_FILE,
+    CLIPBOARD_POLICY_FILE, DEFAULT_MAX_CLIP_AUTO_SYNC_BYTES, LOCATOR_POLICY_FILE, PROFILES_FILE,
 };
 pub use uihttp::{
     loopback_delete, loopback_events_connect, loopback_get, loopback_post, loopback_put, SseStream,

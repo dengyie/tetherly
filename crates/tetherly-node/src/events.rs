@@ -396,6 +396,34 @@ pub enum UiEvent {
         allowed_types: Vec<String>,
         timestamp_ms: u64,
     },
+    LocateRingTriggered {
+        request_id: String,
+        peer_id: String,
+        peer_alias: String,
+        duration_secs: u32,
+        pattern: String,
+        override_silent: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        timestamp_ms: u64,
+    },
+    LocateRingStopped {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        peer_id: String,
+        peer_alias: String,
+        reason: String,
+        timestamp_ms: u64,
+    },
+    LocatePolicyChanged {
+        enabled: bool,
+        allow_override_silent: bool,
+        max_duration_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -679,6 +707,65 @@ impl UiEvent {
             critical_battery_threshold,
             alert_on_low_battery,
             auto_throttle_on_battery_saver,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn locate_ring_triggered(
+        request_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        duration_secs: u32,
+        pattern: impl Into<String>,
+        override_silent: bool,
+        message: Option<impl Into<String>>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::LocateRingTriggered {
+            request_id: request_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            duration_secs,
+            pattern: pattern.into(),
+            override_silent,
+            message: message.map(Into::into),
+            timestamp_ms,
+        }
+    }
+
+    pub fn locate_ring_stopped(
+        request_id: Option<impl Into<String>>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        reason: impl Into<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::LocateRingStopped {
+            request_id: request_id.map(Into::into),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            reason: reason.into(),
+            timestamp_ms,
+        }
+    }
+
+    pub fn locate_policy_changed(
+        enabled: bool,
+        allow_override_silent: bool,
+        max_duration_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::LocatePolicyChanged {
+            enabled,
+            allow_override_silent,
+            max_duration_secs,
             allowed_groups,
             allowed_tags,
             allowed_types,
@@ -1193,5 +1280,56 @@ mod tests {
         assert!(json3.contains("\"low_battery_threshold\":20"));
         assert!(json3.contains("\"critical_battery_threshold\":10"));
         assert!(json3.contains("\"alert_on_low_battery\":true"));
+    }
+
+    #[test]
+    fn test_locate_events_serialization() {
+        let ev1 = UiEvent::locate_ring_triggered(
+            "req_loc_1",
+            "peer_phone",
+            "My Pixel",
+            20,
+            "siren",
+            true,
+            Some("Where is my phone?"),
+            123456797,
+        );
+        let json1 = serde_json::to_string(&ev1).unwrap();
+        assert!(json1.contains("\"kind\":\"locate_ring_triggered\""));
+        assert!(json1.contains("\"request_id\":\"req_loc_1\""));
+        assert!(json1.contains("\"peer_id\":\"peer_phone\""));
+        assert!(json1.contains("\"peer_alias\":\"My Pixel\""));
+        assert!(json1.contains("\"duration_secs\":20"));
+        assert!(json1.contains("\"pattern\":\"siren\""));
+        assert!(json1.contains("\"override_silent\":true"));
+        assert!(json1.contains("\"message\":\"Where is my phone?\""));
+
+        let ev2 = UiEvent::locate_ring_stopped(
+            Some("req_loc_1"),
+            "peer_phone",
+            "My Pixel",
+            "found_device",
+            123456798,
+        );
+        let json2 = serde_json::to_string(&ev2).unwrap();
+        assert!(json2.contains("\"kind\":\"locate_ring_stopped\""));
+        assert!(json2.contains("\"request_id\":\"req_loc_1\""));
+        assert!(json2.contains("\"reason\":\"found_device\""));
+
+        let ev3 = UiEvent::locate_policy_changed(
+            true,
+            false,
+            45,
+            vec!["family".into()],
+            vec!["trusted".into()],
+            vec!["phone".into()],
+            123456799,
+        );
+        let json3 = serde_json::to_string(&ev3).unwrap();
+        assert!(json3.contains("\"kind\":\"locate_policy_changed\""));
+        assert!(json3.contains("\"enabled\":true"));
+        assert!(json3.contains("\"allow_override_silent\":false"));
+        assert!(json3.contains("\"max_duration_secs\":45"));
+        assert!(json3.contains("\"allowed_groups\":[\"family\"]"));
     }
 }

@@ -24,6 +24,7 @@ pub const HANDOFF_POLICY_FILE: &str = "handoff_policy.json";
 pub const HANDOFF_INBOX_FILE: &str = "handoff_inbox.json";
 pub const MEDIA_POLICY_FILE: &str = "media_policy.json";
 pub const BATTERY_POLICY_FILE: &str = "battery_policy.json";
+pub const LOCATOR_POLICY_FILE: &str = "locator_policy.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -954,6 +955,95 @@ pub fn save_battery_policy(dir: &Path, policy: &BatteryPolicy) -> Result<(), Nod
     Ok(())
 }
 
+fn default_locator_max_duration() -> u32 {
+    60
+}
+
+/// Node policy governing cross-device device locator and acoustic ringing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocatorPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub allow_override_silent: bool,
+    #[serde(default = "default_locator_max_duration")]
+    pub max_duration_secs: u32,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+}
+
+impl Default for LocatorPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_override_silent: true,
+            max_duration_secs: 60,
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+        }
+    }
+}
+
+impl LocatorPolicy {
+    /// Checks whether an inbound locate/ring request is eligible based on peer profile.
+    pub fn is_peer_eligible(&self, profile: &PeerProfile) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        // If no filter is configured, all trusted peers are eligible
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        if let Some(group) = &profile.group {
+            if self.allowed_groups.iter().any(|g| g == group) {
+                return true;
+            }
+        }
+
+        if profile.tags.iter().any(|t| self.allowed_tags.contains(t)) {
+            return true;
+        }
+
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+
+    /// Sanitizes duration to valid limits (1..=60).
+    pub fn sanitize(&mut self) {
+        self.max_duration_secs = self.max_duration_secs.clamp(1, 60);
+    }
+}
+
+pub fn load_locator_policy(dir: &Path) -> LocatorPolicy {
+    let path = dir.join(LOCATOR_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_locator_policy(dir: &Path, policy: &LocatorPolicy) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(LOCATOR_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -1519,6 +1609,81 @@ mod tests {
         invalid.sanitize();
         assert_eq!(invalid.low_battery_threshold, 100);
         assert_eq!(invalid.critical_battery_threshold, 80);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn locator_policy_roundtrip_and_matching() {
+        let dir = std::env::temp_dir().join(format!("tetherly-loc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Defaults
+        let def = load_locator_policy(&dir);
+        assert!(def.enabled);
+        assert!(def.allow_override_silent);
+        assert_eq!(def.max_duration_secs, 60);
+
+        // 2. Custom policy persistence
+        let mut custom = LocatorPolicy {
+            enabled: true,
+            allow_override_silent: false,
+            max_duration_secs: 30,
+            allowed_groups: vec!["family".into()],
+            allowed_tags: vec!["phone".into()],
+            allowed_types: vec![DeviceType::Phone],
+        };
+        custom.sanitize();
+        save_locator_policy(&dir, &custom).unwrap();
+        let loaded = load_locator_policy(&dir);
+        assert_eq!(loaded, custom);
+
+        // 3. Matching
+        let prof_ok = PeerProfile {
+            device_id: "phone_1".into(),
+            device_type: DeviceType::Phone,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_ok));
+
+        let prof_group = PeerProfile {
+            device_id: "pc_1".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec![],
+            group: Some("family".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_group));
+
+        let prof_unmatched = PeerProfile {
+            device_id: "pc_2".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec!["work".into()],
+            group: Some("office".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded.is_peer_eligible(&prof_unmatched));
+
+        // 4. Disabled policy blocks all
+        let disabled = LocatorPolicy {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(!disabled.is_peer_eligible(&prof_ok));
+
+        // 5. Sanitize duration
+        let mut invalid = LocatorPolicy {
+            max_duration_secs: 120,
+            ..Default::default()
+        };
+        invalid.sanitize();
+        assert_eq!(invalid.max_duration_secs, 60);
 
         let _ = fs::remove_dir_all(&dir);
     }

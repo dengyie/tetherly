@@ -903,6 +903,48 @@ struct BatteryPolicyBody {
 }
 
 #[derive(serde::Deserialize, Default)]
+struct LocateRingBody {
+    #[serde(default, alias = "target")]
+    peer: Option<String>,
+    #[serde(default, alias = "duration")]
+    duration_secs: Option<u32>,
+    #[serde(default)]
+    pattern: Option<String>,
+    #[serde(default)]
+    override_silent: Option<bool>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct LocateStopBody {
+    #[serde(default, alias = "target")]
+    peer: Option<String>,
+    #[serde(default, alias = "id")]
+    request_id: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct LocatePolicyBody {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    allow_override_silent: Option<bool>,
+    #[serde(default, alias = "max_duration")]
+    max_duration_secs: Option<u32>,
+    #[serde(default)]
+    allowed_groups: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_tags: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_types: Option<Vec<String>>,
+    #[serde(default)]
+    clear_filters: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
 struct AuditQueryBody {
     #[serde(default)]
     category: Option<String>,
@@ -4576,6 +4618,229 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 Err(e) => err(400, &e.to_string()),
             }
         }
+        ("GET", "/api/locate/status")
+        | ("GET", "/api/locate/state")
+        | ("GET", "/api/find/status")
+        | ("GET", "/api/find/state") => json_ok(&node.locate_status()),
+        ("POST", "/api/locate/ring")
+        | ("PUT", "/api/locate/ring")
+        | ("POST", "/api/find/ring")
+        | ("PUT", "/api/find/ring") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<LocateRingBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<LocateRingBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected LocateRingBody"),
+                }
+            };
+
+            let peer = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone())
+                .or_else(|| qmap.get("peer").cloned())
+                .or_else(|| qmap.get("target").cloned());
+
+            let Some(peer_target) = peer.filter(|p| !p.trim().is_empty()) else {
+                return err(400, "missing target peer (specify 'peer' or 'target')");
+            };
+
+            let duration_secs = parsed_body
+                .as_ref()
+                .and_then(|b| b.duration_secs)
+                .or_else(|| {
+                    qmap.get("duration")
+                        .or_else(|| qmap.get("duration_secs"))
+                        .and_then(|s| s.parse::<u32>().ok())
+                });
+
+            let pattern_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.pattern.as_deref())
+                .or_else(|| qmap.get("pattern").map(|s| s.as_str()));
+
+            let pattern = match pattern_str {
+                Some(p) => match p.parse::<tetherly_core::LocatePattern>() {
+                    Ok(pat) => Some(pat),
+                    Err(e) => return err(400, &format!("invalid locate pattern: {e}")),
+                },
+                None => None,
+            };
+
+            let override_silent = parsed_body
+                .as_ref()
+                .and_then(|b| b.override_silent)
+                .or_else(|| {
+                    qmap.get("override_silent")
+                        .or_else(|| qmap.get("override"))
+                        .and_then(|s| s.parse::<bool>().ok())
+                });
+
+            let message = parsed_body
+                .as_ref()
+                .and_then(|b| b.message.clone())
+                .or_else(|| qmap.get("message").cloned());
+
+            match node
+                .locate_ring(
+                    &peer_target,
+                    duration_secs,
+                    pattern,
+                    override_silent,
+                    message,
+                )
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/locate/stop")
+        | ("PUT", "/api/locate/stop")
+        | ("POST", "/api/find/stop")
+        | ("PUT", "/api/find/stop") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<LocateStopBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<LocateStopBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected LocateStopBody"),
+                }
+            };
+
+            let peer = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone())
+                .or_else(|| qmap.get("peer").cloned())
+                .or_else(|| qmap.get("target").cloned());
+
+            let request_id = parsed_body
+                .as_ref()
+                .and_then(|b| b.request_id.clone())
+                .or_else(|| qmap.get("id").cloned())
+                .or_else(|| qmap.get("request_id").cloned());
+
+            let reason = parsed_body
+                .as_ref()
+                .and_then(|b| b.reason.clone())
+                .or_else(|| qmap.get("reason").cloned());
+
+            match node.locate_stop(peer.as_deref(), request_id, reason).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/locate/policy") | ("GET", "/api/find/policy") => {
+            json_ok(&node.locator_policy_report())
+        }
+        ("POST", "/api/locate/policy")
+        | ("PUT", "/api/locate/policy")
+        | ("POST", "/api/find/policy")
+        | ("PUT", "/api/find/policy") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<LocatePolicyBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<LocatePolicyBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected LocatePolicyBody"),
+                }
+            };
+
+            let mut policy = node.locator_policy();
+
+            if let Some(ref b) = parsed_body {
+                if let Some(enabled) = b.enabled {
+                    policy.enabled = enabled;
+                }
+                if let Some(override_silent) = b.allow_override_silent {
+                    policy.allow_override_silent = override_silent;
+                }
+                if let Some(max_dur) = b.max_duration_secs {
+                    policy.max_duration_secs = max_dur.clamp(1, 60);
+                }
+                if let Some(ref grps) = b.allowed_groups {
+                    policy.allowed_groups = grps.clone();
+                }
+                if let Some(ref tags) = b.allowed_tags {
+                    policy.allowed_tags = tags.clone();
+                }
+                if let Some(ref types) = b.allowed_types {
+                    let mut dtypes = Vec::new();
+                    for t in types {
+                        match t.parse::<crate::store::DeviceType>() {
+                            Ok(dt) => dtypes.push(dt),
+                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
+                        }
+                    }
+                    policy.allowed_types = dtypes;
+                }
+                if b.clear_filters == Some(true) {
+                    policy.allowed_groups.clear();
+                    policy.allowed_tags.clear();
+                    policy.allowed_types.clear();
+                }
+            }
+
+            if let Some(en_str) = qmap.get("enabled") {
+                if let Ok(en) = en_str.parse::<bool>() {
+                    policy.enabled = en;
+                }
+            }
+            if let Some(ov_str) = qmap
+                .get("allow_override_silent")
+                .or_else(|| qmap.get("override_silent"))
+                .or_else(|| qmap.get("override"))
+            {
+                if let Ok(ov) = ov_str.parse::<bool>() {
+                    policy.allow_override_silent = ov;
+                }
+            }
+            if let Some(max_dur_str) = qmap
+                .get("max_duration_secs")
+                .or_else(|| qmap.get("max_duration"))
+            {
+                if let Ok(md) = max_dur_str.parse::<u32>() {
+                    policy.max_duration_secs = md.clamp(1, 60);
+                }
+            }
+            if let Some(g) = qmap.get("group") {
+                if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
+                    policy.allowed_groups.push(g.clone());
+                }
+            }
+            if let Some(t) = qmap.get("tag") {
+                if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
+                    policy.allowed_tags.push(t.clone());
+                }
+            }
+            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
+                match dt_str.parse::<crate::store::DeviceType>() {
+                    Ok(dt) => {
+                        if !policy.allowed_types.contains(&dt) {
+                            policy.allowed_types.push(dt);
+                        }
+                    }
+                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
+                }
+            }
+            if qmap
+                .get("clear_filters")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false)
+            {
+                policy.allowed_groups.clear();
+                policy.allowed_tags.clear();
+                policy.allowed_types.clear();
+            }
+
+            match node.set_locator_policy(policy) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         (_, "/api/events" | "/api/events/stream") => err(405, "method not allowed"),
         _ => UiResponse::new(404, "text/plain; charset=utf-8", b"not found".to_vec()),
     }
@@ -4934,6 +5199,83 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/battery/state HTTP/1.1\r\nHost: malicious.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_locate_endpoints_and_host_403() {
+        let (node, dir) = temp_test_node("locate_endpoints");
+        let port = bind_and_spawn(node.clone(), 0).await.unwrap();
+
+        // 1. GET /api/locate/policy
+        let (code, body) = loopback_get(port, "/api/locate/policy").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["enabled"], true);
+        assert_eq!(rep["policy"]["allow_override_silent"], true);
+        assert_eq!(rep["policy"]["max_duration_secs"], 60);
+
+        // 2. POST /api/locate/policy (update)
+        let update_req = serde_json::json!({
+            "allow_override_silent": false,
+            "max_duration_secs": 45,
+            "allowed_groups": ["security_desk"],
+            "allowed_tags": ["watch"]
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/locate/policy",
+            &serde_json::to_vec(&update_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["allow_override_silent"], false);
+        assert_eq!(rep["policy"]["max_duration_secs"], 45);
+        assert_eq!(
+            rep["policy"]["allowed_groups"],
+            serde_json::json!(["security_desk"])
+        );
+        assert_eq!(rep["policy"]["allowed_tags"], serde_json::json!(["watch"]));
+
+        // 3. GET /api/locate/status
+        let (code, body) = loopback_get(port, "/api/locate/status").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["is_ringing"], false);
+        assert!(rep["active_ring"].is_null());
+
+        // 4. POST /api/locate/stop (local stop when idle)
+        let stop_req = serde_json::json!({
+            "reason": "testing"
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/locate/stop",
+            &serde_json::to_vec(&stop_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+
+        // 5. Host header 403 test on /api/locate/status
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/locate/status HTTP/1.1\r\nHost: malicious-attacker.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();

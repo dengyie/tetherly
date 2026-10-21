@@ -19,6 +19,7 @@ pub mod hello;
 pub mod input;
 pub mod insertion;
 pub mod liveness;
+pub mod locate;
 pub mod media;
 pub mod notify;
 pub mod otp;
@@ -55,8 +56,8 @@ pub use frame::{
     IncrementalSha256, InnerFrame, NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame,
     TextMessage, CANDIDATE_TTL_MS, CLIPBOARD_OTP_CLEAR_MS, CLIP_TEXT_MAX, FILE_CHUNK,
     FILE_TOKEN_TTL_MS, HANDOFF_TITLE_MAX, HANDOFF_URL_MAX, NOTIFY_TEXT_MAX, TEXT_MESSAGE_MAX,
-    TYPE_BATTERY_STATE, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_PING, TYPE_PONG,
-    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
+    TYPE_BATTERY_STATE, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND,
+    TYPE_MEDIA_STATE, TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
 };
 pub use handoff::{
     HandoffAction, HandoffEntry, HandoffStatus, ResourceHandoffValidator, SanitizedHandoffUrl,
@@ -71,6 +72,10 @@ pub use input::{
 };
 pub use insertion::{plan as insertion_plan, InsertionDecision, InsertionPlan};
 pub use liveness::{Liveness, SESSION_HEARTBEAT, SESSION_LIVENESS_DEADLINE};
+pub use locate::{
+    LocatePattern, LocateRequestFrame, LocateStopFrame, LocateValidator,
+    DEFAULT_LOCATE_DURATION_SECS, MAX_LOCATE_DURATION_SECS, MIN_LOCATE_DURATION_SECS,
+};
 pub use media::{
     MediaCommand, MediaCommandFrame, MediaControlMode, MediaStateFrame, MediaValidator,
     PlaybackState, MAX_MEDIA_ALBUM_LEN, MAX_MEDIA_ARTIST_LEN, MAX_MEDIA_PLAYER_ID_LEN,

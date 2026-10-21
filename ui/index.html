@@ -648,6 +648,152 @@
         <div id="battery-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
       </div>
     </section>
+    <!-- Cross-device Device Locator & Find My Device Pipeline (v1.75 / ADR-068) -->
+    <section style="margin-top:16px" id="locate-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">跨端设备查找、声响定位与防骚扰治理 (Find My Device & Acoustic Locator)</h2>
+        <div style="display:flex;gap:6px">
+          <button id="togglelocatepolicybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">寻机策略</button>
+          <button id="togglelocateringbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">发起响铃</button>
+          <button id="refreshlocatebtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新状态</button>
+        </div>
+      </div>
+      <div class="hint">在 Mesh 网络中快速定位遗落或放置在另一房间的设备，支持响铃警报、强穿静音勿扰与防骚扰限频保护。</div>
+
+      <!-- Active Ringing Alert Banner -->
+      <div id="locate-alert-banner" style="display:none;background:#2b1900;border:1px solid #ff9800;color:#ffe0b2;padding:12px 16px;border-radius:6px;margin-top:8px;font-size:13px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="font-size:22px">🔔</span>
+            <div>
+              <div id="locate-alert-title" style="font-weight:700;color:#ffb74d">正在响铃定位警报中！</div>
+              <div id="locate-alert-detail" style="font-size:11px;color:#ffe0b2;margin-top:2px">发起设备: -- · 响铃模式: chime · 剩余时间: --s</div>
+            </div>
+          </div>
+          <button id="locate-stop-ring-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px;font-weight:600;border-color:#ff9800;color:#ffb74d">停止响铃 (Stop)</button>
+        </div>
+      </div>
+
+      <!-- Locator Policy Panel -->
+      <div id="locate-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div style="font-size:12px;font-weight:600;color:var(--text)">设备定位与防骚扰策略 (Device Locator Policy)</div>
+          <span id="locate-policy-badge" class="badge completed" style="font-size:11px">Locator: Enabled</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">开启响铃定位响应:</label>
+            <select id="locate-policy-enabled" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">开启 (允许响铃定位)</option>
+              <option value="false">关闭 (禁用定位响铃)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">强穿静音/勿扰模式 (DND):</label>
+            <select id="locate-policy-override-silent" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许强穿静音 (Override Silent)</option>
+              <option value="false">遵守静音模式 (Respect Silent)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">单次响铃最大安全时长 (1-60s):</label>
+            <input id="locate-policy-max-duration" type="number" min="1" max="60" placeholder="60" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">限定允许分组 (逗号分隔):</label>
+            <input id="locate-policy-groups" placeholder="留空表示不限制分组" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">限定允许标签 (逗号分隔):</label>
+            <input id="locate-policy-tags" placeholder="留空表示不限制标签" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">限定允许设备形态 (phone, tablet...):</label>
+            <input id="locate-policy-types" placeholder="留空表示不限制形态" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+          <div style="display:flex;gap:6px">
+            <button id="locate-policy-save-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px">保存策略 (Save)</button>
+            <button id="locate-policy-clear-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">重置限制 (Reset)</button>
+          </div>
+          <div id="locate-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Initiate Locate Ring Panel -->
+      <div id="locate-ring-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:8px">远程触发对端设备响铃寻机 (Trigger Remote Acoustic Locate Ring)</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">目标对端设备:</label>
+            <select id="locate-ring-target-peer" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="">(请选择在线对端设备)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">响铃模式 (Pattern):</label>
+            <select id="locate-ring-pattern" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="chime">风铃轻响 (Chime - 默认音效)</option>
+              <option value="siren">警报鸣响 (Siren - 穿透声响)</option>
+              <option value="pulse">脉冲提示 (Pulse - 节奏蜂鸣)</option>
+              <option value="vibrate_only">仅震动 (VibrateOnly - 静音触觉)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">响铃时长 (1..=60s):</label>
+            <input id="locate-ring-duration" type="number" min="1" max="60" value="15" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">强穿静音/勿扰模式:</label>
+            <select id="locate-ring-override-silent" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">强穿静音 (Override)</option>
+              <option value="false">遵守勿扰 (Do not override)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">附加显示消息 (可选, 最长 128 字符):</label>
+            <input id="locate-ring-message" placeholder="例如: 手机落在客厅沙发上了" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+          <div style="display:flex;gap:6px">
+            <button id="locate-ring-submit-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px;font-weight:600">🔔 发起寻机响铃 (Ring Peer)</button>
+            <button id="locate-remote-stop-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">⏹ 停止对端响铃 (Stop Peer)</button>
+          </div>
+          <div id="locate-ring-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Locator Status Dashboard Card -->
+      <div style="margin-top:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px">
+        <div class="card" style="padding:14px;margin:0;background:#131a22;border:1px solid var(--line);border-radius:6px;flex-direction:column;align-items:stretch;gap:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span id="locate-icon" style="font-size:24px">📍</span>
+              <div>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span id="locate-status-title" style="font-size:16px;font-weight:700;color:var(--text)">待机静止</span>
+                  <span id="locate-status-badge" class="badge offline" style="font-size:11px">未响铃</span>
+                  <span id="locate-policy-status-badge" class="badge completed" style="font-size:11px">防骚扰: 开启</span>
+                </div>
+                <div id="locate-active-desc" style="font-size:12px;color:var(--muted)">当前设备未处于响铃定位状态，已就绪接收或发起寻机定位</div>
+              </div>
+            </div>
+            <div style="text-align:right">
+              <div id="locate-rate-limit-text" style="font-size:12px;color:var(--text);font-weight:600">限频防骚扰: 10s 冷却</div>
+              <div id="locate-max-duration-text" style="font-size:11px;color:var(--muted)">最大保护时长: 60s</div>
+            </div>
+          </div>
+          <!-- Bottom Indicators -->
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted)">
+            <span id="locate-silent-override-indicator">强穿静音: 允许</span>
+            <span id="locate-filter-indicator">画像准入: 全网开放</span>
+          </div>
+        </div>
+        <div id="locate-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
+      </div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
@@ -1507,6 +1653,11 @@ function render(s) {
   if (bp) {
     bp.innerHTML = '<option value="">(本机设备 / Local Device)</option>';
   }
+  const locp = $("locate-ring-target-peer");
+  const prevLocPeer = locp ? locp.value : "";
+  if (locp) {
+    locp.innerHTML = '<option value="">(请选择在线对端设备)</option>';
+  }
   for (const x of s.peers) {
     let rttBadge = '<span class="badge offline" style="margin-left:6px">RTT 未测</span>';
     if (x.rtt_ms != null) {
@@ -1630,6 +1781,13 @@ function render(s) {
       opt.textContent = displayName + " (" + (x.path || "lan") + ")";
       if (opt.value === prevBatPeer) opt.selected = true;
       bp.appendChild(opt);
+    }
+    if (locp) {
+      const opt = document.createElement("option");
+      opt.value = x.device_id;
+      opt.textContent = displayName + " (" + (x.path || "lan") + ")";
+      if (opt.value === prevLocPeer) opt.selected = true;
+      locp.appendChild(opt);
     }
   }
   const tr = $("trusted");
@@ -3181,6 +3339,270 @@ if (batteryPolicyClearBtn) {
         if (msg) msg.textContent = "过滤器已重置为不限！";
         setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
         updateBatteryPolicy();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "清空异常: " + e.message;
+    }
+  };
+}
+
+async function updateLocateStatus() {
+  try {
+    const rep = await api("/api/locate/status");
+    if (!rep || !rep.ok) return;
+
+    const banner = $("locate-alert-banner");
+    const bannerTitle = $("locate-alert-title");
+    const bannerDetail = $("locate-alert-detail");
+    const statusTitle = $("locate-status-title");
+    const statusBadge = $("locate-status-badge");
+    const activeDesc = $("locate-active-desc");
+    const iconEl = $("locate-icon");
+
+    if (rep.is_ringing && rep.active_ring) {
+      const ar = rep.active_ring;
+      if (banner) banner.style.display = "block";
+      if (bannerTitle) bannerTitle.textContent = "🔔 设备正在响铃定位警报中！";
+      if (bannerDetail) {
+        bannerDetail.textContent = "发起端: " + (ar.initiator_alias || ar.initiator_peer) +
+          " · 模式: " + (ar.pattern || "chime") +
+          " · 时长: " + ar.duration_secs + "s (剩余: " + ar.remaining_secs + "s)" +
+          (ar.message ? (" · 附言: \"" + escapeHtml(ar.message) + "\"") : "");
+      }
+      if (statusTitle) statusTitle.textContent = "正在响铃警报";
+      if (statusBadge) {
+        statusBadge.textContent = "响铃中 (" + ar.remaining_secs + "s)";
+        statusBadge.className = "badge bad";
+      }
+      if (iconEl) iconEl.textContent = "🔔";
+      if (activeDesc) {
+        activeDesc.textContent = "接收到来自 " + (ar.initiator_alias || ar.initiator_peer) +
+          " 的定位寻机呼叫，正在播放 " + (ar.pattern || "chime") + " 声响模式。";
+      }
+    } else {
+      if (banner) banner.style.display = "none";
+      if (statusTitle) statusTitle.textContent = "待机静止";
+      if (statusBadge) {
+        statusBadge.textContent = "未响铃";
+        statusBadge.className = "badge offline";
+      }
+      if (iconEl) iconEl.textContent = "📍";
+      if (activeDesc) {
+        activeDesc.textContent = "当前设备未处于响铃定位状态，已就绪接收或发起寻机定位";
+      }
+    }
+
+    if (rep.policy) {
+      const p = rep.policy;
+      if ($("locate-policy-status-badge")) {
+        $("locate-policy-status-badge").textContent = p.enabled ? "定位功能: 已启用" : "定位功能: 已关闭";
+        $("locate-policy-status-badge").className = p.enabled ? "badge completed" : "badge offline";
+      }
+      if ($("locate-silent-override-indicator")) {
+        $("locate-silent-override-indicator").textContent = "强穿静音: " + (p.allow_override_silent ? "允许" : "禁止");
+      }
+      if ($("locate-max-duration-text")) {
+        $("locate-max-duration-text").textContent = "最大保护时长: " + p.max_duration_secs + "s";
+      }
+      if ($("locate-filter-indicator")) {
+        const filters = [];
+        if (p.allowed_groups && p.allowed_groups.length) filters.push("群组:" + p.allowed_groups.join("/"));
+        if (p.allowed_tags && p.allowed_tags.length) filters.push("标签:" + p.allowed_tags.join("/"));
+        if (p.allowed_types && p.allowed_types.length) filters.push("形态:" + p.allowed_types.join("/"));
+        $("locate-filter-indicator").textContent = "画像准入: " + (filters.length ? filters.join(" · ") : "全网开放");
+      }
+    }
+  } catch (e) {}
+}
+
+async function updateLocatePolicy() {
+  try {
+    const rep = await api("/api/locate/policy");
+    if (!rep || !rep.ok) return;
+    const p = rep.policy;
+    if (!p) return;
+    if ($("locate-policy-badge")) {
+      $("locate-policy-badge").textContent = p.enabled ? "Locator: Enabled" : "Locator: Disabled";
+      $("locate-policy-badge").className = p.enabled ? "badge completed" : "badge offline";
+    }
+    if ($("locate-policy-enabled") && document.activeElement !== $("locate-policy-enabled")) {
+      $("locate-policy-enabled").value = p.enabled ? "true" : "false";
+    }
+    if ($("locate-policy-override-silent") && document.activeElement !== $("locate-policy-override-silent")) {
+      $("locate-policy-override-silent").value = p.allow_override_silent ? "true" : "false";
+    }
+    if ($("locate-policy-max-duration") && document.activeElement !== $("locate-policy-max-duration")) {
+      $("locate-policy-max-duration").value = p.max_duration_secs;
+    }
+    if ($("locate-policy-groups") && document.activeElement !== $("locate-policy-groups")) {
+      $("locate-policy-groups").value = (p.allowed_groups || []).join(", ");
+    }
+    if ($("locate-policy-tags") && document.activeElement !== $("locate-policy-tags")) {
+      $("locate-policy-tags").value = (p.allowed_tags || []).join(", ");
+    }
+    if ($("locate-policy-types") && document.activeElement !== $("locate-policy-types")) {
+      $("locate-policy-types").value = (p.allowed_types || []).join(", ");
+    }
+  } catch (e) {}
+}
+
+const toggleLocatePolicyBtn = $("togglelocatepolicybtn");
+if (toggleLocatePolicyBtn) {
+  toggleLocatePolicyBtn.onclick = () => {
+    const p = $("locate-policy-panel");
+    if (!p) return;
+    p.style.display = p.style.display === "none" ? "block" : "none";
+    if (p.style.display !== "none") updateLocatePolicy();
+  };
+}
+
+const toggleLocateRingBtn = $("togglelocateringbtn");
+if (toggleLocateRingBtn) {
+  toggleLocateRingBtn.onclick = () => {
+    const p = $("locate-ring-panel");
+    if (!p) return;
+    p.style.display = p.style.display === "none" ? "block" : "none";
+  };
+}
+
+const refreshLocateBtn = $("refreshlocatebtn");
+if (refreshLocateBtn) {
+  refreshLocateBtn.onclick = () => {
+    updateLocateStatus();
+    updateLocatePolicy();
+  };
+}
+
+const locateStopRingBtn = $("locate-stop-ring-btn");
+if (locateStopRingBtn) {
+  locateStopRingBtn.onclick = async () => {
+    try {
+      const rep = await api("/api/locate/stop", { reason: "user_dismissed" });
+      if (rep && rep.ok) {
+        updateLocateStatus();
+      }
+    } catch (e) {
+      alert("停止响铃失败: " + e.message);
+    }
+  };
+}
+
+const locateRingSubmitBtn = $("locate-ring-submit-btn");
+if (locateRingSubmitBtn) {
+  locateRingSubmitBtn.onclick = async () => {
+    const peerVal = $("locate-ring-target-peer") ? $("locate-ring-target-peer").value : "";
+    const patVal = $("locate-ring-pattern") ? $("locate-ring-pattern").value : "chime";
+    const durVal = $("locate-ring-duration") ? parseInt($("locate-ring-duration").value, 10) : 15;
+    const ovVal = $("locate-ring-override-silent") ? $("locate-ring-override-silent").value === "true" : true;
+    const msgVal = $("locate-ring-message") ? $("locate-ring-message").value.trim() : "";
+    const msg = $("locate-ring-msg");
+
+    if (!peerVal) {
+      if (msg) msg.textContent = "请先选择目标对端设备！";
+      return;
+    }
+    if (msg) msg.textContent = "正在发送响铃指令…";
+    try {
+      const rep = await api("/api/locate/ring", {
+        peer: peerVal,
+        duration_secs: isNaN(durVal) ? 15 : durVal,
+        pattern: patVal,
+        override_silent: ovVal,
+        message: msgVal || undefined
+      });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "已向设备 " + rep.target_peer + " 发起寻机响铃 (ID: " + rep.request_id + ")！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 4000);
+        updateLocateStatus();
+      } else {
+        if (msg) msg.textContent = "发起失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "调用异常: " + e.message;
+    }
+  };
+}
+
+const locateRemoteStopBtn = $("locate-remote-stop-btn");
+if (locateRemoteStopBtn) {
+  locateRemoteStopBtn.onclick = async () => {
+    const peerVal = $("locate-ring-target-peer") ? $("locate-ring-target-peer").value : "";
+    const msg = $("locate-ring-msg");
+    if (!peerVal) {
+      if (msg) msg.textContent = "请先选择目标对端设备！";
+      return;
+    }
+    if (msg) msg.textContent = "正在向对端发送停止指令…";
+    try {
+      const rep = await api("/api/locate/stop", {
+        peer: peerVal,
+        reason: "user_remote_cancelled"
+      });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "已停止对端 " + rep.target_peer + " 的响铃警报！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 4000);
+        updateLocateStatus();
+      } else {
+        if (msg) msg.textContent = "停止失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "停止异常: " + e.message;
+    }
+  };
+}
+
+const locatePolicySaveBtn = $("locate-policy-save-btn");
+if (locatePolicySaveBtn) {
+  locatePolicySaveBtn.onclick = async () => {
+    const enVal = $("locate-policy-enabled") ? $("locate-policy-enabled").value === "true" : undefined;
+    const ovVal = $("locate-policy-override-silent") ? $("locate-policy-override-silent").value === "true" : undefined;
+    const maxDur = $("locate-policy-max-duration") ? parseInt($("locate-policy-max-duration").value, 10) : undefined;
+    const grpsVal = $("locate-policy-groups") ? $("locate-policy-groups").value.trim() : "";
+    const tagsVal = $("locate-policy-tags") ? $("locate-policy-tags").value.trim() : "";
+    const typesVal = $("locate-policy-types") ? $("locate-policy-types").value.trim() : "";
+    const msg = $("locate-policy-msg");
+
+    const payload = {};
+    if (enVal != null) payload.enabled = enVal;
+    if (ovVal != null) payload.allow_override_silent = ovVal;
+    if (!isNaN(maxDur)) payload.max_duration_secs = maxDur;
+    if (grpsVal) {
+      payload.allowed_groups = grpsVal.split(",").map(s => s.trim()).filter(Boolean);
+    }
+    if (tagsVal) {
+      payload.allowed_tags = tagsVal.split(",").map(s => s.trim().replace(/^#/, "")).filter(Boolean);
+    }
+    if (typesVal) {
+      payload.allowed_types = typesVal.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+    }
+
+    if (msg) msg.textContent = "正在保存定位策略…";
+    try {
+      const rep = await api("/api/locate/policy", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "寻机策略已保存！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateLocatePolicy();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "保存异常: " + e.message;
+    }
+  };
+}
+
+const locatePolicyClearBtn = $("locate-policy-clear-btn");
+if (locatePolicyClearBtn) {
+  locatePolicyClearBtn.onclick = async () => {
+    const msg = $("locate-policy-msg");
+    if (msg) msg.textContent = "正在清空过滤器限制…";
+    try {
+      const rep = await api("/api/locate/policy", { clear_filters: true });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "准入过滤器已重置为不限！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateLocatePolicy();
       }
     } catch (e) {
       if (msg) msg.textContent = "清空异常: " + e.message;
@@ -4937,10 +5359,23 @@ function setupEventSource() {
 								            }
 								            updateBatteryStatus();
 								          }
-								          else if (ev.kind === "battery_policy_changed") {
-								            desc = "电量预警策略更新: 低电量 " + ev.low_battery_threshold + "% · 危急 " + ev.critical_battery_threshold + "% · 警报:" + (ev.alert_on_low_battery ? "开启" : "关闭");
-								            updateBatteryPolicy();
-								          }
+									          else if (ev.kind === "battery_policy_changed") {
+									            desc = "电量预警策略更新: 低电量 " + ev.low_battery_threshold + "% · 危急 " + ev.critical_battery_threshold + "% · 警报:" + (ev.alert_on_low_battery ? "开启" : "关闭");
+									            updateBatteryPolicy();
+									          }
+									          else if (ev.kind === "locate_ring_triggered") {
+									            desc = "🔔 寻机响铃触发: " + ev.initiator_alias + " [" + ev.pattern + "] " + ev.duration_secs + "s" + (ev.message ? (" · " + ev.message) : "");
+									            updateLocateStatus();
+									          }
+									          else if (ev.kind === "locate_ring_stopped") {
+									            desc = "⏹ 寻机响铃停止: " + ev.stopped_by_alias + " (原因: " + (ev.reason || "unspecified") + ")";
+									            updateLocateStatus();
+									          }
+									          else if (ev.kind === "locate_policy_changed") {
+									            desc = "寻机策略更新: 状态=" + (ev.enabled ? "开启" : "关闭") + " · 强穿静音=" + (ev.allow_override_silent ? "允许" : "禁止") + " · 最大时长=" + ev.max_duration_secs + "s";
+									            updateLocatePolicy();
+									            updateLocateStatus();
+									          }
 						          else if (ev.kind === "screen_state_changed") {
 					            desc = "屏幕状态: " + ev.state + " (授权:" + (ev.allowed ? "是" : "否") + ")" + (ev.peer ? (" · 对端:" + ev.peer) : "");
 					            updateScreenStatus();
@@ -5100,10 +5535,14 @@ function setupEventSource() {
 														setInterval(updateMediaStatus, 3000);
 														updateMediaPolicy();
 														setInterval(updateMediaPolicy, 3000);
-														updateBatteryStatus();
-														setInterval(updateBatteryStatus, 3000);
-														updateBatteryPolicy();
-														setInterval(updateBatteryPolicy, 3000);
+															updateBatteryStatus();
+															setInterval(updateBatteryStatus, 3000);
+															updateBatteryPolicy();
+															setInterval(updateBatteryPolicy, 3000);
+															updateLocateStatus();
+															setInterval(updateLocateStatus, 3000);
+															updateLocatePolicy();
+															setInterval(updateLocatePolicy, 3000);
 				</script>
 </body>
 </html>

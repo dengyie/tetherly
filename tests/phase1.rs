@@ -9796,6 +9796,258 @@ async fn battery_power_state_sync_and_low_battery_alert_via_loopback_api() {
     peer.shutdown();
 }
 
+#[tokio::test]
+async fn locate_find_my_device_pipeline_acoustic_ring_and_anti_harassment_via_loopback_api() {
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to Peer SSE Event Stream to monitor real-time ringing events
+    let mut peer_sse = tetherly_node::loopback_events_connect(peer_ui)
+        .await
+        .expect("connect to peer sse stream");
+
+    // 2. Initial Locator Policy Check on Peer
+    let (code_pol, body_pol) = tetherly_node::loopback_get(peer_ui, "/api/locate/policy")
+        .await
+        .unwrap();
+    assert_eq!(code_pol, 200);
+    let pol_init: serde_json::Value = serde_json::from_slice(&body_pol).unwrap();
+    assert_eq!(pol_init["policy"]["enabled"], true);
+    assert_eq!(pol_init["policy"]["allow_override_silent"], true);
+    assert_eq!(pol_init["policy"]["max_duration_secs"], 60);
+
+    // 3. Initial Status Check on Peer (must not be ringing)
+    let (code_st, body_st) = tetherly_node::loopback_get(peer_ui, "/api/locate/status")
+        .await
+        .unwrap();
+    assert_eq!(code_st, 200);
+    let st_init: serde_json::Value = serde_json::from_slice(&body_st).unwrap();
+    assert_eq!(st_init["is_ringing"], false);
+    assert!(st_init["active_ring"].is_null());
+
+    // 4. Host sends locate ring request to Peer
+    let ring_req = serde_json::json!({
+        "peer": peer_id.to_string(),
+        "duration_secs": 15,
+        "pattern": "siren",
+        "override_silent": true,
+        "message": "Keys or phone misplaced in living room"
+    });
+    let (code_ring, body_ring) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/locate/ring",
+        &serde_json::to_vec(&ring_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_ring, 200);
+    let ring_rep: serde_json::Value = serde_json::from_slice(&body_ring).unwrap();
+    assert_eq!(ring_rep["ok"], true);
+    let req_id = ring_rep["request_id"].as_str().unwrap().to_string();
+    assert!(req_id.starts_with("loc_"));
+    assert_eq!(ring_rep["duration_secs"], 15);
+    assert_eq!(ring_rep["pattern"], "siren");
+
+    // 5. Verify Peer is now ringing
+    let t_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut peer_started_ringing = false;
+    while tokio::time::Instant::now() < t_deadline {
+        let (c, b) = tetherly_node::loopback_get(peer_ui, "/api/locate/status")
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if val["is_ringing"] == true {
+                    if let Some(ar) = val.get("active_ring").filter(|r| !r.is_null()) {
+                        if ar["request_id"] == req_id
+                            && ar["pattern"] == "siren"
+                            && ar["initiator_peer"] == host_id.to_string()
+                        {
+                            peer_started_ringing = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        peer_started_ringing,
+        "peer must transition to active ringing upon receiving TYPE_LOCATE_REQUEST frame"
+    );
+
+    // 6. Verify Peer receives SSE event locate_ring_triggered
+    let sse_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut saw_ring_triggered = false;
+    while tokio::time::Instant::now() < sse_deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), peer_sse.next_event()).await
+        {
+            if raw.contains("locate_ring_triggered") {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if val["request_id"] == req_id && val["pattern"] == "siren" {
+                        saw_ring_triggered = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        saw_ring_triggered,
+        "peer must emit locate_ring_triggered SSE event"
+    );
+
+    // 7. Test Anti-Harassment Rate Limiting: Host immediately attempts second ring to Peer
+    let (code_rate, body_rate) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/locate/ring",
+        &serde_json::to_vec(&ring_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    // Host should reject with 400 Bad Request due to 10s cooldown
+    assert_eq!(code_rate, 400);
+    let rate_err = String::from_utf8_lossy(&body_rate);
+    assert!(
+        rate_err.contains("anti-harassment") || rate_err.contains("rate limit"),
+        "subsequent locate request within 10s must be throttled: {}",
+        rate_err
+    );
+
+    // 8. Host stops Peer's ringing via /api/locate/stop
+    let stop_req = serde_json::json!({
+        "peer": peer_id.to_string(),
+        "reason": "device_found"
+    });
+    let (code_stop, body_stop) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/locate/stop",
+        &serde_json::to_vec(&stop_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_stop, 200);
+    let stop_rep: serde_json::Value = serde_json::from_slice(&body_stop).unwrap();
+    assert_eq!(stop_rep["ok"], true);
+
+    // 9. Verify Peer ceases ringing
+    let stop_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut peer_stopped_ringing = false;
+    while tokio::time::Instant::now() < stop_deadline {
+        let (c, b) = tetherly_node::loopback_get(peer_ui, "/api/locate/status")
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if val["is_ringing"] == false && val["active_ring"].is_null() {
+                    peer_stopped_ringing = true;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        peer_stopped_ringing,
+        "peer must stop ringing upon receiving TYPE_LOCATE_STOP frame"
+    );
+
+    // 10. Verify Peer receives SSE event locate_ring_stopped
+    let sse_stop_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut saw_ring_stopped = false;
+    while tokio::time::Instant::now() < sse_stop_deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), peer_sse.next_event()).await
+        {
+            if raw.contains("locate_ring_stopped") {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if val["reason"] == "device_found" {
+                        saw_ring_stopped = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        saw_ring_stopped,
+        "peer must emit locate_ring_stopped SSE event"
+    );
+
+    // 11. Peer updates Locator Policy
+    let update_pol = serde_json::json!({
+        "enabled": true,
+        "allow_override_silent": false,
+        "max_duration_secs": 25,
+        "allowed_groups": ["trusted_family"],
+        "allowed_tags": ["mobile"]
+    });
+    let (code_pol_up, body_pol_up) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/locate/policy",
+        &serde_json::to_vec(&update_pol).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_pol_up, 200);
+    let pol_updated: serde_json::Value = serde_json::from_slice(&body_pol_up).unwrap();
+    assert_eq!(pol_updated["policy"]["allow_override_silent"], false);
+    assert_eq!(pol_updated["policy"]["max_duration_secs"], 25);
+    assert_eq!(
+        pol_updated["policy"]["allowed_groups"],
+        serde_json::json!(["trusted_family"])
+    );
+    assert_eq!(
+        pol_updated["policy"]["allowed_tags"],
+        serde_json::json!(["mobile"])
+    );
+
+    // 12. File persistence check on peer data_dir (0o600 permissions)
+    let policy_path = g2.path().join("locator_policy.json");
+    assert!(
+        policy_path.exists(),
+        "locator_policy.json must be persisted"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(&policy_path).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "locator_policy.json must have 0o600 permissions"
+        );
+    }
+
+    // 13. Security Guard: Host header 403 Forbidden attack defense
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], peer_ui));
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let evil_req =
+        "GET /api/locate/status HTTP/1.1\r\nHost: malicious-attacker.com\r\nConnection: close\r\n\r\n";
+    tokio::io::AsyncWriteExt::write_all(&mut stream, evil_req.as_bytes())
+        .await
+        .unwrap();
+    tokio::io::AsyncWriteExt::flush(&mut stream).await.unwrap();
+    let mut raw_resp = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut raw_resp)
+        .await
+        .unwrap();
+    let resp_str = String::from_utf8_lossy(&raw_resp);
+    assert!(
+        resp_str.starts_with("HTTP/1.1 403") || resp_str.starts_with("HTTP/1.0 403"),
+        "Host header attack must be rejected with 403 Forbidden"
+    );
+
+    // 14. Clean Shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

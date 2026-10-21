@@ -6,9 +6,11 @@ use tetherly_core::frame::{
     decode_unix_ms, CapsUpdate, ClipSet, FileDecision, FileDone, FileOffer, InnerFrame,
     NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame, TextMessage, TYPE_BATTERY_STATE,
     TYPE_CAPS_UPDATE, TYPE_CLIP_SET, TYPE_FILE_ACCEPT, TYPE_FILE_DONE, TYPE_FILE_OFFER,
-    TYPE_FILE_REJECT, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH,
-    TYPE_NOTIFY_REPLY, TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
+    TYPE_FILE_REJECT, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE,
+    TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY, TYPE_PING, TYPE_PONG,
+    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
 };
+use tetherly_core::locate::{LocateRequestFrame, LocateStopFrame};
 use tetherly_core::media::{MediaCommandFrame, MediaStateFrame};
 
 #[derive(Debug)]
@@ -24,6 +26,8 @@ pub enum SessionEvent {
     MediaCommand(MediaCommandFrame),
     MediaState(MediaStateFrame),
     BatteryState(BatteryStateFrame),
+    LocateRequest(LocateRequestFrame),
+    LocateStop(LocateStopFrame),
     FileOffer(FileOffer),
     FileAccept(FileDecision),
     FileReject(FileDecision),
@@ -61,6 +65,12 @@ impl SessionEvent {
             }
             TYPE_BATTERY_STATE => {
                 SessionEvent::BatteryState(BatteryStateFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_LOCATE_REQUEST => {
+                SessionEvent::LocateRequest(LocateRequestFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_LOCATE_STOP => {
+                SessionEvent::LocateStop(LocateStopFrame::from_payload(&frame.payload)?)
             }
             TYPE_FILE_OFFER => SessionEvent::FileOffer(FileOffer::from_payload(&frame.payload)?),
             TYPE_FILE_ACCEPT => {
