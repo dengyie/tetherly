@@ -35,6 +35,10 @@ pub const TYPE_MEDIA_STATE: u16 = 0x0205;
 pub const TYPE_BATTERY_STATE: u16 = 0x0206;
 pub const TYPE_LOCATE_REQUEST: u16 = 0x0207;
 pub const TYPE_LOCATE_STOP: u16 = 0x0208;
+pub const TYPE_ACTION_LIST_REQ: u16 = 0x0209;
+pub const TYPE_ACTION_LIST_RESP: u16 = 0x020A;
+pub const TYPE_ACTION_TRIGGER: u16 = 0x020B;
+pub const TYPE_ACTION_RESULT: u16 = 0x020C;
 pub const TYPE_FILE_OFFER: u16 = 0x0301;
 pub const TYPE_FILE_ACCEPT: u16 = 0x0302;
 pub const TYPE_FILE_REJECT: u16 = 0x0303;
@@ -122,6 +126,10 @@ pub fn is_known_type(ty: u16) -> bool {
             | TYPE_BATTERY_STATE
             | TYPE_LOCATE_REQUEST
             | TYPE_LOCATE_STOP
+            | TYPE_ACTION_LIST_REQ
+            | TYPE_ACTION_LIST_RESP
+            | TYPE_ACTION_TRIGGER
+            | TYPE_ACTION_RESULT
             | TYPE_FILE_OFFER
             | TYPE_FILE_ACCEPT
             | TYPE_FILE_REJECT

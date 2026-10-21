@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::error::NetError;
+use tetherly_core::action::{
+    ActionListReqFrame, ActionListRespFrame, ActionResultFrame, ActionTriggerFrame,
+};
 use tetherly_core::battery::BatteryStateFrame;
 use tetherly_core::frame::{
     decode_unix_ms, CapsUpdate, ClipSet, FileDecision, FileDone, FileOffer, InnerFrame,
-    NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame, TextMessage, TYPE_BATTERY_STATE,
-    TYPE_CAPS_UPDATE, TYPE_CLIP_SET, TYPE_FILE_ACCEPT, TYPE_FILE_DONE, TYPE_FILE_OFFER,
-    TYPE_FILE_REJECT, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE,
-    TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY, TYPE_PING, TYPE_PONG,
-    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
+    NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame, TextMessage,
+    TYPE_ACTION_LIST_REQ, TYPE_ACTION_LIST_RESP, TYPE_ACTION_RESULT, TYPE_ACTION_TRIGGER,
+    TYPE_BATTERY_STATE, TYPE_CAPS_UPDATE, TYPE_CLIP_SET, TYPE_FILE_ACCEPT, TYPE_FILE_DONE,
+    TYPE_FILE_OFFER, TYPE_FILE_REJECT, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND,
+    TYPE_MEDIA_STATE, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY, TYPE_PING,
+    TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
 };
 use tetherly_core::locate::{LocateRequestFrame, LocateStopFrame};
 use tetherly_core::media::{MediaCommandFrame, MediaStateFrame};
@@ -28,6 +32,10 @@ pub enum SessionEvent {
     BatteryState(BatteryStateFrame),
     LocateRequest(LocateRequestFrame),
     LocateStop(LocateStopFrame),
+    ActionListReq(ActionListReqFrame),
+    ActionListResp(ActionListRespFrame),
+    ActionTrigger(ActionTriggerFrame),
+    ActionResult(ActionResultFrame),
     FileOffer(FileOffer),
     FileAccept(FileDecision),
     FileReject(FileDecision),
@@ -71,6 +79,18 @@ impl SessionEvent {
             }
             TYPE_LOCATE_STOP => {
                 SessionEvent::LocateStop(LocateStopFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_ACTION_LIST_REQ => {
+                SessionEvent::ActionListReq(ActionListReqFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_ACTION_LIST_RESP => {
+                SessionEvent::ActionListResp(ActionListRespFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_ACTION_TRIGGER => {
+                SessionEvent::ActionTrigger(ActionTriggerFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_ACTION_RESULT => {
+                SessionEvent::ActionResult(ActionResultFrame::from_payload(&frame.payload)?)
             }
             TYPE_FILE_OFFER => SessionEvent::FileOffer(FileOffer::from_payload(&frame.payload)?),
             TYPE_FILE_ACCEPT => {

@@ -424,6 +424,48 @@ pub enum UiEvent {
         allowed_types: Vec<String>,
         timestamp_ms: u64,
     },
+    ActionListRequested {
+        peer_id: String,
+        peer_alias: String,
+        timestamp_ms: u64,
+    },
+    ActionListReceived {
+        peer_id: String,
+        peer_alias: String,
+        count: usize,
+        timestamp_ms: u64,
+    },
+    ActionTriggered {
+        trigger_id: String,
+        action_id: String,
+        peer_id: String,
+        peer_alias: String,
+        timestamp_ms: u64,
+    },
+    ActionResultReceived {
+        trigger_id: String,
+        action_id: String,
+        peer_id: String,
+        peer_alias: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        duration_ms: u64,
+        timestamp_ms: u64,
+    },
+    ActionPolicyChanged {
+        mode: String,
+        max_timeout_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        expose_action_list: bool,
+        timestamp_ms: u64,
+    },
+    LocalActionsChanged {
+        count: usize,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -769,6 +811,98 @@ impl UiEvent {
             allowed_groups,
             allowed_tags,
             allowed_types,
+            timestamp_ms,
+        }
+    }
+
+    pub fn action_list_requested(
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::ActionListRequested {
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            timestamp_ms,
+        }
+    }
+
+    pub fn action_list_received(
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        count: usize,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::ActionListReceived {
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            count,
+            timestamp_ms,
+        }
+    }
+
+    pub fn action_triggered(
+        trigger_id: impl Into<String>,
+        action_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::ActionTriggered {
+            trigger_id: trigger_id.into(),
+            action_id: action_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn action_result_received(
+        trigger_id: impl Into<String>,
+        action_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        success: bool,
+        exit_code: Option<i32>,
+        duration_ms: u64,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::ActionResultReceived {
+            trigger_id: trigger_id.into(),
+            action_id: action_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            success,
+            exit_code,
+            duration_ms,
+            timestamp_ms,
+        }
+    }
+
+    pub fn action_policy_changed(
+        mode: impl Into<String>,
+        max_timeout_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        expose_action_list: bool,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::ActionPolicyChanged {
+            mode: mode.into(),
+            max_timeout_secs,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            expose_action_list,
+            timestamp_ms,
+        }
+    }
+
+    pub fn local_actions_changed(count: usize, timestamp_ms: u64) -> Self {
+        UiEvent::LocalActionsChanged {
+            count,
             timestamp_ms,
         }
     }
@@ -1331,5 +1465,65 @@ mod tests {
         assert!(json3.contains("\"allow_override_silent\":false"));
         assert!(json3.contains("\"max_duration_secs\":45"));
         assert!(json3.contains("\"allowed_groups\":[\"family\"]"));
+    }
+
+    #[test]
+    fn test_action_events_serialization_and_zero_plaintext() {
+        let ev1 = UiEvent::action_list_requested("peer_laptop", "MacBook Pro", 123456800);
+        let json1 = serde_json::to_string(&ev1).unwrap();
+        assert!(json1.contains("\"kind\":\"action_list_requested\""));
+        assert!(json1.contains("\"peer_id\":\"peer_laptop\""));
+        assert!(json1.contains("\"peer_alias\":\"MacBook Pro\""));
+
+        let ev2 = UiEvent::action_list_received("peer_laptop", "MacBook Pro", 5, 123456801);
+        let json2 = serde_json::to_string(&ev2).unwrap();
+        assert!(json2.contains("\"kind\":\"action_list_received\""));
+        assert!(json2.contains("\"count\":5"));
+
+        let ev3 =
+            UiEvent::action_triggered("trig_1", "lock_screen", "peer_phone", "iPhone", 123456802);
+        let json3 = serde_json::to_string(&ev3).unwrap();
+        assert!(json3.contains("\"kind\":\"action_triggered\""));
+        assert!(json3.contains("\"trigger_id\":\"trig_1\""));
+        assert!(json3.contains("\"action_id\":\"lock_screen\""));
+        // Zero-Plaintext: command string or args must never appear in trigger event
+        assert!(!json3.contains("loginctl"));
+        assert!(!json3.contains("sh"));
+
+        let ev4 = UiEvent::action_result_received(
+            "trig_1",
+            "lock_screen",
+            "peer_phone",
+            "iPhone",
+            true,
+            Some(0),
+            120,
+            123456803,
+        );
+        let json4 = serde_json::to_string(&ev4).unwrap();
+        assert!(json4.contains("\"kind\":\"action_result_received\""));
+        assert!(json4.contains("\"success\":true"));
+        assert!(json4.contains("\"exit_code\":0"));
+        assert!(json4.contains("\"duration_ms\":120"));
+
+        let ev5 = UiEvent::action_policy_changed(
+            "allow",
+            15,
+            vec!["work".into()],
+            vec!["laptop".into()],
+            vec!["desktop".into()],
+            true,
+            123456804,
+        );
+        let json5 = serde_json::to_string(&ev5).unwrap();
+        assert!(json5.contains("\"kind\":\"action_policy_changed\""));
+        assert!(json5.contains("\"mode\":\"allow\""));
+        assert!(json5.contains("\"max_timeout_secs\":15"));
+        assert!(json5.contains("\"expose_action_list\":true"));
+
+        let ev6 = UiEvent::local_actions_changed(3, 123456805);
+        let json6 = serde_json::to_string(&ev6).unwrap();
+        assert!(json6.contains("\"kind\":\"local_actions_changed\""));
+        assert!(json6.contains("\"count\":3"));
     }
 }

@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod action;
 pub mod allowlist;
 pub mod ancs;
 pub mod battery;
@@ -31,6 +32,12 @@ pub mod replay;
 pub mod screen;
 pub mod session;
 
+pub use action::{
+    ActionItem, ActionListReqFrame, ActionListRespFrame, ActionResultFrame, ActionTriggerFrame,
+    ActionValidator, DEFAULT_ACTION_TIMEOUT_SECS, MAX_ACTION_DESC_LEN, MAX_ACTION_ERROR_LEN,
+    MAX_ACTION_ICON_LEN, MAX_ACTION_ID_LEN, MAX_ACTION_NAME_LEN, MAX_ACTION_OUTPUT_LEN,
+    MAX_ACTION_TIMEOUT_SECS, MIN_ACTION_TIMEOUT_SECS,
+};
 pub use allowlist::{sanitize_file_name, OpenAllowlist, OpenRule};
 pub use ancs::{
     ancs_actions, ancs_backoff_delay, ancs_source_id, parse_ble_address, AncsCharacteristic,
@@ -56,6 +63,7 @@ pub use frame::{
     IncrementalSha256, InnerFrame, NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame,
     TextMessage, CANDIDATE_TTL_MS, CLIPBOARD_OTP_CLEAR_MS, CLIP_TEXT_MAX, FILE_CHUNK,
     FILE_TOKEN_TTL_MS, HANDOFF_TITLE_MAX, HANDOFF_URL_MAX, NOTIFY_TEXT_MAX, TEXT_MESSAGE_MAX,
+    TYPE_ACTION_LIST_REQ, TYPE_ACTION_LIST_RESP, TYPE_ACTION_RESULT, TYPE_ACTION_TRIGGER,
     TYPE_BATTERY_STATE, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND,
     TYPE_MEDIA_STATE, TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
 };

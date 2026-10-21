@@ -10048,6 +10048,274 @@ async fn locate_find_my_device_pipeline_acoustic_ring_and_anti_harassment_via_lo
     peer.shutdown();
 }
 
+#[tokio::test]
+async fn action_predefined_quick_actions_local_execution_and_governance_via_loopback_api() {
+    let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let _host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to Host SSE Event Stream to monitor real-time action results
+    let mut host_sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect to host sse stream");
+
+    // 2. Initial Action Policy Check on Peer
+    let (code_pol, body_pol) = tetherly_node::loopback_get(peer_ui, "/api/action/policy")
+        .await
+        .unwrap();
+    assert_eq!(code_pol, 200);
+    let pol_init: serde_json::Value = serde_json::from_slice(&body_pol).unwrap();
+    assert_eq!(pol_init["policy"]["mode"], "allow");
+    assert_eq!(pol_init["policy"]["max_timeout_secs"], 10);
+    assert_eq!(pol_init["policy"]["expose_action_list"], true);
+
+    // 3. Initial Local Actions Check on Peer (must be empty)
+    let (code_loc, body_loc) = tetherly_node::loopback_get(peer_ui, "/api/action/local")
+        .await
+        .unwrap();
+    assert_eq!(code_loc, 200);
+    let loc_init: serde_json::Value = serde_json::from_slice(&body_loc).unwrap();
+    assert_eq!(loc_init["count"], 0);
+    assert!(loc_init["actions"].as_array().unwrap().is_empty());
+
+    // 4. Peer registers a predefined local action (safe echo test)
+    let add_req = serde_json::json!({
+        "id": "ping_action",
+        "name": "Ping Test Action",
+        "command": "echo",
+        "args": ["pong_payload_123"],
+        "description": "Echoes pong payload",
+        "icon": "🏓",
+        "timeout_secs": 5,
+        "enabled": true
+    });
+    let (code_add, body_add) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/action/local",
+        &serde_json::to_vec(&add_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_add, 200);
+    let add_rep: serde_json::Value = serde_json::from_slice(&body_add).unwrap();
+    assert_eq!(add_rep["ok"], true);
+    assert_eq!(add_rep["count"], 1);
+    assert_eq!(add_rep["actions"][0]["id"], "ping_action");
+    assert_eq!(add_rep["actions"][0]["name"], "Ping Test Action");
+
+    // Verify Peer local actions now returns 1 item
+    let (code_loc2, body_loc2) = tetherly_node::loopback_get(peer_ui, "/api/action/local")
+        .await
+        .unwrap();
+    assert_eq!(code_loc2, 200);
+    let loc_list: serde_json::Value = serde_json::from_slice(&body_loc2).unwrap();
+    assert_eq!(loc_list["count"], 1);
+    assert_eq!(loc_list["actions"][0]["id"], "ping_action");
+
+    // 5. Host requests Peer's advertised actions
+    let refresh_path = format!(
+        "/api/action/remote/refresh?peer={}",
+        tetherly_cli_test_url_encode(&peer_id.to_string())
+    );
+    let (code_ref, _) = tetherly_node::loopback_post(host_ui, &refresh_path, &[])
+        .await
+        .unwrap();
+    assert_eq!(code_ref, 200);
+
+    // 6. Wait for Host to receive and cache Peer's advertised actions
+    let remote_path = format!(
+        "/api/action/remote?peer={}",
+        tetherly_cli_test_url_encode(&peer_id.to_string())
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut found_advertised_action = false;
+    let mut raw_remote_body = Vec::new();
+    while tokio::time::Instant::now() < deadline {
+        let (c, b) = tetherly_node::loopback_get(host_ui, &remote_path)
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(rep) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if let Some(actions) = rep.get("actions").and_then(|a| a.as_array()) {
+                    if actions.iter().any(|act| act["id"] == "ping_action") {
+                        found_advertised_action = true;
+                        raw_remote_body = b;
+                        break;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        found_advertised_action,
+        "host must receive peer's advertised action 'ping_action' over mesh"
+    );
+
+    // ADR-008: Security Guardrail: Publicly advertised metadata MUST NOT leak command or args!
+    let remote_json_str = String::from_utf8_lossy(&raw_remote_body);
+    assert!(
+        !remote_json_str.contains("pong_payload_123"),
+        "advertised action metadata must never leak underlying arguments to network"
+    );
+    assert!(
+        !remote_json_str.contains("\"command\""),
+        "advertised action metadata must never contain command field"
+    );
+
+    // 7. Host triggers Peer's predefined 'ping_action'
+    let trig_req = serde_json::json!({
+        "peer": peer_id.to_string(),
+        "action_id": "ping_action"
+    });
+    let (code_trig, body_trig) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/action/trigger",
+        &serde_json::to_vec(&trig_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_trig, 200);
+    let trig_rep: serde_json::Value = serde_json::from_slice(&body_trig).unwrap();
+    let trig_id = trig_rep["trigger_id"].as_str().unwrap().to_string();
+    assert!(trig_id.starts_with("trig_"));
+    assert_eq!(trig_rep["status"], "triggered");
+
+    // 8. Wait for Peer to execute and return ActionResultFrame to Host
+    let exec_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut action_executed_successfully = false;
+    while tokio::time::Instant::now() < exec_deadline {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/action/history")
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(rep) = serde_json::from_slice::<serde_json::Value>(&b) {
+                let history = if let Some(arr) = rep.get("results").and_then(|r| r.as_array()) {
+                    arr.clone()
+                } else if let Some(arr) = rep.as_array() {
+                    arr.clone()
+                } else {
+                    Vec::new()
+                };
+                if let Some(entry) = history.iter().find(|h| h["trigger_id"] == trig_id) {
+                    if entry["success"] == true && entry["exit_code"] == 0 {
+                        let out = entry["output_summary"].as_str().unwrap_or("");
+                        if out.contains("pong_payload_123") {
+                            action_executed_successfully = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        action_executed_successfully,
+        "host must receive successful action result containing command output"
+    );
+
+    // 9. Verify Host receives SSE event action_result_received
+    let sse_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_result_event = false;
+    while tokio::time::Instant::now() < sse_deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), host_sse.next_event()).await
+        {
+            if raw.contains("action_result_received") && raw.contains(&trig_id) {
+                saw_result_event = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_result_event,
+        "host must receive action_result_received SSE event"
+    );
+
+    // 10. Test Anti-Harassment Rate Limiting (5-second cooldown)
+    let (code_rate, body_rate) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/action/trigger",
+        &serde_json::to_vec(&trig_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_rate, 400);
+    let rate_err = String::from_utf8_lossy(&body_rate);
+    assert!(
+        rate_err.contains("rate limit") || rate_err.contains("cooldown"),
+        "subsequent trigger within 5s must be throttled: {}",
+        rate_err
+    );
+
+    // 11. Peer updates Action Policy to Disabled
+    let update_pol = serde_json::json!({
+        "mode": "Disabled",
+        "max_timeout_secs": 15,
+        "expose_action_list": false
+    });
+    let (code_pol_up, body_pol_up) = tetherly_node::loopback_post(
+        peer_ui,
+        "/api/action/policy",
+        &serde_json::to_vec(&update_pol).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_pol_up, 200);
+    let pol_updated: serde_json::Value = serde_json::from_slice(&body_pol_up).unwrap();
+    assert_eq!(pol_updated["policy"]["mode"], "disabled");
+    assert_eq!(pol_updated["policy"]["max_timeout_secs"], 15);
+    assert_eq!(pol_updated["policy"]["expose_action_list"], false);
+
+    // 12. File persistence check on peer data_dir (0o600 permissions)
+    let actions_path = g2.path().join("actions.json");
+    let policy_path = g2.path().join("action_policy.json");
+    assert!(actions_path.exists(), "actions.json must be persisted");
+    assert!(policy_path.exists(), "action_policy.json must be persisted");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms1 = std::fs::metadata(&actions_path).unwrap().permissions();
+        assert_eq!(
+            perms1.mode() & 0o777,
+            0o600,
+            "actions.json must have 0o600 permissions"
+        );
+        let perms2 = std::fs::metadata(&policy_path).unwrap().permissions();
+        assert_eq!(
+            perms2.mode() & 0o777,
+            0o600,
+            "action_policy.json must have 0o600 permissions"
+        );
+    }
+
+    // 13. Security Guard: Host header 403 Forbidden attack defense
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], peer_ui));
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let evil_req =
+        "GET /api/action/local HTTP/1.1\r\nHost: malicious-attacker.com\r\nConnection: close\r\n\r\n";
+    tokio::io::AsyncWriteExt::write_all(&mut stream, evil_req.as_bytes())
+        .await
+        .unwrap();
+    tokio::io::AsyncWriteExt::flush(&mut stream).await.unwrap();
+    let mut raw_resp = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut raw_resp)
+        .await
+        .unwrap();
+    let resp_str = String::from_utf8_lossy(&raw_resp);
+    assert!(
+        resp_str.starts_with("HTTP/1.1 403") || resp_str.starts_with("HTTP/1.0 403"),
+        "Host header attack must be rejected with 403 Forbidden"
+    );
+
+    // 14. Clean Shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

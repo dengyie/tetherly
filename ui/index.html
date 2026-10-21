@@ -794,6 +794,177 @@
         <div id="locate-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
       </div>
     </section>
+
+    <!-- Cross-Device Predefined Quick Actions & Local Allowlist Execution (v1.76 / ADR-069) -->
+    <section style="margin-top:16px" id="action-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2>跨端受控快捷动作与本地白名单指令 (Predefined Quick Actions & Allowlist)</h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button id="toggleactionpolicybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">准入策略</button>
+          <button id="toggleactionaddbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">新增本地动作</button>
+          <button id="toggleactionremotebtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">触发对端动作</button>
+          <button id="toggleactionhistorybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">执行记录</button>
+          <button id="refreshactionbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新状态</button>
+        </div>
+      </div>
+      <div class="hint">基于 ADR-008 铁律，远程对端仅可触发本地预置白名单动作 ID，严禁执行任意 Shell 命令行或远程脚本传输；公开元数据严格脱敏。</div>
+
+      <!-- Action Policy Panel -->
+      <div id="action-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-weight:600;font-size:13px">动作准入与治理策略配置 (Action Governance Policy)</span>
+          <span id="action-policy-badge" class="badge completed" style="font-size:11px">Mode: Allow</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+          <div>
+            <label style="font-size:11px;color:var(--muted)">准入模式 (Access Mode):</label>
+            <select id="action-policy-mode" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="Allow">允许白名单触发 (Allow)</option>
+              <option value="PromptOnly">仅待确认提示 (PromptOnly)</option>
+              <option value="Disabled">完全禁用执行 (Disabled)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">超时上限 (Max Timeout 1-30s):</label>
+            <input id="action-policy-max-timeout" type="number" min="1" max="30" placeholder="30" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">公开元数据 (Expose Actions List):</label>
+            <select id="action-policy-expose" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">公开安全元数据 (Expose)</option>
+              <option value="false">隐藏对外动作列表 (Hidden)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">允许画像分组 (Allowed Groups, 逗号分隔):</label>
+            <input id="action-policy-groups" placeholder="留空表示不限制分组" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">允许画像标签 (Allowed Tags, 逗号分隔):</label>
+            <input id="action-policy-tags" placeholder="留空表示不限制标签" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">允许设备形态 (Allowed Types, 逗号分隔):</label>
+            <input id="action-policy-types" placeholder="留空表示不限制形态" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:10px;align-items:center">
+          <button id="action-policy-save-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px">保存策略 (Save)</button>
+          <button id="action-policy-clear-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">重置限制 (Reset)</button>
+          <div id="action-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Add Local Predefined Action Panel -->
+      <div id="action-add-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px">注册本地预置受控动作 (Register Predefined Local Action)</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div>
+            <label style="font-size:11px;color:var(--muted)">动作唯一标识 ID (如 lock_screen):</label>
+            <input id="action-add-id" placeholder="lock_screen" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">友好名称 Name (如 锁定屏幕):</label>
+            <input id="action-add-name" placeholder="锁定屏幕" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">本地执行命令 Command (如 loginctl):</label>
+            <input id="action-add-cmd" placeholder="loginctl" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">预置命令参数 Args (逗号分隔，如 lock-session):</label>
+            <input id="action-add-args" placeholder="lock-session" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">图标或 Emoji Icon (如 🔒):</label>
+            <input id="action-add-icon" placeholder="🔒" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">动作描述 Description:</label>
+            <input id="action-add-desc" placeholder="立即锁定本机桌面会话" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">超时限制 Timeout (1..=30s):</label>
+            <input id="action-add-timeout" type="number" min="1" max="30" value="10" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">状态启用 Enabled:</label>
+            <select id="action-add-enabled" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">已启用 (Enabled)</option>
+              <option value="false">已禁用 (Disabled)</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:10px;align-items:center">
+          <button id="action-add-submit-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px;font-weight:600">注册动作 (Register)</button>
+          <button id="action-add-cancel-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px">取消</button>
+          <div id="action-add-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Remote Action Trigger Panel -->
+      <div id="action-remote-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div style="font-weight:600;font-size:13px">跨端触发对端快捷动作 (Trigger Remote Peer Action)</div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select id="action-remote-peer-select" style="padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="">(请选择在线对端设备)</option>
+            </select>
+            <button id="action-remote-refresh-btn" class="ghost" type="button" style="padding:4px 10px;font-size:12px">🔄 刷新对端动作</button>
+          </div>
+        </div>
+        <div id="action-remote-items" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(220px, 1fr));gap:8px;margin-top:8px">
+          <div class="empty" style="grid-column:1/-1">请选择对端设备以加载其公开的受控动作。</div>
+        </div>
+        <div id="action-remote-status-msg" style="font-size:12px;color:var(--ok);margin-top:8px"></div>
+      </div>
+
+      <!-- Action Execution History Panel -->
+      <div id="action-history-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-weight:600;font-size:13px">动作执行审计流水 (Action Execution History)</span>
+          <button id="action-history-refresh-btn" class="ghost" type="button" style="padding:2px 8px;font-size:11px">刷新流水</button>
+        </div>
+        <div id="action-history-items" style="display:flex;flex-direction:column;gap:6px;max-height:240px;overflow-y:auto">
+          <div class="empty">暂无动作执行流水记录。</div>
+        </div>
+      </div>
+
+      <!-- Main Action Dashboard Card -->
+      <div style="margin-top:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px">
+        <div class="card" style="padding:14px;margin:0;background:#131a22;border:1px solid var(--line);border-radius:6px;flex-direction:column;align-items:stretch;gap:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span id="action-main-icon" style="font-size:24px">⚡</span>
+              <div>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="font-size:16px;font-weight:700;color:var(--text)">本地白名单指令库</span>
+                  <span id="action-local-count-badge" class="badge completed" style="font-size:11px">0 个动作已配置</span>
+                  <span id="action-policy-status-badge" class="badge completed" style="font-size:11px">准入: Allow</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">ADR-008 受控沙盒守护运行，严格校验本地命令白名单与 5 秒防轰炸冷却</div>
+              </div>
+            </div>
+            <div style="text-align:right">
+              <div id="action-rate-limit-text" style="font-size:12px;color:var(--text);font-weight:600">防轰炸频控: 5s 冷却</div>
+              <div id="action-max-timeout-text" style="font-size:11px;color:var(--muted)">超时限制: 30s</div>
+            </div>
+          </div>
+
+          <!-- Local Actions Grid -->
+          <div id="action-local-items" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(260px, 1fr));gap:8px;margin-top:4px">
+            <div class="empty" style="grid-column:1/-1">暂无配置本地快捷动作，点击上方「新增本地动作」添加常用预置指令。</div>
+          </div>
+
+          <!-- Bottom Indicators -->
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:6px;margin-top:4px">
+            <span id="action-expose-indicator">元数据广播: 公开</span>
+            <span id="action-filter-indicator">画像准入: 全网开放</span>
+          </div>
+        </div>
+        <div id="action-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
+      </div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
@@ -1658,6 +1829,11 @@ function render(s) {
   if (locp) {
     locp.innerHTML = '<option value="">(请选择在线对端设备)</option>';
   }
+  const actp = $("action-remote-peer-select");
+  const prevActPeer = actp ? actp.value : "";
+  if (actp) {
+    actp.innerHTML = '<option value="">(请选择在线对端设备)</option>';
+  }
   for (const x of s.peers) {
     let rttBadge = '<span class="badge offline" style="margin-left:6px">RTT 未测</span>';
     if (x.rtt_ms != null) {
@@ -1788,6 +1964,13 @@ function render(s) {
       opt.textContent = displayName + " (" + (x.path || "lan") + ")";
       if (opt.value === prevLocPeer) opt.selected = true;
       locp.appendChild(opt);
+    }
+    if (actp) {
+      const opt = document.createElement("option");
+      opt.value = x.device_id;
+      opt.textContent = displayName + " (" + (x.path || "lan") + ")";
+      if (opt.value === prevActPeer) opt.selected = true;
+      actp.appendChild(opt);
     }
   }
   const tr = $("trusted");
@@ -3610,6 +3793,462 @@ if (locatePolicyClearBtn) {
   };
 }
 
+/* =========================================================================
+ * Quick Actions & Allowlist Management (v1.76 / ADR-069)
+ * ========================================================================= */
+
+async function updateActionLocal() {
+  try {
+    const rep = await api("/api/action/local");
+    const container = $("action-local-items");
+    const badge = $("action-local-count-badge");
+    const list = (rep && rep.actions) || (Array.isArray(rep) ? rep : []);
+    if (!container || !Array.isArray(list)) return;
+
+    if (badge) {
+      badge.textContent = list.length + " 个动作已配置";
+      badge.className = list.length > 0 ? "badge completed" : "badge offline";
+    }
+
+    container.innerHTML = "";
+    if (list.length === 0) {
+      container.innerHTML = '<div class="empty" style="grid-column:1/-1">暂无配置本地快捷动作，点击上方「新增本地动作」添加常用预置指令。</div>';
+      return;
+    }
+
+    for (const a of list) {
+      const card = document.createElement("div");
+      card.style.background = "#0d1218";
+      card.style.border = "1px solid var(--line)";
+      card.style.borderRadius = "6px";
+      card.style.padding = "8px 10px";
+      card.style.display = "flex";
+      card.style.flexDirection = "column";
+      card.style.justifyContent = "space-between";
+      card.style.gap = "6px";
+
+      const icon = a.icon || "⚡";
+      const name = a.name || a.id;
+      const id = a.id;
+      const cmdStr = (a.command || "") + " " + (a.args || []).join(" ");
+      const timeout = a.timeout_secs || 10;
+      const enabled = a.enabled !== false;
+      const desc = a.description || "";
+
+      card.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span style="font-size:16px">${escapeHtml(icon)}</span>
+            <div>
+              <div style="font-size:13px;font-weight:600;color:var(--text)">${escapeHtml(name)}</div>
+              <div style="font-size:11px;color:var(--muted);font-family:monospace">${escapeHtml(id)}</div>
+            </div>
+          </div>
+          <span class="badge ${enabled ? 'completed' : 'offline'}" style="font-size:10px">${enabled ? '已启用' : '已禁用'}</span>
+        </div>
+        <div style="font-size:11px;color:var(--muted);background:#131a22;padding:4px 6px;border-radius:4px;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(cmdStr)}">
+          $ ${escapeHtml(cmdStr)}
+        </div>
+        ${desc ? `<div style="font-size:11px;color:var(--muted)">${escapeHtml(desc)}</div>` : ''}
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
+          <span style="font-size:10px;color:var(--muted)">超时: ${timeout}s</span>
+          <button class="bad ghost delete-action-btn" type="button" style="padding:1px 6px;font-size:11px" data-id="${escapeHtml(id)}">删除</button>
+        </div>
+      `;
+
+      const delBtn = card.querySelector(".delete-action-btn");
+      if (delBtn) {
+        delBtn.onclick = async () => {
+          if (!confirm(`确定删除本地快捷动作 "${name}" (${id}) 吗？`)) return;
+          try {
+            const path = "/api/action/local?id=" + encodeURIComponent(id);
+            const rep = await api(path, undefined, { method: "DELETE" });
+            if (rep && rep.ok) {
+              updateActionLocal();
+            } else {
+              alert("删除失败: " + (rep ? rep.error : "未知错误"));
+            }
+          } catch (e) {
+            alert("删除异常: " + e.message);
+          }
+        };
+      }
+
+      container.appendChild(card);
+    }
+  } catch (e) {}
+}
+
+async function updateActionPolicy() {
+  try {
+    const rep = await api("/api/action/policy");
+    if (!rep || !rep.ok) return;
+    const p = rep.policy || rep;
+
+    if ($("action-policy-badge")) {
+      $("action-policy-badge").textContent = "Mode: " + p.mode;
+      $("action-policy-badge").className = p.mode === "allow" || p.mode === "Allow" ? "badge completed" : (p.mode === "prompt_only" || p.mode === "PromptOnly" ? "badge outbound" : "badge offline");
+    }
+    if ($("action-policy-status-badge")) {
+      $("action-policy-status-badge").textContent = "准入: " + p.mode;
+      $("action-policy-status-badge").className = p.mode === "allow" || p.mode === "Allow" ? "badge completed" : (p.mode === "prompt_only" || p.mode === "PromptOnly" ? "badge outbound" : "badge offline");
+    }
+    if ($("action-max-timeout-text")) {
+      $("action-max-timeout-text").textContent = "超时限制: " + p.max_timeout_secs + "s";
+    }
+    if ($("action-expose-indicator")) {
+      $("action-expose-indicator").textContent = "元数据广播: " + (p.expose_action_list ? "公开" : "隐藏");
+    }
+    if ($("action-filter-indicator")) {
+      const filters = [];
+      if (p.allowed_groups && p.allowed_groups.length) filters.push("群组:" + p.allowed_groups.join("/"));
+      if (p.allowed_tags && p.allowed_tags.length) filters.push("标签:" + p.allowed_tags.join("/"));
+      if (p.allowed_types && p.allowed_types.length) filters.push("形态:" + p.allowed_types.join("/"));
+      $("action-filter-indicator").textContent = "画像准入: " + (filters.length ? filters.join(" · ") : "全网开放");
+    }
+
+    if ($("action-policy-mode") && document.activeElement !== $("action-policy-mode")) {
+      $("action-policy-mode").value = p.mode;
+    }
+    if ($("action-policy-max-timeout") && document.activeElement !== $("action-policy-max-timeout")) {
+      $("action-policy-max-timeout").value = p.max_timeout_secs;
+    }
+    if ($("action-policy-expose") && document.activeElement !== $("action-policy-expose")) {
+      $("action-policy-expose").value = p.expose_action_list ? "true" : "false";
+    }
+    if ($("action-policy-groups") && document.activeElement !== $("action-policy-groups")) {
+      $("action-policy-groups").value = (p.allowed_groups || []).join(", ");
+    }
+    if ($("action-policy-tags") && document.activeElement !== $("action-policy-tags")) {
+      $("action-policy-tags").value = (p.allowed_tags || []).join(", ");
+    }
+    if ($("action-policy-types") && document.activeElement !== $("action-policy-types")) {
+      $("action-policy-types").value = (p.allowed_types || []).join(", ");
+    }
+  } catch (e) {}
+}
+
+async function updateActionRemote(refresh) {
+  const peerSelect = $("action-remote-peer-select");
+  const container = $("action-remote-items");
+  const statusMsg = $("action-remote-status-msg");
+  if (!peerSelect || !container) return;
+
+  const peer = peerSelect.value;
+  if (!peer) {
+    container.innerHTML = '<div class="empty" style="grid-column:1/-1">请选择对端设备以加载其公开的受控动作。</div>';
+    return;
+  }
+
+  if (refresh) {
+    if (statusMsg) statusMsg.textContent = "正在向对端请求刷新动作列表…";
+    try {
+      await api("/api/action/remote/refresh?peer=" + encodeURIComponent(peer), undefined, { method: "POST" });
+    } catch (e) {}
+  }
+
+  try {
+    const rep = await api("/api/action/remote?peer=" + encodeURIComponent(peer));
+    const actions = (rep && rep.actions) || (Array.isArray(rep) ? rep : []);
+    if (!actions.length) {
+      container.innerHTML = '<div class="empty" style="grid-column:1/-1">该对端暂无公开的受控动作 (或未开启公开元数据)。</div>';
+      if (statusMsg) statusMsg.textContent = "";
+      return;
+    }
+
+    const peerAlias = (rep && rep.peer) || peer;
+
+    container.innerHTML = "";
+    for (const act of actions) {
+      const card = document.createElement("div");
+      card.style.background = "#0d1218";
+      card.style.border = "1px solid var(--line)";
+      card.style.borderRadius = "6px";
+      card.style.padding = "10px";
+      card.style.display = "flex";
+      card.style.flexDirection = "column";
+      card.style.justifyContent = "space-between";
+      card.style.gap = "8px";
+
+      const icon = act.icon || "⚡";
+      const name = act.name || act.id;
+      const id = act.id;
+      const desc = act.description || "";
+
+      card.innerHTML = `
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:20px">${escapeHtml(icon)}</span>
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--text)">${escapeHtml(name)}</div>
+            <div style="font-size:11px;color:var(--muted);font-family:monospace">${escapeHtml(id)}</div>
+          </div>
+        </div>
+        ${desc ? `<div style="font-size:11px;color:var(--muted)">${escapeHtml(desc)}</div>` : ''}
+        <button class="ghost trigger-remote-btn" type="button" style="padding:4px 8px;font-size:12px;font-weight:600;width:100%" data-id="${escapeHtml(id)}">
+          🚀 远程触发 (Trigger)
+        </button>
+      `;
+
+      const btn = card.querySelector(".trigger-remote-btn");
+      if (btn) {
+        btn.onclick = async () => {
+          btn.disabled = true;
+          btn.textContent = "触发中…";
+          if (statusMsg) statusMsg.textContent = `正在向 ${peerReport.peer_alias || peer} 发送动作 [${name}] 触发指令…`;
+          try {
+            const rep = await api("/api/action/trigger", {
+              peer: peer,
+              action_id: id
+            });
+            if (rep && rep.ok) {
+              if (statusMsg) statusMsg.textContent = `动作 [${name}] 触发指令已派发 (Trigger ID: ${rep.trigger_id})！`;
+              btn.textContent = "已派发";
+              setTimeout(() => { btn.textContent = "🚀 远程触发 (Trigger)"; btn.disabled = false; }, 2000);
+              updateActionHistory();
+            } else {
+              if (statusMsg) statusMsg.textContent = `触发失败: ${rep ? rep.error : "未知错误"}`;
+              btn.textContent = "失败";
+              setTimeout(() => { btn.textContent = "🚀 远程触发 (Trigger)"; btn.disabled = false; }, 2000);
+            }
+          } catch (e) {
+            if (statusMsg) statusMsg.textContent = "触发异常: " + e.message;
+            btn.textContent = "异常";
+            setTimeout(() => { btn.textContent = "🚀 远程触发 (Trigger)"; btn.disabled = false; }, 2000);
+          }
+        };
+      }
+
+      container.appendChild(card);
+    }
+    if (statusMsg && refresh) statusMsg.textContent = "对端可用动作已更新！";
+  } catch (e) {}
+}
+
+async function updateActionHistory() {
+  try {
+    const res = await api("/api/action/history");
+    const container = $("action-history-items");
+    if (!container) return;
+    const list = (res && res.results) || (Array.isArray(res) ? res : []);
+
+    container.innerHTML = "";
+    if (list.length === 0) {
+      container.innerHTML = '<div class="empty">暂无动作执行流水记录。</div>';
+      return;
+    }
+
+    for (const h of list) {
+      const item = document.createElement("div");
+      item.style.background = "#0d1218";
+      item.style.border = "1px solid var(--line)";
+      item.style.borderRadius = "4px";
+      item.style.padding = "6px 8px";
+      item.style.fontSize = "12px";
+
+      const timeStr = new Date(h.timestamp_ms).toLocaleTimeString();
+      const succ = h.success;
+      const statusBadge = `<span class="badge ${succ ? 'completed' : 'offline'}" style="font-size:10px">${succ ? '成功' : '失败'}</span>`;
+      const dirBadge = `<span class="badge ${h.direction === 'inbound' ? 'outbound' : 'verifying'}" style="font-size:10px">${h.direction === 'inbound' ? '入站' : '出站'}</span>`;
+      const exitStr = h.exit_code != null ? `exit: ${h.exit_code}` : "no exit";
+
+      item.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="display:flex;align-items:center;gap:6px">
+            ${statusBadge}
+            ${dirBadge}
+            <span style="font-weight:600;color:var(--text)">${escapeHtml(h.action_id)}</span>
+            <span style="color:var(--muted);font-size:11px">对端: ${escapeHtml(h.peer_alias || h.peer_id)}</span>
+          </div>
+          <div style="color:var(--muted);font-size:11px">${timeStr} · ${h.duration_ms}ms · ${exitStr}</div>
+        </div>
+        ${h.output_summary ? `<div style="font-size:11px;color:var(--muted);font-family:monospace;background:#131a22;padding:2px 6px;border-radius:2px;margin-top:4px">${escapeHtml(h.output_summary)}</div>` : ''}
+        ${h.error_message ? `<div style="font-size:11px;color:var(--warn);margin-top:2px">${escapeHtml(h.error_message)}</div>` : ''}
+      `;
+      container.appendChild(item);
+    }
+  } catch (e) {}
+}
+
+const toggleActionPolicyBtn = $("toggleactionpolicybtn");
+if (toggleActionPolicyBtn) {
+  toggleActionPolicyBtn.onclick = () => {
+    const p = $("action-policy-panel");
+    if (!p) return;
+    p.style.display = p.style.display === "none" ? "block" : "none";
+    if (p.style.display !== "none") updateActionPolicy();
+  };
+}
+
+const toggleActionAddBtn = $("toggleactionaddbtn");
+if (toggleActionAddBtn) {
+  toggleActionAddBtn.onclick = () => {
+    const p = $("action-add-panel");
+    if (!p) return;
+    p.style.display = p.style.display === "none" ? "block" : "none";
+  };
+}
+
+const toggleActionRemoteBtn = $("toggleactionremotebtn");
+if (toggleActionRemoteBtn) {
+  toggleActionRemoteBtn.onclick = () => {
+    const p = $("action-remote-panel");
+    if (!p) return;
+    p.style.display = p.style.display === "none" ? "block" : "none";
+    if (p.style.display !== "none") updateActionRemote(false);
+  };
+}
+
+const toggleActionHistoryBtn = $("toggleactionhistorybtn");
+if (toggleActionHistoryBtn) {
+  toggleActionHistoryBtn.onclick = () => {
+    const p = $("action-history-panel");
+    if (!p) return;
+    p.style.display = p.style.display === "none" ? "block" : "none";
+    if (p.style.display !== "none") updateActionHistory();
+  };
+}
+
+const refreshActionBtn = $("refreshactionbtn");
+if (refreshActionBtn) {
+  refreshActionBtn.onclick = () => {
+    updateActionLocal();
+    updateActionPolicy();
+    updateActionRemote(false);
+    updateActionHistory();
+  };
+}
+
+const actionPolicySaveBtn = $("action-policy-save-btn");
+if (actionPolicySaveBtn) {
+  actionPolicySaveBtn.onclick = async () => {
+    const modeVal = $("action-policy-mode") ? $("action-policy-mode").value : undefined;
+    const maxTimeout = $("action-policy-max-timeout") ? parseInt($("action-policy-max-timeout").value, 10) : undefined;
+    const exposeVal = $("action-policy-expose") ? $("action-policy-expose").value === "true" : undefined;
+    const grpsVal = $("action-policy-groups") ? $("action-policy-groups").value.trim() : "";
+    const tagsVal = $("action-policy-tags") ? $("action-policy-tags").value.trim() : "";
+    const typesVal = $("action-policy-types") ? $("action-policy-types").value.trim() : "";
+    const msg = $("action-policy-msg");
+
+    const payload = {};
+    if (modeVal) payload.mode = modeVal;
+    if (!isNaN(maxTimeout)) payload.max_timeout_secs = maxTimeout;
+    if (exposeVal != null) payload.expose_action_list = exposeVal;
+    if (grpsVal) {
+      payload.allowed_groups = grpsVal.split(",").map(s => s.trim()).filter(Boolean);
+    }
+    if (tagsVal) {
+      payload.allowed_tags = tagsVal.split(",").map(s => s.trim().replace(/^#/, "")).filter(Boolean);
+    }
+    if (typesVal) {
+      payload.allowed_types = typesVal.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+    }
+
+    if (msg) msg.textContent = "正在保存动作策略…";
+    try {
+      const rep = await api("/api/action/policy", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "动作治理策略已保存！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateActionPolicy();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "保存异常: " + e.message;
+    }
+  };
+}
+
+const actionPolicyClearBtn = $("action-policy-clear-btn");
+if (actionPolicyClearBtn) {
+  actionPolicyClearBtn.onclick = async () => {
+    const msg = $("action-policy-msg");
+    if (msg) msg.textContent = "正在清空过滤器限制…";
+    try {
+      const rep = await api("/api/action/policy", { clear_filters: true });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "准入过滤器已重置为不限！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateActionPolicy();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "清空异常: " + e.message;
+    }
+  };
+}
+
+const actionAddSubmitBtn = $("action-add-submit-btn");
+if (actionAddSubmitBtn) {
+  actionAddSubmitBtn.onclick = async () => {
+    const idVal = $("action-add-id") ? $("action-add-id").value.trim() : "";
+    const nameVal = $("action-add-name") ? $("action-add-name").value.trim() : "";
+    const cmdVal = $("action-add-cmd") ? $("action-add-cmd").value.trim() : "";
+    const argsVal = $("action-add-args") ? $("action-add-args").value.trim() : "";
+    const iconVal = $("action-add-icon") ? $("action-add-icon").value.trim() : "";
+    const descVal = $("action-add-desc") ? $("action-add-desc").value.trim() : "";
+    const timeoutVal = $("action-add-timeout") ? parseInt($("action-add-timeout").value, 10) : 10;
+    const enabledVal = $("action-add-enabled") ? $("action-add-enabled").value === "true" : true;
+    const msg = $("action-add-msg");
+
+    if (!idVal || !nameVal || !cmdVal) {
+      if (msg) msg.textContent = "请完整填写动作 ID、名称和本地命令！";
+      return;
+    }
+
+    const payload = {
+      id: idVal,
+      name: nameVal,
+      command: cmdVal,
+      args: argsVal ? argsVal.split(",").map(s => s.trim()).filter(Boolean) : [],
+      description: descVal || undefined,
+      icon: iconVal || undefined,
+      timeout_secs: isNaN(timeoutVal) ? 10 : timeoutVal,
+      enabled: enabledVal
+    };
+
+    if (msg) msg.textContent = "正在注册本地动作…";
+    try {
+      const rep = await api("/api/action/local", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = `动作 "${nameVal}" 已注册！`;
+        setTimeout(() => {
+          if (msg) msg.textContent = "";
+          const p = $("action-add-panel");
+          if (p) p.style.display = "none";
+        }, 1500);
+        updateActionLocal();
+      } else {
+        if (msg) msg.textContent = "注册失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "注册异常: " + e.message;
+    }
+  };
+}
+
+const actionAddCancelBtn = $("action-add-cancel-btn");
+if (actionAddCancelBtn) {
+  actionAddCancelBtn.onclick = () => {
+    const p = $("action-add-panel");
+    if (p) p.style.display = "none";
+  };
+}
+
+const actionRemoteRefreshBtn = $("action-remote-refresh-btn");
+if (actionRemoteRefreshBtn) {
+  actionRemoteRefreshBtn.onclick = () => updateActionRemote(true);
+}
+
+const actionRemotePeerSelect = $("action-remote-peer-select");
+if (actionRemotePeerSelect) {
+  actionRemotePeerSelect.onchange = () => updateActionRemote(false);
+}
+
+const actionHistoryRefreshBtn = $("action-history-refresh-btn");
+if (actionHistoryRefreshBtn) {
+  actionHistoryRefreshBtn.onclick = () => updateActionHistory();
+}
+
 async function updateStorage() {
   try {
     const s = await api("/api/storage");
@@ -5371,11 +6010,34 @@ function setupEventSource() {
 									            desc = "⏹ 寻机响铃停止: " + ev.stopped_by_alias + " (原因: " + (ev.reason || "unspecified") + ")";
 									            updateLocateStatus();
 									          }
-									          else if (ev.kind === "locate_policy_changed") {
-									            desc = "寻机策略更新: 状态=" + (ev.enabled ? "开启" : "关闭") + " · 强穿静音=" + (ev.allow_override_silent ? "允许" : "禁止") + " · 最大时长=" + ev.max_duration_secs + "s";
-									            updateLocatePolicy();
-									            updateLocateStatus();
-									          }
+										          else if (ev.kind === "locate_policy_changed") {
+										            desc = "寻机策略更新: 状态=" + (ev.enabled ? "开启" : "关闭") + " · 强穿静音=" + (ev.allow_override_silent ? "允许" : "禁止") + " · 最大时长=" + ev.max_duration_secs + "s";
+										            updateLocatePolicy();
+										            updateLocateStatus();
+										          }
+										          else if (ev.kind === "action_list_requested") {
+										            desc = "⚡ 对端请求动作列表: " + ev.peer_alias;
+										          }
+										          else if (ev.kind === "action_list_received") {
+										            desc = "⚡ 收到对端可用动作: " + ev.peer_alias + " (共 " + ev.count + " 项)";
+										            updateActionRemote(false);
+										          }
+										          else if (ev.kind === "action_triggered") {
+										            desc = "⚡ 触发快捷动作: [" + ev.action_id + "] 来自 " + ev.peer_alias;
+										            updateActionHistory();
+										          }
+										          else if (ev.kind === "action_result_received") {
+										            desc = "⚡ 动作执行结果: [" + ev.action_id + "] " + (ev.success ? "成功" : "失败") + " (" + ev.duration_ms + "ms)";
+										            updateActionHistory();
+										          }
+										          else if (ev.kind === "action_policy_changed") {
+										            desc = "动作策略变更: 模式=" + ev.mode + " · 超时上限=" + ev.max_timeout_secs + "s";
+										            updateActionPolicy();
+										          }
+										          else if (ev.kind === "local_actions_changed") {
+										            desc = "本地快捷动作表更新: 当前共 " + ev.count + " 项";
+										            updateActionLocal();
+										          }
 						          else if (ev.kind === "screen_state_changed") {
 					            desc = "屏幕状态: " + ev.state + " (授权:" + (ev.allowed ? "是" : "否") + ")" + (ev.peer ? (" · 对端:" + ev.peer) : "");
 					            updateScreenStatus();
@@ -5539,10 +6201,16 @@ function setupEventSource() {
 															setInterval(updateBatteryStatus, 3000);
 															updateBatteryPolicy();
 															setInterval(updateBatteryPolicy, 3000);
-															updateLocateStatus();
-															setInterval(updateLocateStatus, 3000);
-															updateLocatePolicy();
-															setInterval(updateLocatePolicy, 3000);
-				</script>
+																updateLocateStatus();
+																setInterval(updateLocateStatus, 3000);
+																updateLocatePolicy();
+																setInterval(updateLocatePolicy, 3000);
+																updateActionLocal();
+																setInterval(updateActionLocal, 3000);
+																updateActionPolicy();
+																setInterval(updateActionPolicy, 3000);
+																updateActionHistory();
+																setInterval(updateActionHistory, 3000);
+					</script>
 </body>
 </html>

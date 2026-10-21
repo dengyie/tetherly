@@ -25,6 +25,8 @@ pub const HANDOFF_INBOX_FILE: &str = "handoff_inbox.json";
 pub const MEDIA_POLICY_FILE: &str = "media_policy.json";
 pub const BATTERY_POLICY_FILE: &str = "battery_policy.json";
 pub const LOCATOR_POLICY_FILE: &str = "locator_policy.json";
+pub const ACTIONS_FILE: &str = "actions.json";
+pub const ACTION_POLICY_FILE: &str = "action_policy.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -1044,6 +1046,212 @@ pub fn save_locator_policy(dir: &Path, policy: &LocatorPolicy) -> Result<(), Nod
     Ok(())
 }
 
+fn default_action_timeout() -> u32 {
+    10
+}
+
+/// Local definition of an executable action.
+///
+/// Under the ADR-008 security invariant, the actual command string and arguments
+/// are strictly private to this node's local storage and are NEVER transmitted over the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalActionDefinition {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_action_timeout")]
+    pub timeout_secs: u32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl LocalActionDefinition {
+    pub fn sanitize(&mut self) {
+        self.id = tetherly_core::ActionValidator::clean_identifier(
+            &self.id,
+            tetherly_core::MAX_ACTION_ID_LEN,
+        );
+        self.name = tetherly_core::ActionValidator::sanitize_text(
+            &self.name,
+            tetherly_core::MAX_ACTION_NAME_LEN,
+        );
+        if let Some(desc) = &self.description {
+            self.description = Some(tetherly_core::ActionValidator::sanitize_text(
+                desc,
+                tetherly_core::MAX_ACTION_DESC_LEN,
+            ));
+        }
+        if let Some(icon) = &self.icon {
+            self.icon = Some(tetherly_core::ActionValidator::sanitize_text(
+                icon,
+                tetherly_core::MAX_ACTION_ICON_LEN,
+            ));
+        }
+        self.timeout_secs = tetherly_core::ActionValidator::clamp_timeout(self.timeout_secs);
+    }
+
+    /// Converts this local definition into a safe public metadata ActionItem to advertise to peers.
+    pub fn to_item(&self) -> tetherly_core::ActionItem {
+        tetherly_core::ActionItem {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            description: self.description.clone(),
+            icon: self.icon.clone(),
+        }
+    }
+}
+
+/// Mode governing inbound remote action trigger requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionAccessMode {
+    #[default]
+    Allow,
+    PromptOnly,
+    Disabled,
+}
+
+impl ActionAccessMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::PromptOnly => "prompt_only",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+impl std::fmt::Display for ActionAccessMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for ActionAccessMode {
+    type Err = tetherly_core::CoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "allow" | "enabled" | "yes" => Ok(Self::Allow),
+            "prompt_only" | "prompt" | "ask" => Ok(Self::PromptOnly),
+            "disabled" | "deny" | "off" | "no" => Ok(Self::Disabled),
+            other => Err(tetherly_core::CoreError::InvalidPayload(format!(
+                "invalid action access mode: '{other}', expected allow, prompt_only, or disabled"
+            ))),
+        }
+    }
+}
+
+/// Inbound access control and scoping policy for predefined quick actions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionPolicy {
+    #[serde(default)]
+    pub mode: ActionAccessMode,
+    #[serde(default = "default_action_timeout")]
+    pub max_timeout_secs: u32,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+    #[serde(default = "default_true")]
+    pub expose_action_list: bool,
+}
+
+impl Default for ActionPolicy {
+    fn default() -> Self {
+        Self {
+            mode: ActionAccessMode::Allow,
+            max_timeout_secs: 10,
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+            expose_action_list: true,
+        }
+    }
+}
+
+impl ActionPolicy {
+    /// Evaluates if an inbound action request or list query from a peer is eligible.
+    pub fn is_peer_eligible(&self, profile: &PeerProfile) -> bool {
+        if self.mode == ActionAccessMode::Disabled {
+            return false;
+        }
+
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        if let Some(group) = &profile.group {
+            if self.allowed_groups.iter().any(|g| g == group) {
+                return true;
+            }
+        }
+
+        if profile.tags.iter().any(|t| self.allowed_tags.contains(t)) {
+            return true;
+        }
+
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+
+    pub fn sanitize(&mut self) {
+        self.max_timeout_secs =
+            tetherly_core::ActionValidator::clamp_timeout(self.max_timeout_secs);
+    }
+}
+
+pub fn load_local_actions(dir: &Path) -> Vec<LocalActionDefinition> {
+    let path = dir.join(ACTIONS_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_local_actions(
+    dir: &Path,
+    actions: &[LocalActionDefinition],
+) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(ACTIONS_FILE),
+        &serde_json::to_vec_pretty(actions)?,
+    )?;
+    Ok(())
+}
+
+pub fn load_action_policy(dir: &Path) -> ActionPolicy {
+    let path = dir.join(ACTION_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_action_policy(dir: &Path, policy: &ActionPolicy) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(ACTION_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -1684,6 +1892,111 @@ mod tests {
         };
         invalid.sanitize();
         assert_eq!(invalid.max_duration_secs, 60);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_actions_and_policy_roundtrip_and_matching() {
+        let dir = std::env::temp_dir().join(format!("tetherly-act-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Defaults
+        let def_actions = load_local_actions(&dir);
+        assert!(def_actions.is_empty());
+
+        let def_pol = load_action_policy(&dir);
+        assert_eq!(def_pol.mode, ActionAccessMode::Allow);
+        assert_eq!(def_pol.max_timeout_secs, 10);
+        assert!(def_pol.expose_action_list);
+
+        // 2. Add local actions and save
+        let mut actions = vec![
+            LocalActionDefinition {
+                id: "lock_screen".into(),
+                name: "Lock Screen".into(),
+                description: Some("Locks the desktop session".into()),
+                icon: Some("lock".into()),
+                command: "loginctl".into(),
+                args: vec!["lock-session".into()],
+                timeout_secs: 5,
+                enabled: true,
+            },
+            LocalActionDefinition {
+                id: "sleep_display".into(),
+                name: "Sleep Display".into(),
+                description: None,
+                icon: None,
+                command: "xset".into(),
+                args: vec!["dpms".into(), "force".into(), "off".into()],
+                timeout_secs: 10,
+                enabled: false,
+            },
+        ];
+        for a in &mut actions {
+            a.sanitize();
+        }
+        save_local_actions(&dir, &actions).unwrap();
+
+        let loaded_actions = load_local_actions(&dir);
+        assert_eq!(loaded_actions.len(), 2);
+        assert_eq!(loaded_actions[0].id, "lock_screen");
+        assert_eq!(loaded_actions[1].id, "sleep_display");
+        assert_eq!(loaded_actions[0].to_item().name, "Lock Screen");
+
+        // 3. Custom policy persistence
+        let mut custom_pol = ActionPolicy {
+            mode: ActionAccessMode::PromptOnly,
+            max_timeout_secs: 20,
+            allowed_groups: vec!["admin".into()],
+            allowed_tags: vec!["secure".into()],
+            allowed_types: vec![DeviceType::Phone],
+            expose_action_list: true,
+        };
+        custom_pol.sanitize();
+        save_action_policy(&dir, &custom_pol).unwrap();
+
+        let loaded_pol = load_action_policy(&dir);
+        assert_eq!(loaded_pol, custom_pol);
+
+        // 4. Matching
+        let prof_ok = PeerProfile {
+            device_id: "phone_1".into(),
+            device_type: DeviceType::Phone,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded_pol.is_peer_eligible(&prof_ok));
+
+        let prof_group = PeerProfile {
+            device_id: "pc_1".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec![],
+            group: Some("admin".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded_pol.is_peer_eligible(&prof_group));
+
+        let prof_unmatched = PeerProfile {
+            device_id: "pc_2".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec!["guest".into()],
+            group: Some("visitor".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded_pol.is_peer_eligible(&prof_unmatched));
+
+        // 5. Disabled mode blocks all
+        let disabled_pol = ActionPolicy {
+            mode: ActionAccessMode::Disabled,
+            ..Default::default()
+        };
+        assert!(!disabled_pol.is_peer_eligible(&prof_ok));
 
         let _ = fs::remove_dir_all(&dir);
     }
