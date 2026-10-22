@@ -6,7 +6,7 @@ use crate::runtime::{Node, OutboxStatus};
 use crate::store::{ActionAccessMode, LocalActionDefinition};
 use serde::Serialize;
 use std::net::SocketAddr;
-use tetherly_core::{ActionValidator, MediaCommand, PlaybackState, PowerSource};
+use tetherly_core::{ActionValidator, DisplayEdge, MediaCommand, PlaybackState, PowerSource};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
@@ -476,6 +476,9 @@ struct Snapshot {
     /// Focus status report if present.
     #[serde(skip_serializing_if = "Option::is_none")]
     focus_status: Option<crate::runtime::FocusStatusReport>,
+    /// Spatial topology layout report if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    topology_layout: Option<crate::runtime::TopologyLayoutReport>,
 }
 
 #[derive(Serialize)]
@@ -1033,6 +1036,66 @@ struct FocusPolicyBody {
     #[serde(default)]
     allowed_tags: Option<Vec<String>>,
     #[serde(default)]
+    allowed_types: Option<Vec<String>>,
+    #[serde(default)]
+    clear_filters: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TopologyLinkBody {
+    #[serde(default)]
+    edge: Option<String>,
+    #[serde(default, alias = "peer_id", alias = "device_id", alias = "target")]
+    peer: Option<String>,
+    #[serde(default)]
+    peer_edge: Option<String>,
+    #[serde(default)]
+    offset: Option<i32>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TopologyUnlinkBody {
+    #[serde(default)]
+    edge: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TopologyConfigBody {
+    #[serde(default, alias = "resistance")]
+    resistance_px: Option<u32>,
+    #[serde(default, alias = "delay")]
+    delay_ms: Option<u32>,
+    #[serde(default, alias = "corner_lock", alias = "corner_lock_size")]
+    corner_lock_size_px: Option<u32>,
+    #[serde(default, alias = "wrap")]
+    wrap_around: Option<bool>,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default, alias = "scale")]
+    scale_factor: Option<f32>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TopologyPolicyBody {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default, alias = "allow_inbound")]
+    allow_inbound_control: Option<bool>,
+    #[serde(default, alias = "auto_link")]
+    auto_link_paired_peers: Option<bool>,
+    #[serde(default, alias = "group", alias = "groups")]
+    allowed_groups: Option<Vec<String>>,
+    #[serde(default, alias = "tag", alias = "tags")]
+    allowed_tags: Option<Vec<String>>,
+    #[serde(
+        default,
+        alias = "type",
+        alias = "types",
+        alias = "device_type",
+        alias = "device_types"
+    )]
     allowed_types: Option<Vec<String>>,
     #[serde(default)]
     clear_filters: Option<bool>,
@@ -5470,6 +5533,292 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 Err(e) => err(400, &e.to_string()),
             }
         }
+        ("GET", "/api/topology/layout") => json_ok(&node.topology_layout()),
+        ("POST", "/api/topology/link") | ("PUT", "/api/topology/link") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TopologyLinkBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<TopologyLinkBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected TopologyLinkBody"),
+                }
+            };
+
+            let edge_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.edge.clone())
+                .or_else(|| qmap.get("edge").cloned());
+            let edge = match edge_str {
+                Some(s) => match s.parse::<DisplayEdge>() {
+                    Ok(e) => e,
+                    Err(e) => return err(400, &format!("invalid edge '{s}': {e}")),
+                },
+                None => return err(400, "missing 'edge' parameter"),
+            };
+
+            let peer = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone())
+                .or_else(|| qmap.get("peer").cloned())
+                .or_else(|| qmap.get("peer_id").cloned())
+                .or_else(|| qmap.get("target").cloned());
+            let peer = match peer {
+                Some(p) if !p.trim().is_empty() => p,
+                _ => return err(400, "missing 'peer' parameter"),
+            };
+
+            let peer_edge_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer_edge.clone())
+                .or_else(|| qmap.get("peer_edge").cloned());
+            let peer_edge = match peer_edge_str {
+                Some(s) => match s.parse::<DisplayEdge>() {
+                    Ok(e) => Some(e),
+                    Err(e) => return err(400, &format!("invalid peer_edge '{s}': {e}")),
+                },
+                None => None,
+            };
+
+            let offset = parsed_body
+                .as_ref()
+                .and_then(|b| b.offset)
+                .or_else(|| qmap.get("offset").and_then(|s| s.parse::<i32>().ok()));
+
+            match node
+                .topology_link_neighbor(edge, &peer, peer_edge, offset)
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/topology/unlink")
+        | ("DELETE", "/api/topology/link")
+        | ("DELETE", "/api/topology/unlink") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TopologyUnlinkBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<TopologyUnlinkBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected TopologyUnlinkBody"),
+                }
+            };
+
+            let edge_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.edge.clone())
+                .or_else(|| qmap.get("edge").cloned());
+            let edge = match edge_str {
+                Some(s) => match s.parse::<DisplayEdge>() {
+                    Ok(e) => e,
+                    Err(e) => return err(400, &format!("invalid edge '{s}': {e}")),
+                },
+                None => return err(400, "missing 'edge' parameter"),
+            };
+
+            match node.topology_unlink_neighbor(edge).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/topology/config") | ("PUT", "/api/topology/config") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TopologyConfigBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<TopologyConfigBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected TopologyConfigBody"),
+                }
+            };
+
+            let resistance_px = parsed_body
+                .as_ref()
+                .and_then(|b| b.resistance_px)
+                .or_else(|| {
+                    qmap.get("resistance_px")
+                        .or_else(|| qmap.get("resistance"))
+                        .and_then(|s| s.parse::<u32>().ok())
+                });
+
+            let delay_ms = parsed_body.as_ref().and_then(|b| b.delay_ms).or_else(|| {
+                qmap.get("delay_ms")
+                    .or_else(|| qmap.get("delay"))
+                    .and_then(|s| s.parse::<u32>().ok())
+            });
+
+            let corner_lock_size_px = parsed_body
+                .as_ref()
+                .and_then(|b| b.corner_lock_size_px)
+                .or_else(|| {
+                    qmap.get("corner_lock_size_px")
+                        .or_else(|| qmap.get("corner_lock"))
+                        .and_then(|s| s.parse::<u32>().ok())
+                });
+
+            let wrap_around = parsed_body
+                .as_ref()
+                .and_then(|b| b.wrap_around)
+                .or_else(|| {
+                    qmap.get("wrap_around")
+                        .or_else(|| qmap.get("wrap"))
+                        .and_then(|s| s.parse::<bool>().ok())
+                });
+
+            let width = parsed_body
+                .as_ref()
+                .and_then(|b| b.width)
+                .or_else(|| qmap.get("width").and_then(|s| s.parse::<u32>().ok()));
+
+            let height = parsed_body
+                .as_ref()
+                .and_then(|b| b.height)
+                .or_else(|| qmap.get("height").and_then(|s| s.parse::<u32>().ok()));
+
+            let scale_factor = parsed_body
+                .as_ref()
+                .and_then(|b| b.scale_factor)
+                .or_else(|| {
+                    qmap.get("scale_factor")
+                        .or_else(|| qmap.get("scale"))
+                        .and_then(|s| s.parse::<f32>().ok())
+                });
+
+            match node
+                .topology_update_config(
+                    resistance_px,
+                    delay_ms,
+                    corner_lock_size_px,
+                    wrap_around,
+                    width,
+                    height,
+                    scale_factor,
+                )
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/topology/peers") => json_ok(&node.topology_peers()),
+        ("POST", "/api/topology/sync") | ("PUT", "/api/topology/sync") => {
+            let sync_res = node.topology_request_sync().await;
+            let bc_res = node.topology_broadcast_state().await;
+            match (sync_res, bc_res) {
+                (Ok(sent), Ok(bc)) => json_ok(&serde_json::json!({
+                    "ok": true,
+                    "sync_requests_sent": sent,
+                    "broadcasts_sent": bc,
+                    "broadcast_count": bc,
+                    "message": "topology sync requested and local state broadcast"
+                })),
+                (Err(e), _) | (_, Err(e)) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/topology/policy") => json_ok(&node.topology_policy_report()),
+        ("POST", "/api/topology/policy") | ("PUT", "/api/topology/policy") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TopologyPolicyBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<TopologyPolicyBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected TopologyPolicyBody"),
+                }
+            };
+
+            let mut policy = node.topology_policy();
+            if let Some(ref b) = parsed_body {
+                if let Some(en) = b.enabled {
+                    policy.enabled = en;
+                }
+                if let Some(inbound) = b.allow_inbound_control {
+                    policy.allow_inbound_control = inbound;
+                }
+                if let Some(auto) = b.auto_link_paired_peers {
+                    policy.auto_link_paired_peers = auto;
+                }
+                if let Some(ref grps) = b.allowed_groups {
+                    policy.allowed_groups = grps.clone();
+                }
+                if let Some(ref tags) = b.allowed_tags {
+                    policy.allowed_tags = tags.clone();
+                }
+                if let Some(ref types) = b.allowed_types {
+                    let mut dtypes = Vec::new();
+                    for t in types {
+                        match t.parse::<crate::store::DeviceType>() {
+                            Ok(dt) => dtypes.push(dt),
+                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
+                        }
+                    }
+                    policy.allowed_types = dtypes;
+                }
+                if b.clear_filters == Some(true) {
+                    policy.allowed_groups.clear();
+                    policy.allowed_tags.clear();
+                    policy.allowed_types.clear();
+                }
+            }
+
+            if let Some(en) = qmap.get("enabled").or_else(|| qmap.get("enable")) {
+                if let Ok(b) = en.parse::<bool>() {
+                    policy.enabled = b;
+                }
+            }
+            if let Some(inbound) = qmap
+                .get("allow_inbound")
+                .or_else(|| qmap.get("allow_inbound_control"))
+            {
+                if let Ok(b) = inbound.parse::<bool>() {
+                    policy.allow_inbound_control = b;
+                }
+            }
+            if let Some(auto) = qmap
+                .get("auto_link")
+                .or_else(|| qmap.get("auto_link_paired_peers"))
+            {
+                if let Ok(b) = auto.parse::<bool>() {
+                    policy.auto_link_paired_peers = b;
+                }
+            }
+            if let Some(grp) = qmap.get("group").or_else(|| qmap.get("allowed_group")) {
+                if !policy.allowed_groups.contains(grp) {
+                    policy.allowed_groups.push(grp.clone());
+                }
+            }
+            if let Some(tag) = qmap.get("tag").or_else(|| qmap.get("allowed_tag")) {
+                if !policy.allowed_tags.contains(tag) {
+                    policy.allowed_tags.push(tag.clone());
+                }
+            }
+            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
+                match dt_str.parse::<crate::store::DeviceType>() {
+                    Ok(dt) => {
+                        if !policy.allowed_types.contains(&dt) {
+                            policy.allowed_types.push(dt);
+                        }
+                    }
+                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
+                }
+            }
+            if qmap
+                .get("clear_filters")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false)
+            {
+                policy.allowed_groups.clear();
+                policy.allowed_tags.clear();
+                policy.allowed_types.clear();
+            }
+
+            match node.set_topology_policy(policy) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         (_, "/api/events" | "/api/events/stream") => err(405, "method not allowed"),
         _ => UiResponse::new(404, "text/plain; charset=utf-8", b"not found".to_vec()),
     }
@@ -5604,6 +5953,7 @@ async fn snapshot(node: &Node) -> Snapshot {
         battery_state: node.battery_get_state(None).ok().and_then(|r| r.state),
         battery_low_threshold: node.battery_policy().low_battery_threshold,
         focus_status: Some(node.focus_status()),
+        topology_layout: Some(node.topology_layout()),
     }
 }
 
@@ -6115,6 +6465,154 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/focus/state HTTP/1.1\r\nHost: attacker-phishing.org\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_topology_http_api_and_host_validation() {
+        let (node, dir) = temp_test_node("topology-api");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/topology/layout (defaults)
+        let (code, body) = loopback_get(port, "/api/topology/layout").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["display"]["width"], 1920);
+        assert_eq!(rep["display"]["height"], 1080);
+        assert_eq!(rep["config"]["resistance_px"], 15);
+
+        // 2. POST /api/topology/config (update config and display)
+        let config_body = serde_json::json!({
+            "resistance_px": 35,
+            "delay_ms": 150,
+            "corner_lock_size_px": 25,
+            "width": 2560,
+            "height": 1440,
+            "scale_factor": 1.25
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/topology/config",
+            &serde_json::to_vec(&config_body).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["display"]["width"], 2560);
+        assert_eq!(rep["display"]["height"], 1440);
+        assert_eq!(rep["config"]["resistance_px"], 35);
+        assert_eq!(rep["config"]["delay_ms"], 150);
+
+        // 3. POST /api/topology/link (link Right edge)
+        let peer_id_str = "tdev_abcdefgh234567aa";
+        let link_body = serde_json::json!({
+            "edge": "right",
+            "peer": peer_id_str,
+            "peer_edge": "left",
+            "offset": 50
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/topology/link",
+            &serde_json::to_vec(&link_body).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["edge"], "right");
+        assert_eq!(rep["peer_id"], peer_id_str);
+        assert_eq!(rep["peer_edge"], "left");
+        assert_eq!(rep["offset"], 50);
+
+        // Verify layout has neighbor
+        let (code, body) = loopback_get(port, "/api/topology/layout").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(rep["neighbors"]["right"].is_object());
+        assert_eq!(rep["neighbors"]["right"]["peer_id"], peer_id_str);
+
+        // 4. GET /api/topology/peers
+        let (code, body) = loopback_get(port, "/api/topology/peers").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+
+        // 5. POST /api/topology/unlink (unlink Right edge)
+        let unlink_body = serde_json::json!({ "edge": "right" });
+        let (code, body) = loopback_post(
+            port,
+            "/api/topology/unlink",
+            &serde_json::to_vec(&unlink_body).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["edge"], "right");
+
+        // Verify layout unlinked
+        let (code, body) = loopback_get(port, "/api/topology/layout").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(rep["neighbors"]["right"].is_null());
+
+        // 6. POST /api/topology/sync
+        let (code, body) = loopback_post(port, "/api/topology/sync", b"{}")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+
+        // 7. GET /api/topology/policy
+        let (code, body) = loopback_get(port, "/api/topology/policy").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["enabled"], true);
+        assert_eq!(rep["policy"]["allow_inbound_control"], true);
+
+        // 8. POST /api/topology/policy
+        let pol_body = serde_json::json!({
+            "enabled": true,
+            "allow_inbound_control": false,
+            "allowed_groups": ["studio"],
+            "allowed_tags": ["display"]
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/topology/policy",
+            &serde_json::to_vec(&pol_body).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["allow_inbound_control"], false);
+        assert_eq!(
+            rep["policy"]["allowed_groups"],
+            serde_json::json!(["studio"])
+        );
+
+        // 9. Host header 403 test on /api/topology/layout
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/topology/layout HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();

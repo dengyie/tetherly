@@ -32,6 +32,7 @@ pub mod ports;
 pub mod replay;
 pub mod screen;
 pub mod session;
+pub mod topology;
 
 pub use action::{
     ActionItem, ActionListReqFrame, ActionListRespFrame, ActionResultFrame, ActionTriggerFrame,
@@ -71,7 +72,7 @@ pub use frame::{
     TYPE_ACTION_LIST_REQ, TYPE_ACTION_LIST_RESP, TYPE_ACTION_RESULT, TYPE_ACTION_TRIGGER,
     TYPE_BATTERY_STATE, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ, TYPE_LOCATE_REQUEST,
     TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_PING, TYPE_PONG,
-    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
+    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE, TYPE_TOPOLOGY_SYNC_REQ,
 };
 pub use handoff::{
     HandoffAction, HandoffEntry, HandoffStatus, ResourceHandoffValidator, SanitizedHandoffUrl,
@@ -115,4 +116,8 @@ pub use screen::{
 };
 pub use session::{
     backoff_delay, commit_trust, dispose_hello, ConnState, HelloDisposition, LockoutTable, PIN_TTL,
+};
+pub use topology::{
+    map_edge_exit_to_entry, DisplayEdge, DisplayRect, EdgeCrossingConfig, EdgeNeighbor,
+    TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
 };

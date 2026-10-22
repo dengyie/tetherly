@@ -1123,6 +1123,237 @@
         <div id="focus-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
       </div>
     </section>
+    <section style="margin-top:16px" id="topology-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2>跨端多屏空间拓扑与无界鼠标穿越 (Multi-Display Spatial Topology & Borderless Cursor Crossing)</h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button id="toggletopologypolicybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">治理策略</button>
+          <button id="topologysyncbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">全网同步</button>
+          <button id="refreshtopologybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新拓扑</button>
+        </div>
+      </div>
+      <div class="hint">基于 ADR-071 规范，支持局域网多设备物理空间二维拓扑编排、四向边缘自动映射、阻尼/时延/四角防误触以及跨分辨率等比光标坐标投射。</div>
+
+      <!-- Topology Policy Panel -->
+      <div id="topology-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-weight:600;font-size:13px">多屏空间拓扑协同准入策略 (Spatial Topology Governance Policy)</span>
+          <span id="topology-policy-badge" class="badge completed" style="font-size:11px">Policy: Active</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+          <div>
+            <label style="font-size:11px;color:var(--muted)">策略总开关 (Policy Enabled):</label>
+            <select id="topology-policy-enabled" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">启用拓扑协同 (Enabled)</option>
+              <option value="false">禁用拓扑协同 (Disabled)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">允许入站控制 (Allow Inbound Control):</label>
+            <select id="topology-policy-inbound" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许对端穿越入站 (Allowed)</option>
+              <option value="false">禁止对端入站控制 (Denied)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">自动链接配对设备 (Auto Link Paired Peers):</label>
+            <select id="topology-policy-autolink" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">自动映射首个空闲边缘 (Auto)</option>
+              <option value="false">仅允许手动编排 (Manual Only)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">允许画像分组 (Allowed Groups, 逗号分隔):</label>
+            <input id="topology-policy-groups" placeholder="留空表示不限制分组" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">允许画像标签 (Allowed Tags, 逗号分隔):</label>
+            <input id="topology-policy-tags" placeholder="留空表示不限制标签" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">允许设备形态 (Allowed Types, 逗号分隔):</label>
+            <input id="topology-policy-types" placeholder="留空表示不限制形态" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:10px;align-items:center">
+          <button id="topology-policy-save-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px">保存策略 (Save)</button>
+          <button id="topology-policy-reset-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">重置过滤 (Reset)</button>
+          <div id="topology-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Main Topology 2D Visual Canvas & Dashboard -->
+      <div style="margin-top:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px">
+        <div class="card" style="padding:14px;margin:0;background:#131a22;border:1px solid var(--line);border-radius:6px;flex-direction:column;align-items:stretch;gap:12px">
+          
+          <!-- Summary header -->
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:24px">🖥️</span>
+              <div>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="font-size:16px;font-weight:700;color:var(--text)">空间虚拟多屏拓扑画布</span>
+                  <span id="topology-status-badge" class="badge completed" style="font-size:11px">拓扑协同激活</span>
+                  <span id="topology-neighbors-badge" class="badge" style="font-size:11px">已连接 0 台邻居</span>
+                </div>
+                <div id="topology-local-info" style="font-size:12px;color:var(--muted)">本地主屏: 1920x1080 @ 1.0x · 阻尼 15px · 时延 80ms · 角区锁 20px</div>
+              </div>
+            </div>
+            <div style="text-align:right">
+              <div id="topology-crossing-indicator" style="font-size:12px;color:var(--muted);font-weight:600">光标席位: 本机主屏</div>
+              <div id="topology-last-event" style="font-size:11px;color:var(--muted)">最近穿越: 无</div>
+            </div>
+          </div>
+
+          <!-- 2D Spatial Layout Diagram (Interactive Visual Box) -->
+          <div style="display:flex;justify-content:center;align-items:center;padding:20px;background:#0a0e14;border-radius:8px;border:1px solid var(--line)">
+            <div style="display:grid;grid-template-columns:160px 200px 160px;grid-template-rows:90px 120px 90px;gap:12px;align-items:center;justify-items:center">
+              
+              <!-- Empty Top-Left -->
+              <div></div>
+
+              <!-- TOP Neighbor Slot -->
+              <div id="slot-top" style="width:100%;height:100%;border:1px dashed var(--line);border-radius:6px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:6px;background:#0f151e;transition:all 0.2s">
+                <span style="font-size:11px;color:var(--muted);font-weight:600">⬆️ 上边缘 (Top)</span>
+                <span id="slot-top-desc" style="font-size:11px;color:var(--muted);text-align:center;margin-top:2px">未链接</span>
+                <button id="slot-top-unlink" class="bad ghost" type="button" style="display:none;padding:1px 6px;font-size:10px;margin-top:4px">解除</button>
+              </div>
+
+              <!-- Empty Top-Right -->
+              <div></div>
+
+              <!-- LEFT Neighbor Slot -->
+              <div id="slot-left" style="width:100%;height:100%;border:1px dashed var(--line);border-radius:6px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:6px;background:#0f151e;transition:all 0.2s">
+                <span style="font-size:11px;color:var(--muted);font-weight:600">⬅️ 左边缘 (Left)</span>
+                <span id="slot-left-desc" style="font-size:11px;color:var(--muted);text-align:center;margin-top:2px">未链接</span>
+                <button id="slot-left-unlink" class="bad ghost" type="button" style="display:none;padding:1px 6px;font-size:10px;margin-top:4px">解除</button>
+              </div>
+
+              <!-- CENTER Local Display Box -->
+              <div style="width:100%;height:100%;border:2px solid var(--accent);border-radius:6px;background:#182330;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:8px;box-shadow:0 0 12px rgba(56,189,248,0.15)">
+                <span style="font-size:13px;font-weight:700;color:var(--text)">💻 本机物理屏幕</span>
+                <span id="center-display-res" style="font-size:11px;color:var(--accent);margin-top:2px">1920 x 1080 (1.0x)</span>
+                <span id="center-display-sub" style="font-size:10px;color:var(--muted);margin-top:2px">空间拓扑中枢原点</span>
+              </div>
+
+              <!-- RIGHT Neighbor Slot -->
+              <div id="slot-right" style="width:100%;height:100%;border:1px dashed var(--line);border-radius:6px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:6px;background:#0f151e;transition:all 0.2s">
+                <span style="font-size:11px;color:var(--muted);font-weight:600">➡️ 右边缘 (Right)</span>
+                <span id="slot-right-desc" style="font-size:11px;color:var(--muted);text-align:center;margin-top:2px">未链接</span>
+                <button id="slot-right-unlink" class="bad ghost" type="button" style="display:none;padding:1px 6px;font-size:10px;margin-top:4px">解除</button>
+              </div>
+
+              <!-- Empty Bottom-Left -->
+              <div></div>
+
+              <!-- BOTTOM Neighbor Slot -->
+              <div id="slot-bottom" style="width:100%;height:100%;border:1px dashed var(--line);border-radius:6px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:6px;background:#0f151e;transition:all 0.2s">
+                <span style="font-size:11px;color:var(--muted);font-weight:600">⬇️ 下边缘 (Bottom)</span>
+                <span id="slot-bottom-desc" style="font-size:11px;color:var(--muted);text-align:center;margin-top:2px">未链接</span>
+                <button id="slot-bottom-unlink" class="bad ghost" type="button" style="display:none;padding:1px 6px;font-size:10px;margin-top:4px">解除</button>
+              </div>
+
+              <!-- Empty Bottom-Right -->
+              <div></div>
+
+            </div>
+          </div>
+
+          <!-- Quick Link Toolbars -->
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#0d1218;padding:10px;border-radius:6px;border:1px solid var(--line)">
+            <span style="font-size:12px;font-weight:600;color:var(--text);margin-right:4px">🔗 邻居映射:</span>
+            <div style="display:flex;gap:4px;align-items:center">
+              <span style="font-size:12px;color:var(--muted)">边缘:</span>
+              <select id="topology-link-edge" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="right">➡️ 右 (Right)</option>
+                <option value="left">⬅️ 左 (Left)</option>
+                <option value="top">⬆️ 上 (Top)</option>
+                <option value="bottom">⬇️ 下 (Bottom)</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center;flex:1;min-width:180px">
+              <span style="font-size:12px;color:var(--muted)">对端设备:</span>
+              <select id="topology-link-peer-select" style="flex:1;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="">-- 选择在线/配对对端 --</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center">
+              <span style="font-size:12px;color:var(--muted)">对端接触边缘:</span>
+              <select id="topology-link-peer-edge" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="">自动对偶 (Auto Opposite)</option>
+                <option value="left">左 (Left)</option>
+                <option value="right">右 (Right)</option>
+                <option value="top">上 (Top)</option>
+                <option value="bottom">下 (Bottom)</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center">
+              <span style="font-size:12px;color:var(--muted)">相对偏移:</span>
+              <input id="topology-link-offset" type="number" placeholder="0" value="0" style="width:60px;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <span style="font-size:11px;color:var(--muted)">px</span>
+            </div>
+            <button id="topology-link-btn" class="ghost" type="button" style="padding:4px 14px;font-size:12px;font-weight:600;background:var(--accent);color:#fff">建立链接</button>
+          </div>
+
+          <!-- Parameter Tuning Toolbar -->
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#0d1218;padding:10px;border-radius:6px;border:1px solid var(--line)">
+            <span style="font-size:12px;font-weight:600;color:var(--text);margin-right:4px">⚙️ 穿越防线:</span>
+            <div style="display:flex;gap:4px;align-items:center">
+              <span style="font-size:12px;color:var(--muted)">阻尼:</span>
+              <input id="topology-cfg-resistance" type="number" min="0" max="100" placeholder="15" style="width:55px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <span style="font-size:11px;color:var(--muted)">px</span>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center">
+              <span style="font-size:12px;color:var(--muted)">时延:</span>
+              <input id="topology-cfg-delay" type="number" min="0" max="1000" placeholder="80" style="width:60px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <span style="font-size:11px;color:var(--muted)">ms</span>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center">
+              <span style="font-size:12px;color:var(--muted)">角区锁:</span>
+              <input id="topology-cfg-corner" type="number" min="0" max="100" placeholder="20" style="width:55px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <span style="font-size:11px;color:var(--muted)">px</span>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center">
+              <span style="font-size:12px;color:var(--muted)">回绕:</span>
+              <select id="topology-cfg-wrap" style="padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="false">关</option>
+                <option value="true">开</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center">
+              <span style="font-size:12px;color:var(--muted)">本机分辨率:</span>
+              <input id="topology-cfg-width" type="number" placeholder="1920" style="width:65px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <span>x</span>
+              <input id="topology-cfg-height" type="number" placeholder="1080" style="width:65px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center">
+              <span style="font-size:12px;color:var(--muted)">缩放比:</span>
+              <input id="topology-cfg-scale" type="number" step="0.25" min="0.5" max="4.0" placeholder="1.0" style="width:55px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+            </div>
+            <button id="topology-cfg-save-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px">更新参数</button>
+          </div>
+
+          <!-- Peer Topology Grid -->
+          <div style="margin-top:4px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <span style="font-size:12px;font-weight:600;color:var(--muted)">对端空间拓扑缓存 (Cached Peer Topologies)</span>
+              <span id="topology-peers-count-badge" class="badge" style="font-size:11px">0 台对端上报</span>
+            </div>
+            <div id="topology-peer-items" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(260px, 1fr));gap:8px">
+              <div class="empty" style="grid-column:1/-1">暂无对端空间几何信息，点击右上角「全网同步」立即拉取。</div>
+            </div>
+          </div>
+
+          <!-- Bottom Indicators -->
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:6px;margin-top:4px">
+            <span id="topology-policy-indicator">拓扑协同: 启用 · 允许入站控制</span>
+            <span id="topology-autolink-indicator">自动链接: 启用</span>
+            <span id="topology-audit-indicator">穿越安全审计: 正常已激活</span>
+          </div>
+        </div>
+        <div id="topology-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
+      </div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
@@ -4743,6 +4974,365 @@ if (refreshFocusBtn) {
   };
 }
 
+// --- Multi-Display Spatial Topology & Borderless Cursor Crossing (ADR-071) ---
+let cachedTopologyPeers = [];
+
+async function updateTopologyLayout() {
+  try {
+    const rep = await api("/api/topology/layout");
+    if (!rep || !rep.ok) return;
+
+    const en = rep.enabled !== false;
+    const disp = rep.display || { width: 1920, height: 1080, scale_factor: 1.0 };
+    const cfg = rep.config || { resistance_px: 15, delay_ms: 80, corner_lock_size_px: 20, wrap_around: false };
+    const neighbors = rep.neighbors || {};
+    const neighborCount = Object.keys(neighbors).length;
+
+    if ($("topology-status-badge")) {
+      $("topology-status-badge").textContent = en ? "拓扑协同激活" : "拓扑已禁用";
+      $("topology-status-badge").className = en ? "badge completed" : "badge";
+    }
+    if ($("topology-neighbors-badge")) {
+      $("topology-neighbors-badge").textContent = `已连接 ${neighborCount} 台邻居`;
+      $("topology-neighbors-badge").className = neighborCount > 0 ? "badge outbound" : "badge";
+    }
+
+    if ($("topology-local-info")) {
+      $("topology-local-info").textContent = `本地主屏: ${disp.width}x${disp.height} @ ${disp.scale_factor.toFixed(1)}x · 阻尼 ${cfg.resistance_px}px · 时延 ${cfg.delay_ms}ms · 角区锁 ${cfg.corner_lock_size_px}px · 回绕 ${cfg.wrap_around ? "开" : "关"}`;
+    }
+    if ($("center-display-res")) {
+      $("center-display-res").textContent = `${disp.width} x ${disp.height} (${disp.scale_factor.toFixed(1)}x)`;
+    }
+
+    // Prefill config inputs if not being actively edited
+    if ($("topology-cfg-resistance") && document.activeElement !== $("topology-cfg-resistance")) {
+      $("topology-cfg-resistance").value = cfg.resistance_px;
+    }
+    if ($("topology-cfg-delay") && document.activeElement !== $("topology-cfg-delay")) {
+      $("topology-cfg-delay").value = cfg.delay_ms;
+    }
+    if ($("topology-cfg-corner") && document.activeElement !== $("topology-cfg-corner")) {
+      $("topology-cfg-corner").value = cfg.corner_lock_size_px;
+    }
+    if ($("topology-cfg-wrap") && document.activeElement !== $("topology-cfg-wrap")) {
+      $("topology-cfg-wrap").value = cfg.wrap_around ? "true" : "false";
+    }
+    if ($("topology-cfg-width") && document.activeElement !== $("topology-cfg-width")) {
+      $("topology-cfg-width").value = disp.width;
+    }
+    if ($("topology-cfg-height") && document.activeElement !== $("topology-cfg-height")) {
+      $("topology-cfg-height").value = disp.height;
+    }
+    if ($("topology-cfg-scale") && document.activeElement !== $("topology-cfg-scale")) {
+      $("topology-cfg-scale").value = disp.scale_factor;
+    }
+
+    // Render the 4 cardinal slots
+    const edges = ["top", "left", "right", "bottom"];
+    for (const edge of edges) {
+      const slotEl = $(`slot-${edge}`);
+      const descEl = $(`slot-${edge}-desc`);
+      const unlinkBtn = $(`slot-${edge}-unlink`);
+      const neighbor = neighbors[edge];
+
+      if (slotEl && descEl && unlinkBtn) {
+        if (neighbor) {
+          slotEl.style.border = "1px solid var(--accent)";
+          slotEl.style.background = "#131e2b";
+          const alias = neighbor.peer_alias || (neighbor.peer_id ? neighbor.peer_id.slice(0, 8) + "…" : "未知");
+          descEl.textContent = `${alias} (${neighbor.peer_edge}边缘, 偏${neighbor.offset}px)`;
+          descEl.style.color = "var(--text)";
+          unlinkBtn.style.display = "inline-block";
+          unlinkBtn.onclick = () => unlinkTopologyNeighbor(edge);
+        } else {
+          slotEl.style.border = "1px dashed var(--line)";
+          slotEl.style.background = "#0f151e";
+          descEl.textContent = "未链接";
+          descEl.style.color = "var(--muted)";
+          unlinkBtn.style.display = "none";
+        }
+      }
+    }
+  } catch (e) {}
+}
+
+async function unlinkTopologyNeighbor(edge) {
+  const msg = $("topology-status-msg");
+  try {
+    const rep = await api("/api/topology/unlink", { edge });
+    if (rep && rep.ok) {
+      if (msg) msg.textContent = `已成功解除 ${edge.toUpperCase()} 边缘邻居映射！`;
+      setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+      updateTopologyLayout();
+    } else {
+      if (msg) msg.textContent = "解除映射失败: " + (rep ? rep.error : "未知错误");
+    }
+  } catch (e) {
+    if (msg) msg.textContent = "请求异常: " + e.message;
+  }
+}
+
+async function updateTopologyPeers() {
+  try {
+    const rep = await api("/api/topology/peers");
+    if (!rep || !rep.ok) return;
+
+    const peers = rep.peers || [];
+    cachedTopologyPeers = peers;
+
+    if ($("topology-peers-count-badge")) {
+      $("topology-peers-count-badge").textContent = `${peers.length} 台对端上报`;
+    }
+
+    // Update link peer select options
+    const peerSel = $("topology-link-peer-select");
+    if (peerSel && document.activeElement !== peerSel) {
+      const currentVal = peerSel.value;
+      let html = '<option value="">-- 选择在线/配对对端 --</option>';
+      for (const p of peers) {
+        const id = p.peer_id || "";
+        const alias = p.peer_alias || id.slice(0, 8);
+        const res = p.display ? ` (${p.display.width}x${p.display.height})` : "";
+        html += `<option value="${id}">${escapeHtml(alias)}${res}</option>`;
+      }
+      peerSel.innerHTML = html;
+      if (currentVal) peerSel.value = currentVal;
+    }
+
+    // Render Peer Topologies Grid
+    const container = $("topology-peer-items");
+    if (container) {
+      if (peers.length === 0) {
+        container.innerHTML = '<div class="empty" style="grid-column:1/-1">暂无对端空间几何信息，点击右上角「全网同步」立即拉取。</div>';
+      } else {
+        container.innerHTML = peers.map(p => {
+          const id = p.peer_id || "";
+          const alias = p.peer_alias || id.slice(0, 8);
+          const disp = p.display || { width: 1920, height: 1080, scale_factor: 1.0 };
+          const cfg = p.config || { resistance_px: 15, delay_ms: 80, corner_lock_size_px: 20 };
+          const nMap = p.neighbors || {};
+          const nKeys = Object.keys(nMap);
+
+          return `
+            <div style="background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:4px">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-weight:600;font-size:12px;color:var(--text)">🖥️ ${escapeHtml(alias)}</span>
+                <span class="badge" style="font-size:10px">${escapeHtml(id.slice(0, 10))}…</span>
+              </div>
+              <div style="font-size:11px;color:var(--accent)">几何: ${disp.width} x ${disp.height} @ ${disp.scale_factor.toFixed(1)}x</div>
+              <div style="font-size:10px;color:var(--muted)">穿越防线: 阻尼 ${cfg.resistance_px}px · 时延 ${cfg.delay_ms}ms · 角锁 ${cfg.corner_lock_size_px}px</div>
+              <div style="font-size:10px;color:var(--muted)">邻居关联: ${nKeys.length > 0 ? nKeys.join(", ") : "无独立链接"}</div>
+            </div>
+          `;
+        }).join("");
+      }
+    }
+  } catch (e) {}
+}
+
+async function updateTopologyPolicy() {
+  try {
+    const rep = await api("/api/topology/policy");
+    if (!rep || !rep.ok) return;
+
+    const p = rep.policy || {};
+    const en = p.enabled !== false;
+    const inbound = p.allow_inbound_control !== false;
+    const autoLink = p.auto_link_paired_peers !== false;
+
+    if ($("topology-policy-badge")) {
+      $("topology-policy-badge").textContent = en ? "Policy: Active" : "Policy: Disabled";
+      $("topology-policy-badge").className = en ? "badge completed" : "badge";
+    }
+    if ($("topology-policy-indicator")) {
+      $("topology-policy-indicator").textContent = `拓扑协同: ${en ? "启用" : "禁用"} · ${inbound ? "允许入站控制" : "禁止入站控制"}`;
+    }
+    if ($("topology-autolink-indicator")) {
+      $("topology-autolink-indicator").textContent = `自动链接: ${autoLink ? "启用" : "仅手动"}`;
+    }
+
+    if ($("topology-policy-enabled") && document.activeElement !== $("topology-policy-enabled")) {
+      $("topology-policy-enabled").value = en ? "true" : "false";
+    }
+    if ($("topology-policy-inbound") && document.activeElement !== $("topology-policy-inbound")) {
+      $("topology-policy-inbound").value = inbound ? "true" : "false";
+    }
+    if ($("topology-policy-autolink") && document.activeElement !== $("topology-policy-autolink")) {
+      $("topology-policy-autolink").value = autoLink ? "true" : "false";
+    }
+    if ($("topology-policy-groups") && document.activeElement !== $("topology-policy-groups")) {
+      $("topology-policy-groups").value = (p.allowed_groups || []).join(", ");
+    }
+    if ($("topology-policy-tags") && document.activeElement !== $("topology-policy-tags")) {
+      $("topology-policy-tags").value = (p.allowed_tags || []).join(", ");
+    }
+    if ($("topology-policy-types") && document.activeElement !== $("topology-policy-types")) {
+      $("topology-policy-types").value = (p.allowed_types || []).join(", ");
+    }
+  } catch (e) {}
+}
+
+const toggleTopologyPolicyBtn = $("toggletopologypolicybtn");
+if (toggleTopologyPolicyBtn) {
+  toggleTopologyPolicyBtn.onclick = () => {
+    const p = $("topology-policy-panel");
+    if (!p) return;
+    p.style.display = p.style.display === "none" ? "block" : "none";
+    if (p.style.display !== "none") updateTopologyPolicy();
+  };
+}
+
+const topologyPolicySaveBtn = $("topology-policy-save-btn");
+if (topologyPolicySaveBtn) {
+  topologyPolicySaveBtn.onclick = async () => {
+    const en = $("topology-policy-enabled") ? $("topology-policy-enabled").value === "true" : undefined;
+    const inbound = $("topology-policy-inbound") ? $("topology-policy-inbound").value === "true" : undefined;
+    const autolink = $("topology-policy-autolink") ? $("topology-policy-autolink").value === "true" : undefined;
+    const grpsVal = $("topology-policy-groups") ? $("topology-policy-groups").value.trim() : "";
+    const tagsVal = $("topology-policy-tags") ? $("topology-policy-tags").value.trim() : "";
+    const typesVal = $("topology-policy-types") ? $("topology-policy-types").value.trim() : "";
+    const msg = $("topology-policy-msg");
+
+    const payload = {};
+    if (en !== undefined) payload.enabled = en;
+    if (inbound !== undefined) payload.allow_inbound_control = inbound;
+    if (autolink !== undefined) payload.auto_link_paired_peers = autolink;
+    if (grpsVal) payload.allowed_groups = grpsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (tagsVal) payload.allowed_tags = tagsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (typesVal) payload.allowed_types = typesVal.split(",").map(s => s.trim()).filter(Boolean);
+
+    try {
+      const rep = await api("/api/topology/policy", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "拓扑准入策略已成功持久化！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateTopologyPolicy();
+        updateTopologyLayout();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const topologyPolicyResetBtn = $("topology-policy-reset-btn");
+if (topologyPolicyResetBtn) {
+  topologyPolicyResetBtn.onclick = async () => {
+    const msg = $("topology-policy-msg");
+    try {
+      const rep = await api("/api/topology/policy", { clear_filters: true });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "已清空拓扑白名单画像过滤！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateTopologyPolicy();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "重置失败: " + e.message;
+    }
+  };
+}
+
+const topologyLinkBtn = $("topology-link-btn");
+if (topologyLinkBtn) {
+  topologyLinkBtn.onclick = async () => {
+    const edge = $("topology-link-edge") ? $("topology-link-edge").value : "right";
+    const peer = $("topology-link-peer-select") ? $("topology-link-peer-select").value.trim() : "";
+    const peerEdge = $("topology-link-peer-edge") ? $("topology-link-peer-edge").value : "";
+    const offset = $("topology-link-offset") ? parseInt($("topology-link-offset").value, 10) || 0 : 0;
+    const msg = $("topology-status-msg");
+
+    if (!peer) {
+      if (msg) msg.textContent = "请先选择需要链接的对端设备！";
+      return;
+    }
+
+    const payload = {
+      edge: edge,
+      peer: peer,
+      peer_edge: peerEdge || null,
+      offset: offset,
+    };
+
+    try {
+      const rep = await api("/api/topology/link", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = `成功链接 ${edge.toUpperCase()} 边缘到对端设备！`;
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateTopologyLayout();
+      } else {
+        if (msg) msg.textContent = "链接失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const topologyCfgSaveBtn = $("topology-cfg-save-btn");
+if (topologyCfgSaveBtn) {
+  topologyCfgSaveBtn.onclick = async () => {
+    const res = $("topology-cfg-resistance") ? parseInt($("topology-cfg-resistance").value, 10) : undefined;
+    const delay = $("topology-cfg-delay") ? parseInt($("topology-cfg-delay").value, 10) : undefined;
+    const corner = $("topology-cfg-corner") ? parseInt($("topology-cfg-corner").value, 10) : undefined;
+    const wrap = $("topology-cfg-wrap") ? $("topology-cfg-wrap").value === "true" : undefined;
+    const width = $("topology-cfg-width") ? parseInt($("topology-cfg-width").value, 10) : undefined;
+    const height = $("topology-cfg-height") ? parseInt($("topology-cfg-height").value, 10) : undefined;
+    const scale = $("topology-cfg-scale") ? parseFloat($("topology-cfg-scale").value) : undefined;
+    const msg = $("topology-status-msg");
+
+    const payload = {};
+    if (!isNaN(res)) payload.resistance_px = res;
+    if (!isNaN(delay)) payload.delay_ms = delay;
+    if (!isNaN(corner)) payload.corner_lock_size_px = corner;
+    if (wrap !== undefined) payload.wrap_around = wrap;
+    if (!isNaN(width)) payload.width = width;
+    if (!isNaN(height)) payload.height = height;
+    if (!isNaN(scale)) payload.scale_factor = scale;
+
+    try {
+      const rep = await api("/api/topology/config", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "穿越防线与显示几何参数已成功更新！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateTopologyLayout();
+      } else {
+        if (msg) msg.textContent = "配置失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const topologySyncBtn = $("topologysyncbtn");
+if (topologySyncBtn) {
+  topologySyncBtn.onclick = async () => {
+    const msg = $("topology-status-msg");
+    try {
+      const rep = await api("/api/topology/sync", {});
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = `已向 ${rep.sync_requests_sent || 0} 台配对设备发送拓扑同步请求！`;
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateTopologyPeers();
+        updateTopologyLayout();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "同步请求失败: " + e.message;
+    }
+  };
+}
+
+const refreshTopologyBtn = $("refreshtopologybtn");
+if (refreshTopologyBtn) {
+  refreshTopologyBtn.onclick = () => {
+    updateTopologyLayout();
+    updateTopologyPeers();
+    updateTopologyPolicy();
+  };
+}
+
 async function updateStorage() {
   try {
     const s = await api("/api/storage");
@@ -6540,11 +7130,39 @@ function setupEventSource() {
 											            desc = "对端专注状态变更: " + ev.peer_alias + " -> " + (ev.enabled ? "开启" : "关闭") + " (" + ev.mode + ")";
 											            updateFocusPeers();
 											          }
-											          else if (ev.kind === "focus_policy_changed") {
-											            desc = "专注治理策略变更: 状态=" + (ev.enabled ? "启用" : "禁用") + " · 定时静音=" + (ev.quiet_hours_enabled ? "开启" : "关闭");
-											            updateFocusPolicy();
-											            updateFocusStatus();
-											          }
+												          else if (ev.kind === "focus_policy_changed") {
+												            desc = "专注治理策略变更: 状态=" + (ev.enabled ? "启用" : "禁用") + " · 定时静音=" + (ev.quiet_hours_enabled ? "开启" : "关闭");
+												            updateFocusPolicy();
+												            updateFocusStatus();
+												          }
+												          else if (ev.kind === "topology_changed") {
+												            desc = "空间拓扑变更: " + (ev.enabled ? "启用" : "禁用") + " · 邻居=" + ev.neighbors_count + "台";
+												            updateTopologyLayout();
+												          }
+												          else if (ev.kind === "peer_topology_updated") {
+												            desc = "对端拓扑同步: " + ev.peer_alias + " (" + ev.width + "x" + ev.height + ")";
+												            updateTopologyPeers();
+												          }
+												          else if (ev.kind === "cursor_edge_crossed") {
+												            desc = "光标边缘穿越: " + ev.from_device + " -> " + ev.to_device + " (" + ev.edge + "边缘, " + ev.x + "," + ev.y + ")";
+												            if ($("topology-crossing-indicator")) {
+												              $("topology-crossing-indicator").textContent = `光标穿越: -> ${ev.to_device.slice(0, 8)}…`;
+												              $("topology-crossing-indicator").style.color = "var(--accent)";
+												              setTimeout(() => {
+												                if ($("topology-crossing-indicator")) {
+												                  $("topology-crossing-indicator").style.color = "var(--muted)";
+												                }
+												              }, 1500);
+												            }
+												            if ($("topology-last-event")) {
+												              $("topology-last-event").textContent = `最近穿越: ${ev.edge} 边缘 (${ev.x}, ${ev.y})`;
+												            }
+												          }
+												          else if (ev.kind === "topology_policy_changed") {
+												            desc = "拓扑治理策略变更: 状态=" + (ev.enabled ? "启用" : "禁用") + " · 允许入站=" + (ev.allow_inbound ? "是" : "否");
+												            updateTopologyPolicy();
+												            updateTopologyLayout();
+												          }
 						          else if (ev.kind === "screen_state_changed") {
 					            desc = "屏幕状态: " + ev.state + " (授权:" + (ev.allowed ? "是" : "否") + ")" + (ev.peer ? (" · 对端:" + ev.peer) : "");
 					            updateScreenStatus();
@@ -6722,8 +7340,14 @@ function setupEventSource() {
 																	setInterval(updateFocusStatus, 3000);
 																	updateFocusPeers();
 																	setInterval(updateFocusPeers, 3000);
-																	updateFocusPolicy();
-																	setInterval(updateFocusPolicy, 3000);
-						</script>
+																		updateFocusPolicy();
+																		setInterval(updateFocusPolicy, 3000);
+																		updateTopologyLayout();
+																		setInterval(updateTopologyLayout, 3000);
+																		updateTopologyPeers();
+																		setInterval(updateTopologyPeers, 3000);
+																		updateTopologyPolicy();
+																		setInterval(updateTopologyPolicy, 3000);
+							</script>
 </body>
 </html>

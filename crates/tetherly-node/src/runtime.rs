@@ -9,12 +9,13 @@ use crate::sidecar::{self, OverlayConfig, OverlaySource, OverlayStatus};
 use crate::store::{
     load_action_policy, load_battery_policy, load_clipboard_policy, load_focus_policy,
     load_handoff_inbox, load_handoff_policy, load_local_actions, load_locator_policy,
-    load_media_policy, load_trust, remember_route, save_action_policy, save_battery_policy,
-    save_clipboard_policy, save_focus_policy, save_handoff_inbox, save_handoff_policy,
-    save_local_actions, save_locator_policy, save_media_policy, save_trust, ActionAccessMode,
+    load_media_policy, load_topology_layout, load_topology_policy, load_trust, remember_route,
+    save_action_policy, save_battery_policy, save_clipboard_policy, save_focus_policy,
+    save_handoff_inbox, save_handoff_policy, save_local_actions, save_locator_policy,
+    save_media_policy, save_topology_layout, save_topology_policy, save_trust, ActionAccessMode,
     ActionPolicy, AutoAcceptPolicy, BatteryPolicy, ClipboardPolicy, DeviceType, FocusPolicy,
     HandoffInboxTable, HandoffPolicy, LocalActionDefinition, LocatorPolicy, MediaControlPolicy,
-    PeerProfile, ProfileTable, RouteTable, TargetSelector,
+    PeerProfile, ProfileTable, RouteTable, TargetSelector, TopologyLayout, TopologyPolicy,
 };
 use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::{HashMap, VecDeque};
@@ -33,18 +34,20 @@ use tetherly_core::ports::{Clip, Clock, Rng, SystemClock};
 use tetherly_core::session::LockoutTable;
 use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
-    ancs_actions, ancs_source_id, path_kind, ActionItem, ActionListReqFrame, ActionListRespFrame,
-    ActionResultFrame, ActionTriggerFrame, ActionValidator, AncsEvent, AncsIngress, AncsState,
-    AncsTransport, BatteryStateFrame, BatteryValidator, ClipApply, ClipDirection, ClipHub,
-    ClipMetaEntry, ConnectOutcome, ControlMsg, CoreError, CursorSeat, DeviceId, FileHub, FocusMode,
-    FocusStateFrame, FocusSyncReqFrame, FocusValidator, HandoffEntry, HandoffStatus, IngestOutcome,
-    InputClient, InputEvent, InputServer, InputSink, LocatePattern, LocateRequestFrame,
-    LocateStopFrame, LocateValidator, MediaCommand, MediaCommandFrame, MediaStateFrame,
-    MediaValidator, MemoryScreenSink, MemorySink, MemoryTrustStore, NotificationPayload,
-    NotificationUrgency, Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource,
-    ReplyView, ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenFrame, ScreenReceiver,
-    ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats, SensitiveContentGuard,
-    TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS,
+    ancs_actions, ancs_source_id, map_edge_exit_to_entry, path_kind, ActionItem,
+    ActionListReqFrame, ActionListRespFrame, ActionResultFrame, ActionTriggerFrame,
+    ActionValidator, AncsEvent, AncsIngress, AncsState, AncsTransport, BatteryStateFrame,
+    BatteryValidator, ClipApply, ClipDirection, ClipHub, ClipMetaEntry, ConnectOutcome, ControlMsg,
+    CoreError, CursorSeat, DeviceId, DisplayEdge, DisplayRect, EdgeCrossingConfig, EdgeNeighbor,
+    FileHub, FocusMode, FocusStateFrame, FocusSyncReqFrame, FocusValidator, HandoffEntry,
+    HandoffStatus, IngestOutcome, InputClient, InputEvent, InputServer, InputSink, LocatePattern,
+    LocateRequestFrame, LocateStopFrame, LocateValidator, MediaCommand, MediaCommandFrame,
+    MediaStateFrame, MediaValidator, MemoryScreenSink, MemorySink, MemoryTrustStore,
+    NotificationPayload, NotificationUrgency, Notifier, NotifyHub, OpenAllowlist, PathKind,
+    PlaybackState, PowerSource, ReplyView, ResourceHandoffValidator, ScreenAssembler, ScreenCodec,
+    ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats,
+    SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
+    TrustStore, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -1674,6 +1677,98 @@ pub struct FocusPolicyReport {
     pub message: String,
 }
 
+/// Status and configuration report for local spatial display topology.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TopologyLayoutReport {
+    pub ok: bool,
+    pub display: DisplayRect,
+    pub neighbors: HashMap<DisplayEdge, EdgeNeighbor>,
+    pub config: EdgeCrossingConfig,
+    pub peer_count: usize,
+    pub message: String,
+}
+
+/// Summary entry for a peer's advertised display topology.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PeerTopologyItem {
+    pub peer_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_alias: Option<String>,
+    pub display: DisplayRect,
+    pub neighbors: HashMap<DisplayEdge, EdgeNeighbor>,
+    pub config: EdgeCrossingConfig,
+    pub timestamp_ms: u64,
+}
+
+/// Report of all known remote peer display topologies.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TopologyPeersReport {
+    pub ok: bool,
+    pub count: usize,
+    pub peers: Vec<PeerTopologyItem>,
+    pub message: String,
+}
+
+/// Report returned when linking a peer to a display edge.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TopologyLinkReport {
+    pub ok: bool,
+    pub edge: DisplayEdge,
+    pub peer_id: String,
+    pub peer_edge: DisplayEdge,
+    pub offset: i32,
+    pub message: String,
+}
+
+/// Report returned when unlinking an edge neighbor.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TopologyUnlinkReport {
+    pub ok: bool,
+    pub edge: DisplayEdge,
+    pub message: String,
+}
+
+/// Report returned when updating display geometry or crossing parameters.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TopologyConfigReport {
+    pub ok: bool,
+    pub display: DisplayRect,
+    pub config: EdgeCrossingConfig,
+    pub message: String,
+}
+
+/// Report returned after broadcasting topology synchronization.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TopologySyncReport {
+    pub ok: bool,
+    pub broadcast_count: usize,
+    pub message: String,
+}
+
+/// Status and governance report for topology coordination policy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TopologyPolicyReport {
+    pub ok: bool,
+    pub policy: TopologyPolicy,
+    pub message: String,
+}
+
+/// Result of an edge crossing decision on cursor movement.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CursorCrossingDecision {
+    pub crossed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_peer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge: Option<DisplayEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_x: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_y: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+}
+
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ClipStatusReport {
@@ -2449,6 +2544,12 @@ struct Shared {
     focus_policy: Mutex<FocusPolicy>,
     local_focus_state: Mutex<FocusStateFrame>,
     peer_focus_states: Mutex<HashMap<String, FocusStateFrame>>,
+    topology_layout: Mutex<TopologyLayout>,
+    topology_policy: Mutex<TopologyPolicy>,
+    peer_topologies: Mutex<HashMap<String, TopologyStateFrame>>,
+    cursor_last_pos: Mutex<(i32, i32)>,
+    cursor_edge_dwell: Mutex<HashMap<DisplayEdge, u64>>,
+    cursor_edge_resistance_acc: Mutex<HashMap<DisplayEdge, u32>>,
 }
 
 #[derive(Clone)]
@@ -2598,6 +2699,8 @@ impl Node {
         let initial_local_actions = load_local_actions(&cfg.data_dir);
         let initial_action_policy = load_action_policy(&cfg.data_dir);
         let initial_focus_policy = load_focus_policy(&cfg.data_dir);
+        let initial_topology_layout = load_topology_layout(&cfg.data_dir);
+        let initial_topology_policy = load_topology_policy(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -2740,6 +2843,12 @@ impl Node {
                 timestamp_ms: 0,
             }),
             peer_focus_states: Mutex::new(HashMap::new()),
+            topology_layout: Mutex::new(initial_topology_layout),
+            topology_policy: Mutex::new(initial_topology_policy),
+            peer_topologies: Mutex::new(HashMap::new()),
+            cursor_last_pos: Mutex::new((0, 0)),
+            cursor_edge_dwell: Mutex::new(HashMap::new()),
+            cursor_edge_resistance_acc: Mutex::new(HashMap::new()),
         });
         Ok(Self { shared })
     }
@@ -8105,6 +8214,14 @@ impl Node {
                 (req.request_id.len() + 32) as u64,
                 tetherly_core::frame::TYPE_FOCUS_SYNC_REQ,
             ),
+            SessionEvent::TopologyState(st) => (
+                (st.device_id.len() + st.neighbors.len() * 48 + 64) as u64,
+                tetherly_core::frame::TYPE_TOPOLOGY_STATE,
+            ),
+            SessionEvent::TopologySyncReq(req) => (
+                (req.request_id.len() + 32) as u64,
+                tetherly_core::frame::TYPE_TOPOLOGY_SYNC_REQ,
+            ),
             SessionEvent::Unknown(ty) => (32u64, *ty),
         };
         self.shared.telemetry.record_control_rx(ev_bytes, ev_ty);
@@ -8378,6 +8495,12 @@ impl Node {
             }
             SessionEvent::FocusSyncReq(req) => {
                 self.receive_focus_sync_req(peer, req);
+            }
+            SessionEvent::TopologyState(st) => {
+                self.receive_topology_state(peer, st);
+            }
+            SessionEvent::TopologySyncReq(req) => {
+                self.receive_topology_sync_req(peer, req);
             }
             SessionEvent::Unknown(_) => {}
         }
@@ -12237,6 +12360,655 @@ impl Node {
             }
         }
         Ok(sent)
+    }
+
+    /// Returns the current local spatial display topology, configured neighbors, and crossing settings.
+    pub fn topology_layout(&self) -> TopologyLayoutReport {
+        let layout = self
+            .shared
+            .topology_layout
+            .lock()
+            .expect("topology_layout")
+            .clone();
+        let peer_count = self
+            .shared
+            .peer_topologies
+            .lock()
+            .expect("peer_topologies")
+            .len();
+        TopologyLayoutReport {
+            ok: true,
+            display: layout.display,
+            neighbors: layout.neighbors,
+            config: layout.config,
+            peer_count,
+            message: "local topology layout".to_string(),
+        }
+    }
+
+    /// Returns all known remote peer display topologies with aliases.
+    pub fn topology_peers(&self) -> TopologyPeersReport {
+        let map = self.shared.peer_topologies.lock().expect("peer_topologies");
+        let live = self.live_peers();
+        let mut peers = Vec::new();
+        for (peer_id_str, frame) in map.iter() {
+            let alias = live
+                .iter()
+                .find(|p| p.device_id.to_string() == *peer_id_str)
+                .map(|p| p.name.clone());
+            peers.push(PeerTopologyItem {
+                peer_id: peer_id_str.clone(),
+                peer_alias: alias,
+                display: frame.display,
+                neighbors: frame.neighbors.clone(),
+                config: frame.config,
+                timestamp_ms: frame.timestamp_ms,
+            });
+        }
+        peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        TopologyPeersReport {
+            ok: true,
+            count: peers.len(),
+            peers,
+            message: "known peer topologies".to_string(),
+        }
+    }
+
+    /// Returns the current spatial topology coordination and inbound control policy.
+    pub fn topology_policy(&self) -> TopologyPolicy {
+        self.shared
+            .topology_policy
+            .lock()
+            .expect("topology_policy")
+            .clone()
+    }
+
+    /// Status and configuration report for topology policy.
+    pub fn topology_policy_report(&self) -> TopologyPolicyReport {
+        TopologyPolicyReport {
+            ok: true,
+            policy: self.topology_policy(),
+            message: "topology policy report".to_string(),
+        }
+    }
+
+    /// Update spatial topology coordination policy and persist to disk atomically with 0o600 permissions.
+    pub fn set_topology_policy(
+        &self,
+        mut policy: TopologyPolicy,
+    ) -> Result<TopologyPolicyReport, CoreError> {
+        let now = self.shared.clock.unix_ms();
+        policy.sanitize();
+        save_topology_policy(&self.shared.cfg.data_dir, &policy)
+            .map_err(|e| CoreError::File(format!("failed to save topology_policy.json: {e}")))?;
+        *self.shared.topology_policy.lock().expect("topology_policy") = policy.clone();
+
+        self.emit(UiEvent::topology_policy_changed(
+            policy.enabled,
+            policy.allow_inbound_control,
+            policy.auto_link_paired_peers,
+            policy.allowed_groups.clone(),
+            policy.allowed_tags.clone(),
+            policy
+                .allowed_types
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect(),
+            now,
+        ));
+
+        self.record_audit(
+            AuditCategory::Config,
+            AuditSeverity::Info,
+            "topology_policy_changed",
+            None::<String>,
+            format!(
+                "Updated topology policy: enabled={}, allow_inbound_control={}, auto_link_paired_peers={}, groups={:?}, tags={:?}, types={:?}",
+                policy.enabled,
+                policy.allow_inbound_control,
+                policy.auto_link_paired_peers,
+                policy.allowed_groups,
+                policy.allowed_tags,
+                policy.allowed_types,
+            ),
+            true,
+        );
+
+        Ok(TopologyPolicyReport {
+            ok: true,
+            policy,
+            message: "topology policy updated successfully".to_string(),
+        })
+    }
+
+    /// Links a remote peer's display edge to the specified local edge.
+    pub async fn topology_link_neighbor(
+        &self,
+        edge: DisplayEdge,
+        peer_target: &str,
+        peer_edge: Option<DisplayEdge>,
+        offset: Option<i32>,
+    ) -> Result<TopologyLinkReport, CoreError> {
+        let peer_id = self.resolve_peer(peer_target)?;
+        let peer_str = peer_id.to_string();
+        let target_edge = peer_edge.unwrap_or_else(|| edge.opposite());
+        let target_offset = offset.unwrap_or(0).clamp(-4096, 4096);
+
+        let now = self.shared.clock.unix_ms();
+        let neighbor = EdgeNeighbor {
+            peer_id: peer_str.clone(),
+            peer_edge: target_edge,
+            offset: target_offset,
+        };
+
+        let neighbors_count = {
+            let mut layout = self.shared.topology_layout.lock().expect("topology_layout");
+            layout.neighbors.insert(edge, neighbor);
+            save_topology_layout(&self.shared.cfg.data_dir, &layout).map_err(|e| {
+                CoreError::File(format!("failed to save topology_layout.json: {e}"))
+            })?;
+            layout.neighbors.len()
+        };
+
+        let policy = self.topology_policy();
+        self.emit(UiEvent::topology_changed(
+            policy.enabled,
+            neighbors_count,
+            now,
+        ));
+
+        let alias = self
+            .peer_alias(&peer_id)
+            .unwrap_or_else(|| peer_str.clone());
+        self.record_audit(
+            AuditCategory::Config,
+            AuditSeverity::Info,
+            "topology_neighbor_linked",
+            Some(peer_str.clone()),
+            format!(
+                "Linked local edge {:?} to peer {} ({}) edge {:?} with offset {}",
+                edge, alias, peer_str, target_edge, target_offset
+            ),
+            true,
+        );
+
+        // Broadcast updated state in the background
+        let node = self.clone_handle();
+        tokio::spawn(async move {
+            let _ = node.topology_broadcast_state().await;
+        });
+
+        Ok(TopologyLinkReport {
+            ok: true,
+            edge,
+            peer_id: peer_str,
+            peer_edge: target_edge,
+            offset: target_offset,
+            message: format!("neighbor linked at {:?}", edge),
+        })
+    }
+
+    /// Unlinks any peer attached to the specified local display edge.
+    pub async fn topology_unlink_neighbor(
+        &self,
+        edge: DisplayEdge,
+    ) -> Result<TopologyUnlinkReport, CoreError> {
+        let now = self.shared.clock.unix_ms();
+        let (removed, neighbors_count) = {
+            let mut layout = self.shared.topology_layout.lock().expect("topology_layout");
+            let removed = layout.neighbors.remove(&edge);
+            save_topology_layout(&self.shared.cfg.data_dir, &layout).map_err(|e| {
+                CoreError::File(format!("failed to save topology_layout.json: {e}"))
+            })?;
+            (removed, layout.neighbors.len())
+        };
+
+        let policy = self.topology_policy();
+        self.emit(UiEvent::topology_changed(
+            policy.enabled,
+            neighbors_count,
+            now,
+        ));
+
+        let removed_peer = removed.as_ref().map(|n| n.peer_id.clone());
+        self.record_audit(
+            AuditCategory::Config,
+            AuditSeverity::Info,
+            "topology_neighbor_unlinked",
+            removed_peer,
+            format!("Unlinked neighbor from local edge {:?}", edge),
+            true,
+        );
+
+        // Broadcast updated state in the background
+        let node = self.clone_handle();
+        tokio::spawn(async move {
+            let _ = node.topology_broadcast_state().await;
+        });
+
+        Ok(TopologyUnlinkReport {
+            ok: true,
+            edge,
+            message: format!("neighbor unlinked from {:?}", edge),
+        })
+    }
+
+    /// Updates display geometry and edge crossing parameters.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn topology_update_config(
+        &self,
+        resistance_px: Option<u32>,
+        delay_ms: Option<u32>,
+        corner_lock_size_px: Option<u32>,
+        wrap_around: Option<bool>,
+        width: Option<u32>,
+        height: Option<u32>,
+        scale_factor: Option<f32>,
+    ) -> Result<TopologyConfigReport, CoreError> {
+        let now = self.shared.clock.unix_ms();
+        let (display, config, neighbors_count) = {
+            let mut layout = self.shared.topology_layout.lock().expect("topology_layout");
+            if let Some(res) = resistance_px {
+                layout.config.resistance_px = TopologyValidator::clamp_resistance(res);
+            }
+            if let Some(del) = delay_ms {
+                layout.config.delay_ms = TopologyValidator::clamp_delay(del);
+            }
+            if let Some(cls) = corner_lock_size_px {
+                layout.config.corner_lock_size_px = TopologyValidator::clamp_corner_lock(cls);
+            }
+            if let Some(wrap) = wrap_around {
+                layout.config.wrap_around = wrap;
+            }
+            if let Some(w) = width {
+                layout.display.width = TopologyValidator::clamp_width(w);
+            }
+            if let Some(h) = height {
+                layout.display.height = TopologyValidator::clamp_height(h);
+            }
+            if let Some(scale) = scale_factor {
+                layout.display.scale_factor = TopologyValidator::clamp_scale(scale);
+            }
+            save_topology_layout(&self.shared.cfg.data_dir, &layout).map_err(|e| {
+                CoreError::File(format!("failed to save topology_layout.json: {e}"))
+            })?;
+            (layout.display, layout.config, layout.neighbors.len())
+        };
+
+        let policy = self.topology_policy();
+        self.emit(UiEvent::topology_changed(
+            policy.enabled,
+            neighbors_count,
+            now,
+        ));
+
+        self.record_audit(
+            AuditCategory::Config,
+            AuditSeverity::Info,
+            "topology_config_updated",
+            None::<String>,
+            format!(
+                "Updated topology config: display={}x{}@{:.2}, resistance={}px, delay={}ms, corner_lock={}px, wrap={}",
+                display.width, display.height, display.scale_factor,
+                config.resistance_px, config.delay_ms, config.corner_lock_size_px, config.wrap_around
+            ),
+            true,
+        );
+
+        // Broadcast updated state in the background
+        let node = self.clone_handle();
+        tokio::spawn(async move {
+            let _ = node.topology_broadcast_state().await;
+        });
+
+        Ok(TopologyConfigReport {
+            ok: true,
+            display,
+            config,
+            message: "topology configuration updated".to_string(),
+        })
+    }
+
+    /// Broadcast current spatial display topology to all connected and eligible peers.
+    pub async fn topology_broadcast_state(&self) -> Result<usize, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let my_id = self.shared.identity.device_id().to_string();
+        let (display, neighbors, config) = {
+            let layout = self.shared.topology_layout.lock().expect("topology_layout");
+            (layout.display, layout.neighbors.clone(), layout.config)
+        };
+
+        let frame = TopologyStateFrame {
+            device_id: my_id,
+            display,
+            neighbors,
+            config,
+            timestamp_ms: now_ms,
+        };
+
+        let inner = frame.to_frame()?;
+        let live = self.live_peers();
+        let policy = self.topology_policy();
+        let mut broadcast_count = 0;
+
+        for p in live {
+            let profile = self.peer_profile(&p.device_id);
+            if policy.is_peer_eligible(&profile)
+                && self.send_to(&p.device_id, inner.clone()).await.is_ok()
+            {
+                broadcast_count += 1;
+            }
+        }
+
+        Ok(broadcast_count)
+    }
+
+    /// Request topology state synchronization from all eligible connected peers.
+    pub async fn topology_request_sync(&self) -> Result<usize, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let req_frame = TopologySyncReqFrame {
+            request_id: format!("topo_req_{}", now_ms),
+            timestamp_ms: now_ms,
+        };
+        let inner = req_frame.to_frame()?;
+        let live = self.live_peers();
+        let policy = self.topology_policy();
+        let mut sent = 0;
+
+        for p in live {
+            let profile = self.peer_profile(&p.device_id);
+            if policy.is_peer_eligible(&profile)
+                && self.send_to(&p.device_id, inner.clone()).await.is_ok()
+            {
+                sent += 1;
+            }
+        }
+
+        Ok(sent)
+    }
+
+    /// Ingest and process an inbound TopologyStateFrame from a connected peer.
+    pub fn receive_topology_state(&self, peer: &DeviceId, mut frame: TopologyStateFrame) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        let policy = self.topology_policy();
+        let profile = self.peer_profile(peer);
+
+        if !policy.enabled || !policy.is_peer_eligible(&profile) {
+            debug!(peer = %peer, "topology state ignored: policy disabled or peer not eligible");
+            return;
+        }
+
+        frame.sanitize();
+        frame.device_id = peer_str.clone();
+
+        let width = frame.display.width;
+        let height = frame.display.height;
+        let scale_factor = frame.display.scale_factor;
+
+        {
+            let mut cache = self.shared.peer_topologies.lock().expect("peer_topologies");
+            cache.insert(peer_str.clone(), frame);
+        }
+
+        self.emit(UiEvent::peer_topology_updated(
+            &peer_str,
+            &alias,
+            width,
+            height,
+            scale_factor,
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Config,
+            AuditSeverity::Info,
+            "peer_topology_updated",
+            Some(peer_str),
+            format!(
+                "Updated topology for peer {} ({}): display={}x{}",
+                alias, peer, width, height
+            ),
+            true,
+        );
+    }
+
+    /// Ingest and process an inbound TopologySyncReqFrame from a connected peer.
+    pub fn receive_topology_sync_req(&self, peer: &DeviceId, _frame: TopologySyncReqFrame) {
+        let policy = self.topology_policy();
+        let profile = self.peer_profile(peer);
+
+        if !policy.enabled || !policy.is_peer_eligible(&profile) {
+            return;
+        }
+
+        let my_id = self.shared.identity.device_id().to_string();
+        let now_ms = self.shared.clock.unix_ms();
+        let (display, neighbors, config) = {
+            let layout = self.shared.topology_layout.lock().expect("topology_layout");
+            (layout.display, layout.neighbors.clone(), layout.config)
+        };
+
+        let frame = TopologyStateFrame {
+            device_id: my_id,
+            display,
+            neighbors,
+            config,
+            timestamp_ms: now_ms,
+        };
+
+        let node = self.clone_handle();
+        let target = peer.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Ok(inner) = frame.to_frame() {
+                    let _ = node.send_to(&target, inner).await;
+                }
+            });
+        }
+    }
+
+    /// Evaluates cursor position against 2D spatial display topology, anti-misclick corner zones,
+    /// edge resistance, and dwell delay. Computes proportional remote coordinates if crossing criteria are satisfied.
+    pub fn evaluate_cursor_crossing(&self, x: i32, y: i32) -> CursorCrossingDecision {
+        let policy = self.topology_policy();
+        if !policy.enabled {
+            return CursorCrossingDecision {
+                crossed: false,
+                target_peer: None,
+                edge: None,
+                entry_x: None,
+                entry_y: None,
+                blocked_reason: Some("topology coordination disabled".to_string()),
+            };
+        }
+
+        let now = self.shared.clock.unix_ms();
+        let (display, neighbors, config) = {
+            let layout = self.shared.topology_layout.lock().expect("topology_layout");
+            (layout.display, layout.neighbors.clone(), layout.config)
+        };
+
+        let width = display.width as i32;
+        let height = display.height as i32;
+
+        // 1. Anti-misclick corner lock exclusion zone check
+        if TopologyValidator::is_in_corner_zone(
+            x,
+            y,
+            display.width,
+            display.height,
+            config.corner_lock_size_px,
+        ) {
+            return CursorCrossingDecision {
+                crossed: false,
+                target_peer: None,
+                edge: None,
+                entry_x: None,
+                entry_y: None,
+                blocked_reason: Some("corner anti-misclick exclusion zone".to_string()),
+            };
+        }
+
+        // 2. Identify active edge boundary touch
+        let active_edge = if x <= 0 {
+            Some(DisplayEdge::Left)
+        } else if x >= width - 1 {
+            Some(DisplayEdge::Right)
+        } else if y <= 0 {
+            Some(DisplayEdge::Top)
+        } else if y >= height - 1 {
+            Some(DisplayEdge::Bottom)
+        } else {
+            None
+        };
+
+        let Some(edge) = active_edge else {
+            // Not touching any edge: reset dwell and resistance
+            self.shared.cursor_edge_dwell.lock().expect("dwell").clear();
+            self.shared
+                .cursor_edge_resistance_acc
+                .lock()
+                .expect("res")
+                .clear();
+            *self.shared.cursor_last_pos.lock().expect("pos") = (x, y);
+            return CursorCrossingDecision {
+                crossed: false,
+                target_peer: None,
+                edge: None,
+                entry_x: None,
+                entry_y: None,
+                blocked_reason: None,
+            };
+        };
+
+        // 3. Check if neighbor is configured at this edge
+        let Some(neighbor) = neighbors.get(&edge) else {
+            return CursorCrossingDecision {
+                crossed: false,
+                target_peer: None,
+                edge: Some(edge),
+                entry_x: None,
+                entry_y: None,
+                blocked_reason: Some(format!("no neighbor configured at {:?}", edge)),
+            };
+        };
+
+        // 4. Check dwell delay
+        {
+            let mut dwell_map = self.shared.cursor_edge_dwell.lock().expect("dwell");
+            let dwell_start = dwell_map.entry(edge).or_insert(now);
+            if now.saturating_sub(*dwell_start) < config.delay_ms as u64 {
+                return CursorCrossingDecision {
+                    crossed: false,
+                    target_peer: Some(neighbor.peer_id.clone()),
+                    edge: Some(edge),
+                    entry_x: None,
+                    entry_y: None,
+                    blocked_reason: Some(format!(
+                        "dwell delay not reached ({}ms / {}ms)",
+                        now.saturating_sub(*dwell_start),
+                        config.delay_ms
+                    )),
+                };
+            }
+        }
+
+        // 5. Check edge resistance
+        let (last_x, last_y) = *self.shared.cursor_last_pos.lock().expect("pos");
+        let push_distance = match edge {
+            DisplayEdge::Left => (last_x - x).max(1) as u32,
+            DisplayEdge::Right => (x - last_x).max(1) as u32,
+            DisplayEdge::Top => (last_y - y).max(1) as u32,
+            DisplayEdge::Bottom => (y - last_y).max(1) as u32,
+        };
+
+        {
+            let mut res_map = self.shared.cursor_edge_resistance_acc.lock().expect("res");
+            let accumulated = res_map.entry(edge).or_insert(0);
+            *accumulated = accumulated.saturating_add(push_distance);
+            if *accumulated < config.resistance_px {
+                return CursorCrossingDecision {
+                    crossed: false,
+                    target_peer: Some(neighbor.peer_id.clone()),
+                    edge: Some(edge),
+                    entry_x: None,
+                    entry_y: None,
+                    blocked_reason: Some(format!(
+                        "edge resistance not overcome ({}px / {}px)",
+                        *accumulated, config.resistance_px
+                    )),
+                };
+            }
+        }
+
+        // 6. Resolve target peer display geometry
+        let remote_display = {
+            let peers = self.shared.peer_topologies.lock().expect("peer_topologies");
+            peers
+                .get(&neighbor.peer_id)
+                .map(|p| p.display)
+                .unwrap_or_else(|| {
+                    // Default fallback: 1920x1080@1.0
+                    DisplayRect::new(1920, 1080, 1.0)
+                })
+        };
+
+        // 7. Calculate proportional entrance coordinate
+        let (entry_x, entry_y) = map_edge_exit_to_entry(
+            &display,
+            edge,
+            (x, y),
+            &remote_display,
+            neighbor.peer_edge,
+            neighbor.offset,
+        );
+
+        // Reset resistance and dwell after successful crossing trigger
+        self.shared
+            .cursor_edge_dwell
+            .lock()
+            .expect("dwell")
+            .remove(&edge);
+        self.shared
+            .cursor_edge_resistance_acc
+            .lock()
+            .expect("res")
+            .remove(&edge);
+        *self.shared.cursor_last_pos.lock().expect("pos") = (x, y);
+
+        let my_id = self.shared.identity.device_id().to_string();
+        self.emit(UiEvent::cursor_edge_crossed(
+            &my_id,
+            &neighbor.peer_id,
+            edge.as_str(),
+            entry_x,
+            entry_y,
+            now,
+        ));
+
+        self.record_audit(
+            AuditCategory::Security,
+            AuditSeverity::Info,
+            "topology_edge_crossed",
+            Some(neighbor.peer_id.clone()),
+            format!(
+                "Cursor crossed edge {:?} to peer {} at ({}, {})",
+                edge, neighbor.peer_id, entry_x, entry_y
+            ),
+            true,
+        );
+
+        CursorCrossingDecision {
+            crossed: true,
+            target_peer: Some(neighbor.peer_id.clone()),
+            edge: Some(edge),
+            entry_x: Some(entry_x),
+            entry_y: Some(entry_y),
+            blocked_reason: None,
+        }
     }
 
     /// Polls system clipboard for automatic outbound synchronization.

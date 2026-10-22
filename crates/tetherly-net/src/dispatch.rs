@@ -14,9 +14,11 @@ use tetherly_core::frame::{
     TYPE_FILE_OFFER, TYPE_FILE_REJECT, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ, TYPE_LOCATE_REQUEST,
     TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH,
     TYPE_NOTIFY_REPLY, TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
+    TYPE_TOPOLOGY_STATE, TYPE_TOPOLOGY_SYNC_REQ,
 };
 use tetherly_core::locate::{LocateRequestFrame, LocateStopFrame};
 use tetherly_core::media::{MediaCommandFrame, MediaStateFrame};
+use tetherly_core::topology::{TopologyStateFrame, TopologySyncReqFrame};
 
 #[derive(Debug)]
 pub enum SessionEvent {
@@ -39,6 +41,8 @@ pub enum SessionEvent {
     ActionResult(ActionResultFrame),
     FocusState(FocusStateFrame),
     FocusSyncReq(FocusSyncReqFrame),
+    TopologyState(TopologyStateFrame),
+    TopologySyncReq(TopologySyncReqFrame),
     FileOffer(FileOffer),
     FileAccept(FileDecision),
     FileReject(FileDecision),
@@ -100,6 +104,12 @@ impl SessionEvent {
             }
             TYPE_FOCUS_SYNC_REQ => {
                 SessionEvent::FocusSyncReq(FocusSyncReqFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_TOPOLOGY_STATE => {
+                SessionEvent::TopologyState(TopologyStateFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_TOPOLOGY_SYNC_REQ => {
+                SessionEvent::TopologySyncReq(TopologySyncReqFrame::from_payload(&frame.payload)?)
             }
             TYPE_FILE_OFFER => SessionEvent::FileOffer(FileOffer::from_payload(&frame.payload)?),
             TYPE_FILE_ACCEPT => {

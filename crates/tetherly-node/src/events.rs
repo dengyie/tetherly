@@ -501,6 +501,36 @@ pub enum UiEvent {
         allowed_types: Vec<String>,
         timestamp_ms: u64,
     },
+    TopologyChanged {
+        enabled: bool,
+        neighbors_count: usize,
+        timestamp_ms: u64,
+    },
+    PeerTopologyUpdated {
+        peer_id: String,
+        peer_alias: String,
+        width: u32,
+        height: u32,
+        scale_factor: f32,
+        timestamp_ms: u64,
+    },
+    CursorEdgeCrossed {
+        from_device: String,
+        to_device: String,
+        edge: String,
+        x: i32,
+        y: i32,
+        timestamp_ms: u64,
+    },
+    TopologyPolicyChanged {
+        enabled: bool,
+        allow_inbound_control: bool,
+        auto_link_paired_peers: bool,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -1005,6 +1035,70 @@ impl UiEvent {
             quiet_hours_enabled,
             quiet_hours_start_minute,
             quiet_hours_end_minute,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            timestamp_ms,
+        }
+    }
+
+    pub fn topology_changed(enabled: bool, neighbors_count: usize, timestamp_ms: u64) -> Self {
+        UiEvent::TopologyChanged {
+            enabled,
+            neighbors_count,
+            timestamp_ms,
+        }
+    }
+
+    pub fn peer_topology_updated(
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        width: u32,
+        height: u32,
+        scale_factor: f32,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::PeerTopologyUpdated {
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            width,
+            height,
+            scale_factor,
+            timestamp_ms,
+        }
+    }
+
+    pub fn cursor_edge_crossed(
+        from_device: impl Into<String>,
+        to_device: impl Into<String>,
+        edge: impl Into<String>,
+        x: i32,
+        y: i32,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::CursorEdgeCrossed {
+            from_device: from_device.into(),
+            to_device: to_device.into(),
+            edge: edge.into(),
+            x,
+            y,
+            timestamp_ms,
+        }
+    }
+
+    pub fn topology_policy_changed(
+        enabled: bool,
+        allow_inbound_control: bool,
+        auto_link_paired_peers: bool,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::TopologyPolicyChanged {
+            enabled,
+            allow_inbound_control,
+            auto_link_paired_peers,
             allowed_groups,
             allowed_tags,
             allowed_types,

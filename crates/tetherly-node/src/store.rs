@@ -3,12 +3,17 @@
 //! lives under %LOCALAPPDATA% (user ACL). Never logs secret bytes.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 pub use tetherly_core::battery::{BatteryStateFrame, BatteryValidator, PowerSource};
 pub use tetherly_core::focus::{FocusMode, FocusStateFrame, FocusSyncReqFrame, FocusValidator};
 pub use tetherly_core::media::{MediaCommand, MediaControlMode, MediaStateFrame, PlaybackState};
+pub use tetherly_core::topology::{
+    DisplayEdge, DisplayRect, EdgeCrossingConfig, EdgeNeighbor, TopologyStateFrame,
+    TopologySyncReqFrame, TopologyValidator,
+};
 use tetherly_core::{ClipSyncMode, MemoryTrustStore, TrustFile};
 pub use tetherly_core::{HandoffAction, HandoffEntry, HandoffStatus};
 use tetherly_crypto::Identity;
@@ -29,6 +34,8 @@ pub const LOCATOR_POLICY_FILE: &str = "locator_policy.json";
 pub const ACTIONS_FILE: &str = "actions.json";
 pub const ACTION_POLICY_FILE: &str = "action_policy.json";
 pub const FOCUS_POLICY_FILE: &str = "focus_policy.json";
+pub const TOPOLOGY_LAYOUT_FILE: &str = "topology_layout.json";
+pub const TOPOLOGY_POLICY_FILE: &str = "topology_policy.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -1380,6 +1387,121 @@ pub fn save_focus_policy(dir: &Path, policy: &FocusPolicy) -> Result<(), NodeSto
     Ok(())
 }
 
+/// Local screen layout and multi-display edge neighbor arrangement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TopologyLayout {
+    #[serde(default)]
+    pub display: DisplayRect,
+    #[serde(default)]
+    pub neighbors: HashMap<DisplayEdge, EdgeNeighbor>,
+    #[serde(default)]
+    pub config: EdgeCrossingConfig,
+}
+
+pub fn load_topology_layout(dir: &Path) -> TopologyLayout {
+    let path = dir.join(TOPOLOGY_LAYOUT_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_topology_layout(dir: &Path, layout: &TopologyLayout) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(TOPOLOGY_LAYOUT_FILE),
+        &serde_json::to_vec_pretty(layout)?,
+    )?;
+    Ok(())
+}
+
+/// Node policy governing cross-device spatial multi-display topology and cursor crossing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TopologyPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub allow_inbound_control: bool,
+    #[serde(default = "default_true")]
+    pub auto_link_paired_peers: bool,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+}
+
+impl Default for TopologyPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_inbound_control: true,
+            auto_link_paired_peers: true,
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+        }
+    }
+}
+
+impl TopologyPolicy {
+    /// Checks whether an inbound topology request or cursor crossing is eligible based on peer profile.
+    pub fn is_peer_eligible(&self, profile: &PeerProfile) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        if let Some(group) = &profile.group {
+            if self.allowed_groups.iter().any(|g| g == group) {
+                return true;
+            }
+        }
+
+        if profile.tags.iter().any(|t| self.allowed_tags.contains(t)) {
+            return true;
+        }
+
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+
+    pub fn sanitize(&mut self) {
+        self.allowed_groups.retain(|g| !g.trim().is_empty());
+        self.allowed_groups.truncate(32);
+        self.allowed_tags.retain(|t| !t.trim().is_empty());
+        self.allowed_tags.truncate(32);
+        self.allowed_types.truncate(16);
+    }
+}
+
+pub fn load_topology_policy(dir: &Path) -> TopologyPolicy {
+    let path = dir.join(TOPOLOGY_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_topology_policy(dir: &Path, policy: &TopologyPolicy) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(TOPOLOGY_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -2241,6 +2363,105 @@ mod tests {
             ..Default::default()
         };
         assert!(!disabled_focus.is_peer_eligible(&prof_ok));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn topology_layout_and_policy_roundtrip_and_matching() {
+        let dir = std::env::temp_dir().join(format!("tetherly-topo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Defaults
+        let def_layout = load_topology_layout(&dir);
+        assert_eq!(def_layout.display.width, 1920);
+        assert_eq!(def_layout.display.height, 1080);
+        assert!(def_layout.neighbors.is_empty());
+
+        let def_policy = load_topology_policy(&dir);
+        assert!(def_policy.enabled);
+        assert!(def_policy.allow_inbound_control);
+        assert!(def_policy.auto_link_paired_peers);
+        assert!(def_policy.allowed_groups.is_empty());
+
+        // 2. Custom layout persistence
+        let mut neighbors = HashMap::new();
+        neighbors.insert(
+            DisplayEdge::Right,
+            EdgeNeighbor {
+                peer_id: "peer_right".into(),
+                peer_edge: DisplayEdge::Left,
+                offset: 50,
+            },
+        );
+        let custom_layout = TopologyLayout {
+            display: DisplayRect::new(2560, 1440, 1.25),
+            neighbors,
+            config: EdgeCrossingConfig {
+                resistance_px: 20,
+                delay_ms: 150,
+                corner_lock_size_px: 40,
+                wrap_around: true,
+            },
+        };
+        save_topology_layout(&dir, &custom_layout).unwrap();
+        let loaded_layout = load_topology_layout(&dir);
+        assert_eq!(loaded_layout, custom_layout);
+
+        // 3. Custom policy persistence
+        let custom_policy = TopologyPolicy {
+            enabled: true,
+            allow_inbound_control: false,
+            auto_link_paired_peers: false,
+            allowed_groups: vec!["office".into()],
+            allowed_tags: vec!["laptop".into()],
+            allowed_types: vec![DeviceType::Desktop, DeviceType::Laptop],
+        };
+        save_topology_policy(&dir, &custom_policy).unwrap();
+        let loaded_policy = load_topology_policy(&dir);
+        assert_eq!(loaded_policy, custom_policy);
+
+        // 4. Policy matching
+        let prof_ok = PeerProfile {
+            device_id: "lap_1".into(),
+            device_type: DeviceType::Laptop,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded_policy.is_peer_eligible(&prof_ok));
+
+        let prof_group = PeerProfile {
+            device_id: "desk_1".into(),
+            device_type: DeviceType::Other,
+            tags: vec![],
+            group: Some("office".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded_policy.is_peer_eligible(&prof_group));
+
+        let prof_tag = PeerProfile {
+            device_id: "other_1".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["laptop".into()],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded_policy.is_peer_eligible(&prof_tag));
+
+        let prof_unmatched = PeerProfile {
+            device_id: "phone_1".into(),
+            device_type: DeviceType::Phone,
+            tags: vec!["mobile".into()],
+            group: Some("home".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded_policy.is_peer_eligible(&prof_unmatched));
 
         let _ = fs::remove_dir_all(&dir);
     }

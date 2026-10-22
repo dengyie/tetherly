@@ -10584,6 +10584,306 @@ async fn focus_mode_cross_device_synchronization_quiet_hours_and_governance_via_
     peer.shutdown();
 }
 
+/// ADR-071 End-to-End Integration Test:
+/// Multi-Display Virtual Spatial Topology, Borderless Edge Cursor Crossing &
+/// Spatial Layout Governance Pipeline via Loopback HTTP API & Wire Frame Protocol.
+#[tokio::test]
+async fn topology_multi_display_spatial_layout_borderless_cursor_and_governance_via_loopback_api() {
+    let (host, peer, g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to Host and Peer SSE streams
+    let mut host_sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect to host sse stream");
+    let mut _peer_sse = tetherly_node::loopback_events_connect(peer_ui)
+        .await
+        .expect("connect to peer sse stream");
+
+    // 2. Initial Topology Layout Check on Host (default 1920x1080, empty neighbors)
+    let (code_lay, body_lay) = tetherly_node::loopback_get(host_ui, "/api/topology/layout")
+        .await
+        .unwrap();
+    assert_eq!(code_lay, 200);
+    let lay_init: serde_json::Value = serde_json::from_slice(&body_lay).unwrap();
+    assert_eq!(lay_init["ok"], true);
+    assert_eq!(lay_init["display"]["width"], 1920);
+    assert_eq!(lay_init["display"]["height"], 1080);
+    assert_eq!(lay_init["config"]["resistance_px"], 15);
+    assert_eq!(lay_init["config"]["delay_ms"], 100);
+    assert_eq!(lay_init["config"]["corner_lock_size_px"], 30);
+
+    // 3. Initial Topology Policy Check on Host
+    let (code_pol, body_pol) = tetherly_node::loopback_get(host_ui, "/api/topology/policy")
+        .await
+        .unwrap();
+    assert_eq!(code_pol, 200);
+    let pol_init: serde_json::Value = serde_json::from_slice(&body_pol).unwrap();
+    assert_eq!(pol_init["ok"], true);
+    assert_eq!(pol_init["policy"]["enabled"], true);
+    assert_eq!(pol_init["policy"]["allow_inbound_control"], true);
+    assert_eq!(pol_init["policy"]["auto_link_paired_peers"], true);
+
+    // 4. Host updates display configuration and crossing parameters via POST /api/topology/config
+    let cfg_req = serde_json::json!({
+        "width": 2560,
+        "height": 1440,
+        "scale_factor": 1.25,
+        "resistance_px": 25,
+        "delay_ms": 120,
+        "corner_lock_size_px": 30,
+        "wrap_around": true
+    });
+    let (code_cfg, body_cfg) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/topology/config",
+        &serde_json::to_vec(&cfg_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_cfg, 200);
+    let cfg_rep: serde_json::Value = serde_json::from_slice(&body_cfg).unwrap();
+    assert_eq!(cfg_rep["ok"], true);
+    assert_eq!(cfg_rep["display"]["width"], 2560);
+    assert_eq!(cfg_rep["display"]["height"], 1440);
+    assert_eq!(cfg_rep["config"]["resistance_px"], 25);
+    assert_eq!(cfg_rep["config"]["delay_ms"], 120);
+    assert_eq!(cfg_rep["config"]["corner_lock_size_px"], 30);
+    assert_eq!(cfg_rep["config"]["wrap_around"], true);
+
+    // 5. Host links Peer to its Right edge via POST /api/topology/link
+    let link_req = serde_json::json!({
+        "edge": "right",
+        "peer": peer_id.to_string(),
+        "peer_edge": "left",
+        "offset": 100
+    });
+    let (code_link, body_link) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/topology/link",
+        &serde_json::to_vec(&link_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_link, 200);
+    let link_rep: serde_json::Value = serde_json::from_slice(&body_link).unwrap();
+    assert_eq!(link_rep["ok"], true);
+    assert_eq!(link_rep["edge"], "right");
+    assert_eq!(link_rep["peer_id"], peer_id.to_string());
+    assert_eq!(link_rep["peer_edge"], "left");
+    assert_eq!(link_rep["offset"], 100);
+
+    // Verify GET /api/topology/layout reflects the newly linked neighbor
+    let (code_lay2, body_lay2) = tetherly_node::loopback_get(host_ui, "/api/topology/layout")
+        .await
+        .unwrap();
+    assert_eq!(code_lay2, 200);
+    let lay2: serde_json::Value = serde_json::from_slice(&body_lay2).unwrap();
+    assert_eq!(lay2["neighbors"]["right"]["peer_id"], peer_id.to_string());
+    assert_eq!(lay2["neighbors"]["right"]["peer_edge"], "left");
+    assert_eq!(lay2["neighbors"]["right"]["offset"], 100);
+
+    // 6. Verify SSE event on Host
+    let mut saw_topology_changed = false;
+    let sse_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < sse_deadline {
+        if let Ok(Ok(Some(ev_raw))) =
+            tokio::time::timeout(std::time::Duration::from_millis(400), host_sse.next_event()).await
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev_raw) {
+                if v["kind"] == "topology_changed" && v["neighbors_count"] == 1 {
+                    saw_topology_changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_topology_changed,
+        "Host must emit topology_changed SSE event with 1 neighbor"
+    );
+
+    // 7. Trigger network topology sync via POST /api/topology/sync
+    let (code_sync, body_sync) = tetherly_node::loopback_post(host_ui, "/api/topology/sync", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(code_sync, 200);
+    let sync_rep: serde_json::Value = serde_json::from_slice(&body_sync).unwrap();
+    assert_eq!(sync_rep["ok"], true);
+    assert!(sync_rep["broadcast_count"].as_u64().unwrap() >= 1);
+
+    // Peer should receive Host's topology over Wire protocol
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let (code_peer_peers, body_peer_peers) =
+        tetherly_node::loopback_get(peer_ui, "/api/topology/peers")
+            .await
+            .unwrap();
+    assert_eq!(code_peer_peers, 200);
+    let peer_peers_rep: serde_json::Value = serde_json::from_slice(&body_peer_peers).unwrap();
+    assert_eq!(peer_peers_rep["ok"], true);
+    let peers_arr = peer_peers_rep["peers"].as_array().expect("peers array");
+    let host_found = peers_arr
+        .iter()
+        .find(|p| p["peer_id"] == host_id.to_string());
+    assert!(
+        host_found.is_some(),
+        "Peer must have cached Host's topology state"
+    );
+    let h_entry = host_found.unwrap();
+    assert_eq!(h_entry["display"]["width"], 2560);
+    assert_eq!(h_entry["display"]["height"], 1440);
+
+    // 8. Test Edge Crossing Engine & Anti-Misclick Corner Lock Guardrails
+    // Corner lock zone test: cursor movement in corner (e.g., x=2550, y=10, corner_lock=30)
+    let corner_cross = host.evaluate_cursor_crossing(2550, 10);
+    assert!(
+        !corner_cross.crossed,
+        "Cursor motion in corner lock zone must not cross boundary"
+    );
+    assert_eq!(
+        corner_cross.blocked_reason.as_deref(),
+        Some("corner anti-misclick exclusion zone")
+    );
+
+    // Position cursor near right edge inside bounds to prime last_pos
+    let _ = host.evaluate_cursor_crossing(2550, 720);
+
+    // Insufficient resistance test: push distance = 2559 - 2550 = 9px < 25px
+    let weak_cross = host.evaluate_cursor_crossing(2559, 720);
+    assert!(
+        !weak_cross.crossed,
+        "Cursor motion below resistance threshold must not cross boundary"
+    );
+
+    // Host tunes config with delay_ms = 0 to test pure resistance crossing
+    let cfg_fast = serde_json::json!({
+        "resistance_px": 10,
+        "delay_ms": 0
+    });
+    let (code_cfg2, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/topology/config",
+        &serde_json::to_vec(&cfg_fast).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_cfg2, 200);
+
+    // Prime last pos again
+    let _ = host.evaluate_cursor_crossing(2540, 720);
+    // Push past right edge: 2559 - 2540 = 19px >= 10px, delay = 0
+    let valid_cross = host.evaluate_cursor_crossing(2559, 720);
+    assert!(
+        valid_cross.crossed,
+        "Cursor pushing past resistance must trigger crossing: {:?}",
+        valid_cross.blocked_reason
+    );
+    assert_eq!(
+        valid_cross.edge,
+        Some(tetherly_core::topology::DisplayEdge::Right)
+    );
+    assert_eq!(valid_cross.target_peer, Some(peer_id.to_string()));
+    assert!(valid_cross.entry_x.is_some());
+    assert!(valid_cross.entry_y.is_some());
+
+    // 9. Host unlinks right edge via POST /api/topology/unlink
+    let unlink_req = serde_json::json!({
+        "edge": "right"
+    });
+    let (code_unlink, body_unlink) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/topology/unlink",
+        &serde_json::to_vec(&unlink_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_unlink, 200);
+    let unlink_rep: serde_json::Value = serde_json::from_slice(&body_unlink).unwrap();
+    assert_eq!(unlink_rep["ok"], true);
+
+    // Verify neighbor is removed
+    let (code_lay3, body_lay3) = tetherly_node::loopback_get(host_ui, "/api/topology/layout")
+        .await
+        .unwrap();
+    assert_eq!(code_lay3, 200);
+    let lay3: serde_json::Value = serde_json::from_slice(&body_lay3).unwrap();
+    assert!(lay3["neighbors"]["right"].is_null());
+
+    // 10. Host updates topology governance policy via POST /api/topology/policy
+    let pol_update = serde_json::json!({
+        "enabled": true,
+        "allow_inbound": false,
+        "auto_link": false,
+        "group": ["workstations"],
+        "tag": ["display-hub"],
+        "device_type": ["desktop"]
+    });
+    let (code_pol_up, body_pol_up) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/topology/policy",
+        &serde_json::to_vec(&pol_update).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_pol_up, 200);
+    let pol_updated: serde_json::Value = serde_json::from_slice(&body_pol_up).unwrap();
+    assert_eq!(pol_updated["ok"], true);
+    assert_eq!(pol_updated["policy"]["allow_inbound_control"], false);
+    assert_eq!(pol_updated["policy"]["auto_link_paired_peers"], false);
+    assert_eq!(
+        pol_updated["policy"]["allowed_groups"],
+        serde_json::json!(["workstations"])
+    );
+
+    // Verify layout and policy files persisted with 0o600 permissions
+    let layout_path = g1.path().join("topology_layout.json");
+    let policy_path = g1.path().join("topology_policy.json");
+    assert!(layout_path.exists(), "topology_layout.json must exist");
+    assert!(policy_path.exists(), "topology_policy.json must exist");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms_l = std::fs::metadata(&layout_path).unwrap().permissions();
+        assert_eq!(
+            perms_l.mode() & 0o777,
+            0o600,
+            "topology_layout.json must have 0o600 perms"
+        );
+        let perms_p = std::fs::metadata(&policy_path).unwrap().permissions();
+        assert_eq!(
+            perms_p.mode() & 0o777,
+            0o600,
+            "topology_policy.json must have 0o600 perms"
+        );
+    }
+
+    // 11. Security Red Line: Host header 403 Forbidden attack defense
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], host_ui));
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let evil_req =
+        "GET /api/topology/layout HTTP/1.1\r\nHost: evil-attacker-phishing.com\r\nConnection: close\r\n\r\n";
+    tokio::io::AsyncWriteExt::write_all(&mut stream, evil_req.as_bytes())
+        .await
+        .unwrap();
+    tokio::io::AsyncWriteExt::flush(&mut stream).await.unwrap();
+    let mut raw_resp = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut raw_resp)
+        .await
+        .unwrap();
+    let resp_str = String::from_utf8_lossy(&raw_resp);
+    assert!(
+        resp_str.starts_with("HTTP/1.1 403") || resp_str.starts_with("HTTP/1.0 403"),
+        "Host header attack must be rejected with 403 Forbidden: {resp_str}"
+    );
+
+    // 12. Clean Shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {
