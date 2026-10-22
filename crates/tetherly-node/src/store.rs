@@ -36,6 +36,7 @@ pub const ACTION_POLICY_FILE: &str = "action_policy.json";
 pub const FOCUS_POLICY_FILE: &str = "focus_policy.json";
 pub const TOPOLOGY_LAYOUT_FILE: &str = "topology_layout.json";
 pub const TOPOLOGY_POLICY_FILE: &str = "topology_policy.json";
+pub const INPUT_POLICY_FILE: &str = "input_policy.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -1502,6 +1503,106 @@ pub fn save_topology_policy(dir: &Path, policy: &TopologyPolicy) -> Result<(), N
     Ok(())
 }
 
+/// Security and admission governance policy for cross-device virtual peripheral / input tunneling.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InputTunnelPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub allow_inbound_control: bool,
+    #[serde(default = "default_true")]
+    pub allow_keyboard: bool,
+    #[serde(default = "default_true")]
+    pub allow_mouse: bool,
+    #[serde(default = "default_true")]
+    pub hotkey_release_enabled: bool,
+    #[serde(default = "default_input_tunnel_idle_timeout")]
+    pub idle_timeout_secs: u32,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+}
+
+fn default_input_tunnel_idle_timeout() -> u32 {
+    300
+}
+
+impl Default for InputTunnelPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_inbound_control: true,
+            allow_keyboard: true,
+            allow_mouse: true,
+            hotkey_release_enabled: true,
+            idle_timeout_secs: default_input_tunnel_idle_timeout(),
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+        }
+    }
+}
+
+impl InputTunnelPolicy {
+    pub fn is_peer_eligible(&self, profile: &PeerProfile) -> bool {
+        if !self.enabled || !self.allow_inbound_control {
+            return false;
+        }
+
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        if let Some(group) = &profile.group {
+            if self.allowed_groups.iter().any(|g| g == group) {
+                return true;
+            }
+        }
+
+        if profile.tags.iter().any(|t| self.allowed_tags.contains(t)) {
+            return true;
+        }
+
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+
+    pub fn sanitize(&mut self) {
+        self.idle_timeout_secs = self.idle_timeout_secs.clamp(10, 3600);
+        self.allowed_groups.retain(|g| !g.trim().is_empty());
+        self.allowed_groups.truncate(32);
+        self.allowed_tags.retain(|t| !t.trim().is_empty());
+        self.allowed_tags.truncate(32);
+        self.allowed_types.truncate(16);
+    }
+}
+
+pub fn load_input_policy(dir: &Path) -> InputTunnelPolicy {
+    let path = dir.join(INPUT_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_input_policy(dir: &Path, policy: &InputTunnelPolicy) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(INPUT_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -2462,6 +2563,89 @@ mod tests {
             updated_ms: 0,
         };
         assert!(!loaded_policy.is_peer_eligible(&prof_unmatched));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn input_tunnel_policy_roundtrip_and_matching() {
+        let dir = std::env::temp_dir().join(format!("tetherly-inp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Defaults
+        let def = load_input_policy(&dir);
+        assert!(def.enabled);
+        assert!(def.allow_inbound_control);
+        assert!(def.allow_keyboard);
+        assert!(def.allow_mouse);
+        assert!(def.hotkey_release_enabled);
+        assert_eq!(def.idle_timeout_secs, 300);
+
+        // 2. Custom policy persistence
+        let mut custom = InputTunnelPolicy {
+            enabled: true,
+            allow_inbound_control: true,
+            allow_keyboard: false,
+            allow_mouse: true,
+            hotkey_release_enabled: true,
+            idle_timeout_secs: 180,
+            allowed_groups: vec!["studio".into()],
+            allowed_tags: vec!["peripherals".into()],
+            allowed_types: vec![DeviceType::Desktop, DeviceType::Laptop],
+        };
+        custom.sanitize();
+        save_input_policy(&dir, &custom).unwrap();
+        let loaded = load_input_policy(&dir);
+        assert_eq!(loaded, custom);
+
+        // 3. Matching
+        let prof_ok = PeerProfile {
+            device_id: "desk_1".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_ok));
+
+        let prof_group = PeerProfile {
+            device_id: "tab_1".into(),
+            device_type: DeviceType::Other,
+            tags: vec![],
+            group: Some("studio".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_group));
+
+        let prof_tag = PeerProfile {
+            device_id: "phone_1".into(),
+            device_type: DeviceType::Phone,
+            tags: vec!["peripherals".into()],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_tag));
+
+        let prof_unmatched = PeerProfile {
+            device_id: "tv_1".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["entertainment".into()],
+            group: Some("living_room".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded.is_peer_eligible(&prof_unmatched));
+
+        // 4. Inbound disabled blocks all
+        let disabled_inbound = InputTunnelPolicy {
+            allow_inbound_control: false,
+            ..Default::default()
+        };
+        assert!(!disabled_inbound.is_peer_eligible(&prof_ok));
 
         let _ = fs::remove_dir_all(&dir);
     }

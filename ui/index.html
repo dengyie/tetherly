@@ -1354,6 +1354,134 @@
         <div id="topology-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
       </div>
     </section>
+    <section style="margin-top:16px" id="input-tunnel-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2>跨端虚拟外设共享与输入控制隧道 (Virtual Peripheral Sharing & Input Tunneling)</h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button id="toggleinputpolicybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">治理策略</button>
+          <button id="refreshinputtunnelbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新状态</button>
+        </div>
+      </div>
+      <div class="hint">零明文物理按键与鼠标位移安全流转，支持跨端双向控制附着、手势与滚轮协同，与跨屏拓扑联动实现光标无界穿梭。</div>
+
+      <!-- Policy Subpanel -->
+      <div id="input-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-weight:600;font-size:12px;color:var(--text)">虚拟外设安全准入与流转治理策略 (ADR-072)</span>
+          <span id="input-policy-badge" class="badge completed" style="font-size:11px">Policy: Active</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">外设隧道总开关 (Enabled):</label>
+            <select id="input-policy-enabled" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">启用 (Enabled)</option>
+              <option value="false">禁用 (Disabled)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许入站受控 (Inbound Control):</label>
+            <select id="input-policy-inbound" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许 (Allow Inbound)</option>
+              <option value="false">禁止 (Block Inbound)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">键盘事件转发 (Keyboard):</label>
+            <select id="input-policy-keyboard" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">开启 (Allow Keyboard)</option>
+              <option value="false">关闭 (Block Keyboard)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">鼠标/指针转发 (Mouse):</label>
+            <select id="input-policy-mouse" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">开启 (Allow Mouse)</option>
+              <option value="false">关闭 (Block Mouse)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">系统快捷键 (System Hotkeys):</label>
+            <select id="input-policy-hotkeys" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许全局穿透 (Allow Hotkeys)</option>
+              <option value="false">仅本地捕获 (Block Hotkeys)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">闲置自动释放时延 (Idle Timeout):</label>
+            <input id="input-policy-timeout" type="number" min="0" placeholder="300" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">业务分组准入 (Allowed Groups):</label>
+            <input id="input-policy-groups" placeholder="留空表示不限制分组" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">业务标签准入 (Allowed Tags):</label>
+            <input id="input-policy-tags" placeholder="留空表示不限制标签" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">设备形态准入 (Allowed Types):</label>
+            <input id="input-policy-types" placeholder="留空表示不限制形态" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+          <button id="input-policy-save-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px">保存策略 (Save)</button>
+          <button id="input-policy-reset-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">重置过滤 (Reset)</button>
+          <div id="input-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Main Tunnel Panel -->
+      <div style="background:var(--card-bg);border:1px solid var(--line);border-radius:6px;padding:12px;margin-top:8px">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <!-- Status Banner -->
+          <div style="display:flex;justify-content:space-between;align-items:center;background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:8px 12px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-size:16px">⌨️🖱️</span>
+              <div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <span id="input-status-badge" class="badge" style="font-size:11px">隧道未激活</span>
+                  <span id="input-role-badge" class="badge" style="font-size:11px">席位: 本地 (Local)</span>
+                </div>
+                <div id="input-session-info" style="font-size:12px;color:var(--muted);margin-top:2px">外设就绪，支持随时向已配对对端发起远程虚拟输入控制。</div>
+              </div>
+            </div>
+            <div style="text-align:right">
+              <div id="input-active-peer" style="font-size:12px;color:var(--muted);font-weight:600">当前对端: 无</div>
+              <div id="input-last-event" style="font-size:11px;color:var(--muted)">最近事件: 无</div>
+            </div>
+          </div>
+
+          <!-- Attach & Release Actions -->
+          <div style="background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px">
+            <div style="font-size:12px;font-weight:600;color:var(--muted)">控制端手动附着 / 释放通道 (Attach & Release)</div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <select id="input-attach-peer-select" style="flex:1;min-width:180px;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="">-- 选择目标对端 --</option>
+              </select>
+              <select id="input-attach-edge" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="">直连 (Direct)</option>
+                <option value="left">左侧边缘 (Left)</option>
+                <option value="right">右侧边缘 (Right)</option>
+                <option value="top">上方边缘 (Top)</option>
+                <option value="bottom">下方边缘 (Bottom)</option>
+              </select>
+              <input id="input-attach-x" type="number" placeholder="X (px)" style="width:65px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <input id="input-attach-y" type="number" placeholder="Y (px)" style="width:65px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <button id="input-attach-btn" class="ghost" type="button" style="padding:4px 14px;font-size:12px;font-weight:600;background:var(--accent);color:#fff">附着控制 (Attach)</button>
+              <input id="input-release-reason" placeholder="释放原因 (可选)" style="width:130px;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <button id="input-release-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">释放控制 (Release)</button>
+            </div>
+          </div>
+
+          <!-- Bottom Indicators -->
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:6px;margin-top:4px">
+            <span id="input-policy-indicator">外设隧道: 启用 · 允许入站 · 键鼠全开 · 超时 300s</span>
+            <span id="input-audit-indicator">零明文安全防护: 纯扫描码传输 · 严禁明文密码与日志审计</span>
+          </div>
+        </div>
+        <div id="input-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
+      </div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
@@ -5099,6 +5227,21 @@ async function updateTopologyPeers() {
       if (currentVal) peerSel.value = currentVal;
     }
 
+    // Update input tunnel attach peer select options
+    const inputPeerSel = $("input-attach-peer-select");
+    if (inputPeerSel && document.activeElement !== inputPeerSel) {
+      const currentVal = inputPeerSel.value;
+      let html = '<option value="">-- 选择目标对端 --</option>';
+      for (const p of peers) {
+        const id = p.peer_id || "";
+        const alias = p.peer_alias || id.slice(0, 8);
+        const res = p.display ? ` (${p.display.width}x${p.display.height})` : "";
+        html += `<option value="${id}">${escapeHtml(alias)}${res}</option>`;
+      }
+      inputPeerSel.innerHTML = html;
+      if (currentVal) inputPeerSel.value = currentVal;
+    }
+
     // Render Peer Topologies Grid
     const container = $("topology-peer-items");
     if (container) {
@@ -5330,6 +5473,243 @@ if (refreshTopologyBtn) {
     updateTopologyLayout();
     updateTopologyPeers();
     updateTopologyPolicy();
+  };
+}
+
+// Virtual Peripheral Sharing & Input Tunnel Pipeline (v1.79 / ADR-072)
+async function updateInputTunnel() {
+  try {
+    const rep = await api("/api/input/tunnel");
+    if (!rep || !rep.ok) return;
+
+    const active = !!rep.active;
+    const sess = rep.session;
+
+    if ($("input-status-badge")) {
+      $("input-status-badge").textContent = active ? "隧道已激活 (Active)" : "隧道未激活 (Inactive)";
+      $("input-status-badge").className = active ? "badge completed" : "badge";
+    }
+
+    if ($("input-role-badge")) {
+      if (active && sess) {
+        const isCtrl = sess.role === "controller";
+        $("input-role-badge").textContent = isCtrl ? "席位: 控制端 (Controller)" : "席位: 受控端 (Target)";
+        $("input-role-badge").className = isCtrl ? "badge outbound" : "badge completed";
+      } else {
+        $("input-role-badge").textContent = "席位: 本地 (Local)";
+        $("input-role-badge").className = "badge";
+      }
+    }
+
+    if ($("input-session-info")) {
+      if (active && sess) {
+        const sid = sess.session_id || "";
+        const peer = sess.peer || "";
+        const dur = sess.duration_secs || 0;
+        const idle = sess.idle_secs || 0;
+        const res = sess.capture_width && sess.capture_height ? ` · 远端分辨率: ${sess.capture_width}x${sess.capture_height}` : "";
+        $("input-session-info").textContent = `会话: ${sid} · 对端: ${peer} · 时长: ${dur}s (闲置: ${idle}s)${res}`;
+      } else {
+        $("input-session-info").textContent = "外设就绪，支持随时向已配对对端发起远程虚拟输入控制。";
+      }
+    }
+
+    if ($("input-active-peer")) {
+      $("input-active-peer").textContent = active && sess ? `当前对端: ${sess.peer}` : "当前对端: 无";
+    }
+
+    if (rep.policy) {
+      updateInputPolicyUI(rep.policy);
+    }
+  } catch (e) {
+    // silently ignore network polling blips
+  }
+}
+
+async function updateInputPolicy() {
+  try {
+    const rep = await api("/api/input/policy");
+    if (!rep || !rep.ok) return;
+    const p = rep.policy || rep;
+    updateInputPolicyUI(p);
+  } catch (e) {}
+}
+
+function updateInputPolicyUI(p) {
+  if (!p) return;
+  const en = p.enabled !== false;
+  const inbound = p.allow_inbound_control !== false;
+  const kb = p.forward_keyboard !== false;
+  const mouse = p.forward_mouse !== false;
+  const hotkey = p.forward_hotkeys !== false;
+  const timeout = p.idle_timeout_secs || 300;
+
+  if ($("input-policy-badge")) {
+    $("input-policy-badge").textContent = en ? "Policy: Active" : "Policy: Disabled";
+    $("input-policy-badge").className = en ? "badge completed" : "badge";
+  }
+
+  if ($("input-policy-indicator")) {
+    $("input-policy-indicator").textContent = `外设隧道: ${en ? "启用" : "禁用"} · ${inbound ? "允许入站" : "禁止入站"} · 键[${kb ? "开" : "关"}] 鼠[${mouse ? "开" : "关"}] 快捷键[${hotkey ? "开" : "关"}] · 超时 ${timeout}s`;
+  }
+
+  if ($("input-policy-enabled") && document.activeElement !== $("input-policy-enabled")) {
+    $("input-policy-enabled").value = en ? "true" : "false";
+  }
+  if ($("input-policy-inbound") && document.activeElement !== $("input-policy-inbound")) {
+    $("input-policy-inbound").value = inbound ? "true" : "false";
+  }
+  if ($("input-policy-keyboard") && document.activeElement !== $("input-policy-keyboard")) {
+    $("input-policy-keyboard").value = kb ? "true" : "false";
+  }
+  if ($("input-policy-mouse") && document.activeElement !== $("input-policy-mouse")) {
+    $("input-policy-mouse").value = mouse ? "true" : "false";
+  }
+  if ($("input-policy-hotkeys") && document.activeElement !== $("input-policy-hotkeys")) {
+    $("input-policy-hotkeys").value = hotkey ? "true" : "false";
+  }
+  if ($("input-policy-timeout") && document.activeElement !== $("input-policy-timeout")) {
+    $("input-policy-timeout").value = timeout;
+  }
+  if ($("input-policy-groups") && document.activeElement !== $("input-policy-groups")) {
+    $("input-policy-groups").value = (p.allowed_groups || []).join(", ");
+  }
+  if ($("input-policy-tags") && document.activeElement !== $("input-policy-tags")) {
+    $("input-policy-tags").value = (p.allowed_tags || []).join(", ");
+  }
+  if ($("input-policy-types") && document.activeElement !== $("input-policy-types")) {
+    $("input-policy-types").value = (p.allowed_types || []).join(", ");
+  }
+}
+
+const toggleInputPolicyBtn = $("toggleinputpolicybtn");
+if (toggleInputPolicyBtn) {
+  toggleInputPolicyBtn.onclick = () => {
+    const p = $("input-policy-panel");
+    if (p) p.style.display = p.style.display === "none" ? "block" : "none";
+  };
+}
+
+const inputPolicySaveBtn = $("input-policy-save-btn");
+if (inputPolicySaveBtn) {
+  inputPolicySaveBtn.onclick = async () => {
+    const en = $("input-policy-enabled") ? $("input-policy-enabled").value === "true" : undefined;
+    const inbound = $("input-policy-inbound") ? $("input-policy-inbound").value === "true" : undefined;
+    const kb = $("input-policy-keyboard") ? $("input-policy-keyboard").value === "true" : undefined;
+    const mouse = $("input-policy-mouse") ? $("input-policy-mouse").value === "true" : undefined;
+    const hotkey = $("input-policy-hotkeys") ? $("input-policy-hotkeys").value === "true" : undefined;
+    const timeout = $("input-policy-timeout") && $("input-policy-timeout").value ? parseInt($("input-policy-timeout").value, 10) : undefined;
+    const grpsVal = $("input-policy-groups") ? $("input-policy-groups").value.trim() : "";
+    const tagsVal = $("input-policy-tags") ? $("input-policy-tags").value.trim() : "";
+    const typesVal = $("input-policy-types") ? $("input-policy-types").value.trim() : "";
+    const msg = $("input-policy-msg");
+
+    const payload = {};
+    if (en !== undefined) payload.enabled = en;
+    if (inbound !== undefined) payload.allow_inbound_control = inbound;
+    if (kb !== undefined) payload.forward_keyboard = kb;
+    if (mouse !== undefined) payload.forward_mouse = mouse;
+    if (hotkey !== undefined) payload.forward_hotkeys = hotkey;
+    if (timeout !== undefined) payload.idle_timeout_secs = timeout;
+    if (grpsVal) payload.allowed_groups = grpsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (tagsVal) payload.allowed_tags = tagsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (typesVal) payload.allowed_types = typesVal.split(",").map(s => s.trim()).filter(Boolean);
+
+    try {
+      const rep = await api("/api/input/policy", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "外设治理策略已成功保存并落盘！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateInputPolicy();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const inputPolicyResetBtn = $("input-policy-reset-btn");
+if (inputPolicyResetBtn) {
+  inputPolicyResetBtn.onclick = async () => {
+    const msg = $("input-policy-msg");
+    try {
+      const rep = await api("/api/input/policy", { clear_filters: true });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "准入过滤已清空重置为全量放行！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateInputPolicy();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "重置失败: " + e.message;
+    }
+  };
+}
+
+const refreshInputTunnelBtn = $("refreshinputtunnelbtn");
+if (refreshInputTunnelBtn) {
+  refreshInputTunnelBtn.onclick = () => {
+    updateInputTunnel();
+    updateInputPolicy();
+  };
+}
+
+const inputAttachBtn = $("input-attach-btn");
+if (inputAttachBtn) {
+  inputAttachBtn.onclick = async () => {
+    const peer = $("input-attach-peer-select") ? $("input-attach-peer-select").value.trim() : "";
+    const edge = $("input-attach-edge") ? $("input-attach-edge").value : "";
+    const x = $("input-attach-x") && $("input-attach-x").value ? parseInt($("input-attach-x").value, 10) : undefined;
+    const y = $("input-attach-y") && $("input-attach-y").value ? parseInt($("input-attach-y").value, 10) : undefined;
+    const msg = $("input-status-msg");
+
+    if (!peer) {
+      if (msg) msg.textContent = "请先选择要附着控制的目标对端！";
+      return;
+    }
+
+    const payload = { peer };
+    if (edge) payload.edge = edge;
+    if (x !== undefined) payload.x = x;
+    if (y !== undefined) payload.y = y;
+
+    try {
+      const rep = await api("/api/input/tunnel/attach", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = `成功向对端建立输入控制隧道！会话: ${rep.session_id}`;
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateInputTunnel();
+      } else {
+        if (msg) msg.textContent = "建立隧道失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const inputReleaseBtn = $("input-release-btn");
+if (inputReleaseBtn) {
+  inputReleaseBtn.onclick = async () => {
+    const reason = $("input-release-reason") ? $("input-release-reason").value.trim() : "";
+    const msg = $("input-status-msg");
+
+    const payload = {};
+    if (reason) payload.reason = reason;
+
+    try {
+      const rep = await api("/api/input/tunnel/release", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = `已成功释放输入隧道并切回本地！时长: ${rep.duration_secs || 0}s`;
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateInputTunnel();
+      } else {
+        if (msg) msg.textContent = "释放失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
   };
 }
 
@@ -7167,10 +7547,33 @@ function setupEventSource() {
 					            desc = "屏幕状态: " + ev.state + " (授权:" + (ev.allowed ? "是" : "否") + ")" + (ev.peer ? (" · 对端:" + ev.peer) : "");
 					            updateScreenStatus();
 					          }
-					          else if (ev.kind === "input_seat_changed") {
-					            desc = "键鼠共享: 光标" + (ev.seat === "remote" ? "移至对端" : "返回本机") + (ev.channel_open ? " (通道开启)" : " (通道关闭)") + (ev.peer ? (" · 对端:" + ev.peer) : "");
-					            updateInputStatus();
-					          }
+						          else if (ev.kind === "input_seat_changed") {
+						            desc = "键鼠共享: 光标" + (ev.seat === "remote" ? "移至对端" : "返回本机") + (ev.channel_open ? " (通道开启)" : " (通道关闭)") + (ev.peer ? (" · 对端:" + ev.peer) : "");
+						            updateInputStatus();
+						            updateInputTunnel();
+						          }
+						          else if (ev.kind === "input_tunnel_session_started") {
+						            desc = "外设隧道建立: " + ev.session_id + " [" + ev.role + "] 对端:" + (ev.peer_alias || ev.peer_id);
+						            if ($("input-last-event")) {
+						              $("input-last-event").textContent = `最近事件: 建立 [${ev.session_id}] -> ${ev.peer_alias || ev.peer_id} (${ev.role})`;
+						            }
+						            updateInputTunnel();
+						          }
+						          else if (ev.kind === "input_tunnel_session_closed") {
+						            desc = "外设隧道释放: " + ev.session_id + " (" + ev.reason + ")";
+						            if ($("input-last-event")) {
+						              $("input-last-event").textContent = `最近事件: 释放 [${ev.session_id}] 原因:${ev.reason}`;
+						            }
+						            updateInputTunnel();
+						          }
+						          else if (ev.kind === "input_tunnel_policy_changed") {
+						            desc = "外设策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许入站=" + (ev.allow_inbound ? "是" : "否");
+						            if ($("input-last-event")) {
+						              $("input-last-event").textContent = `最近事件: 策略变更 [enabled=${ev.enabled}]`;
+						            }
+						            updateInputPolicy();
+						            updateInputTunnel();
+						          }
 					          else if (ev.kind === "network_refreshed") {
 					            desc = "网络已重探: 扫描 " + ev.iface_count + " 网卡 (监听 " + ev.listen_count + ")" + (ev.overlay_present ? (" · 侧车: " + (ev.overlay_source || "在网")) : "");
 					            updateNetworkStatus();
@@ -7346,8 +7749,12 @@ function setupEventSource() {
 																		setInterval(updateTopologyLayout, 3000);
 																		updateTopologyPeers();
 																		setInterval(updateTopologyPeers, 3000);
-																		updateTopologyPolicy();
-																		setInterval(updateTopologyPolicy, 3000);
+																			updateTopologyPolicy();
+																			setInterval(updateTopologyPolicy, 3000);
+																			updateInputTunnel();
+																			setInterval(updateInputTunnel, 3000);
+																			updateInputPolicy();
+																			setInterval(updateInputPolicy, 3000);
 							</script>
 </body>
 </html>

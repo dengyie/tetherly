@@ -8,14 +8,15 @@ use crate::platform::{insert_foreground, MemoryClip, SystemClip};
 use crate::sidecar::{self, OverlayConfig, OverlaySource, OverlayStatus};
 use crate::store::{
     load_action_policy, load_battery_policy, load_clipboard_policy, load_focus_policy,
-    load_handoff_inbox, load_handoff_policy, load_local_actions, load_locator_policy,
-    load_media_policy, load_topology_layout, load_topology_policy, load_trust, remember_route,
-    save_action_policy, save_battery_policy, save_clipboard_policy, save_focus_policy,
-    save_handoff_inbox, save_handoff_policy, save_local_actions, save_locator_policy,
-    save_media_policy, save_topology_layout, save_topology_policy, save_trust, ActionAccessMode,
-    ActionPolicy, AutoAcceptPolicy, BatteryPolicy, ClipboardPolicy, DeviceType, FocusPolicy,
-    HandoffInboxTable, HandoffPolicy, LocalActionDefinition, LocatorPolicy, MediaControlPolicy,
-    PeerProfile, ProfileTable, RouteTable, TargetSelector, TopologyLayout, TopologyPolicy,
+    load_handoff_inbox, load_handoff_policy, load_input_policy, load_local_actions,
+    load_locator_policy, load_media_policy, load_topology_layout, load_topology_policy, load_trust,
+    remember_route, save_action_policy, save_battery_policy, save_clipboard_policy,
+    save_focus_policy, save_handoff_inbox, save_handoff_policy, save_input_policy,
+    save_local_actions, save_locator_policy, save_media_policy, save_topology_layout,
+    save_topology_policy, save_trust, ActionAccessMode, ActionPolicy, AutoAcceptPolicy,
+    BatteryPolicy, ClipboardPolicy, DeviceType, FocusPolicy, HandoffInboxTable, HandoffPolicy,
+    InputTunnelPolicy, LocalActionDefinition, LocatorPolicy, MediaControlPolicy, PeerProfile,
+    ProfileTable, RouteTable, TargetSelector, TopologyLayout, TopologyPolicy,
 };
 use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::{HashMap, VecDeque};
@@ -40,14 +41,16 @@ use tetherly_core::{
     BatteryValidator, ClipApply, ClipDirection, ClipHub, ClipMetaEntry, ConnectOutcome, ControlMsg,
     CoreError, CursorSeat, DeviceId, DisplayEdge, DisplayRect, EdgeCrossingConfig, EdgeNeighbor,
     FileHub, FocusMode, FocusStateFrame, FocusSyncReqFrame, FocusValidator, HandoffEntry,
-    HandoffStatus, IngestOutcome, InputClient, InputEvent, InputServer, InputSink, LocatePattern,
-    LocateRequestFrame, LocateStopFrame, LocateValidator, MediaCommand, MediaCommandFrame,
-    MediaStateFrame, MediaValidator, MemoryScreenSink, MemorySink, MemoryTrustStore,
-    NotificationPayload, NotificationUrgency, Notifier, NotifyHub, OpenAllowlist, PathKind,
-    PlaybackState, PowerSource, ReplyView, ResourceHandoffValidator, ScreenAssembler, ScreenCodec,
-    ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats,
-    SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
-    TrustStore, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS,
+    HandoffStatus, IngestOutcome, InputClient, InputEvent, InputServer, InputSink,
+    InputTunnelHeartbeatFrame, InputTunnelReleaseFrame, InputTunnelRequestFrame,
+    InputTunnelRespFrame, InputTunnelRole, InputTunnelValidator, LocatePattern, LocateRequestFrame,
+    LocateStopFrame, LocateValidator, MediaCommand, MediaCommandFrame, MediaStateFrame,
+    MediaValidator, MemoryScreenSink, MemorySink, MemoryTrustStore, NotificationPayload,
+    NotificationUrgency, Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource,
+    ReplyView, ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenFrame, ScreenReceiver,
+    ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats, SensitiveContentGuard,
+    TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator, TrustStore,
+    CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -1769,6 +1772,83 @@ pub struct CursorCrossingDecision {
     pub blocked_reason: Option<String>,
 }
 
+/// Active virtual input tunnel session metadata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ActiveInputTunnelSession {
+    pub session_id: String,
+    pub peer_id: String,
+    pub role: InputTunnelRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_edge: Option<DisplayEdge>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_x: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_y: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_height: Option<u32>,
+    pub started_at_ms: u64,
+    pub last_activity_ms: u64,
+}
+
+/// Comprehensive status report of virtual peripheral sharing and input tunneling.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InputTunnelStatusReport {
+    pub ok: bool,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<ActiveInputTunnelSession>,
+    pub policy: InputTunnelPolicy,
+    pub timestamp_ms: u64,
+}
+
+/// Decision report when attaching or releasing an input tunnel session.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InputTunnelDecisionReport {
+    pub ok: bool,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<InputTunnelRole>,
+    pub message: String,
+    pub timestamp_ms: u64,
+}
+
+/// Governance policy report for virtual peripheral sharing and input tunneling.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InputTunnelPolicyReport {
+    pub ok: bool,
+    pub policy: InputTunnelPolicy,
+    pub message: String,
+}
+
+/// Partial update payload for input tunnel policy.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct InputTunnelPolicyUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_inbound_control: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_keyboard: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_mouse: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hotkey_release_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_groups: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_types: Option<Vec<DeviceType>>,
+}
+
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ClipStatusReport {
@@ -2550,6 +2630,8 @@ struct Shared {
     cursor_last_pos: Mutex<(i32, i32)>,
     cursor_edge_dwell: Mutex<HashMap<DisplayEdge, u64>>,
     cursor_edge_resistance_acc: Mutex<HashMap<DisplayEdge, u32>>,
+    input_policy: Mutex<InputTunnelPolicy>,
+    active_input_tunnel: Mutex<Option<ActiveInputTunnelSession>>,
 }
 
 #[derive(Clone)]
@@ -2701,6 +2783,7 @@ impl Node {
         let initial_focus_policy = load_focus_policy(&cfg.data_dir);
         let initial_topology_layout = load_topology_layout(&cfg.data_dir);
         let initial_topology_policy = load_topology_policy(&cfg.data_dir);
+        let initial_input_policy = load_input_policy(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -2849,6 +2932,8 @@ impl Node {
             cursor_last_pos: Mutex::new((0, 0)),
             cursor_edge_dwell: Mutex::new(HashMap::new()),
             cursor_edge_resistance_acc: Mutex::new(HashMap::new()),
+            input_policy: Mutex::new(initial_input_policy),
+            active_input_tunnel: Mutex::new(None),
         });
         Ok(Self { shared })
     }
@@ -8222,6 +8307,23 @@ impl Node {
                 (req.request_id.len() + 32) as u64,
                 tetherly_core::frame::TYPE_TOPOLOGY_SYNC_REQ,
             ),
+            SessionEvent::InputTunnelRequest(req) => (
+                (req.session_id.len() + req.client_device_id.len() + 48) as u64,
+                tetherly_core::frame::TYPE_INPUT_TUNNEL_REQUEST,
+            ),
+            SessionEvent::InputTunnelResp(resp) => (
+                (resp.session_id.len() + resp.reject_reason.as_ref().map_or(0, |s| s.len()) + 48)
+                    as u64,
+                tetherly_core::frame::TYPE_INPUT_TUNNEL_RESP,
+            ),
+            SessionEvent::InputTunnelRelease(rel) => (
+                (rel.session_id.len() + rel.reason.len() + 48) as u64,
+                tetherly_core::frame::TYPE_INPUT_TUNNEL_RELEASE,
+            ),
+            SessionEvent::InputTunnelHeartbeat(hb) => (
+                (hb.session_id.len() + 32) as u64,
+                tetherly_core::frame::TYPE_INPUT_TUNNEL_HEARTBEAT,
+            ),
             SessionEvent::Unknown(ty) => (32u64, *ty),
         };
         self.shared.telemetry.record_control_rx(ev_bytes, ev_ty);
@@ -8501,6 +8603,18 @@ impl Node {
             }
             SessionEvent::TopologySyncReq(req) => {
                 self.receive_topology_sync_req(peer, req);
+            }
+            SessionEvent::InputTunnelRequest(req) => {
+                self.receive_input_tunnel_request(peer, req).await;
+            }
+            SessionEvent::InputTunnelResp(resp) => {
+                self.receive_input_tunnel_resp(peer, resp).await;
+            }
+            SessionEvent::InputTunnelRelease(rel) => {
+                self.receive_input_tunnel_release(peer, rel).await;
+            }
+            SessionEvent::InputTunnelHeartbeat(hb) => {
+                self.receive_input_tunnel_heartbeat(peer, hb);
             }
             SessionEvent::Unknown(_) => {}
         }
@@ -13001,14 +13115,682 @@ impl Node {
             true,
         );
 
-        CursorCrossingDecision {
+        let decision = CursorCrossingDecision {
             crossed: true,
             target_peer: Some(neighbor.peer_id.clone()),
             edge: Some(edge),
             entry_x: Some(entry_x),
             entry_y: Some(entry_y),
             blocked_reason: None,
+        };
+
+        if policy.auto_link_paired_peers && self.input_policy().enabled {
+            let node = self.clone_handle();
+            let target_peer = neighbor.peer_id.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let _ = node
+                        .input_tunnel_attach(&target_peer, Some(edge), Some(entry_x), Some(entry_y))
+                        .await;
+                });
+            }
         }
+
+        decision
+    }
+
+    /// Ingest and process an inbound InputTunnelRequestFrame from a controller peer.
+    pub async fn receive_input_tunnel_request(
+        &self,
+        peer: &DeviceId,
+        mut frame: InputTunnelRequestFrame,
+    ) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        frame.sanitize();
+        if InputTunnelValidator::validate_session_id(&frame.session_id).is_err() {
+            warn!(peer = %peer, session_id = %frame.session_id, "invalid input tunnel session_id rejected");
+            return;
+        }
+
+        let policy = self.input_policy();
+        let profile = self.peer_profile(peer);
+
+        let rejection_reason = if !policy.enabled {
+            Some("virtual peripheral sharing disabled".to_string())
+        } else if !policy.allow_inbound_control {
+            Some("inbound input control rejected by target policy".to_string())
+        } else if !policy.is_peer_eligible(&profile) {
+            Some("peer ineligible under input policy filters".to_string())
+        } else {
+            None
+        };
+
+        if let Some(reason) = rejection_reason {
+            let resp = InputTunnelRespFrame {
+                session_id: frame.session_id.clone(),
+                accepted: false,
+                reject_reason: Some(reason.clone()),
+                capture_width: None,
+                capture_height: None,
+                timestamp_ms: now_ms,
+            };
+            if let Ok(inner) = resp.to_frame() {
+                let _ = self.send_to(peer, inner).await;
+            }
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Warning,
+                "input_tunnel_rejected",
+                Some(peer_str.clone()),
+                format!(
+                    "Rejected inbound input tunnel request from {}: {}",
+                    peer_str, reason
+                ),
+                false,
+            );
+            return;
+        }
+
+        let (width, height) = {
+            let layout = self.shared.topology_layout.lock().expect("topology_layout");
+            (layout.display.width, layout.display.height)
+        };
+
+        let (clamped_entry_x, clamped_entry_y) = match (frame.entry_x, frame.entry_y) {
+            (Some(x), Some(y)) => {
+                let (cx, cy) = InputTunnelValidator::clamp_coords(x, y, width, height);
+                (Some(cx), Some(cy))
+            }
+            (Some(x), None) => {
+                let (cx, _) = InputTunnelValidator::clamp_coords(x, 0, width, height);
+                (Some(cx), None)
+            }
+            (None, Some(y)) => {
+                let (_, cy) = InputTunnelValidator::clamp_coords(0, y, width, height);
+                (None, Some(cy))
+            }
+            (None, None) => (None, None),
+        };
+
+        let session = ActiveInputTunnelSession {
+            session_id: frame.session_id.clone(),
+            peer_id: peer_str.clone(),
+            role: InputTunnelRole::Target,
+            requested_edge: frame.requested_edge,
+            entry_x: clamped_entry_x,
+            entry_y: clamped_entry_y,
+            capture_width: Some(width),
+            capture_height: Some(height),
+            started_at_ms: now_ms,
+            last_activity_ms: now_ms,
+        };
+
+        *self
+            .shared
+            .active_input_tunnel
+            .lock()
+            .expect("active_input_tunnel") = Some(session);
+
+        let resp = InputTunnelRespFrame {
+            session_id: frame.session_id.clone(),
+            accepted: true,
+            reject_reason: None,
+            capture_width: Some(width),
+            capture_height: Some(height),
+            timestamp_ms: now_ms,
+        };
+
+        if let Ok(inner) = resp.to_frame() {
+            let _ = self.send_to(peer, inner).await;
+        }
+
+        self.emit(UiEvent::input_tunnel_session_started(
+            &frame.session_id,
+            &peer_str,
+            &alias,
+            "target",
+            Some(width),
+            Some(height),
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Security,
+            AuditSeverity::Notice,
+            "input_tunnel_started",
+            Some(peer_str.clone()),
+            format!(
+                "Inbound input tunnel established with peer {} (target role)",
+                peer_str
+            ),
+            true,
+        );
+    }
+
+    /// Ingest and process an inbound InputTunnelRespFrame from a target peer.
+    pub async fn receive_input_tunnel_resp(
+        &self,
+        peer: &DeviceId,
+        mut frame: InputTunnelRespFrame,
+    ) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        frame.sanitize();
+        if InputTunnelValidator::validate_session_id(&frame.session_id).is_err() {
+            return;
+        }
+
+        if frame.accepted {
+            {
+                let mut guard = self
+                    .shared
+                    .active_input_tunnel
+                    .lock()
+                    .expect("active_input_tunnel");
+                if let Some(ref mut session) = *guard {
+                    if session.session_id == frame.session_id {
+                        session.capture_width = frame.capture_width;
+                        session.capture_height = frame.capture_height;
+                        session.last_activity_ms = now_ms;
+                    }
+                } else {
+                    *guard = Some(ActiveInputTunnelSession {
+                        session_id: frame.session_id.clone(),
+                        peer_id: peer_str.clone(),
+                        role: InputTunnelRole::Controller,
+                        requested_edge: None,
+                        entry_x: None,
+                        entry_y: None,
+                        capture_width: frame.capture_width,
+                        capture_height: frame.capture_height,
+                        started_at_ms: now_ms,
+                        last_activity_ms: now_ms,
+                    });
+                }
+            }
+
+            if !self.input_channel_open().await {
+                let _ = self.open_input(peer).await;
+            }
+
+            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Remote);
+            self.emit(UiEvent::input_seat_changed(
+                "remote",
+                true,
+                Some(peer_str.clone()),
+            ));
+
+            self.emit(UiEvent::input_tunnel_session_started(
+                &frame.session_id,
+                &peer_str,
+                &alias,
+                "controller",
+                frame.capture_width,
+                frame.capture_height,
+                now_ms,
+            ));
+
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Notice,
+                "input_tunnel_started",
+                Some(peer_str.clone()),
+                format!(
+                    "Outbound input tunnel accepted by peer {} (controller role)",
+                    peer_str
+                ),
+                true,
+            );
+        } else {
+            let reason = frame
+                .reject_reason
+                .unwrap_or_else(|| "rejected by peer".to_string());
+            *self
+                .shared
+                .active_input_tunnel
+                .lock()
+                .expect("active_input_tunnel") = None;
+            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+            self.emit(UiEvent::input_seat_changed(
+                "local",
+                false,
+                Some(peer_str.clone()),
+            ));
+
+            self.emit(UiEvent::input_tunnel_session_closed(
+                &frame.session_id,
+                &peer_str,
+                &alias,
+                &reason,
+                now_ms,
+            ));
+
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Warning,
+                "input_tunnel_rejected",
+                Some(peer_str.clone()),
+                format!(
+                    "Input tunnel request rejected by peer {}: {}",
+                    peer_str, reason
+                ),
+                false,
+            );
+        }
+    }
+
+    /// Ingest and process an inbound InputTunnelReleaseFrame from either end of the tunnel.
+    pub async fn receive_input_tunnel_release(
+        &self,
+        peer: &DeviceId,
+        mut frame: InputTunnelReleaseFrame,
+    ) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        frame.sanitize();
+        let was_active = {
+            let mut guard = self
+                .shared
+                .active_input_tunnel
+                .lock()
+                .expect("active_input_tunnel");
+            if let Some(session) = guard.take() {
+                session.session_id == frame.session_id || session.peer_id == peer_str
+            } else {
+                false
+            }
+        };
+
+        if was_active {
+            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+            self.emit(UiEvent::input_seat_changed(
+                "local",
+                false,
+                Some(peer_str.clone()),
+            ));
+
+            self.emit(UiEvent::input_tunnel_session_closed(
+                &frame.session_id,
+                &peer_str,
+                &alias,
+                &frame.reason,
+                now_ms,
+            ));
+
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Info,
+                "input_tunnel_closed",
+                Some(peer_str.clone()),
+                format!(
+                    "Input tunnel released by peer {}: {}",
+                    peer_str, frame.reason
+                ),
+                true,
+            );
+        }
+    }
+
+    /// Ingest and process keepalive heartbeat for an active input tunnel.
+    pub fn receive_input_tunnel_heartbeat(
+        &self,
+        peer: &DeviceId,
+        frame: InputTunnelHeartbeatFrame,
+    ) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+
+        let mut guard = self
+            .shared
+            .active_input_tunnel
+            .lock()
+            .expect("active_input_tunnel");
+        if let Some(ref mut session) = *guard {
+            if session.session_id == frame.session_id && session.peer_id == peer_str {
+                session.last_activity_ms = now_ms;
+            }
+        }
+    }
+
+    /// Query status of active virtual input tunnel session and governance policy.
+    pub fn input_tunnel_status(&self) -> InputTunnelStatusReport {
+        let now_ms = self.shared.clock.unix_ms();
+        let policy = self.input_policy();
+        let mut guard = self
+            .shared
+            .active_input_tunnel
+            .lock()
+            .expect("active_input_tunnel");
+
+        let is_timed_out = if let Some(ref session) = *guard {
+            let timeout_ms = (policy.idle_timeout_secs as u64) * 1000;
+            now_ms.saturating_sub(session.last_activity_ms) > timeout_ms
+        } else {
+            false
+        };
+
+        if is_timed_out {
+            if let Some(session) = guard.take() {
+                drop(guard);
+                let alias = DeviceId::parse(&session.peer_id)
+                    .ok()
+                    .and_then(|id| self.peer_alias(&id))
+                    .unwrap_or_else(|| session.peer_id.clone());
+
+                self.emit(UiEvent::input_tunnel_session_closed(
+                    &session.session_id,
+                    &session.peer_id,
+                    &alias,
+                    "idle timeout exceeded",
+                    now_ms,
+                ));
+                self.record_audit(
+                    AuditCategory::Security,
+                    AuditSeverity::Notice,
+                    "input_tunnel_idle_timeout",
+                    Some(session.peer_id.clone()),
+                    format!(
+                        "Input tunnel session {} closed due to idle timeout",
+                        session.session_id
+                    ),
+                    true,
+                );
+                return InputTunnelStatusReport {
+                    ok: true,
+                    active: false,
+                    session: None,
+                    policy,
+                    timestamp_ms: now_ms,
+                };
+            }
+        }
+
+        let (active, session) = match *guard {
+            Some(ref s) => (true, Some(s.clone())),
+            None => (false, None),
+        };
+
+        InputTunnelStatusReport {
+            ok: true,
+            active,
+            session,
+            policy,
+            timestamp_ms: now_ms,
+        }
+    }
+
+    /// Request virtual peripheral input tunnel attachment to a target peer.
+    pub async fn input_tunnel_attach(
+        &self,
+        peer_query: &str,
+        edge: Option<DisplayEdge>,
+        x: Option<i32>,
+        y: Option<i32>,
+    ) -> Result<InputTunnelDecisionReport, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_id = self.resolve_peer(peer_query)?;
+        let peer_str = peer_id.to_string();
+
+        let policy = self.input_policy();
+        if !policy.enabled {
+            return Err(CoreError::InvalidPayload(
+                "input tunnel sharing disabled".to_string(),
+            ));
+        }
+        let profile = self.peer_profile(&peer_id);
+        if !policy.is_peer_eligible(&profile) {
+            return Err(CoreError::InvalidPayload(
+                "peer not eligible under input policy".to_string(),
+            ));
+        }
+
+        let session_id = format!("tun_{}", now_ms);
+        let my_id = self.shared.identity.device_id().to_string();
+
+        let req_frame = InputTunnelRequestFrame {
+            session_id: session_id.clone(),
+            client_device_id: my_id,
+            requested_edge: edge,
+            entry_x: x,
+            entry_y: y,
+            timestamp_ms: now_ms,
+        };
+
+        let inner = req_frame.to_frame()?;
+        self.send_to(&peer_id, inner).await.map_err(|e| {
+            CoreError::InvalidPayload(format!("failed to send input tunnel request to peer: {e}"))
+        })?;
+
+        {
+            let mut guard = self
+                .shared
+                .active_input_tunnel
+                .lock()
+                .expect("active_input_tunnel");
+            *guard = Some(ActiveInputTunnelSession {
+                session_id: session_id.clone(),
+                peer_id: peer_str.clone(),
+                role: InputTunnelRole::Controller,
+                requested_edge: edge,
+                entry_x: x,
+                entry_y: y,
+                capture_width: None,
+                capture_height: None,
+                started_at_ms: now_ms,
+                last_activity_ms: now_ms,
+            });
+        }
+
+        Ok(InputTunnelDecisionReport {
+            ok: true,
+            action: "attach".to_string(),
+            session_id: Some(session_id),
+            peer_id: Some(peer_str),
+            role: Some(InputTunnelRole::Controller),
+            message: "input tunnel request sent to peer".to_string(),
+            timestamp_ms: now_ms,
+        })
+    }
+
+    /// Release the active virtual input tunnel session.
+    pub async fn input_tunnel_release(
+        &self,
+        reason: Option<&str>,
+    ) -> Result<InputTunnelDecisionReport, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let reason_str = reason.unwrap_or("user requested release");
+        let sanitized_reason = InputTunnelValidator::sanitize_reason(reason_str);
+
+        let active_opt = {
+            let mut guard = self
+                .shared
+                .active_input_tunnel
+                .lock()
+                .expect("active_input_tunnel");
+            guard.take()
+        };
+
+        if let Some(session) = active_opt {
+            let peer_id = DeviceId::parse(&session.peer_id).ok();
+
+            let rel_frame = InputTunnelReleaseFrame {
+                session_id: session.session_id.clone(),
+                exit_edge: session.requested_edge,
+                return_x: session.entry_x,
+                return_y: session.entry_y,
+                reason: sanitized_reason.clone(),
+                timestamp_ms: now_ms,
+            };
+
+            if let Some(peer) = peer_id {
+                if let Ok(inner) = rel_frame.to_frame() {
+                    let _ = self.send_to(&peer, inner).await;
+                }
+            }
+
+            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+            let alias = DeviceId::parse(&session.peer_id)
+                .ok()
+                .and_then(|id| self.peer_alias(&id))
+                .unwrap_or_else(|| session.peer_id.clone());
+
+            self.emit(UiEvent::input_seat_changed(
+                "local",
+                false,
+                Some(session.peer_id.clone()),
+            ));
+            self.emit(UiEvent::input_tunnel_session_closed(
+                &session.session_id,
+                &session.peer_id,
+                &alias,
+                &sanitized_reason,
+                now_ms,
+            ));
+
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Notice,
+                "input_tunnel_closed",
+                Some(session.peer_id.clone()),
+                format!(
+                    "Input tunnel session {} released: {}",
+                    session.session_id, sanitized_reason
+                ),
+                true,
+            );
+
+            Ok(InputTunnelDecisionReport {
+                ok: true,
+                action: "release".to_string(),
+                session_id: Some(session.session_id),
+                peer_id: Some(session.peer_id),
+                role: Some(session.role),
+                message: format!("input tunnel session released: {}", sanitized_reason),
+                timestamp_ms: now_ms,
+            })
+        } else {
+            Ok(InputTunnelDecisionReport {
+                ok: true,
+                action: "release".to_string(),
+                session_id: None,
+                peer_id: None,
+                role: None,
+                message: "no active input tunnel session to release".to_string(),
+                timestamp_ms: now_ms,
+            })
+        }
+    }
+
+    /// Returns the current input tunneling and virtual peripheral sharing policy.
+    pub fn input_policy(&self) -> InputTunnelPolicy {
+        self.shared
+            .input_policy
+            .lock()
+            .expect("input_policy")
+            .clone()
+    }
+
+    /// Status and configuration report for input policy.
+    pub fn input_policy_report(&self) -> InputTunnelPolicyReport {
+        InputTunnelPolicyReport {
+            ok: true,
+            policy: self.input_policy(),
+            message: "input policy report".to_string(),
+        }
+    }
+
+    /// Update input tunneling policy and persist to disk atomically with 0o600 permissions.
+    pub fn set_input_policy(
+        &self,
+        mut policy: InputTunnelPolicy,
+    ) -> Result<InputTunnelPolicyReport, CoreError> {
+        let now = self.shared.clock.unix_ms();
+        policy.sanitize();
+        save_input_policy(&self.shared.cfg.data_dir, &policy)
+            .map_err(|e| CoreError::File(format!("failed to save input_policy.json: {e}")))?;
+        *self.shared.input_policy.lock().expect("input_policy") = policy.clone();
+
+        self.emit(UiEvent::input_tunnel_policy_changed(
+            policy.enabled,
+            policy.allow_inbound_control,
+            policy.allow_keyboard,
+            policy.allow_mouse,
+            policy.hotkey_release_enabled,
+            policy.idle_timeout_secs,
+            policy.allowed_groups.clone(),
+            policy.allowed_tags.clone(),
+            policy
+                .allowed_types
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect(),
+            now,
+        ));
+
+        self.record_audit(
+            AuditCategory::Config,
+            AuditSeverity::Info,
+            "input_tunnel_policy_changed",
+            None::<String>,
+            format!(
+                "Updated input policy: enabled={}, allow_inbound={}, keyboard={}, mouse={}, timeout={}s",
+                policy.enabled,
+                policy.allow_inbound_control,
+                policy.allow_keyboard,
+                policy.allow_mouse,
+                policy.idle_timeout_secs
+            ),
+            true,
+        );
+
+        Ok(InputTunnelPolicyReport {
+            ok: true,
+            policy,
+            message: "input policy updated".to_string(),
+        })
+    }
+
+    /// Partially update input tunneling policy and persist to disk.
+    pub fn update_input_policy(
+        &self,
+        update: InputTunnelPolicyUpdate,
+    ) -> Result<InputTunnelPolicyReport, CoreError> {
+        let mut policy = self.input_policy();
+        if let Some(v) = update.enabled {
+            policy.enabled = v;
+        }
+        if let Some(v) = update.allow_inbound_control {
+            policy.allow_inbound_control = v;
+        }
+        if let Some(v) = update.allow_keyboard {
+            policy.allow_keyboard = v;
+        }
+        if let Some(v) = update.allow_mouse {
+            policy.allow_mouse = v;
+        }
+        if let Some(v) = update.hotkey_release_enabled {
+            policy.hotkey_release_enabled = v;
+        }
+        if let Some(v) = update.idle_timeout_secs {
+            policy.idle_timeout_secs = v;
+        }
+        if let Some(v) = update.allowed_groups {
+            policy.allowed_groups = v;
+        }
+        if let Some(v) = update.allowed_tags {
+            policy.allowed_tags = v;
+        }
+        if let Some(v) = update.allowed_types {
+            policy.allowed_types = v;
+        }
+        self.set_input_policy(policy)
     }
 
     /// Polls system clipboard for automatic outbound synchronization.

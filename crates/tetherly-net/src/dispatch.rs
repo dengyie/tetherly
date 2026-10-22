@@ -11,10 +11,16 @@ use tetherly_core::frame::{
     NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame, TextMessage,
     TYPE_ACTION_LIST_REQ, TYPE_ACTION_LIST_RESP, TYPE_ACTION_RESULT, TYPE_ACTION_TRIGGER,
     TYPE_BATTERY_STATE, TYPE_CAPS_UPDATE, TYPE_CLIP_SET, TYPE_FILE_ACCEPT, TYPE_FILE_DONE,
-    TYPE_FILE_OFFER, TYPE_FILE_REJECT, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ, TYPE_LOCATE_REQUEST,
-    TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH,
-    TYPE_NOTIFY_REPLY, TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
-    TYPE_TOPOLOGY_STATE, TYPE_TOPOLOGY_SYNC_REQ,
+    TYPE_FILE_OFFER, TYPE_FILE_REJECT, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ,
+    TYPE_INPUT_TUNNEL_HEARTBEAT, TYPE_INPUT_TUNNEL_RELEASE, TYPE_INPUT_TUNNEL_REQUEST,
+    TYPE_INPUT_TUNNEL_RESP, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND,
+    TYPE_MEDIA_STATE, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY, TYPE_PING,
+    TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE,
+    TYPE_TOPOLOGY_SYNC_REQ,
+};
+use tetherly_core::input_tunnel::{
+    InputTunnelHeartbeatFrame, InputTunnelReleaseFrame, InputTunnelRequestFrame,
+    InputTunnelRespFrame,
 };
 use tetherly_core::locate::{LocateRequestFrame, LocateStopFrame};
 use tetherly_core::media::{MediaCommandFrame, MediaStateFrame};
@@ -43,6 +49,10 @@ pub enum SessionEvent {
     FocusSyncReq(FocusSyncReqFrame),
     TopologyState(TopologyStateFrame),
     TopologySyncReq(TopologySyncReqFrame),
+    InputTunnelRequest(InputTunnelRequestFrame),
+    InputTunnelResp(InputTunnelRespFrame),
+    InputTunnelRelease(InputTunnelReleaseFrame),
+    InputTunnelHeartbeat(InputTunnelHeartbeatFrame),
     FileOffer(FileOffer),
     FileAccept(FileDecision),
     FileReject(FileDecision),
@@ -111,6 +121,18 @@ impl SessionEvent {
             TYPE_TOPOLOGY_SYNC_REQ => {
                 SessionEvent::TopologySyncReq(TopologySyncReqFrame::from_payload(&frame.payload)?)
             }
+            TYPE_INPUT_TUNNEL_REQUEST => SessionEvent::InputTunnelRequest(
+                InputTunnelRequestFrame::from_payload(&frame.payload)?,
+            ),
+            TYPE_INPUT_TUNNEL_RESP => {
+                SessionEvent::InputTunnelResp(InputTunnelRespFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_INPUT_TUNNEL_RELEASE => SessionEvent::InputTunnelRelease(
+                InputTunnelReleaseFrame::from_payload(&frame.payload)?,
+            ),
+            TYPE_INPUT_TUNNEL_HEARTBEAT => SessionEvent::InputTunnelHeartbeat(
+                InputTunnelHeartbeatFrame::from_payload(&frame.payload)?,
+            ),
             TYPE_FILE_OFFER => SessionEvent::FileOffer(FileOffer::from_payload(&frame.payload)?),
             TYPE_FILE_ACCEPT => {
                 SessionEvent::FileAccept(FileDecision::from_payload(&frame.payload)?)

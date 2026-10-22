@@ -19,6 +19,7 @@ pub mod frame;
 pub mod handoff;
 pub mod hello;
 pub mod input;
+pub mod input_tunnel;
 pub mod insertion;
 pub mod liveness;
 pub mod locate;
@@ -84,6 +85,10 @@ pub use input::{
     MemorySink, ScreenEdge, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, INPUT_MAGIC, SCREEN_UNITS,
     TYPE_INPUT_BUTTON, TYPE_INPUT_CLIP_HINT, TYPE_INPUT_ENTER, TYPE_INPUT_KEY, TYPE_INPUT_LEAVE,
     TYPE_INPUT_MOVE, TYPE_INPUT_WHEEL,
+};
+pub use input_tunnel::{
+    InputTunnelHeartbeatFrame, InputTunnelReleaseFrame, InputTunnelRequestFrame,
+    InputTunnelRespFrame, InputTunnelRole, InputTunnelValidator,
 };
 pub use insertion::{plan as insertion_plan, InsertionDecision, InsertionPlan};
 pub use liveness::{Liveness, SESSION_HEARTBEAT, SESSION_LIVENESS_DEADLINE};

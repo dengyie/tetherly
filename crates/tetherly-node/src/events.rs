@@ -531,6 +531,34 @@ pub enum UiEvent {
         allowed_types: Vec<String>,
         timestamp_ms: u64,
     },
+    InputTunnelSessionStarted {
+        session_id: String,
+        peer_id: String,
+        peer_alias: String,
+        role: String,
+        capture_width: Option<u32>,
+        capture_height: Option<u32>,
+        timestamp_ms: u64,
+    },
+    InputTunnelSessionClosed {
+        session_id: String,
+        peer_id: String,
+        peer_alias: String,
+        reason: String,
+        timestamp_ms: u64,
+    },
+    InputTunnelPolicyChanged {
+        enabled: bool,
+        allow_inbound_control: bool,
+        allow_keyboard: bool,
+        allow_mouse: bool,
+        hotkey_release_enabled: bool,
+        idle_timeout_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -1099,6 +1127,69 @@ impl UiEvent {
             enabled,
             allow_inbound_control,
             auto_link_paired_peers,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            timestamp_ms,
+        }
+    }
+
+    pub fn input_tunnel_session_started(
+        session_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        role: impl Into<String>,
+        capture_width: Option<u32>,
+        capture_height: Option<u32>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::InputTunnelSessionStarted {
+            session_id: session_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            role: role.into(),
+            capture_width,
+            capture_height,
+            timestamp_ms,
+        }
+    }
+
+    pub fn input_tunnel_session_closed(
+        session_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        reason: impl Into<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::InputTunnelSessionClosed {
+            session_id: session_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            reason: reason.into(),
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn input_tunnel_policy_changed(
+        enabled: bool,
+        allow_inbound_control: bool,
+        allow_keyboard: bool,
+        allow_mouse: bool,
+        hotkey_release_enabled: bool,
+        idle_timeout_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::InputTunnelPolicyChanged {
+            enabled,
+            allow_inbound_control,
+            allow_keyboard,
+            allow_mouse,
+            hotkey_release_enabled,
+            idle_timeout_secs,
             allowed_groups,
             allowed_tags,
             allowed_types,
