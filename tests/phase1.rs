@@ -10316,6 +10316,274 @@ async fn action_predefined_quick_actions_local_execution_and_governance_via_loop
     peer.shutdown();
 }
 
+/// ADR-070: Cross-device focus mode, do-not-disturb synchronization,
+/// notification suppression, OTP breakthrough, and quiet hours governance via loopback API.
+#[tokio::test]
+async fn focus_mode_cross_device_synchronization_quiet_hours_and_governance_via_loopback_api() {
+    let (host, peer, g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let host_id = host.identity().device_id().clone();
+    let _peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to Host and Peer SSE streams
+    let mut host_sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect to host sse stream");
+    let mut peer_sse = tetherly_node::loopback_events_connect(peer_ui)
+        .await
+        .expect("connect to peer sse stream");
+
+    // 2. Initial Focus State Check on Host (must be inactive)
+    let (code_st, body_st) = tetherly_node::loopback_get(host_ui, "/api/focus/state")
+        .await
+        .unwrap();
+    assert_eq!(code_st, 200);
+    let st_init: serde_json::Value = serde_json::from_slice(&body_st).unwrap();
+    assert_eq!(st_init["ok"], true);
+    assert_eq!(st_init["enabled"], false);
+    assert_eq!(st_init["active"], false);
+    assert_eq!(st_init["mode"], "dnd");
+
+    // 3. Initial Focus Policy Check on Host
+    let (code_pol, body_pol) = tetherly_node::loopback_get(host_ui, "/api/focus/policy")
+        .await
+        .unwrap();
+    assert_eq!(code_pol, 200);
+    let pol_init: serde_json::Value = serde_json::from_slice(&body_pol).unwrap();
+    assert_eq!(pol_init["ok"], true);
+    assert_eq!(pol_init["policy"]["enabled"], true);
+    assert_eq!(pol_init["policy"]["default_mode"], "dnd");
+    assert_eq!(pol_init["policy"]["allow_emergency_breakthrough"], true);
+
+    // 4. Host activates focus mode with Meeting mode, duration 30m, reason
+    let set_req = serde_json::json!({
+        "enabled": true,
+        "mode": "meeting",
+        "duration": 30,
+        "reason": "Sprint Planning",
+        "broadcast": true
+    });
+    let (code_on, body_on) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/focus/state",
+        &serde_json::to_vec(&set_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_on, 200);
+    let on_rep: serde_json::Value = serde_json::from_slice(&body_on).unwrap();
+    assert_eq!(on_rep["ok"], true);
+    assert_eq!(on_rep["active"], true);
+    assert_eq!(on_rep["mode"], "meeting");
+    assert_eq!(on_rep["reason"], "Sprint Planning");
+    assert!(on_rep["expires_ms"].as_u64().is_some());
+    assert!(on_rep["broadcast_count"].as_u64().unwrap() >= 1);
+
+    // 5. Host GET /api/focus/state reflects the active state
+    let (code_st2, body_st2) = tetherly_node::loopback_get(host_ui, "/api/focus/state")
+        .await
+        .unwrap();
+    assert_eq!(code_st2, 200);
+    let st2: serde_json::Value = serde_json::from_slice(&body_st2).unwrap();
+    assert_eq!(st2["active"], true);
+    assert_eq!(st2["enabled"], true);
+    assert_eq!(st2["mode"], "meeting");
+    assert_eq!(st2["reason"], "Sprint Planning");
+    assert!(st2["remaining_secs"].as_u64().unwrap() > 0);
+
+    // 6. Host SSE receives UiEvent::FocusStateChanged
+    let sse_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_host_focus_ev = false;
+    while tokio::time::Instant::now() < sse_deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), host_sse.next_event()).await
+        {
+            if raw.contains("focus_state_changed")
+                && raw.contains("meeting")
+                && raw.contains("Sprint Planning")
+            {
+                saw_host_focus_ev = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_host_focus_ev,
+        "host SSE must emit focus_state_changed event"
+    );
+
+    // 7. Peer receives FocusStateFrame over mesh and stores in peer focus states
+    let peer_poll_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut peer_recorded_host = false;
+    while tokio::time::Instant::now() < peer_poll_deadline {
+        let (c, b) = tetherly_node::loopback_get(peer_ui, "/api/focus/peers")
+            .await
+            .unwrap();
+        if c == 200 {
+            if let Ok(rep) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if let Some(peers) = rep.get("peers").and_then(|p| p.as_array()) {
+                    if let Some(h) = peers.iter().find(|p| p["peer"] == host_id.as_str()) {
+                        if h["active"] == true && h["state"]["mode"] == "meeting" {
+                            peer_recorded_host = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        peer_recorded_host,
+        "peer must record host's advertised focus state via mesh"
+    );
+
+    // 8. Peer SSE receives UiEvent::PeerFocusStateChanged
+    let peer_sse_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_peer_focus_ev = false;
+    while tokio::time::Instant::now() < peer_sse_deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(Duration::from_millis(200), peer_sse.next_event()).await
+        {
+            if raw.contains("peer_focus_state_changed") && raw.contains("meeting") {
+                saw_peer_focus_ev = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_peer_focus_ev,
+        "peer SSE must emit peer_focus_state_changed event"
+    );
+
+    // 9. Test Notification Suppression on Host:
+    // Regular notification banner is suppressed
+    let normal_notify = host.dispatch_notification_banner(
+        "Team Chat",
+        "Hey how is the meeting going?",
+        None,
+        false,
+    );
+    assert!(
+        !normal_notify.unwrap(),
+        "normal notification must be suppressed in focus mode"
+    );
+
+    // Critical OTP notification banner breaks through suppression
+    let otp_notify =
+        host.dispatch_notification_banner("Verification", "Your OTP code is 987654", None, true);
+    assert!(
+        otp_notify.unwrap(),
+        "critical/OTP notification must breakthrough in focus mode"
+    );
+
+    // test_notification_banner API report also reflects suppression
+    let test_notify_rep = host
+        .test_notification_banner(Some("Test"), Some("Testing focus suppression"))
+        .unwrap();
+    assert!(!test_notify_rep.sent);
+    assert!(test_notify_rep.suppressed);
+    assert_eq!(
+        test_notify_rep.suppression_reason.as_deref(),
+        Some("focus_mode_meeting")
+    );
+
+    // 10. Peer initiates manual focus sync request via POST /api/focus/sync
+    let (code_sync, body_sync) = tetherly_node::loopback_post(peer_ui, "/api/focus/sync", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(code_sync, 200);
+    let sync_rep: serde_json::Value = serde_json::from_slice(&body_sync).unwrap();
+    assert_eq!(sync_rep["ok"], true);
+    assert!(sync_rep["sync_requests_sent"].as_u64().unwrap() >= 1);
+
+    // 11. Host updates focus policy (enables quiet hours, mirrors, breakthrough)
+    let pol_update = serde_json::json!({
+        "quiet_hours": true,
+        "start": "23:00",
+        "end": "07:00",
+        "mirror": true,
+        "breakthrough": true
+    });
+    let (code_pol_up, body_pol_up) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/focus/policy",
+        &serde_json::to_vec(&pol_update).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_pol_up, 200);
+    let pol_updated: serde_json::Value = serde_json::from_slice(&body_pol_up).unwrap();
+    assert_eq!(pol_updated["ok"], true);
+    assert_eq!(pol_updated["policy"]["quiet_hours_enabled"], true);
+    assert_eq!(pol_updated["policy"]["quiet_hours_start_minute"], 1380); // 23 * 60
+    assert_eq!(pol_updated["policy"]["quiet_hours_end_minute"], 420); // 7 * 60
+    assert_eq!(pol_updated["policy"]["mirror_inbound_focus"], true);
+
+    // Verify policy file persistence on disk with 0o600 permissions
+    let policy_path = g1.path().join("focus_policy.json");
+    assert!(policy_path.exists(), "focus_policy.json must be persisted");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(&policy_path).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "focus_policy.json must have 0o600 permissions"
+        );
+    }
+
+    // 12. Host turns off focus mode
+    let off_req = serde_json::json!({
+        "enabled": false,
+        "broadcast": true
+    });
+    let (code_off, body_off) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/focus/state",
+        &serde_json::to_vec(&off_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_off, 200);
+    let off_rep: serde_json::Value = serde_json::from_slice(&body_off).unwrap();
+    assert_eq!(off_rep["active"], false);
+    assert_eq!(off_rep["enabled"], false);
+
+    // Notifications now pass through normally
+    let restored_notify =
+        host.dispatch_notification_banner("Team Chat", "Meeting concluded", None, false);
+    assert!(
+        restored_notify.unwrap(),
+        "notifications must be delivered normally when focus is off"
+    );
+
+    // 13. Security Red Line: Host header 403 Forbidden attack defense
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], host_ui));
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let evil_req =
+        "GET /api/focus/state HTTP/1.1\r\nHost: evil-attacker-phishing.com\r\nConnection: close\r\n\r\n";
+    tokio::io::AsyncWriteExt::write_all(&mut stream, evil_req.as_bytes())
+        .await
+        .unwrap();
+    tokio::io::AsyncWriteExt::flush(&mut stream).await.unwrap();
+    let mut raw_resp = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut raw_resp)
+        .await
+        .unwrap();
+    let resp_str = String::from_utf8_lossy(&raw_resp);
+    assert!(
+        resp_str.starts_with("HTTP/1.1 403") || resp_str.starts_with("HTTP/1.0 403"),
+        "Host header attack must be rejected with 403 Forbidden: {resp_str}"
+    );
+
+    // 14. Clean Shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

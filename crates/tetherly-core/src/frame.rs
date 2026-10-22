@@ -39,6 +39,8 @@ pub const TYPE_ACTION_LIST_REQ: u16 = 0x0209;
 pub const TYPE_ACTION_LIST_RESP: u16 = 0x020A;
 pub const TYPE_ACTION_TRIGGER: u16 = 0x020B;
 pub const TYPE_ACTION_RESULT: u16 = 0x020C;
+pub const TYPE_FOCUS_STATE: u16 = 0x020D;
+pub const TYPE_FOCUS_SYNC_REQ: u16 = 0x020E;
 pub const TYPE_FILE_OFFER: u16 = 0x0301;
 pub const TYPE_FILE_ACCEPT: u16 = 0x0302;
 pub const TYPE_FILE_REJECT: u16 = 0x0303;
@@ -130,6 +132,8 @@ pub fn is_known_type(ty: u16) -> bool {
             | TYPE_ACTION_LIST_RESP
             | TYPE_ACTION_TRIGGER
             | TYPE_ACTION_RESULT
+            | TYPE_FOCUS_STATE
+            | TYPE_FOCUS_SYNC_REQ
             | TYPE_FILE_OFFER
             | TYPE_FILE_ACCEPT
             | TYPE_FILE_REJECT

@@ -466,6 +466,41 @@ pub enum UiEvent {
         count: usize,
         timestamp_ms: u64,
     },
+    FocusStateChanged {
+        enabled: bool,
+        mode: String,
+        active: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expires_ms: Option<u64>,
+        timestamp_ms: u64,
+    },
+    PeerFocusStateChanged {
+        peer_id: String,
+        peer_alias: String,
+        enabled: bool,
+        mode: String,
+        active: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expires_ms: Option<u64>,
+        timestamp_ms: u64,
+    },
+    FocusPolicyChanged {
+        enabled: bool,
+        default_mode: String,
+        mirror_inbound_focus: bool,
+        allow_emergency_breakthrough: bool,
+        quiet_hours_enabled: bool,
+        quiet_hours_start_minute: u16,
+        quiet_hours_end_minute: u16,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -903,6 +938,76 @@ impl UiEvent {
     pub fn local_actions_changed(count: usize, timestamp_ms: u64) -> Self {
         UiEvent::LocalActionsChanged {
             count,
+            timestamp_ms,
+        }
+    }
+
+    pub fn focus_state_changed(
+        enabled: bool,
+        mode: impl Into<String>,
+        active: bool,
+        reason: Option<impl Into<String>>,
+        expires_ms: Option<u64>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::FocusStateChanged {
+            enabled,
+            mode: mode.into(),
+            active,
+            reason: reason.map(Into::into),
+            expires_ms,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn peer_focus_state_changed(
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        enabled: bool,
+        mode: impl Into<String>,
+        active: bool,
+        reason: Option<impl Into<String>>,
+        expires_ms: Option<u64>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::PeerFocusStateChanged {
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            enabled,
+            mode: mode.into(),
+            active,
+            reason: reason.map(Into::into),
+            expires_ms,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn focus_policy_changed(
+        enabled: bool,
+        default_mode: impl Into<String>,
+        mirror_inbound_focus: bool,
+        allow_emergency_breakthrough: bool,
+        quiet_hours_enabled: bool,
+        quiet_hours_start_minute: u16,
+        quiet_hours_end_minute: u16,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::FocusPolicyChanged {
+            enabled,
+            default_mode: default_mode.into(),
+            mirror_inbound_focus,
+            allow_emergency_breakthrough,
+            quiet_hours_enabled,
+            quiet_hours_start_minute,
+            quiet_hours_end_minute,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
             timestamp_ms,
         }
     }
@@ -1525,5 +1630,66 @@ mod tests {
         let json6 = serde_json::to_string(&ev6).unwrap();
         assert!(json6.contains("\"kind\":\"local_actions_changed\""));
         assert!(json6.contains("\"count\":3"));
+    }
+
+    #[test]
+    fn test_focus_events_serialization() {
+        let ev1 = UiEvent::focus_state_changed(
+            true,
+            "meeting",
+            true,
+            Some("Quarterly review"),
+            Some(1700000000000),
+            123456806,
+        );
+        let json1 = serde_json::to_string(&ev1).unwrap();
+        assert!(json1.contains("\"kind\":\"focus_state_changed\""));
+        assert!(json1.contains("\"enabled\":true"));
+        assert!(json1.contains("\"mode\":\"meeting\""));
+        assert!(json1.contains("\"active\":true"));
+        assert!(json1.contains("\"reason\":\"Quarterly review\""));
+        assert!(json1.contains("\"expires_ms\":1700000000000"));
+
+        let ev2 = UiEvent::peer_focus_state_changed(
+            "peer_phone",
+            "iPhone",
+            true,
+            "dnd",
+            true,
+            None::<String>,
+            None,
+            123456807,
+        );
+        let json2 = serde_json::to_string(&ev2).unwrap();
+        assert!(json2.contains("\"kind\":\"peer_focus_state_changed\""));
+        assert!(json2.contains("\"peer_id\":\"peer_phone\""));
+        assert!(json2.contains("\"peer_alias\":\"iPhone\""));
+        assert!(json2.contains("\"enabled\":true"));
+        assert!(json2.contains("\"mode\":\"dnd\""));
+        assert!(json2.contains("\"active\":true"));
+
+        let ev3 = UiEvent::focus_policy_changed(
+            true,
+            "work",
+            true,
+            true,
+            true,
+            1380,
+            420,
+            vec!["exec".into()],
+            vec!["vip".into()],
+            vec!["phone".into()],
+            123456808,
+        );
+        let json3 = serde_json::to_string(&ev3).unwrap();
+        assert!(json3.contains("\"kind\":\"focus_policy_changed\""));
+        assert!(json3.contains("\"enabled\":true"));
+        assert!(json3.contains("\"default_mode\":\"work\""));
+        assert!(json3.contains("\"mirror_inbound_focus\":true"));
+        assert!(json3.contains("\"allow_emergency_breakthrough\":true"));
+        assert!(json3.contains("\"quiet_hours_enabled\":true"));
+        assert!(json3.contains("\"quiet_hours_start_minute\":1380"));
+        assert!(json3.contains("\"quiet_hours_end_minute\":420"));
+        assert!(json3.contains("\"allowed_groups\":[\"exec\"]"));
     }
 }

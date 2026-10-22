@@ -965,6 +965,164 @@
         <div id="action-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
       </div>
     </section>
+    <section style="margin-top:16px" id="focus-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2>跨端专注模式与免打扰协同治理 (Focus Mode & Cross-Device DND)</h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button id="togglefocuspolicybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">治理策略</button>
+          <button id="focussyncbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">跨端同步</button>
+          <button id="refreshfocusbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新状态</button>
+        </div>
+      </div>
+      <div class="hint">基于 ADR-070 规范，局域网多设备专注模式与定时静音时段协同治理；支持防通知风暴静默抑制与危急 OTP 验证码分级穿透。</div>
+
+      <!-- Focus Policy Panel -->
+      <div id="focus-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-weight:600;font-size:13px">专注模式治理策略与静音时段 (Focus Governance & Quiet Hours)</span>
+          <span id="focus-policy-badge" class="badge completed" style="font-size:11px">Policy: Active</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+          <div>
+            <label style="font-size:11px;color:var(--muted)">策略总开关 (Policy Enabled):</label>
+            <select id="focus-policy-enabled" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">启用专注管线 (Enabled)</option>
+              <option value="false">完全关闭专注管线 (Disabled)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">默认专注模式 (Default Mode):</label>
+            <select id="focus-policy-default-mode" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="dnd">免打扰 (DND)</option>
+              <option value="work">工作模式 (Work)</option>
+              <option value="meeting">会议模式 (Meeting)</option>
+              <option value="sleep">睡眠模式 (Sleep)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">跟随对端免打扰 (Mirror Remote Focus):</label>
+            <select id="focus-policy-mirror" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="false">仅感知不跟随 (Ignore Mirror)</option>
+              <option value="true">自动跟随对端免打扰 (Auto Mirror)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">紧急穿透防线 (OTP Breakthrough):</label>
+            <select id="focus-policy-breakthrough" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许危急/OTP穿透 (Allowed)</option>
+              <option value="false">一律静音抑制 (Suppress All)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">定时静音时段 (Quiet Hours Automation):</label>
+            <select id="focus-policy-quiet-hours" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="false">关闭定时静音 (Disabled)</option>
+              <option value="true">开启定时静音 (Enabled)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">静音起止时段 (HH:MM e.g. 23:00 - 07:00):</label>
+            <div style="display:flex;gap:4px;align-items:center">
+              <input id="focus-policy-quiet-start" placeholder="23:00" style="width:50%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <span>-</span>
+              <input id="focus-policy-quiet-end" placeholder="07:00" style="width:50%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+            </div>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">允许画像分组 (Allowed Groups, 逗号分隔):</label>
+            <input id="focus-policy-groups" placeholder="留空表示不限制分组" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">允许画像标签 (Allowed Tags, 逗号分隔):</label>
+            <input id="focus-policy-tags" placeholder="留空表示不限制标签" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted)">允许设备形态 (Allowed Types, 逗号分隔):</label>
+            <input id="focus-policy-types" placeholder="留空表示不限制形态" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:10px;align-items:center">
+          <button id="focus-policy-save-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px">保存策略 (Save)</button>
+          <button id="focus-policy-reset-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">重置过滤 (Reset)</button>
+          <div id="focus-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Main Focus Control Card -->
+      <div style="margin-top:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px">
+        <div class="card" style="padding:14px;margin:0;background:#131a22;border:1px solid var(--line);border-radius:6px;flex-direction:column;align-items:stretch;gap:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span id="focus-main-icon" style="font-size:24px">🔕</span>
+              <div>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="font-size:16px;font-weight:700;color:var(--text)">本地专注模式状态</span>
+                  <span id="focus-status-badge" class="badge" style="font-size:11px">未开启</span>
+                  <span id="focus-mode-badge" class="badge" style="font-size:11px;display:none">DND</span>
+                  <span id="focus-quiet-badge" class="badge" style="font-size:11px;display:none">🌙 静音时段中</span>
+                </div>
+                <div id="focus-sub-desc" style="font-size:12px;color:var(--muted)">专注模式开启时将静默抑制普通通知声音与横幅，紧急 OTP 验证码仍可穿透</div>
+              </div>
+            </div>
+            <div style="text-align:right">
+              <div id="focus-countdown-text" style="font-size:13px;color:var(--text);font-weight:600">--</div>
+              <div id="focus-reason-text" style="font-size:11px;color:var(--muted)">原因: 无</div>
+            </div>
+          </div>
+
+          <!-- Quick Toggle Controls -->
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#0d1218;padding:10px;border-radius:6px;border:1px solid var(--line)">
+            <div style="display:flex;gap:4px;align-items:center">
+              <span style="font-size:12px;color:var(--muted)">模式:</span>
+              <select id="focus-quick-mode" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="dnd">🔕 免打扰 (DND)</option>
+                <option value="work">💼 工作 (Work)</option>
+                <option value="meeting">🤝 会议 (Meeting)</option>
+                <option value="sleep">🛌 睡眠 (Sleep)</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center">
+              <span style="font-size:12px;color:var(--muted)">时长:</span>
+              <select id="focus-quick-duration" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="0">直到手动关闭</option>
+                <option value="15">15 分钟</option>
+                <option value="30">30 分钟</option>
+                <option value="60">1 小时</option>
+                <option value="120">2 小时</option>
+                <option value="480">8 小时</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center;flex:1;min-width:160px">
+              <span style="font-size:12px;color:var(--muted)">备忘/原因:</span>
+              <input id="focus-quick-reason" placeholder="如：闭门编写核心算法 (max 64B)" style="flex:1;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+            </div>
+            <div style="display:flex;gap:6px;align-items:center">
+              <button id="focus-turn-on-btn" class="ghost" type="button" style="padding:4px 14px;font-size:12px;font-weight:600;background:var(--accent);color:#fff">开启专注</button>
+              <button id="focus-turn-off-btn" class="bad ghost" type="button" style="padding:4px 14px;font-size:12px">解除专注</button>
+            </div>
+          </div>
+
+          <!-- Peer Focus States Grid -->
+          <div style="margin-top:4px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <span style="font-size:12px;font-weight:600;color:var(--muted)">局域网设备专注状态感知 (Mesh Peer Focus States)</span>
+              <span id="focus-peer-count-badge" class="badge" style="font-size:11px">0 台对端在线</span>
+            </div>
+            <div id="focus-peer-items" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(260px, 1fr));gap:8px">
+              <div class="empty" style="grid-column:1/-1">暂无对端专注状态上报，点击右上角「跨端同步」立即探测。</div>
+            </div>
+          </div>
+
+          <!-- Bottom Indicators -->
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:6px;margin-top:4px">
+            <span id="focus-breakthrough-indicator">紧急 OTP 穿透: 允许</span>
+            <span id="focus-quiet-hours-indicator">定时静音: 未启用</span>
+            <span id="focus-mirror-indicator">跟随对端: 关闭</span>
+          </div>
+        </div>
+        <div id="focus-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
+      </div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
@@ -4249,6 +4407,342 @@ if (actionHistoryRefreshBtn) {
   actionHistoryRefreshBtn.onclick = () => updateActionHistory();
 }
 
+// --- Focus Mode & DND Governance (ADR-070) ---
+function formatMinuteOfDay(m) {
+  if (typeof m !== "number" || isNaN(m)) return "00:00";
+  const h = Math.floor(m / 60) % 24;
+  const min = m % 60;
+  return String(h).padStart(2, "0") + ":" + String(min).padStart(2, "0");
+}
+
+function getFocusIcon(mode) {
+  switch ((mode || "").toLowerCase()) {
+    case "work": return "💼";
+    case "meeting": return "🤝";
+    case "sleep": return "🛌";
+    case "dnd":
+    default:
+      return "🔕";
+  }
+}
+
+async function updateFocusStatus() {
+  try {
+    const rep = await api("/api/focus/state");
+    if (!rep || !rep.ok) return;
+
+    const active = !!rep.active;
+    const mode = rep.mode || "dnd";
+    const quietActive = !!rep.quiet_hours_active;
+    const remaining = typeof rep.remaining_secs === "number" ? rep.remaining_secs : null;
+    const reason = rep.reason || "";
+    const pol = rep.policy || {};
+
+    if ($("focus-status-badge")) {
+      $("focus-status-badge").textContent = active ? "专注生效中" : "未开启";
+      $("focus-status-badge").className = active ? "badge completed" : "badge";
+    }
+    if ($("focus-mode-badge")) {
+      if (active) {
+        $("focus-mode-badge").style.display = "inline-block";
+        $("focus-mode-badge").textContent = mode.toUpperCase();
+        $("focus-mode-badge").className = "badge outbound";
+      } else {
+        $("focus-mode-badge").style.display = "none";
+      }
+    }
+    if ($("focus-quiet-badge")) {
+      $("focus-quiet-badge").style.display = quietActive ? "inline-block" : "none";
+    }
+    if ($("focus-main-icon")) {
+      $("focus-main-icon").textContent = getFocusIcon(mode);
+    }
+    if ($("focus-countdown-text")) {
+      if (active) {
+        if (remaining !== null) {
+          const m = Math.floor(remaining / 60);
+          const s = remaining % 60;
+          $("focus-countdown-text").textContent = `剩余 ${m}分 ${s}秒`;
+        } else {
+          $("focus-countdown-text").textContent = "手动常开 (直到关闭)";
+        }
+      } else {
+        $("focus-countdown-text").textContent = "--";
+      }
+    }
+    if ($("focus-reason-text")) {
+      $("focus-reason-text").textContent = "原因: " + (reason ? reason : "无");
+    }
+
+    if ($("focus-breakthrough-indicator")) {
+      $("focus-breakthrough-indicator").textContent = "紧急 OTP 穿透: " + (pol.allow_emergency_breakthrough !== false ? "允许" : "禁止");
+    }
+    if ($("focus-quiet-hours-indicator")) {
+      if (pol.quiet_hours_enabled) {
+        $("focus-quiet-hours-indicator").textContent = "定时静音: " + formatMinuteOfDay(pol.quiet_hours_start_minute) + " - " + formatMinuteOfDay(pol.quiet_hours_end_minute) + (quietActive ? " (生效中)" : "");
+      } else {
+        $("focus-quiet-hours-indicator").textContent = "定时静音: 未启用";
+      }
+    }
+    if ($("focus-mirror-indicator")) {
+      $("focus-mirror-indicator").textContent = "跟随对端: " + (pol.mirror_inbound_focus ? "开启" : "关闭");
+    }
+  } catch (e) {}
+}
+
+async function updateFocusPeers() {
+  const container = $("focus-peer-items");
+  const countBadge = $("focus-peer-count-badge");
+  if (!container) return;
+
+  try {
+    const rep = await api("/api/focus/peers");
+    if (!rep || !rep.ok) return;
+    const peers = rep.peers || [];
+
+    if (countBadge) {
+      countBadge.textContent = peers.length + " 台对端已知";
+    }
+
+    if (!peers.length) {
+      container.innerHTML = '<div class="empty" style="grid-column:1/-1">暂无对端专注状态上报，点击右上角「跨端同步」立即探测。</div>';
+      return;
+    }
+
+    let html = "";
+    for (const p of peers) {
+      const alias = p.peer_alias || p.peer;
+      const pid = p.peer;
+      const active = !!p.active;
+      const state = p.state || {};
+      const mode = state.mode || "dnd";
+      const reason = state.reason || "";
+      const remaining = typeof p.remaining_secs === "number" ? p.remaining_secs : null;
+      const icon = getFocusIcon(mode);
+
+      const statusBadge = active
+        ? '<span class="badge outbound" style="font-size:11px">' + icon + ' ' + mode.toUpperCase() + '</span>'
+        : '<span class="badge offline" style="font-size:11px">空闲/未开启</span>';
+
+      let remText = "";
+      if (active) {
+        if (remaining !== null) {
+          remText = ' · 剩余 ' + Math.floor(remaining / 60) + 'm';
+        } else {
+          remText = ' · 常开';
+        }
+      }
+
+      html += '<div class="card" style="padding:8px 10px;margin:0;background:#0d1218;border:1px solid var(--line);border-radius:6px;flex-direction:column;align-items:stretch;gap:4px">';
+      html += '  <div style="display:flex;justify-content:space-between;align-items:center">';
+      html += '    <span style="font-weight:600;font-size:13px;color:var(--text)">' + escapeHtml(alias) + '</span>';
+      html += '    ' + statusBadge;
+      html += '  </div>';
+      html += '  <div style="font-size:11px;color:var(--muted);font-family:ui-monospace, Consolas, monospace">' + escapeHtml(pid) + '</div>';
+      html += '  <div style="font-size:11px;color:var(--muted);margin-top:2px">原因: ' + (reason ? escapeHtml(reason) : "无") + remText + '</div>';
+      html += '</div>';
+    }
+    container.innerHTML = html;
+  } catch (e) {}
+}
+
+async function updateFocusPolicy() {
+  try {
+    const rep = await api("/api/focus/policy");
+    if (!rep || !rep.ok) return;
+    const p = rep.policy || rep;
+
+    if ($("focus-policy-badge")) {
+      $("focus-policy-badge").textContent = p.enabled ? "Policy: Active" : "Policy: Disabled";
+      $("focus-policy-badge").className = p.enabled ? "badge completed" : "badge offline";
+    }
+
+    if ($("focus-policy-enabled") && document.activeElement !== $("focus-policy-enabled")) {
+      $("focus-policy-enabled").value = p.enabled ? "true" : "false";
+    }
+    if ($("focus-policy-default-mode") && document.activeElement !== $("focus-policy-default-mode")) {
+      $("focus-policy-default-mode").value = p.default_mode || "dnd";
+    }
+    if ($("focus-policy-mirror") && document.activeElement !== $("focus-policy-mirror")) {
+      $("focus-policy-mirror").value = p.mirror_inbound_focus ? "true" : "false";
+    }
+    if ($("focus-policy-breakthrough") && document.activeElement !== $("focus-policy-breakthrough")) {
+      $("focus-policy-breakthrough").value = p.allow_emergency_breakthrough !== false ? "true" : "false";
+    }
+    if ($("focus-policy-quiet-hours") && document.activeElement !== $("focus-policy-quiet-hours")) {
+      $("focus-policy-quiet-hours").value = p.quiet_hours_enabled ? "true" : "false";
+    }
+    if ($("focus-policy-quiet-start") && document.activeElement !== $("focus-policy-quiet-start")) {
+      $("focus-policy-quiet-start").value = formatMinuteOfDay(p.quiet_hours_start_minute);
+    }
+    if ($("focus-policy-quiet-end") && document.activeElement !== $("focus-policy-quiet-end")) {
+      $("focus-policy-quiet-end").value = formatMinuteOfDay(p.quiet_hours_end_minute);
+    }
+    if ($("focus-policy-groups") && document.activeElement !== $("focus-policy-groups")) {
+      $("focus-policy-groups").value = (p.allowed_groups || []).join(", ");
+    }
+    if ($("focus-policy-tags") && document.activeElement !== $("focus-policy-tags")) {
+      $("focus-policy-tags").value = (p.allowed_tags || []).join(", ");
+    }
+    if ($("focus-policy-types") && document.activeElement !== $("focus-policy-types")) {
+      $("focus-policy-types").value = (p.allowed_types || []).join(", ");
+    }
+  } catch (e) {}
+}
+
+const toggleFocusPolicyBtn = $("togglefocuspolicybtn");
+if (toggleFocusPolicyBtn) {
+  toggleFocusPolicyBtn.onclick = () => {
+    const p = $("focus-policy-panel");
+    if (!p) return;
+    p.style.display = p.style.display === "none" ? "block" : "none";
+    if (p.style.display !== "none") updateFocusPolicy();
+  };
+}
+
+const focusPolicySaveBtn = $("focus-policy-save-btn");
+if (focusPolicySaveBtn) {
+  focusPolicySaveBtn.onclick = async () => {
+    const en = $("focus-policy-enabled") ? $("focus-policy-enabled").value === "true" : undefined;
+    const defMode = $("focus-policy-default-mode") ? $("focus-policy-default-mode").value : undefined;
+    const mirror = $("focus-policy-mirror") ? $("focus-policy-mirror").value === "true" : undefined;
+    const brk = $("focus-policy-breakthrough") ? $("focus-policy-breakthrough").value === "true" : undefined;
+    const qh = $("focus-policy-quiet-hours") ? $("focus-policy-quiet-hours").value === "true" : undefined;
+    const qhStart = $("focus-policy-quiet-start") ? $("focus-policy-quiet-start").value.trim() : undefined;
+    const qhEnd = $("focus-policy-quiet-end") ? $("focus-policy-quiet-end").value.trim() : undefined;
+    const grpsVal = $("focus-policy-groups") ? $("focus-policy-groups").value.trim() : "";
+    const tagsVal = $("focus-policy-tags") ? $("focus-policy-tags").value.trim() : "";
+    const typesVal = $("focus-policy-types") ? $("focus-policy-types").value.trim() : "";
+    const msg = $("focus-policy-msg");
+
+    const payload = {};
+    if (en !== undefined) payload.enabled = en;
+    if (defMode) payload.default_mode = defMode;
+    if (mirror !== undefined) payload.mirror = mirror;
+    if (brk !== undefined) payload.breakthrough = brk;
+    if (qh !== undefined) payload.quiet_hours = qh;
+    if (qhStart) payload.start = qhStart;
+    if (qhEnd) payload.end = qhEnd;
+
+    if (grpsVal) payload.allowed_groups = grpsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (tagsVal) payload.allowed_tags = tagsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (typesVal) payload.allowed_types = typesVal.split(",").map(s => s.trim()).filter(Boolean);
+
+    try {
+      const rep = await api("/api/focus/policy", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "策略已保存！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2000);
+        updateFocusPolicy();
+        updateFocusStatus();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "保存异常: " + e.message;
+    }
+  };
+}
+
+const focusPolicyResetBtn = $("focus-policy-reset-btn");
+if (focusPolicyResetBtn) {
+  focusPolicyResetBtn.onclick = async () => {
+    const msg = $("focus-policy-msg");
+    try {
+      const rep = await api("/api/focus/policy", { clear_filters: true });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "已清空白名单过滤规则！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2000);
+        updateFocusPolicy();
+        updateFocusStatus();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "重置失败: " + e.message;
+    }
+  };
+}
+
+const focusTurnOnBtn = $("focus-turn-on-btn");
+if (focusTurnOnBtn) {
+  focusTurnOnBtn.onclick = async () => {
+    const mode = $("focus-quick-mode") ? $("focus-quick-mode").value : "dnd";
+    const durMins = $("focus-quick-duration") ? parseInt($("focus-quick-duration").value, 10) : 0;
+    const reason = $("focus-quick-reason") ? $("focus-quick-reason").value.trim() : "";
+    const msg = $("focus-status-msg");
+
+    const payload = {
+      enabled: true,
+      mode: mode,
+      duration: durMins > 0 ? durMins : null,
+      reason: reason || null,
+      broadcast: true,
+    };
+
+    try {
+      const rep = await api("/api/focus/state", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = `已开启专注模式 (${mode})，并向对端广播同步！`;
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateFocusStatus();
+      } else {
+        if (msg) msg.textContent = "开启专注失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const focusTurnOffBtn = $("focus-turn-off-btn");
+if (focusTurnOffBtn) {
+  focusTurnOffBtn.onclick = async () => {
+    const msg = $("focus-status-msg");
+    const payload = {
+      enabled: false,
+      broadcast: true,
+    };
+
+    try {
+      const rep = await api("/api/focus/state", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "已解除专注模式，恢复所有普通通知正常接收！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 3000);
+        updateFocusStatus();
+      } else {
+        if (msg) msg.textContent = "解除专注失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const focusSyncBtn = $("focussyncbtn");
+if (focusSyncBtn) {
+  focusSyncBtn.onclick = async () => {
+    const msg = $("focus-status-msg");
+    try {
+      const rep = await api("/api/focus/sync", {});
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = `已向 ${rep.sync_requests_sent || 0} 台配对设备发送专注同步请求！`;
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateFocusPeers();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "同步请求失败: " + e.message;
+    }
+  };
+}
+
+const refreshFocusBtn = $("refreshfocusbtn");
+if (refreshFocusBtn) {
+  refreshFocusBtn.onclick = () => {
+    updateFocusStatus();
+    updateFocusPeers();
+    updateFocusPolicy();
+  };
+}
+
 async function updateStorage() {
   try {
     const s = await api("/api/storage");
@@ -6030,14 +6524,27 @@ function setupEventSource() {
 										            desc = "⚡ 动作执行结果: [" + ev.action_id + "] " + (ev.success ? "成功" : "失败") + " (" + ev.duration_ms + "ms)";
 										            updateActionHistory();
 										          }
-										          else if (ev.kind === "action_policy_changed") {
-										            desc = "动作策略变更: 模式=" + ev.mode + " · 超时上限=" + ev.max_timeout_secs + "s";
-										            updateActionPolicy();
-										          }
-										          else if (ev.kind === "local_actions_changed") {
-										            desc = "本地快捷动作表更新: 当前共 " + ev.count + " 项";
-										            updateActionLocal();
-										          }
+											          else if (ev.kind === "action_policy_changed") {
+											            desc = "动作策略变更: 模式=" + ev.mode + " · 超时上限=" + ev.max_timeout_secs + "s";
+											            updateActionPolicy();
+											          }
+											          else if (ev.kind === "local_actions_changed") {
+											            desc = "本地快捷动作表更新: 当前共 " + ev.count + " 项";
+											            updateActionLocal();
+											          }
+											          else if (ev.kind === "focus_state_changed") {
+											            desc = "专注状态变更: " + (ev.enabled ? "开启" : "关闭") + " (" + ev.mode + ")" + (ev.reason ? (" · " + ev.reason) : "");
+											            updateFocusStatus();
+											          }
+											          else if (ev.kind === "peer_focus_state_changed") {
+											            desc = "对端专注状态变更: " + ev.peer_alias + " -> " + (ev.enabled ? "开启" : "关闭") + " (" + ev.mode + ")";
+											            updateFocusPeers();
+											          }
+											          else if (ev.kind === "focus_policy_changed") {
+											            desc = "专注治理策略变更: 状态=" + (ev.enabled ? "启用" : "禁用") + " · 定时静音=" + (ev.quiet_hours_enabled ? "开启" : "关闭");
+											            updateFocusPolicy();
+											            updateFocusStatus();
+											          }
 						          else if (ev.kind === "screen_state_changed") {
 					            desc = "屏幕状态: " + ev.state + " (授权:" + (ev.allowed ? "是" : "否") + ")" + (ev.peer ? (" · 对端:" + ev.peer) : "");
 					            updateScreenStatus();
@@ -6205,12 +6712,18 @@ function setupEventSource() {
 																setInterval(updateLocateStatus, 3000);
 																updateLocatePolicy();
 																setInterval(updateLocatePolicy, 3000);
-																updateActionLocal();
-																setInterval(updateActionLocal, 3000);
-																updateActionPolicy();
-																setInterval(updateActionPolicy, 3000);
-																updateActionHistory();
-																setInterval(updateActionHistory, 3000);
-					</script>
+																	updateActionLocal();
+																	setInterval(updateActionLocal, 3000);
+																	updateActionPolicy();
+																	setInterval(updateActionPolicy, 3000);
+																	updateActionHistory();
+																	setInterval(updateActionHistory, 3000);
+																	updateFocusStatus();
+																	setInterval(updateFocusStatus, 3000);
+																	updateFocusPeers();
+																	setInterval(updateFocusPeers, 3000);
+																	updateFocusPolicy();
+																	setInterval(updateFocusPolicy, 3000);
+						</script>
 </body>
 </html>

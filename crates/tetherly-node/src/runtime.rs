@@ -7,13 +7,14 @@ use crate::lan::{bind_many, bind_many_optional, bind_overlay, control_bind_addrs
 use crate::platform::{insert_foreground, MemoryClip, SystemClip};
 use crate::sidecar::{self, OverlayConfig, OverlaySource, OverlayStatus};
 use crate::store::{
-    load_action_policy, load_battery_policy, load_clipboard_policy, load_handoff_inbox,
-    load_handoff_policy, load_local_actions, load_locator_policy, load_media_policy, load_trust,
-    remember_route, save_action_policy, save_battery_policy, save_clipboard_policy,
-    save_handoff_inbox, save_handoff_policy, save_local_actions, save_locator_policy,
-    save_media_policy, save_trust, ActionAccessMode, ActionPolicy, AutoAcceptPolicy, BatteryPolicy,
-    ClipboardPolicy, DeviceType, HandoffInboxTable, HandoffPolicy, LocalActionDefinition,
-    LocatorPolicy, MediaControlPolicy, PeerProfile, ProfileTable, RouteTable, TargetSelector,
+    load_action_policy, load_battery_policy, load_clipboard_policy, load_focus_policy,
+    load_handoff_inbox, load_handoff_policy, load_local_actions, load_locator_policy,
+    load_media_policy, load_trust, remember_route, save_action_policy, save_battery_policy,
+    save_clipboard_policy, save_focus_policy, save_handoff_inbox, save_handoff_policy,
+    save_local_actions, save_locator_policy, save_media_policy, save_trust, ActionAccessMode,
+    ActionPolicy, AutoAcceptPolicy, BatteryPolicy, ClipboardPolicy, DeviceType, FocusPolicy,
+    HandoffInboxTable, HandoffPolicy, LocalActionDefinition, LocatorPolicy, MediaControlPolicy,
+    PeerProfile, ProfileTable, RouteTable, TargetSelector,
 };
 use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::{HashMap, VecDeque};
@@ -35,15 +36,15 @@ use tetherly_core::{
     ancs_actions, ancs_source_id, path_kind, ActionItem, ActionListReqFrame, ActionListRespFrame,
     ActionResultFrame, ActionTriggerFrame, ActionValidator, AncsEvent, AncsIngress, AncsState,
     AncsTransport, BatteryStateFrame, BatteryValidator, ClipApply, ClipDirection, ClipHub,
-    ClipMetaEntry, ConnectOutcome, ControlMsg, CoreError, CursorSeat, DeviceId, FileHub,
-    HandoffEntry, HandoffStatus, IngestOutcome, InputClient, InputEvent, InputServer, InputSink,
-    LocatePattern, LocateRequestFrame, LocateStopFrame, LocateValidator, MediaCommand,
-    MediaCommandFrame, MediaStateFrame, MediaValidator, MemoryScreenSink, MemorySink,
-    MemoryTrustStore, NotificationPayload, NotificationUrgency, Notifier, NotifyHub, OpenAllowlist,
-    PathKind, PlaybackState, PowerSource, ReplyView, ResourceHandoffValidator, ScreenAssembler,
-    ScreenCodec, ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState,
-    ScreenStats, SensitiveContentGuard, TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS,
-    DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS,
+    ClipMetaEntry, ConnectOutcome, ControlMsg, CoreError, CursorSeat, DeviceId, FileHub, FocusMode,
+    FocusStateFrame, FocusSyncReqFrame, FocusValidator, HandoffEntry, HandoffStatus, IngestOutcome,
+    InputClient, InputEvent, InputServer, InputSink, LocatePattern, LocateRequestFrame,
+    LocateStopFrame, LocateValidator, MediaCommand, MediaCommandFrame, MediaStateFrame,
+    MediaValidator, MemoryScreenSink, MemorySink, MemoryTrustStore, NotificationPayload,
+    NotificationUrgency, Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource,
+    ReplyView, ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenFrame, ScreenReceiver,
+    ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats, SensitiveContentGuard,
+    TcpLimiter, TrustStore, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -715,6 +716,7 @@ pub enum AuditCategory {
     Notify,
     Route,
     Config,
+    Focus,
 }
 
 impl std::fmt::Display for AuditCategory {
@@ -727,6 +729,7 @@ impl std::fmt::Display for AuditCategory {
             AuditCategory::Notify => write!(f, "notify"),
             AuditCategory::Route => write!(f, "route"),
             AuditCategory::Config => write!(f, "config"),
+            AuditCategory::Focus => write!(f, "focus"),
         }
     }
 }
@@ -742,8 +745,9 @@ impl std::str::FromStr for AuditCategory {
             "notify" | "notification" => Ok(AuditCategory::Notify),
             "route" | "routes" => Ok(AuditCategory::Route),
             "config" | "configuration" => Ok(AuditCategory::Config),
+            "focus" | "dnd" => Ok(AuditCategory::Focus),
             _ => Err(format!(
-                "unknown audit category '{s}', expected: security, peer, file, clipboard, notify, route, config"
+                "unknown audit category '{s}', expected: security, peer, file, clipboard, notify, route, config, focus"
             )),
         }
     }
@@ -1608,6 +1612,68 @@ pub struct ActionHistoryReport {
     pub message: String,
 }
 
+/// Status report for the local device's focus and DND state, effective status, and active quiet hours.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FocusStatusReport {
+    pub ok: bool,
+    pub enabled: bool,
+    pub mode: FocusMode,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_secs: Option<u64>,
+    pub quiet_hours_active: bool,
+    pub policy: FocusPolicy,
+    pub message: String,
+}
+
+/// Report for a specific peer device's focus state and active countdown.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeerFocusReport {
+    pub ok: bool,
+    pub peer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_alias: Option<String>,
+    pub state: FocusStateFrame,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_secs: Option<u64>,
+}
+
+/// Aggregated report of known mesh peers and their advertised focus states.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeersFocusReport {
+    pub ok: bool,
+    pub count: usize,
+    pub peers: Vec<PeerFocusReport>,
+}
+
+/// Report returned when activating or deactivating focus mode locally and broadcasting to mesh peers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FocusSetReport {
+    pub ok: bool,
+    pub enabled: bool,
+    pub mode: FocusMode,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub broadcast_count: usize,
+    pub message: String,
+}
+
+/// Status and governance report for focus and quiet hours policy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FocusPolicyReport {
+    pub ok: bool,
+    pub policy: FocusPolicy,
+    pub message: String,
+}
+
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ClipStatusReport {
@@ -2380,6 +2446,9 @@ struct Shared {
     peer_last_action_trigger_ms: Mutex<HashMap<String, u64>>,
     action_trigger_seq: AtomicU64,
     action_results_cache: Mutex<VecDeque<ActionResultFrame>>,
+    focus_policy: Mutex<FocusPolicy>,
+    local_focus_state: Mutex<FocusStateFrame>,
+    peer_focus_states: Mutex<HashMap<String, FocusStateFrame>>,
 }
 
 #[derive(Clone)]
@@ -2528,6 +2597,7 @@ impl Node {
         let initial_locator_policy = load_locator_policy(&cfg.data_dir);
         let initial_local_actions = load_local_actions(&cfg.data_dir);
         let initial_action_policy = load_action_policy(&cfg.data_dir);
+        let initial_focus_policy = load_focus_policy(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -2661,6 +2731,15 @@ impl Node {
             peer_last_action_trigger_ms: Mutex::new(HashMap::new()),
             action_trigger_seq: AtomicU64::new(0),
             action_results_cache: Mutex::new(VecDeque::with_capacity(100)),
+            focus_policy: Mutex::new(initial_focus_policy),
+            local_focus_state: Mutex::new(FocusStateFrame {
+                enabled: false,
+                mode: FocusMode::Dnd,
+                expires_ms: None,
+                reason: None,
+                timestamp_ms: 0,
+            }),
+            peer_focus_states: Mutex::new(HashMap::new()),
         });
         Ok(Self { shared })
     }
@@ -2831,6 +2910,29 @@ impl Node {
             return Ok(false);
         }
 
+        // ADR-070: Cross-device focus mode and quiet hours suppression
+        let focus_status = self.focus_status();
+        if focus_status.active {
+            let breakthrough = is_otp && focus_status.policy.allow_emergency_breakthrough;
+            if !breakthrough {
+                self.shared
+                    .notify_suppressed_count
+                    .fetch_add(1, Ordering::Relaxed);
+                self.record_audit(
+                    AuditCategory::Focus,
+                    AuditSeverity::Info,
+                    "focus_notification_suppressed",
+                    None::<String>,
+                    format!(
+                        "Notification '{}' suppressed due to active focus mode ({:?})",
+                        title, focus_status.mode
+                    ),
+                    false,
+                );
+                return Ok(false);
+            }
+        }
+
         let play_sound = cfg.sound_enabled && cfg.dnd_mode != DndMode::Silent;
 
         let display_body = if is_otp && cfg.mask_otp {
@@ -2909,6 +3011,27 @@ impl Node {
                 message: format!(
                     "notification suppressed by Do-Not-Disturb mode: {:?}",
                     cfg.dnd_mode
+                ),
+                title: t.into(),
+            });
+        }
+
+        // ADR-070: Cross-device focus mode and quiet hours suppression for test notifications
+        let focus_status = self.focus_status();
+        if focus_status.active {
+            self.shared
+                .notify_suppressed_count
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(NotifyTestReport {
+                ok: true,
+                sent: false,
+                suppressed: true,
+                suppression_reason: Some(
+                    format!("focus_mode_{:?}", focus_status.mode).to_lowercase(),
+                ),
+                message: format!(
+                    "notification suppressed by active focus mode: {:?} (quiet_hours={})",
+                    focus_status.mode, focus_status.quiet_hours_active
                 ),
                 title: t.into(),
             });
@@ -7974,6 +8097,14 @@ impl Node {
                     + 48) as u64,
                 tetherly_core::frame::TYPE_ACTION_RESULT,
             ),
+            SessionEvent::FocusState(st) => (
+                (st.reason.as_ref().map(|s| s.len()).unwrap_or(0) + 32) as u64,
+                tetherly_core::frame::TYPE_FOCUS_STATE,
+            ),
+            SessionEvent::FocusSyncReq(req) => (
+                (req.request_id.len() + 32) as u64,
+                tetherly_core::frame::TYPE_FOCUS_SYNC_REQ,
+            ),
             SessionEvent::Unknown(ty) => (32u64, *ty),
         };
         self.shared.telemetry.record_control_rx(ev_bytes, ev_ty);
@@ -8241,6 +8372,12 @@ impl Node {
             }
             SessionEvent::ActionResult(res) => {
                 self.receive_action_result(peer, res);
+            }
+            SessionEvent::FocusState(st) => {
+                self.receive_focus_state(peer, st);
+            }
+            SessionEvent::FocusSyncReq(req) => {
+                self.receive_focus_sync_req(peer, req);
             }
             SessionEvent::Unknown(_) => {}
         }
@@ -11708,6 +11845,398 @@ impl Node {
             }
             cache.push_back(frame);
         }
+    }
+
+    /// Returns the currently active focus and quiet hours policy.
+    pub fn focus_policy(&self) -> FocusPolicy {
+        self.shared
+            .focus_policy
+            .lock()
+            .expect("focus_policy")
+            .clone()
+    }
+
+    /// Status and configuration report for focus and quiet hours policy.
+    pub fn focus_policy_report(&self) -> FocusPolicyReport {
+        FocusPolicyReport {
+            ok: true,
+            policy: self.focus_policy(),
+            message: "focus policy report".to_string(),
+        }
+    }
+
+    /// Update the focus and quiet hours policy and persist to disk atomically with 0o600 permissions.
+    pub fn set_focus_policy(
+        &self,
+        mut policy: FocusPolicy,
+    ) -> Result<FocusPolicyReport, CoreError> {
+        let now = self.shared.clock.unix_ms();
+        policy.sanitize();
+        save_focus_policy(&self.shared.cfg.data_dir, &policy)
+            .map_err(|e| CoreError::File(format!("failed to save focus_policy.json: {e}")))?;
+        *self.shared.focus_policy.lock().expect("focus_policy") = policy.clone();
+
+        self.emit(UiEvent::focus_policy_changed(
+            policy.enabled,
+            policy.default_mode.as_str(),
+            policy.mirror_inbound_focus,
+            policy.allow_emergency_breakthrough,
+            policy.quiet_hours_enabled,
+            policy.quiet_hours_start_minute,
+            policy.quiet_hours_end_minute,
+            policy.allowed_groups.clone(),
+            policy.allowed_tags.clone(),
+            policy
+                .allowed_types
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect(),
+            now,
+        ));
+
+        self.record_audit(
+            AuditCategory::Focus,
+            AuditSeverity::Info,
+            "focus_policy_updated",
+            None::<String>,
+            format!(
+                "Updated focus policy: enabled={}, default_mode={}, mirror={}, breakthrough={}, quiet_hours={}",
+                policy.enabled,
+                policy.default_mode.as_str(),
+                policy.mirror_inbound_focus,
+                policy.allow_emergency_breakthrough,
+                policy.quiet_hours_enabled,
+            ),
+            true,
+        );
+
+        Ok(FocusPolicyReport {
+            ok: true,
+            policy,
+            message: "focus policy updated successfully".to_string(),
+        })
+    }
+
+    /// Returns the current focus status, combining local state, expiry, and quiet hours.
+    pub fn focus_status(&self) -> FocusStatusReport {
+        let now_ms = self.shared.clock.unix_ms();
+        let policy = self.focus_policy();
+        let minute_of_day = ((now_ms / 1000) % 86400 / 60) as u16;
+        let quiet_hours_active = policy.is_quiet_hours_active(minute_of_day);
+
+        let local_state = self
+            .shared
+            .local_focus_state
+            .lock()
+            .expect("local_focus_state")
+            .clone();
+
+        let manual_active = local_state.is_active_at(now_ms);
+        let enabled = local_state.enabled;
+        let mode = local_state.mode;
+        let reason = local_state.reason.clone();
+        let expires_ms = local_state.expires_ms;
+
+        let overall_active = policy.enabled && (manual_active || quiet_hours_active);
+        let effective_mode = if manual_active {
+            mode
+        } else if quiet_hours_active {
+            FocusMode::Sleep
+        } else {
+            mode
+        };
+
+        let remaining_secs = expires_ms.and_then(|exp| {
+            if exp > now_ms {
+                Some((exp - now_ms) / 1000)
+            } else {
+                None
+            }
+        });
+
+        FocusStatusReport {
+            ok: true,
+            enabled,
+            mode: effective_mode,
+            active: overall_active,
+            reason,
+            expires_ms,
+            remaining_secs,
+            quiet_hours_active,
+            policy,
+            message: if overall_active {
+                format!("focus mode active ({:?})", effective_mode)
+            } else {
+                "focus mode inactive".to_string()
+            },
+        }
+    }
+
+    /// Set local focus state (on/off, mode, duration, reason) and optionally broadcast to mesh peers.
+    pub async fn set_focus_state(
+        &self,
+        enabled: bool,
+        mode: Option<FocusMode>,
+        duration_mins: Option<u32>,
+        reason: Option<String>,
+        broadcast: bool,
+    ) -> Result<FocusSetReport, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let clean_reason = reason.as_deref().map(FocusValidator::sanitize_reason);
+        let policy = self.focus_policy();
+        let chosen_mode = mode.unwrap_or(policy.default_mode);
+
+        let (expires_ms, frame) = if enabled {
+            let duration = duration_mins.map(FocusValidator::clamp_duration_mins);
+            let exp = duration.map(|d| now_ms + (d as u64) * 60 * 1000);
+            let f = FocusStateFrame {
+                enabled: true,
+                mode: chosen_mode,
+                expires_ms: exp,
+                reason: clean_reason.clone(),
+                timestamp_ms: now_ms,
+            };
+            (exp, f)
+        } else {
+            let f = FocusStateFrame {
+                enabled: false,
+                mode: chosen_mode,
+                expires_ms: None,
+                reason: clean_reason.clone(),
+                timestamp_ms: now_ms,
+            };
+            (None, f)
+        };
+
+        *self
+            .shared
+            .local_focus_state
+            .lock()
+            .expect("local_focus_state") = frame.clone();
+
+        let active = frame.is_active_at(now_ms);
+        self.emit(UiEvent::focus_state_changed(
+            frame.enabled,
+            frame.mode.as_str(),
+            active,
+            frame.reason.as_deref(),
+            frame.expires_ms,
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Focus,
+            AuditSeverity::Info,
+            if enabled {
+                "focus_mode_activated"
+            } else {
+                "focus_mode_deactivated"
+            },
+            None::<String>,
+            format!(
+                "Focus mode {}: mode={:?}, duration={:?}, reason={:?}",
+                if enabled { "activated" } else { "deactivated" },
+                frame.mode,
+                duration_mins,
+                frame.reason
+            ),
+            true,
+        );
+
+        let mut broadcast_count = 0;
+        if broadcast {
+            if let Ok(inner) = frame.to_frame() {
+                let live = self.live_peers();
+                for p in live {
+                    let profile = self.peer_profile(&p.device_id);
+                    if policy.is_peer_eligible(&profile)
+                        && self.send_to(&p.device_id, inner.clone()).await.is_ok()
+                    {
+                        broadcast_count += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(FocusSetReport {
+            ok: true,
+            enabled: frame.enabled,
+            mode: frame.mode,
+            active,
+            expires_ms,
+            reason: frame.reason,
+            broadcast_count,
+            message: if enabled {
+                "focus mode activated".to_string()
+            } else {
+                "focus mode deactivated".to_string()
+            },
+        })
+    }
+
+    /// Returns focus state of all connected/known peers.
+    pub fn peer_focus_states(&self) -> PeersFocusReport {
+        let now_ms = self.shared.clock.unix_ms();
+        let map = self
+            .shared
+            .peer_focus_states
+            .lock()
+            .expect("peer_focus_states");
+        let mut peers = Vec::new();
+        for (peer_id_str, frame) in map.iter() {
+            let alias = self
+                .live_peers()
+                .iter()
+                .find(|p| p.device_id.to_string() == *peer_id_str)
+                .map(|p| p.name.clone());
+
+            let active = frame.is_active_at(now_ms);
+            let remaining_secs = frame.expires_ms.and_then(|exp| {
+                if exp > now_ms {
+                    Some((exp - now_ms) / 1000)
+                } else {
+                    None
+                }
+            });
+            peers.push(PeerFocusReport {
+                ok: true,
+                peer: peer_id_str.clone(),
+                peer_alias: alias,
+                state: frame.clone(),
+                active,
+                remaining_secs,
+            });
+        }
+        peers.sort_by(|a, b| a.peer.cmp(&b.peer));
+        PeersFocusReport {
+            ok: true,
+            count: peers.len(),
+            peers,
+        }
+    }
+
+    /// Ingest and process an inbound FocusStateFrame from a connected peer.
+    pub fn receive_focus_state(&self, peer: &DeviceId, frame: FocusStateFrame) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        let policy = self.focus_policy();
+        let profile = self.peer_profile(peer);
+
+        if !policy.enabled || !policy.is_peer_eligible(&profile) {
+            debug!(peer = %peer, "focus state ignored: policy disabled or peer not eligible");
+            return;
+        }
+
+        let active = frame.is_active_at(now_ms);
+        {
+            let mut map = self
+                .shared
+                .peer_focus_states
+                .lock()
+                .expect("peer_focus_states");
+            map.insert(peer_str.clone(), frame.clone());
+        }
+
+        self.emit(UiEvent::peer_focus_state_changed(
+            &peer_str,
+            &alias,
+            frame.enabled,
+            frame.mode.as_str(),
+            active,
+            frame.reason.as_deref(),
+            frame.expires_ms,
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Focus,
+            AuditSeverity::Info,
+            "peer_focus_state_updated",
+            Some(peer_str.clone()),
+            format!(
+                "Peer {} ({}) updated focus state: enabled={}, mode={:?}, active={}",
+                alias, peer_str, frame.enabled, frame.mode, active
+            ),
+            true,
+        );
+
+        if policy.mirror_inbound_focus && active {
+            let mut local = self
+                .shared
+                .local_focus_state
+                .lock()
+                .expect("local_focus_state");
+            let should_mirror = !local.is_active_at(now_ms);
+            if should_mirror {
+                let mirrored_frame = FocusStateFrame {
+                    enabled: true,
+                    mode: frame.mode,
+                    expires_ms: frame.expires_ms,
+                    reason: Some(format!("mirrored from {}", alias)),
+                    timestamp_ms: now_ms,
+                };
+                *local = mirrored_frame;
+                self.emit(UiEvent::focus_state_changed(
+                    true,
+                    frame.mode.as_str(),
+                    true,
+                    Some(&format!("mirrored from {}", alias)),
+                    frame.expires_ms,
+                    now_ms,
+                ));
+            }
+        }
+    }
+
+    /// Ingest and process an inbound FocusSyncReqFrame from a connected peer.
+    pub fn receive_focus_sync_req(&self, peer: &DeviceId, _frame: FocusSyncReqFrame) {
+        let policy = self.focus_policy();
+        let profile = self.peer_profile(peer);
+
+        if !policy.enabled || !policy.is_peer_eligible(&profile) {
+            return;
+        }
+
+        let frame = self
+            .shared
+            .local_focus_state
+            .lock()
+            .expect("local_focus_state")
+            .clone();
+
+        let node = self.clone_handle();
+        let target = peer.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Ok(inner) = frame.to_frame() {
+                    let _ = node.send_to(&target, inner).await;
+                }
+            });
+        }
+    }
+
+    /// Request focus state sync from all eligible peers.
+    pub async fn request_peers_focus_sync(&self) -> Result<usize, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let req_frame = FocusSyncReqFrame {
+            request_id: format!("req_{}", now_ms),
+            timestamp_ms: now_ms,
+        };
+        let inner = req_frame.to_frame()?;
+        let live = self.live_peers();
+        let policy = self.focus_policy();
+        let mut sent = 0;
+        for p in live {
+            let profile = self.peer_profile(&p.device_id);
+            if policy.is_peer_eligible(&profile)
+                && self.send_to(&p.device_id, inner.clone()).await.is_ok()
+            {
+                sent += 1;
+            }
+        }
+        Ok(sent)
     }
 
     /// Polls system clipboard for automatic outbound synchronization.
@@ -15649,6 +16178,133 @@ mod locator_policy_tests {
         // 8. Test remove_local_action
         let rep_rem = node.remove_local_action("echo_test").unwrap();
         assert_eq!(rep_rem.count, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_focus_mode_runtime_and_notification_suppression() {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-focus-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.clone(),
+            control_port: 0,
+            file_port: 0,
+            input_port: 0,
+            screen_port: 0,
+            ui_port: 0,
+            name: "focus-test-node".into(),
+            platform: "test".into(),
+            memory_clip: true,
+            memory_notifier: true,
+            loopback_only: true,
+            advertise: false,
+            reconnect: false,
+            overlay: OverlayConfig::default(),
+            ..Default::default()
+        };
+        let clock = Arc::new(ManualClock::new(10_000));
+        let node = Node::start_with_clock(cfg, clock.clone()).unwrap();
+
+        // 1. Initial focus status: inactive by default
+        let st0 = node.focus_status();
+        assert!(st0.ok);
+        assert!(!st0.enabled);
+        assert!(!st0.active);
+
+        // 2. Normal notifications pass when focus mode is inactive
+        let res_norm1 = node
+            .dispatch_notification_banner("测试通知 1", "普通内容", Some("ChatApp"), false)
+            .unwrap();
+        assert!(res_norm1);
+
+        // 3. Activate focus mode with 30 min duration
+        let set_rep = node
+            .set_focus_state(
+                true,
+                Some(FocusMode::Meeting),
+                Some(30),
+                Some("Weekly sync meeting".to_string()),
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(set_rep.ok);
+        assert!(set_rep.enabled);
+        assert!(set_rep.active);
+        assert_eq!(set_rep.mode, FocusMode::Meeting);
+        assert_eq!(set_rep.expires_ms, Some(10_000 + 30 * 60 * 1000));
+
+        let st1 = node.focus_status();
+        assert!(st1.active);
+        assert_eq!(st1.mode, FocusMode::Meeting);
+        assert_eq!(st1.remaining_secs, Some(1800));
+
+        // 4. In active focus mode, normal notifications are suppressed!
+        let res_norm2 = node
+            .dispatch_notification_banner("测试通知 2", "工作群聊消息", Some("Slack"), false)
+            .unwrap();
+        assert!(!res_norm2); // Suppressed!
+
+        // 5. In active focus mode, critical / OTP notifications break through!
+        let res_otp = node
+            .dispatch_notification_banner(
+                "银行验证码",
+                "您的验证码是 654321，5分钟内有效",
+                Some("Messages"),
+                true, // is_otp
+            )
+            .unwrap();
+        assert!(res_otp); // Emergency breakthrough permitted!
+
+        // 6. Test notification banner test endpoint reflects focus mode suppression
+        let test_rep = node.test_notification_banner(None, None).unwrap();
+        assert!(test_rep.suppressed);
+        assert_eq!(
+            test_rep.suppression_reason,
+            Some("focus_mode_meeting".to_string())
+        );
+
+        // 7. Receive peer focus state
+        let peer_did = DeviceId::from_id_pk(&[77u8; 32]);
+        let peer_frame = FocusStateFrame {
+            enabled: true,
+            mode: FocusMode::Work,
+            expires_ms: Some(50_000),
+            reason: Some("Deep coding".to_string()),
+            timestamp_ms: 10_000,
+        };
+        node.receive_focus_state(&peer_did, peer_frame);
+
+        let peers_rep = node.peer_focus_states();
+        assert_eq!(peers_rep.count, 1);
+        assert_eq!(peers_rep.peers[0].peer, peer_did.to_string());
+        assert!(peers_rep.peers[0].active);
+        assert_eq!(peers_rep.peers[0].state.mode, FocusMode::Work);
+
+        // 8. Turn off focus mode
+        let off_rep = node
+            .set_focus_state(false, None, None, None, false)
+            .await
+            .unwrap();
+        assert!(!off_rep.enabled);
+        assert!(!off_rep.active);
+
+        let st_off = node.focus_status();
+        assert!(!st_off.active);
+
+        // 9. Now normal notification passes again
+        let res_norm3 = node
+            .dispatch_notification_banner("测试通知 3", "已恢复正常通知", Some("Slack"), false)
+            .unwrap();
+        assert!(res_norm3);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

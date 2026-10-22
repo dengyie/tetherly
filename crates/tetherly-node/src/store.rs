@@ -7,6 +7,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 pub use tetherly_core::battery::{BatteryStateFrame, BatteryValidator, PowerSource};
+pub use tetherly_core::focus::{FocusMode, FocusStateFrame, FocusSyncReqFrame, FocusValidator};
 pub use tetherly_core::media::{MediaCommand, MediaControlMode, MediaStateFrame, PlaybackState};
 use tetherly_core::{ClipSyncMode, MemoryTrustStore, TrustFile};
 pub use tetherly_core::{HandoffAction, HandoffEntry, HandoffStatus};
@@ -27,6 +28,7 @@ pub const BATTERY_POLICY_FILE: &str = "battery_policy.json";
 pub const LOCATOR_POLICY_FILE: &str = "locator_policy.json";
 pub const ACTIONS_FILE: &str = "actions.json";
 pub const ACTION_POLICY_FILE: &str = "action_policy.json";
+pub const FOCUS_POLICY_FILE: &str = "focus_policy.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -1252,6 +1254,132 @@ pub fn save_action_policy(dir: &Path, policy: &ActionPolicy) -> Result<(), NodeS
     Ok(())
 }
 
+fn default_quiet_hours_start() -> u16 {
+    1380 // 23:00 (23 * 60)
+}
+
+fn default_quiet_hours_end() -> u16 {
+    420 // 07:00 (7 * 60)
+}
+
+/// Node policy governing cross-device focus mode synchronization, quiet hours, and urgency breakthroughs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FocusPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub default_mode: FocusMode,
+    #[serde(default)]
+    pub mirror_inbound_focus: bool,
+    #[serde(default = "default_true")]
+    pub allow_emergency_breakthrough: bool,
+    #[serde(default)]
+    pub quiet_hours_enabled: bool,
+    #[serde(default = "default_quiet_hours_start")]
+    pub quiet_hours_start_minute: u16,
+    #[serde(default = "default_quiet_hours_end")]
+    pub quiet_hours_end_minute: u16,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+}
+
+impl Default for FocusPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_mode: FocusMode::Dnd,
+            mirror_inbound_focus: false,
+            allow_emergency_breakthrough: true,
+            quiet_hours_enabled: false,
+            quiet_hours_start_minute: default_quiet_hours_start(),
+            quiet_hours_end_minute: default_quiet_hours_end(),
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+        }
+    }
+}
+
+impl FocusPolicy {
+    /// Evaluates if an inbound focus broadcast from a peer is eligible for mirroring/tracking.
+    pub fn is_peer_eligible(&self, profile: &PeerProfile) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        if let Some(group) = &profile.group {
+            if self.allowed_groups.iter().any(|g| g == group) {
+                return true;
+            }
+        }
+
+        if profile.tags.iter().any(|t| self.allowed_tags.contains(t)) {
+            return true;
+        }
+
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+
+    /// Evaluates whether the given minute-of-day (0..=1439) falls within configured quiet hours.
+    /// Handles both daytime intervals (e.g., 09:00 to 17:00, start < end) and overnight wrap-around (e.g., 23:00 to 07:00, start > end).
+    pub fn is_quiet_hours_active(&self, minute_of_day: u16) -> bool {
+        if !self.quiet_hours_enabled {
+            return false;
+        }
+        let start = self.quiet_hours_start_minute % 1440;
+        let end = self.quiet_hours_end_minute % 1440;
+        let current = minute_of_day % 1440;
+
+        if start == end {
+            // Equal start and end when enabled means active all 24 hours
+            true
+        } else if start < end {
+            // Normal range within same calendar day
+            current >= start && current < end
+        } else {
+            // Crosses midnight (e.g., 23:00 to 07:00: >= 23:00 OR < 07:00)
+            current >= start || current < end
+        }
+    }
+
+    pub fn sanitize(&mut self) {
+        self.quiet_hours_start_minute %= 1440;
+        self.quiet_hours_end_minute %= 1440;
+    }
+}
+
+pub fn load_focus_policy(dir: &Path) -> FocusPolicy {
+    let path = dir.join(FOCUS_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_focus_policy(dir: &Path, policy: &FocusPolicy) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(FOCUS_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -1997,6 +2125,122 @@ mod tests {
             ..Default::default()
         };
         assert!(!disabled_pol.is_peer_eligible(&prof_ok));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn focus_policy_roundtrip_and_quiet_hours_calculation() {
+        let dir = std::env::temp_dir().join(format!("tetherly-focus-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Defaults
+        let def = load_focus_policy(&dir);
+        assert!(def.enabled);
+        assert_eq!(def.default_mode, FocusMode::Dnd);
+        assert!(!def.mirror_inbound_focus);
+        assert!(def.allow_emergency_breakthrough);
+        assert!(!def.quiet_hours_enabled);
+        assert_eq!(def.quiet_hours_start_minute, 1380); // 23:00
+        assert_eq!(def.quiet_hours_end_minute, 420); // 07:00
+        assert!(def.allowed_groups.is_empty());
+        assert!(def.allowed_tags.is_empty());
+        assert!(def.allowed_types.is_empty());
+
+        // Quiet hours inactive when quiet_hours_enabled == false
+        assert!(!def.is_quiet_hours_active(1380));
+        assert!(!def.is_quiet_hours_active(0));
+
+        // 2. Custom policy persistence
+        let mut custom = FocusPolicy {
+            enabled: true,
+            default_mode: FocusMode::Meeting,
+            mirror_inbound_focus: true,
+            allow_emergency_breakthrough: false,
+            quiet_hours_enabled: true,
+            quiet_hours_start_minute: 1380, // 23:00
+            quiet_hours_end_minute: 420,    // 07:00
+            allowed_groups: vec!["exec".into()],
+            allowed_tags: vec!["vip".into()],
+            allowed_types: vec![DeviceType::Phone],
+        };
+        custom.sanitize();
+        save_focus_policy(&dir, &custom).unwrap();
+        let loaded = load_focus_policy(&dir);
+        assert_eq!(loaded, custom);
+
+        // 3. Overnight quiet hours (23:00 to 07:00)
+        assert!(!loaded.is_quiet_hours_active(1379)); // 22:59
+        assert!(loaded.is_quiet_hours_active(1380)); // 23:00
+        assert!(loaded.is_quiet_hours_active(1410)); // 23:30
+        assert!(loaded.is_quiet_hours_active(0)); // 00:00
+        assert!(loaded.is_quiet_hours_active(240)); // 04:00
+        assert!(loaded.is_quiet_hours_active(419)); // 06:59
+        assert!(!loaded.is_quiet_hours_active(420)); // 07:00
+        assert!(!loaded.is_quiet_hours_active(720)); // 12:00
+
+        // 4. Daytime quiet hours (09:00 to 17:00: 540 to 1020)
+        let daytime = FocusPolicy {
+            quiet_hours_enabled: true,
+            quiet_hours_start_minute: 540,
+            quiet_hours_end_minute: 1020,
+            ..Default::default()
+        };
+        assert!(!daytime.is_quiet_hours_active(539)); // 08:59
+        assert!(daytime.is_quiet_hours_active(540)); // 09:00
+        assert!(daytime.is_quiet_hours_active(720)); // 12:00
+        assert!(daytime.is_quiet_hours_active(1019)); // 16:59
+        assert!(!daytime.is_quiet_hours_active(1020)); // 17:00
+        assert!(!daytime.is_quiet_hours_active(0));
+
+        // 5. Peer eligibility matching
+        let prof_ok = PeerProfile {
+            device_id: "phone_1".into(),
+            device_type: DeviceType::Phone,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_ok));
+
+        let prof_group = PeerProfile {
+            device_id: "pc_1".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec![],
+            group: Some("exec".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_group));
+
+        let prof_tag = PeerProfile {
+            device_id: "tab_1".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["vip".into()],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_tag));
+
+        let prof_unmatched = PeerProfile {
+            device_id: "pc_2".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec!["guest".into()],
+            group: Some("visitor".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded.is_peer_eligible(&prof_unmatched));
+
+        // Disabled policy blocks all
+        let disabled_focus = FocusPolicy {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(!disabled_focus.is_peer_eligible(&prof_ok));
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -14,6 +14,7 @@ pub mod dedup;
 pub mod device_id;
 pub mod error;
 pub mod filexfer;
+pub mod focus;
 pub mod frame;
 pub mod handoff;
 pub mod hello;
@@ -58,14 +59,19 @@ pub use dedup::{ClipLimiter, NotifyLimiter, TcpLimiter, TokenBucket};
 pub use device_id::DeviceId;
 pub use error::CoreError;
 pub use filexfer::{FileHub, IncomingTransfer, ResumeState, ResumeTable, TransferStatus, FILE_MAX};
+pub use focus::{
+    FocusMode, FocusStateFrame, FocusSyncReqFrame, FocusValidator, DEFAULT_FOCUS_DURATION_MINS,
+    MAX_FOCUS_DURATION_MINS, MAX_FOCUS_REASON_LEN, MIN_FOCUS_DURATION_MINS,
+};
 pub use frame::{
     hex_lower, hex_sha256, CapsUpdate, ClipSet, FileDecision, FileDone, FileMeta, FileOffer,
     IncrementalSha256, InnerFrame, NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame,
     TextMessage, CANDIDATE_TTL_MS, CLIPBOARD_OTP_CLEAR_MS, CLIP_TEXT_MAX, FILE_CHUNK,
     FILE_TOKEN_TTL_MS, HANDOFF_TITLE_MAX, HANDOFF_URL_MAX, NOTIFY_TEXT_MAX, TEXT_MESSAGE_MAX,
     TYPE_ACTION_LIST_REQ, TYPE_ACTION_LIST_RESP, TYPE_ACTION_RESULT, TYPE_ACTION_TRIGGER,
-    TYPE_BATTERY_STATE, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND,
-    TYPE_MEDIA_STATE, TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
+    TYPE_BATTERY_STATE, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ, TYPE_LOCATE_REQUEST,
+    TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_PING, TYPE_PONG,
+    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
 };
 pub use handoff::{
     HandoffAction, HandoffEntry, HandoffStatus, ResourceHandoffValidator, SanitizedHandoffUrl,
