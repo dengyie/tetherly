@@ -37,6 +37,7 @@ pub const FOCUS_POLICY_FILE: &str = "focus_policy.json";
 pub const TOPOLOGY_LAYOUT_FILE: &str = "topology_layout.json";
 pub const TOPOLOGY_POLICY_FILE: &str = "topology_policy.json";
 pub const INPUT_POLICY_FILE: &str = "input_policy.json";
+pub const VIRTUAL_DISPLAY_POLICY_FILE: &str = "virtual_display_policy.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -1603,6 +1604,133 @@ pub fn save_input_policy(dir: &Path, policy: &InputTunnelPolicy) -> Result<(), N
     Ok(())
 }
 
+/// Governance policy for virtual secondary display hosting and client extension.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VirtualDisplayPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub allow_hosting: bool,
+    #[serde(default = "default_true")]
+    pub allow_remote_extend: bool,
+    #[serde(default = "default_vdisp_max_width")]
+    pub max_resolution_width: u32,
+    #[serde(default = "default_vdisp_max_height")]
+    pub max_resolution_height: u32,
+    #[serde(default = "default_vdisp_max_fps")]
+    pub max_fps: u32,
+    #[serde(default = "default_vdisp_idle_timeout")]
+    pub idle_timeout_secs: u32,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+}
+
+fn default_vdisp_max_width() -> u32 {
+    3840
+}
+
+fn default_vdisp_max_height() -> u32 {
+    2160
+}
+
+fn default_vdisp_max_fps() -> u32 {
+    60
+}
+
+fn default_vdisp_idle_timeout() -> u32 {
+    300
+}
+
+impl Default for VirtualDisplayPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_hosting: true,
+            allow_remote_extend: true,
+            max_resolution_width: default_vdisp_max_width(),
+            max_resolution_height: default_vdisp_max_height(),
+            max_fps: default_vdisp_max_fps(),
+            idle_timeout_secs: default_vdisp_idle_timeout(),
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+        }
+    }
+}
+
+impl VirtualDisplayPolicy {
+    pub fn is_peer_eligible(&self, profile: &PeerProfile, as_host: bool) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if as_host && !self.allow_hosting {
+            return false;
+        }
+        if !as_host && !self.allow_remote_extend {
+            return false;
+        }
+
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        if let Some(group) = &profile.group {
+            if self.allowed_groups.iter().any(|g| g == group) {
+                return true;
+            }
+        }
+
+        if profile.tags.iter().any(|t| self.allowed_tags.contains(t)) {
+            return true;
+        }
+
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+
+    pub fn sanitize(&mut self) {
+        self.max_resolution_width = self.max_resolution_width.clamp(320, 7680);
+        self.max_resolution_height = self.max_resolution_height.clamp(240, 4320);
+        self.max_fps = self.max_fps.clamp(10, 120);
+        self.idle_timeout_secs = self.idle_timeout_secs.clamp(10, 3600);
+        self.allowed_groups.retain(|g| !g.trim().is_empty());
+        self.allowed_groups.truncate(32);
+        self.allowed_tags.retain(|t| !t.trim().is_empty());
+        self.allowed_tags.truncate(32);
+        self.allowed_types.truncate(16);
+    }
+}
+
+pub fn load_virtual_display_policy(dir: &Path) -> VirtualDisplayPolicy {
+    let path = dir.join(VIRTUAL_DISPLAY_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_virtual_display_policy(
+    dir: &Path,
+    policy: &VirtualDisplayPolicy,
+) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(VIRTUAL_DISPLAY_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -2646,6 +2774,93 @@ mod tests {
             ..Default::default()
         };
         assert!(!disabled_inbound.is_peer_eligible(&prof_ok));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn virtual_display_policy_roundtrip_and_matching() {
+        let dir = std::env::temp_dir().join(format!("tetherly-vdisp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Defaults
+        let def = load_virtual_display_policy(&dir);
+        assert!(def.enabled);
+        assert!(def.allow_hosting);
+        assert!(def.allow_remote_extend);
+        assert_eq!(def.max_resolution_width, 3840);
+        assert_eq!(def.max_resolution_height, 2160);
+        assert_eq!(def.max_fps, 60);
+        assert_eq!(def.idle_timeout_secs, 300);
+
+        // 2. Custom policy persistence
+        let mut custom = VirtualDisplayPolicy {
+            enabled: true,
+            allow_hosting: true,
+            allow_remote_extend: true,
+            max_resolution_width: 2560,
+            max_resolution_height: 1440,
+            max_fps: 60,
+            idle_timeout_secs: 180,
+            allowed_groups: vec!["displays".into()],
+            allowed_tags: vec!["4k".into()],
+            allowed_types: vec![DeviceType::Desktop, DeviceType::Laptop],
+        };
+        custom.sanitize();
+        save_virtual_display_policy(&dir, &custom).unwrap();
+        let loaded = load_virtual_display_policy(&dir);
+        assert_eq!(loaded, custom);
+
+        // 3. Matching
+        let prof_ok = PeerProfile {
+            device_id: "tab_1".into(),
+            device_type: DeviceType::Desktop,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_ok, true));
+        assert!(loaded.is_peer_eligible(&prof_ok, false));
+
+        let prof_group = PeerProfile {
+            device_id: "phone_1".into(),
+            device_type: DeviceType::Phone,
+            tags: vec![],
+            group: Some("displays".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_group, true));
+
+        let prof_tag = PeerProfile {
+            device_id: "monitor_1".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["4k".into()],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_tag, true));
+
+        let prof_unmatched = PeerProfile {
+            device_id: "iot_1".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["guest".into()],
+            group: Some("visitor".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded.is_peer_eligible(&prof_unmatched, true));
+
+        // 4. Hosting / Extend toggles
+        let hosting_disabled = VirtualDisplayPolicy {
+            allow_hosting: false,
+            ..Default::default()
+        };
+        assert!(!hosting_disabled.is_peer_eligible(&prof_ok, true));
+        assert!(hosting_disabled.is_peer_eligible(&prof_ok, false));
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -16,7 +16,8 @@ use tetherly_core::frame::{
     TYPE_INPUT_TUNNEL_RESP, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND,
     TYPE_MEDIA_STATE, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY, TYPE_PING,
     TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE,
-    TYPE_TOPOLOGY_SYNC_REQ,
+    TYPE_TOPOLOGY_SYNC_REQ, TYPE_VIRTUAL_DISPLAY_ANNOUNCE, TYPE_VIRTUAL_DISPLAY_ATTACH,
+    TYPE_VIRTUAL_DISPLAY_DETACH, TYPE_VIRTUAL_DISPLAY_FRAME_ACK,
 };
 use tetherly_core::input_tunnel::{
     InputTunnelHeartbeatFrame, InputTunnelReleaseFrame, InputTunnelRequestFrame,
@@ -25,6 +26,10 @@ use tetherly_core::input_tunnel::{
 use tetherly_core::locate::{LocateRequestFrame, LocateStopFrame};
 use tetherly_core::media::{MediaCommandFrame, MediaStateFrame};
 use tetherly_core::topology::{TopologyStateFrame, TopologySyncReqFrame};
+use tetherly_core::virtual_display::{
+    VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayDetachFrame,
+    VirtualDisplayFrameAck,
+};
 
 #[derive(Debug)]
 pub enum SessionEvent {
@@ -53,6 +58,10 @@ pub enum SessionEvent {
     InputTunnelResp(InputTunnelRespFrame),
     InputTunnelRelease(InputTunnelReleaseFrame),
     InputTunnelHeartbeat(InputTunnelHeartbeatFrame),
+    VirtualDisplayAnnounce(VirtualDisplayAnnounceFrame),
+    VirtualDisplayAttach(VirtualDisplayAttachFrame),
+    VirtualDisplayDetach(VirtualDisplayDetachFrame),
+    VirtualDisplayFrameAck(VirtualDisplayFrameAck),
     FileOffer(FileOffer),
     FileAccept(FileDecision),
     FileReject(FileDecision),
@@ -132,6 +141,18 @@ impl SessionEvent {
             ),
             TYPE_INPUT_TUNNEL_HEARTBEAT => SessionEvent::InputTunnelHeartbeat(
                 InputTunnelHeartbeatFrame::from_payload(&frame.payload)?,
+            ),
+            TYPE_VIRTUAL_DISPLAY_ANNOUNCE => SessionEvent::VirtualDisplayAnnounce(
+                VirtualDisplayAnnounceFrame::from_payload(&frame.payload)?,
+            ),
+            TYPE_VIRTUAL_DISPLAY_ATTACH => SessionEvent::VirtualDisplayAttach(
+                VirtualDisplayAttachFrame::from_payload(&frame.payload)?,
+            ),
+            TYPE_VIRTUAL_DISPLAY_DETACH => SessionEvent::VirtualDisplayDetach(
+                VirtualDisplayDetachFrame::from_payload(&frame.payload)?,
+            ),
+            TYPE_VIRTUAL_DISPLAY_FRAME_ACK => SessionEvent::VirtualDisplayFrameAck(
+                VirtualDisplayFrameAck::from_payload(&frame.payload)?,
             ),
             TYPE_FILE_OFFER => SessionEvent::FileOffer(FileOffer::from_payload(&frame.payload)?),
             TYPE_FILE_ACCEPT => {

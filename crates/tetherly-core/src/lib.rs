@@ -34,6 +34,7 @@ pub mod replay;
 pub mod screen;
 pub mod session;
 pub mod topology;
+pub mod virtual_display;
 
 pub use action::{
     ActionItem, ActionListReqFrame, ActionListRespFrame, ActionResultFrame, ActionTriggerFrame,
@@ -125,4 +126,9 @@ pub use session::{
 pub use topology::{
     map_edge_exit_to_entry, DisplayEdge, DisplayRect, EdgeCrossingConfig, EdgeNeighbor,
     TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
+};
+pub use virtual_display::{
+    VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCapabilities,
+    VirtualDisplayCodec, VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
+    VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator,
 };

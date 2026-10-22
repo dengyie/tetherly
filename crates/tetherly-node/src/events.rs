@@ -559,6 +559,37 @@ pub enum UiEvent {
         allowed_types: Vec<String>,
         timestamp_ms: u64,
     },
+    VirtualDisplaySessionStarted {
+        session_id: String,
+        peer_id: String,
+        peer_alias: String,
+        role: String,
+        width: u32,
+        height: u32,
+        fps: u32,
+        edge: String,
+        timestamp_ms: u64,
+    },
+    VirtualDisplaySessionStopped {
+        session_id: String,
+        peer_id: String,
+        peer_alias: String,
+        reason: Option<String>,
+        timestamp_ms: u64,
+    },
+    VirtualDisplayPolicyChanged {
+        enabled: bool,
+        allow_hosting: bool,
+        allow_remote_extend: bool,
+        max_resolution_width: u32,
+        max_resolution_height: u32,
+        max_fps: u32,
+        idle_timeout_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -1189,6 +1220,76 @@ impl UiEvent {
             allow_keyboard,
             allow_mouse,
             hotkey_release_enabled,
+            idle_timeout_secs,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn virtual_display_session_started(
+        session_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        role: impl Into<String>,
+        width: u32,
+        height: u32,
+        fps: u32,
+        edge: impl Into<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::VirtualDisplaySessionStarted {
+            session_id: session_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            role: role.into(),
+            width,
+            height,
+            fps,
+            edge: edge.into(),
+            timestamp_ms,
+        }
+    }
+
+    pub fn virtual_display_session_stopped(
+        session_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        reason: Option<impl Into<String>>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::VirtualDisplaySessionStopped {
+            session_id: session_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            reason: reason.map(Into::into),
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn virtual_display_policy_changed(
+        enabled: bool,
+        allow_hosting: bool,
+        allow_remote_extend: bool,
+        max_resolution_width: u32,
+        max_resolution_height: u32,
+        max_fps: u32,
+        idle_timeout_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::VirtualDisplayPolicyChanged {
+            enabled,
+            allow_hosting,
+            allow_remote_extend,
+            max_resolution_width,
+            max_resolution_height,
+            max_fps,
             idle_timeout_secs,
             allowed_groups,
             allowed_tags,
@@ -1876,5 +1977,66 @@ mod tests {
         assert!(json3.contains("\"quiet_hours_start_minute\":1380"));
         assert!(json3.contains("\"quiet_hours_end_minute\":420"));
         assert!(json3.contains("\"allowed_groups\":[\"exec\"]"));
+    }
+
+    #[test]
+    fn test_virtual_display_events_serialization_and_zero_plaintext() {
+        let ev1 = UiEvent::virtual_display_session_started(
+            "vdisp_sess_1",
+            "peer_tab_1",
+            "iPad Pro",
+            "host",
+            1920,
+            1080,
+            60,
+            "right",
+            123456809,
+        );
+        let json1 = serde_json::to_string(&ev1).unwrap();
+        assert!(json1.contains("\"kind\":\"virtual_display_session_started\""));
+        assert!(json1.contains("\"session_id\":\"vdisp_sess_1\""));
+        assert!(json1.contains("\"peer_id\":\"peer_tab_1\""));
+        assert!(json1.contains("\"peer_alias\":\"iPad Pro\""));
+        assert!(json1.contains("\"role\":\"host\""));
+        assert!(json1.contains("\"width\":1920"));
+        assert!(json1.contains("\"height\":1080"));
+        assert!(json1.contains("\"fps\":60"));
+        assert!(json1.contains("\"edge\":\"right\""));
+
+        let ev2 = UiEvent::virtual_display_session_stopped(
+            "vdisp_sess_1",
+            "peer_tab_1",
+            "iPad Pro",
+            Some("user_detached"),
+            123456810,
+        );
+        let json2 = serde_json::to_string(&ev2).unwrap();
+        assert!(json2.contains("\"kind\":\"virtual_display_session_stopped\""));
+        assert!(json2.contains("\"session_id\":\"vdisp_sess_1\""));
+        assert!(json2.contains("\"reason\":\"user_detached\""));
+
+        let ev3 = UiEvent::virtual_display_policy_changed(
+            true,
+            true,
+            true,
+            2560,
+            1440,
+            60,
+            300,
+            vec!["displays".into()],
+            vec!["4k".into()],
+            vec!["tablet".into()],
+            123456811,
+        );
+        let json3 = serde_json::to_string(&ev3).unwrap();
+        assert!(json3.contains("\"kind\":\"virtual_display_policy_changed\""));
+        assert!(json3.contains("\"enabled\":true"));
+        assert!(json3.contains("\"allow_hosting\":true"));
+        assert!(json3.contains("\"allow_remote_extend\":true"));
+        assert!(json3.contains("\"max_resolution_width\":2560"));
+        assert!(json3.contains("\"max_resolution_height\":1440"));
+        assert!(json3.contains("\"max_fps\":60"));
+        assert!(json3.contains("\"idle_timeout_secs\":300"));
+        assert!(json3.contains("\"allowed_groups\":[\"displays\"]"));
     }
 }

@@ -11128,6 +11128,254 @@ async fn input_tunnel_virtual_peripheral_sharing_lifecycle_and_governance_via_lo
     peer.shutdown();
 }
 
+#[tokio::test]
+async fn virtual_display_secondary_screen_lifecycle_and_governance_via_loopback_api() {
+    let (host, peer, g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to Host SSE stream
+    let mut host_sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect to host sse stream");
+
+    // 2. Initial Virtual Display Status Check on Host (inactive, default policy)
+    let (code_disp, body_disp) = tetherly_node::loopback_get(host_ui, "/api/display/virtual")
+        .await
+        .unwrap();
+    assert_eq!(code_disp, 200);
+    let disp_init: serde_json::Value = serde_json::from_slice(&body_disp).unwrap();
+    assert_eq!(disp_init["ok"], true);
+    assert_eq!(disp_init["active"], false);
+    assert_eq!(disp_init["policy"]["enabled"], true);
+    assert_eq!(disp_init["policy"]["allow_hosting"], true);
+    assert_eq!(disp_init["policy"]["allow_remote_extend"], true);
+    assert_eq!(disp_init["policy"]["max_resolution_width"], 3840);
+    assert_eq!(disp_init["policy"]["max_resolution_height"], 2160);
+    assert_eq!(disp_init["policy"]["max_fps"], 60);
+    assert_eq!(disp_init["policy"]["idle_timeout_secs"], 300);
+
+    // 3. Initial Policy Check via GET /api/display/virtual/policy
+    let (code_pol, body_pol) = tetherly_node::loopback_get(host_ui, "/api/display/virtual/policy")
+        .await
+        .unwrap();
+    assert_eq!(code_pol, 200);
+    let pol_init: serde_json::Value = serde_json::from_slice(&body_pol).unwrap();
+    assert_eq!(pol_init["ok"], true);
+    assert_eq!(pol_init["policy"]["enabled"], true);
+
+    // 4. Host updates virtual display governance policy via POST /api/display/virtual/policy
+    let pol_req = serde_json::json!({
+        "enabled": true,
+        "allow_hosting": true,
+        "allow_remote_extend": true,
+        "max_resolution_width": 2560,
+        "max_resolution_height": 1440,
+        "max_fps": 30,
+        "idle_timeout_secs": 180,
+        "allowed_groups": ["tablets"]
+    });
+    let (code_set, body_set) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/display/virtual/policy",
+        &serde_json::to_vec(&pol_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_set, 200);
+    let pol_set: serde_json::Value = serde_json::from_slice(&body_set).unwrap();
+    assert_eq!(pol_set["ok"], true);
+    assert_eq!(pol_set["policy"]["max_fps"], 30);
+    assert_eq!(pol_set["policy"]["idle_timeout_secs"], 180);
+
+    // Verify policy file persisted with 0o600 permissions
+    let policy_path = g1.path().join("virtual_display_policy.json");
+    assert!(
+        policy_path.exists(),
+        "virtual_display_policy.json must exist"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(&policy_path).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "virtual_display_policy.json must have 0o600 perms"
+        );
+    }
+
+    // 5. Check SSE event on Host for policy change
+    let mut saw_policy_changed = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), host_sse.next_event()).await
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if v["kind"] == "virtual_display_policy_changed" {
+                    saw_policy_changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_policy_changed,
+        "Host must emit virtual_display_policy_changed SSE event"
+    );
+
+    // 6. Clear filters so peer is eligible for virtual display attachment
+    let (code_clear, _body_clear) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/display/virtual/policy",
+        &serde_json::to_vec(&serde_json::json!({
+            "clear_filters": true,
+            "max_fps": 60,
+            "idle_timeout_secs": 300
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_clear, 200);
+
+    // 7. Host attaches peer as virtual secondary screen via POST /api/display/virtual/attach
+    let attach_req = serde_json::json!({
+        "peer": peer_id.to_string(),
+        "edge": "right",
+        "width": 1920,
+        "height": 1080,
+        "fps": 60
+    });
+    let (code_att, body_att) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/display/virtual/attach",
+        &serde_json::to_vec(&attach_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_att, 200);
+    let att_rep: serde_json::Value = serde_json::from_slice(&body_att).unwrap();
+    assert_eq!(att_rep["ok"], true);
+    assert_eq!(att_rep["action"], "attach");
+    assert_eq!(att_rep["role"], "host");
+    assert_eq!(att_rep["peer_id"], peer_id.to_string());
+    let session_id = att_rep["session_id"].as_str().unwrap().to_string();
+
+    // 8. Verify active session on Host via GET /api/display/virtual
+    let (code_host_act, body_host_act) =
+        tetherly_node::loopback_get(host_ui, "/api/display/virtual")
+            .await
+            .unwrap();
+    assert_eq!(code_host_act, 200);
+    let host_act: serde_json::Value = serde_json::from_slice(&body_host_act).unwrap();
+    assert_eq!(host_act["active"], true);
+    assert_eq!(host_act["session"]["session_id"], session_id);
+    assert_eq!(host_act["session"]["role"], "host");
+    assert_eq!(host_act["session"]["peer_id"], peer_id.to_string());
+    assert_eq!(host_act["session"]["assigned_edge"], "right");
+    assert_eq!(host_act["session"]["mode"]["width"], 1920);
+    assert_eq!(host_act["session"]["mode"]["height"], 1080);
+
+    // 9. Verify Peer received attach frame and activated as sink node
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    let mut peer_active = false;
+    while tokio::time::Instant::now() < deadline {
+        let (code_p, body_p) = tetherly_node::loopback_get(peer_ui, "/api/display/virtual")
+            .await
+            .unwrap();
+        if code_p == 200 {
+            if let Ok(rep) = serde_json::from_slice::<serde_json::Value>(&body_p) {
+                if rep["active"] == true && rep["session"]["session_id"] == session_id {
+                    assert_eq!(rep["session"]["role"], "sink");
+                    assert_eq!(rep["session"]["peer_id"], host_id.to_string());
+                    peer_active = true;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        peer_active,
+        "Peer must activate virtual display session as sink node"
+    );
+
+    // 10. Detach virtual display via POST /api/display/virtual/detach on Host
+    let det_req = serde_json::json!({
+        "reason": "presentation_finished"
+    });
+    let (code_det, body_det) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/display/virtual/detach",
+        &serde_json::to_vec(&det_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_det, 200);
+    let det_rep: serde_json::Value = serde_json::from_slice(&body_det).unwrap();
+    assert_eq!(det_rep["ok"], true);
+    assert_eq!(det_rep["action"], "detach");
+    assert_eq!(det_rep["session_id"], session_id);
+
+    // Verify Host is inactive
+    let (code_host_inact, body_host_inact) =
+        tetherly_node::loopback_get(host_ui, "/api/display/virtual")
+            .await
+            .unwrap();
+    assert_eq!(code_host_inact, 200);
+    let host_inact: serde_json::Value = serde_json::from_slice(&body_host_inact).unwrap();
+    assert_eq!(host_inact["active"], false);
+
+    // Verify Peer receives detach frame and becomes inactive
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    let mut peer_inactive = false;
+    while tokio::time::Instant::now() < deadline {
+        let (code_p, body_p) = tetherly_node::loopback_get(peer_ui, "/api/display/virtual")
+            .await
+            .unwrap();
+        if code_p == 200 {
+            if let Ok(rep) = serde_json::from_slice::<serde_json::Value>(&body_p) {
+                if rep["active"] == false {
+                    peer_inactive = true;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        peer_inactive,
+        "Peer must transition to inactive after virtual display detach"
+    );
+
+    // 11. Security Red Line: Host header 403 Forbidden attack defense
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], host_ui));
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let evil_req =
+        "GET /api/display/virtual HTTP/1.1\r\nHost: evil-attacker-virtual-display.com\r\nConnection: close\r\n\r\n";
+    tokio::io::AsyncWriteExt::write_all(&mut stream, evil_req.as_bytes())
+        .await
+        .unwrap();
+    tokio::io::AsyncWriteExt::flush(&mut stream).await.unwrap();
+    let mut raw_resp = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut raw_resp)
+        .await
+        .unwrap();
+    let resp_str = String::from_utf8_lossy(&raw_resp);
+    assert!(
+        resp_str.starts_with("HTTP/1.1 403") || resp_str.starts_with("HTTP/1.0 403"),
+        "Host header attack must be rejected with 403 Forbidden: {resp_str}"
+    );
+
+    // 12. Clean Shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

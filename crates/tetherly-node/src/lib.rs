@@ -46,7 +46,8 @@ pub use runtime::{
     PeersCapsReport, PinReport, ProcessMetrics, ResumeMarkerDto, ResumeMarkersReport,
     RouteEntryDto, RouteMutateReport, RoutesReport, ScreenControlReport, ScreenStatusReport,
     StorageCleanReport, StorageReport, SystemReport, TransferDirection, TransferPhase,
-    TransferStats, TransfersReport, UserCommand,
+    TransferStats, TransfersReport, UserCommand, VirtualDisplayDecisionReport,
+    VirtualDisplayPolicyReport, VirtualDisplayPolicyUpdate, VirtualDisplayStatusReport,
 };
 pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
 pub use telemetry::{ChannelTrafficDto, ProtocolMessagesDto, TrafficReport, TrafficTelemetry};
@@ -60,11 +61,13 @@ pub use screen::X11Source;
 pub use sidecar::{parse_overlay_cidrs, OverlayConfig, OverlaySource, OverlayStatus};
 pub use store::{
     default_data_dir, load_auto_accept_policy, load_battery_policy, load_clipboard_policy,
-    load_locator_policy, load_profiles, save_auto_accept_policy, save_battery_policy,
-    save_clipboard_policy, save_locator_policy, save_profiles, AutoAcceptPolicy, BatteryPolicy,
-    BlockedPeer, BlockedTable, ClipboardPolicy, DeviceType, LocatorPolicy, PeerProfile,
-    ProfileTable, TargetSelector, AUTO_ACCEPT_FILE, BATTERY_POLICY_FILE, BLOCKED_FILE,
+    load_locator_policy, load_profiles, load_virtual_display_policy, save_auto_accept_policy,
+    save_battery_policy, save_clipboard_policy, save_locator_policy, save_profiles,
+    save_virtual_display_policy, AutoAcceptPolicy, BatteryPolicy, BlockedPeer, BlockedTable,
+    ClipboardPolicy, DeviceType, LocatorPolicy, PeerProfile, ProfileTable, TargetSelector,
+    VirtualDisplayPolicy, AUTO_ACCEPT_FILE, BATTERY_POLICY_FILE, BLOCKED_FILE,
     CLIPBOARD_POLICY_FILE, DEFAULT_MAX_CLIP_AUTO_SYNC_BYTES, LOCATOR_POLICY_FILE, PROFILES_FILE,
+    VIRTUAL_DISPLAY_POLICY_FILE,
 };
 pub use uihttp::{
     loopback_delete, loopback_events_connect, loopback_get, loopback_post, loopback_put, SseStream,

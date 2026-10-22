@@ -1482,6 +1482,131 @@
         <div id="input-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
       </div>
     </section>
+    <section style="margin-top:16px" id="virtual-display-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2>跨端轻量级虚拟副屏与扩展流媒体协同 (Virtual Secondary Display & Low-Latency Streaming)</h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button id="togglevdisplaypolicybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">治理策略</button>
+          <button id="refreshvdisplaybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新状态</button>
+        </div>
+      </div>
+      <div class="hint">将对端轻量级设备（平板/便携本/手机）作为主机的虚拟副屏扩展桌面，支持超低延迟帧流传输、自适应丢帧率遥测微调与四向边缘挂载协同。</div>
+
+      <!-- Policy Subpanel -->
+      <div id="vdisplay-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-weight:600;font-size:12px;color:var(--text)">虚拟副屏准入与流媒体治理策略 (ADR-073)</span>
+          <span id="vdisplay-policy-badge" class="badge completed" style="font-size:11px">Policy: Active</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">副屏协同总开关 (Enabled):</label>
+            <select id="vdisplay-policy-enabled" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">启用 (Enabled)</option>
+              <option value="false">禁用 (Disabled)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">作为副屏接收端 (Allow Hosting):</label>
+            <select id="vdisplay-policy-hosting" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许作为副屏接收 (Sink)</option>
+              <option value="false">禁止作为副屏接收</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">主动扩展对端副屏 (Allow Extend):</label>
+            <select id="vdisplay-policy-extend" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许主动扩展 (Host)</option>
+              <option value="false">禁止主动扩展</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">最高分辨率上限 (Max Resolution):</label>
+            <div style="display:flex;gap:4px">
+              <input id="vdisplay-policy-maxw" type="number" min="320" max="7680" placeholder="3840" style="width:50%;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <input id="vdisplay-policy-maxh" type="number" min="240" max="4320" placeholder="2160" style="width:50%;padding:4px 6px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+            </div>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">最高推流帧率上限 (Max FPS):</label>
+            <input id="vdisplay-policy-maxfps" type="number" min="10" max="120" placeholder="60" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">闲置超时自动断开 (Idle Timeout):</label>
+            <input id="vdisplay-policy-timeout" type="number" min="0" placeholder="300" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">业务分组准入 (Allowed Groups):</label>
+            <input id="vdisplay-policy-groups" placeholder="留空表示不限制分组" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">业务标签准入 (Allowed Tags):</label>
+            <input id="vdisplay-policy-tags" placeholder="留空表示不限制标签" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">设备形态准入 (Allowed Types):</label>
+            <input id="vdisplay-policy-types" placeholder="留空表示不限制形态" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+          <button id="vdisplay-policy-save-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px">保存策略 (Save)</button>
+          <button id="vdisplay-policy-reset-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">重置过滤 (Reset)</button>
+          <div id="vdisplay-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Main Display Panel -->
+      <div style="background:var(--card-bg);border:1px solid var(--line);border-radius:6px;padding:12px;margin-top:8px">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <!-- Status Banner -->
+          <div style="display:flex;justify-content:space-between;align-items:center;background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:8px 12px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-size:18px">🖥️📺</span>
+              <div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <span id="vdisplay-status-badge" class="badge" style="font-size:11px">副屏未激活</span>
+                  <span id="vdisplay-role-badge" class="badge" style="font-size:11px">角色: 空闲 (Idle)</span>
+                </div>
+                <div id="vdisplay-session-info" style="font-size:12px;color:var(--muted);margin-top:2px">虚拟副屏就绪，可随时将对端平板/电脑作为第二屏幕扩展。</div>
+              </div>
+            </div>
+            <div style="text-align:right">
+              <div id="vdisplay-active-peer" style="font-size:12px;color:var(--muted);font-weight:600">当前对端: 无</div>
+              <div id="vdisplay-telemetry-info" style="font-size:11px;color:var(--muted)">指标: 0 FPS · RTT: 0µs · 丢帧: 0</div>
+            </div>
+          </div>
+
+          <!-- Attach & Detach Actions -->
+          <div style="background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px">
+            <div style="font-size:12px;font-weight:600;color:var(--muted)">主机端扩展副屏挂载 / 释放连接 (Attach & Detach)</div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <select id="vdisplay-attach-peer-select" style="flex:1;min-width:180px;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="">-- 选择目标副屏设备 --</option>
+              </select>
+              <select id="vdisplay-attach-edge" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="right">挂载右侧 (Right Edge)</option>
+                <option value="left">挂载左侧 (Left Edge)</option>
+                <option value="top">挂载上方 (Top Edge)</option>
+                <option value="bottom">挂载下方 (Bottom Edge)</option>
+              </select>
+              <input id="vdisplay-attach-width" type="number" placeholder="宽 (1920)" style="width:80px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <input id="vdisplay-attach-height" type="number" placeholder="高 (1080)" style="width:80px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <input id="vdisplay-attach-fps" type="number" placeholder="FPS (60)" style="width:70px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <button id="vdisplay-attach-btn" class="ghost" type="button" style="padding:4px 14px;font-size:12px;font-weight:600;background:var(--accent);color:#fff">扩展副屏 (Attach)</button>
+              <input id="vdisplay-detach-reason" placeholder="断开原因 (可选)" style="width:130px;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <button id="vdisplay-detach-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">断开副屏 (Detach)</button>
+            </div>
+          </div>
+
+          <!-- Bottom Indicators -->
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:6px;margin-top:4px">
+            <span id="vdisplay-policy-indicator">虚拟副屏: 启用 · 双向扩展放行 · 最高 3840x2160@60FPS · 超时 300s</span>
+            <span id="vdisplay-audit-indicator">自适应协同: 帧遥测微调 · 零明文像素审计保障 · 阻尼穿梭联动</span>
+          </div>
+        </div>
+        <div id="vdisplay-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
+      </div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
@@ -5242,6 +5367,21 @@ async function updateTopologyPeers() {
       if (currentVal) inputPeerSel.value = currentVal;
     }
 
+    // Update virtual display attach peer select options
+    const vdispPeerSel = $("vdisplay-attach-peer-select");
+    if (vdispPeerSel && document.activeElement !== vdispPeerSel) {
+      const currentVal = vdispPeerSel.value;
+      let html = '<option value="">-- 选择目标副屏设备 --</option>';
+      for (const p of peers) {
+        const id = p.peer_id || "";
+        const alias = p.peer_alias || id.slice(0, 8);
+        const res = p.display ? ` (${p.display.width}x${p.display.height})` : "";
+        html += `<option value="${id}">${escapeHtml(alias)}${res}</option>`;
+      }
+      vdispPeerSel.innerHTML = html;
+      if (currentVal) vdispPeerSel.value = currentVal;
+    }
+
     // Render Peer Topologies Grid
     const container = $("topology-peer-items");
     if (container) {
@@ -5706,6 +5846,262 @@ if (inputReleaseBtn) {
         updateInputTunnel();
       } else {
         if (msg) msg.textContent = "释放失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+async function updateVirtualDisplay() {
+  try {
+    const rep = await api("/api/display/virtual");
+    if (!rep || !rep.ok) return;
+
+    const active = !!rep.active;
+    const sess = rep.session;
+
+    if ($("vdisplay-status-badge")) {
+      $("vdisplay-status-badge").textContent = active ? "副屏已激活 (Active)" : "副屏未激活 (Inactive)";
+      $("vdisplay-status-badge").className = active ? "badge completed" : "badge";
+    }
+
+    if ($("vdisplay-role-badge")) {
+      if (active && sess) {
+        const isHost = sess.role === "host";
+        $("vdisplay-role-badge").textContent = isHost ? "角色: 扩展主机 (Host)" : "角色: 副屏呈现 (Sink)";
+        $("vdisplay-role-badge").className = isHost ? "badge outbound" : "badge completed";
+      } else {
+        $("vdisplay-role-badge").textContent = "角色: 空闲 (Idle)";
+        $("vdisplay-role-badge").className = "badge";
+      }
+    }
+
+    if ($("vdisplay-session-info")) {
+      if (active && sess) {
+        const sid = sess.session_id || "";
+        const peer = sess.peer_id || sess.peer || "";
+        const edge = sess.assigned_edge ? ` · 边缘: ${sess.assigned_edge.toUpperCase()}` : "";
+        const mode = sess.mode ? ` · 规格: ${sess.mode.width}x${sess.mode.height}@${sess.mode.refresh_rate}Hz` : "";
+        $("vdisplay-session-info").textContent = `会话: ${sid} · 对端: ${peer}${edge}${mode}`;
+      } else {
+        $("vdisplay-session-info").textContent = "虚拟副屏就绪，可随时将对端平板/电脑作为第二屏幕扩展。";
+      }
+    }
+
+    if ($("vdisplay-active-peer")) {
+      const p = sess ? (sess.peer_id || sess.peer) : "";
+      $("vdisplay-active-peer").textContent = active && p ? `当前对端: ${p}` : "当前对端: 无";
+    }
+
+    if ($("vdisplay-telemetry-info")) {
+      if (active && sess) {
+        const curFps = sess.current_fps || 0;
+        const tgtFps = sess.target_fps || 0;
+        const rtt = sess.rtt_us || 0;
+        const dropped = sess.dropped_frames || 0;
+        $("vdisplay-telemetry-info").textContent = `指标: ${curFps}/${tgtFps} FPS · RTT: ${rtt}µs · 丢帧: ${dropped}`;
+      } else {
+        $("vdisplay-telemetry-info").textContent = "指标: 0 FPS · RTT: 0µs · 丢帧: 0";
+      }
+    }
+
+    if (rep.policy) {
+      updateVirtualDisplayPolicyUI(rep.policy);
+    }
+  } catch (e) {
+    // ignore polling blip
+  }
+}
+
+async function updateVirtualDisplayPolicy() {
+  try {
+    const rep = await api("/api/display/virtual/policy");
+    if (!rep || !rep.ok) return;
+    const p = rep.policy || rep;
+    updateVirtualDisplayPolicyUI(p);
+  } catch (e) {}
+}
+
+function updateVirtualDisplayPolicyUI(p) {
+  if (!p) return;
+  const en = p.enabled !== false;
+  const hosting = p.allow_hosting !== false;
+  const extend = p.allow_remote_extend !== false;
+  const maxW = p.max_resolution_width || 3840;
+  const maxH = p.max_resolution_height || 2160;
+  const maxFps = p.max_fps || 60;
+  const timeout = p.idle_timeout_secs || 300;
+
+  if ($("vdisplay-policy-badge")) {
+    $("vdisplay-policy-badge").textContent = en ? "Policy: Active" : "Policy: Disabled";
+    $("vdisplay-policy-badge").className = en ? "badge completed" : "badge";
+  }
+
+  if ($("vdisplay-policy-indicator")) {
+    $("vdisplay-policy-indicator").textContent = `虚拟副屏: ${en ? "启用" : "禁用"} · 接收[${hosting ? "放行" : "拦截"}] 扩展[${extend ? "放行" : "拦截"}] · 上限 ${maxW}x${maxH}@${maxFps}FPS · 超时 ${timeout}s`;
+  }
+
+  if ($("vdisplay-policy-enabled") && document.activeElement !== $("vdisplay-policy-enabled")) {
+    $("vdisplay-policy-enabled").value = en ? "true" : "false";
+  }
+  if ($("vdisplay-policy-hosting") && document.activeElement !== $("vdisplay-policy-hosting")) {
+    $("vdisplay-policy-hosting").value = hosting ? "true" : "false";
+  }
+  if ($("vdisplay-policy-extend") && document.activeElement !== $("vdisplay-policy-extend")) {
+    $("vdisplay-policy-extend").value = extend ? "true" : "false";
+  }
+  if ($("vdisplay-policy-maxw") && document.activeElement !== $("vdisplay-policy-maxw")) {
+    $("vdisplay-policy-maxw").value = maxW;
+  }
+  if ($("vdisplay-policy-maxh") && document.activeElement !== $("vdisplay-policy-maxh")) {
+    $("vdisplay-policy-maxh").value = maxH;
+  }
+  if ($("vdisplay-policy-maxfps") && document.activeElement !== $("vdisplay-policy-maxfps")) {
+    $("vdisplay-policy-maxfps").value = maxFps;
+  }
+  if ($("vdisplay-policy-timeout") && document.activeElement !== $("vdisplay-policy-timeout")) {
+    $("vdisplay-policy-timeout").value = timeout;
+  }
+  if ($("vdisplay-policy-groups") && document.activeElement !== $("vdisplay-policy-groups")) {
+    $("vdisplay-policy-groups").value = (p.allowed_groups || []).join(", ");
+  }
+  if ($("vdisplay-policy-tags") && document.activeElement !== $("vdisplay-policy-tags")) {
+    $("vdisplay-policy-tags").value = (p.allowed_tags || []).join(", ");
+  }
+  if ($("vdisplay-policy-types") && document.activeElement !== $("vdisplay-policy-types")) {
+    $("vdisplay-policy-types").value = (p.allowed_types || []).join(", ");
+  }
+}
+
+const toggleVDisplayPolicyBtn = $("togglevdisplaypolicybtn");
+if (toggleVDisplayPolicyBtn) {
+  toggleVDisplayPolicyBtn.onclick = () => {
+    const p = $("vdisplay-policy-panel");
+    if (p) p.style.display = p.style.display === "none" ? "block" : "none";
+  };
+}
+
+const refreshVDisplayBtn = $("refreshvdisplaybtn");
+if (refreshVDisplayBtn) {
+  refreshVDisplayBtn.onclick = () => {
+    updateVirtualDisplay();
+    updateVirtualDisplayPolicy();
+  };
+}
+
+const vdisplayPolicySaveBtn = $("vdisplay-policy-save-btn");
+if (vdisplayPolicySaveBtn) {
+  vdisplayPolicySaveBtn.onclick = async () => {
+    const en = $("vdisplay-policy-enabled") ? $("vdisplay-policy-enabled").value === "true" : undefined;
+    const hosting = $("vdisplay-policy-hosting") ? $("vdisplay-policy-hosting").value === "true" : undefined;
+    const extend = $("vdisplay-policy-extend") ? $("vdisplay-policy-extend").value === "true" : undefined;
+    const maxW = $("vdisplay-policy-maxw") && $("vdisplay-policy-maxw").value ? parseInt($("vdisplay-policy-maxw").value, 10) : undefined;
+    const maxH = $("vdisplay-policy-maxh") && $("vdisplay-policy-maxh").value ? parseInt($("vdisplay-policy-maxh").value, 10) : undefined;
+    const maxFps = $("vdisplay-policy-maxfps") && $("vdisplay-policy-maxfps").value ? parseInt($("vdisplay-policy-maxfps").value, 10) : undefined;
+    const timeout = $("vdisplay-policy-timeout") && $("vdisplay-policy-timeout").value ? parseInt($("vdisplay-policy-timeout").value, 10) : undefined;
+    const grpsVal = $("vdisplay-policy-groups") ? $("vdisplay-policy-groups").value.trim() : "";
+    const tagsVal = $("vdisplay-policy-tags") ? $("vdisplay-policy-tags").value.trim() : "";
+    const typesVal = $("vdisplay-policy-types") ? $("vdisplay-policy-types").value.trim() : "";
+    const msg = $("vdisplay-policy-msg");
+
+    const payload = {};
+    if (en !== undefined) payload.enabled = en;
+    if (hosting !== undefined) payload.allow_hosting = hosting;
+    if (extend !== undefined) payload.allow_remote_extend = extend;
+    if (maxW !== undefined) payload.max_resolution_width = maxW;
+    if (maxH !== undefined) payload.max_resolution_height = maxH;
+    if (maxFps !== undefined) payload.max_fps = maxFps;
+    if (timeout !== undefined) payload.idle_timeout_secs = timeout;
+    if (grpsVal) payload.allowed_groups = grpsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (tagsVal) payload.allowed_tags = tagsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (typesVal) payload.allowed_types = typesVal.split(",").map(s => s.trim()).filter(Boolean);
+
+    try {
+      const rep = await api("/api/display/virtual/policy", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "副屏治理策略已成功保存并落盘！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateVirtualDisplayPolicy();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const vdisplayPolicyResetBtn = $("vdisplay-policy-reset-btn");
+if (vdisplayPolicyResetBtn) {
+  vdisplayPolicyResetBtn.onclick = async () => {
+    const msg = $("vdisplay-policy-msg");
+    try {
+      const rep = await api("/api/display/virtual/policy", { clear_filters: true });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "准入过滤已清空重置为全量放行！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateVirtualDisplayPolicy();
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "重置失败: " + e.message;
+    }
+  };
+}
+
+const vdisplayAttachBtn = $("vdisplay-attach-btn");
+if (vdisplayAttachBtn) {
+  vdisplayAttachBtn.onclick = async () => {
+    const peer = $("vdisplay-attach-peer-select") ? $("vdisplay-attach-peer-select").value.trim() : "";
+    const edge = $("vdisplay-attach-edge") ? $("vdisplay-attach-edge").value : "right";
+    const width = $("vdisplay-attach-width") && $("vdisplay-attach-width").value ? parseInt($("vdisplay-attach-width").value, 10) : undefined;
+    const height = $("vdisplay-attach-height") && $("vdisplay-attach-height").value ? parseInt($("vdisplay-attach-height").value, 10) : undefined;
+    const fps = $("vdisplay-attach-fps") && $("vdisplay-attach-fps").value ? parseInt($("vdisplay-attach-fps").value, 10) : undefined;
+    const msg = $("vdisplay-status-msg");
+
+    if (!peer) {
+      if (msg) msg.textContent = "请先选择要扩展副屏的目标设备！";
+      return;
+    }
+
+    const payload = { peer };
+    if (edge) payload.edge = edge;
+    if (width !== undefined) payload.width = width;
+    if (height !== undefined) payload.height = height;
+    if (fps !== undefined) payload.fps = fps;
+
+    try {
+      const rep = await api("/api/display/virtual/attach", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = `成功挂载虚拟副屏！会话: ${rep.session_id}`;
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateVirtualDisplay();
+      } else {
+        if (msg) msg.textContent = "挂载失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const vdisplayDetachBtn = $("vdisplay-detach-btn");
+if (vdisplayDetachBtn) {
+  vdisplayDetachBtn.onclick = async () => {
+    const reason = $("vdisplay-detach-reason") ? $("vdisplay-detach-reason").value.trim() : "";
+    const msg = $("vdisplay-status-msg");
+
+    const payload = {};
+    if (reason) payload.reason = reason;
+
+    try {
+      const rep = await api("/api/display/virtual/detach", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "已成功断开虚拟副屏！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateVirtualDisplay();
+      } else {
+        if (msg) msg.textContent = "断开失败: " + (rep ? rep.error : "未知错误");
       }
     } catch (e) {
       if (msg) msg.textContent = "请求异常: " + e.message;
@@ -7566,14 +7962,27 @@ function setupEventSource() {
 						            }
 						            updateInputTunnel();
 						          }
-						          else if (ev.kind === "input_tunnel_policy_changed") {
-						            desc = "外设策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许入站=" + (ev.allow_inbound ? "是" : "否");
-						            if ($("input-last-event")) {
-						              $("input-last-event").textContent = `最近事件: 策略变更 [enabled=${ev.enabled}]`;
-						            }
-						            updateInputPolicy();
-						            updateInputTunnel();
-						          }
+							          else if (ev.kind === "input_tunnel_policy_changed") {
+							            desc = "外设策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许入站=" + (ev.allow_inbound ? "是" : "否");
+							            if ($("input-last-event")) {
+							              $("input-last-event").textContent = `最近事件: 策略变更 [enabled=${ev.enabled}]`;
+							            }
+							            updateInputPolicy();
+							            updateInputTunnel();
+							          }
+							          else if (ev.kind === "virtual_display_session_started") {
+							            desc = "虚拟副屏建立: " + ev.session_id + " [" + ev.role + "] 对端:" + (ev.peer_alias || ev.peer_id) + " (" + ev.width + "x" + ev.height + "@" + ev.fps + "FPS, " + ev.edge + ")";
+							            updateVirtualDisplay();
+							          }
+							          else if (ev.kind === "virtual_display_session_stopped") {
+							            desc = "虚拟副屏释放: " + ev.session_id + " (" + (ev.reason || "正常退出") + ")";
+							            updateVirtualDisplay();
+							          }
+							          else if (ev.kind === "virtual_display_policy_changed") {
+							            desc = "副屏策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许呈现=" + (ev.allow_hosting ? "是" : "否") + " · 允许扩展=" + (ev.allow_remote_extend ? "是" : "否");
+							            updateVirtualDisplayPolicy();
+							            updateVirtualDisplay();
+							          }
 					          else if (ev.kind === "network_refreshed") {
 					            desc = "网络已重探: 扫描 " + ev.iface_count + " 网卡 (监听 " + ev.listen_count + ")" + (ev.overlay_present ? (" · 侧车: " + (ev.overlay_source || "在网")) : "");
 					            updateNetworkStatus();
@@ -7753,8 +8162,12 @@ function setupEventSource() {
 																			setInterval(updateTopologyPolicy, 3000);
 																			updateInputTunnel();
 																			setInterval(updateInputTunnel, 3000);
-																			updateInputPolicy();
-																			setInterval(updateInputPolicy, 3000);
-							</script>
+																				updateInputPolicy();
+																				setInterval(updateInputPolicy, 3000);
+																				updateVirtualDisplay();
+																				setInterval(updateVirtualDisplay, 3000);
+																				updateVirtualDisplayPolicy();
+																				setInterval(updateVirtualDisplayPolicy, 3000);
+								</script>
 </body>
 </html>

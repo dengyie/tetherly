@@ -1149,6 +1149,58 @@ struct InputTunnelPolicyBody {
     clear_filters: Option<bool>,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct VirtualDisplayAttachBody {
+    #[serde(default, alias = "peer_id", alias = "device_id", alias = "target")]
+    peer: Option<String>,
+    #[serde(default, alias = "assigned_edge")]
+    edge: Option<String>,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default, alias = "target_fps", alias = "refresh_rate")]
+    fps: Option<u32>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct VirtualDisplayDetachBody {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct VirtualDisplayPolicyBody {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default, alias = "host", alias = "allow_host")]
+    allow_hosting: Option<bool>,
+    #[serde(default, alias = "extend", alias = "allow_extend")]
+    allow_remote_extend: Option<bool>,
+    #[serde(default, alias = "max_width")]
+    max_resolution_width: Option<u32>,
+    #[serde(default, alias = "max_height")]
+    max_resolution_height: Option<u32>,
+    #[serde(default)]
+    max_fps: Option<u32>,
+    #[serde(default, alias = "timeout", alias = "idle_timeout")]
+    idle_timeout_secs: Option<u32>,
+    #[serde(default, alias = "group", alias = "groups")]
+    allowed_groups: Option<Vec<String>>,
+    #[serde(default, alias = "tag", alias = "tags")]
+    allowed_tags: Option<Vec<String>>,
+    #[serde(
+        default,
+        alias = "type",
+        alias = "types",
+        alias = "device_type",
+        alias = "device_types"
+    )]
+    allowed_types: Option<Vec<String>>,
+    #[serde(default)]
+    clear_filters: Option<bool>,
+}
+
 fn parse_hh_mm(s: &str) -> Option<u16> {
     let parts: Vec<&str> = s.trim().split(':').collect();
     if parts.len() != 2 {
@@ -3860,6 +3912,233 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             }
 
             match node.set_input_policy(policy) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/display/virtual") | ("GET", "/api/display/virtual/status") => {
+            json_ok(&node.virtual_display_status())
+        }
+        ("POST", "/api/display/virtual/attach") | ("PUT", "/api/display/virtual/attach") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<VirtualDisplayAttachBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<VirtualDisplayAttachBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected VirtualDisplayAttachBody"),
+                }
+            };
+
+            let peer = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone())
+                .or_else(|| qmap.get("peer").cloned())
+                .or_else(|| qmap.get("peer_id").cloned())
+                .or_else(|| qmap.get("target").cloned());
+            let peer = match peer {
+                Some(p) if !p.trim().is_empty() => p,
+                _ => return err(400, "missing 'peer' parameter"),
+            };
+
+            let edge_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.edge.clone())
+                .or_else(|| qmap.get("edge").cloned());
+            let edge = match edge_str {
+                Some(s) => match s.parse::<DisplayEdge>() {
+                    Ok(e) => Some(e),
+                    Err(e) => return err(400, &format!("invalid edge '{s}': {e}")),
+                },
+                None => None,
+            };
+
+            let width = parsed_body
+                .as_ref()
+                .and_then(|b| b.width)
+                .or_else(|| qmap.get("width").and_then(|s| s.parse::<u32>().ok()));
+
+            let height = parsed_body
+                .as_ref()
+                .and_then(|b| b.height)
+                .or_else(|| qmap.get("height").and_then(|s| s.parse::<u32>().ok()));
+
+            let fps = parsed_body.as_ref().and_then(|b| b.fps).or_else(|| {
+                qmap.get("fps")
+                    .or_else(|| qmap.get("target_fps"))
+                    .and_then(|s| s.parse::<u32>().ok())
+            });
+
+            match node
+                .virtual_display_attach(&peer, edge, width, height, fps)
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/display/virtual/detach") | ("PUT", "/api/display/virtual/detach") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<VirtualDisplayDetachBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<VirtualDisplayDetachBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected VirtualDisplayDetachBody"),
+                }
+            };
+
+            let reason = parsed_body
+                .as_ref()
+                .and_then(|b| b.reason.clone())
+                .or_else(|| qmap.get("reason").cloned());
+
+            match node.virtual_display_detach(reason.as_deref()).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/display/virtual/policy") => json_ok(&node.virtual_display_policy_report()),
+        ("POST", "/api/display/virtual/policy") | ("PUT", "/api/display/virtual/policy") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<VirtualDisplayPolicyBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<VirtualDisplayPolicyBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected VirtualDisplayPolicyBody"),
+                }
+            };
+
+            let mut policy = node.virtual_display_policy();
+            if let Some(ref b) = parsed_body {
+                if let Some(en) = b.enabled {
+                    policy.enabled = en;
+                }
+                if let Some(hosting) = b.allow_hosting {
+                    policy.allow_hosting = hosting;
+                }
+                if let Some(extend) = b.allow_remote_extend {
+                    policy.allow_remote_extend = extend;
+                }
+                if let Some(w) = b.max_resolution_width {
+                    policy.max_resolution_width = w;
+                }
+                if let Some(h) = b.max_resolution_height {
+                    policy.max_resolution_height = h;
+                }
+                if let Some(fps) = b.max_fps {
+                    policy.max_fps = fps;
+                }
+                if let Some(to) = b.idle_timeout_secs {
+                    policy.idle_timeout_secs = to;
+                }
+                if let Some(ref grps) = b.allowed_groups {
+                    policy.allowed_groups = grps.clone();
+                }
+                if let Some(ref tags) = b.allowed_tags {
+                    policy.allowed_tags = tags.clone();
+                }
+                if let Some(ref types) = b.allowed_types {
+                    let mut dtypes = Vec::new();
+                    for t in types {
+                        match t.parse::<crate::store::DeviceType>() {
+                            Ok(dt) => dtypes.push(dt),
+                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
+                        }
+                    }
+                    policy.allowed_types = dtypes;
+                }
+                if b.clear_filters == Some(true) {
+                    policy.allowed_groups.clear();
+                    policy.allowed_tags.clear();
+                    policy.allowed_types.clear();
+                }
+            }
+
+            if let Some(en) = qmap.get("enable").or_else(|| qmap.get("enabled")) {
+                if let Ok(b) = en.parse::<bool>() {
+                    policy.enabled = b;
+                }
+            }
+            if let Some(h) = qmap
+                .get("allow_host")
+                .or_else(|| qmap.get("allow_hosting"))
+                .or_else(|| qmap.get("hosting"))
+            {
+                if let Ok(b) = h.parse::<bool>() {
+                    policy.allow_hosting = b;
+                }
+            }
+            if let Some(ext) = qmap
+                .get("allow_extend")
+                .or_else(|| qmap.get("allow_remote_extend"))
+                .or_else(|| qmap.get("remote_extend"))
+            {
+                if let Ok(b) = ext.parse::<bool>() {
+                    policy.allow_remote_extend = b;
+                }
+            }
+            if let Some(mw) = qmap
+                .get("max_width")
+                .or_else(|| qmap.get("max_resolution_width"))
+            {
+                if let Ok(w) = mw.parse::<u32>() {
+                    policy.max_resolution_width = w;
+                }
+            }
+            if let Some(mh) = qmap
+                .get("max_height")
+                .or_else(|| qmap.get("max_resolution_height"))
+            {
+                if let Ok(h) = mh.parse::<u32>() {
+                    policy.max_resolution_height = h;
+                }
+            }
+            if let Some(fps) = qmap.get("max_fps").or_else(|| qmap.get("fps")) {
+                if let Ok(f) = fps.parse::<u32>() {
+                    policy.max_fps = f;
+                }
+            }
+            if let Some(to) = qmap
+                .get("timeout")
+                .or_else(|| qmap.get("idle_timeout_secs"))
+            {
+                if let Ok(secs) = to.parse::<u32>() {
+                    policy.idle_timeout_secs = secs;
+                }
+            }
+            if let Some(grp) = qmap.get("group").or_else(|| qmap.get("allowed_group")) {
+                if !policy.allowed_groups.contains(grp) {
+                    policy.allowed_groups.push(grp.clone());
+                }
+            }
+            if let Some(tag) = qmap.get("tag").or_else(|| qmap.get("allowed_tag")) {
+                if !policy.allowed_tags.contains(tag) {
+                    policy.allowed_tags.push(tag.clone());
+                }
+            }
+            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
+                match dt_str.parse::<crate::store::DeviceType>() {
+                    Ok(dt) => {
+                        if !policy.allowed_types.contains(&dt) {
+                            policy.allowed_types.push(dt);
+                        }
+                    }
+                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
+                }
+            }
+            if qmap
+                .get("clear_filters")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false)
+            {
+                policy.allowed_groups.clear();
+                policy.allowed_tags.clear();
+                policy.allowed_types.clear();
+            }
+
+            match node.set_virtual_display_policy(policy) {
                 Ok(rep) => json_ok(&rep),
                 Err(e) => err(400, &e.to_string()),
             }
@@ -6944,6 +7223,98 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/input/tunnel HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_virtual_display_endpoints_and_host_validation() {
+        let (node, dir) = temp_test_node("virtual_display");
+        let port = bind_and_spawn(node.clone(), 0).await.unwrap();
+
+        // 1. GET /api/display/virtual (default inactive)
+        let (code, body) = loopback_get(port, "/api/display/virtual").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["active"], false);
+        assert_eq!(rep["policy"]["enabled"], true);
+
+        // 2. GET /api/display/virtual/policy (defaults)
+        let (code, body) = loopback_get(port, "/api/display/virtual/policy")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["enabled"], true);
+        assert_eq!(rep["policy"]["allow_hosting"], true);
+        assert_eq!(rep["policy"]["allow_remote_extend"], true);
+
+        // 3. POST /api/display/virtual/policy
+        let pol_body = serde_json::json!({
+            "enabled": true,
+            "allow_hosting": false,
+            "allow_remote_extend": true,
+            "max_resolution_width": 2560,
+            "max_resolution_height": 1440,
+            "max_fps": 60,
+            "idle_timeout_secs": 180,
+            "allowed_groups": ["displays"]
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/display/virtual/policy",
+            &serde_json::to_vec(&pol_body).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["allow_hosting"], false);
+        assert_eq!(rep["policy"]["max_resolution_width"], 2560);
+        assert_eq!(rep["policy"]["max_resolution_height"], 1440);
+        assert_eq!(rep["policy"]["idle_timeout_secs"], 180);
+        assert_eq!(
+            rep["policy"]["allowed_groups"],
+            serde_json::json!(["displays"])
+        );
+
+        // 4. Verify policy reflected on GET /api/display/virtual/policy
+        let (code, body) = loopback_get(port, "/api/display/virtual/policy")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["policy"]["allow_hosting"], false);
+        assert_eq!(rep["policy"]["max_resolution_width"], 2560);
+
+        // 5. POST /api/display/virtual/detach (when idle/empty)
+        let det_body = serde_json::json!({ "reason": "unit test cleanup" });
+        let (code, body) = loopback_post(
+            port,
+            "/api/display/virtual/detach",
+            &serde_json::to_vec(&det_body).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["action"], "detach");
+
+        // 6. Host header 403 test on /api/display/virtual
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/display/virtual HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();
