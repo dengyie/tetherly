@@ -18561,7 +18561,9 @@ mod handoff_engine_tests {
     use super::*;
     use tetherly_core::ManualClock;
 
-    fn temp_handoff_node(tag: &str) -> (Node, std::path::PathBuf) {
+    fn temp_handoff_node(
+        tag: &str,
+    ) -> (Node, std::path::PathBuf, Arc<crate::platform::MemoryOpener>) {
         let dir = std::env::temp_dir().join(format!(
             "tetherly-handoff-test-{tag}-{}-{}",
             std::process::id(),
@@ -18595,13 +18597,16 @@ mod handoff_engine_tests {
         };
         let clock = Arc::new(ManualClock::new(5000));
         let node = Node::start_with_clock(cfg, clock).unwrap();
-        (node, dir)
+        // Record opens instead of launching the user's real browser.
+        let opener = Arc::new(crate::platform::MemoryOpener::new());
+        node.set_opener(opener.clone());
+        (node, dir, opener)
     }
 
     #[test]
     fn test_handoff_policy_defaults_and_mutation() {
         use tetherly_core::HandoffAction;
-        let (node, dir) = temp_handoff_node("policy");
+        let (node, dir, _opener) = temp_handoff_node("policy");
         let report = node.handoff_policy_report();
         assert!(report.ok);
         assert_eq!(report.policy.action, HandoffAction::PromptOnly);
@@ -18629,9 +18634,7 @@ mod handoff_engine_tests {
 
     #[test]
     fn test_handoff_receive_prompt_only_and_inbox_lifecycle() {
-        let (node, dir) = temp_handoff_node("inbox");
-        // Record opens instead of launching the user's real browser.
-        node.set_opener(Arc::new(crate::platform::MemoryOpener::new()));
+        let (node, dir, opener) = temp_handoff_node("inbox");
         let peer = DeviceId::from_id_pk(&[9u8; 32]);
 
         // 1. Receive valid URL with default PromptOnly policy
@@ -18657,6 +18660,10 @@ mod handoff_engine_tests {
         let opened = node.handoff_inbox_open("ho_test_1").unwrap();
         assert_eq!(opened.status, HandoffStatus::Opened);
         assert!(opened.opened_ms.is_some());
+        assert_eq!(
+            opener.opened(),
+            vec!["https://example.com/docs/api?q=rust".to_string()]
+        );
 
         // 4. Dismiss entry
         let dismissed = node.handoff_inbox_dismiss("ho_test_1").unwrap();
@@ -18672,7 +18679,7 @@ mod handoff_engine_tests {
 
     #[test]
     fn test_handoff_receive_firewall_rejects_malicious_urls() {
-        let (node, dir) = temp_handoff_node("reject");
+        let (node, dir, opener) = temp_handoff_node("reject");
         let peer = DeviceId::from_id_pk(&[9u8; 32]);
 
         // Attempt to hand off file:// URL
@@ -18707,6 +18714,10 @@ mod handoff_engine_tests {
         };
         node.receive_resource_handoff(&peer, meta_frame);
         assert_eq!(node.handoff_inbox_list(None).len(), 0);
+        assert!(
+            opener.opened().is_empty(),
+            "firewall-rejected URLs must never reach the opener"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

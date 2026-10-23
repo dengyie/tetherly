@@ -8692,6 +8692,10 @@ async fn policy_based_clipboard_auto_sync_and_sensitive_leak_guard_via_loopback_
 #[tokio::test(flavor = "multi_thread")]
 async fn resource_and_url_handoff_pipeline_and_governance_via_loopback_api() {
     let (host, peer, _g1, g2) = pair_phone_desktop().await;
+    // Keep a handle to the recorder so the test can assert on what was opened.
+    let opener = tetherly_node::MemoryOpener::new();
+    host.set_opener(Arc::new(opener.clone()));
+    peer.set_opener(Arc::new(opener.clone()));
     let host_ui = host.spawn_ui().await.expect("host UI spawns");
     let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
     let host_id = host.identity().device_id().clone();
@@ -9057,6 +9061,11 @@ async fn resource_and_url_handoff_pipeline_and_governance_via_loopback_api() {
     assert!(
         saw_auto_opened,
         "scoped peer matching group must be automatically opened"
+    );
+    assert!(
+        opener.opened().iter().any(|u| u == "https://rust-lang.org"),
+        "auto-open must record the handed-off URL, got {:?}",
+        opener.opened()
     );
 
     // 8. Multi-cast Handoff Dispatch via POST /api/handoff/send with all: true
