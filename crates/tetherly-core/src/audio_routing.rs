@@ -262,11 +262,14 @@ impl AudioRoutingDetachFrame {
     }
 }
 
-/// Chunk frame containing streaming audio data (max 64 KiB per chunk).
+/// Chunk frame containing streaming audio data.
+/// On the wire `payload_bytes` rides as a base64 string so the fully encoded
+/// inner frame always fits the Noise transport budget (see `crate::wire`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioRoutingChunkFrame {
     pub session_id: String,
     pub chunk_seq: u64,
+    #[serde(with = "crate::wire::base64_bytes")]
     pub payload_bytes: Vec<u8>,
     #[serde(default)]
     pub timestamp_ms: u64,
@@ -353,10 +356,12 @@ impl AudioRoutingValidator {
         Ok(())
     }
 
-    /// Validates audio chunk: max 64 KiB payload.
+    /// Validates audio chunk against the shared wire-budget cap.
     pub fn validate_chunk(frame: &AudioRoutingChunkFrame) -> Result<(), CoreError> {
         Self::validate_session_id(&frame.session_id)?;
-        if frame.payload_bytes.is_empty() || frame.payload_bytes.len() > 65536 {
+        if frame.payload_bytes.is_empty()
+            || frame.payload_bytes.len() > crate::wire::MAX_WIRE_CHUNK_BYTES
+        {
             return Err(CoreError::TruncatedFrame);
         }
         Ok(())

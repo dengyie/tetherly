@@ -211,6 +211,8 @@ impl MicDetachFrame {
 }
 
 /// Audio stream chunk carrying encoded microphone packet slices.
+/// On the wire `data` rides as a base64 string so the fully encoded inner
+/// frame always fits the Noise transport budget (see `crate::wire`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MicAudioChunkFrame {
     pub session_id: String,
@@ -219,6 +221,7 @@ pub struct MicAudioChunkFrame {
     pub total_chunks: u32,
     pub is_muted: bool,
     pub rms_db: f32,
+    #[serde(with = "crate::wire::base64_bytes")]
     pub data: Vec<u8>,
     #[serde(default)]
     pub timestamp_ms: u64,
@@ -241,7 +244,8 @@ impl MicAudioChunkFrame {
 pub struct MicValidator;
 
 impl MicValidator {
-    pub const MAX_CHUNK_BYTES: usize = 65536;
+    /// Wire-budget cap shared with camera/bench (see `crate::wire`).
+    pub const MAX_CHUNK_BYTES: usize = crate::wire::MAX_WIRE_CHUNK_BYTES;
     pub const MIN_SAMPLE_RATE: u32 = 8000;
     pub const MAX_SAMPLE_RATE: u32 = 192000;
     pub const MIN_CHANNELS: u32 = 1;

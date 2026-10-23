@@ -12175,10 +12175,13 @@ async fn link_bench_throughput_and_governance_via_loopback_api() {
     let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
     let peer_id = peer.identity().device_id().clone();
 
-    // 1. Connect to Host SSE stream
+    // 1. Connect to Host SSE stream (and Peer SSE for receive-side proof)
     let mut host_sse = tetherly_node::loopback_events_connect(host_ui)
         .await
         .expect("connect to host sse stream");
+    let mut peer_sse = tetherly_node::loopback_events_connect(peer_ui)
+        .await
+        .expect("connect to peer sse stream");
 
     // 2. Initial Bench Status Check on Host (idle, default policy)
     let (code_bench, body_bench) = tetherly_node::loopback_get(host_ui, "/api/bench")
@@ -12268,7 +12271,7 @@ async fn link_bench_throughput_and_governance_via_loopback_api() {
         "peer": peer_id.to_string(),
         "direction": "push",
         "duration_secs": 2,
-        "chunk_size": 65536
+        "chunk_size": 32768
     });
     let (code_start, body_start) = tetherly_node::loopback_post(
         host_ui,
@@ -12295,7 +12298,7 @@ async fn link_bench_throughput_and_governance_via_loopback_api() {
     assert_eq!(host_act["session"]["role"], "initiator");
     assert_eq!(host_act["session"]["direction"], "push");
     assert_eq!(host_act["session"]["duration_secs"], 2);
-    assert_eq!(host_act["session"]["chunk_size"], 65536);
+    assert_eq!(host_act["session"]["chunk_size"], 32768);
 
     // 8. Verify Peer activated as bench responder
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
@@ -12372,6 +12375,43 @@ async fn link_bench_throughput_and_governance_via_loopback_api() {
     assert!(
         peer_inactive,
         "Peer responder session must finalize after the report"
+    );
+
+    // 10b. Zero-Bug Proof of Real Wire Flow: the peer's receive-side finish
+    // event counts only chunks that actually arrived over the Noise channel
+    // (receive_bench_data is the sole path that grows those counters). A
+    // positive receive-side throughput here is direct evidence the base64
+    // wire encoding delivers payloads end-to-end, not fabricated counters.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut saw_recv_finished = false;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), peer_sse.next_event()).await
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if v["kind"] == "bench_session_finished" && v["session_id"] == session_id {
+                    assert_eq!(v["direction"], "push");
+                    assert!(
+                        v["bytes_transferred"].as_u64().unwrap_or(0) > 0,
+                        "peer must have received real bytes: {v}"
+                    );
+                    assert!(
+                        v["chunks"].as_u64().unwrap_or(0) > 0,
+                        "peer must have received real chunks: {v}"
+                    );
+                    assert!(
+                        v["throughput_mbps"].as_f64().unwrap_or(0.0) > 0.0,
+                        "peer receive-side throughput must be positive: {v}"
+                    );
+                    saw_recv_finished = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_recv_finished,
+        "Peer must emit bench_session_finished with receive-side measurements"
     );
 
     // 11. Security Red Line: Host header 403 Forbidden attack defense

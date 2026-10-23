@@ -2943,7 +2943,7 @@ enum BenchCmd {
         /// Test duration in seconds (1..=60, default: 5).
         #[arg(long)]
         duration: Option<u32>,
-        /// Payload chunk size in bytes (1024..=65536, default: 16384).
+        /// Payload chunk size in bytes (1024..=32768, default: 16384).
         #[arg(long)]
         chunk: Option<u32>,
         #[arg(long)]

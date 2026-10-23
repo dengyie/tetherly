@@ -16900,28 +16900,28 @@ impl Node {
             return;
         }
 
-        // Only the initiator consumes accepts for a session it created.
-        let is_initiator = {
-            let guard = self.shared.active_bench.lock().expect("active_bench");
-            guard
+        // Only the initiator consumes accepts for a session it created; the
+        // role check and parameter adoption happen in one critical section.
+        let adopted = {
+            let mut guard = self.shared.active_bench.lock().expect("active_bench");
+            let is_initiator = guard
                 .as_ref()
                 .map(|s| {
                     s.session_id == frame.session_id
                         && s.peer_id == peer_str
                         && s.role == BenchRole::Initiator
                 })
-                .unwrap_or(false)
-        };
-        if !is_initiator {
-            return;
-        }
-
-        {
-            let mut guard = self.shared.active_bench.lock().expect("active_bench");
-            if let Some(ref mut session) = *guard {
-                session.duration_secs = frame.duration_secs;
-                session.chunk_size = frame.chunk_size;
+                .unwrap_or(false);
+            if is_initiator {
+                if let Some(ref mut session) = *guard {
+                    session.duration_secs = frame.duration_secs;
+                    session.chunk_size = frame.chunk_size;
+                }
             }
+            is_initiator
+        };
+        if !adopted {
+            return;
         }
 
         if frame.direction == BenchDirection::Push {
@@ -17054,8 +17054,11 @@ impl Node {
 
             let mut chunk_seq: u64 = 0;
             let mut last_send_ms: Option<u64> = None;
-            let mut jitter_acc_us: u64 = 0;
-            let mut latency_acc_us: u64 = 0;
+            // Send-side pacing metrics: mean inter-send gap and its mean absolute
+            // deviation (jitter proxy). Receiver-side numbers stay authoritative.
+            let mut gap_sum_us: u64 = 0;
+            let mut mad_sum_us: u64 = 0;
+            let mut gap_samples: u64 = 0;
 
             loop {
                 let now_ms = node.shared.clock.unix_ms();
@@ -17074,23 +17077,21 @@ impl Node {
                 }
 
                 if let Some(last) = last_send_ms {
-                    let delta = now_ms.saturating_sub(last) * 1000;
-                    latency_acc_us = latency_acc_us.saturating_add(delta);
-                    jitter_acc_us = jitter_acc_us
-                        .saturating_add(delta.abs_diff(latency_acc_us / chunk_seq.max(1)));
+                    let gap_us = now_ms.saturating_sub(last).saturating_mul(1000);
+                    gap_sum_us = gap_sum_us.saturating_add(gap_us);
+                    let running_mean = gap_sum_us / gap_samples.max(1);
+                    mad_sum_us = mad_sum_us.saturating_add(gap_us.abs_diff(running_mean));
+                    gap_samples = gap_samples.saturating_add(1);
                 }
                 last_send_ms = Some(now_ms);
 
-                let data_frame = BenchDataFrame {
-                    session_id: session_id.clone(),
-                    chunk_seq,
-                    data: template.clone(),
-                    timestamp_ms: now_ms,
-                };
-                if let Ok(inner) = data_frame.to_frame() {
-                    if node.send_to(&peer, inner).await.is_err() {
-                        break;
-                    }
+                let inner =
+                    match BenchDataFrame::to_frame_for(&session_id, chunk_seq, &template, now_ms) {
+                        Ok(inner) => inner,
+                        Err(_) => break, // unrecoverable codec failure; finalize below
+                    };
+                if node.send_to(&peer, inner).await.is_err() {
+                    break;
                 }
                 chunk_seq = chunk_seq.saturating_add(1);
 
@@ -17125,7 +17126,8 @@ impl Node {
                 stats
             };
             let throughput_mbps = (bytes_sent as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1e6;
-            let avg_latency_us = latency_acc_us.checked_div(chunks_sent).unwrap_or(0);
+            let avg_gap_us = gap_sum_us.checked_div(gap_samples).unwrap_or(0);
+            let jitter_us = mad_sum_us.checked_div(gap_samples).unwrap_or(0);
 
             let report = BenchReportFrame {
                 session_id: session_id.clone(),
@@ -17134,8 +17136,8 @@ impl Node {
                 bytes_transferred: bytes_sent,
                 chunks: chunks_sent,
                 throughput_mbps,
-                avg_chunk_latency_us: avg_latency_us,
-                jitter_us: jitter_acc_us / chunks_sent.max(1),
+                avg_chunk_latency_us: avg_gap_us,
+                jitter_us,
                 stopped_early: Some(end_ms < deadline),
                 timestamp_ms: end_ms,
             };
@@ -17153,8 +17155,8 @@ impl Node {
                 bytes_sent,
                 chunks_sent,
                 throughput_mbps,
-                avg_latency_us,
-                jitter_acc_us / chunks_sent.max(1),
+                avg_gap_us,
+                jitter_us,
                 end_ms,
             ));
             node.record_audit(
@@ -17296,15 +17298,6 @@ impl Node {
             ));
         }
 
-        {
-            let guard = self.shared.active_bench.lock().expect("active_bench");
-            if guard.is_some() {
-                return Err(CoreError::InvalidPayload(
-                    "a benchmark session is already active".to_string(),
-                ));
-            }
-        }
-
         let req_duration = BenchValidator::clamp_duration(
             duration_secs.unwrap_or(5).min(policy.max_duration_secs),
         );
@@ -17321,22 +17314,43 @@ impl Node {
         };
 
         BenchValidator::validate_request(&request)?;
-        let inner = request.to_frame()?;
-        self.send_to(&peer_id, inner).await?;
 
-        let session = ActiveBenchSession {
-            session_id: session_id.clone(),
-            peer_id: peer_str.clone(),
-            role: BenchRole::Initiator,
-            direction,
-            duration_secs: req_duration,
-            chunk_size: req_chunk,
-            chunks_processed: 0,
-            bytes_transferred: 0,
-            started_at_ms: now_ms,
-            last_activity_ms: now_ms,
-        };
-        *self.shared.active_bench.lock().expect("active_bench") = Some(session);
+        // Atomically reserve the single session slot before the await, so two
+        // concurrent starts cannot both pass the emptiness check (TOCTOU).
+        {
+            let mut guard = self.shared.active_bench.lock().expect("active_bench");
+            if guard.is_some() {
+                return Err(CoreError::InvalidPayload(
+                    "a benchmark session is already active".to_string(),
+                ));
+            }
+            *guard = Some(ActiveBenchSession {
+                session_id: session_id.clone(),
+                peer_id: peer_str.clone(),
+                role: BenchRole::Initiator,
+                direction,
+                duration_secs: req_duration,
+                chunk_size: req_chunk,
+                chunks_processed: 0,
+                bytes_transferred: 0,
+                started_at_ms: now_ms,
+                last_activity_ms: now_ms,
+            });
+        }
+
+        let inner = request.to_frame()?;
+        if let Err(e) = self.send_to(&peer_id, inner).await {
+            // Roll back the reservation so a later start is not blocked forever.
+            let mut guard = self.shared.active_bench.lock().expect("active_bench");
+            if guard
+                .as_ref()
+                .map(|s| s.session_id == session_id)
+                .unwrap_or(false)
+            {
+                *guard = None;
+            }
+            return Err(e);
+        }
 
         self.emit(UiEvent::bench_session_started(
             &session_id,

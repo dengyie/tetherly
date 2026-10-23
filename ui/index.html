@@ -2146,7 +2146,7 @@
                 <option value="pull">拉取压测 (Pull: 远端发流)</option>
               </select>
               <input id="bench-start-duration" type="number" min="1" max="60" placeholder="时长s (5)" style="width:85px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
-              <input id="bench-start-chunk" type="number" min="1024" max="65536" placeholder="分块B (16384)" style="width:110px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <input id="bench-start-chunk" type="number" min="1024" max="32768" placeholder="分块B (16384)" style="width:110px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
               <button id="bench-start-btn" class="ghost" type="button" style="padding:4px 14px;font-size:12px;font-weight:600;background:var(--accent);color:#fff">启动压测 (Start)</button>
               <button id="bench-stop-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">停止压测 (Stop)</button>
             </div>

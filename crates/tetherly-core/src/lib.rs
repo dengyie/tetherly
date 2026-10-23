@@ -39,6 +39,7 @@ pub mod screen;
 pub mod session;
 pub mod topology;
 pub mod virtual_display;
+pub mod wire;
 
 pub use action::{
     ActionItem, ActionListReqFrame, ActionListRespFrame, ActionResultFrame, ActionTriggerFrame,

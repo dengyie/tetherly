@@ -257,6 +257,8 @@ impl CameraDetachFrame {
 }
 
 /// Video stream frame chunk carrying encoded frame slices.
+/// On the wire `data` rides as a base64 string so the fully encoded inner
+/// frame always fits the Noise transport budget (see `crate::wire`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CameraFrameChunk {
     pub session_id: String,
@@ -264,6 +266,7 @@ pub struct CameraFrameChunk {
     pub chunk_seq: u32,
     pub total_chunks: u32,
     pub payload_bytes: u32,
+    #[serde(with = "crate::wire::base64_bytes")]
     pub data: Vec<u8>,
     #[serde(default)]
     pub timestamp_ms: u64,
@@ -369,7 +372,7 @@ impl CameraValidator {
                 "chunk_seq must be strictly less than total_chunks".to_string(),
             ));
         }
-        if data.len() > 65536 {
+        if data.len() > crate::wire::MAX_WIRE_CHUNK_BYTES {
             return Err(CoreError::PayloadTooLarge);
         }
         Ok(())
