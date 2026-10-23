@@ -2044,6 +2044,61 @@ async fn node_health_probe_ping_and_graceful_shutdown_via_loopback_api() {
     );
 }
 
+/// Regression (v1.87): on hosts with no display server (headless Linux) the
+/// OS clipboard port fails; status and clear must degrade gracefully instead
+/// of answering HTTP 500. The CI matrix covers both branches: ubuntu-latest
+/// has no X11/Wayland (arboard fails) while macos/windows runners have a
+/// working pasteboard.
+#[tokio::test(flavor = "multi_thread")]
+async fn clipboard_status_degrades_gracefully_without_display_server() {
+    let (data_dir, _guard) = temp_dir("clip-headless");
+    let mut c = cfg(data_dir.clone(), "clip-headless", "linux");
+    c.memory_clip = false;
+    c.memory_notifier = true;
+    let node = Node::start(c).unwrap();
+    let ui_port = node.spawn_ui().await.unwrap();
+    assert_ne!(ui_port, 0, "test node must serve loopback UI");
+
+    let (code, body) = tetherly_node::loopback_get(ui_port, "/api/clip/status")
+        .await
+        .unwrap();
+    assert_eq!(
+        code,
+        200,
+        "clip status must never 5xx: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rep["ok"], true);
+    let available = rep["clipboard_available"].as_bool().unwrap_or(true);
+    if !available {
+        assert!(
+            rep["reason"].as_str().is_some_and(|r| !r.is_empty()),
+            "an unavailable clipboard must carry a reason: {rep}"
+        );
+        assert_eq!(rep["has_text"], false);
+    }
+
+    let (code_clear, body_clear) = tetherly_node::loopback_post(ui_port, "/api/clip/clear", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(
+        code_clear,
+        200,
+        "clip clear must never 5xx: {}",
+        String::from_utf8_lossy(&body_clear)
+    );
+    let clear_rep: serde_json::Value = serde_json::from_slice(&body_clear).unwrap();
+    assert_eq!(clear_rep["ok"], true);
+    assert_eq!(
+        clear_rep["clipboard_available"].as_bool().unwrap_or(true),
+        available,
+        "clear must report the same availability as status"
+    );
+
+    node.shutdown();
+}
+
 /// ADR-057: Daemon process resources, thread count, file descriptors and host system telemetry.
 #[tokio::test(flavor = "multi_thread")]
 async fn system_telemetry_metrics_and_probe_via_loopback_api() {

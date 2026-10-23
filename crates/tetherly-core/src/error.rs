@@ -32,6 +32,8 @@ pub enum CoreError {
     Revoked,
     #[error("json: {0}")]
     Json(String),
+    #[error("clipboard: {0}")]
+    Clipboard(String),
     #[error("unknown candidate")]
     UnknownCandidate,
     #[error("candidate expired")]

@@ -3,12 +3,23 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.86** |
+| 文档版本 | **1.87** |
 | 日期 | 2026-10-24 |
-| 状态 | **v1.86 CI 三平台红转绿维护修复**——(1) **输入隧道陈旧 RESP 复活竞态修复**（`receive_input_tunnel_resp` 仅当应答匹配当前活跃会话 ID 才生效：release 终态化、迟到 accepted 不得复活已释放隧道或劫持座位、reject 只拆除其所应答的会话）；(2) **Windows cfg 分支 clippy 违规清零**（`platform.rs::sample_host` 重构为无 mut 的 cfg 双分支构造、`store.rs` 测试 path 绑定移入 `#[cfg(unix)]` 块）；(3) **链路档位断言确定性治理**（`tests/phase1.rs` 三处 Excellent 硬断言放宽为不低于 Good，4/4 收达与 0% 丢包不变量保持严格）；(4) **cargo-deny wildcard 违禁修复**（`tetherly-android` 的 `tetherly-net` path 依赖补钉 version）；(5) **Windows 进程/主机遥测补齐**（`PlatformSysProbe` Windows 分支：RSS/CPU 时间/线程数/物理内存，ADR-057 SysProbe 自落地以来 Windows CI 从未跑到此断言的缺口）。本地六门全绿（fmt / 宿主 clippy / `x86_64-pc-windows-msvc` 交叉 clippy `-D warnings` / `cargo test --workspace --locked` 31 套件 478 全过 / `cargo deny` / Cargo.lock 不变），CI 三平台矩阵复绿，发版 **v0.1.6**。 |
+| 状态 | **v1.87 headless 剪贴板优雅降级（v0.1.6 真机冒烟暴露缺陷的闭环修复）**——v0.1.6 在荷兰 LeaseWeb 沙盒 VPS 真机冒烟暴露：headless Linux（无 X11/Wayland）上 `GET /api/clip/status` 因 OS 剪贴板端口失败直接 HTTP 500，且 arboard 错误被误标为 `CoreError::Json`（错误链前缀 `json:` 误导排障方向）。修复：新增 `CoreError::Clipboard` 变体（`SystemClip` 全部 arboard 错误改映射至此，根因标签诚实）；`clipboard_status` 优雅降级为 200 + `clipboard_available:false` + `reason`（同步统计在无显示服务器下仍可观）；`clear_clipboard` 对不存在的剪贴板按幂等语义成功（历史照常重置并回报可用性）；双端 CLI `clip status` 渲染 `System Clipboard: unavailable (…)` 行。新增回归测试 `clipboard_status_degrades_gracefully_without_display_server`：CI 矩阵天然覆盖两分支（headless ubuntu-latest=失败分支、macos/windows=可用分支）。v1.86 全部既有修复与验证（含 v0.1.6 真机冒烟全记录）见「1.86 相对 1.85」块。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.87 相对 1.86(headless 剪贴板优雅降级)**
+
+- **动机(v0.1.6 真机冒烟暴露的缺陷)**:
+  在荷兰 LeaseWeb 沙盒 VPS（headless Ubuntu 22.04，无 X11/Wayland）实测 v0.1.6 时，`tetherly clip status` 返回 HTTP 500：`clipboard_status()` 对 OS 剪贴板端口错误直接 `?` 传播，而 `SystemClip` 把 arboard 错误映射为 `CoreError::Json`，错误链呈现 `json: Unknown error while interacting with the clipboard: X11 server connection timed out…`——根因标签误导（这是环境状态而非序列化故障）。文档 §6.1 明确支持 headless Linux（凭据库回退文件即为此场景），剪贴板子系统在无显示服务器主机上应作为**状态**而非**故障**上报。
+  1. **`CoreError::Clipboard(String)` 变体（`tetherly-core/src/error.rs`）**：display 为 `clipboard: {0}`；`SystemClip` 的 set/get 全部 arboard 错误改映射至此（`platform.rs` 新增 `clipboard_err` 映射函数），排障时根因一眼可辨。
+  2. **`clipboard_status` 优雅降级（`runtime.rs`）**：`ClipStatusReport` 新增 `clipboard_available: bool` 与 `reason: Option<String>`；端口失败时仍返回 200——同步统计（seq/双向计数/历史数）在无显示服务器主机上保持可观测，仅 `has_text/bytes` 归零并附原因。
+  3. **`clear_clipboard` 幂等语义**：`ClipClearReport` 同样新增两字段；无 OS 剪贴板时「无可清之物」——历史照常重置、事件照常广播、返回 200 并回报 `clipboard_available:false`，不再 500。
+  4. **双端 CLI 同构（`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`）**：`clip status` 在不可用时渲染 `System Clipboard: unavailable (<reason>)` 行。
+  5. **回归测试 `clipboard_status_degrades_gracefully_without_display_server`（`tests/phase1.rs`）**：断言 status/clear 永不 5xx、`ok:true`、不可用时必附非空 reason 且 `has_text:false`、clear 与 status 的可用性一致——CI 矩阵天然双分支覆盖（ubuntu-latest 无显示服务器=失败分支；macos/windows runner 有 pasteboard=可用分支）。
+- **验证**：本地 fmt / 宿主 clippy `-D warnings` / `x86_64-pc-windows-gnu` 交叉 clippy `-D warnings` 全绿；`cargo test --workspace --locked` 31 套件 **479** 用例全过（+1 新回归）。
 
 **1.86 相对 1.85(CI 三平台红转绿维护修复)**
 

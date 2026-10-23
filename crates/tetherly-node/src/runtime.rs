@@ -2297,6 +2297,11 @@ pub struct ClipStatusReport {
     pub inbound_count: u64,
     pub outbound_count: u64,
     pub history_count: usize,
+    /// False on hosts with no display server (headless Linux): the OS
+    /// clipboard port itself is absent, sync statistics remain observable.
+    pub clipboard_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Bounded history report of clipboard synchronization events without leaking plaintext.
@@ -2324,6 +2329,11 @@ pub struct ClipClearReport {
     pub ok: bool,
     pub cleared_history_count: usize,
     pub timestamp_ms: u64,
+    /// False when no OS clipboard exists (headless): history still resets,
+    /// there is simply nothing on the display server to clear.
+    pub clipboard_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 struct Hubs {
@@ -18104,11 +18114,15 @@ impl Node {
     }
 
     /// Inspect clipboard status, size, and synchronization statistics without leaking plaintext.
+    ///
+    /// An absent OS clipboard (headless Linux, no display server) is a state,
+    /// not a failure: the report degrades with `clipboard_available: false`
+    /// while sync statistics stay observable, instead of answering 500.
     pub fn clipboard_status(&self) -> Result<ClipStatusReport, CoreError> {
-        let cur = self.shared.clip.get_text()?;
-        let (has_text, bytes) = match cur {
-            Some(ref t) if !t.is_empty() => (true, t.len()),
-            _ => (false, 0),
+        let (has_text, bytes, clipboard_available, reason) = match self.shared.clip.get_text() {
+            Ok(Some(ref t)) if !t.is_empty() => (true, t.len(), true, None),
+            Ok(_) => (false, 0, true, None),
+            Err(e) => (false, 0, false, Some(e.to_string())),
         };
         let hubs = self.shared.hubs.lock().expect("hubs");
         let (inbound_count, outbound_count) = hubs.clip.stats();
@@ -18124,6 +18138,8 @@ impl Node {
             inbound_count,
             outbound_count,
             history_count,
+            clipboard_available,
+            reason,
         })
     }
 
@@ -18157,7 +18173,9 @@ impl Node {
 
     /// Clears the system clipboard and resets hub state and history buffer.
     pub fn clear_clipboard(&self) -> Result<ClipClearReport, CoreError> {
-        self.shared.clip.set_text("")?;
+        // A host with no OS clipboard has nothing to clear: reset the sync
+        // state anyway and report the absence instead of failing.
+        let clip_err = self.shared.clip.set_text("").err();
         let cleared_history_count = {
             let mut hubs = self.shared.hubs.lock().expect("hubs");
             hubs.clip.reset_state()
@@ -18170,6 +18188,8 @@ impl Node {
             ok: true,
             cleared_history_count,
             timestamp_ms: now_ms,
+            clipboard_available: clip_err.is_none(),
+            reason: clip_err.map(|e| e.to_string()),
         })
     }
 

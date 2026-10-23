@@ -12,19 +12,25 @@ pub struct SystemClip;
 
 impl Clip for SystemClip {
     fn set_text(&self, text: &str) -> Result<(), CoreError> {
-        let mut cb = arboard::Clipboard::new().map_err(|e| CoreError::Json(e.to_string()))?;
-        cb.set_text(text.to_string())
-            .map_err(|e| CoreError::Json(e.to_string()))
+        let mut cb = arboard::Clipboard::new().map_err(clipboard_err)?;
+        cb.set_text(text.to_string()).map_err(clipboard_err)
     }
 
     fn get_text(&self) -> Result<Option<String>, CoreError> {
-        let mut cb = arboard::Clipboard::new().map_err(|e| CoreError::Json(e.to_string()))?;
+        let mut cb = arboard::Clipboard::new().map_err(clipboard_err)?;
         match cb.get_text() {
             Ok(t) => Ok(Some(t)),
             Err(arboard::Error::ContentNotAvailable) => Ok(None),
-            Err(e) => Err(CoreError::Json(e.to_string())),
+            Err(e) => Err(clipboard_err(e)),
         }
     }
+}
+
+/// Map an OS clipboard failure to a labeled error: on hosts with no display
+/// server (headless Linux) this is the expected arboard/X11 outcome, and the
+/// label must not masquerade as a serialization problem.
+fn clipboard_err(e: arboard::Error) -> CoreError {
+    CoreError::Clipboard(e.to_string())
 }
 
 /// In-memory clipboard for tests and headless CI.

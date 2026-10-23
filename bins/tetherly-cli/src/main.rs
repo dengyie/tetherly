@@ -6489,6 +6489,12 @@ async fn main() -> Result<()> {
                     let outbound = v["outbound_count"].as_u64().unwrap_or(0);
                     let history_count = v["history_count"].as_u64().unwrap_or(0);
                     println!("Clipboard Status:");
+                    if !v["clipboard_available"].as_bool().unwrap_or(true) {
+                        println!(
+                            "  System Clipboard: unavailable ({})",
+                            v["reason"].as_str().unwrap_or("no display server")
+                        );
+                    }
                     println!("  Has Content:     {has_text}");
                     println!("  Bytes:           {bytes}");
                     println!("  SHA-256 Digest:  {hash}");
