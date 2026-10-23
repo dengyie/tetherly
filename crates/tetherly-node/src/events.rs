@@ -622,6 +622,42 @@ pub enum UiEvent {
         allowed_types: Vec<String>,
         timestamp_ms: u64,
     },
+    CameraSessionStarted {
+        session_id: String,
+        peer_id: String,
+        peer_alias: String,
+        role: String,
+        lens_id: String,
+        width: u32,
+        height: u32,
+        fps: u32,
+        codec: String,
+        flashlight_on: bool,
+        zoom_ratio: f32,
+        timestamp_ms: u64,
+    },
+    CameraSessionStopped {
+        session_id: String,
+        peer_id: String,
+        peer_alias: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        timestamp_ms: u64,
+    },
+    CameraPolicyChanged {
+        enabled: bool,
+        allow_inbound_stream: bool,
+        allow_remote_capture: bool,
+        max_resolution_width: u32,
+        max_resolution_height: u32,
+        max_fps: u32,
+        enforce_privacy_shutter_indicator: bool,
+        idle_timeout_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -1394,6 +1430,84 @@ impl UiEvent {
             allow_outbound_routing,
             max_volume_limit,
             allow_spatial_rendering,
+            idle_timeout_secs,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn camera_session_started(
+        session_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        role: impl Into<String>,
+        lens_id: impl Into<String>,
+        width: u32,
+        height: u32,
+        fps: u32,
+        codec: impl Into<String>,
+        flashlight_on: bool,
+        zoom_ratio: f32,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::CameraSessionStarted {
+            session_id: session_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            role: role.into(),
+            lens_id: lens_id.into(),
+            width,
+            height,
+            fps,
+            codec: codec.into(),
+            flashlight_on,
+            zoom_ratio,
+            timestamp_ms,
+        }
+    }
+
+    pub fn camera_session_stopped(
+        session_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        reason: Option<impl Into<String>>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::CameraSessionStopped {
+            session_id: session_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            reason: reason.map(Into::into),
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn camera_policy_changed(
+        enabled: bool,
+        allow_inbound_stream: bool,
+        allow_remote_capture: bool,
+        max_resolution_width: u32,
+        max_resolution_height: u32,
+        max_fps: u32,
+        enforce_privacy_shutter_indicator: bool,
+        idle_timeout_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::CameraPolicyChanged {
+            enabled,
+            allow_inbound_stream,
+            allow_remote_capture,
+            max_resolution_width,
+            max_resolution_height,
+            max_fps,
+            enforce_privacy_shutter_indicator,
             idle_timeout_secs,
             allowed_groups,
             allowed_tags,

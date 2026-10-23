@@ -10,6 +10,7 @@ pub mod ancs;
 pub mod audio_routing;
 pub mod battery;
 pub mod bind;
+pub mod camera;
 pub mod clip;
 pub mod dedup;
 pub mod device_id;
@@ -60,6 +61,10 @@ pub use battery::{BatteryStateFrame, BatteryValidator, PowerSource};
 pub use bind::{
     classify, classify_v4, is_unspecified_bind, should_listen, should_listen_v4, BindClass,
 };
+pub use camera::{
+    CameraAnnounceFrame, CameraAttachFrame, CameraCapabilities, CameraCodec, CameraDetachFrame,
+    CameraFacing, CameraFrameChunk, CameraLens, CameraResolution, CameraRole, CameraValidator,
+};
 pub use clip::{
     ClipApply, ClipDirection, ClipHub, ClipMetaEntry, ClipSyncMode, SensitiveContentGuard,
     SensitiveLeakReason, MAX_CLIP_HISTORY,
@@ -78,9 +83,12 @@ pub use frame::{
     TextMessage, CANDIDATE_TTL_MS, CLIPBOARD_OTP_CLEAR_MS, CLIP_TEXT_MAX, FILE_CHUNK,
     FILE_TOKEN_TTL_MS, HANDOFF_TITLE_MAX, HANDOFF_URL_MAX, NOTIFY_TEXT_MAX, TEXT_MESSAGE_MAX,
     TYPE_ACTION_LIST_REQ, TYPE_ACTION_LIST_RESP, TYPE_ACTION_RESULT, TYPE_ACTION_TRIGGER,
-    TYPE_BATTERY_STATE, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ, TYPE_LOCATE_REQUEST,
-    TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_PING, TYPE_PONG,
-    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE, TYPE_TOPOLOGY_SYNC_REQ,
+    TYPE_AUDIO_ROUTING_ANNOUNCE, TYPE_AUDIO_ROUTING_ATTACH, TYPE_AUDIO_ROUTING_CHUNK,
+    TYPE_AUDIO_ROUTING_DETACH, TYPE_BATTERY_STATE, TYPE_CAMERA_ANNOUNCE, TYPE_CAMERA_ATTACH,
+    TYPE_CAMERA_DETACH, TYPE_CAMERA_FRAME_CHUNK, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ,
+    TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_PING,
+    TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE,
+    TYPE_TOPOLOGY_SYNC_REQ,
 };
 pub use handoff::{
     HandoffAction, HandoffEntry, HandoffStatus, ResourceHandoffValidator, SanitizedHandoffUrl,

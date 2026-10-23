@@ -55,6 +55,10 @@ pub const TYPE_AUDIO_ROUTING_ANNOUNCE: u16 = 0x0219;
 pub const TYPE_AUDIO_ROUTING_ATTACH: u16 = 0x021A;
 pub const TYPE_AUDIO_ROUTING_DETACH: u16 = 0x021B;
 pub const TYPE_AUDIO_ROUTING_CHUNK: u16 = 0x021C;
+pub const TYPE_CAMERA_ANNOUNCE: u16 = 0x021D;
+pub const TYPE_CAMERA_ATTACH: u16 = 0x021E;
+pub const TYPE_CAMERA_DETACH: u16 = 0x021F;
+pub const TYPE_CAMERA_FRAME_CHUNK: u16 = 0x0220;
 pub const TYPE_FILE_OFFER: u16 = 0x0301;
 pub const TYPE_FILE_ACCEPT: u16 = 0x0302;
 pub const TYPE_FILE_REJECT: u16 = 0x0303;
@@ -162,6 +166,10 @@ pub fn is_known_type(ty: u16) -> bool {
             | TYPE_AUDIO_ROUTING_ATTACH
             | TYPE_AUDIO_ROUTING_DETACH
             | TYPE_AUDIO_ROUTING_CHUNK
+            | TYPE_CAMERA_ANNOUNCE
+            | TYPE_CAMERA_ATTACH
+            | TYPE_CAMERA_DETACH
+            | TYPE_CAMERA_FRAME_CHUNK
             | TYPE_FILE_OFFER
             | TYPE_FILE_ACCEPT
             | TYPE_FILE_REJECT

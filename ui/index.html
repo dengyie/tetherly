@@ -1734,6 +1734,153 @@
         <div id="audio-routing-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
       </div>
     </section>
+    <section style="margin-top:16px" id="camera-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2>跨端轻量级虚拟摄像头推流与硬件隐私治理 (Cross-Device Virtual Camera & Privacy Governance)</h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button id="togglecamerapolicybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">治理策略</button>
+          <button id="refreshcamerabtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新状态</button>
+        </div>
+      </div>
+      <div class="hint">发现并协商挂载远端配对设备（手机/平板/外部镜头）作为高清虚拟摄像头，支持镜头切换、闪光灯补光、数码变焦与强制硬件隐私指示灯治理。</div>
+
+      <!-- Policy Subpanel -->
+      <div id="camera-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-weight:600;font-size:12px;color:var(--text)">虚拟摄像头准入与硬件隐私治理策略 (ADR-075)</span>
+          <span id="camera-policy-badge" class="badge completed" style="font-size:11px">Policy: Active</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">虚拟摄像头总开关 (Enabled):</label>
+            <select id="camera-policy-enabled" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">启用 (Enabled)</option>
+              <option value="false">禁用 (Disabled)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">接收远端推流 (Allow Inbound):</label>
+            <select id="camera-policy-inbound" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许接收远端摄像头流 (Client)</option>
+              <option value="false">禁止接收远端摄像头流</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许本机镜头采集 (Allow Capture):</label>
+            <select id="camera-policy-capture" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许本机被挂载为摄像头 (Host)</option>
+              <option value="false">禁止本机镜头采集推流</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">最大分辨率宽 (Max Width px):</label>
+            <input id="camera-policy-maxwidth" type="number" min="320" max="3840" placeholder="3840" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">最大分辨率高 (Max Height px):</label>
+            <input id="camera-policy-maxheight" type="number" min="240" max="2160" placeholder="2160" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">最高帧率上限 (Max FPS):</label>
+            <input id="camera-policy-maxfps" type="number" min="10" max="60" placeholder="60" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">强制硬件隐私指示灯 (Privacy Shutter):</label>
+            <select id="camera-policy-shutter" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">强制点亮指示灯 (必须提示)</option>
+              <option value="false">放宽指示灯检查</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">闲置超时自动释放 (Idle Timeout):</label>
+            <input id="camera-policy-timeout" type="number" min="0" placeholder="300" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">业务分组准入 (Allowed Groups):</label>
+            <input id="camera-policy-groups" placeholder="留空表示不限制分组" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">业务标签准入 (Allowed Tags):</label>
+            <input id="camera-policy-tags" placeholder="留空表示不限制标签" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">设备形态准入 (Allowed Types):</label>
+            <input id="camera-policy-types" placeholder="留空表示不限制形态" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+          <button id="camera-policy-save-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px">保存策略 (Save)</button>
+          <button id="camera-policy-reset-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">重置过滤 (Reset)</button>
+          <div id="camera-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Main Camera Panel -->
+      <div style="background:var(--card-bg);border:1px solid var(--line);border-radius:6px;padding:12px;margin-top:8px">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <!-- Status Banner -->
+          <div style="display:flex;justify-content:space-between;align-items:center;background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:8px 12px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-size:18px">📷📹</span>
+              <div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <span id="camera-status-badge" class="badge" style="font-size:11px">虚拟摄像头未激活</span>
+                  <span id="camera-role-badge" class="badge" style="font-size:11px">角色: 空闲 (Idle)</span>
+                  <span id="camera-privacy-badge" class="badge" style="font-size:11px;background:#182026;color:var(--muted)">隐私指示灯: 熄灭</span>
+                </div>
+                <div id="camera-session-info" style="font-size:12px;color:var(--muted);margin-top:2px">轻量级虚拟摄像头引擎就绪，支持远端镜头挂载、自适应帧率调谐与硬件隐私指示灯治理。</div>
+              </div>
+            </div>
+            <div style="text-align:right">
+              <div id="camera-active-peer" style="font-size:12px;color:var(--muted);font-weight:600">当前对端: 无</div>
+              <div id="camera-telemetry-info" style="font-size:11px;color:var(--muted)">指标: 0 帧 · 0 字节 · 丢帧: 0 · 闪光灯: 关 · 变焦: 1.0x</div>
+            </div>
+          </div>
+
+          <!-- Attach & Detach Actions -->
+          <div style="background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px">
+            <div style="font-size:12px;font-weight:600;color:var(--muted)">虚拟摄像头挂载 / 释放连接 (Attach & Detach)</div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <select id="camera-attach-peer-select" style="flex:1;min-width:180px;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="">-- 选择目标摄像头设备 --</option>
+              </select>
+              <select id="camera-attach-lens-select" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="back">后置主摄 (Back Lens)</option>
+                <option value="front">前置自拍 (Front Lens)</option>
+                <option value="external">外接镜头 (External)</option>
+              </select>
+              <select id="camera-attach-resolution" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="1920x1080">1080P (1920x1080)</option>
+                <option value="1280x720">720P (1280x720)</option>
+                <option value="640x480">480P (640x480)</option>
+                <option value="3840x2160">4K UHD (3840x2160)</option>
+              </select>
+              <input id="camera-attach-fps" type="number" min="10" max="60" placeholder="FPS (30)" style="width:75px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <select id="camera-attach-codec" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="mjpeg">MJPEG (轻量流)</option>
+                <option value="zstd_rgb">Zstd-RGB (无损压缩)</option>
+                <option value="raw_nv12">Raw-NV12 (高频原始)</option>
+                <option value="h264_light">H264-Light (压缩优先)</option>
+              </select>
+              <label style="font-size:12px;color:var(--text);display:flex;align-items:center;gap:4px">
+                <input id="camera-attach-torch" type="checkbox" style="vertical-align:middle"/> 补光灯
+              </label>
+              <input id="camera-attach-zoom" type="number" step="0.1" min="0.5" max="20.0" placeholder="变焦 (1.0x)" style="width:85px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <button id="camera-attach-btn" class="ghost" type="button" style="padding:4px 14px;font-size:12px;font-weight:600;background:var(--accent);color:#fff">挂载镜头 (Attach)</button>
+              <input id="camera-detach-reason" placeholder="断开原因 (可选)" style="width:130px;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <button id="camera-detach-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">断开镜头 (Detach)</button>
+            </div>
+          </div>
+
+          <!-- Bottom Indicators -->
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:6px;margin-top:4px">
+            <span id="camera-policy-indicator">虚拟摄像头: 启用 · 双向推流放行 · 最高 3840x2160@60FPS · 强制隐私灯 · 超时 300s</span>
+            <span id="camera-audit-indicator">隐私合规: 硬件指示灯物理防偷窥 · 零明文人脸像素审计 · 授权双向闭锁</span>
+          </div>
+        </div>
+        <div id="camera-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
+      </div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
@@ -5523,6 +5670,20 @@ async function updateTopologyPeers() {
       if (currentVal) audioPeerSel.value = currentVal;
     }
 
+    // Update virtual camera attach peer select options
+    const cameraPeerSel = $("camera-attach-peer-select");
+    if (cameraPeerSel && document.activeElement !== cameraPeerSel) {
+      const currentVal = cameraPeerSel.value;
+      let html = '<option value="">-- 选择目标摄像头设备 --</option>';
+      for (const p of peers) {
+        const id = p.peer_id || "";
+        const alias = p.peer_alias || id.slice(0, 8);
+        html += `<option value="${id}">${escapeHtml(alias)}</option>`;
+      }
+      cameraPeerSel.innerHTML = html;
+      if (currentVal) cameraPeerSel.value = currentVal;
+    }
+
     // Render Peer Topologies Grid
     const container = $("topology-peer-items");
     if (container) {
@@ -6507,6 +6668,294 @@ if (audioRoutingDetachBtn) {
         if (msg) msg.textContent = "已成功断开空间音频路由！";
         setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
         updateAudioRouting();
+      } else {
+        if (msg) msg.textContent = "断开失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+async function updateCamera() {
+  try {
+    const rep = await api("/api/camera");
+    if (!rep || !rep.ok) return;
+
+    const active = !!rep.active;
+    const sess = rep.session;
+
+    if ($("camera-status-badge")) {
+      $("camera-status-badge").textContent = active ? "虚拟摄像头已激活 (Active)" : "虚拟摄像头未激活 (Inactive)";
+      $("camera-status-badge").className = active ? "badge completed" : "badge";
+    }
+
+    if ($("camera-role-badge")) {
+      if (active && sess) {
+        const isClient = sess.role === "client";
+        $("camera-role-badge").textContent = isClient ? "角色: 虚拟输入端 (Client)" : "角色: 镜头采集端 (Host)";
+        $("camera-role-badge").className = isClient ? "badge outbound" : "badge completed";
+      } else {
+        $("camera-role-badge").textContent = "角色: 空闲 (Idle)";
+        $("camera-role-badge").className = "badge";
+      }
+    }
+
+    if ($("camera-privacy-badge")) {
+      if (active && sess && sess.privacy_shutter_active) {
+        $("camera-privacy-badge").textContent = "隐私指示灯: 绿色点亮 (采集监控中)";
+        $("camera-privacy-badge").style.background = "#133820";
+        $("camera-privacy-badge").style.color = "var(--ok)";
+      } else {
+        $("camera-privacy-badge").textContent = "隐私指示灯: 熄灭";
+        $("camera-privacy-badge").style.background = "#182026";
+        $("camera-privacy-badge").style.color = "var(--muted)";
+      }
+    }
+
+    if ($("camera-session-info")) {
+      if (active && sess) {
+        const sid = sess.session_id || "";
+        const peer = sess.peer_id || sess.peer || "";
+        const lens = sess.lens_id ? ` · 镜头: ${sess.lens_id}` : "";
+        const res = sess.width && sess.height ? ` · 规格: ${sess.width}x${sess.height}` : "";
+        const fps = sess.fps ? `@${sess.fps}FPS` : "";
+        const codec = sess.codec ? ` · 编码: ${sess.codec.toUpperCase()}` : "";
+        $("camera-session-info").textContent = `会话: ${sid} · 对端: ${peer}${lens}${res}${fps}${codec}`;
+      } else {
+        $("camera-session-info").textContent = "轻量级虚拟摄像头引擎就绪，支持远端镜头挂载、自适应帧率调谐与硬件隐私指示灯治理。";
+      }
+    }
+
+    if ($("camera-active-peer")) {
+      const p = sess ? (sess.peer_id || sess.peer) : "";
+      $("camera-active-peer").textContent = active && p ? `当前对端: ${p}` : "当前对端: 无";
+    }
+
+    if ($("camera-telemetry-info")) {
+      if (active && sess) {
+        const bytes = sess.bytes_transferred || 0;
+        const frames = (sess.frames_sent || 0) + (sess.frames_received || 0);
+        const dropped = sess.dropped_frames || 0;
+        const torch = sess.torch ? "开" : "关";
+        const zoom = sess.zoom !== undefined ? sess.zoom.toFixed(1) : "1.0";
+        const curFps = sess.current_fps !== undefined ? sess.current_fps.toFixed(1) : (sess.fps || 30);
+        $("camera-telemetry-info").textContent = `指标: ${frames} 帧 (${curFps} FPS) · ${formatBytes(bytes)} · 丢帧: ${dropped} · 闪光灯: ${torch} · 变焦: ${zoom}x`;
+      } else {
+        $("camera-telemetry-info").textContent = "指标: 0 帧 · 0 字节 · 丢帧: 0 · 闪光灯: 关 · 变焦: 1.0x";
+      }
+    }
+
+    if (rep.policy) {
+      updateCameraPolicyUI(rep.policy);
+    }
+  } catch (e) {
+    // ignore polling blip
+  }
+}
+
+async function updateCameraPolicy() {
+  try {
+    const rep = await api("/api/camera/policy");
+    if (!rep || !rep.ok) return;
+    const p = rep.policy || rep;
+    updateCameraPolicyUI(p);
+  } catch (e) {}
+}
+
+function updateCameraPolicyUI(p) {
+  if (!p) return;
+  const en = p.enabled !== false;
+  const inbound = p.allow_inbound !== false;
+  const capture = p.allow_capture !== false;
+  const maxW = p.max_resolution_width || 3840;
+  const maxH = p.max_resolution_height || 2160;
+  const maxFps = p.max_fps || 60;
+  const shutter = p.require_hardware_privacy_shutter !== false;
+  const timeout = p.idle_timeout_secs || 300;
+
+  if ($("camera-policy-badge")) {
+    $("camera-policy-badge").textContent = en ? "Policy: Active" : "Policy: Disabled";
+    $("camera-policy-badge").className = en ? "badge completed" : "badge";
+  }
+
+  if ($("camera-policy-indicator")) {
+    $("camera-policy-indicator").textContent = `虚拟摄像头: ${en ? "启用" : "禁用"} · 接收[${inbound ? "放行" : "拦截"}] 采集[${capture ? "放行" : "拦截"}] · 最高 ${maxW}x${maxH}@${maxFps}FPS · 隐私灯[${shutter ? "强制" : "放宽"}] · 超时 ${timeout}s`;
+  }
+
+  if ($("camera-policy-enabled") && document.activeElement !== $("camera-policy-enabled")) {
+    $("camera-policy-enabled").value = en ? "true" : "false";
+  }
+  if ($("camera-policy-inbound") && document.activeElement !== $("camera-policy-inbound")) {
+    $("camera-policy-inbound").value = inbound ? "true" : "false";
+  }
+  if ($("camera-policy-capture") && document.activeElement !== $("camera-policy-capture")) {
+    $("camera-policy-capture").value = capture ? "true" : "false";
+  }
+  if ($("camera-policy-maxwidth") && document.activeElement !== $("camera-policy-maxwidth")) {
+    $("camera-policy-maxwidth").value = maxW;
+  }
+  if ($("camera-policy-maxheight") && document.activeElement !== $("camera-policy-maxheight")) {
+    $("camera-policy-maxheight").value = maxH;
+  }
+  if ($("camera-policy-maxfps") && document.activeElement !== $("camera-policy-maxfps")) {
+    $("camera-policy-maxfps").value = maxFps;
+  }
+  if ($("camera-policy-shutter") && document.activeElement !== $("camera-policy-shutter")) {
+    $("camera-policy-shutter").value = shutter ? "true" : "false";
+  }
+  if ($("camera-policy-timeout") && document.activeElement !== $("camera-policy-timeout")) {
+    $("camera-policy-timeout").value = timeout;
+  }
+  if ($("camera-policy-groups") && document.activeElement !== $("camera-policy-groups")) {
+    $("camera-policy-groups").value = (p.allowed_groups || []).join(", ");
+  }
+  if ($("camera-policy-tags") && document.activeElement !== $("camera-policy-tags")) {
+    $("camera-policy-tags").value = (p.allowed_tags || []).join(", ");
+  }
+  if ($("camera-policy-types") && document.activeElement !== $("camera-policy-types")) {
+    $("camera-policy-types").value = (p.allowed_types || []).join(", ");
+  }
+}
+
+const toggleCameraPolicyBtn = $("togglecamerapolicybtn");
+if (toggleCameraPolicyBtn) {
+  toggleCameraPolicyBtn.onclick = () => {
+    const p = $("camera-policy-panel");
+    if (p) p.style.display = p.style.display === "none" ? "block" : "none";
+  };
+}
+
+const refreshCameraBtn = $("refreshcamerabtn");
+if (refreshCameraBtn) {
+  refreshCameraBtn.onclick = () => {
+    updateCamera();
+    updateCameraPolicy();
+  };
+}
+
+const cameraPolicySaveBtn = $("camera-policy-save-btn");
+if (cameraPolicySaveBtn) {
+  cameraPolicySaveBtn.onclick = async () => {
+    const en = $("camera-policy-enabled") ? $("camera-policy-enabled").value === "true" : undefined;
+    const inbound = $("camera-policy-inbound") ? $("camera-policy-inbound").value === "true" : undefined;
+    const capture = $("camera-policy-capture") ? $("camera-policy-capture").value === "true" : undefined;
+    const maxW = $("camera-policy-maxwidth") && $("camera-policy-maxwidth").value ? parseInt($("camera-policy-maxwidth").value, 10) : undefined;
+    const maxH = $("camera-policy-maxheight") && $("camera-policy-maxheight").value ? parseInt($("camera-policy-maxheight").value, 10) : undefined;
+    const maxFps = $("camera-policy-maxfps") && $("camera-policy-maxfps").value ? parseInt($("camera-policy-maxfps").value, 10) : undefined;
+    const shutter = $("camera-policy-shutter") ? $("camera-policy-shutter").value === "true" : undefined;
+    const timeout = $("camera-policy-timeout") && $("camera-policy-timeout").value ? parseInt($("camera-policy-timeout").value, 10) : undefined;
+    const grpsVal = $("camera-policy-groups") ? $("camera-policy-groups").value.trim() : "";
+    const tagsVal = $("camera-policy-tags") ? $("camera-policy-tags").value.trim() : "";
+    const typesVal = $("camera-policy-types") ? $("camera-policy-types").value.trim() : "";
+    const msg = $("camera-policy-msg");
+
+    const payload = {};
+    if (en !== undefined) payload.enabled = en;
+    if (inbound !== undefined) payload.allow_inbound = inbound;
+    if (capture !== undefined) payload.allow_capture = capture;
+    if (maxW !== undefined) payload.max_resolution_width = maxW;
+    if (maxH !== undefined) payload.max_resolution_height = maxH;
+    if (maxFps !== undefined) payload.max_fps = maxFps;
+    if (shutter !== undefined) payload.require_hardware_privacy_shutter = shutter;
+    if (timeout !== undefined) payload.idle_timeout_secs = timeout;
+    if (grpsVal) payload.allowed_groups = grpsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (tagsVal) payload.allowed_tags = tagsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (typesVal) payload.allowed_types = typesVal.split(",").map(s => s.trim()).filter(Boolean);
+
+    try {
+      const rep = await api("/api/camera/policy", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "策略已保存并原子持久化！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateCameraPolicy();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const cameraPolicyResetBtn = $("camera-policy-reset-btn");
+if (cameraPolicyResetBtn) {
+  cameraPolicyResetBtn.onclick = async () => {
+    const msg = $("camera-policy-msg");
+    try {
+      const rep = await api("/api/camera/policy", {
+        allowed_groups: [],
+        allowed_tags: [],
+        allowed_types: []
+      });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "设备准入白名单过滤已重置为空！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateCameraPolicy();
+      } else {
+        if (msg) msg.textContent = "重置失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const cameraAttachBtn = $("camera-attach-btn");
+if (cameraAttachBtn) {
+  cameraAttachBtn.onclick = async () => {
+    const peer = $("camera-attach-peer-select") ? $("camera-attach-peer-select").value.trim() : "";
+    const lens = $("camera-attach-lens-select") ? $("camera-attach-lens-select").value : "back";
+    const res = $("camera-attach-resolution") ? $("camera-attach-resolution").value : "1920x1080";
+    const fps = $("camera-attach-fps") && $("camera-attach-fps").value ? parseInt($("camera-attach-fps").value, 10) : undefined;
+    const codec = $("camera-attach-codec") ? $("camera-attach-codec").value : "mjpeg";
+    const torch = $("camera-attach-torch") ? $("camera-attach-torch").checked : false;
+    const zoom = $("camera-attach-zoom") && $("camera-attach-zoom").value ? parseFloat($("camera-attach-zoom").value) : undefined;
+    const msg = $("camera-status-msg");
+
+    if (!peer) {
+      if (msg) msg.textContent = "请先选择目标摄像头设备！";
+      return;
+    }
+
+    const [wStr, hStr] = res.split("x");
+    const width = parseInt(wStr, 10) || 1920;
+    const height = parseInt(hStr, 10) || 1080;
+
+    const payload = { peer, lens_id: lens, width, height, codec, torch };
+    if (fps !== undefined) payload.fps = fps;
+    if (zoom !== undefined) payload.zoom = zoom;
+
+    try {
+      const rep = await api("/api/camera/attach", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "虚拟摄像头已成功挂载！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateCamera();
+      } else {
+        if (msg) msg.textContent = "挂载失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const cameraDetachBtn = $("camera-detach-btn");
+if (cameraDetachBtn) {
+  cameraDetachBtn.onclick = async () => {
+    const reason = $("camera-detach-reason") ? $("camera-detach-reason").value.trim() : "";
+    const msg = $("camera-status-msg");
+
+    const payload = {};
+    if (reason) payload.reason = reason;
+
+    try {
+      const rep = await api("/api/camera/detach", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "已成功断开虚拟摄像头！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateCamera();
       } else {
         if (msg) msg.textContent = "断开失败: " + (rep ? rep.error : "未知错误");
       }
@@ -8398,11 +8847,24 @@ function setupEventSource() {
 								            desc = "空间音频释放: " + ev.session_id + " (" + (ev.reason || "正常退出") + ")";
 								            updateAudioRouting();
 								          }
-								          else if (ev.kind === "audio_routing_policy_changed") {
-								            desc = "空间音频策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许接收=" + (ev.allow_inbound_sink ? "是" : "否") + " · 允许推流=" + (ev.allow_outbound_routing ? "是" : "否");
-								            updateAudioRoutingPolicy();
-								            updateAudioRouting();
-								          }
+									          else if (ev.kind === "audio_routing_policy_changed") {
+									            desc = "空间音频策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许接收=" + (ev.allow_inbound_sink ? "是" : "否") + " · 允许推流=" + (ev.allow_outbound_routing ? "是" : "否");
+									            updateAudioRoutingPolicy();
+									            updateAudioRouting();
+									          }
+									          else if (ev.kind === "camera_session_started") {
+									            desc = "虚拟摄像头建立: " + ev.session_id + " [" + ev.role + "] 对端:" + (ev.peer_alias || ev.peer_id) + " (" + ev.width + "x" + ev.height + "@" + ev.fps + "FPS, 镜头:" + ev.lens_id + ")";
+									            updateCamera();
+									          }
+									          else if (ev.kind === "camera_session_stopped") {
+									            desc = "虚拟摄像头释放: " + ev.session_id + " (" + (ev.reason || "正常退出") + ")";
+									            updateCamera();
+									          }
+									          else if (ev.kind === "camera_policy_changed") {
+									            desc = "虚拟摄像头策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许接收=" + (ev.allow_inbound ? "是" : "否") + " · 允许采集=" + (ev.allow_capture ? "是" : "否");
+									            updateCameraPolicy();
+									            updateCamera();
+									          }
 					          else if (ev.kind === "network_refreshed") {
 					            desc = "网络已重探: 扫描 " + ev.iface_count + " 网卡 (监听 " + ev.listen_count + ")" + (ev.overlay_present ? (" · 侧车: " + (ev.overlay_source || "在网")) : "");
 					            updateNetworkStatus();
@@ -8588,10 +9050,14 @@ function setupEventSource() {
 																					setInterval(updateVirtualDisplay, 3000);
 																					updateVirtualDisplayPolicy();
 																					setInterval(updateVirtualDisplayPolicy, 3000);
-																					updateAudioRouting();
-																					setInterval(updateAudioRouting, 3000);
-																					updateAudioRoutingPolicy();
-																					setInterval(updateAudioRoutingPolicy, 3000);
-								</script>
+																						updateAudioRouting();
+																						setInterval(updateAudioRouting, 3000);
+																						updateAudioRoutingPolicy();
+																						setInterval(updateAudioRoutingPolicy, 3000);
+																						updateCamera();
+																						setInterval(updateCamera, 3000);
+																						updateCameraPolicy();
+																						setInterval(updateCameraPolicy, 3000);
+									</script>
 </body>
 </html>

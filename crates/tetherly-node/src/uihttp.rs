@@ -7,7 +7,8 @@ use crate::store::{ActionAccessMode, LocalActionDefinition};
 use serde::Serialize;
 use std::net::SocketAddr;
 use tetherly_core::{
-    ActionValidator, AudioChannelLayout, DisplayEdge, MediaCommand, PlaybackState, PowerSource,
+    ActionValidator, AudioChannelLayout, CameraCodec, DisplayEdge, MediaCommand, PlaybackState,
+    PowerSource,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::{TcpListener, TcpStream};
@@ -484,6 +485,9 @@ struct Snapshot {
     /// Spatial audio routing status report if present.
     #[serde(skip_serializing_if = "Option::is_none")]
     audio_routing_status: Option<crate::runtime::AudioRoutingStatusReport>,
+    /// Virtual camera status report if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    camera_status: Option<crate::runtime::CameraStatusReport>,
 }
 
 #[derive(Serialize)]
@@ -1261,6 +1265,66 @@ struct AudioRoutingPolicyBody {
         alias = "spatial_rendering_enabled"
     )]
     allow_spatial_rendering: Option<bool>,
+    #[serde(default, alias = "timeout", alias = "idle_timeout")]
+    idle_timeout_secs: Option<u32>,
+    #[serde(default, alias = "group", alias = "groups")]
+    allowed_groups: Option<Vec<String>>,
+    #[serde(default, alias = "tag", alias = "tags")]
+    allowed_tags: Option<Vec<String>>,
+    #[serde(
+        default,
+        alias = "type",
+        alias = "types",
+        alias = "device_type",
+        alias = "device_types"
+    )]
+    allowed_types: Option<Vec<String>>,
+    #[serde(default)]
+    clear_filters: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct CameraAttachBody {
+    #[serde(default, alias = "peer_id", alias = "device_id", alias = "target")]
+    peer: Option<String>,
+    #[serde(default, alias = "lens")]
+    lens_id: Option<String>,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default, alias = "target_fps")]
+    fps: Option<u32>,
+    #[serde(default)]
+    codec: Option<String>,
+    #[serde(default, alias = "torch")]
+    flashlight: Option<bool>,
+    #[serde(default, alias = "zoom_ratio")]
+    zoom: Option<f32>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct CameraDetachBody {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct CameraPolicyBody {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default, alias = "inbound", alias = "allow_inbound")]
+    allow_inbound_stream: Option<bool>,
+    #[serde(default, alias = "capture", alias = "allow_capture")]
+    allow_remote_capture: Option<bool>,
+    #[serde(default, alias = "max_width")]
+    max_resolution_width: Option<u32>,
+    #[serde(default, alias = "max_height")]
+    max_resolution_height: Option<u32>,
+    #[serde(default, alias = "fps")]
+    max_fps: Option<u32>,
+    #[serde(default, alias = "privacy_shutter", alias = "enforce_privacy_shutter")]
+    enforce_privacy_shutter_indicator: Option<bool>,
     #[serde(default, alias = "timeout", alias = "idle_timeout")]
     idle_timeout_secs: Option<u32>,
     #[serde(default, alias = "group", alias = "groups")]
@@ -4477,6 +4541,272 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 Err(e) => err(400, &e.to_string()),
             }
         }
+        ("GET", "/api/camera") | ("GET", "/api/camera/status") => json_ok(&node.camera_status()),
+        ("POST", "/api/camera/attach") | ("PUT", "/api/camera/attach") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<CameraAttachBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<CameraAttachBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected CameraAttachBody"),
+                }
+            };
+
+            let peer = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone())
+                .or_else(|| qmap.get("peer").cloned())
+                .or_else(|| qmap.get("peer_id").cloned())
+                .or_else(|| qmap.get("target").cloned());
+            let peer = match peer {
+                Some(p) if !p.trim().is_empty() => p,
+                _ => return err(400, "missing 'peer' parameter"),
+            };
+
+            let lens_id = parsed_body
+                .as_ref()
+                .and_then(|b| b.lens_id.clone())
+                .or_else(|| qmap.get("lens_id").cloned())
+                .or_else(|| qmap.get("lens").cloned());
+
+            let width = parsed_body
+                .as_ref()
+                .and_then(|b| b.width)
+                .or_else(|| qmap.get("width").and_then(|s| s.parse::<u32>().ok()));
+
+            let height = parsed_body
+                .as_ref()
+                .and_then(|b| b.height)
+                .or_else(|| qmap.get("height").and_then(|s| s.parse::<u32>().ok()));
+
+            let fps = parsed_body.as_ref().and_then(|b| b.fps).or_else(|| {
+                qmap.get("target_fps")
+                    .or_else(|| qmap.get("fps"))
+                    .and_then(|s| s.parse::<u32>().ok())
+            });
+
+            let codec = parsed_body
+                .as_ref()
+                .and_then(|b| b.codec.clone())
+                .or_else(|| qmap.get("codec").cloned())
+                .and_then(|c| match c.to_ascii_lowercase().as_str() {
+                    "mjpeg" => Some(CameraCodec::Mjpeg),
+                    "zstd_rgb" | "zstd-rgb" | "zstd" => Some(CameraCodec::ZstdRgb),
+                    "raw_nv12" | "raw-nv12" | "nv12" => Some(CameraCodec::RawNv12),
+                    "h264_light" | "h264-light" | "h264" => Some(CameraCodec::H264Light),
+                    _ => None,
+                });
+
+            let flashlight = parsed_body.as_ref().and_then(|b| b.flashlight).or_else(|| {
+                qmap.get("flashlight")
+                    .or_else(|| qmap.get("torch"))
+                    .or_else(|| qmap.get("flashlight_on"))
+                    .and_then(|s| s.parse::<bool>().ok())
+            });
+
+            let zoom = parsed_body.as_ref().and_then(|b| b.zoom).or_else(|| {
+                qmap.get("zoom")
+                    .or_else(|| qmap.get("zoom_ratio"))
+                    .and_then(|s| s.parse::<f32>().ok())
+            });
+
+            match node
+                .camera_attach(
+                    &peer,
+                    lens_id.as_deref(),
+                    width,
+                    height,
+                    fps,
+                    codec,
+                    flashlight,
+                    zoom,
+                )
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/camera/detach") | ("PUT", "/api/camera/detach") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<CameraDetachBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<CameraDetachBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected CameraDetachBody"),
+                }
+            };
+
+            let reason = parsed_body
+                .as_ref()
+                .and_then(|b| b.reason.clone())
+                .or_else(|| qmap.get("reason").cloned());
+
+            match node.camera_detach(reason.as_deref()).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/camera/policy") => json_ok(&node.camera_policy_report()),
+        ("POST", "/api/camera/policy") | ("PUT", "/api/camera/policy") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<CameraPolicyBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<CameraPolicyBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected CameraPolicyBody"),
+                }
+            };
+
+            let mut policy = node.camera_policy();
+            if let Some(ref b) = parsed_body {
+                if let Some(en) = b.enabled {
+                    policy.enabled = en;
+                }
+                if let Some(inbound) = b.allow_inbound_stream {
+                    policy.allow_inbound_stream = inbound;
+                }
+                if let Some(capture) = b.allow_remote_capture {
+                    policy.allow_remote_capture = capture;
+                }
+                if let Some(w) = b.max_resolution_width {
+                    policy.max_resolution_width = w;
+                }
+                if let Some(h) = b.max_resolution_height {
+                    policy.max_resolution_height = h;
+                }
+                if let Some(fps) = b.max_fps {
+                    policy.max_fps = fps;
+                }
+                if let Some(shutter) = b.enforce_privacy_shutter_indicator {
+                    policy.enforce_privacy_shutter_indicator = shutter;
+                }
+                if let Some(to) = b.idle_timeout_secs {
+                    policy.idle_timeout_secs = to;
+                }
+                if let Some(ref grps) = b.allowed_groups {
+                    policy.allowed_groups = grps.clone();
+                }
+                if let Some(ref tags) = b.allowed_tags {
+                    policy.allowed_tags = tags.clone();
+                }
+                if let Some(ref types) = b.allowed_types {
+                    let mut dtypes = Vec::new();
+                    for t in types {
+                        match t.parse::<crate::store::DeviceType>() {
+                            Ok(dt) => dtypes.push(dt),
+                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
+                        }
+                    }
+                    policy.allowed_types = dtypes;
+                }
+                if b.clear_filters == Some(true) {
+                    policy.allowed_groups.clear();
+                    policy.allowed_tags.clear();
+                    policy.allowed_types.clear();
+                }
+            }
+
+            if let Some(en) = qmap.get("enabled").or_else(|| qmap.get("enable")) {
+                if let Ok(b) = en.parse::<bool>() {
+                    policy.enabled = b;
+                }
+            }
+            if let Some(inbound) = qmap
+                .get("allow_inbound_stream")
+                .or_else(|| qmap.get("allow_inbound"))
+                .or_else(|| qmap.get("inbound"))
+            {
+                if let Ok(b) = inbound.parse::<bool>() {
+                    policy.allow_inbound_stream = b;
+                }
+            }
+            if let Some(capture) = qmap
+                .get("allow_remote_capture")
+                .or_else(|| qmap.get("allow_capture"))
+                .or_else(|| qmap.get("capture"))
+            {
+                if let Ok(b) = capture.parse::<bool>() {
+                    policy.allow_remote_capture = b;
+                }
+            }
+            if let Some(w_str) = qmap
+                .get("max_resolution_width")
+                .or_else(|| qmap.get("max_width"))
+            {
+                if let Ok(w) = w_str.parse::<u32>() {
+                    policy.max_resolution_width = w;
+                }
+            }
+            if let Some(h_str) = qmap
+                .get("max_resolution_height")
+                .or_else(|| qmap.get("max_height"))
+            {
+                if let Ok(h) = h_str.parse::<u32>() {
+                    policy.max_resolution_height = h;
+                }
+            }
+            if let Some(fps_str) = qmap.get("max_fps").or_else(|| qmap.get("fps")) {
+                if let Ok(f) = fps_str.parse::<u32>() {
+                    policy.max_fps = f;
+                }
+            }
+            if let Some(shutter_str) = qmap
+                .get("enforce_privacy_shutter_indicator")
+                .or_else(|| qmap.get("privacy_shutter"))
+                .or_else(|| qmap.get("shutter"))
+            {
+                if let Ok(b) = shutter_str.parse::<bool>() {
+                    policy.enforce_privacy_shutter_indicator = b;
+                }
+            }
+            if let Some(to) = qmap
+                .get("idle_timeout_secs")
+                .or_else(|| qmap.get("timeout"))
+                .or_else(|| qmap.get("idle_timeout"))
+            {
+                if let Ok(v) = to.parse::<u32>() {
+                    policy.idle_timeout_secs = v;
+                }
+            }
+            if let Some(grp) = qmap.get("group").or_else(|| qmap.get("allowed_group")) {
+                if !policy.allowed_groups.contains(grp) {
+                    policy.allowed_groups.push(grp.clone());
+                }
+            }
+            if let Some(tag) = qmap.get("tag").or_else(|| qmap.get("allowed_tag")) {
+                if !policy.allowed_tags.contains(tag) {
+                    policy.allowed_tags.push(tag.clone());
+                }
+            }
+            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
+                match dt_str.parse::<crate::store::DeviceType>() {
+                    Ok(dt) => {
+                        if !policy.allowed_types.contains(&dt) {
+                            policy.allowed_types.push(dt);
+                        }
+                    }
+                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
+                }
+            }
+            if qmap
+                .get("clear_filters")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false)
+            {
+                policy.allowed_groups.clear();
+                policy.allowed_tags.clear();
+                policy.allowed_types.clear();
+            }
+
+            match node.set_camera_policy(policy) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         ("GET", "/api/audit")
         | ("GET", "/api/security/audit")
         | ("GET", "/api/audit/logs")
@@ -6818,6 +7148,7 @@ async fn snapshot(node: &Node) -> Snapshot {
         focus_status: Some(node.focus_status()),
         topology_layout: Some(node.topology_layout()),
         audio_routing_status: Some(node.audio_routing_status()),
+        camera_status: Some(node.camera_status()),
     }
 }
 
@@ -7735,6 +8066,91 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/audio/routing HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_camera_endpoints_and_host_validation() {
+        let (node, dir) = temp_test_node("camera");
+        let port = bind_and_spawn(node.clone(), 0).await.unwrap();
+
+        // 1. GET /api/camera (default inactive)
+        let (code, body) = loopback_get(port, "/api/camera").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["active"], false);
+        assert_eq!(rep["policy"]["enabled"], true);
+
+        // 2. GET /api/camera/policy (defaults)
+        let (code, body) = loopback_get(port, "/api/camera/policy").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["enabled"], true);
+        assert_eq!(rep["policy"]["allow_inbound_stream"], true);
+        assert_eq!(rep["policy"]["allow_remote_capture"], true);
+        assert_eq!(rep["policy"]["enforce_privacy_shutter_indicator"], true);
+
+        // 3. POST /api/camera/policy
+        let pol_body = serde_json::json!({
+            "enabled": true,
+            "allow_inbound_stream": false,
+            "allow_remote_capture": true,
+            "max_resolution_width": 1920,
+            "max_resolution_height": 1080,
+            "max_fps": 30,
+            "enforce_privacy_shutter_indicator": true,
+            "idle_timeout_secs": 180,
+            "allowed_groups": ["creators"]
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/camera/policy",
+            &serde_json::to_vec(&pol_body).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["allow_inbound_stream"], false);
+        assert_eq!(rep["policy"]["max_resolution_width"], 1920);
+        assert_eq!(rep["policy"]["max_fps"], 30);
+
+        // 4. Verify policy reflected on GET /api/camera/policy
+        let (code, body) = loopback_get(port, "/api/camera/policy").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["policy"]["allow_inbound_stream"], false);
+        assert_eq!(rep["policy"]["max_resolution_width"], 1920);
+
+        // 5. POST /api/camera/detach (when idle/empty)
+        let det_body = serde_json::json!({ "reason": "unit test cleanup" });
+        let (code, body) = loopback_post(
+            port,
+            "/api/camera/detach",
+            &serde_json::to_vec(&det_body).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["action"], "detach");
+
+        // 6. Host header 403 test on /api/camera
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/camera HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();
