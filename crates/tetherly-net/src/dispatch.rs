@@ -4,18 +4,23 @@ use crate::error::NetError;
 use tetherly_core::action::{
     ActionListReqFrame, ActionListRespFrame, ActionResultFrame, ActionTriggerFrame,
 };
+use tetherly_core::audio_routing::{
+    AudioRoutingAnnounceFrame, AudioRoutingAttachFrame, AudioRoutingChunkFrame,
+    AudioRoutingDetachFrame,
+};
 use tetherly_core::battery::BatteryStateFrame;
 use tetherly_core::focus::{FocusStateFrame, FocusSyncReqFrame};
 use tetherly_core::frame::{
     decode_unix_ms, CapsUpdate, ClipSet, FileDecision, FileDone, FileOffer, InnerFrame,
     NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame, TextMessage,
     TYPE_ACTION_LIST_REQ, TYPE_ACTION_LIST_RESP, TYPE_ACTION_RESULT, TYPE_ACTION_TRIGGER,
-    TYPE_BATTERY_STATE, TYPE_CAPS_UPDATE, TYPE_CLIP_SET, TYPE_FILE_ACCEPT, TYPE_FILE_DONE,
-    TYPE_FILE_OFFER, TYPE_FILE_REJECT, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ,
-    TYPE_INPUT_TUNNEL_HEARTBEAT, TYPE_INPUT_TUNNEL_RELEASE, TYPE_INPUT_TUNNEL_REQUEST,
-    TYPE_INPUT_TUNNEL_RESP, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND,
-    TYPE_MEDIA_STATE, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY, TYPE_PING,
-    TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE,
+    TYPE_AUDIO_ROUTING_ANNOUNCE, TYPE_AUDIO_ROUTING_ATTACH, TYPE_AUDIO_ROUTING_CHUNK,
+    TYPE_AUDIO_ROUTING_DETACH, TYPE_BATTERY_STATE, TYPE_CAPS_UPDATE, TYPE_CLIP_SET,
+    TYPE_FILE_ACCEPT, TYPE_FILE_DONE, TYPE_FILE_OFFER, TYPE_FILE_REJECT, TYPE_FOCUS_STATE,
+    TYPE_FOCUS_SYNC_REQ, TYPE_INPUT_TUNNEL_HEARTBEAT, TYPE_INPUT_TUNNEL_RELEASE,
+    TYPE_INPUT_TUNNEL_REQUEST, TYPE_INPUT_TUNNEL_RESP, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP,
+    TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY,
+    TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE,
     TYPE_TOPOLOGY_SYNC_REQ, TYPE_VIRTUAL_DISPLAY_ANNOUNCE, TYPE_VIRTUAL_DISPLAY_ATTACH,
     TYPE_VIRTUAL_DISPLAY_DETACH, TYPE_VIRTUAL_DISPLAY_FRAME_ACK,
 };
@@ -62,6 +67,10 @@ pub enum SessionEvent {
     VirtualDisplayAttach(VirtualDisplayAttachFrame),
     VirtualDisplayDetach(VirtualDisplayDetachFrame),
     VirtualDisplayFrameAck(VirtualDisplayFrameAck),
+    AudioRoutingAnnounce(AudioRoutingAnnounceFrame),
+    AudioRoutingAttach(AudioRoutingAttachFrame),
+    AudioRoutingDetach(AudioRoutingDetachFrame),
+    AudioRoutingChunk(AudioRoutingChunkFrame),
     FileOffer(FileOffer),
     FileAccept(FileDecision),
     FileReject(FileDecision),
@@ -153,6 +162,18 @@ impl SessionEvent {
             ),
             TYPE_VIRTUAL_DISPLAY_FRAME_ACK => SessionEvent::VirtualDisplayFrameAck(
                 VirtualDisplayFrameAck::from_payload(&frame.payload)?,
+            ),
+            TYPE_AUDIO_ROUTING_ANNOUNCE => SessionEvent::AudioRoutingAnnounce(
+                AudioRoutingAnnounceFrame::from_payload(&frame.payload)?,
+            ),
+            TYPE_AUDIO_ROUTING_ATTACH => SessionEvent::AudioRoutingAttach(
+                AudioRoutingAttachFrame::from_payload(&frame.payload)?,
+            ),
+            TYPE_AUDIO_ROUTING_DETACH => SessionEvent::AudioRoutingDetach(
+                AudioRoutingDetachFrame::from_payload(&frame.payload)?,
+            ),
+            TYPE_AUDIO_ROUTING_CHUNK => SessionEvent::AudioRoutingChunk(
+                AudioRoutingChunkFrame::from_payload(&frame.payload)?,
             ),
             TYPE_FILE_OFFER => SessionEvent::FileOffer(FileOffer::from_payload(&frame.payload)?),
             TYPE_FILE_ACCEPT => {

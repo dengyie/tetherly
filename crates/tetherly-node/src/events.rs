@@ -590,6 +590,38 @@ pub enum UiEvent {
         allowed_types: Vec<String>,
         timestamp_ms: u64,
     },
+    AudioRoutingSessionStarted {
+        session_id: String,
+        peer_id: String,
+        peer_alias: String,
+        role: String,
+        layout: String,
+        sample_rate: u32,
+        channels: u8,
+        format: String,
+        codec: String,
+        volume_gain: f32,
+        timestamp_ms: u64,
+    },
+    AudioRoutingSessionStopped {
+        session_id: String,
+        peer_id: String,
+        peer_alias: String,
+        reason: Option<String>,
+        timestamp_ms: u64,
+    },
+    AudioRoutingPolicyChanged {
+        enabled: bool,
+        allow_inbound_sink: bool,
+        allow_outbound_routing: bool,
+        max_volume_limit: u8,
+        allow_spatial_rendering: bool,
+        idle_timeout_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -1290,6 +1322,78 @@ impl UiEvent {
             max_resolution_width,
             max_resolution_height,
             max_fps,
+            idle_timeout_secs,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn audio_routing_session_started(
+        session_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        role: impl Into<String>,
+        layout: impl Into<String>,
+        sample_rate: u32,
+        channels: u8,
+        format: impl Into<String>,
+        codec: impl Into<String>,
+        volume_gain: f32,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::AudioRoutingSessionStarted {
+            session_id: session_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            role: role.into(),
+            layout: layout.into(),
+            sample_rate,
+            channels,
+            format: format.into(),
+            codec: codec.into(),
+            volume_gain,
+            timestamp_ms,
+        }
+    }
+
+    pub fn audio_routing_session_stopped(
+        session_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        reason: Option<impl Into<String>>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::AudioRoutingSessionStopped {
+            session_id: session_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            reason: reason.map(Into::into),
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn audio_routing_policy_changed(
+        enabled: bool,
+        allow_inbound_sink: bool,
+        allow_outbound_routing: bool,
+        max_volume_limit: u8,
+        allow_spatial_rendering: bool,
+        idle_timeout_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::AudioRoutingPolicyChanged {
+            enabled,
+            allow_inbound_sink,
+            allow_outbound_routing,
+            max_volume_limit,
+            allow_spatial_rendering,
             idle_timeout_secs,
             allowed_groups,
             allowed_tags,
@@ -2038,5 +2142,71 @@ mod tests {
         assert!(json3.contains("\"max_fps\":60"));
         assert!(json3.contains("\"idle_timeout_secs\":300"));
         assert!(json3.contains("\"allowed_groups\":[\"displays\"]"));
+    }
+
+    #[test]
+    fn test_audio_routing_events_serialization_and_zero_plaintext() {
+        let ev1 = UiEvent::audio_routing_session_started(
+            "audio_sess_1",
+            "peer_speaker_1",
+            "Smart Soundbar",
+            "source",
+            "surround5_1",
+            48000,
+            6,
+            "f32le",
+            "zstd_pcm",
+            1.25,
+            123456812,
+        );
+        let json1 = serde_json::to_string(&ev1).unwrap();
+        assert!(json1.contains("\"kind\":\"audio_routing_session_started\""));
+        assert!(json1.contains("\"session_id\":\"audio_sess_1\""));
+        assert!(json1.contains("\"peer_id\":\"peer_speaker_1\""));
+        assert!(json1.contains("\"peer_alias\":\"Smart Soundbar\""));
+        assert!(json1.contains("\"role\":\"source\""));
+        assert!(json1.contains("\"layout\":\"surround5_1\""));
+        assert!(json1.contains("\"sample_rate\":48000"));
+        assert!(json1.contains("\"channels\":6"));
+        assert!(json1.contains("\"format\":\"f32le\""));
+        assert!(json1.contains("\"codec\":\"zstd_pcm\""));
+        assert!(json1.contains("\"volume_gain\":1.25"));
+        // Zero-Plaintext: Raw audio buffers or pcm data must never leak into event JSON
+        assert!(!json1.contains("sample_bytes"));
+        assert!(!json1.contains("pcm_data"));
+
+        let ev2 = UiEvent::audio_routing_session_stopped(
+            "audio_sess_1",
+            "peer_speaker_1",
+            "Smart Soundbar",
+            Some("track_ended"),
+            123456813,
+        );
+        let json2 = serde_json::to_string(&ev2).unwrap();
+        assert!(json2.contains("\"kind\":\"audio_routing_session_stopped\""));
+        assert!(json2.contains("\"session_id\":\"audio_sess_1\""));
+        assert!(json2.contains("\"reason\":\"track_ended\""));
+
+        let ev3 = UiEvent::audio_routing_policy_changed(
+            true,
+            true,
+            true,
+            85,
+            true,
+            300,
+            vec!["sound".into()],
+            vec!["surround".into()],
+            vec!["speaker".into()],
+            123456814,
+        );
+        let json3 = serde_json::to_string(&ev3).unwrap();
+        assert!(json3.contains("\"kind\":\"audio_routing_policy_changed\""));
+        assert!(json3.contains("\"enabled\":true"));
+        assert!(json3.contains("\"allow_inbound_sink\":true"));
+        assert!(json3.contains("\"allow_outbound_routing\":true"));
+        assert!(json3.contains("\"max_volume_limit\":85"));
+        assert!(json3.contains("\"allow_spatial_rendering\":true"));
+        assert!(json3.contains("\"idle_timeout_secs\":300"));
+        assert!(json3.contains("\"allowed_groups\":[\"sound\"]"));
     }
 }

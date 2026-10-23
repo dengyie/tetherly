@@ -7,17 +7,18 @@ use crate::lan::{bind_many, bind_many_optional, bind_overlay, control_bind_addrs
 use crate::platform::{insert_foreground, MemoryClip, SystemClip};
 use crate::sidecar::{self, OverlayConfig, OverlaySource, OverlayStatus};
 use crate::store::{
-    load_action_policy, load_battery_policy, load_clipboard_policy, load_focus_policy,
-    load_handoff_inbox, load_handoff_policy, load_input_policy, load_local_actions,
-    load_locator_policy, load_media_policy, load_topology_layout, load_topology_policy, load_trust,
-    load_virtual_display_policy, remember_route, save_action_policy, save_battery_policy,
-    save_clipboard_policy, save_focus_policy, save_handoff_inbox, save_handoff_policy,
-    save_input_policy, save_local_actions, save_locator_policy, save_media_policy,
-    save_topology_layout, save_topology_policy, save_trust, save_virtual_display_policy,
-    ActionAccessMode, ActionPolicy, AutoAcceptPolicy, BatteryPolicy, ClipboardPolicy, DeviceType,
-    FocusPolicy, HandoffInboxTable, HandoffPolicy, InputTunnelPolicy, LocalActionDefinition,
-    LocatorPolicy, MediaControlPolicy, PeerProfile, ProfileTable, RouteTable, TargetSelector,
-    TopologyLayout, TopologyPolicy, VirtualDisplayPolicy,
+    load_action_policy, load_audio_routing_policy, load_battery_policy, load_clipboard_policy,
+    load_focus_policy, load_handoff_inbox, load_handoff_policy, load_input_policy,
+    load_local_actions, load_locator_policy, load_media_policy, load_topology_layout,
+    load_topology_policy, load_trust, load_virtual_display_policy, remember_route,
+    save_action_policy, save_audio_routing_policy, save_battery_policy, save_clipboard_policy,
+    save_focus_policy, save_handoff_inbox, save_handoff_policy, save_input_policy,
+    save_local_actions, save_locator_policy, save_media_policy, save_topology_layout,
+    save_topology_policy, save_trust, save_virtual_display_policy, ActionAccessMode, ActionPolicy,
+    AudioRoutingPolicy, AutoAcceptPolicy, BatteryPolicy, ClipboardPolicy, DeviceType, FocusPolicy,
+    HandoffInboxTable, HandoffPolicy, InputTunnelPolicy, LocalActionDefinition, LocatorPolicy,
+    MediaControlPolicy, PeerProfile, ProfileTable, RouteTable, TargetSelector, TopologyLayout,
+    TopologyPolicy, VirtualDisplayPolicy,
 };
 use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::{HashMap, VecDeque};
@@ -38,21 +39,23 @@ use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
     ancs_actions, ancs_source_id, map_edge_exit_to_entry, path_kind, ActionItem,
     ActionListReqFrame, ActionListRespFrame, ActionResultFrame, ActionTriggerFrame,
-    ActionValidator, AncsEvent, AncsIngress, AncsState, AncsTransport, BatteryStateFrame,
-    BatteryValidator, ClipApply, ClipDirection, ClipHub, ClipMetaEntry, ConnectOutcome, ControlMsg,
-    CoreError, CursorSeat, DeviceId, DisplayEdge, DisplayRect, EdgeCrossingConfig, EdgeNeighbor,
-    FileHub, FocusMode, FocusStateFrame, FocusSyncReqFrame, FocusValidator, HandoffEntry,
-    HandoffStatus, IngestOutcome, InputClient, InputEvent, InputServer, InputSink,
-    InputTunnelHeartbeatFrame, InputTunnelReleaseFrame, InputTunnelRequestFrame,
-    InputTunnelRespFrame, InputTunnelRole, InputTunnelValidator, LocatePattern, LocateRequestFrame,
-    LocateStopFrame, LocateValidator, MediaCommand, MediaCommandFrame, MediaStateFrame,
-    MediaValidator, MemoryScreenSink, MemorySink, MemoryTrustStore, NotificationPayload,
-    NotificationUrgency, Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource,
-    ReplyView, ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenFrame, ScreenReceiver,
-    ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats, SensitiveContentGuard,
-    TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator, TrustStore,
-    VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
-    VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
+    ActionValidator, AncsEvent, AncsIngress, AncsState, AncsTransport, AudioChannelLayout,
+    AudioRoutingAnnounceFrame, AudioRoutingAttachFrame, AudioRoutingChunkFrame,
+    AudioRoutingDetachFrame, AudioRoutingRole, AudioRoutingValidator, AudioSampleFormat,
+    AudioSpatialPosition, AudioStreamCodec, BatteryStateFrame, BatteryValidator, ClipApply,
+    ClipDirection, ClipHub, ClipMetaEntry, ConnectOutcome, ControlMsg, CoreError, CursorSeat,
+    DeviceId, DisplayEdge, DisplayRect, EdgeCrossingConfig, EdgeNeighbor, FileHub, FocusMode,
+    FocusStateFrame, FocusSyncReqFrame, FocusValidator, HandoffEntry, HandoffStatus, IngestOutcome,
+    InputClient, InputEvent, InputServer, InputSink, InputTunnelHeartbeatFrame,
+    InputTunnelReleaseFrame, InputTunnelRequestFrame, InputTunnelRespFrame, InputTunnelRole,
+    InputTunnelValidator, LocatePattern, LocateRequestFrame, LocateStopFrame, LocateValidator,
+    MediaCommand, MediaCommandFrame, MediaStateFrame, MediaValidator, MemoryScreenSink, MemorySink,
+    MemoryTrustStore, NotificationPayload, NotificationUrgency, Notifier, NotifyHub, OpenAllowlist,
+    PathKind, PlaybackState, PowerSource, ReplyView, ResourceHandoffValidator, ScreenAssembler,
+    ScreenCodec, ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState,
+    ScreenStats, SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame,
+    TopologyValidator, TrustStore, VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame,
+    VirtualDisplayCodec, VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
     VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
     DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS,
 };
@@ -1929,6 +1932,83 @@ pub struct VirtualDisplayPolicyUpdate {
     pub allowed_types: Option<Vec<DeviceType>>,
 }
 
+/// Active spatial audio routing session metadata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ActiveAudioRoutingSession {
+    pub session_id: String,
+    pub peer_id: String,
+    pub role: AudioRoutingRole,
+    pub layout: AudioChannelLayout,
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub format: AudioSampleFormat,
+    pub codec: AudioStreamCodec,
+    pub spatial_pos: Option<AudioSpatialPosition>,
+    pub volume_gain: f32,
+    pub chunks_sent: u64,
+    pub chunks_received: u64,
+    pub bytes_transferred: u64,
+    pub started_at_ms: u64,
+    pub last_activity_ms: u64,
+}
+
+/// Status report for spatial audio routing.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct AudioRoutingStatusReport {
+    pub ok: bool,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<ActiveAudioRoutingSession>,
+    pub policy: AudioRoutingPolicy,
+    pub timestamp_ms: u64,
+}
+
+/// Decision report when establishing or terminating an audio routing route.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct AudioRoutingDecisionReport {
+    pub ok: bool,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<AudioRoutingRole>,
+    pub message: String,
+    pub timestamp_ms: u64,
+}
+
+/// Governance policy report for spatial audio routing.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AudioRoutingPolicyReport {
+    pub ok: bool,
+    pub policy: AudioRoutingPolicy,
+    pub message: String,
+}
+
+/// Partial update payload for audio routing policy.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AudioRoutingPolicyUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_inbound_sink: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_outbound_routing: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_volume_limit: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_spatial_rendering: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_groups: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_types: Option<Vec<DeviceType>>,
+}
+
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ClipStatusReport {
@@ -2714,6 +2794,8 @@ struct Shared {
     active_input_tunnel: Mutex<Option<ActiveInputTunnelSession>>,
     virtual_display_policy: Mutex<VirtualDisplayPolicy>,
     active_virtual_display: Mutex<Option<ActiveVirtualDisplaySession>>,
+    audio_routing_policy: Mutex<AudioRoutingPolicy>,
+    active_audio_routing: Mutex<Option<ActiveAudioRoutingSession>>,
 }
 
 #[derive(Clone)]
@@ -2867,6 +2949,7 @@ impl Node {
         let initial_topology_policy = load_topology_policy(&cfg.data_dir);
         let initial_input_policy = load_input_policy(&cfg.data_dir);
         let initial_virtual_display_policy = load_virtual_display_policy(&cfg.data_dir);
+        let initial_audio_routing_policy = load_audio_routing_policy(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -3019,6 +3102,8 @@ impl Node {
             active_input_tunnel: Mutex::new(None),
             virtual_display_policy: Mutex::new(initial_virtual_display_policy),
             active_virtual_display: Mutex::new(None),
+            audio_routing_policy: Mutex::new(initial_audio_routing_policy),
+            active_audio_routing: Mutex::new(None),
         });
         Ok(Self { shared })
     }
@@ -8425,6 +8510,22 @@ impl Node {
                 (ack.session_id.len() + 32) as u64,
                 tetherly_core::frame::TYPE_VIRTUAL_DISPLAY_FRAME_ACK,
             ),
+            SessionEvent::AudioRoutingAnnounce(ann) => (
+                (ann.device_name.len() + 64) as u64,
+                tetherly_core::frame::TYPE_AUDIO_ROUTING_ANNOUNCE,
+            ),
+            SessionEvent::AudioRoutingAttach(att) => (
+                (att.session_id.len() + att.source_id.len() + 64) as u64,
+                tetherly_core::frame::TYPE_AUDIO_ROUTING_ATTACH,
+            ),
+            SessionEvent::AudioRoutingDetach(det) => (
+                (det.session_id.len() + det.reason.as_ref().map_or(0, |r| r.len()) + 48) as u64,
+                tetherly_core::frame::TYPE_AUDIO_ROUTING_DETACH,
+            ),
+            SessionEvent::AudioRoutingChunk(chunk) => (
+                (chunk.payload_bytes.len() + 32) as u64,
+                tetherly_core::frame::TYPE_AUDIO_ROUTING_CHUNK,
+            ),
             SessionEvent::Unknown(ty) => (32u64, *ty),
         };
         self.shared.telemetry.record_control_rx(ev_bytes, ev_ty);
@@ -8728,6 +8829,18 @@ impl Node {
             }
             SessionEvent::VirtualDisplayFrameAck(ack) => {
                 self.receive_virtual_display_frame_ack(peer, ack);
+            }
+            SessionEvent::AudioRoutingAnnounce(ann) => {
+                self.receive_audio_routing_announce(peer, ann);
+            }
+            SessionEvent::AudioRoutingAttach(att) => {
+                self.receive_audio_routing_attach(peer, att).await;
+            }
+            SessionEvent::AudioRoutingDetach(det) => {
+                self.receive_audio_routing_detach(peer, det).await;
+            }
+            SessionEvent::AudioRoutingChunk(chunk) => {
+                self.receive_audio_routing_chunk(peer, chunk);
             }
             SessionEvent::Unknown(_) => {}
         }
@@ -14494,6 +14607,593 @@ impl Node {
             policy.allowed_types = v;
         }
         self.set_virtual_display_policy(policy)
+    }
+
+    /// Ingest and process an inbound AudioRoutingAnnounceFrame from a peer.
+    pub fn receive_audio_routing_announce(
+        &self,
+        peer: &DeviceId,
+        frame: AudioRoutingAnnounceFrame,
+    ) {
+        let peer_str = peer.to_string();
+        debug!(
+            peer = %peer_str,
+            device = %frame.device_name,
+            capabilities = ?frame.capabilities,
+            "received audio routing announcement"
+        );
+    }
+
+    /// Ingest and process an inbound AudioRoutingAttachFrame to act as an audio sink.
+    pub async fn receive_audio_routing_attach(
+        &self,
+        peer: &DeviceId,
+        mut frame: AudioRoutingAttachFrame,
+    ) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        frame.sanitize();
+        if AudioRoutingValidator::validate_attach(&frame).is_err() {
+            warn!(peer = %peer, session_id = %frame.session_id, "invalid audio routing attach frame rejected");
+            return;
+        }
+
+        let policy = self.audio_routing_policy();
+        let profile = self.peer_profile(peer);
+
+        let rejection_reason = if !policy.enabled {
+            Some("spatial audio routing disabled".to_string())
+        } else if !policy.allow_inbound_sink {
+            Some("sink audio playback disabled by policy".to_string())
+        } else if !policy.is_peer_eligible(&profile, true) {
+            Some("peer ineligible under audio routing policy filters".to_string())
+        } else {
+            None
+        };
+
+        if let Some(reason) = rejection_reason {
+            let detach = AudioRoutingDetachFrame {
+                session_id: frame.session_id.clone(),
+                reason: Some(reason.clone()),
+                timestamp_ms: now_ms,
+            };
+            if let Ok(inner) = detach.to_frame() {
+                let _ = self.send_to(peer, inner).await;
+            }
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Warning,
+                "audio_routing_attach_rejected",
+                Some(peer_str.clone()),
+                format!(
+                    "Rejected audio routing attach from {}: {}",
+                    peer_str, reason
+                ),
+                false,
+            );
+            return;
+        }
+
+        let max_gain = (policy.max_volume_limit as f32) / 100.0;
+        let effective_gain = frame.volume_gain.min(max_gain);
+
+        let session = ActiveAudioRoutingSession {
+            session_id: frame.session_id.clone(),
+            peer_id: peer_str.clone(),
+            role: AudioRoutingRole::Sink,
+            layout: frame.layout,
+            sample_rate: frame.sample_rate,
+            channels: frame.channels,
+            format: frame.format,
+            codec: frame.codec,
+            spatial_pos: frame.spatial_pos,
+            volume_gain: effective_gain,
+            chunks_sent: 0,
+            chunks_received: 0,
+            bytes_transferred: 0,
+            started_at_ms: now_ms,
+            last_activity_ms: now_ms,
+        };
+
+        *self
+            .shared
+            .active_audio_routing
+            .lock()
+            .expect("active_audio_routing") = Some(session);
+
+        self.emit(UiEvent::audio_routing_session_started(
+            &frame.session_id,
+            &peer_str,
+            &alias,
+            "sink",
+            frame.layout.as_str(),
+            frame.sample_rate,
+            frame.channels,
+            frame.format.as_str(),
+            frame.codec.as_str(),
+            effective_gain,
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Security,
+            AuditSeverity::Notice,
+            "audio_routing_sink_started",
+            Some(peer_str.clone()),
+            format!(
+                "Audio routing session {} established as sink for host {}",
+                frame.session_id, peer_str
+            ),
+            true,
+        );
+    }
+
+    /// Ingest and process an inbound AudioRoutingDetachFrame.
+    pub async fn receive_audio_routing_detach(
+        &self,
+        peer: &DeviceId,
+        mut frame: AudioRoutingDetachFrame,
+    ) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        frame.sanitize();
+        let was_active = {
+            let mut guard = self
+                .shared
+                .active_audio_routing
+                .lock()
+                .expect("active_audio_routing");
+            if let Some(session) = guard.take() {
+                session.session_id == frame.session_id || session.peer_id == peer_str
+            } else {
+                false
+            }
+        };
+
+        if was_active {
+            self.emit(UiEvent::audio_routing_session_stopped(
+                &frame.session_id,
+                &peer_str,
+                &alias,
+                frame.reason.as_deref(),
+                now_ms,
+            ));
+
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Info,
+                "audio_routing_detached",
+                Some(peer_str.clone()),
+                format!(
+                    "Audio routing detached by peer {}: {:?}",
+                    peer_str, frame.reason
+                ),
+                true,
+            );
+        }
+    }
+
+    /// Ingest streaming audio chunk.
+    pub fn receive_audio_routing_chunk(&self, peer: &DeviceId, frame: AudioRoutingChunkFrame) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+
+        if AudioRoutingValidator::validate_chunk(&frame).is_err() {
+            return;
+        }
+
+        let mut guard = self
+            .shared
+            .active_audio_routing
+            .lock()
+            .expect("active_audio_routing");
+        if let Some(ref mut session) = *guard {
+            if session.session_id == frame.session_id && session.peer_id == peer_str {
+                session.last_activity_ms = now_ms;
+                session.chunks_received = session.chunks_received.saturating_add(1);
+                session.bytes_transferred = session
+                    .bytes_transferred
+                    .saturating_add(frame.payload_bytes.len() as u64);
+            }
+        }
+    }
+
+    /// Query status of active spatial audio routing session and governance policy.
+    pub fn audio_routing_status(&self) -> AudioRoutingStatusReport {
+        let now_ms = self.shared.clock.unix_ms();
+        let policy = self.audio_routing_policy();
+        let mut guard = self
+            .shared
+            .active_audio_routing
+            .lock()
+            .expect("active_audio_routing");
+
+        let is_timed_out = if let Some(ref session) = *guard {
+            let timeout_ms = (policy.idle_timeout_secs as u64) * 1000;
+            now_ms.saturating_sub(session.last_activity_ms) > timeout_ms
+        } else {
+            false
+        };
+
+        if is_timed_out {
+            if let Some(session) = guard.take() {
+                drop(guard);
+                let alias = DeviceId::parse(&session.peer_id)
+                    .ok()
+                    .and_then(|id| self.peer_alias(&id))
+                    .unwrap_or_else(|| session.peer_id.clone());
+
+                self.emit(UiEvent::audio_routing_session_stopped(
+                    &session.session_id,
+                    &session.peer_id,
+                    &alias,
+                    Some("idle timeout exceeded"),
+                    now_ms,
+                ));
+                self.record_audit(
+                    AuditCategory::Security,
+                    AuditSeverity::Notice,
+                    "audio_routing_idle_timeout",
+                    Some(session.peer_id.clone()),
+                    format!(
+                        "Audio routing session {} closed due to idle timeout",
+                        session.session_id
+                    ),
+                    true,
+                );
+                return AudioRoutingStatusReport {
+                    ok: true,
+                    active: false,
+                    session: None,
+                    policy,
+                    timestamp_ms: now_ms,
+                };
+            }
+        }
+
+        let (active, session) = match *guard {
+            Some(ref s) => (true, Some(s.clone())),
+            None => (false, None),
+        };
+
+        AudioRoutingStatusReport {
+            ok: true,
+            active,
+            session,
+            policy,
+            timestamp_ms: now_ms,
+        }
+    }
+
+    /// Request to attach a peer as an audio sink (routing local audio to peer).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn audio_routing_attach(
+        &self,
+        peer_query: &str,
+        layout: Option<AudioChannelLayout>,
+        sample_rate: Option<u32>,
+        channels: Option<u8>,
+        spatial_x: Option<f32>,
+        spatial_y: Option<f32>,
+        spatial_z: Option<f32>,
+        volume_gain: Option<f32>,
+    ) -> Result<AudioRoutingDecisionReport, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_id = self.resolve_peer(peer_query)?;
+        let peer_str = peer_id.to_string();
+        let alias = self
+            .peer_alias(&peer_id)
+            .unwrap_or_else(|| peer_str.clone());
+
+        let policy = self.audio_routing_policy();
+        if !policy.enabled {
+            return Err(CoreError::InvalidPayload(
+                "spatial audio routing disabled".to_string(),
+            ));
+        }
+        if !policy.allow_outbound_routing {
+            return Err(CoreError::InvalidPayload(
+                "routing audio to remote peers disabled by policy".to_string(),
+            ));
+        }
+
+        let profile = self.peer_profile(&peer_id);
+        if !policy.is_peer_eligible(&profile, false) {
+            return Err(CoreError::InvalidPayload(
+                "peer is ineligible under audio routing policy filters".to_string(),
+            ));
+        }
+
+        let req_layout = layout.unwrap_or(AudioChannelLayout::Stereo);
+        let req_sample_rate = sample_rate.unwrap_or(48000).clamp(8000, 192000);
+        let req_channels = channels
+            .unwrap_or_else(|| req_layout.default_channels())
+            .clamp(1, 8);
+        let req_format = AudioSampleFormat::S16Le;
+        let req_codec = AudioStreamCodec::ZstdPcm;
+        let spatial_pos = if spatial_x.is_some() || spatial_y.is_some() || spatial_z.is_some() {
+            Some(AudioSpatialPosition {
+                x: spatial_x.unwrap_or(0.0).clamp(-10.0, 10.0),
+                y: spatial_y.unwrap_or(0.0).clamp(-10.0, 10.0),
+                z: spatial_z.unwrap_or(0.0).clamp(-10.0, 10.0),
+            })
+        } else {
+            None
+        };
+        let max_gain = (policy.max_volume_limit as f32) / 100.0;
+        let req_gain = volume_gain.unwrap_or(1.0).clamp(0.0, 2.0).min(max_gain);
+
+        let session_id = format!("ar-sess-{}", &now_ms.to_string()[6..]);
+        let attach_frame = AudioRoutingAttachFrame {
+            session_id: session_id.clone(),
+            source_id: self.identity().device_id().to_string(),
+            sink_id: peer_str.clone(),
+            layout: req_layout,
+            sample_rate: req_sample_rate,
+            channels: req_channels,
+            format: req_format,
+            codec: req_codec,
+            spatial_pos,
+            volume_gain: req_gain,
+            timestamp_ms: now_ms,
+        };
+
+        AudioRoutingValidator::validate_attach(&attach_frame)?;
+        let inner = attach_frame.to_frame()?;
+        self.send_to(&peer_id, inner).await?;
+
+        let session = ActiveAudioRoutingSession {
+            session_id: session_id.clone(),
+            peer_id: peer_str.clone(),
+            role: AudioRoutingRole::Source,
+            layout: req_layout,
+            sample_rate: req_sample_rate,
+            channels: req_channels,
+            format: req_format,
+            codec: req_codec,
+            spatial_pos,
+            volume_gain: req_gain,
+            chunks_sent: 0,
+            chunks_received: 0,
+            bytes_transferred: 0,
+            started_at_ms: now_ms,
+            last_activity_ms: now_ms,
+        };
+
+        *self
+            .shared
+            .active_audio_routing
+            .lock()
+            .expect("active_audio_routing") = Some(session);
+
+        self.emit(UiEvent::audio_routing_session_started(
+            &session_id,
+            &peer_str,
+            &alias,
+            "source",
+            req_layout.as_str(),
+            req_sample_rate,
+            req_channels,
+            req_format.as_str(),
+            req_codec.as_str(),
+            req_gain,
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Security,
+            AuditSeverity::Notice,
+            "audio_routing_attached",
+            Some(peer_str.clone()),
+            format!(
+                "Routed audio to peer {} ({:?} @ {}Hz, {} ch, gain={:.2})",
+                peer_str, req_layout, req_sample_rate, req_channels, req_gain
+            ),
+            true,
+        );
+
+        Ok(AudioRoutingDecisionReport {
+            ok: true,
+            action: "attach".to_string(),
+            session_id: Some(session_id),
+            peer_id: Some(peer_str),
+            role: Some(AudioRoutingRole::Source),
+            message: "audio routing established to peer".to_string(),
+            timestamp_ms: now_ms,
+        })
+    }
+
+    /// Detach the active audio routing session.
+    pub async fn audio_routing_detach(
+        &self,
+        reason: Option<&str>,
+    ) -> Result<AudioRoutingDecisionReport, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let reason_str = reason.unwrap_or("user requested detach");
+        let sanitized_reason = AudioRoutingValidator::sanitize_reason(reason_str);
+
+        let active_opt = {
+            let mut guard = self
+                .shared
+                .active_audio_routing
+                .lock()
+                .expect("active_audio_routing");
+            guard.take()
+        };
+
+        if let Some(session) = active_opt {
+            let peer_id = DeviceId::parse(&session.peer_id).ok();
+            let detach_frame = AudioRoutingDetachFrame {
+                session_id: session.session_id.clone(),
+                reason: Some(sanitized_reason.clone()),
+                timestamp_ms: now_ms,
+            };
+
+            if let Some(peer) = peer_id {
+                if let Ok(inner) = detach_frame.to_frame() {
+                    let _ = self.send_to(&peer, inner).await;
+                }
+            }
+
+            let alias = DeviceId::parse(&session.peer_id)
+                .ok()
+                .and_then(|id| self.peer_alias(&id))
+                .unwrap_or_else(|| session.peer_id.clone());
+
+            self.emit(UiEvent::audio_routing_session_stopped(
+                &session.session_id,
+                &session.peer_id,
+                &alias,
+                Some(&sanitized_reason),
+                now_ms,
+            ));
+
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Notice,
+                "audio_routing_detached",
+                Some(session.peer_id.clone()),
+                format!(
+                    "Audio routing session {} detached: {}",
+                    session.session_id, sanitized_reason
+                ),
+                true,
+            );
+
+            Ok(AudioRoutingDecisionReport {
+                ok: true,
+                action: "detach".to_string(),
+                session_id: Some(session.session_id),
+                peer_id: Some(session.peer_id),
+                role: Some(session.role),
+                message: format!("audio routing session detached: {}", sanitized_reason),
+                timestamp_ms: now_ms,
+            })
+        } else {
+            Ok(AudioRoutingDecisionReport {
+                ok: true,
+                action: "detach".to_string(),
+                session_id: None,
+                peer_id: None,
+                role: None,
+                message: "no active audio routing session to detach".to_string(),
+                timestamp_ms: now_ms,
+            })
+        }
+    }
+
+    /// Returns the current audio routing governance policy.
+    pub fn audio_routing_policy(&self) -> AudioRoutingPolicy {
+        self.shared
+            .audio_routing_policy
+            .lock()
+            .expect("audio_routing_policy")
+            .clone()
+    }
+
+    /// Status and configuration report for audio routing policy.
+    pub fn audio_routing_policy_report(&self) -> AudioRoutingPolicyReport {
+        AudioRoutingPolicyReport {
+            ok: true,
+            policy: self.audio_routing_policy(),
+            message: "audio routing policy report".to_string(),
+        }
+    }
+
+    /// Update audio routing policy and persist to disk atomically with 0o600 permissions.
+    pub fn set_audio_routing_policy(
+        &self,
+        mut policy: AudioRoutingPolicy,
+    ) -> Result<AudioRoutingPolicyReport, CoreError> {
+        let now = self.shared.clock.unix_ms();
+        policy.sanitize();
+        save_audio_routing_policy(&self.shared.cfg.data_dir, &policy).map_err(|e| {
+            CoreError::File(format!("failed to save audio_routing_policy.json: {e}"))
+        })?;
+        *self
+            .shared
+            .audio_routing_policy
+            .lock()
+            .expect("audio_routing_policy") = policy.clone();
+
+        self.emit(UiEvent::audio_routing_policy_changed(
+            policy.enabled,
+            policy.allow_inbound_sink,
+            policy.allow_outbound_routing,
+            policy.max_volume_limit,
+            policy.allow_spatial_rendering,
+            policy.idle_timeout_secs,
+            policy.allowed_groups.clone(),
+            policy.allowed_tags.clone(),
+            policy
+                .allowed_types
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect(),
+            now,
+        ));
+
+        self.record_audit(
+            AuditCategory::Config,
+            AuditSeverity::Info,
+            "audio_routing_policy_changed",
+            None::<String>,
+            format!(
+                "Updated audio routing policy: enabled={}, allow_sink={}, allow_outbound={}, max_vol={}, spatial={}",
+                policy.enabled,
+                policy.allow_inbound_sink,
+                policy.allow_outbound_routing,
+                policy.max_volume_limit,
+                policy.allow_spatial_rendering
+            ),
+            true,
+        );
+
+        Ok(AudioRoutingPolicyReport {
+            ok: true,
+            policy,
+            message: "audio routing policy updated".to_string(),
+        })
+    }
+
+    /// Partially update audio routing policy and persist to disk.
+    pub fn update_audio_routing_policy(
+        &self,
+        update: AudioRoutingPolicyUpdate,
+    ) -> Result<AudioRoutingPolicyReport, CoreError> {
+        let mut policy = self.audio_routing_policy();
+        if let Some(v) = update.enabled {
+            policy.enabled = v;
+        }
+        if let Some(v) = update.allow_inbound_sink {
+            policy.allow_inbound_sink = v;
+        }
+        if let Some(v) = update.allow_outbound_routing {
+            policy.allow_outbound_routing = v;
+        }
+        if let Some(v) = update.max_volume_limit {
+            policy.max_volume_limit = v;
+        }
+        if let Some(v) = update.allow_spatial_rendering {
+            policy.allow_spatial_rendering = v;
+        }
+        if let Some(v) = update.idle_timeout_secs {
+            policy.idle_timeout_secs = v;
+        }
+        if let Some(v) = update.allowed_groups {
+            policy.allowed_groups = v;
+        }
+        if let Some(v) = update.allowed_tags {
+            policy.allowed_tags = v;
+        }
+        if let Some(v) = update.allowed_types {
+            policy.allowed_types = v;
+        }
+        self.set_audio_routing_policy(policy)
     }
 
     /// Polls system clipboard for automatic outbound synchronization.

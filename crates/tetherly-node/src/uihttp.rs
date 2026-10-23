@@ -6,7 +6,9 @@ use crate::runtime::{Node, OutboxStatus};
 use crate::store::{ActionAccessMode, LocalActionDefinition};
 use serde::Serialize;
 use std::net::SocketAddr;
-use tetherly_core::{ActionValidator, DisplayEdge, MediaCommand, PlaybackState, PowerSource};
+use tetherly_core::{
+    ActionValidator, AudioChannelLayout, DisplayEdge, MediaCommand, PlaybackState, PowerSource,
+};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
@@ -479,6 +481,9 @@ struct Snapshot {
     /// Spatial topology layout report if present.
     #[serde(skip_serializing_if = "Option::is_none")]
     topology_layout: Option<crate::runtime::TopologyLayoutReport>,
+    /// Spatial audio routing status report if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_routing_status: Option<crate::runtime::AudioRoutingStatusReport>,
 }
 
 #[derive(Serialize)]
@@ -1183,6 +1188,79 @@ struct VirtualDisplayPolicyBody {
     max_resolution_height: Option<u32>,
     #[serde(default)]
     max_fps: Option<u32>,
+    #[serde(default, alias = "timeout", alias = "idle_timeout")]
+    idle_timeout_secs: Option<u32>,
+    #[serde(default, alias = "group", alias = "groups")]
+    allowed_groups: Option<Vec<String>>,
+    #[serde(default, alias = "tag", alias = "tags")]
+    allowed_tags: Option<Vec<String>>,
+    #[serde(
+        default,
+        alias = "type",
+        alias = "types",
+        alias = "device_type",
+        alias = "device_types"
+    )]
+    allowed_types: Option<Vec<String>>,
+    #[serde(default)]
+    clear_filters: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default, Clone, Copy)]
+struct AudioSpatialPositionReq {
+    #[serde(default)]
+    x: Option<f32>,
+    #[serde(default)]
+    y: Option<f32>,
+    #[serde(default)]
+    z: Option<f32>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct AudioRoutingAttachBody {
+    #[serde(default, alias = "peer_id", alias = "device_id", alias = "target")]
+    peer: Option<String>,
+    #[serde(default, alias = "channel_layout")]
+    layout: Option<String>,
+    #[serde(default)]
+    sample_rate: Option<u32>,
+    #[serde(default)]
+    channels: Option<u8>,
+    #[serde(default, alias = "x")]
+    spatial_x: Option<f32>,
+    #[serde(default, alias = "y")]
+    spatial_y: Option<f32>,
+    #[serde(default, alias = "z")]
+    spatial_z: Option<f32>,
+    #[serde(default)]
+    spatial_position: Option<AudioSpatialPositionReq>,
+    #[serde(default, alias = "gain", alias = "volume")]
+    volume_gain: Option<f32>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct AudioRoutingDetachBody {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct AudioRoutingPolicyBody {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default, alias = "sink", alias = "allow_sink")]
+    allow_inbound_sink: Option<bool>,
+    #[serde(default, alias = "routing", alias = "allow_outbound")]
+    allow_outbound_routing: Option<bool>,
+    #[serde(default, alias = "max_volume", alias = "volume_limit")]
+    max_volume_limit: Option<u8>,
+    #[serde(
+        default,
+        alias = "spatial",
+        alias = "allow_spatial",
+        alias = "spatial_rendering_enabled"
+    )]
+    allow_spatial_rendering: Option<bool>,
     #[serde(default, alias = "timeout", alias = "idle_timeout")]
     idle_timeout_secs: Option<u32>,
     #[serde(default, alias = "group", alias = "groups")]
@@ -4143,6 +4221,262 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 Err(e) => err(400, &e.to_string()),
             }
         }
+        ("GET", "/api/audio/routing") | ("GET", "/api/audio/routing/status") => {
+            json_ok(&node.audio_routing_status())
+        }
+        ("POST", "/api/audio/routing/attach") | ("PUT", "/api/audio/routing/attach") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<AudioRoutingAttachBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<AudioRoutingAttachBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected AudioRoutingAttachBody"),
+                }
+            };
+
+            let peer = parsed_body
+                .as_ref()
+                .and_then(|b| b.peer.clone())
+                .or_else(|| qmap.get("peer").cloned())
+                .or_else(|| qmap.get("peer_id").cloned())
+                .or_else(|| qmap.get("target").cloned());
+            let peer = match peer {
+                Some(p) if !p.trim().is_empty() => p,
+                _ => return err(400, "missing 'peer' parameter"),
+            };
+
+            let layout = parsed_body
+                .as_ref()
+                .and_then(|b| b.layout.as_deref())
+                .or_else(|| qmap.get("layout").map(String::as_str))
+                .map(AudioChannelLayout::from_str_lenient);
+
+            let sample_rate = parsed_body
+                .as_ref()
+                .and_then(|b| b.sample_rate)
+                .or_else(|| qmap.get("sample_rate").and_then(|s| s.parse::<u32>().ok()));
+
+            let channels = parsed_body
+                .as_ref()
+                .and_then(|b| b.channels)
+                .or_else(|| qmap.get("channels").and_then(|s| s.parse::<u8>().ok()));
+
+            let spatial_x = parsed_body
+                .as_ref()
+                .and_then(|b| b.spatial_x.or_else(|| b.spatial_position.and_then(|p| p.x)))
+                .or_else(|| {
+                    qmap.get("x")
+                        .or_else(|| qmap.get("spatial_x"))
+                        .and_then(|s| s.parse::<f32>().ok())
+                });
+
+            let spatial_y = parsed_body
+                .as_ref()
+                .and_then(|b| b.spatial_y.or_else(|| b.spatial_position.and_then(|p| p.y)))
+                .or_else(|| {
+                    qmap.get("y")
+                        .or_else(|| qmap.get("spatial_y"))
+                        .and_then(|s| s.parse::<f32>().ok())
+                });
+
+            let spatial_z = parsed_body
+                .as_ref()
+                .and_then(|b| b.spatial_z.or_else(|| b.spatial_position.and_then(|p| p.z)))
+                .or_else(|| {
+                    qmap.get("z")
+                        .or_else(|| qmap.get("spatial_z"))
+                        .and_then(|s| s.parse::<f32>().ok())
+                });
+
+            let volume_gain = parsed_body
+                .as_ref()
+                .and_then(|b| b.volume_gain)
+                .or_else(|| {
+                    qmap.get("gain")
+                        .or_else(|| qmap.get("volume"))
+                        .or_else(|| qmap.get("volume_gain"))
+                        .and_then(|s| s.parse::<f32>().ok())
+                });
+
+            match node
+                .audio_routing_attach(
+                    &peer,
+                    layout,
+                    sample_rate,
+                    channels,
+                    spatial_x,
+                    spatial_y,
+                    spatial_z,
+                    volume_gain,
+                )
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("POST", "/api/audio/routing/detach") | ("PUT", "/api/audio/routing/detach") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<AudioRoutingDetachBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<AudioRoutingDetachBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected AudioRoutingDetachBody"),
+                }
+            };
+
+            let reason = parsed_body
+                .as_ref()
+                .and_then(|b| b.reason.clone())
+                .or_else(|| qmap.get("reason").cloned());
+
+            match node.audio_routing_detach(reason.as_deref()).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
+        ("GET", "/api/audio/routing/policy") => json_ok(&node.audio_routing_policy_report()),
+        ("POST", "/api/audio/routing/policy") | ("PUT", "/api/audio/routing/policy") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<AudioRoutingPolicyBody> = if body.is_empty() {
+                None
+            } else {
+                match serde_json::from_slice::<AudioRoutingPolicyBody>(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected AudioRoutingPolicyBody"),
+                }
+            };
+
+            let mut policy = node.audio_routing_policy();
+            if let Some(ref b) = parsed_body {
+                if let Some(en) = b.enabled {
+                    policy.enabled = en;
+                }
+                if let Some(sink) = b.allow_inbound_sink {
+                    policy.allow_inbound_sink = sink;
+                }
+                if let Some(outbound) = b.allow_outbound_routing {
+                    policy.allow_outbound_routing = outbound;
+                }
+                if let Some(max_vol) = b.max_volume_limit {
+                    policy.max_volume_limit = max_vol.min(100);
+                }
+                if let Some(spatial) = b.allow_spatial_rendering {
+                    policy.allow_spatial_rendering = spatial;
+                }
+                if let Some(timeout) = b.idle_timeout_secs {
+                    policy.idle_timeout_secs = timeout;
+                }
+                if let Some(ref grps) = b.allowed_groups {
+                    policy.allowed_groups = grps.clone();
+                }
+                if let Some(ref tags) = b.allowed_tags {
+                    policy.allowed_tags = tags.clone();
+                }
+                if let Some(ref types) = b.allowed_types {
+                    let mut dtypes = Vec::new();
+                    for t in types {
+                        match t.parse::<crate::store::DeviceType>() {
+                            Ok(dt) => dtypes.push(dt),
+                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
+                        }
+                    }
+                    policy.allowed_types = dtypes;
+                }
+                if b.clear_filters == Some(true) {
+                    policy.allowed_groups.clear();
+                    policy.allowed_tags.clear();
+                    policy.allowed_types.clear();
+                }
+            }
+
+            if let Some(en) = qmap.get("enabled").or_else(|| qmap.get("enable")) {
+                if let Ok(b) = en.parse::<bool>() {
+                    policy.enabled = b;
+                }
+            }
+            if let Some(sink) = qmap
+                .get("allow_inbound_sink")
+                .or_else(|| qmap.get("allow_sink"))
+                .or_else(|| qmap.get("sink"))
+            {
+                if let Ok(b) = sink.parse::<bool>() {
+                    policy.allow_inbound_sink = b;
+                }
+            }
+            if let Some(outbound) = qmap
+                .get("allow_outbound_routing")
+                .or_else(|| qmap.get("allow_outbound"))
+                .or_else(|| qmap.get("routing"))
+            {
+                if let Ok(b) = outbound.parse::<bool>() {
+                    policy.allow_outbound_routing = b;
+                }
+            }
+            if let Some(mv) = qmap
+                .get("max_volume_limit")
+                .or_else(|| qmap.get("max_volume"))
+                .or_else(|| qmap.get("volume_limit"))
+            {
+                if let Ok(v) = mv.parse::<u8>() {
+                    policy.max_volume_limit = v.min(100);
+                }
+            }
+            if let Some(sp) = qmap
+                .get("allow_spatial_rendering")
+                .or_else(|| qmap.get("allow_spatial"))
+                .or_else(|| qmap.get("spatial"))
+            {
+                if let Ok(b) = sp.parse::<bool>() {
+                    policy.allow_spatial_rendering = b;
+                }
+            }
+            if let Some(to) = qmap
+                .get("idle_timeout_secs")
+                .or_else(|| qmap.get("timeout"))
+                .or_else(|| qmap.get("idle_timeout"))
+            {
+                if let Ok(v) = to.parse::<u32>() {
+                    policy.idle_timeout_secs = v;
+                }
+            }
+            if let Some(grp) = qmap.get("group").or_else(|| qmap.get("allowed_group")) {
+                if !policy.allowed_groups.contains(grp) {
+                    policy.allowed_groups.push(grp.clone());
+                }
+            }
+            if let Some(tag) = qmap.get("tag").or_else(|| qmap.get("allowed_tag")) {
+                if !policy.allowed_tags.contains(tag) {
+                    policy.allowed_tags.push(tag.clone());
+                }
+            }
+            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
+                match dt_str.parse::<crate::store::DeviceType>() {
+                    Ok(dt) => {
+                        if !policy.allowed_types.contains(&dt) {
+                            policy.allowed_types.push(dt);
+                        }
+                    }
+                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
+                }
+            }
+            if qmap
+                .get("clear_filters")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false)
+            {
+                policy.allowed_groups.clear();
+                policy.allowed_tags.clear();
+                policy.allowed_types.clear();
+            }
+
+            match node.set_audio_routing_policy(policy) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &e.to_string()),
+            }
+        }
         ("GET", "/api/audit")
         | ("GET", "/api/security/audit")
         | ("GET", "/api/audit/logs")
@@ -6483,6 +6817,7 @@ async fn snapshot(node: &Node) -> Snapshot {
         battery_low_threshold: node.battery_policy().low_battery_threshold,
         focus_status: Some(node.focus_status()),
         topology_layout: Some(node.topology_layout()),
+        audio_routing_status: Some(node.audio_routing_status()),
     }
 }
 
@@ -7315,6 +7650,91 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/display/virtual HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_audio_routing_endpoints_and_host_validation() {
+        let (node, dir) = temp_test_node("audio_routing");
+        let port = bind_and_spawn(node.clone(), 0).await.unwrap();
+
+        // 1. GET /api/audio/routing (default inactive)
+        let (code, body) = loopback_get(port, "/api/audio/routing").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["active"], false);
+        assert_eq!(rep["policy"]["enabled"], true);
+
+        // 2. GET /api/audio/routing/policy (defaults)
+        let (code, body) = loopback_get(port, "/api/audio/routing/policy")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["enabled"], true);
+        assert_eq!(rep["policy"]["allow_inbound_sink"], true);
+        assert_eq!(rep["policy"]["allow_outbound_routing"], true);
+
+        // 3. POST /api/audio/routing/policy
+        let pol_body = serde_json::json!({
+            "enabled": true,
+            "allow_inbound_sink": false,
+            "allow_outbound_routing": true,
+            "max_volume_limit": 80,
+            "allow_spatial_rendering": true,
+            "idle_timeout_secs": 180,
+            "allowed_groups": ["sound"]
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/audio/routing/policy",
+            &serde_json::to_vec(&pol_body).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["policy"]["allow_inbound_sink"], false);
+        assert_eq!(rep["policy"]["max_volume_limit"], 80);
+
+        // 4. Verify policy reflected on GET /api/audio/routing/policy
+        let (code, body) = loopback_get(port, "/api/audio/routing/policy")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["policy"]["allow_inbound_sink"], false);
+        assert_eq!(rep["policy"]["max_volume_limit"], 80);
+
+        // 5. POST /api/audio/routing/detach (when idle/empty)
+        let det_body = serde_json::json!({ "reason": "unit test cleanup" });
+        let (code, body) = loopback_post(
+            port,
+            "/api/audio/routing/detach",
+            &serde_json::to_vec(&det_body).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["action"], "detach");
+
+        // 6. Host header 403 test on /api/audio/routing
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/audio/routing HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();

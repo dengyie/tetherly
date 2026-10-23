@@ -7,6 +7,7 @@
 pub mod action;
 pub mod allowlist;
 pub mod ancs;
+pub mod audio_routing;
 pub mod battery;
 pub mod bind;
 pub mod clip;
@@ -49,6 +50,11 @@ pub use ancs::{
     ConnectOutcome, DataAssembler, DataItem, EventFlags, EventId, MemoryAncsTransport,
     NotificationEvent, APP_NAME_WAIT_MS, ATTR_MESSAGE, ATTR_TITLE, NOTIF_ATTR_REQUEST,
     UUID_ANCS_SERVICE, UUID_CONTROL_POINT, UUID_DATA_SOURCE, UUID_NOTIFICATION_SOURCE,
+};
+pub use audio_routing::{
+    AudioChannelLayout, AudioRoutingAnnounceFrame, AudioRoutingAttachFrame,
+    AudioRoutingCapabilities, AudioRoutingChunkFrame, AudioRoutingDetachFrame, AudioRoutingRole,
+    AudioRoutingValidator, AudioSampleFormat, AudioSpatialPosition, AudioStreamCodec,
 };
 pub use battery::{BatteryStateFrame, BatteryValidator, PowerSource};
 pub use bind::{

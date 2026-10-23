@@ -1607,6 +1607,133 @@
         <div id="vdisplay-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
       </div>
     </section>
+    <section style="margin-top:16px" id="audio-routing-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2>跨端轻量级空间音频路由与声学协同 (Spatial Audio Routing & Acoustic Governance)</h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button id="toggleaudioroutingpolicybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">治理策略</button>
+          <button id="refreshaudioroutingbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新状态</button>
+        </div>
+      </div>
+      <div class="hint">将对端轻量级设备（平板/音箱/便携本/手机）作为多声道与3D空间声场播放端，支持声学校验、音量钳位防护、零明文音频安全与平滑混音。</div>
+
+      <!-- Policy Subpanel -->
+      <div id="audio-routing-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-weight:600;font-size:12px;color:var(--text)">空间音频准入与声学治理策略 (ADR-074)</span>
+          <span id="audio-routing-policy-badge" class="badge completed" style="font-size:11px">Policy: Active</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">空间音频总开关 (Enabled):</label>
+            <select id="audio-routing-policy-enabled" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">启用 (Enabled)</option>
+              <option value="false">禁用 (Disabled)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">接收播放端 (Allow Inbound Sink):</label>
+            <select id="audio-routing-policy-sink" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许作为播放接收端 (Sink)</option>
+              <option value="false">禁止作为播放接收端</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">主动音频推流 (Allow Outbound):</label>
+            <select id="audio-routing-policy-outbound" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许主动推流音频 (Source)</option>
+              <option value="false">禁止主动推流音频</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">最大音量限制 (Max Volume %):</label>
+            <input id="audio-routing-policy-maxvol" type="number" min="0" max="100" placeholder="100" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">空间声场渲染 (Spatial Rendering):</label>
+            <select id="audio-routing-policy-spatial" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">启用 3D 声学方位计算</option>
+              <option value="false">仅标准立体声/多声道</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">闲置超时自动释放 (Idle Timeout):</label>
+            <input id="audio-routing-policy-timeout" type="number" min="0" placeholder="300" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">业务分组准入 (Allowed Groups):</label>
+            <input id="audio-routing-policy-groups" placeholder="留空表示不限制分组" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">业务标签准入 (Allowed Tags):</label>
+            <input id="audio-routing-policy-tags" placeholder="留空表示不限制标签" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">设备形态准入 (Allowed Types):</label>
+            <input id="audio-routing-policy-types" placeholder="留空表示不限制形态" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+          <button id="audio-routing-policy-save-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px">保存策略 (Save)</button>
+          <button id="audio-routing-policy-reset-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">重置过滤 (Reset)</button>
+          <div id="audio-routing-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Main Audio Routing Panel -->
+      <div style="background:var(--card-bg);border:1px solid var(--line);border-radius:6px;padding:12px;margin-top:8px">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <!-- Status Banner -->
+          <div style="display:flex;justify-content:space-between;align-items:center;background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:8px 12px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-size:18px">🔊🎧</span>
+              <div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <span id="audio-routing-status-badge" class="badge" style="font-size:11px">音频路由未激活</span>
+                  <span id="audio-routing-role-badge" class="badge" style="font-size:11px">角色: 空闲 (Idle)</span>
+                </div>
+                <div id="audio-routing-session-info" style="font-size:12px;color:var(--muted);margin-top:2px">空间音频引擎就绪，可随时将对端设备作为多声道/空间音响路由。</div>
+              </div>
+            </div>
+            <div style="text-align:right">
+              <div id="audio-routing-active-peer" style="font-size:12px;color:var(--muted);font-weight:600">当前对端: 无</div>
+              <div id="audio-routing-telemetry-info" style="font-size:11px;color:var(--muted)">指标: 0 字节 · TX/RX: 0 块 · 增益: 1.00</div>
+            </div>
+          </div>
+
+          <!-- Attach & Detach Actions -->
+          <div style="background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px">
+            <div style="font-size:12px;font-weight:600;color:var(--muted)">音频路由推流挂载 / 释放连接 (Attach & Detach)</div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <select id="audio-routing-attach-peer-select" style="flex:1;min-width:180px;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="">-- 选择目标音频接收设备 --</option>
+              </select>
+              <select id="audio-routing-attach-layout" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="stereo">立体声 (Stereo 2.0)</option>
+                <option value="mono">单声道 (Mono 1.0)</option>
+                <option value="quad">四声道 (Quad 4.0)</option>
+                <option value="surround5_1">5.1 环绕声 (Surround 5.1)</option>
+              </select>
+              <input id="audio-routing-attach-rate" type="number" placeholder="采样率 (48000)" style="width:90px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <input id="audio-routing-attach-gain" type="number" step="0.1" min="0" max="2.0" placeholder="增益 (1.0)" style="width:75px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <input id="audio-routing-attach-x" type="number" step="0.5" placeholder="X (0.0)" style="width:65px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <input id="audio-routing-attach-y" type="number" step="0.5" placeholder="Y (0.0)" style="width:65px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <input id="audio-routing-attach-z" type="number" step="0.5" placeholder="Z (0.0)" style="width:65px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <button id="audio-routing-attach-btn" class="ghost" type="button" style="padding:4px 14px;font-size:12px;font-weight:600;background:var(--accent);color:#fff">路由音频 (Attach)</button>
+              <input id="audio-routing-detach-reason" placeholder="断开原因 (可选)" style="width:130px;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <button id="audio-routing-detach-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">停止路由 (Detach)</button>
+            </div>
+          </div>
+
+          <!-- Bottom Indicators -->
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:6px;margin-top:4px">
+            <span id="audio-routing-policy-indicator">空间音频: 启用 · 双向路由放行 · 最大音量 100% · 超时 300s</span>
+            <span id="audio-routing-audit-indicator">声学治理: 3D声场平移 · 零明文音频审计 · 音量钳位防护</span>
+          </div>
+        </div>
+        <div id="audio-routing-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
+      </div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
@@ -5382,6 +5509,20 @@ async function updateTopologyPeers() {
       if (currentVal) vdispPeerSel.value = currentVal;
     }
 
+    // Update audio routing attach peer select options
+    const audioPeerSel = $("audio-routing-attach-peer-select");
+    if (audioPeerSel && document.activeElement !== audioPeerSel) {
+      const currentVal = audioPeerSel.value;
+      let html = '<option value="">-- 选择目标音频接收设备 --</option>';
+      for (const p of peers) {
+        const id = p.peer_id || "";
+        const alias = p.peer_alias || id.slice(0, 8);
+        html += `<option value="${id}">${escapeHtml(alias)}</option>`;
+      }
+      audioPeerSel.innerHTML = html;
+      if (currentVal) audioPeerSel.value = currentVal;
+    }
+
     // Render Peer Topologies Grid
     const container = $("topology-peer-items");
     if (container) {
@@ -6100,6 +6241,272 @@ if (vdisplayDetachBtn) {
         if (msg) msg.textContent = "已成功断开虚拟副屏！";
         setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
         updateVirtualDisplay();
+      } else {
+        if (msg) msg.textContent = "断开失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+async function updateAudioRouting() {
+  try {
+    const rep = await api("/api/audio/routing");
+    if (!rep || !rep.ok) return;
+
+    const active = !!rep.active;
+    const sess = rep.session;
+
+    if ($("audio-routing-status-badge")) {
+      $("audio-routing-status-badge").textContent = active ? "音频路由已激活 (Active)" : "音频路由未激活 (Inactive)";
+      $("audio-routing-status-badge").className = active ? "badge completed" : "badge";
+    }
+
+    if ($("audio-routing-role-badge")) {
+      if (active && sess) {
+        const isSource = sess.role === "source";
+        $("audio-routing-role-badge").textContent = isSource ? "角色: 音频推流 (Source)" : "角色: 扬声器接收 (Sink)";
+        $("audio-routing-role-badge").className = isSource ? "badge outbound" : "badge completed";
+      } else {
+        $("audio-routing-role-badge").textContent = "角色: 空闲 (Idle)";
+        $("audio-routing-role-badge").className = "badge";
+      }
+    }
+
+    if ($("audio-routing-session-info")) {
+      if (active && sess) {
+        const sid = sess.session_id || "";
+        const peer = sess.peer_id || sess.peer || "";
+        const lName = sess.layout || sess.channel_layout;
+        const layout = lName ? ` · 声道: ${lName.toUpperCase()}` : "";
+        const rate = sess.sample_rate ? ` · 采样: ${sess.sample_rate}Hz` : "";
+        const pObj = sess.spatial_pos || sess.spatial_position;
+        const pos = pObj ? ` · 方位: (${pObj.x.toFixed(1)}, ${pObj.y.toFixed(1)}, ${pObj.z.toFixed(1)})` : "";
+        $("audio-routing-session-info").textContent = `会话: ${sid} · 对端: ${peer}${layout}${rate}${pos}`;
+      } else {
+        $("audio-routing-session-info").textContent = "空间音频引擎就绪，可随时将对端设备作为多声道/空间音响路由。";
+      }
+    }
+
+    if ($("audio-routing-active-peer")) {
+      const p = sess ? (sess.peer_id || sess.peer) : "";
+      $("audio-routing-active-peer").textContent = active && p ? `当前对端: ${p}` : "当前对端: 无";
+    }
+
+    if ($("audio-routing-telemetry-info")) {
+      if (active && sess) {
+        const bytes = sess.bytes_transferred !== undefined ? sess.bytes_transferred : (sess.total_bytes || 0);
+        const tx = sess.chunks_sent || 0;
+        const rx = sess.chunks_received || 0;
+        const gain = sess.volume_gain !== undefined ? sess.volume_gain.toFixed(2) : "1.00";
+        $("audio-routing-telemetry-info").textContent = `指标: ${formatBytes(bytes)} · TX/RX: ${tx}/${rx} 块 · 增益: ${gain}`;
+      } else {
+        $("audio-routing-telemetry-info").textContent = "指标: 0 字节 · TX/RX: 0 块 · 增益: 1.00";
+      }
+    }
+
+    if (rep.policy) {
+      updateAudioRoutingPolicyUI(rep.policy);
+    }
+  } catch (e) {
+    // ignore polling blip
+  }
+}
+
+async function updateAudioRoutingPolicy() {
+  try {
+    const rep = await api("/api/audio/routing/policy");
+    if (!rep || !rep.ok) return;
+    const p = rep.policy || rep;
+    updateAudioRoutingPolicyUI(p);
+  } catch (e) {}
+}
+
+function updateAudioRoutingPolicyUI(p) {
+  if (!p) return;
+  const en = p.enabled !== false;
+  const sink = p.allow_inbound_sink !== false;
+  const outbound = p.allow_outbound_routing !== false;
+  const maxVol = p.max_volume_limit !== undefined ? p.max_volume_limit : 100;
+  const spatial = (p.allow_spatial_rendering !== undefined ? p.allow_spatial_rendering : p.spatial_rendering_enabled) !== false;
+  const timeout = p.idle_timeout_secs || 300;
+
+  if ($("audio-routing-policy-badge")) {
+    $("audio-routing-policy-badge").textContent = en ? "Policy: Active" : "Policy: Disabled";
+    $("audio-routing-policy-badge").className = en ? "badge completed" : "badge";
+  }
+
+  if ($("audio-routing-policy-indicator")) {
+    $("audio-routing-policy-indicator").textContent = `空间音频: ${en ? "启用" : "禁用"} · 接收[${sink ? "放行" : "拦截"}] 推流[${outbound ? "放行" : "拦截"}] · 最大音量 ${maxVol}% · 超时 ${timeout}s`;
+  }
+
+  if ($("audio-routing-policy-enabled") && document.activeElement !== $("audio-routing-policy-enabled")) {
+    $("audio-routing-policy-enabled").value = en ? "true" : "false";
+  }
+  if ($("audio-routing-policy-sink") && document.activeElement !== $("audio-routing-policy-sink")) {
+    $("audio-routing-policy-sink").value = sink ? "true" : "false";
+  }
+  if ($("audio-routing-policy-outbound") && document.activeElement !== $("audio-routing-policy-outbound")) {
+    $("audio-routing-policy-outbound").value = outbound ? "true" : "false";
+  }
+  if ($("audio-routing-policy-maxvol") && document.activeElement !== $("audio-routing-policy-maxvol")) {
+    $("audio-routing-policy-maxvol").value = maxVol;
+  }
+  if ($("audio-routing-policy-spatial") && document.activeElement !== $("audio-routing-policy-spatial")) {
+    $("audio-routing-policy-spatial").value = spatial ? "true" : "false";
+  }
+  if ($("audio-routing-policy-timeout") && document.activeElement !== $("audio-routing-policy-timeout")) {
+    $("audio-routing-policy-timeout").value = timeout;
+  }
+  if ($("audio-routing-policy-groups") && document.activeElement !== $("audio-routing-policy-groups")) {
+    $("audio-routing-policy-groups").value = (p.allowed_groups || []).join(", ");
+  }
+  if ($("audio-routing-policy-tags") && document.activeElement !== $("audio-routing-policy-tags")) {
+    $("audio-routing-policy-tags").value = (p.allowed_tags || []).join(", ");
+  }
+  if ($("audio-routing-policy-types") && document.activeElement !== $("audio-routing-policy-types")) {
+    $("audio-routing-policy-types").value = (p.allowed_types || []).join(", ");
+  }
+}
+
+const toggleAudioRoutingPolicyBtn = $("toggleaudioroutingpolicybtn");
+if (toggleAudioRoutingPolicyBtn) {
+  toggleAudioRoutingPolicyBtn.onclick = () => {
+    const p = $("audio-routing-policy-panel");
+    if (p) p.style.display = p.style.display === "none" ? "block" : "none";
+  };
+}
+
+const refreshAudioRoutingBtn = $("refreshaudioroutingbtn");
+if (refreshAudioRoutingBtn) {
+  refreshAudioRoutingBtn.onclick = () => {
+    updateAudioRouting();
+    updateAudioRoutingPolicy();
+  };
+}
+
+const audioRoutingPolicySaveBtn = $("audio-routing-policy-save-btn");
+if (audioRoutingPolicySaveBtn) {
+  audioRoutingPolicySaveBtn.onclick = async () => {
+    const en = $("audio-routing-policy-enabled") ? $("audio-routing-policy-enabled").value === "true" : undefined;
+    const sink = $("audio-routing-policy-sink") ? $("audio-routing-policy-sink").value === "true" : undefined;
+    const outbound = $("audio-routing-policy-outbound") ? $("audio-routing-policy-outbound").value === "true" : undefined;
+    const maxVol = $("audio-routing-policy-maxvol") && $("audio-routing-policy-maxvol").value ? parseInt($("audio-routing-policy-maxvol").value, 10) : undefined;
+    const spatial = $("audio-routing-policy-spatial") ? $("audio-routing-policy-spatial").value === "true" : undefined;
+    const timeout = $("audio-routing-policy-timeout") && $("audio-routing-policy-timeout").value ? parseInt($("audio-routing-policy-timeout").value, 10) : undefined;
+    const grpsVal = $("audio-routing-policy-groups") ? $("audio-routing-policy-groups").value.trim() : "";
+    const tagsVal = $("audio-routing-policy-tags") ? $("audio-routing-policy-tags").value.trim() : "";
+    const typesVal = $("audio-routing-policy-types") ? $("audio-routing-policy-types").value.trim() : "";
+    const msg = $("audio-routing-policy-msg");
+
+    const payload = {};
+    if (en !== undefined) payload.enabled = en;
+    if (sink !== undefined) payload.allow_inbound_sink = sink;
+    if (outbound !== undefined) payload.allow_outbound_routing = outbound;
+    if (maxVol !== undefined) payload.max_volume_limit = maxVol;
+    if (spatial !== undefined) payload.spatial_rendering_enabled = spatial;
+    if (timeout !== undefined) payload.idle_timeout_secs = timeout;
+    if (grpsVal) payload.allowed_groups = grpsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (tagsVal) payload.allowed_tags = tagsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (typesVal) payload.allowed_types = typesVal.split(",").map(s => s.trim()).filter(Boolean);
+
+    try {
+      const rep = await api("/api/audio/routing/policy", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "策略已保存并原子持久化！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateAudioRoutingPolicy();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const audioRoutingPolicyResetBtn = $("audio-routing-policy-reset-btn");
+if (audioRoutingPolicyResetBtn) {
+  audioRoutingPolicyResetBtn.onclick = async () => {
+    const msg = $("audio-routing-policy-msg");
+    try {
+      const rep = await api("/api/audio/routing/policy", {
+        allowed_groups: [],
+        allowed_tags: [],
+        allowed_types: []
+      });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "设备准入白名单过滤已重置为空！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateAudioRoutingPolicy();
+      } else {
+        if (msg) msg.textContent = "重置失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const audioRoutingAttachBtn = $("audio-routing-attach-btn");
+if (audioRoutingAttachBtn) {
+  audioRoutingAttachBtn.onclick = async () => {
+    const peer = $("audio-routing-attach-peer-select") ? $("audio-routing-attach-peer-select").value.trim() : "";
+    const layout = $("audio-routing-attach-layout") ? $("audio-routing-attach-layout").value : "stereo";
+    const sampleRate = $("audio-routing-attach-rate") && $("audio-routing-attach-rate").value ? parseInt($("audio-routing-attach-rate").value, 10) : undefined;
+    const gain = $("audio-routing-attach-gain") && $("audio-routing-attach-gain").value ? parseFloat($("audio-routing-attach-gain").value) : undefined;
+    const posX = $("audio-routing-attach-x") && $("audio-routing-attach-x").value ? parseFloat($("audio-routing-attach-x").value) : undefined;
+    const posY = $("audio-routing-attach-y") && $("audio-routing-attach-y").value ? parseFloat($("audio-routing-attach-y").value) : undefined;
+    const posZ = $("audio-routing-attach-z") && $("audio-routing-attach-z").value ? parseFloat($("audio-routing-attach-z").value) : undefined;
+    const msg = $("audio-routing-status-msg");
+
+    if (!peer) {
+      if (msg) msg.textContent = "请先选择目标音频接收设备！";
+      return;
+    }
+
+    const payload = { peer, channel_layout: layout };
+    if (sampleRate !== undefined) payload.sample_rate = sampleRate;
+    if (gain !== undefined) payload.volume_gain = gain;
+    if (posX !== undefined || posY !== undefined || posZ !== undefined) {
+      payload.spatial_position = {
+        x: posX !== undefined ? posX : 0.0,
+        y: posY !== undefined ? posY : 0.0,
+        z: posZ !== undefined ? posZ : 0.0
+      };
+    }
+
+    try {
+      const rep = await api("/api/audio/routing/attach", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "音频路由已成功建立！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateAudioRouting();
+      } else {
+        if (msg) msg.textContent = "路由失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const audioRoutingDetachBtn = $("audio-routing-detach-btn");
+if (audioRoutingDetachBtn) {
+  audioRoutingDetachBtn.onclick = async () => {
+    const reason = $("audio-routing-detach-reason") ? $("audio-routing-detach-reason").value.trim() : "";
+    const msg = $("audio-routing-status-msg");
+
+    const payload = {};
+    if (reason) payload.reason = reason;
+
+    try {
+      const rep = await api("/api/audio/routing/detach", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "已成功断开空间音频路由！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateAudioRouting();
       } else {
         if (msg) msg.textContent = "断开失败: " + (rep ? rep.error : "未知错误");
       }
@@ -7978,11 +8385,24 @@ function setupEventSource() {
 							            desc = "虚拟副屏释放: " + ev.session_id + " (" + (ev.reason || "正常退出") + ")";
 							            updateVirtualDisplay();
 							          }
-							          else if (ev.kind === "virtual_display_policy_changed") {
-							            desc = "副屏策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许呈现=" + (ev.allow_hosting ? "是" : "否") + " · 允许扩展=" + (ev.allow_remote_extend ? "是" : "否");
-							            updateVirtualDisplayPolicy();
-							            updateVirtualDisplay();
-							          }
+								          else if (ev.kind === "virtual_display_policy_changed") {
+								            desc = "副屏策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许呈现=" + (ev.allow_hosting ? "是" : "否") + " · 允许扩展=" + (ev.allow_remote_extend ? "是" : "否");
+								            updateVirtualDisplayPolicy();
+								            updateVirtualDisplay();
+								          }
+								          else if (ev.kind === "audio_routing_session_started") {
+								            desc = "空间音频建立: " + ev.session_id + " [" + ev.role + "] 对端:" + (ev.peer_alias || ev.peer_id) + " (" + ev.channel_layout + "@" + ev.sample_rate + "Hz)";
+								            updateAudioRouting();
+								          }
+								          else if (ev.kind === "audio_routing_session_stopped") {
+								            desc = "空间音频释放: " + ev.session_id + " (" + (ev.reason || "正常退出") + ")";
+								            updateAudioRouting();
+								          }
+								          else if (ev.kind === "audio_routing_policy_changed") {
+								            desc = "空间音频策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许接收=" + (ev.allow_inbound_sink ? "是" : "否") + " · 允许推流=" + (ev.allow_outbound_routing ? "是" : "否");
+								            updateAudioRoutingPolicy();
+								            updateAudioRouting();
+								          }
 					          else if (ev.kind === "network_refreshed") {
 					            desc = "网络已重探: 扫描 " + ev.iface_count + " 网卡 (监听 " + ev.listen_count + ")" + (ev.overlay_present ? (" · 侧车: " + (ev.overlay_source || "在网")) : "");
 					            updateNetworkStatus();
@@ -8164,10 +8584,14 @@ function setupEventSource() {
 																			setInterval(updateInputTunnel, 3000);
 																				updateInputPolicy();
 																				setInterval(updateInputPolicy, 3000);
-																				updateVirtualDisplay();
-																				setInterval(updateVirtualDisplay, 3000);
-																				updateVirtualDisplayPolicy();
-																				setInterval(updateVirtualDisplayPolicy, 3000);
+																					updateVirtualDisplay();
+																					setInterval(updateVirtualDisplay, 3000);
+																					updateVirtualDisplayPolicy();
+																					setInterval(updateVirtualDisplayPolicy, 3000);
+																					updateAudioRouting();
+																					setInterval(updateAudioRouting, 3000);
+																					updateAudioRoutingPolicy();
+																					setInterval(updateAudioRoutingPolicy, 3000);
 								</script>
 </body>
 </html>

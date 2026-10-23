@@ -38,6 +38,7 @@ pub const TOPOLOGY_LAYOUT_FILE: &str = "topology_layout.json";
 pub const TOPOLOGY_POLICY_FILE: &str = "topology_policy.json";
 pub const INPUT_POLICY_FILE: &str = "input_policy.json";
 pub const VIRTUAL_DISPLAY_POLICY_FILE: &str = "virtual_display_policy.json";
+pub const AUDIO_ROUTING_POLICY_FILE: &str = "audio_routing_policy.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -1731,6 +1732,120 @@ pub fn save_virtual_display_policy(
     Ok(())
 }
 
+fn default_audio_max_volume() -> u8 {
+    100
+}
+
+fn default_audio_idle_timeout() -> u32 {
+    300
+}
+
+/// Governance policy for cross-device spatial audio routing and sink playback.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AudioRoutingPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub allow_inbound_sink: bool,
+    #[serde(default = "default_true")]
+    pub allow_outbound_routing: bool,
+    #[serde(default = "default_audio_max_volume")]
+    pub max_volume_limit: u8,
+    #[serde(default = "default_true")]
+    pub allow_spatial_rendering: bool,
+    #[serde(default = "default_audio_idle_timeout")]
+    pub idle_timeout_secs: u32,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+}
+
+impl Default for AudioRoutingPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_inbound_sink: true,
+            allow_outbound_routing: true,
+            max_volume_limit: default_audio_max_volume(),
+            allow_spatial_rendering: true,
+            idle_timeout_secs: default_audio_idle_timeout(),
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+        }
+    }
+}
+
+impl AudioRoutingPolicy {
+    pub fn is_peer_eligible(&self, profile: &PeerProfile, as_sink: bool) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if as_sink && !self.allow_inbound_sink {
+            return false;
+        }
+        if !as_sink && !self.allow_outbound_routing {
+            return false;
+        }
+
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        if let Some(group) = &profile.group {
+            if self.allowed_groups.iter().any(|g| g == group) {
+                return true;
+            }
+        }
+
+        if profile.tags.iter().any(|t| self.allowed_tags.contains(t)) {
+            return true;
+        }
+
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+
+    pub fn sanitize(&mut self) {
+        self.max_volume_limit = self.max_volume_limit.min(100);
+        self.idle_timeout_secs = self.idle_timeout_secs.clamp(10, 3600);
+        self.allowed_groups.retain(|g| !g.trim().is_empty());
+        self.allowed_groups.truncate(32);
+        self.allowed_tags.retain(|t| !t.trim().is_empty());
+        self.allowed_tags.truncate(32);
+        self.allowed_types.truncate(16);
+    }
+}
+
+pub fn load_audio_routing_policy(dir: &Path) -> AudioRoutingPolicy {
+    let path = dir.join(AUDIO_ROUTING_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_audio_routing_policy(
+    dir: &Path,
+    policy: &AudioRoutingPolicy,
+) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(AUDIO_ROUTING_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -2861,6 +2976,92 @@ mod tests {
         };
         assert!(!hosting_disabled.is_peer_eligible(&prof_ok, true));
         assert!(hosting_disabled.is_peer_eligible(&prof_ok, false));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audio_routing_policy_roundtrip_and_matching() {
+        let dir = std::env::temp_dir().join(format!("tetherly-audio-pol-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Defaults
+        let def = load_audio_routing_policy(&dir);
+        assert!(def.enabled);
+        assert!(def.allow_inbound_sink);
+        assert!(def.allow_outbound_routing);
+        assert_eq!(def.max_volume_limit, 100);
+        assert!(def.allow_spatial_rendering);
+        assert_eq!(def.idle_timeout_secs, 300);
+
+        // 2. Custom policy persistence
+        let mut custom = AudioRoutingPolicy {
+            enabled: true,
+            allow_inbound_sink: true,
+            allow_outbound_routing: true,
+            max_volume_limit: 85,
+            allow_spatial_rendering: true,
+            idle_timeout_secs: 180,
+            allowed_groups: vec!["sound".into()],
+            allowed_tags: vec!["surround".into()],
+            allowed_types: vec![DeviceType::Tablet, DeviceType::Desktop],
+        };
+        custom.sanitize();
+        save_audio_routing_policy(&dir, &custom).unwrap();
+        let loaded = load_audio_routing_policy(&dir);
+        assert_eq!(loaded.max_volume_limit, 85);
+        assert_eq!(loaded.idle_timeout_secs, 180);
+
+        // 3. Matching
+        let prof_ok = PeerProfile {
+            device_id: "spk_1".into(),
+            device_type: DeviceType::Tablet,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_ok, true));
+        assert!(loaded.is_peer_eligible(&prof_ok, false));
+
+        let prof_group = PeerProfile {
+            device_id: "box_1".into(),
+            device_type: DeviceType::Other,
+            tags: vec![],
+            group: Some("sound".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_group, true));
+
+        let prof_tag = PeerProfile {
+            device_id: "theater_1".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["surround".into()],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_tag, true));
+
+        let prof_unmatched = PeerProfile {
+            device_id: "iot_1".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["guest".into()],
+            group: Some("visitor".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded.is_peer_eligible(&prof_unmatched, true));
+
+        // 4. Inbound Sink / Outbound Routing toggles
+        let sink_disabled = AudioRoutingPolicy {
+            allow_inbound_sink: false,
+            ..Default::default()
+        };
+        assert!(!sink_disabled.is_peer_eligible(&prof_ok, true));
+        assert!(sink_disabled.is_peer_eligible(&prof_ok, false));
 
         let _ = fs::remove_dir_all(&dir);
     }
