@@ -894,17 +894,15 @@ impl SysProbe for PlatformSysProbe {
     }
 
     fn sample_host(&self) -> Result<HostSample, CoreError> {
-        let mut sample = HostSample::default();
-
         #[cfg(unix)]
-        unsafe {
+        let total_memory_bytes = unsafe {
             let pages = libc::sysconf(libc::_SC_PHYS_PAGES);
             let page_size = libc::sysconf(libc::_SC_PAGESIZE);
-            if pages > 0 && page_size > 0 {
-                sample.total_memory_bytes = Some((pages as u64).saturating_mul(page_size as u64));
-            }
-        }
+            (pages > 0 && page_size > 0).then(|| (pages as u64).saturating_mul(page_size as u64))
+        };
+        #[cfg(not(unix))]
+        let total_memory_bytes: Option<u64> = None;
 
-        Ok(sample)
+        Ok(HostSample { total_memory_bytes })
     }
 }

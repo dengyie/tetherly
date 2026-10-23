@@ -13892,35 +13892,33 @@ impl Node {
             return;
         }
 
-        if frame.accepted {
-            {
-                let mut guard = self
-                    .shared
-                    .active_input_tunnel
-                    .lock()
-                    .expect("active_input_tunnel");
-                if let Some(ref mut session) = *guard {
-                    if session.session_id == frame.session_id {
-                        session.capture_width = frame.capture_width;
-                        session.capture_height = frame.capture_height;
-                        session.last_activity_ms = now_ms;
-                    }
-                } else {
-                    *guard = Some(ActiveInputTunnelSession {
-                        session_id: frame.session_id.clone(),
-                        peer_id: peer_str.clone(),
-                        role: InputTunnelRole::Controller,
-                        requested_edge: None,
-                        entry_x: None,
-                        entry_y: None,
-                        capture_width: frame.capture_width,
-                        capture_height: frame.capture_height,
-                        started_at_ms: now_ms,
-                        last_activity_ms: now_ms,
-                    });
-                }
+        // `input_tunnel_attach` pre-arms the controller session before the
+        // request is answered, so a resp that matches no live session is
+        // stale: the tunnel was released or timed out while the answer was in
+        // flight. Release is terminal — a late resp must not resurrect the
+        // tunnel or hijack the seat.
+        {
+            let mut guard = self
+                .shared
+                .active_input_tunnel
+                .lock()
+                .expect("active_input_tunnel");
+            let Some(session) = guard.as_mut() else {
+                return;
+            };
+            if session.session_id != frame.session_id {
+                return;
             }
+            if frame.accepted {
+                session.capture_width = frame.capture_width;
+                session.capture_height = frame.capture_height;
+                session.last_activity_ms = now_ms;
+            } else {
+                *guard = None;
+            }
+        }
 
+        if frame.accepted {
             if !self.input_channel_open().await {
                 let _ = self.open_input(peer).await;
             }
@@ -13957,11 +13955,6 @@ impl Node {
             let reason = frame
                 .reject_reason
                 .unwrap_or_else(|| "rejected by peer".to_string());
-            *self
-                .shared
-                .active_input_tunnel
-                .lock()
-                .expect("active_input_tunnel") = None;
             *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
             self.emit(UiEvent::input_seat_changed(
                 "local",

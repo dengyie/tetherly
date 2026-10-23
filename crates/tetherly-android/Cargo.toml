@@ -21,8 +21,9 @@ tetherly-crypto.workspace = true
 # The phone never discovers peers; it dials. Disable mDNS so the .so stays
 # lean and does not pull a service daemon onto Android. Declared by path (not
 # workspace inheritance) because rustc < 1.99 cannot override a workspace
-# dependency's default features.
-tetherly-net = { path = "../tetherly-net", default-features = false }
+# dependency's default features. The explicit version keeps cargo-deny's
+# `wildcards = "deny"` policy satisfied (a bare path dep is a wildcard).
+tetherly-net = { path = "../tetherly-net", version = "0.1.5", default-features = false }
 tokio.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

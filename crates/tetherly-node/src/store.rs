@@ -3836,11 +3836,12 @@ mod tests {
 
         // Persistence roundtrip with 0o600
         save_bandwidth_profiles(&dir, &table).unwrap();
-        let path = dir.join(BANDWIDTH_PROFILES_FILE);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::metadata(&path).unwrap().permissions();
+            let perms = std::fs::metadata(dir.join(BANDWIDTH_PROFILES_FILE))
+                .unwrap()
+                .permissions();
             assert_eq!(perms.mode() & 0o777, 0o600);
         }
         let loaded = load_bandwidth_profiles(&dir);
