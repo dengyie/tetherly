@@ -455,6 +455,16 @@ enum Cmd {
         #[command(subcommand)]
         action: BenchCmd,
     },
+    /// Bandwidth-profile-driven streaming parameter recommendation (v1.85 / ADR-078).
+    Recommend {
+        /// Show the per-peer detailed report for this device_id or alias.
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// List connected and trusted peer devices, or probe peer latency.
     Peers {
         /// Include offline trusted devices.
@@ -6431,6 +6441,13 @@ async fn main() -> Result<()> {
             }
         },
 
+        Cmd::Recommend {
+            peer,
+            json,
+            ui_port,
+        } => {
+            do_recommend(ui_port, peer.as_deref(), json).await?;
+        }
         Cmd::Peers {
             trusted,
             ping,
@@ -17101,4 +17118,90 @@ async fn do_bench_watch(ui_port: u16, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn do_recommend(ui_port: u16, peer: Option<&str>, json: bool) -> Result<()> {
+    let path = match peer {
+        Some(p) => format!("/api/recommendation?peer={p}"),
+        None => "/api/recommendation".to_string(),
+    };
+    let (code, body) = tetherly_node::loopback_get(ui_port, &path).await?;
+    if code != 200 {
+        let err_msg = String::from_utf8_lossy(&body);
+        anyhow::bail!("failed to query streaming recommendation (HTTP {code}): {err_msg}");
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&body));
+        return Ok(());
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body)?;
+
+    if let Some(rec) = v.get("recommendation") {
+        print_recommendation_value(&v, rec);
+        return Ok(());
+    }
+
+    println!("Streaming Recommendations (aggregate):");
+    match v.get("peers").and_then(|p| p.as_array()) {
+        Some(peers) if !peers.is_empty() => {
+            for p in peers {
+                let alias = p["peer_alias"].as_str().unwrap_or("unknown");
+                let mbps = p["measured_mbps"].as_f64().unwrap_or(0.0);
+                let tier = p["tier"].as_str().unwrap_or("minimal");
+                let direction = p["direction"].as_str().unwrap_or("-");
+                println!("  - {alias}: {mbps:.2} Mbps ({direction}) -> tier {tier}");
+            }
+        }
+        _ => {
+            println!("  (no measured peers yet; run `tetherly bench start` first)");
+        }
+    }
+    Ok(())
+}
+
+fn print_recommendation_value(rep: &serde_json::Value, rec: &serde_json::Value) {
+    let alias = rep["peer_alias"].as_str().unwrap_or("unknown");
+    let has_profile = rep["has_profile"].as_bool().unwrap_or(false);
+    let mbps = rep["measured_mbps"].as_f64().unwrap_or(0.0);
+    let tier = rec["tier"].as_str().unwrap_or("minimal");
+    println!("Streaming Recommendation for {alias}:");
+    if has_profile {
+        println!("  Measured:        {mbps:.2} Mbps (receiver-side)");
+    } else {
+        println!("  Measured:        none yet (conservative fallback)");
+    }
+    println!("  Tier:            {tier}");
+    if let Some(d) = rec.get("display") {
+        println!(
+            "  Virtual Display: {}x{} @ {}fps",
+            d["width"].as_u64().unwrap_or(0),
+            d["height"].as_u64().unwrap_or(0),
+            d["fps"].as_u64().unwrap_or(0)
+        );
+    }
+    if let Some(c) = rec.get("camera") {
+        println!(
+            "  Virtual Camera:  {}x{} @ {}fps codec={}",
+            c["width"].as_u64().unwrap_or(0),
+            c["height"].as_u64().unwrap_or(0),
+            c["fps"].as_u64().unwrap_or(0),
+            c["codec"].as_str().unwrap_or("-")
+        );
+    }
+    if let Some(a) = rec.get("audio") {
+        println!(
+            "  Spatial Audio:   {}Hz x{}ch codec={}",
+            a["sample_rate"].as_u64().unwrap_or(0),
+            a["channels"].as_u64().unwrap_or(0),
+            a["codec"].as_str().unwrap_or("-")
+        );
+    }
+    if let Some(m) = rec.get("mic") {
+        println!(
+            "  Virtual Mic:     {}Hz x{}ch codec={}",
+            m["sample_rate"].as_u64().unwrap_or(0),
+            m["channels"].as_u64().unwrap_or(0),
+            m["codec"].as_str().unwrap_or("-")
+        );
+    }
 }

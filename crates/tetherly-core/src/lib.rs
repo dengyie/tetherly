@@ -34,6 +34,7 @@ pub mod overlay;
 pub mod persist;
 pub mod pin;
 pub mod ports;
+pub mod recommend;
 pub mod replay;
 pub mod screen;
 pub mod session;
@@ -139,6 +140,10 @@ pub use ports::{
     Clip, Clock, Insertor, ManualClock, MemoryTrustStore, NotificationPayload, NotificationUrgency,
     Notifier, Opener, PhoneNotification, Rng, ScreenCodec, ScreenSink, ScreenSource, SystemClock,
     TrustStore, TrustedPeer,
+};
+pub use recommend::{
+    recommend_streaming_params, AudioTier, CameraTier, DisplayTier, MicTier,
+    StreamingRecommendation,
 };
 pub use replay::ReplayGuard;
 pub use screen::{

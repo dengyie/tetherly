@@ -728,6 +728,14 @@ pub enum UiEvent {
         allowed_types: Vec<String>,
         timestamp_ms: u64,
     },
+    BandwidthProfileUpdated {
+        peer_id: String,
+        peer_alias: String,
+        measured_mbps: f64,
+        direction: String,
+        tier: String,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -1737,6 +1745,24 @@ impl UiEvent {
             allowed_groups,
             allowed_tags,
             allowed_types,
+            timestamp_ms,
+        }
+    }
+
+    pub fn bandwidth_profile_updated(
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        measured_mbps: f64,
+        direction: impl Into<String>,
+        tier: impl Into<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::BandwidthProfileUpdated {
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            measured_mbps,
+            direction: direction.into(),
+            tier: tier.into(),
             timestamp_ms,
         }
     }

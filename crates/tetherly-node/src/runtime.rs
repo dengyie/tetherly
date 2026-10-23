@@ -7,20 +7,21 @@ use crate::lan::{bind_many, bind_many_optional, bind_overlay, control_bind_addrs
 use crate::platform::{insert_foreground, MemoryClip, SystemClip};
 use crate::sidecar::{self, OverlayConfig, OverlaySource, OverlayStatus};
 use crate::store::{
-    load_action_policy, load_audio_routing_policy, load_battery_policy, load_bench_policy,
-    load_camera_policy, load_clipboard_policy, load_focus_policy, load_handoff_inbox,
-    load_handoff_policy, load_input_policy, load_local_actions, load_locator_policy,
-    load_media_policy, load_microphone_policy, load_topology_layout, load_topology_policy,
-    load_trust, load_virtual_display_policy, remember_route, save_action_policy,
-    save_audio_routing_policy, save_battery_policy, save_bench_policy, save_camera_policy,
-    save_clipboard_policy, save_focus_policy, save_handoff_inbox, save_handoff_policy,
-    save_input_policy, save_local_actions, save_locator_policy, save_media_policy,
-    save_microphone_policy, save_topology_layout, save_topology_policy, save_trust,
-    save_virtual_display_policy, ActionAccessMode, ActionPolicy, AudioRoutingPolicy,
-    AutoAcceptPolicy, BatteryPolicy, BenchPolicy, CameraPolicy, ClipboardPolicy, DeviceType,
-    FocusPolicy, HandoffInboxTable, HandoffPolicy, InputTunnelPolicy, LocalActionDefinition,
-    LocatorPolicy, MediaControlPolicy, MicrophonePolicy, PeerProfile, ProfileTable, RouteTable,
-    TargetSelector, TopologyLayout, TopologyPolicy, VirtualDisplayPolicy,
+    load_action_policy, load_audio_routing_policy, load_bandwidth_profiles, load_battery_policy,
+    load_bench_policy, load_camera_policy, load_clipboard_policy, load_focus_policy,
+    load_handoff_inbox, load_handoff_policy, load_input_policy, load_local_actions,
+    load_locator_policy, load_media_policy, load_microphone_policy, load_topology_layout,
+    load_topology_policy, load_trust, load_virtual_display_policy, remember_route,
+    save_action_policy, save_audio_routing_policy, save_bandwidth_profiles, save_battery_policy,
+    save_bench_policy, save_camera_policy, save_clipboard_policy, save_focus_policy,
+    save_handoff_inbox, save_handoff_policy, save_input_policy, save_local_actions,
+    save_locator_policy, save_media_policy, save_microphone_policy, save_topology_layout,
+    save_topology_policy, save_trust, save_virtual_display_policy, ActionAccessMode, ActionPolicy,
+    AudioRoutingPolicy, AutoAcceptPolicy, BandwidthProfileTable, BatteryPolicy, BenchPolicy,
+    CameraPolicy, ClipboardPolicy, DeviceType, FocusPolicy, HandoffInboxTable, HandoffPolicy,
+    InputTunnelPolicy, LocalActionDefinition, LocatorPolicy, MediaControlPolicy, MicrophonePolicy,
+    PeerBandwidthProfile, PeerProfile, ProfileTable, RouteTable, TargetSelector, TopologyLayout,
+    TopologyPolicy, VirtualDisplayPolicy,
 };
 use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::{HashMap, VecDeque};
@@ -39,8 +40,8 @@ use tetherly_core::ports::{Clip, Clock, Rng, SystemClock};
 use tetherly_core::session::LockoutTable;
 use tetherly_core::session::{backoff_delay, PIN_TTL};
 use tetherly_core::{
-    ancs_actions, ancs_source_id, map_edge_exit_to_entry, path_kind, ActionItem,
-    ActionListReqFrame, ActionListRespFrame, ActionResultFrame, ActionTriggerFrame,
+    ancs_actions, ancs_source_id, map_edge_exit_to_entry, path_kind, recommend_streaming_params,
+    ActionItem, ActionListReqFrame, ActionListRespFrame, ActionResultFrame, ActionTriggerFrame,
     ActionValidator, AncsEvent, AncsIngress, AncsState, AncsTransport, AudioChannelLayout,
     AudioRoutingAnnounceFrame, AudioRoutingAttachFrame, AudioRoutingChunkFrame,
     AudioRoutingDetachFrame, AudioRoutingRole, AudioRoutingValidator, AudioSampleFormat,
@@ -2233,6 +2234,39 @@ pub struct BenchPolicyReport {
     pub message: String,
 }
 
+/// Streaming parameter recommendation report for a single peer (ADR-078).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct StreamingRecommendationReport {
+    pub ok: bool,
+    pub peer_id: String,
+    pub peer_alias: String,
+    pub has_profile: bool,
+    pub measured_mbps: f64,
+    pub direction: String,
+    pub measured_at_ms: u64,
+    pub recommendation: tetherly_core::recommend::StreamingRecommendation,
+    pub timestamp_ms: u64,
+}
+
+/// One peer's recommendation summary line for the aggregate status view.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct PeerRecommendationSummary {
+    pub peer_id: String,
+    pub peer_alias: String,
+    pub measured_mbps: f64,
+    pub direction: String,
+    pub measured_at_ms: u64,
+    pub tier: String,
+}
+
+/// Aggregate recommendation status across all measured peers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct RecommendationStatusReport {
+    pub ok: bool,
+    pub peers: Vec<PeerRecommendationSummary>,
+    pub timestamp_ms: u64,
+}
+
 /// Partial update payload for bench policy.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BenchPolicyUpdate {
@@ -3046,6 +3080,7 @@ struct Shared {
     bench_policy: Mutex<BenchPolicy>,
     active_bench: Mutex<Option<ActiveBenchSession>>,
     last_bench_report: Mutex<Option<BenchReportFrame>>,
+    bandwidth_profiles: Mutex<BandwidthProfileTable>,
 }
 
 #[derive(Clone)]
@@ -3203,6 +3238,7 @@ impl Node {
         let initial_camera_policy = load_camera_policy(&cfg.data_dir);
         let initial_microphone_policy = load_microphone_policy(&cfg.data_dir);
         let initial_bench_policy = load_bench_policy(&cfg.data_dir);
+        let initial_bandwidth_profiles = load_bandwidth_profiles(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -3364,6 +3400,7 @@ impl Node {
             bench_policy: Mutex::new(initial_bench_policy),
             active_bench: Mutex::new(None),
             last_bench_report: Mutex::new(None),
+            bandwidth_profiles: Mutex::new(initial_bandwidth_profiles),
         });
         Ok(Self { shared })
     }
@@ -16987,11 +17024,35 @@ impl Node {
             let throughput_mbps =
                 (session.bytes_transferred as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1e6;
 
+            // Authoritative profile report: receiver-side bytes/chunks/throughput,
+            // sender-side pacing latency/jitter retained for reference. Stored in
+            // last_bench_report and distilled into the persistent peer profile.
+            let authoritative = BenchReportFrame {
+                session_id: session.session_id.clone(),
+                direction: session.direction,
+                duration_ms,
+                bytes_transferred: session.bytes_transferred,
+                chunks: session.chunks_processed,
+                throughput_mbps,
+                avg_chunk_latency_us: frame.avg_chunk_latency_us,
+                jitter_us: frame.jitter_us,
+                stopped_early: frame.stopped_early,
+                timestamp_ms: now_ms,
+            };
             *self
                 .shared
                 .last_bench_report
                 .lock()
-                .expect("last_bench_report") = Some(frame.clone());
+                .expect("last_bench_report") = Some(authoritative);
+
+            self.record_bandwidth_profile(
+                &session.peer_id,
+                &alias,
+                throughput_mbps,
+                session.direction.as_str(),
+                &session.session_id,
+                now_ms,
+            );
 
             self.emit(UiEvent::bench_session_finished(
                 &session.session_id,
@@ -17022,6 +17083,56 @@ impl Node {
                 true,
             );
         }
+    }
+
+    /// Distill a completed receiver-side measurement into the persistent
+    /// per-peer bandwidth profile, broadcast the update, and audit it.
+    fn record_bandwidth_profile(
+        &self,
+        peer_id: &str,
+        alias: &str,
+        measured_mbps: f64,
+        direction: &str,
+        session_id: &str,
+        now_ms: u64,
+    ) {
+        let tier = recommend_streaming_params(measured_mbps).tier;
+        {
+            let mut table = self
+                .shared
+                .bandwidth_profiles
+                .lock()
+                .expect("bandwidth_profiles");
+            table.upsert(PeerBandwidthProfile {
+                peer_id: peer_id.to_string(),
+                measured_mbps,
+                direction: direction.to_string(),
+                session_id: session_id.to_string(),
+                measured_at_ms: now_ms,
+            });
+            if let Err(e) = save_bandwidth_profiles(&self.shared.cfg.data_dir, &table) {
+                warn!(error = %e, "failed to persist bandwidth_profiles.json");
+            }
+        }
+        self.emit(UiEvent::bandwidth_profile_updated(
+            peer_id,
+            alias,
+            measured_mbps,
+            direction,
+            &tier,
+            now_ms,
+        ));
+        self.record_audit(
+            AuditCategory::Peer,
+            AuditSeverity::Info,
+            "bandwidth_profile_updated",
+            Some(peer_id.to_string()),
+            format!(
+                "Bandwidth profile updated for peer {} ({}, session {}): {:.2} Mbps -> tier {}",
+                peer_id, direction, session_id, measured_mbps, tier
+            ),
+            true,
+        );
     }
 
     /// Spawn the paced payload-sending engine for the given benchmark session.
@@ -17566,6 +17677,84 @@ impl Node {
             policy.allowed_types = v;
         }
         self.set_bench_policy(policy)
+    }
+
+    /// Bandwidth-profile-driven streaming parameter recommendation for one peer
+    /// (ADR-078). Falls back to the conservative minimal tier when no
+    /// receiver-side measurement exists for the peer yet.
+    pub fn streaming_recommendation(
+        &self,
+        peer_query: &str,
+    ) -> Result<StreamingRecommendationReport, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_id = self.resolve_peer(peer_query)?;
+        let peer_str = peer_id.to_string();
+        let alias = self
+            .peer_alias(&peer_id)
+            .unwrap_or_else(|| peer_str.clone());
+
+        let profile = self
+            .shared
+            .bandwidth_profiles
+            .lock()
+            .expect("bandwidth_profiles")
+            .get(&peer_str)
+            .cloned();
+
+        let (measured_mbps, direction, measured_at_ms, has_profile) = match &profile {
+            Some(p) => (p.measured_mbps, p.direction.clone(), p.measured_at_ms, true),
+            None => (0.0, "none".to_string(), 0, false),
+        };
+        let recommendation = recommend_streaming_params(measured_mbps);
+        // A recommendation that cannot survive the owning validators is a
+        // logic bug; surface it instead of returning unusable tiers.
+        recommendation.validate()?;
+
+        Ok(StreamingRecommendationReport {
+            ok: true,
+            peer_id: peer_str,
+            peer_alias: alias,
+            has_profile,
+            measured_mbps,
+            direction,
+            measured_at_ms,
+            recommendation,
+            timestamp_ms: now_ms,
+        })
+    }
+
+    /// Aggregate recommendation status across all known peer profiles.
+    pub fn recommendation_status(&self) -> RecommendationStatusReport {
+        let now_ms = self.shared.clock.unix_ms();
+        let table = self
+            .shared
+            .bandwidth_profiles
+            .lock()
+            .expect("bandwidth_profiles")
+            .clone();
+        let peers = table
+            .peers
+            .iter()
+            .map(|p| {
+                let alias = DeviceId::parse(&p.peer_id)
+                    .ok()
+                    .and_then(|id| self.peer_alias(&id))
+                    .unwrap_or_else(|| p.peer_id.clone());
+                PeerRecommendationSummary {
+                    peer_id: p.peer_id.clone(),
+                    peer_alias: alias,
+                    measured_mbps: p.measured_mbps,
+                    direction: p.direction.clone(),
+                    measured_at_ms: p.measured_at_ms,
+                    tier: recommend_streaming_params(p.measured_mbps).tier,
+                }
+            })
+            .collect();
+        RecommendationStatusReport {
+            ok: true,
+            peers,
+            timestamp_ms: now_ms,
+        }
     }
 
     /// Polls system clipboard for automatic outbound synchronization.

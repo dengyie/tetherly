@@ -12173,6 +12173,7 @@ async fn link_bench_throughput_and_governance_via_loopback_api() {
     let (host, peer, g1, _g2) = pair_phone_desktop().await;
     let host_ui = host.spawn_ui().await.expect("host UI spawns");
     let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let host_id = host.identity().device_id().clone();
     let peer_id = peer.identity().device_id().clone();
 
     // 1. Connect to Host SSE stream (and Peer SSE for receive-side proof)
@@ -12377,14 +12378,16 @@ async fn link_bench_throughput_and_governance_via_loopback_api() {
         "Peer responder session must finalize after the report"
     );
 
-    // 10b. Zero-Bug Proof of Real Wire Flow: the peer's receive-side finish
-    // event counts only chunks that actually arrived over the Noise channel
-    // (receive_bench_data is the sole path that grows those counters). A
-    // positive receive-side throughput here is direct evidence the base64
-    // wire encoding delivers payloads end-to-end, not fabricated counters.
+    // 10b. Zero-Bug Proof of Real Wire Flow + Profile Distillation: the peer's
+    // receive-side finish event counts only chunks that actually arrived over
+    // the Noise channel (receive_bench_data is the sole path that grows those
+    // counters), and the bandwidth_profile_updated event (emitted first, on the
+    // same stream) distills that authoritative measurement. One drain loop
+    // captures both in emission order so neither is consumed by the other.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut saw_recv_finished = false;
-    while tokio::time::Instant::now() < deadline {
+    let mut saw_profile_event = false;
+    while tokio::time::Instant::now() < deadline && !(saw_recv_finished && saw_profile_event) {
         if let Ok(Ok(Some(raw))) =
             tokio::time::timeout(std::time::Duration::from_millis(300), peer_sse.next_event()).await
         {
@@ -12404,7 +12407,15 @@ async fn link_bench_throughput_and_governance_via_loopback_api() {
                         "peer receive-side throughput must be positive: {v}"
                     );
                     saw_recv_finished = true;
-                    break;
+                } else if v["kind"] == "bandwidth_profile_updated"
+                    && v["peer_id"] == host_id.to_string()
+                {
+                    assert!(
+                        v["measured_mbps"].as_f64().unwrap_or(0.0) > 0.0,
+                        "profiled throughput must be positive: {v}"
+                    );
+                    assert!(!v["tier"].as_str().unwrap_or("").is_empty());
+                    saw_profile_event = true;
                 }
             }
         }
@@ -12413,6 +12424,84 @@ async fn link_bench_throughput_and_governance_via_loopback_api() {
         saw_recv_finished,
         "Peer must emit bench_session_finished with receive-side measurements"
     );
+    assert!(
+        saw_profile_event,
+        "Peer must emit bandwidth_profile_updated after receiving the report"
+    );
+
+    // 10d. Recommendation closed loop: the completed benchmark must be
+    // distilled into a validated per-peer streaming parameter recommendation.
+    let (code_rec, body_rec) =
+        tetherly_node::loopback_get(peer_ui, &format!("/api/recommendation?peer={}", host_id))
+            .await
+            .unwrap();
+    assert_eq!(code_rec, 200);
+    let rec: serde_json::Value = serde_json::from_slice(&body_rec).unwrap();
+    assert_eq!(rec["ok"], true);
+    assert_eq!(rec["has_profile"], true, "profile must exist after bench");
+    assert!(
+        rec["measured_mbps"].as_f64().unwrap_or(0.0) > 0.0,
+        "profiled throughput must be the receiver-side measurement"
+    );
+    let recommendation = &rec["recommendation"];
+    assert!(
+        ["flagship", "high", "standard", "basic", "minimal"]
+            .contains(&recommendation["tier"].as_str().unwrap_or("")),
+        "tier must be a known band: {recommendation}"
+    );
+    // Tier values must survive the owning modules' Fail-Closed clamps.
+    let d = &recommendation["display"];
+    assert!(
+        d["width"].as_u64().unwrap_or(0) >= 320
+            && d["width"].as_u64().unwrap_or(0) <= 7680
+            && d["height"].as_u64().unwrap_or(0) >= 240
+            && d["height"].as_u64().unwrap_or(0) <= 4320,
+        "display tier outside validator bounds: {d}"
+    );
+    let c = &recommendation["camera"];
+    assert!(
+        c["fps"].as_u64().unwrap_or(0) >= 1 && c["fps"].as_u64().unwrap_or(0) <= 60,
+        "camera fps outside validator bounds: {c}"
+    );
+    let m = &recommendation["mic"];
+    assert!(
+        (8000..=192000).contains(&m["sample_rate"].as_u64().unwrap_or(0)),
+        "mic sample rate outside validator bounds: {m}"
+    );
+
+    // Aggregate view must list the measured peer too.
+    let (code_agg, body_agg) = tetherly_node::loopback_get(peer_ui, "/api/recommendation")
+        .await
+        .unwrap();
+    assert_eq!(code_agg, 200);
+    let agg: serde_json::Value = serde_json::from_slice(&body_agg).unwrap();
+    assert_eq!(agg["ok"], true);
+    let listed = agg["peers"]
+        .as_array()
+        .map(|a| {
+            a.iter().any(|p| {
+                p["peer_id"] == host_id.to_string()
+                    && p["measured_mbps"].as_f64().unwrap_or(0.0) > 0.0
+            })
+        })
+        .unwrap_or(false);
+    assert!(
+        listed,
+        "aggregate recommendations must list the measured peer: {agg}"
+    );
+
+    // Known-but-unmeasured peer falls back to the conservative minimal tier:
+    // in Push mode the host was the sender, so the host holds no profile for
+    // the peer even though they are paired.
+    let (code_fb, body_fb) =
+        tetherly_node::loopback_get(host_ui, &format!("/api/recommendation?peer={}", peer_id))
+            .await
+            .unwrap();
+    assert_eq!(code_fb, 200);
+    let fb: serde_json::Value = serde_json::from_slice(&body_fb).unwrap();
+    assert_eq!(fb["ok"], true);
+    assert_eq!(fb["has_profile"], false);
+    assert_eq!(fb["recommendation"]["tier"], "minimal");
 
     // 11. Security Red Line: Host header 403 Forbidden attack defense
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], host_ui));

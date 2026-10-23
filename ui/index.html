@@ -2134,6 +2134,15 @@
             </div>
           </div>
 
+          <!-- Recommendation Panel -->
+          <div id="recommendation-panel" style="background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:10px;display:none">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px">
+              <div style="font-size:12px;font-weight:600;color:var(--muted)">推荐流媒体参数 (Recommended Tiers · ADR-078)</div>
+              <span id="recommendation-tier-badge" class="badge completed" style="font-size:11px">Tier: -</span>
+            </div>
+            <div id="recommendation-body" style="font-size:12px;color:var(--muted);display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:6px"></div>
+          </div>
+
           <!-- Start & Stop Actions -->
           <div style="background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px">
             <div style="font-size:12px;font-weight:600;color:var(--muted)">启动 / 停止链路压测 (Start & Stop)</div>
@@ -7691,6 +7700,49 @@ function updateBenchPolicyUI(p) {
   }
 }
 
+async function updateRecommendation() {
+  try {
+    const rep = await api("/api/recommendation");
+    if (!rep || !rep.ok) return;
+    const peers = rep.peers || [];
+    if (!peers.length) {
+      if ($("recommendation-panel")) $("recommendation-panel").style.display = "none";
+      return;
+    }
+    // Detailed panel shows the first measured peer (single-peer LAN common case);
+    // aggregate tiers render as chips for the rest.
+    const p = peers[0];
+    if ($("recommendation-panel")) $("recommendation-panel").style.display = "block";
+    if ($("recommendation-tier-badge")) {
+      $("recommendation-tier-badge").textContent = "Tier: " + (p.tier || "minimal") + " · " + (p.measured_mbps || 0).toFixed(2) + " Mbps";
+    }
+    if ($("recommendation-body")) {
+      let html = `<div>对端: <b>${escapeHtml(p.peer_alias || p.peer_id || "-")}</b> (${p.direction || "-"})</div>`;
+      try {
+        const detail = await api("/api/recommendation?peer=" + encodeURIComponent(p.peer_id));
+        if (detail && detail.ok && detail.recommendation) {
+          const r = detail.recommendation;
+          const d = r.display || {};
+          const c = r.camera || {};
+          const a = r.audio || {};
+          const m = r.mic || {};
+          html += `<div>虚拟副屏: ${d.width || "-"}x${d.height || "-"} @ ${d.fps || "-"}fps</div>`;
+          html += `<div>虚拟摄像头: ${c.width || "-"}x${c.height || "-"} @ ${c.fps || "-"}fps ${c.codec || ""}</div>`;
+          html += `<div>空间音频: ${a.sample_rate || "-"}Hz x${a.channels || "-"}ch ${a.codec || ""}</div>`;
+          html += `<div>虚拟麦克风: ${m.sample_rate || "-"}Hz x${m.channels || "-"}ch ${m.codec || ""}</div>`;
+        }
+      } catch (e) { /* detail fetch optional */ }
+      const rest = peers.slice(1);
+      if (rest.length) {
+        html += `<div>其他: ${rest.map(x => escapeHtml(x.peer_alias || x.peer_id) + "=" + (x.tier || "minimal")).join(", ")}</div>`;
+      }
+      $("recommendation-body").innerHTML = html;
+    }
+  } catch (e) {
+    // ignore polling blip
+  }
+}
+
 const toggleBenchPolicyBtn = $("togglebenchpolicybtn");
 if (toggleBenchPolicyBtn) {
   toggleBenchPolicyBtn.onclick = () => {
@@ -9744,6 +9796,10 @@ function setupEventSource() {
 										            updateBenchPolicy();
 										            updateBench();
 										          }
+										          else if (ev.kind === "bandwidth_profile_updated") {
+										            desc = "带宽画像更新: " + (ev.peer_alias || ev.peer_id) + " 实测 " + (ev.measured_mbps || 0).toFixed(2) + " Mbps -> 推荐档位 " + ev.tier;
+										            updateRecommendation();
+										          }
 						          else if (ev.kind === "network_refreshed") {
 					            desc = "网络已重探: 扫描 " + ev.iface_count + " 网卡 (监听 " + ev.listen_count + ")" + (ev.overlay_present ? (" · 侧车: " + (ev.overlay_source || "在网")) : "");
 					            updateNetworkStatus();
@@ -9945,6 +10001,8 @@ function setupEventSource() {
 																							setInterval(updateBench, 2000);
 																							updateBenchPolicy();
 																							setInterval(updateBenchPolicy, 3000);
+																							updateRecommendation();
+																							setInterval(updateRecommendation, 5000);
 										</script>
 </body>
 </html>

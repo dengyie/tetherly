@@ -42,6 +42,7 @@ pub const AUDIO_ROUTING_POLICY_FILE: &str = "audio_routing_policy.json";
 pub const CAMERA_POLICY_FILE: &str = "camera_policy.json";
 pub const MICROPHONE_POLICY_FILE: &str = "microphone_policy.json";
 pub const BENCH_POLICY_FILE: &str = "bench_policy.json";
+pub const BANDWIDTH_PROFILES_FILE: &str = "bandwidth_profiles.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -2213,6 +2214,75 @@ pub fn save_bench_policy(dir: &Path, policy: &BenchPolicy) -> Result<(), NodeSto
     Ok(())
 }
 
+/// One receiver-side link measurement for a peer, feeding the streaming
+/// parameter recommendation engine (ADR-078).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PeerBandwidthProfile {
+    pub peer_id: String,
+    pub measured_mbps: f64,
+    pub direction: String,
+    pub session_id: String,
+    pub measured_at_ms: u64,
+}
+
+/// Persisted table of per-peer bandwidth profiles, keyed by `peer_id`.
+/// Bounded at [`MAX_BANDWIDTH_PROFILES`] entries; the oldest measurement is
+/// evicted first so the file stays a fixed, tiny footprint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BandwidthProfileTable {
+    #[serde(default)]
+    pub peers: Vec<PeerBandwidthProfile>,
+}
+
+pub const MAX_BANDWIDTH_PROFILES: usize = 64;
+
+impl BandwidthProfileTable {
+    /// Upserts the latest measurement for `peer_id`, evicting the oldest
+    /// entry when the table is full. O(n) over a bounded (<=64) table.
+    pub fn upsert(&mut self, profile: PeerBandwidthProfile) {
+        if let Some(slot) = self.peers.iter_mut().find(|p| p.peer_id == profile.peer_id) {
+            *slot = profile;
+            return;
+        }
+        if self.peers.len() >= MAX_BANDWIDTH_PROFILES {
+            if let Some(oldest) = self
+                .peers
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, p)| p.measured_at_ms)
+                .map(|(i, _)| i)
+            {
+                self.peers.remove(oldest);
+            }
+        }
+        self.peers.push(profile);
+    }
+
+    pub fn get(&self, peer_id: &str) -> Option<&PeerBandwidthProfile> {
+        self.peers.iter().find(|p| p.peer_id == peer_id)
+    }
+}
+
+pub fn load_bandwidth_profiles(dir: &Path) -> BandwidthProfileTable {
+    let path = dir.join(BANDWIDTH_PROFILES_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_bandwidth_profiles(
+    dir: &Path,
+    table: &BandwidthProfileTable,
+) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(BANDWIDTH_PROFILES_FILE),
+        &serde_json::to_vec_pretty(table)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -3733,6 +3803,64 @@ mod tests {
         };
         assert!(!disabled_all.is_peer_eligible(&prof_ok, true));
         assert!(!disabled_all.is_peer_eligible(&prof_ok, false));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bandwidth_profile_table_upsert_persist_and_eviction() {
+        let dir = std::env::temp_dir().join(format!("tetherly-bw-prof-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        let mut table = load_bandwidth_profiles(&dir);
+        assert!(table.peers.is_empty());
+
+        // Upsert + overwrite semantics
+        table.upsert(PeerBandwidthProfile {
+            peer_id: "tdev_a".into(),
+            measured_mbps: 42.5,
+            direction: "push".into(),
+            session_id: "bench-sess-1".into(),
+            measured_at_ms: 100,
+        });
+        table.upsert(PeerBandwidthProfile {
+            peer_id: "tdev_a".into(),
+            measured_mbps: 88.0,
+            direction: "pull".into(),
+            session_id: "bench-sess-2".into(),
+            measured_at_ms: 200,
+        });
+        assert_eq!(table.peers.len(), 1);
+        assert_eq!(table.get("tdev_a").unwrap().measured_mbps, 88.0);
+
+        // Persistence roundtrip with 0o600
+        save_bandwidth_profiles(&dir, &table).unwrap();
+        let path = dir.join(BANDWIDTH_PROFILES_FILE);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::metadata(&path).unwrap().permissions();
+            assert_eq!(perms.mode() & 0o777, 0o600);
+        }
+        let loaded = load_bandwidth_profiles(&dir);
+        assert_eq!(loaded, table);
+
+        // Eviction: cap enforced, oldest entry dropped
+        for i in 0..(MAX_BANDWIDTH_PROFILES + 4) {
+            table.upsert(PeerBandwidthProfile {
+                peer_id: format!("tdev_{i:03}"),
+                measured_mbps: 10.0,
+                direction: "push".into(),
+                session_id: "s".into(),
+                measured_at_ms: 1000 + i as u64,
+            });
+        }
+        assert_eq!(table.peers.len(), MAX_BANDWIDTH_PROFILES);
+        assert!(table.get("tdev_000").is_none(), "oldest must be evicted");
+        assert!(table.get("tdev_003").is_none());
+        assert!(table.get("tdev_004").is_some());
+        assert!(table.get("tdev_067").is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }

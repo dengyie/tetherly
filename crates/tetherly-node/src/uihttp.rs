@@ -5283,6 +5283,22 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             Ok(rep) => json_ok(&rep),
             Err(e) => err(400, &e.to_string()),
         },
+        ("GET", "/api/recommendation") | ("GET", "/api/recommendations") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            if let Some(peer) = qmap
+                .get("peer")
+                .or_else(|| qmap.get("peer_id"))
+                .or_else(|| qmap.get("target"))
+                .filter(|p| !p.trim().is_empty())
+            {
+                match node.streaming_recommendation(peer) {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(400, &e.to_string()),
+                }
+            } else {
+                json_ok(&node.recommendation_status())
+            }
+        }
         ("GET", "/api/bench/policy") => json_ok(&node.bench_policy_report()),
         ("POST", "/api/bench/policy") | ("PUT", "/api/bench/policy") => {
             let qmap = query_str.map(parse_query_map).unwrap_or_default();
