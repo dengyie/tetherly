@@ -2096,6 +2096,29 @@ async fn clipboard_status_degrades_gracefully_without_display_server() {
         "clear must report the same availability as status"
     );
 
+    // v1.89: reading the plaintext degrades with the same semantics — an
+    // absent clipboard reports availability instead of answering 500.
+    let (code_get, body_get) = tetherly_node::loopback_get(ui_port, "/api/clip")
+        .await
+        .unwrap();
+    assert_eq!(
+        code_get,
+        200,
+        "clip get must never 5xx: {}",
+        String::from_utf8_lossy(&body_get)
+    );
+    let get_rep: serde_json::Value = serde_json::from_slice(&body_get).unwrap();
+    assert_eq!(get_rep["ok"], true);
+    assert_eq!(
+        get_rep["clipboard_available"].as_bool().unwrap_or(true),
+        available,
+        "get must report the same availability as status"
+    );
+    if !available {
+        assert!(get_rep["text"].is_null());
+        assert!(get_rep["reason"].as_str().is_some_and(|r| !r.is_empty()));
+    }
+
     node.shutdown();
 }
 

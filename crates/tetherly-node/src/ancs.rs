@@ -9,9 +9,9 @@
 //! (`Node::spawn_ancs_pump`), so the real stack can keep its own callback
 //! thread instead of dragging async BLE into `tetherly-core`.
 //!
-//! Windows is the implemented stack (WinRT Bluetooth LE GATT, §9.4). macOS
-//! (CoreBluetooth) and Linux (BlueZ) are not written yet, so [`open`] honestly
-//! returns `Ok(None)` there rather than pretending ANCS works.
+//! All three desktop stacks are implemented: Windows (WinRT GATT, v1.23),
+//! macOS (CoreBluetooth, v1.57), and Linux (BlueZ over zbus D-Bus, v1.58).
+//! [`open`] returns `Ok(None)` only on targets with no stack at all.
 //!
 //! **Runtime against a real paired iPhone is Manual-required.** The code here is
 //! compile-verified; nothing in CI can pair a phone, so no test claims otherwise.

@@ -3,12 +3,23 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.88** |
+| 文档版本 | **1.89** |
 | 日期 | 2026-10-24 |
-| 状态 | **v1.88 CLI 管道 SIGPIPE 语义修复（v0.1.7 真机复测暴露缺陷的闭环修复）**——v0.1.7 在荷兰 LeaseWeb 沙盒 VPS 复测时暴露：`tetherly accept --all | head -1` 在下游关闭管道后因 EPIPE 触发 `println!` panic 打屏（Rust 默认忽略 SIGPIPE；传输本身已成功，纯 CLI 健壮性缺陷）。修复：`tetherly` 与 `tetherly-cli` 两个 main() 在 unix 下恢复 SIGPIPE 默认语义（`libc::signal(SIGPIPE, SIG_DFL)`，管道下游关闭即静默退出，与经典工具一致）；`tetherly-cli` 补 unix 目标 `libc` 依赖（lockfile 既有，零新包）。本地验证：`--help | head -1` 干净退出 exit 0。v0.1.7 真机复测其余全过（clip 优雅降级 200 实证、SPAKE2 配对、notify+OTP、16 MiB 文件 sha256 一致、无 PIN 重拨、探测零丢包、Host 403、日志零明文、UI 仅回环）；v1.87/v1.86 详见各自 delta 块。 |
+| 状态 | **v1.89 headless clip 全端点优雅化、产物命名去险与文档纠偏（todo 清偿轮）**——(1) `GET /api/clip`（取明文）补齐 v1.87 的优雅语义：无显示服务器时 200 + `clipboard_available:false` + `reason` + `text:null`（三端点 status/clear/get 全部同构），双端 CLI `clip get` 渲染诚实提示，回归测试扩展覆盖；(2) **产物命名去险**：`bins/tetherly-cli` 此前把同一 `main.rs` 声明为 `tetherly-cli` 与 `tetherly` 两个 bin——与 `tetherly-node` 的节点 bin 同名，同 target 目录存在覆写隐患（release 工作流直接拷 `target/release/tetherly`），删除重复声明并消除cargo manifest 警告；(3) **文档纠偏**：§9.4/§12 Phase 4 中「macOS/Linux ANCS 栈未实现、open() 返回 Ok(None)」为过期陈述（v1.57/v1.58 已全平台落地），连同 `ancs.rs` 模块注释一并修正，另附 **ADR-079 草案**（屏幕有损编码器线上协商——说明为何 H264 接入必须先定协商契约而非本地换端口）与 macOS NSWindow 呈现的正确架构结论（进程内 AppKit 不安全，应为查看器子进程，留待立项）。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.89 相对 1.88(headless clip 全端点优雅化、产物命名去险与文档纠偏)**
+
+- **动机（todo 清偿轮的边界裁定）**:
+  对「完善所有 todo」逐项裁定可实施性后交付：ANCS macOS/Linux 经核**已于 v1.57/v1.58 全平台落地**（§9.4 正文的「未实现」是过期陈述）；NSWindow 呈现与真 H264 接入经工程判定**不宜本轮直写代码**（前者 AppKit 要求主线程 + NSApplication 运行循环，进程内由 tokio 帧泵驱动不安全，正确形态是查看器子进程；后者改线上协议必须先走 ADR——已产出 **ADR-079 草案** `docs/adr/079-screen-lossy-codec-negotiation.md`）；可安全交付的为以下两项代码修正与一批文档纠偏。
+  1. **`GET /api/clip` 优雅化（`uihttp.rs`）**：v1.87 只覆盖 status/clear；取明文端点在 headless 上仍 500。补齐：三个分支（有文本/空/不可用）统一携带 `clipboard_available`，不可用时 200 + `reason` + `text:null`；双端 CLI `clip get` 在不可用时打印 `(no OS clipboard on this host: …)` 而非误导性的 `(clipboard is empty)`；回归测试 `clipboard_status_degrades_gracefully_without_display_server` 扩展断言 get 与 status/clear 可用性一致。
+  2. **产物命名去险（`bins/tetherly-cli/Cargo.toml`）**：删除重复的 `[[bin]] name = "tetherly"`（与 `tetherly-node` 节点 bin 同名，同 target 目录构建存在覆写隐患，release 工作流直接拷 `target/release/tetherly`；当前碰巧节点侧胜出，属未爆雷）。副作用：cargo 的 multiple build targets manifest 警告消失。
+  3. **文档纠偏**：§9.4 v1.23 段与 §12 Phase 4 v1.6 段的「macOS/Linux 未实现」改为历史陈述 + 现状指引；`ancs.rs` 模块注释同步（三平台栈已落地，`Ok(None)` 仅余无栈目标）。
+  4. **ADR-079 草案**：屏幕有损编码（OpenH264 首选、rav1e 暂缓）的线上协商契约——Hello cap `screencodecs=` 交集、`compress=0x03` annex-B、重连强制 IDR、码率接 ADR-078 画像、旧端遇未知 compress 丢帧不拆会话；采纳前 §9.7 维持 zstd 默认链。
+- **边界挂账（经裁定不在本轮直写代码）**：macOS NSWindow 呈现（应立项为查看器子进程，进程内 AppKit 非主线程不安全且本环境无法运行验证）；真 H264/rav1e（等 ADR-079 采纳）；Wayland 键鼠（无成熟 Rust libei 绑定）；Tauri 壳（产品级 UI 决策）；cargo-fuzz（v1.16 已裁定用确定性模糊替代 nightly 依赖）；真机 Manual-required 项（需物理硬件）。
+- **验证**：本地 fmt / 宿主 clippy `-D warnings` / `x86_64-pc-windows-gnu` 交叉 clippy `-D warnings` / `cargo test --workspace --locked`（31 套件 479 用例，回归测试含 get 断言）全绿。
 
 **1.88 相对 1.87(CLI 管道 SIGPIPE 语义修复)**
 
@@ -4090,7 +4101,7 @@ Windows：`windows` crate GATT。macOS：CoreBluetooth。Linux：BlueZ，不要�
 
 用户路径：系统蓝牙设置里让 iPhone 连电脑（ANCS），**再**在 Tetherly 里把这台电脑与 Android/其他电脑 SPAKE2 配对。两步都要在 UI 向导里拆开写。
 
-**v1.23 已落地 Windows 真机传输栈**：`tetherly-node::ancs::win_gatt`（自包含、`#[cfg(windows)]`，照 `screen/macos.rs` 先例）——专属 `tetherly-ancs` 线程 + **MTA 公寓**持有全部 WinRT 接口；`FromBluetoothAddressAsync` → `GetGattServicesForUuidAsync(ANCS)` → `GetCharacteristicsAsync` → 按 UUID 找三特征并**校验属性**（Notification Source / Data Source 必须 `Notify`、Control Point 必须 `Write`，缺一点名报错）；CCCD 写 `Notify` 订阅；`ValueChanged` 回调**只把字节拷进通道**（§9.4 禁止在回调线程写 Control Point）；`write_control_point` 经 `DataWriter` → `WriteValueWithResultAsync` 并核对 `GattWriteResult::Status`，**阻塞到结果为真**（「串行且只有一条在途」成为事实）；前端每次命令的 ack 等待设 **10s 上界**，超时即报 `AncsSubscribe`/`AncsWrite`（不谎报成功）；`ConnectionStatusChanged` 置标志 → 退出会话 → `ancs_backoff_delay` 指数退避（1s→30s）；`Session::drop` 显式 `RemoveValueChanged`/`RemoveConnectionStatusChanged`。**同步的三个端口方法直接用 `windows` 0.59 的阻塞 `IAsyncOperation::get()`**（OS `Waiter` 信号，不空转），故**无新依赖、无自造 executor**。node 侧 `Node::spawn_ancs_pump`（独占线程 + current-thread 运行时）把 `AncsInbound`（`Ready`/`NotificationSource`/`DataSource`/`Disconnected`）喂给 `ancs_connect`/`ancs_notification_source`/`ancs_data_source`/`ancs_disconnected`，并每 500ms `ancs_tick`；CLI `tetherly run --ancs <11:22:33:44:55:66>`。macOS（CoreBluetooth）与 Linux（BlueZ）栈**未实现**，`open()` 诚实返回 `Ok(None)`。物理 iPhone 的运行时 **Manual-required**。
+**v1.23 已落地 Windows 真机传输栈**：`tetherly-node::ancs::win_gatt`（自包含、`#[cfg(windows)]`，照 `screen/macos.rs` 先例）——专属 `tetherly-ancs` 线程 + **MTA 公寓**持有全部 WinRT 接口；`FromBluetoothAddressAsync` → `GetGattServicesForUuidAsync(ANCS)` → `GetCharacteristicsAsync` → 按 UUID 找三特征并**校验属性**（Notification Source / Data Source 必须 `Notify`、Control Point 必须 `Write`，缺一点名报错）；CCCD 写 `Notify` 订阅；`ValueChanged` 回调**只把字节拷进通道**（§9.4 禁止在回调线程写 Control Point）；`write_control_point` 经 `DataWriter` → `WriteValueWithResultAsync` 并核对 `GattWriteResult::Status`，**阻塞到结果为真**（「串行且只有一条在途」成为事实）；前端每次命令的 ack 等待设 **10s 上界**，超时即报 `AncsSubscribe`/`AncsWrite`（不谎报成功）；`ConnectionStatusChanged` 置标志 → 退出会话 → `ancs_backoff_delay` 指数退避（1s→30s）；`Session::drop` 显式 `RemoveValueChanged`/`RemoveConnectionStatusChanged`。**同步的三个端口方法直接用 `windows` 0.59 的阻塞 `IAsyncOperation::get()`**（OS `Waiter` 信号，不空转），故**无新依赖、无自造 executor**。node 侧 `Node::spawn_ancs_pump`（独占线程 + current-thread 运行时）把 `AncsInbound`（`Ready`/`NotificationSource`/`DataSource`/`Disconnected`）喂给 `ancs_connect`/`ancs_notification_source`/`ancs_data_source`/`ancs_disconnected`，并每 500ms `ancs_tick`；CLI `tetherly run --ancs <11:22:33:44:55:66>`。macOS 与 Linux 栈当时**未实现**（历史状态；**v1.57 已落地 CoreBluetooth 栈、v1.58 已落地 BlueZ D-Bus 栈**，三平台 `open()` 全部返回真实传输层——见头部 1.57/1.58 delta 块）。物理 iPhone 的运行时 **Manual-required**。
 
 **v1.6 已落地（CI 切片）**：`tetherly-core::ancs` 协议编解码 + `AncsIngress` 状态机 + `AncsTransport` 端口 + `MemoryAncsTransport`。硬约束按构造强制：订阅顺序由 `connect()` 固定；`on_notification_source` 只入队，Control Point 只在 `tick` 写；`in_flight` 保证串行；`DataAssembler` 只在整条属性元组到齐后才产出；静默一次后重试、再静默则放弃；`on_disconnected` 走 500ms→30s 退避。真实 GATT 栈与物理 iPhone 仍 Manual-required。
 
@@ -4227,7 +4238,7 @@ Wayland 不挡退出。真机注入未落地前不得宣称可替代键鼠。
 | M4.4 | 可选 iOS App：同 LAN 50MB sha256；无此 App 不挡退出 | 未做（不挡退出） |
 | M4.5 | iOS App 无 VPN / Network Extension | 未做（随 M4.4） |
 
-**v1.6 落地范围**：`tetherly-core::ancs`（Notification Source 解析、Control Point 编码、Data Source 按字节重组、`AncsIngress`）、`tetherly-node` 的 `ancs_*` 入口与 `Opener` 端口、UI 两步向导、`tests/phase4.rs`。**Manual-required**：真实 BLE GATT（Windows `windows` / CoreBluetooth / BlueZ）、物理 iPhone p95、蓝牙关 30s 真机复现。
+**v1.6 落地范围**：`tetherly-core::ancs`（Notification Source 解析、Control Point 编码、Data Source 按字节重组、`AncsIngress`）、`tetherly-node` 的 `ancs_*` 入口与 `Opener` 端口、UI 两步向导、`tests/phase4.rs`。**Manual-required**：物理 iPhone p95、蓝牙关 30s 真机复现。（真实 BLE GATT 传输栈已随后续版本全平台落地：Windows v1.23 / macOS v1.57 / Linux v1.58；运行时对真机仍 Manual-required。）
 
 **v1.23 落地范围（补上电脑侧那段真机传输栈）**：`tetherly-node::ancs`（装配点 + `AncsInbound` 通道）+ `tetherly-node::ancs::win_gatt`（Windows WinRT BLE GATT，自包含 `#[cfg(windows)]`）；`Node::spawn_ancs_pump` 把入站值接到 `ancs_*` 入口并驱动 `ancs_tick`；CLI `--ancs <addr>`。**Manual-required 不变**：macOS（CoreBluetooth）/ Linux（BlueZ）栈**仍未实现**（`open()` 诚实 `Ok(None)`），物理 iPhone 的运行时行为需真机验证。§9.4 硬约束在真机栈中逐条落实（订阅顺序、回调不写 Control Point、Control Point 串行 + 10s ack 上界、字节拼接、退避、uid 去重）。
 

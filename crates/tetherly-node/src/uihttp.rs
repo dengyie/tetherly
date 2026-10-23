@@ -2513,6 +2513,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                     "bytes": bytes,
                     "hash": hash,
                     "text": text,
+                    "clipboard_available": true,
                 }))
             }
             Ok(None) => json_ok(&serde_json::json!({
@@ -2521,8 +2522,19 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 "bytes": 0,
                 "hash": null,
                 "text": null,
+                "clipboard_available": true,
             })),
-            Err(e) => err(500, &e.to_string()),
+            // A host with no display server has no clipboard to read: report
+            // the absence (v1.87 status semantics) instead of answering 500.
+            Err(e) => json_ok(&serde_json::json!({
+                "ok": true,
+                "has_text": false,
+                "bytes": 0,
+                "hash": null,
+                "text": null,
+                "clipboard_available": false,
+                "reason": e.to_string(),
+            })),
         },
         ("POST", "/api/clip/sync") => {
             let d: ClipSyncBody = if body.is_empty() {

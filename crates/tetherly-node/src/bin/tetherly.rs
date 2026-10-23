@@ -4649,6 +4649,11 @@ async fn main() -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
                 if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
                     print!("{text}");
+                } else if !v["clipboard_available"].as_bool().unwrap_or(true) {
+                    eprintln!(
+                        "(no OS clipboard on this host: {})",
+                        v["reason"].as_str().unwrap_or("no display server")
+                    );
                 } else {
                     eprintln!("(clipboard is empty)");
                 }
