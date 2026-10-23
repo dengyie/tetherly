@@ -886,6 +886,78 @@ impl SysProbe for PlatformSysProbe {
                 .map(|entries| entries.filter_map(Result::ok).count() as u32);
         }
 
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
+            use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                THREADENTRY32,
+            };
+            use windows_sys::Win32::System::ProcessStatus::{
+                GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+            };
+            use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+
+            // SAFETY: every out-pointer below is an initialized stack local of
+            // the matching Win32 type; handles are the current-process pseudo
+            // handle (never closed) or a snapshot handle we close ourselves.
+            unsafe {
+                let mut counters = std::mem::zeroed::<PROCESS_MEMORY_COUNTERS>();
+                if GetProcessMemoryInfo(
+                    GetCurrentProcess(),
+                    &mut counters,
+                    std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+                ) != 0
+                {
+                    sample.rss_bytes = counters.WorkingSetSize as u64;
+                }
+
+                let (mut creation, mut exit, mut kernel, mut user) = (
+                    std::mem::zeroed::<FILETIME>(),
+                    std::mem::zeroed::<FILETIME>(),
+                    std::mem::zeroed::<FILETIME>(),
+                    std::mem::zeroed::<FILETIME>(),
+                );
+                if GetProcessTimes(
+                    GetCurrentProcess(),
+                    &mut creation,
+                    &mut exit,
+                    &mut kernel,
+                    &mut user,
+                ) != 0
+                {
+                    let ticks =
+                        |t: FILETIME| (t.dwLowDateTime as u64) | ((t.dwHighDateTime as u64) << 32);
+                    // FILETIME units are 100-ns ticks.
+                    sample.cpu_time_ms = ticks(kernel).saturating_add(ticks(user)) / 10_000;
+                }
+
+                let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+                if snap != INVALID_HANDLE_VALUE {
+                    let pid = std::process::id();
+                    let mut entry = THREADENTRY32 {
+                        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                        ..std::mem::zeroed()
+                    };
+                    let mut threads = 0u32;
+                    if Thread32First(snap, &mut entry) != 0 {
+                        loop {
+                            if entry.th32OwnerProcessID == pid {
+                                threads = threads.saturating_add(1);
+                            }
+                            if Thread32Next(snap, &mut entry) == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    if threads > 0 {
+                        sample.thread_count = threads;
+                    }
+                    CloseHandle(snap);
+                }
+            }
+        }
+
         if sample.thread_count == 0 {
             sample.thread_count = 1;
         }
@@ -900,7 +972,22 @@ impl SysProbe for PlatformSysProbe {
             let page_size = libc::sysconf(libc::_SC_PAGESIZE);
             (pages > 0 && page_size > 0).then(|| (pages as u64).saturating_mul(page_size as u64))
         };
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let total_memory_bytes = {
+            use windows_sys::Win32::System::SystemInformation::{
+                GlobalMemoryStatusEx, MEMORYSTATUSEX,
+            };
+            // SAFETY: `zeroed` builds a valid all-zero MEMORYSTATUSEX and the
+            // out-pointer we hand over is correctly sized (dwLength preset).
+            unsafe {
+                let mut status = MEMORYSTATUSEX {
+                    dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+                    ..std::mem::zeroed()
+                };
+                (GlobalMemoryStatusEx(&mut status) != 0).then_some(status.ullTotalPhys)
+            }
+        };
+        #[cfg(not(any(unix, windows)))]
         let total_memory_bytes: Option<u64> = None;
 
         Ok(HostSample { total_memory_bytes })

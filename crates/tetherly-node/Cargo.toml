@@ -41,6 +41,12 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
+    # PlatformSysProbe (platform.rs): process RSS/cpu-time, thread snapshot,
+    # and host physical memory. Feature flags on the already-present
+    # windows-sys crate, so no new package enters the lockfile.
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 windows = { version = "0.59", features = [
     "Win32_Foundation",

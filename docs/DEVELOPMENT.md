@@ -5,7 +5,7 @@
 | 产品名 | **Tetherly** |
 | 文档版本 | **1.86** |
 | 日期 | 2026-10-24 |
-| 状态 | **v1.86 CI 三平台红转绿维护修复**——(1) **输入隧道陈旧 RESP 复活竞态修复**（`receive_input_tunnel_resp` 仅当应答匹配当前活跃会话 ID 才生效：release 终态化、迟到 accepted 不得复活已释放隧道或劫持座位、reject 只拆除其所应答的会话）；(2) **Windows cfg 分支 clippy 违规清零**（`platform.rs::sample_host` 重构为无 mut 的 cfg 双分支构造、`store.rs` 测试 path 绑定移入 `#[cfg(unix)]` 块）；(3) **链路档位断言确定性治理**（`tests/phase1.rs` 三处 Excellent 硬断言放宽为不低于 Good，4/4 收达与 0% 丢包不变量保持严格）；(4) **cargo-deny wildcard 违禁修复**（`tetherly-android` 的 `tetherly-net` path 依赖补钉 version）。本地六门全绿（fmt / 宿主 clippy / `x86_64-pc-windows-msvc` 交叉 clippy `-D warnings` / `cargo test --workspace --locked` 31 套件 478 全过 / `cargo deny` / Cargo.lock 不变），CI 三平台矩阵复绿，发版 **v0.1.6**。 |
+| 状态 | **v1.86 CI 三平台红转绿维护修复**——(1) **输入隧道陈旧 RESP 复活竞态修复**（`receive_input_tunnel_resp` 仅当应答匹配当前活跃会话 ID 才生效：release 终态化、迟到 accepted 不得复活已释放隧道或劫持座位、reject 只拆除其所应答的会话）；(2) **Windows cfg 分支 clippy 违规清零**（`platform.rs::sample_host` 重构为无 mut 的 cfg 双分支构造、`store.rs` 测试 path 绑定移入 `#[cfg(unix)]` 块）；(3) **链路档位断言确定性治理**（`tests/phase1.rs` 三处 Excellent 硬断言放宽为不低于 Good，4/4 收达与 0% 丢包不变量保持严格）；(4) **cargo-deny wildcard 违禁修复**（`tetherly-android` 的 `tetherly-net` path 依赖补钉 version）；(5) **Windows 进程/主机遥测补齐**（`PlatformSysProbe` Windows 分支：RSS/CPU 时间/线程数/物理内存，ADR-057 SysProbe 自落地以来 Windows CI 从未跑到此断言的缺口）。本地六门全绿（fmt / 宿主 clippy / `x86_64-pc-windows-msvc` 交叉 clippy `-D warnings` / `cargo test --workspace --locked` 31 套件 478 全过 / `cargo deny` / Cargo.lock 不变），CI 三平台矩阵复绿，发版 **v0.1.6**。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
@@ -22,6 +22,8 @@
      `Excellent` 档要求实测平均 RTT < 25ms；共享 CI runner 上 loopback 4 包 burst probe 可跨档落 `Good`。`peer_link_quality_profiling_keepalive_tuning_and_burst_probe_via_loopback_api` 的三处硬断言（probe 报告 / SSE 事件 / 滑窗报告）放宽为「不低于 Good」，4/4 收达、0% 丢包与 RTT 存在性保持严格。
   4. **cargo-deny wildcard 违禁**：
      `tetherly-android` 的 `tetherly-net = { path = "../tetherly-net", default-features = false }` 无 version 要求，被现行 cargo-deny 判为 wildcard 依赖，违反 `deny.toml` `wildcards = "deny"`。补钉 `version = "0.1.5"`（与 workspace 声明一致，构建行为零变化）。
+  5. **Windows 进程/主机遥测补齐（ADR-057 SysProbe 缺口）**：
+     `PlatformSysProbe` 此前在 Windows 上返回全零样本（`rss_bytes=0`），`system_telemetry_metrics_and_probe_via_loopback_api` 的 `RSS must be > 0` 断言自 SysProbe 落地以来从未被跑到（windows clippy 门一直先行熔断）。补齐 Windows 分支：`GetProcessMemoryInfo`（RSS=WorkingSetSize）、`GetProcessTimes`（内核+用户 FILETIME 100ns tick 折算 `cpu_time_ms`）、`CreateToolhelp32Snapshot`（`TH32CS_SNAPTHREAD` 按 owner pid 计 `thread_count`，快照句柄显式 `CloseHandle`）、`GlobalMemoryStatusEx`（`total_memory_bytes`）；全部走已入库 `windows-sys` 0.59 的三个新 feature（`Win32_System_ProcessStatus` / `Win32_System_SystemInformation` / `Win32_System_Diagnostics_ToolHelp`），零新包入 lockfile。本地验证手段升级：以 mingw-w64 + `x86_64-pc-windows-gnu` 建立**本地真实 Windows 交叉门**（全 workspace `cargo clippy -D warnings` 绿，先于 CI 抓出 `sample_host` 的 E0133 unsafe 缺陷）——此前 msvc 目标交叉检查因 zstd-sys 无 MSVC C 工具链在构建脚本即失败、clippy 从未真正运行，该路径已废弃。
 - **验证**：本地六门全绿——`cargo fmt --check`、宿主 clippy `-D warnings`、`x86_64-pc-windows-msvc` 交叉 clippy `-D warnings`（精确镜像 CI 失败作业的验收面）、`cargo test --workspace --locked`（31 套件 478 全过、两个原失败测试显式 ok、零回归）、`cargo deny --workspace check`、Cargo.lock 不变；随后 CI 三平台矩阵复绿并发版 v0.1.6。
 
 **1.85 相对 1.84(带宽画像驱动的流媒体参数自动推荐管线)**
