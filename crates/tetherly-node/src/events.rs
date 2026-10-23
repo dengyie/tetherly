@@ -658,6 +658,43 @@ pub enum UiEvent {
         allowed_types: Vec<String>,
         timestamp_ms: u64,
     },
+    MicrophoneSessionStarted {
+        session_id: String,
+        peer_id: String,
+        peer_alias: String,
+        role: String,
+        mode: String,
+        mic_id: String,
+        codec: String,
+        sample_rate: u32,
+        channels: u32,
+        gain: f32,
+        muted: bool,
+        privacy_indicator_active: bool,
+        timestamp_ms: u64,
+    },
+    MicrophoneSessionStopped {
+        session_id: String,
+        peer_id: String,
+        peer_alias: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        timestamp_ms: u64,
+    },
+    MicrophonePolicyChanged {
+        enabled: bool,
+        allow_inbound_stream: bool,
+        allow_remote_capture: bool,
+        allow_intercom: bool,
+        max_sample_rate: u32,
+        enforce_privacy_indicator: bool,
+        default_muted: bool,
+        idle_timeout_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -1508,6 +1545,86 @@ impl UiEvent {
             max_resolution_height,
             max_fps,
             enforce_privacy_shutter_indicator,
+            idle_timeout_secs,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn microphone_session_started(
+        session_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        role: impl Into<String>,
+        mode: impl Into<String>,
+        mic_id: impl Into<String>,
+        codec: impl Into<String>,
+        sample_rate: u32,
+        channels: u32,
+        gain: f32,
+        muted: bool,
+        privacy_indicator_active: bool,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::MicrophoneSessionStarted {
+            session_id: session_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            role: role.into(),
+            mode: mode.into(),
+            mic_id: mic_id.into(),
+            codec: codec.into(),
+            sample_rate,
+            channels,
+            gain,
+            muted,
+            privacy_indicator_active,
+            timestamp_ms,
+        }
+    }
+
+    pub fn microphone_session_stopped(
+        session_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        reason: Option<impl Into<String>>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::MicrophoneSessionStopped {
+            session_id: session_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            reason: reason.map(Into::into),
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn microphone_policy_changed(
+        enabled: bool,
+        allow_inbound_stream: bool,
+        allow_remote_capture: bool,
+        allow_intercom: bool,
+        max_sample_rate: u32,
+        enforce_privacy_indicator: bool,
+        default_muted: bool,
+        idle_timeout_secs: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::MicrophonePolicyChanged {
+            enabled,
+            allow_inbound_stream,
+            allow_remote_capture,
+            allow_intercom,
+            max_sample_rate,
+            enforce_privacy_indicator,
+            default_muted,
             idle_timeout_secs,
             allowed_groups,
             allowed_tags,

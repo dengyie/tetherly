@@ -1881,6 +1881,164 @@
         <div id="camera-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
       </div>
     </section>
+    <section style="margin-top:16px" id="mic-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2>跨端轻量级虚拟麦克风与语音对讲 (Cross-Device Virtual Microphone & Intercom)</h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button id="togglemicpolicybtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">治理策略</button>
+          <button id="refreshmicbtn" class="ghost" type="button" style="padding:2px 8px;font-size:12px">刷新状态</button>
+        </div>
+      </div>
+      <div class="hint">发现并协商挂载远端配对设备麦克风作为本机虚拟音频输入，支持连续虚拟麦与按键对讲 (PTT) 双模式、降噪/回声消除/自动增益与强制拾音隐私指示灯治理。</div>
+
+      <!-- Policy Subpanel -->
+      <div id="mic-policy-panel" style="display:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-weight:600;font-size:12px;color:var(--text)">虚拟麦克风准入与声学隐私治理策略 (ADR-076)</span>
+          <span id="mic-policy-badge" class="badge completed" style="font-size:11px">Policy: Active</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:8px;font-size:12px">
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">虚拟麦克风总开关 (Enabled):</label>
+            <select id="mic-policy-enabled" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">启用 (Enabled)</option>
+              <option value="false">禁用 (Disabled)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">接收远端拾音流 (Allow Inbound):</label>
+            <select id="mic-policy-inbound" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许接收远端麦克风流 (Client)</option>
+              <option value="false">禁止接收远端麦克风流</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许本机拾音采集 (Allow Capture):</label>
+            <select id="mic-policy-capture" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许本机被挂载为麦克风 (Source)</option>
+              <option value="false">禁止本机拾音采集推流</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">允许语音对讲 (Allow Intercom):</label>
+            <select id="mic-policy-intercom" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">允许按键对讲 (PTT)</option>
+              <option value="false">禁止语音对讲</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">最大采样率 (Max Sample Rate Hz):</label>
+            <input id="mic-policy-maxrate" type="number" min="8000" max="192000" placeholder="48000" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">单会话最长时间 (Max Duration s):</label>
+            <input id="mic-policy-maxduration" type="number" min="10" max="86400" placeholder="3600" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">强制拾音隐私指示灯 (Privacy Indicator):</label>
+            <select id="mic-policy-privacy" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="true">强制点亮指示灯 (必须提示)</option>
+              <option value="false">放宽指示灯检查</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">默认静音开局 (Default Muted):</label>
+            <select id="mic-policy-muted" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
+              <option value="false">默认开启拾音</option>
+              <option value="true">默认静音 (需手动解除)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">闲置超时自动释放 (Idle Timeout):</label>
+            <input id="mic-policy-timeout" type="number" min="0" placeholder="300" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">业务分组准入 (Allowed Groups):</label>
+            <input id="mic-policy-groups" placeholder="留空表示不限制分组" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">业务标签准入 (Allowed Tags):</label>
+            <input id="mic-policy-tags" placeholder="留空表示不限制标签" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">设备形态准入 (Allowed Types):</label>
+            <input id="mic-policy-types" placeholder="留空表示不限制形态" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+          <button id="mic-policy-save-btn" class="ghost" type="button" style="padding:4px 12px;font-size:12px">保存策略 (Save)</button>
+          <button id="mic-policy-reset-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">重置过滤 (Reset)</button>
+          <div id="mic-policy-msg" style="font-size:12px;color:var(--ok)"></div>
+        </div>
+      </div>
+
+      <!-- Main Microphone Panel -->
+      <div style="background:var(--card-bg);border:1px solid var(--line);border-radius:6px;padding:12px;margin-top:8px">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <!-- Status Banner -->
+          <div style="display:flex;justify-content:space-between;align-items:center;background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:8px 12px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-size:18px">🎙️🔊</span>
+              <div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <span id="mic-status-badge" class="badge" style="font-size:11px">虚拟麦克风未激活</span>
+                  <span id="mic-role-badge" class="badge" style="font-size:11px">角色: 空闲 (Idle)</span>
+                  <span id="mic-mute-badge" class="badge" style="font-size:11px">拾音: 关闭</span>
+                  <span id="mic-privacy-badge" class="badge" style="font-size:11px;background:#182026;color:var(--muted)">隐私指示灯: 熄灭</span>
+                </div>
+                <div id="mic-session-info" style="font-size:12px;color:var(--muted);margin-top:2px">轻量级虚拟麦克风引擎就绪，支持远端拾音挂载、按键对讲 (PTT)、声学处理链路与强制拾音隐私指示灯治理。</div>
+              </div>
+            </div>
+            <div style="text-align:right">
+              <div id="mic-active-peer" style="font-size:12px;color:var(--muted);font-weight:600">当前对端: 无</div>
+              <div id="mic-telemetry-info" style="font-size:11px;color:var(--muted)">指标: 0 帧 · 0 字节 · 采样: 48000Hz · 增益: 1.00</div>
+            </div>
+          </div>
+
+          <!-- Attach & Detach Actions -->
+          <div style="background:#0d1218;border:1px solid var(--line);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px">
+            <div style="font-size:12px;font-weight:600;color:var(--muted)">虚拟麦克风挂载 / 释放连接 (Attach & Detach)</div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <select id="mic-attach-peer-select" style="flex:1;min-width:180px;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="">-- 选择目标麦克风设备 --</option>
+              </select>
+              <select id="mic-attach-mode" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="virtual_mic">连续虚拟麦 (Virtual Mic)</option>
+                <option value="intercom">按键对讲 (PTT Intercom)</option>
+              </select>
+              <select id="mic-attach-codec" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="opus">Opus (低码率优先)</option>
+                <option value="pcm16">PCM-16 (无损原始)</option>
+                <option value="aac_light">AAC-Light (均衡压缩)</option>
+              </select>
+              <select id="mic-attach-rate" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="48000">48000 Hz</option>
+                <option value="44100">44100 Hz</option>
+                <option value="16000">16000 Hz</option>
+              </select>
+              <select id="mic-attach-channels" style="padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px">
+                <option value="1">单声道 (Mono)</option>
+                <option value="2">立体声 (Stereo)</option>
+              </select>
+              <input id="mic-attach-gain" type="number" step="0.1" min="0.0" max="2.0" placeholder="增益 (1.0)" style="width:85px;padding:4px 6px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <label style="font-size:12px;color:var(--text);display:flex;align-items:center;gap:4px">
+                <input id="mic-attach-muted" type="checkbox" style="vertical-align:middle"/> 静音开局
+              </label>
+              <button id="mic-attach-btn" class="ghost" type="button" style="padding:4px 14px;font-size:12px;font-weight:600;background:var(--accent);color:#fff">挂载麦克风 (Attach)</button>
+              <input id="mic-detach-reason" placeholder="断开原因 (可选)" style="width:130px;padding:4px 8px;font-size:12px;background:#131a22;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+              <button id="mic-detach-btn" class="bad ghost" type="button" style="padding:4px 12px;font-size:12px">断开麦克风 (Detach)</button>
+            </div>
+          </div>
+
+          <!-- Bottom Indicators -->
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:6px;margin-top:4px">
+            <span id="mic-policy-indicator">虚拟麦克风: 启用 · 双向拾音放行 · 最高 48000Hz · 强制隐私灯 · 超时 300s</span>
+            <span id="mic-audit-indicator">隐私合规: 拾音指示灯物理防窃听 · 零明文音频采样审计 · 默认静音可选</span>
+          </div>
+        </div>
+        <div id="mic-status-msg" class="hint" style="font-size:11px;margin-top:6px"></div>
+      </div>
+    </section>
     <section style="margin-top:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <h2>已接收文件与收件箱治理 (Inbox)</h2>
@@ -5684,6 +5842,20 @@ async function updateTopologyPeers() {
       if (currentVal) cameraPeerSel.value = currentVal;
     }
 
+    // Update virtual microphone attach peer select options
+    const micPeerSel = $("mic-attach-peer-select");
+    if (micPeerSel && document.activeElement !== micPeerSel) {
+      const currentVal = micPeerSel.value;
+      let html = '<option value="">-- 选择目标麦克风设备 --</option>';
+      for (const p of peers) {
+        const id = p.peer_id || "";
+        const alias = p.peer_alias || id.slice(0, 8);
+        html += `<option value="${id}">${escapeHtml(alias)}</option>`;
+      }
+      micPeerSel.innerHTML = html;
+      if (currentVal) micPeerSel.value = currentVal;
+    }
+
     // Render Peer Topologies Grid
     const container = $("topology-peer-items");
     if (container) {
@@ -6956,6 +7128,302 @@ if (cameraDetachBtn) {
         if (msg) msg.textContent = "已成功断开虚拟摄像头！";
         setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
         updateCamera();
+      } else {
+        if (msg) msg.textContent = "断开失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+async function updateMic() {
+  try {
+    const rep = await api("/api/mic");
+    if (!rep || !rep.ok) return;
+
+    const active = !!rep.active;
+    const sess = rep.session;
+
+    if ($("mic-status-badge")) {
+      $("mic-status-badge").textContent = active ? "虚拟麦克风已激活 (Active)" : "虚拟麦克风未激活 (Inactive)";
+      $("mic-status-badge").className = active ? "badge completed" : "badge";
+    }
+
+    if ($("mic-role-badge")) {
+      if (active && sess) {
+        const isHost = sess.role === "host";
+        const mode = sess.mode === "intercom" ? "PTT 对讲" : "虚拟麦";
+        $("mic-role-badge").textContent = isHost ? `角色: 虚拟输入端 (Host · ${mode})` : `角色: 拾音源端 (Source · ${mode})`;
+        $("mic-role-badge").className = isHost ? "badge outbound" : "badge completed";
+      } else {
+        $("mic-role-badge").textContent = "角色: 空闲 (Idle)";
+        $("mic-role-badge").className = "badge";
+      }
+    }
+
+    if ($("mic-mute-badge")) {
+      const muted = active && sess && sess.muted;
+      $("mic-mute-badge").textContent = muted ? "拾音: 已静音" : "拾音: 开启";
+      $("mic-mute-badge").className = muted ? "badge" : "badge completed";
+      $("mic-mute-badge").style.background = muted ? "#182026" : "#133820";
+      $("mic-mute-badge").style.color = muted ? "var(--muted)" : "var(--ok)";
+    }
+
+    if ($("mic-privacy-badge")) {
+      if (active && sess && sess.privacy_indicator_active) {
+        $("mic-privacy-badge").textContent = "隐私指示灯: 绿色点亮 (拾音监控中)";
+        $("mic-privacy-badge").style.background = "#133820";
+        $("mic-privacy-badge").style.color = "var(--ok)";
+      } else {
+        $("mic-privacy-badge").textContent = "隐私指示灯: 熄灭";
+        $("mic-privacy-badge").style.background = "#182026";
+        $("mic-privacy-badge").style.color = "var(--muted)";
+      }
+    }
+
+    if ($("mic-session-info")) {
+      if (active && sess) {
+        const sid = sess.session_id || "";
+        const peer = sess.peer_id || sess.peer || "";
+        const mic = sess.mic_id ? ` · 麦克风: ${sess.mic_id}` : "";
+        const mode = sess.mode === "intercom" ? "PTT 对讲" : "连续虚拟麦";
+        const rate = sess.sample_rate ? ` · ${sess.sample_rate}Hz x${sess.channels || 1}ch` : "";
+        const codec = sess.codec ? ` · 编码: ${sess.codec.toUpperCase()}` : "";
+        $("mic-session-info").textContent = `会话: ${sid} · 对端: ${peer}${mic} · 模式: ${mode}${rate}${codec}`;
+      } else {
+        $("mic-session-info").textContent = "轻量级虚拟麦克风引擎就绪，支持远端拾音挂载、按键对讲 (PTT)、声学处理链路与强制拾音隐私指示灯治理。";
+      }
+    }
+
+    if ($("mic-active-peer")) {
+      const p = sess ? (sess.peer_id || sess.peer) : "";
+      $("mic-active-peer").textContent = active && p ? `当前对端: ${p}` : "当前对端: 无";
+    }
+
+    if ($("mic-telemetry-info")) {
+      if (active && sess) {
+        const bytes = sess.bytes_transferred || 0;
+        const frames = (sess.frames_sent || 0) + (sess.frames_received || 0);
+        const rate = sess.sample_rate || 48000;
+        const gain = sess.gain !== undefined ? sess.gain.toFixed(2) : "1.00";
+        $("mic-telemetry-info").textContent = `指标: ${frames} 帧 · ${formatBytes(bytes)} · 采样: ${rate}Hz · 增益: ${gain}`;
+      } else {
+        $("mic-telemetry-info").textContent = "指标: 0 帧 · 0 字节 · 采样: 48000Hz · 增益: 1.00";
+      }
+    }
+
+    if (rep.policy) {
+      updateMicPolicyUI(rep.policy);
+    }
+  } catch (e) {
+    // ignore polling blip
+  }
+}
+
+async function updateMicPolicy() {
+  try {
+    const rep = await api("/api/mic/policy");
+    if (!rep || !rep.ok) return;
+    const p = rep.policy || rep;
+    updateMicPolicyUI(p);
+  } catch (e) {}
+}
+
+function updateMicPolicyUI(p) {
+  if (!p) return;
+  const en = p.enabled !== false;
+  const inbound = p.allow_inbound_stream !== false;
+  const capture = p.allow_remote_capture !== false;
+  const intercom = p.allow_intercom !== false;
+  const maxRate = p.max_sample_rate || 48000;
+  const maxDur = p.max_session_duration_secs || 3600;
+  const privacy = p.enforce_privacy_indicator !== false;
+  const defMuted = p.default_muted === true;
+  const timeout = p.idle_timeout_secs || 300;
+
+  if ($("mic-policy-badge")) {
+    $("mic-policy-badge").textContent = en ? "Policy: Active" : "Policy: Disabled";
+    $("mic-policy-badge").className = en ? "badge completed" : "badge";
+  }
+
+  if ($("mic-policy-indicator")) {
+    $("mic-policy-indicator").textContent = `虚拟麦克风: ${en ? "启用" : "禁用"} · 接收[${inbound ? "放行" : "拦截"}] 采集[${capture ? "放行" : "拦截"}] 对讲[${intercom ? "放行" : "拦截"}] · 最高 ${maxRate}Hz · 隐私灯[${privacy ? "强制" : "放宽"}] · 默认[${defMuted ? "静音" : "拾音"}] · 超时 ${timeout}s`;
+  }
+
+  if ($("mic-policy-enabled") && document.activeElement !== $("mic-policy-enabled")) {
+    $("mic-policy-enabled").value = en ? "true" : "false";
+  }
+  if ($("mic-policy-inbound") && document.activeElement !== $("mic-policy-inbound")) {
+    $("mic-policy-inbound").value = inbound ? "true" : "false";
+  }
+  if ($("mic-policy-capture") && document.activeElement !== $("mic-policy-capture")) {
+    $("mic-policy-capture").value = capture ? "true" : "false";
+  }
+  if ($("mic-policy-intercom") && document.activeElement !== $("mic-policy-intercom")) {
+    $("mic-policy-intercom").value = intercom ? "true" : "false";
+  }
+  if ($("mic-policy-maxrate") && document.activeElement !== $("mic-policy-maxrate")) {
+    $("mic-policy-maxrate").value = maxRate;
+  }
+  if ($("mic-policy-maxduration") && document.activeElement !== $("mic-policy-maxduration")) {
+    $("mic-policy-maxduration").value = maxDur;
+  }
+  if ($("mic-policy-privacy") && document.activeElement !== $("mic-policy-privacy")) {
+    $("mic-policy-privacy").value = privacy ? "true" : "false";
+  }
+  if ($("mic-policy-muted") && document.activeElement !== $("mic-policy-muted")) {
+    $("mic-policy-muted").value = defMuted ? "true" : "false";
+  }
+  if ($("mic-policy-timeout") && document.activeElement !== $("mic-policy-timeout")) {
+    $("mic-policy-timeout").value = timeout;
+  }
+  if ($("mic-policy-groups") && document.activeElement !== $("mic-policy-groups")) {
+    $("mic-policy-groups").value = (p.allowed_groups || []).join(", ");
+  }
+  if ($("mic-policy-tags") && document.activeElement !== $("mic-policy-tags")) {
+    $("mic-policy-tags").value = (p.allowed_tags || []).join(", ");
+  }
+  if ($("mic-policy-types") && document.activeElement !== $("mic-policy-types")) {
+    $("mic-policy-types").value = (p.allowed_types || []).join(", ");
+  }
+}
+
+const toggleMicPolicyBtn = $("togglemicpolicybtn");
+if (toggleMicPolicyBtn) {
+  toggleMicPolicyBtn.onclick = () => {
+    const p = $("mic-policy-panel");
+    if (p) p.style.display = p.style.display === "none" ? "block" : "none";
+  };
+}
+
+const refreshMicBtn = $("refreshmicbtn");
+if (refreshMicBtn) {
+  refreshMicBtn.onclick = () => {
+    updateMic();
+    updateMicPolicy();
+  };
+}
+
+const micPolicySaveBtn = $("mic-policy-save-btn");
+if (micPolicySaveBtn) {
+  micPolicySaveBtn.onclick = async () => {
+    const en = $("mic-policy-enabled") ? $("mic-policy-enabled").value === "true" : undefined;
+    const inbound = $("mic-policy-inbound") ? $("mic-policy-inbound").value === "true" : undefined;
+    const capture = $("mic-policy-capture") ? $("mic-policy-capture").value === "true" : undefined;
+    const intercom = $("mic-policy-intercom") ? $("mic-policy-intercom").value === "true" : undefined;
+    const maxRate = $("mic-policy-maxrate") && $("mic-policy-maxrate").value ? parseInt($("mic-policy-maxrate").value, 10) : undefined;
+    const maxDur = $("mic-policy-maxduration") && $("mic-policy-maxduration").value ? parseInt($("mic-policy-maxduration").value, 10) : undefined;
+    const privacy = $("mic-policy-privacy") ? $("mic-policy-privacy").value === "true" : undefined;
+    const defMuted = $("mic-policy-muted") ? $("mic-policy-muted").value === "true" : undefined;
+    const timeout = $("mic-policy-timeout") && $("mic-policy-timeout").value ? parseInt($("mic-policy-timeout").value, 10) : undefined;
+    const grpsVal = $("mic-policy-groups") ? $("mic-policy-groups").value.trim() : "";
+    const tagsVal = $("mic-policy-tags") ? $("mic-policy-tags").value.trim() : "";
+    const typesVal = $("mic-policy-types") ? $("mic-policy-types").value.trim() : "";
+    const msg = $("mic-policy-msg");
+
+    const payload = {};
+    if (en !== undefined) payload.enabled = en;
+    if (inbound !== undefined) payload.allow_inbound_stream = inbound;
+    if (capture !== undefined) payload.allow_remote_capture = capture;
+    if (intercom !== undefined) payload.allow_intercom = intercom;
+    if (maxRate !== undefined) payload.max_sample_rate = maxRate;
+    if (maxDur !== undefined) payload.max_session_duration_secs = maxDur;
+    if (privacy !== undefined) payload.enforce_privacy_indicator = privacy;
+    if (defMuted !== undefined) payload.default_muted = defMuted;
+    if (timeout !== undefined) payload.idle_timeout_secs = timeout;
+    if (grpsVal) payload.allowed_groups = grpsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (tagsVal) payload.allowed_tags = tagsVal.split(",").map(s => s.trim()).filter(Boolean);
+    if (typesVal) payload.allowed_types = typesVal.split(",").map(s => s.trim()).filter(Boolean);
+
+    try {
+      const rep = await api("/api/mic/policy", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "策略已保存并原子持久化！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateMicPolicy();
+      } else {
+        if (msg) msg.textContent = "保存失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const micPolicyResetBtn = $("mic-policy-reset-btn");
+if (micPolicyResetBtn) {
+  micPolicyResetBtn.onclick = async () => {
+    const msg = $("mic-policy-msg");
+    try {
+      const rep = await api("/api/mic/policy", {
+        allowed_groups: [],
+        allowed_tags: [],
+        allowed_types: []
+      });
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "设备准入白名单过滤已重置为空！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateMicPolicy();
+      } else {
+        if (msg) msg.textContent = "重置失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const micAttachBtn = $("mic-attach-btn");
+if (micAttachBtn) {
+  micAttachBtn.onclick = async () => {
+    const peer = $("mic-attach-peer-select") ? $("mic-attach-peer-select").value.trim() : "";
+    const mode = $("mic-attach-mode") ? $("mic-attach-mode").value : "virtual_mic";
+    const codec = $("mic-attach-codec") ? $("mic-attach-codec").value : "opus";
+    const rate = $("mic-attach-rate") ? parseInt($("mic-attach-rate").value, 10) : 48000;
+    const channels = $("mic-attach-channels") ? parseInt($("mic-attach-channels").value, 10) : 1;
+    const gain = $("mic-attach-gain") && $("mic-attach-gain").value ? parseFloat($("mic-attach-gain").value) : undefined;
+    const muted = $("mic-attach-muted") ? $("mic-attach-muted").checked : false;
+    const msg = $("mic-status-msg");
+
+    if (!peer) {
+      if (msg) msg.textContent = "请先选择目标麦克风设备！";
+      return;
+    }
+
+    const payload = { peer, mode, codec, sample_rate: rate, channels, muted };
+    if (gain !== undefined) payload.gain = gain;
+
+    try {
+      const rep = await api("/api/mic/attach", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "虚拟麦克风已成功挂载！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateMic();
+      } else {
+        if (msg) msg.textContent = "挂载失败: " + (rep ? rep.error : "未知错误");
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const micDetachBtn = $("mic-detach-btn");
+if (micDetachBtn) {
+  micDetachBtn.onclick = async () => {
+    const reason = $("mic-detach-reason") ? $("mic-detach-reason").value.trim() : "";
+    const msg = $("mic-status-msg");
+
+    const payload = {};
+    if (reason) payload.reason = reason;
+
+    try {
+      const rep = await api("/api/mic/detach", payload);
+      if (rep && rep.ok) {
+        if (msg) msg.textContent = "已成功断开虚拟麦克风！";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2500);
+        updateMic();
       } else {
         if (msg) msg.textContent = "断开失败: " + (rep ? rep.error : "未知错误");
       }
@@ -8860,12 +9328,25 @@ function setupEventSource() {
 									            desc = "虚拟摄像头释放: " + ev.session_id + " (" + (ev.reason || "正常退出") + ")";
 									            updateCamera();
 									          }
-									          else if (ev.kind === "camera_policy_changed") {
-									            desc = "虚拟摄像头策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许接收=" + (ev.allow_inbound ? "是" : "否") + " · 允许采集=" + (ev.allow_capture ? "是" : "否");
-									            updateCameraPolicy();
-									            updateCamera();
-									          }
-					          else if (ev.kind === "network_refreshed") {
+										          else if (ev.kind === "camera_policy_changed") {
+										            desc = "虚拟摄像头策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许接收=" + (ev.allow_inbound ? "是" : "否") + " · 允许采集=" + (ev.allow_capture ? "是" : "否");
+										            updateCameraPolicy();
+										            updateCamera();
+										          }
+										          else if (ev.kind === "microphone_session_started") {
+										            desc = "虚拟麦克风建立: " + ev.session_id + " [" + ev.role + "] 对端:" + (ev.peer_alias || ev.peer_id) + " (" + ev.sample_rate + "Hz x" + ev.channels + "ch, 编码:" + ev.codec + ", 模式:" + ev.mode + ")";
+										            updateMic();
+										          }
+										          else if (ev.kind === "microphone_session_stopped") {
+										            desc = "虚拟麦克风释放: " + ev.session_id + " (" + (ev.reason || "正常退出") + ")";
+										            updateMic();
+										          }
+										          else if (ev.kind === "microphone_policy_changed") {
+										            desc = "虚拟麦克风策略更新: 启用=" + (ev.enabled ? "是" : "否") + " · 允许接收=" + (ev.allow_inbound_stream ? "是" : "否") + " · 允许采集=" + (ev.allow_remote_capture ? "是" : "否") + " · 允许对讲=" + (ev.allow_intercom ? "是" : "否");
+										            updateMicPolicy();
+										            updateMic();
+										          }
+						          else if (ev.kind === "network_refreshed") {
 					            desc = "网络已重探: 扫描 " + ev.iface_count + " 网卡 (监听 " + ev.listen_count + ")" + (ev.overlay_present ? (" · 侧车: " + (ev.overlay_source || "在网")) : "");
 					            updateNetworkStatus();
 					          }
@@ -9058,6 +9539,10 @@ function setupEventSource() {
 																						setInterval(updateCamera, 3000);
 																						updateCameraPolicy();
 																						setInterval(updateCameraPolicy, 3000);
-									</script>
+																							updateMic();
+																							setInterval(updateMic, 3000);
+																							updateMicPolicy();
+																							setInterval(updateMicPolicy, 3000);
+										</script>
 </body>
 </html>

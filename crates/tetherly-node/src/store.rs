@@ -40,6 +40,7 @@ pub const INPUT_POLICY_FILE: &str = "input_policy.json";
 pub const VIRTUAL_DISPLAY_POLICY_FILE: &str = "virtual_display_policy.json";
 pub const AUDIO_ROUTING_POLICY_FILE: &str = "audio_routing_policy.json";
 pub const CAMERA_POLICY_FILE: &str = "camera_policy.json";
+pub const MICROPHONE_POLICY_FILE: &str = "microphone_policy.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -1974,6 +1975,136 @@ pub fn save_camera_policy(dir: &Path, policy: &CameraPolicy) -> Result<(), NodeS
     Ok(())
 }
 
+fn default_mic_max_sample_rate() -> u32 {
+    48000
+}
+
+fn default_mic_idle_timeout() -> u32 {
+    300
+}
+
+fn default_mic_max_duration() -> u32 {
+    3600
+}
+
+/// Governance policy for cross-device virtual microphone streaming and voice intercom.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MicrophonePolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub allow_inbound_stream: bool,
+    #[serde(default = "default_true")]
+    pub allow_remote_capture: bool,
+    #[serde(default = "default_true")]
+    pub allow_intercom: bool,
+    #[serde(default = "default_mic_max_sample_rate")]
+    pub max_sample_rate: u32,
+    #[serde(default = "default_mic_max_duration")]
+    pub max_session_duration_secs: u32,
+    #[serde(default = "default_true")]
+    pub enforce_privacy_indicator: bool,
+    #[serde(default)]
+    pub default_muted: bool,
+    #[serde(default = "default_mic_idle_timeout")]
+    pub idle_timeout_secs: u32,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+}
+
+impl Default for MicrophonePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_inbound_stream: true,
+            allow_remote_capture: true,
+            allow_intercom: true,
+            max_sample_rate: default_mic_max_sample_rate(),
+            max_session_duration_secs: default_mic_max_duration(),
+            enforce_privacy_indicator: true,
+            default_muted: false,
+            idle_timeout_secs: default_mic_idle_timeout(),
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+        }
+    }
+}
+
+impl MicrophonePolicy {
+    /// `as_host` selects between inbound consumption (this node plays remote mic feed)
+    /// and remote capture (this node's physical microphone is streamed to a peer).
+    pub fn is_peer_eligible(&self, profile: &PeerProfile, as_host: bool, intercom: bool) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if as_host && !self.allow_inbound_stream {
+            return false;
+        }
+        if !as_host && !self.allow_remote_capture {
+            return false;
+        }
+        if intercom && !self.allow_intercom {
+            return false;
+        }
+
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        if let Some(group) = &profile.group {
+            if self.allowed_groups.iter().any(|g| g == group) {
+                return true;
+            }
+        }
+
+        if profile.tags.iter().any(|t| self.allowed_tags.contains(t)) {
+            return true;
+        }
+
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+
+    pub fn sanitize(&mut self) {
+        self.max_sample_rate = self.max_sample_rate.clamp(8000, 192000);
+        self.max_session_duration_secs = self.max_session_duration_secs.clamp(10, 86400);
+        self.idle_timeout_secs = self.idle_timeout_secs.clamp(10, 3600);
+        self.allowed_groups.retain(|g| !g.trim().is_empty());
+        self.allowed_groups.truncate(32);
+        self.allowed_tags.retain(|t| !t.trim().is_empty());
+        self.allowed_tags.truncate(32);
+        self.allowed_types.truncate(16);
+    }
+}
+
+pub fn load_microphone_policy(dir: &Path) -> MicrophonePolicy {
+    let path = dir.join(MICROPHONE_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_microphone_policy(dir: &Path, policy: &MicrophonePolicy) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(MICROPHONE_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -3288,6 +3419,120 @@ mod tests {
         };
         assert!(capture_disabled.is_peer_eligible(&prof_ok, true));
         assert!(!capture_disabled.is_peer_eligible(&prof_ok, false));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn microphone_policy_roundtrip_and_matching() {
+        let dir = std::env::temp_dir().join(format!("tetherly-mic-pol-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Defaults
+        let def = load_microphone_policy(&dir);
+        assert!(def.enabled);
+        assert!(def.allow_inbound_stream);
+        assert!(def.allow_remote_capture);
+        assert!(def.allow_intercom);
+        assert_eq!(def.max_sample_rate, 48000);
+        assert!(def.enforce_privacy_indicator);
+        assert!(!def.default_muted);
+        assert_eq!(def.idle_timeout_secs, 300);
+
+        // 2. Custom policy persistence
+        let mut custom = MicrophonePolicy {
+            enabled: true,
+            allow_inbound_stream: true,
+            allow_remote_capture: true,
+            allow_intercom: true,
+            max_sample_rate: 44100,
+            max_session_duration_secs: 1800,
+            enforce_privacy_indicator: true,
+            default_muted: true,
+            idle_timeout_secs: 120,
+            allowed_groups: vec!["studio".into()],
+            allowed_tags: vec!["intercom".into()],
+            allowed_types: vec![DeviceType::Phone],
+        };
+        custom.sanitize();
+        save_microphone_policy(&dir, &custom).unwrap();
+        let loaded = load_microphone_policy(&dir);
+        assert_eq!(loaded.max_sample_rate, 44100);
+        assert_eq!(loaded.max_session_duration_secs, 1800);
+        assert!(loaded.default_muted);
+        assert_eq!(loaded.idle_timeout_secs, 120);
+
+        // 3. Matching
+        let prof_ok = PeerProfile {
+            device_id: "phone_mic".into(),
+            device_type: DeviceType::Phone,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_ok, true, false));
+        assert!(loaded.is_peer_eligible(&prof_ok, false, false));
+        assert!(loaded.is_peer_eligible(&prof_ok, true, true));
+
+        let prof_group = PeerProfile {
+            device_id: "mic_grp".into(),
+            device_type: DeviceType::Other,
+            tags: vec![],
+            group: Some("studio".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_group, true, false));
+
+        let prof_tag = PeerProfile {
+            device_id: "mic_tag".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["intercom".into()],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_tag, false, true));
+
+        let prof_unmatched = PeerProfile {
+            device_id: "iot_unmatched".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["guest".into()],
+            group: Some("visitor".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded.is_peer_eligible(&prof_unmatched, true, false));
+
+        // 4. Toggle gating
+        let stream_disabled = MicrophonePolicy {
+            allow_inbound_stream: false,
+            ..Default::default()
+        };
+        assert!(!stream_disabled.is_peer_eligible(&prof_ok, true, false));
+        assert!(stream_disabled.is_peer_eligible(&prof_ok, false, false));
+
+        let capture_disabled = MicrophonePolicy {
+            allow_remote_capture: false,
+            ..Default::default()
+        };
+        assert!(capture_disabled.is_peer_eligible(&prof_ok, true, false));
+        assert!(!capture_disabled.is_peer_eligible(&prof_ok, false, false));
+
+        let intercom_disabled = MicrophonePolicy {
+            allow_intercom: false,
+            ..Default::default()
+        };
+        assert!(intercom_disabled.is_peer_eligible(&prof_ok, true, false));
+        assert!(!intercom_disabled.is_peer_eligible(&prof_ok, true, true));
+
+        let disabled_all = MicrophonePolicy {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(!disabled_all.is_peer_eligible(&prof_ok, true, false));
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -26,6 +26,7 @@ pub mod insertion;
 pub mod liveness;
 pub mod locate;
 pub mod media;
+pub mod microphone;
 pub mod notify;
 pub mod otp;
 pub mod overlay;
@@ -86,9 +87,9 @@ pub use frame::{
     TYPE_AUDIO_ROUTING_ANNOUNCE, TYPE_AUDIO_ROUTING_ATTACH, TYPE_AUDIO_ROUTING_CHUNK,
     TYPE_AUDIO_ROUTING_DETACH, TYPE_BATTERY_STATE, TYPE_CAMERA_ANNOUNCE, TYPE_CAMERA_ATTACH,
     TYPE_CAMERA_DETACH, TYPE_CAMERA_FRAME_CHUNK, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ,
-    TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_PING,
-    TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE,
-    TYPE_TOPOLOGY_SYNC_REQ,
+    TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_MIC_ANNOUNCE,
+    TYPE_MIC_ATTACH, TYPE_MIC_AUDIO_CHUNK, TYPE_MIC_DETACH, TYPE_PING, TYPE_PONG,
+    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE, TYPE_TOPOLOGY_SYNC_REQ,
 };
 pub use handoff::{
     HandoffAction, HandoffEntry, HandoffStatus, ResourceHandoffValidator, SanitizedHandoffUrl,
@@ -115,6 +116,10 @@ pub use media::{
     MediaCommand, MediaCommandFrame, MediaControlMode, MediaStateFrame, MediaValidator,
     PlaybackState, MAX_MEDIA_ALBUM_LEN, MAX_MEDIA_ARTIST_LEN, MAX_MEDIA_PLAYER_ID_LEN,
     MAX_MEDIA_TITLE_LEN,
+};
+pub use microphone::{
+    MicAnnounceFrame, MicAttachFrame, MicAudioChunkFrame, MicCapabilities, MicCodec,
+    MicDetachFrame, MicDevice, MicMode, MicRole, MicValidator,
 };
 pub use notify::{is_desktop_platform, CandidateView, IngestOutcome, NotifyHub, ReplyView};
 pub use otp::{extract_otp, DefaultOtpExtractor, OtpExtractor, DEFAULT_MIN_SCORE};

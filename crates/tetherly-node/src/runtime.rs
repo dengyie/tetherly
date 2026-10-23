@@ -10,16 +10,16 @@ use crate::store::{
     load_action_policy, load_audio_routing_policy, load_battery_policy, load_camera_policy,
     load_clipboard_policy, load_focus_policy, load_handoff_inbox, load_handoff_policy,
     load_input_policy, load_local_actions, load_locator_policy, load_media_policy,
-    load_topology_layout, load_topology_policy, load_trust, load_virtual_display_policy,
-    remember_route, save_action_policy, save_audio_routing_policy, save_battery_policy,
-    save_camera_policy, save_clipboard_policy, save_focus_policy, save_handoff_inbox,
-    save_handoff_policy, save_input_policy, save_local_actions, save_locator_policy,
-    save_media_policy, save_topology_layout, save_topology_policy, save_trust,
-    save_virtual_display_policy, ActionAccessMode, ActionPolicy, AudioRoutingPolicy,
-    AutoAcceptPolicy, BatteryPolicy, CameraPolicy, ClipboardPolicy, DeviceType, FocusPolicy,
-    HandoffInboxTable, HandoffPolicy, InputTunnelPolicy, LocalActionDefinition, LocatorPolicy,
-    MediaControlPolicy, PeerProfile, ProfileTable, RouteTable, TargetSelector, TopologyLayout,
-    TopologyPolicy, VirtualDisplayPolicy,
+    load_microphone_policy, load_topology_layout, load_topology_policy, load_trust,
+    load_virtual_display_policy, remember_route, save_action_policy, save_audio_routing_policy,
+    save_battery_policy, save_camera_policy, save_clipboard_policy, save_focus_policy,
+    save_handoff_inbox, save_handoff_policy, save_input_policy, save_local_actions,
+    save_locator_policy, save_media_policy, save_microphone_policy, save_topology_layout,
+    save_topology_policy, save_trust, save_virtual_display_policy, ActionAccessMode, ActionPolicy,
+    AudioRoutingPolicy, AutoAcceptPolicy, BatteryPolicy, CameraPolicy, ClipboardPolicy, DeviceType,
+    FocusPolicy, HandoffInboxTable, HandoffPolicy, InputTunnelPolicy, LocalActionDefinition,
+    LocatorPolicy, MediaControlPolicy, MicrophonePolicy, PeerProfile, ProfileTable, RouteTable,
+    TargetSelector, TopologyLayout, TopologyPolicy, VirtualDisplayPolicy,
 };
 use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::{HashMap, VecDeque};
@@ -53,12 +53,14 @@ use tetherly_core::{
     InputTunnelRequestFrame, InputTunnelRespFrame, InputTunnelRole, InputTunnelValidator,
     LocatePattern, LocateRequestFrame, LocateStopFrame, LocateValidator, MediaCommand,
     MediaCommandFrame, MediaStateFrame, MediaValidator, MemoryScreenSink, MemorySink,
-    MemoryTrustStore, NotificationPayload, NotificationUrgency, Notifier, NotifyHub, OpenAllowlist,
-    PathKind, PlaybackState, PowerSource, ReplyView, ResourceHandoffValidator, ScreenAssembler,
-    ScreenCodec, ScreenFrame, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState,
-    ScreenStats, SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame,
-    TopologyValidator, TrustStore, VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame,
-    VirtualDisplayCodec, VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
+    MemoryTrustStore, MicAnnounceFrame, MicAttachFrame, MicAudioChunkFrame, MicCodec,
+    MicDetachFrame, MicMode, MicRole, MicValidator, NotificationPayload, NotificationUrgency,
+    Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource, ReplyView,
+    ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenFrame, ScreenReceiver,
+    ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats, SensitiveContentGuard,
+    TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator, TrustStore,
+    VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
+    VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
     VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
     DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS,
 };
@@ -2093,6 +2095,93 @@ pub struct CameraPolicyUpdate {
     pub allowed_types: Option<Vec<DeviceType>>,
 }
 
+/// Active virtual microphone or voice intercom session metadata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ActiveMicrophoneSession {
+    pub session_id: String,
+    pub peer_id: String,
+    pub role: MicRole,
+    pub mode: MicMode,
+    pub mic_id: String,
+    pub codec: MicCodec,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub gain: f32,
+    pub muted: bool,
+    pub noise_suppression: bool,
+    pub echo_cancellation: bool,
+    pub auto_gain: bool,
+    pub privacy_indicator_active: bool,
+    pub frames_sent: u64,
+    pub frames_received: u64,
+    pub bytes_transferred: u64,
+    pub started_at_ms: u64,
+    pub last_activity_ms: u64,
+}
+
+/// Status report for virtual microphone, intercom streaming and governance policy.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct MicrophoneStatusReport {
+    pub ok: bool,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<ActiveMicrophoneSession>,
+    pub policy: MicrophonePolicy,
+    pub timestamp_ms: u64,
+}
+
+/// Decision report when establishing or terminating a microphone session.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct MicrophoneDecisionReport {
+    pub ok: bool,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<MicRole>,
+    pub message: String,
+    pub timestamp_ms: u64,
+}
+
+/// Governance policy report for virtual microphone streaming.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct MicrophonePolicyReport {
+    pub ok: bool,
+    pub policy: MicrophonePolicy,
+    pub message: String,
+}
+
+/// Partial update payload for microphone policy.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct MicrophonePolicyUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_inbound_stream: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_remote_capture: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_intercom: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_session_duration_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce_privacy_indicator: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_muted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_groups: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_types: Option<Vec<DeviceType>>,
+}
+
 /// Status report for the node's clipboard state and statistics without leaking plaintext.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ClipStatusReport {
@@ -2882,6 +2971,8 @@ struct Shared {
     active_audio_routing: Mutex<Option<ActiveAudioRoutingSession>>,
     camera_policy: Mutex<CameraPolicy>,
     active_camera: Mutex<Option<ActiveCameraSession>>,
+    microphone_policy: Mutex<MicrophonePolicy>,
+    active_microphone: Mutex<Option<ActiveMicrophoneSession>>,
 }
 
 #[derive(Clone)]
@@ -3037,6 +3128,7 @@ impl Node {
         let initial_virtual_display_policy = load_virtual_display_policy(&cfg.data_dir);
         let initial_audio_routing_policy = load_audio_routing_policy(&cfg.data_dir);
         let initial_camera_policy = load_camera_policy(&cfg.data_dir);
+        let initial_microphone_policy = load_microphone_policy(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -3193,6 +3285,8 @@ impl Node {
             active_audio_routing: Mutex::new(None),
             camera_policy: Mutex::new(initial_camera_policy),
             active_camera: Mutex::new(None),
+            microphone_policy: Mutex::new(initial_microphone_policy),
+            active_microphone: Mutex::new(None),
         });
         Ok(Self { shared })
     }
@@ -8631,6 +8725,22 @@ impl Node {
                 (chunk.data.len() + 32) as u64,
                 tetherly_core::frame::TYPE_CAMERA_FRAME_CHUNK,
             ),
+            SessionEvent::MicAnnounce(ann) => (
+                (ann.device_name.len() + 64) as u64,
+                tetherly_core::frame::TYPE_MIC_ANNOUNCE,
+            ),
+            SessionEvent::MicAttach(att) => (
+                (att.session_id.len() + att.peer_id.len() + 64) as u64,
+                tetherly_core::frame::TYPE_MIC_ATTACH,
+            ),
+            SessionEvent::MicDetach(det) => (
+                (det.session_id.len() + det.reason.as_ref().map_or(0, |r| r.len()) + 48) as u64,
+                tetherly_core::frame::TYPE_MIC_DETACH,
+            ),
+            SessionEvent::MicAudioChunk(chunk) => (
+                (chunk.data.len() + 32) as u64,
+                tetherly_core::frame::TYPE_MIC_AUDIO_CHUNK,
+            ),
             SessionEvent::Unknown(ty) => (32u64, *ty),
         };
         self.shared.telemetry.record_control_rx(ev_bytes, ev_ty);
@@ -8958,6 +9068,18 @@ impl Node {
             }
             SessionEvent::CameraFrameChunk(chunk) => {
                 self.receive_camera_frame_chunk(peer, chunk);
+            }
+            SessionEvent::MicAnnounce(ann) => {
+                self.receive_mic_announce(peer, ann);
+            }
+            SessionEvent::MicAttach(att) => {
+                self.receive_mic_attach(peer, att).await;
+            }
+            SessionEvent::MicDetach(det) => {
+                self.receive_mic_detach(peer, det).await;
+            }
+            SessionEvent::MicAudioChunk(chunk) => {
+                self.receive_mic_audio_chunk(peer, chunk);
             }
             SessionEvent::Unknown(_) => {}
         }
@@ -15859,6 +15981,627 @@ impl Node {
             policy.allowed_types = v;
         }
         self.set_camera_policy(policy)
+    }
+
+    /// Ingest and process an inbound MicAnnounceFrame from a peer.
+    pub fn receive_mic_announce(&self, peer: &DeviceId, frame: MicAnnounceFrame) {
+        let peer_str = peer.to_string();
+        debug!(
+            peer = %peer_str,
+            device = %frame.device_name,
+            codecs = ?frame.capabilities.supported_codecs,
+            devices = ?frame.capabilities.devices,
+            "received microphone announcement"
+        );
+    }
+
+    /// Ingest and process an inbound MicAttachFrame to act as a microphone stream source.
+    pub async fn receive_mic_attach(&self, peer: &DeviceId, mut frame: MicAttachFrame) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        frame.sanitize();
+        if MicValidator::validate_attach(&frame).is_err() {
+            warn!(peer = %peer, session_id = %frame.session_id, "invalid microphone attach frame rejected");
+            return;
+        }
+
+        let policy = self.microphone_policy();
+        let profile = self.peer_profile(peer);
+
+        let rejection_reason = if !policy.enabled {
+            Some("virtual microphone streaming disabled".to_string())
+        } else if !policy.allow_remote_capture {
+            Some("remote microphone capture disabled by policy".to_string())
+        } else if frame.mode == MicMode::Intercom && !policy.allow_intercom {
+            Some("voice intercom disabled by policy".to_string())
+        } else if frame.sample_rate > policy.max_sample_rate {
+            Some("sample rate exceeds policy limit".to_string())
+        } else if !policy.is_peer_eligible(&profile, false, frame.mode == MicMode::Intercom) {
+            Some("peer ineligible under microphone policy filters".to_string())
+        } else {
+            None
+        };
+
+        if let Some(reason) = rejection_reason {
+            let detach = MicDetachFrame {
+                session_id: frame.session_id.clone(),
+                reason: Some(reason.clone()),
+                timestamp_ms: now_ms,
+            };
+            if let Ok(inner) = detach.to_frame() {
+                let _ = self.send_to(peer, inner).await;
+            }
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Warning,
+                "mic_attach_rejected",
+                Some(peer_str.clone()),
+                format!("Rejected microphone attach from {}: {}", peer_str, reason),
+                false,
+            );
+            return;
+        }
+
+        // Fail-closed privacy governance: the capturing side MUST light the privacy
+        // indicator whenever the policy demands it, refusing silent capture.
+        let privacy_active = frame.enforce_privacy_indicator || policy.enforce_privacy_indicator;
+
+        let session = ActiveMicrophoneSession {
+            session_id: frame.session_id.clone(),
+            peer_id: peer_str.clone(),
+            role: MicRole::Source,
+            mode: frame.mode,
+            mic_id: frame.mic_id.clone(),
+            codec: frame.codec,
+            sample_rate: frame.sample_rate,
+            channels: frame.channels,
+            gain: frame.gain,
+            muted: frame.muted || policy.default_muted,
+            noise_suppression: frame.noise_suppression,
+            echo_cancellation: frame.echo_cancellation,
+            auto_gain: frame.auto_gain,
+            privacy_indicator_active: privacy_active,
+            frames_sent: 0,
+            frames_received: 0,
+            bytes_transferred: 0,
+            started_at_ms: now_ms,
+            last_activity_ms: now_ms,
+        };
+
+        *self
+            .shared
+            .active_microphone
+            .lock()
+            .expect("active_microphone") = Some(session.clone());
+
+        self.emit(UiEvent::microphone_session_started(
+            &frame.session_id,
+            &peer_str,
+            &alias,
+            "source",
+            frame.mode.as_str(),
+            &frame.mic_id,
+            frame.codec.as_str(),
+            frame.sample_rate,
+            frame.channels,
+            frame.gain,
+            session.muted,
+            privacy_active,
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Security,
+            AuditSeverity::Notice,
+            "mic_source_started",
+            Some(peer_str.clone()),
+            format!(
+                "Microphone session {} started as capture source ({}Hz x{}ch, codec={}, mode={}, gain={:.2}, muted={}, privacy_indicator={}) for host {}",
+                frame.session_id,
+                frame.sample_rate,
+                frame.channels,
+                frame.codec.as_str(),
+                frame.mode.as_str(),
+                frame.gain,
+                session.muted,
+                privacy_active,
+                peer_str
+            ),
+            true,
+        );
+    }
+
+    /// Ingest and process an inbound MicDetachFrame.
+    pub async fn receive_mic_detach(&self, peer: &DeviceId, mut frame: MicDetachFrame) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        frame.sanitize();
+        let was_active = {
+            let mut guard = self
+                .shared
+                .active_microphone
+                .lock()
+                .expect("active_microphone");
+            if let Some(session) = guard.take() {
+                session.session_id == frame.session_id || session.peer_id == peer_str
+            } else {
+                false
+            }
+        };
+
+        if was_active {
+            self.emit(UiEvent::microphone_session_stopped(
+                &frame.session_id,
+                &peer_str,
+                &alias,
+                frame.reason.as_deref(),
+                now_ms,
+            ));
+
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Info,
+                "mic_detached",
+                Some(peer_str.clone()),
+                format!(
+                    "Microphone detached by peer {}: {:?}",
+                    peer_str, frame.reason
+                ),
+                true,
+            );
+        }
+    }
+
+    /// Ingest streaming microphone audio chunk. Only session metadata (sequence,
+    /// mute state, RMS dB telemetry) is tracked; raw sample buffers never leave
+    /// this function and are never logged, audited, or broadcast (Zero-Plaintext).
+    pub fn receive_mic_audio_chunk(&self, peer: &DeviceId, frame: MicAudioChunkFrame) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+
+        if MicValidator::validate_chunk_frame(&frame).is_err() {
+            return;
+        }
+
+        let mut guard = self
+            .shared
+            .active_microphone
+            .lock()
+            .expect("active_microphone");
+        if let Some(ref mut session) = *guard {
+            if session.session_id == frame.session_id && session.peer_id == peer_str {
+                session.last_activity_ms = now_ms;
+                session.frames_received = session.frames_received.saturating_add(1);
+                session.bytes_transferred = session
+                    .bytes_transferred
+                    .saturating_add(frame.data.len() as u64);
+            }
+        }
+    }
+
+    /// Query status of active microphone/intercom session and governance policy.
+    pub fn microphone_status(&self) -> MicrophoneStatusReport {
+        let now_ms = self.shared.clock.unix_ms();
+        let policy = self.microphone_policy();
+        let mut guard = self
+            .shared
+            .active_microphone
+            .lock()
+            .expect("active_microphone");
+
+        let is_timed_out = if let Some(ref session) = *guard {
+            let idle_ms = (policy.idle_timeout_secs as u64) * 1000;
+            let max_ms = (policy.max_session_duration_secs as u64) * 1000;
+            now_ms.saturating_sub(session.last_activity_ms) > idle_ms
+                || now_ms.saturating_sub(session.started_at_ms) > max_ms
+        } else {
+            false
+        };
+
+        if is_timed_out {
+            if let Some(session) = guard.take() {
+                drop(guard);
+                let alias = DeviceId::parse(&session.peer_id)
+                    .ok()
+                    .and_then(|id| self.peer_alias(&id))
+                    .unwrap_or_else(|| session.peer_id.clone());
+
+                self.emit(UiEvent::microphone_session_stopped(
+                    &session.session_id,
+                    &session.peer_id,
+                    &alias,
+                    Some("idle or duration timeout exceeded"),
+                    now_ms,
+                ));
+                self.record_audit(
+                    AuditCategory::Security,
+                    AuditSeverity::Notice,
+                    "mic_timeout",
+                    Some(session.peer_id.clone()),
+                    format!(
+                        "Microphone session {} closed due to idle or duration timeout",
+                        session.session_id
+                    ),
+                    true,
+                );
+                return MicrophoneStatusReport {
+                    ok: true,
+                    active: false,
+                    session: None,
+                    policy,
+                    timestamp_ms: now_ms,
+                };
+            }
+        }
+
+        let (active, session) = match *guard {
+            Some(ref s) => (true, Some(s.clone())),
+            None => (false, None),
+        };
+
+        MicrophoneStatusReport {
+            ok: true,
+            active,
+            session,
+            policy,
+            timestamp_ms: now_ms,
+        }
+    }
+
+    /// Request to attach a remote peer's microphone as local virtual mic / intercom feed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mic_attach(
+        &self,
+        peer_query: &str,
+        mic_id: Option<&str>,
+        mode: MicMode,
+        codec: Option<MicCodec>,
+        sample_rate: Option<u32>,
+        channels: Option<u32>,
+        gain: Option<f32>,
+        muted: Option<bool>,
+        noise_suppression: Option<bool>,
+        echo_cancellation: Option<bool>,
+        auto_gain: Option<bool>,
+    ) -> Result<MicrophoneDecisionReport, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_id = self.resolve_peer(peer_query)?;
+        let peer_str = peer_id.to_string();
+        let alias = self
+            .peer_alias(&peer_id)
+            .unwrap_or_else(|| peer_str.clone());
+
+        let policy = self.microphone_policy();
+        if !policy.enabled {
+            return Err(CoreError::InvalidPayload(
+                "virtual microphone streaming disabled".to_string(),
+            ));
+        }
+        if !policy.allow_inbound_stream {
+            return Err(CoreError::InvalidPayload(
+                "attaching remote microphone disabled by policy".to_string(),
+            ));
+        }
+        if mode == MicMode::Intercom && !policy.allow_intercom {
+            return Err(CoreError::InvalidPayload(
+                "voice intercom disabled by policy".to_string(),
+            ));
+        }
+
+        let profile = self.peer_profile(&peer_id);
+        if !policy.is_peer_eligible(&profile, true, mode == MicMode::Intercom) {
+            return Err(CoreError::InvalidPayload(
+                "peer is ineligible under microphone policy filters".to_string(),
+            ));
+        }
+
+        let req_mic_id = MicValidator::validate_mic_id(mic_id.unwrap_or("default"))?;
+        let req_codec = codec.unwrap_or(MicCodec::Opus);
+        let req_rate = MicValidator::clamp_sample_rate(sample_rate.unwrap_or(48000));
+        if req_rate > policy.max_sample_rate {
+            return Err(CoreError::InvalidPayload(
+                "sample rate exceeds policy limit".to_string(),
+            ));
+        }
+        let req_channels = MicValidator::clamp_channels(channels.unwrap_or(1));
+        let req_gain = MicValidator::clamp_gain(gain.unwrap_or(1.0));
+        let req_muted = muted.unwrap_or(false) || policy.default_muted;
+        let req_ns = noise_suppression.unwrap_or(true);
+        let req_aec = echo_cancellation.unwrap_or(true);
+        let req_agc = auto_gain.unwrap_or(true);
+
+        let session_id = format!("mic-sess-{}", &now_ms.to_string()[6..]);
+        let attach_frame = MicAttachFrame {
+            session_id: session_id.clone(),
+            peer_id: self.identity().device_id().to_string(),
+            mode,
+            mic_id: req_mic_id.clone(),
+            codec: req_codec,
+            sample_rate: req_rate,
+            channels: req_channels,
+            gain: req_gain,
+            muted: req_muted,
+            noise_suppression: req_ns,
+            echo_cancellation: req_aec,
+            auto_gain: req_agc,
+            enforce_privacy_indicator: policy.enforce_privacy_indicator,
+            timestamp_ms: now_ms,
+        };
+
+        MicValidator::validate_attach(&attach_frame)?;
+        let inner = attach_frame.to_frame()?;
+        self.send_to(&peer_id, inner).await?;
+
+        let session = ActiveMicrophoneSession {
+            session_id: session_id.clone(),
+            peer_id: peer_str.clone(),
+            role: MicRole::Host,
+            mode,
+            mic_id: req_mic_id.clone(),
+            codec: req_codec,
+            sample_rate: req_rate,
+            channels: req_channels,
+            gain: req_gain,
+            muted: req_muted,
+            noise_suppression: req_ns,
+            echo_cancellation: req_aec,
+            auto_gain: req_agc,
+            privacy_indicator_active: policy.enforce_privacy_indicator,
+            frames_sent: 0,
+            frames_received: 0,
+            bytes_transferred: 0,
+            started_at_ms: now_ms,
+            last_activity_ms: now_ms,
+        };
+
+        *self
+            .shared
+            .active_microphone
+            .lock()
+            .expect("active_microphone") = Some(session);
+
+        self.emit(UiEvent::microphone_session_started(
+            &session_id,
+            &peer_str,
+            &alias,
+            "host",
+            mode.as_str(),
+            &req_mic_id,
+            req_codec.as_str(),
+            req_rate,
+            req_channels,
+            req_gain,
+            req_muted,
+            policy.enforce_privacy_indicator,
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Security,
+            AuditSeverity::Notice,
+            "mic_attached",
+            Some(peer_str.clone()),
+            format!(
+                "Attached microphone from peer {} (mic '{}', {}Hz x{}ch, codec={:?}, mode={:?}, gain={:.2}, muted={})",
+                peer_str, req_mic_id, req_rate, req_channels, req_codec, mode, req_gain, req_muted
+            ),
+            true,
+        );
+
+        Ok(MicrophoneDecisionReport {
+            ok: true,
+            action: "attach".to_string(),
+            session_id: Some(session_id),
+            peer_id: Some(peer_str),
+            role: Some(MicRole::Host),
+            message: "virtual microphone session established to remote source".to_string(),
+            timestamp_ms: now_ms,
+        })
+    }
+
+    /// Detach the active microphone/intercom session.
+    pub async fn mic_detach(
+        &self,
+        reason: Option<&str>,
+    ) -> Result<MicrophoneDecisionReport, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let reason_str = reason.unwrap_or("user requested detach");
+        let sanitized_reason = MicValidator::sanitize_reason(reason_str);
+
+        let active_opt = {
+            let mut guard = self
+                .shared
+                .active_microphone
+                .lock()
+                .expect("active_microphone");
+            guard.take()
+        };
+
+        if let Some(session) = active_opt {
+            let peer_id = DeviceId::parse(&session.peer_id).ok();
+            let detach_frame = MicDetachFrame {
+                session_id: session.session_id.clone(),
+                reason: Some(sanitized_reason.clone()),
+                timestamp_ms: now_ms,
+            };
+
+            if let Some(peer) = peer_id {
+                if let Ok(inner) = detach_frame.to_frame() {
+                    let _ = self.send_to(&peer, inner).await;
+                }
+            }
+
+            let alias = DeviceId::parse(&session.peer_id)
+                .ok()
+                .and_then(|id| self.peer_alias(&id))
+                .unwrap_or_else(|| session.peer_id.clone());
+
+            self.emit(UiEvent::microphone_session_stopped(
+                &session.session_id,
+                &session.peer_id,
+                &alias,
+                Some(&sanitized_reason),
+                now_ms,
+            ));
+
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Notice,
+                "mic_detached",
+                Some(session.peer_id.clone()),
+                format!(
+                    "Microphone session {} detached: {}",
+                    session.session_id, sanitized_reason
+                ),
+                true,
+            );
+
+            Ok(MicrophoneDecisionReport {
+                ok: true,
+                action: "detach".to_string(),
+                session_id: Some(session.session_id),
+                peer_id: Some(session.peer_id),
+                role: Some(session.role),
+                message: format!("microphone session detached: {}", sanitized_reason),
+                timestamp_ms: now_ms,
+            })
+        } else {
+            Ok(MicrophoneDecisionReport {
+                ok: true,
+                action: "detach".to_string(),
+                session_id: None,
+                peer_id: None,
+                role: None,
+                message: "no active microphone session to detach".to_string(),
+                timestamp_ms: now_ms,
+            })
+        }
+    }
+
+    /// Returns the current microphone governance policy.
+    pub fn microphone_policy(&self) -> MicrophonePolicy {
+        self.shared
+            .microphone_policy
+            .lock()
+            .expect("microphone_policy")
+            .clone()
+    }
+
+    /// Status and configuration report for microphone policy.
+    pub fn microphone_policy_report(&self) -> MicrophonePolicyReport {
+        MicrophonePolicyReport {
+            ok: true,
+            policy: self.microphone_policy(),
+            message: "microphone policy report".to_string(),
+        }
+    }
+
+    /// Update microphone policy and persist to disk atomically with 0o600 permissions.
+    pub fn set_microphone_policy(
+        &self,
+        mut policy: MicrophonePolicy,
+    ) -> Result<MicrophonePolicyReport, CoreError> {
+        let now = self.shared.clock.unix_ms();
+        policy.sanitize();
+        save_microphone_policy(&self.shared.cfg.data_dir, &policy)
+            .map_err(|e| CoreError::File(format!("failed to save microphone_policy.json: {e}")))?;
+        *self
+            .shared
+            .microphone_policy
+            .lock()
+            .expect("microphone_policy") = policy.clone();
+
+        self.emit(UiEvent::microphone_policy_changed(
+            policy.enabled,
+            policy.allow_inbound_stream,
+            policy.allow_remote_capture,
+            policy.allow_intercom,
+            policy.max_sample_rate,
+            policy.enforce_privacy_indicator,
+            policy.default_muted,
+            policy.idle_timeout_secs,
+            policy.allowed_groups.clone(),
+            policy.allowed_tags.clone(),
+            policy
+                .allowed_types
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect(),
+            now,
+        ));
+
+        self.record_audit(
+            AuditCategory::Config,
+            AuditSeverity::Info,
+            "microphone_policy_changed",
+            None::<String>,
+            format!(
+                "Updated microphone policy: enabled={}, allow_inbound={}, allow_capture={}, allow_intercom={}, max_rate={}Hz, privacy_indicator={}, default_muted={}",
+                policy.enabled,
+                policy.allow_inbound_stream,
+                policy.allow_remote_capture,
+                policy.allow_intercom,
+                policy.max_sample_rate,
+                policy.enforce_privacy_indicator,
+                policy.default_muted
+            ),
+            true,
+        );
+
+        Ok(MicrophonePolicyReport {
+            ok: true,
+            policy,
+            message: "microphone policy updated".to_string(),
+        })
+    }
+
+    /// Partially update microphone policy and persist to disk.
+    pub fn update_microphone_policy(
+        &self,
+        update: MicrophonePolicyUpdate,
+    ) -> Result<MicrophonePolicyReport, CoreError> {
+        let mut policy = self.microphone_policy();
+        if let Some(v) = update.enabled {
+            policy.enabled = v;
+        }
+        if let Some(v) = update.allow_inbound_stream {
+            policy.allow_inbound_stream = v;
+        }
+        if let Some(v) = update.allow_remote_capture {
+            policy.allow_remote_capture = v;
+        }
+        if let Some(v) = update.allow_intercom {
+            policy.allow_intercom = v;
+        }
+        if let Some(v) = update.max_sample_rate {
+            policy.max_sample_rate = v;
+        }
+        if let Some(v) = update.max_session_duration_secs {
+            policy.max_session_duration_secs = v;
+        }
+        if let Some(v) = update.enforce_privacy_indicator {
+            policy.enforce_privacy_indicator = v;
+        }
+        if let Some(v) = update.default_muted {
+            policy.default_muted = v;
+        }
+        if let Some(v) = update.idle_timeout_secs {
+            policy.idle_timeout_secs = v;
+        }
+        if let Some(v) = update.allowed_groups {
+            policy.allowed_groups = v;
+        }
+        if let Some(v) = update.allowed_tags {
+            policy.allowed_tags = v;
+        }
+        if let Some(v) = update.allowed_types {
+            policy.allowed_types = v;
+        }
+        self.set_microphone_policy(policy)
     }
 
     /// Polls system clipboard for automatic outbound synchronization.

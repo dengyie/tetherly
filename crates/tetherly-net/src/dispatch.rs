@@ -23,10 +23,11 @@ use tetherly_core::frame::{
     TYPE_FILE_DONE, TYPE_FILE_OFFER, TYPE_FILE_REJECT, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ,
     TYPE_INPUT_TUNNEL_HEARTBEAT, TYPE_INPUT_TUNNEL_RELEASE, TYPE_INPUT_TUNNEL_REQUEST,
     TYPE_INPUT_TUNNEL_RESP, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND,
-    TYPE_MEDIA_STATE, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY, TYPE_PING,
-    TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE,
-    TYPE_TOPOLOGY_SYNC_REQ, TYPE_VIRTUAL_DISPLAY_ANNOUNCE, TYPE_VIRTUAL_DISPLAY_ATTACH,
-    TYPE_VIRTUAL_DISPLAY_DETACH, TYPE_VIRTUAL_DISPLAY_FRAME_ACK,
+    TYPE_MEDIA_STATE, TYPE_MIC_ANNOUNCE, TYPE_MIC_ATTACH, TYPE_MIC_AUDIO_CHUNK, TYPE_MIC_DETACH,
+    TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY, TYPE_PING, TYPE_PONG,
+    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE, TYPE_TOPOLOGY_SYNC_REQ,
+    TYPE_VIRTUAL_DISPLAY_ANNOUNCE, TYPE_VIRTUAL_DISPLAY_ATTACH, TYPE_VIRTUAL_DISPLAY_DETACH,
+    TYPE_VIRTUAL_DISPLAY_FRAME_ACK,
 };
 use tetherly_core::input_tunnel::{
     InputTunnelHeartbeatFrame, InputTunnelReleaseFrame, InputTunnelRequestFrame,
@@ -34,6 +35,9 @@ use tetherly_core::input_tunnel::{
 };
 use tetherly_core::locate::{LocateRequestFrame, LocateStopFrame};
 use tetherly_core::media::{MediaCommandFrame, MediaStateFrame};
+use tetherly_core::microphone::{
+    MicAnnounceFrame, MicAttachFrame, MicAudioChunkFrame, MicDetachFrame,
+};
 use tetherly_core::topology::{TopologyStateFrame, TopologySyncReqFrame};
 use tetherly_core::virtual_display::{
     VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayDetachFrame,
@@ -79,6 +83,10 @@ pub enum SessionEvent {
     CameraAttach(CameraAttachFrame),
     CameraDetach(CameraDetachFrame),
     CameraFrameChunk(CameraFrameChunk),
+    MicAnnounce(MicAnnounceFrame),
+    MicAttach(MicAttachFrame),
+    MicDetach(MicDetachFrame),
+    MicAudioChunk(MicAudioChunkFrame),
     FileOffer(FileOffer),
     FileAccept(FileDecision),
     FileReject(FileDecision),
@@ -194,6 +202,18 @@ impl SessionEvent {
             }
             TYPE_CAMERA_FRAME_CHUNK => {
                 SessionEvent::CameraFrameChunk(CameraFrameChunk::from_payload(&frame.payload)?)
+            }
+            TYPE_MIC_ANNOUNCE => {
+                SessionEvent::MicAnnounce(MicAnnounceFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_MIC_ATTACH => {
+                SessionEvent::MicAttach(MicAttachFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_MIC_DETACH => {
+                SessionEvent::MicDetach(MicDetachFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_MIC_AUDIO_CHUNK => {
+                SessionEvent::MicAudioChunk(MicAudioChunkFrame::from_payload(&frame.payload)?)
             }
             TYPE_FILE_OFFER => SessionEvent::FileOffer(FileOffer::from_payload(&frame.payload)?),
             TYPE_FILE_ACCEPT => {

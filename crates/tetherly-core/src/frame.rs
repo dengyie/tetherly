@@ -59,6 +59,10 @@ pub const TYPE_CAMERA_ANNOUNCE: u16 = 0x021D;
 pub const TYPE_CAMERA_ATTACH: u16 = 0x021E;
 pub const TYPE_CAMERA_DETACH: u16 = 0x021F;
 pub const TYPE_CAMERA_FRAME_CHUNK: u16 = 0x0220;
+pub const TYPE_MIC_ANNOUNCE: u16 = 0x0221;
+pub const TYPE_MIC_ATTACH: u16 = 0x0222;
+pub const TYPE_MIC_DETACH: u16 = 0x0223;
+pub const TYPE_MIC_AUDIO_CHUNK: u16 = 0x0224;
 pub const TYPE_FILE_OFFER: u16 = 0x0301;
 pub const TYPE_FILE_ACCEPT: u16 = 0x0302;
 pub const TYPE_FILE_REJECT: u16 = 0x0303;
@@ -170,6 +174,10 @@ pub fn is_known_type(ty: u16) -> bool {
             | TYPE_CAMERA_ATTACH
             | TYPE_CAMERA_DETACH
             | TYPE_CAMERA_FRAME_CHUNK
+            | TYPE_MIC_ANNOUNCE
+            | TYPE_MIC_ATTACH
+            | TYPE_MIC_DETACH
+            | TYPE_MIC_AUDIO_CHUNK
             | TYPE_FILE_OFFER
             | TYPE_FILE_ACCEPT
             | TYPE_FILE_REJECT

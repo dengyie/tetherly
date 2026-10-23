@@ -11904,6 +11904,270 @@ async fn virtual_camera_lifecycle_and_governance_via_loopback_api() {
     peer.shutdown();
 }
 
+#[tokio::test]
+async fn virtual_microphone_intercom_lifecycle_and_governance_via_loopback_api() {
+    let (host, peer, g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let host_id = host.identity().device_id().clone();
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to Host SSE stream
+    let mut host_sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect to host sse stream");
+
+    // 2. Initial Microphone Status Check on Host (inactive, default policy)
+    let (code_mic, body_mic) = tetherly_node::loopback_get(host_ui, "/api/mic")
+        .await
+        .unwrap();
+    assert_eq!(code_mic, 200);
+    let mic_init: serde_json::Value = serde_json::from_slice(&body_mic).unwrap();
+    assert_eq!(mic_init["ok"], true);
+    assert_eq!(mic_init["active"], false);
+    assert_eq!(mic_init["policy"]["enabled"], true);
+    assert_eq!(mic_init["policy"]["allow_inbound_stream"], true);
+    assert_eq!(mic_init["policy"]["allow_remote_capture"], true);
+    assert_eq!(mic_init["policy"]["allow_intercom"], true);
+    assert_eq!(mic_init["policy"]["max_sample_rate"], 48000);
+    assert_eq!(mic_init["policy"]["enforce_privacy_indicator"], true);
+    assert_eq!(mic_init["policy"]["default_muted"], false);
+    assert_eq!(mic_init["policy"]["idle_timeout_secs"], 300);
+
+    // 3. Initial Policy Check via GET /api/mic/policy
+    let (code_pol, body_pol) = tetherly_node::loopback_get(host_ui, "/api/mic/policy")
+        .await
+        .unwrap();
+    assert_eq!(code_pol, 200);
+    let pol_init: serde_json::Value = serde_json::from_slice(&body_pol).unwrap();
+    assert_eq!(pol_init["ok"], true);
+    assert_eq!(pol_init["policy"]["enabled"], true);
+
+    // 4. Host updates microphone governance policy via POST /api/mic/policy
+    let pol_req = serde_json::json!({
+        "enabled": true,
+        "allow_inbound": true,
+        "allow_capture": true,
+        "allow_intercom": true,
+        "max_sample_rate": 48000,
+        "max_session_duration_secs": 1800,
+        "enforce_privacy_indicator": true,
+        "default_muted": false,
+        "idle_timeout_secs": 180,
+        "allowed_groups": ["comms"]
+    });
+    let (code_set, body_set) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/mic/policy",
+        &serde_json::to_vec(&pol_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_set, 200);
+    let pol_set: serde_json::Value = serde_json::from_slice(&body_set).unwrap();
+    assert_eq!(pol_set["ok"], true);
+    assert_eq!(pol_set["policy"]["max_sample_rate"], 48000);
+    assert_eq!(pol_set["policy"]["max_session_duration_secs"], 1800);
+    assert_eq!(pol_set["policy"]["idle_timeout_secs"], 180);
+
+    // Verify policy file persisted with 0o600 permissions
+    let policy_path = g1.path().join("microphone_policy.json");
+    assert!(policy_path.exists(), "microphone_policy.json must exist");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(&policy_path).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "microphone_policy.json must have 0o600 perms"
+        );
+    }
+
+    // 5. Check SSE event on Host for microphone_policy_changed
+    let mut saw_policy_changed = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), host_sse.next_event()).await
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if v["kind"] == "microphone_policy_changed" {
+                    saw_policy_changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_policy_changed,
+        "Host must emit microphone_policy_changed SSE event"
+    );
+
+    // 6. Clear filters so peer is eligible for microphone attachment
+    let (code_clear, _body_clear) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/mic/policy",
+        &serde_json::to_vec(&serde_json::json!({
+            "clear_filters": true,
+            "max_sample_rate": 48000,
+            "max_session_duration_secs": 3600,
+            "idle_timeout_secs": 300
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_clear, 200);
+
+    // 7. Host attaches peer microphone in intercom (PTT) mode via POST /api/mic/attach
+    let attach_req = serde_json::json!({
+        "peer": peer_id.to_string(),
+        "mic_id": "default",
+        "mode": "intercom",
+        "codec": "opus",
+        "sample_rate": 48000,
+        "channels": 1,
+        "gain": 1.0,
+        "muted": false,
+        "noise_suppression": true,
+        "echo_cancellation": true,
+        "auto_gain": true
+    });
+    let (code_att, body_att) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/mic/attach",
+        &serde_json::to_vec(&attach_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_att, 200);
+    let att_rep: serde_json::Value = serde_json::from_slice(&body_att).unwrap();
+    assert_eq!(att_rep["ok"], true);
+    assert_eq!(att_rep["action"], "attach");
+    assert_eq!(att_rep["role"], "host");
+    assert_eq!(att_rep["peer_id"], peer_id.to_string());
+    let session_id = att_rep["session_id"].as_str().unwrap().to_string();
+
+    // 8. Verify active session on Host via GET /api/mic
+    let (code_host_act, body_host_act) = tetherly_node::loopback_get(host_ui, "/api/mic")
+        .await
+        .unwrap();
+    assert_eq!(code_host_act, 200);
+    let host_act: serde_json::Value = serde_json::from_slice(&body_host_act).unwrap();
+    assert_eq!(host_act["active"], true);
+    assert_eq!(host_act["session"]["session_id"], session_id);
+    assert_eq!(host_act["session"]["role"], "host");
+    assert_eq!(host_act["session"]["mode"], "intercom");
+    assert_eq!(host_act["session"]["peer_id"], peer_id.to_string());
+    assert_eq!(host_act["session"]["mic_id"], "default");
+    assert_eq!(host_act["session"]["codec"], "opus");
+    assert_eq!(host_act["session"]["sample_rate"], 48000);
+    assert_eq!(host_act["session"]["channels"], 1);
+    assert_eq!(host_act["session"]["gain"], 1.0);
+    assert_eq!(host_act["session"]["privacy_indicator_active"], true);
+
+    // 9. Verify Peer received attach frame and activated as microphone source node
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    let mut peer_active = false;
+    while tokio::time::Instant::now() < deadline {
+        let (code_p, body_p) = tetherly_node::loopback_get(peer_ui, "/api/mic")
+            .await
+            .unwrap();
+        if code_p == 200 {
+            if let Ok(rep) = serde_json::from_slice::<serde_json::Value>(&body_p) {
+                if rep["active"] == true && rep["session"]["session_id"] == session_id {
+                    assert_eq!(rep["session"]["role"], "source");
+                    assert_eq!(rep["session"]["mode"], "intercom");
+                    assert_eq!(rep["session"]["peer_id"], host_id.to_string());
+                    // Fail-closed privacy governance: source MUST light the indicator
+                    assert_eq!(
+                        rep["session"]["privacy_indicator_active"], true,
+                        "capture source must activate privacy indicator under policy"
+                    );
+                    peer_active = true;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        peer_active,
+        "Peer must activate virtual microphone session as capture source"
+    );
+
+    // 10. Detach microphone session via POST /api/mic/detach on Host
+    let det_req = serde_json::json!({
+        "reason": "intercom_call_complete"
+    });
+    let (code_det, body_det) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/mic/detach",
+        &serde_json::to_vec(&det_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_det, 200);
+    let det_rep: serde_json::Value = serde_json::from_slice(&body_det).unwrap();
+    assert_eq!(det_rep["ok"], true);
+    assert_eq!(det_rep["action"], "detach");
+    assert_eq!(det_rep["session_id"], session_id);
+
+    // Verify Host is inactive
+    let (code_host_inact, body_host_inact) = tetherly_node::loopback_get(host_ui, "/api/mic")
+        .await
+        .unwrap();
+    assert_eq!(code_host_inact, 200);
+    let host_inact: serde_json::Value = serde_json::from_slice(&body_host_inact).unwrap();
+    assert_eq!(host_inact["active"], false);
+
+    // Verify Peer receives detach frame and becomes inactive
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    let mut peer_inactive = false;
+    while tokio::time::Instant::now() < deadline {
+        let (code_p, body_p) = tetherly_node::loopback_get(peer_ui, "/api/mic")
+            .await
+            .unwrap();
+        if code_p == 200 {
+            if let Ok(rep) = serde_json::from_slice::<serde_json::Value>(&body_p) {
+                if rep["active"] == false {
+                    peer_inactive = true;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        peer_inactive,
+        "Peer must transition to inactive after microphone detach"
+    );
+
+    // 11. Security Red Line: Host header 403 Forbidden attack defense
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], host_ui));
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let evil_req =
+        "GET /api/mic HTTP/1.1\r\nHost: evil-attacker-virtual-mic.com\r\nConnection: close\r\n\r\n";
+    tokio::io::AsyncWriteExt::write_all(&mut stream, evil_req.as_bytes())
+        .await
+        .unwrap();
+    tokio::io::AsyncWriteExt::flush(&mut stream).await.unwrap();
+    let mut raw_resp = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut raw_resp)
+        .await
+        .unwrap();
+    let resp_str = String::from_utf8_lossy(&raw_resp);
+    assert!(
+        resp_str.starts_with("HTTP/1.1 403") || resp_str.starts_with("HTTP/1.0 403"),
+        "Host header attack must be rejected with 403 Forbidden: {resp_str}"
+    );
+
+    // 12. Clean Shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {
