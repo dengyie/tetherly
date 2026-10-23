@@ -73,7 +73,7 @@ fn main() {
     // Fragmentation + reassembly on the compressed frame (wire-realistic).
     let enc = zstd::stream::encode_all(f.bytes.as_slice(), 3).unwrap();
     let fc = ScreenFrame {
-        compressed: true,
+        codec_tag: tetherly_core::SCREEN_COMPRESS_ZSTD,
         bytes: enc,
         ..f.clone()
     };

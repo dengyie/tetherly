@@ -65,6 +65,8 @@ fn cfg(
         ancs_peripheral: "test-iphone".into(),
         screen_source,
         screen_codec: None,
+        screen_codec_h264: false,
+        screen_bitrate_kbps: 4000,
         screen_sink: None,
         input_sink: None,
     }
@@ -279,6 +281,91 @@ async fn m5_1_consent_then_start_flows_frames_monotonic() {
 
     host.shutdown();
     visitor.shutdown();
+}
+
+// --------------------------------------------------------------------------
+// M5.1-h264 — negotiated H.264 frames cross the wire and decode (ADR-079)
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_1_h264_stream_roundtrips_through_the_wire() {
+    // The host's source is the memory screen behind a codec that prefers
+    // H.264 with peer support pre-armed; the runtime caps-merge hook keeps it
+    // armed because both peers advertise screencodecs=zstd,h264.
+    let src: Arc<dyn tetherly_core::ScreenSource> = Arc::new(tetherly_node::EncodedSource::new(
+        MemoryScreenSource::new(16, 16).expect("16x16 screen"),
+        Arc::new(tetherly_node::NegotiatedCodec::new(true, 1_000_000, true)),
+    ));
+    let (da, ga) = temp_dir("host-h264");
+    let (db, gb) = temp_dir("visitor-h264");
+    let host = Node::start(cfg(da, "host", Some(src))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+    wait_screen_port(
+        &host,
+        visitor.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+    wait_screen_port(
+        &visitor,
+        host.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+
+    visitor
+        .open_screen(host.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    host.screen_allow();
+    visitor.screen_start().await.unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_state() == ScreenState::Streaming {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("host never started streaming (h264)");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    for _ in 0..5 {
+        assert!(host.screen_send_frame().await.unwrap());
+    }
+    let start = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 5 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "h264 frames did not arrive, count={}",
+                visitor.screen_sink_snapshot().count()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let sink = visitor.screen_sink_snapshot();
+    assert_eq!(sink.presented(), vec![1, 2, 3, 4, 5]);
+    // The visitor presents *decoded* frames: a decoded 16x16 BGRA body means
+    // the tag-3 dispatch went through the real H.264 decoder, not zstd.
+    let last = sink.last().expect("presented frame");
+    assert!(!last.compressed());
+    assert_eq!(last.bytes.len(), 16 * 16 * 4);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
 }
 
 // --------------------------------------------------------------------------

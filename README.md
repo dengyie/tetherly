@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-五个 crate + 两个二进制(`tetherly` 桌面节点、`android_probe` 真机探针)。无 GUI(本机 UI 是 loopback HTTP),无 BLE;EasyTier 仅侧车。
+五个 crate + 两个二进制(`tetherly` 桌面节点、`android_probe` 真机探针)。无 GUI(本机 UI 是 loopback HTTP);ANCS BLE 接收栈三平台齐备(Windows WinRT / macOS CoreBluetooth / Linux BlueZ,真机 Manual-required);屏幕串流默认 zstd 无损,H.264 有损可经 `--screen-codec h264` + 线上协商启用(ADR-079);EasyTier 仅侧车。
 
 | crate | 职责 |
 |---|---|

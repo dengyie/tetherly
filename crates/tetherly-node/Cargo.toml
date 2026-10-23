@@ -33,6 +33,7 @@ getrandom.workspace = true
 arboard.workspace = true
 png = "0.18"
 zstd = "0.13"
+openh264 = "0.9.9"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

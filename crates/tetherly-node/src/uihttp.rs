@@ -7822,6 +7822,8 @@ mod tests {
             ancs_peripheral: "test".into(),
             screen_source: None,
             screen_codec: None,
+            screen_codec_h264: false,
+            screen_bitrate_kbps: 4000,
             screen_sink: None,
             input_sink: None,
         };

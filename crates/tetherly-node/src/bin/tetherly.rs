@@ -55,6 +55,14 @@ enum Cmd {
         /// real iPhone is Manual-required.
         #[arg(long)]
         ancs: Option<String>,
+        /// Outbound screen codec (ADR-079): `zstd` lossless (default) or
+        /// `h264` lossy — h264 still falls back to zstd per peer when the
+        /// other end did not advertise `screencodecs` containing h264.
+        #[arg(long, default_value = "zstd")]
+        screen_codec: String,
+        /// H.264 encoder bitrate ceiling in kbit/s (default 4000).
+        #[arg(long, default_value_t = 4000)]
+        screen_bitrate: u32,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -3748,6 +3756,8 @@ async fn main() -> Result<()> {
             overlay_cidr,
             no_overlay,
             screen_adb,
+            screen_codec,
+            screen_bitrate,
             file_port,
             input_port,
             screen_port,
@@ -3763,11 +3773,26 @@ async fn main() -> Result<()> {
             cfg.input_sink = Some(Arc::new(std::sync::Mutex::new(
                 tetherly_node::SystemInputSink,
             )));
+            cfg.screen_bitrate_kbps = screen_bitrate;
+            let h264 = screen_codec.eq_ignore_ascii_case("h264");
+            cfg.screen_codec_h264 = h264;
+            let encode_codec: Arc<dyn tetherly_core::ScreenCodec> = if h264 {
+                let sel = std::sync::Arc::new(tetherly_node::NegotiatedCodec::new(
+                    true,
+                    (screen_bitrate as u64).saturating_mul(1000) as u32,
+                    false,
+                ));
+                // The daemon's caps-merge hook flips this on when the peer
+                // advertises screencodecs=h264; the CLI only sets the intent.
+                sel.clone()
+            } else {
+                Arc::new(tetherly_node::ZstdCodec::default())
+            };
             if let Some(serial) = screen_adb {
-                // The screen is the adb device; encode it losslessly like DXGI.
+                // The screen is the adb device; encode it like DXGI.
                 cfg.screen_source = Some(Arc::new(tetherly_node::EncodedSource::new(
                     tetherly_node::AdbSource::new(Some(serial)),
-                    Arc::new(tetherly_node::ZstdCodec::default()),
+                    encode_codec,
                 )));
             }
             if let Some(v) = file_port {

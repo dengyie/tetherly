@@ -148,8 +148,9 @@ pub use recommend::{
 pub use replay::ReplayGuard;
 pub use screen::{
     is_screen_type, ControlMsg, MemoryScreenSink, MemoryScreenSource, PixelFormat, ScreenAssembler,
-    ScreenFrame, ScreenReceiver, ScreenRect, ScreenSender, ScreenState, ScreenStats, SCREEN_MAGIC,
-    SCREEN_PROTO, SCREEN_SEQ_WINDOW,
+    ScreenFrame, ScreenReceiver, ScreenRect, ScreenSender, ScreenState, ScreenStats,
+    SCREEN_COMPRESS_H264, SCREEN_COMPRESS_NONE, SCREEN_COMPRESS_ZSTD, SCREEN_MAGIC, SCREEN_PROTO,
+    SCREEN_SEQ_WINDOW,
 };
 pub use session::{
     backoff_delay, commit_trust, dispose_hello, ConnState, HelloDisposition, LockoutTable, PIN_TTL,

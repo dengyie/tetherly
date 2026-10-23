@@ -213,6 +213,31 @@ pub trait ScreenSource: Send + Sync {
 pub trait ScreenCodec: Send + Sync {
     fn compress(&self, raw: &[u8]) -> Result<Vec<u8>, CoreError>;
     fn decompress(&self, compressed: &[u8], expected_len: usize) -> Result<Vec<u8>, CoreError>;
+
+    /// Wire tag this codec stamps into the frame header
+    /// (`crate::screen::SCREEN_COMPRESS_*`). Defaults to zstd.
+    fn wire_tag(&self) -> u8 {
+        1
+    }
+
+    /// Frame-geometry-aware encode; codecs that need dimensions (H.264)
+    /// override this, byte-only codecs inherit the plain path.
+    fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
+        let _ = (w, h);
+        self.compress(raw)
+    }
+
+    /// Frame-geometry-aware decode; mirrors [`Self::compress_frame`].
+    fn decompress_frame(
+        &self,
+        body: &[u8],
+        w: u16,
+        h: u16,
+        expected_len: usize,
+    ) -> Result<Vec<u8>, CoreError> {
+        let _ = (w, h);
+        self.decompress(body, expected_len)
+    }
 }
 
 /// Present one screen frame. In-memory fake for CI; the OS path is Manual.

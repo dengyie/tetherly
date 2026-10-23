@@ -460,7 +460,7 @@ proptest! {
                     seq,
                     rect: small_rect(),
                     format: PixelFormat::Bgra8,
-                    compressed: false,
+                    codec_tag: tetherly_core::SCREEN_COMPRESS_NONE,
                     stride: 0,
                     bytes: vec![0u8; 31], // one byte short of the rect
                 }

@@ -23,7 +23,7 @@ tetherly-crypto.workspace = true
 # workspace inheritance) because rustc < 1.99 cannot override a workspace
 # dependency's default features. The explicit version keeps cargo-deny's
 # `wildcards = "deny"` policy satisfied (a bare path dep is a wildcard).
-tetherly-net = { path = "../tetherly-net", version = "0.1.9", default-features = false }
+tetherly-net = { path = "../tetherly-net", version = "0.1.10", default-features = false }
 tokio.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

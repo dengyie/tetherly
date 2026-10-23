@@ -75,6 +75,8 @@ fn cfg(dir: PathBuf, name: &str, overlay: OverlayConfig) -> NodeConfig {
         ancs_peripheral: "test-iphone".into(),
         screen_source: None,
         screen_codec: None,
+        screen_codec_h264: false,
+        screen_bitrate_kbps: 4000,
         screen_sink: None,
         input_sink: None,
     }

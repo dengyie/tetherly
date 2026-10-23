@@ -131,12 +131,21 @@ pub struct NodeConfig {
     pub screen_source: Option<Arc<dyn ScreenSource>>,
     /// Screen encoder/decoder. `None` defaults to lossless zstd level 3.
     pub screen_codec: Option<Arc<dyn ScreenCodec>>,
+    /// Prefer H.264 for outbound screen streaming (ADR-079). Still falls
+    /// back to zstd per-peer when `screencodecs` negotiation says no.
+    pub screen_codec_h264: bool,
+    /// Encoder bitrate ceiling for H.264 screen streaming, kilobits/s.
+    pub screen_bitrate_kbps: u32,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
     /// Real key/mouse injection for the controlled side of 45719. `None`
     /// keeps CI's MemorySink-only behavior (the observer always records).
     pub input_sink: Option<Arc<Mutex<dyn InputSink>>>,
+}
+
+fn default_screen_bitrate_kbps() -> u32 {
+    4000
 }
 
 impl Default for NodeConfig {
@@ -160,6 +169,8 @@ impl Default for NodeConfig {
             ancs_peripheral: "local-iphone".into(),
             screen_source: None,
             screen_codec: None,
+            screen_codec_h264: false,
+            screen_bitrate_kbps: default_screen_bitrate_kbps(),
             screen_sink: None,
             input_sink: None,
         }
@@ -3001,6 +3012,11 @@ struct Shared {
     screen_ctl: AsyncMutex<Option<mpsc::Sender<ControlMsg>>>,
     /// Visitor-side decompressor. Defaults to zstd lossless.
     screen_codec: Arc<dyn ScreenCodec>,
+    /// H.264 decoder for screen frames tagged SCREEN_COMPRESS_H264 (ADR-079).
+    screen_codec_h264: Arc<dyn ScreenCodec>,
+    /// Outbound screen codec selector when the operator opted into H.264
+    /// (ADR-079); `None` keeps the zstd-only default path.
+    screen_encode_codec: Option<Arc<crate::screen::NegotiatedCodec>>,
     /// Visitor-side output. Defaults to the in-memory observer; production
     /// injects `SystemSink` for real display.
     screen_sink: Arc<dyn ScreenSink>,
@@ -3183,19 +3199,33 @@ impl Node {
         let bound_ui = AtomicU16::new(0);
         let ancs_source = ancs_source_id(&cfg.ancs_peripheral);
         let ancs = cfg.ancs.clone().map(|t| AncsIngress::new(t, clock.clone()));
+        let screen_encode_codec = cfg.screen_codec_h264.then(|| {
+            Arc::new(crate::screen::NegotiatedCodec::new(
+                true,
+                cfg.screen_bitrate_kbps.saturating_mul(1000),
+                false,
+            ))
+        });
         let screen_source: Arc<dyn ScreenSource> = cfg.screen_source.clone().unwrap_or_else(|| {
-            // Production: real DXGI capture → zstd lossless → wire.
-            // Tests inject MemoryScreenSource raw; this default is only
-            // active in the bin on Windows.
+            // Production: real capture → negotiated codec (zstd, or H.264
+            // when opted in and the peer advertised it) → wire. Tests inject
+            // their own source.
+            let codec: Arc<dyn ScreenCodec> = match &screen_encode_codec {
+                Some(sel) => sel.clone(),
+                None => Arc::new(crate::screen::ZstdCodec::default()),
+            };
             Arc::new(crate::screen::EncodedSource::new(
                 crate::screen::SystemSource::new(),
-                Arc::new(crate::screen::ZstdCodec::default()),
+                codec,
             ))
         });
         let screen_codec: Arc<dyn ScreenCodec> = cfg
             .screen_codec
             .clone()
             .unwrap_or_else(|| Arc::new(crate::screen::ZstdCodec::default()));
+        let screen_codec_h264: Arc<dyn ScreenCodec> = Arc::new(crate::screen::H264Codec::new(
+            cfg.screen_bitrate_kbps * 1000,
+        ));
         // The observer always records what was presented, so the local UI and
         // CI can assert on the stream without a display.
         let screen_observer = MemoryScreenSink::new();
@@ -3290,6 +3320,8 @@ impl Node {
             screen_observer: Mutex::new(screen_observer),
             screen_ctl: AsyncMutex::new(None),
             screen_codec,
+            screen_codec_h264,
+            screen_encode_codec,
             screen_sink,
             screen_interval: Mutex::new(ScreenIntervalTracker::new()),
             screen_rx_stats: Mutex::new(ScreenStats::default()),
@@ -5165,6 +5197,7 @@ impl Node {
             all_caps.push(format!("fileport={}", self.file_port()));
             all_caps.push(format!("inputport={}", self.input_port()));
             all_caps.push(format!("screenport={}", self.screen_port()));
+            all_caps.push("screencodecs=zstd,h264".to_string());
             (all_caps, feats)
         };
         LocalCapsReport {
@@ -8548,6 +8581,8 @@ impl Node {
         };
         initial_caps.push(format!("fileport={file_port}"));
         initial_caps.push(format!("inputport={input_port}"));
+
+        initial_caps.push("screencodecs=zstd,h264".to_string());
         initial_caps.push(format!("screenport={screen_port}"));
         let caps = CapsUpdate { caps: initial_caps };
         if let Ok(frame) = caps.to_frame() {
@@ -9112,6 +9147,18 @@ impl Node {
                         }
                         live.caps = update.caps.clone();
                     }
+                }
+                // ADR-079: the outbound screen encoder upgrades to H.264 only
+                // when the peer advertises it. Cheap token scan, caps lists
+                // are a dozen entries.
+                if let Some(sel) = &self.shared.screen_encode_codec {
+                    let supports = update.caps.iter().any(|c| {
+                        c.split('=')
+                            .nth(1)
+                            .is_some_and(|v| v.split(',').any(|n| n == "h264"))
+                            && c.starts_with("screencodecs=")
+                    });
+                    sel.set_peer_supports_h264(supports);
                 }
                 self.emit(UiEvent::PeerCapsChanged {
                     device_id: peer.to_string(),
@@ -19918,16 +19965,25 @@ impl Node {
                                 node.shared.telemetry.record_screen_rx(f_len);
                                 match assembler.push(&frame) {
                                     Ok(Some(sf)) => {
-                                        // Decompress if the sender zstd-compressed
-                                        // this frame.
-                                        let present_frame = if sf.compressed {
-                                            match node.shared.screen_codec.decompress(
+                                        // Decode by the frame's wire tag:
+                                        // zstd (1) or H.264 (3, ADR-079).
+                                        let present_frame = if sf.compressed() {
+                                            let codec = if sf.codec_tag
+                                                == tetherly_core::SCREEN_COMPRESS_H264
+                                            {
+                                                node.shared.screen_codec_h264.clone()
+                                            } else {
+                                                node.shared.screen_codec.clone()
+                                            };
+                                            match codec.decompress_frame(
                                                 &sf.bytes,
+                                                sf.rect.w,
+                                                sf.rect.h,
                                                 sf.raw_len(),
                                             ) {
                                                 Ok(raw) => ScreenFrame {
                                                     bytes: raw,
-                                                    compressed: false,
+                                                    codec_tag: tetherly_core::SCREEN_COMPRESS_NONE,
                                                     ..sf
                                                 },
                                                 Err(e) => {
@@ -21032,6 +21088,8 @@ mod clipboard_policy_tests {
             ancs_peripheral: "test".into(),
             screen_source: None,
             screen_codec: None,
+            screen_codec_h264: false,
+            screen_bitrate_kbps: default_screen_bitrate_kbps(),
             screen_sink: None,
             input_sink: None,
         };
@@ -21166,6 +21224,8 @@ mod handoff_engine_tests {
             ancs_peripheral: "test".into(),
             screen_source: None,
             screen_codec: None,
+            screen_codec_h264: false,
+            screen_bitrate_kbps: default_screen_bitrate_kbps(),
             screen_sink: None,
             input_sink: None,
         };
@@ -21331,6 +21391,8 @@ mod media_policy_tests {
             ancs_peripheral: "test".into(),
             screen_source: None,
             screen_codec: None,
+            screen_codec_h264: false,
+            screen_bitrate_kbps: default_screen_bitrate_kbps(),
             screen_sink: None,
             input_sink: None,
         };
@@ -21472,6 +21534,8 @@ mod locator_policy_tests {
             ancs_peripheral: "test".into(),
             screen_source: None,
             screen_codec: None,
+            screen_codec_h264: false,
+            screen_bitrate_kbps: default_screen_bitrate_kbps(),
             screen_sink: None,
             input_sink: None,
         };
@@ -21593,6 +21657,8 @@ mod locator_policy_tests {
             ancs_peripheral: "test".into(),
             screen_source: None,
             screen_codec: None,
+            screen_codec_h264: false,
+            screen_bitrate_kbps: default_screen_bitrate_kbps(),
             screen_sink: None,
             input_sink: None,
         };

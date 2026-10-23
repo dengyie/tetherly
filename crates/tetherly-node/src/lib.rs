@@ -49,7 +49,9 @@ pub use runtime::{
     TransferStats, TransfersReport, UserCommand, VirtualDisplayDecisionReport,
     VirtualDisplayPolicyReport, VirtualDisplayPolicyUpdate, VirtualDisplayStatusReport,
 };
-pub use screen::{AdbSource, EncodedSource, SystemSink, SystemSource, ZstdCodec};
+pub use screen::{
+    AdbSource, EncodedSource, H264Codec, NegotiatedCodec, SystemSink, SystemSource, ZstdCodec,
+};
 pub use telemetry::{ChannelTrafficDto, ProtocolMessagesDto, TrafficReport, TrafficTelemetry};
 
 #[cfg(windows)]

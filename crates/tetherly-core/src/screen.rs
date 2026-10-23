@@ -58,6 +58,8 @@ pub const SCREEN_TRACE_MAX: usize = 64;
 /// rather than guessing.
 pub const SCREEN_COMPRESS_NONE: u8 = 0;
 pub const SCREEN_COMPRESS_ZSTD: u8 = 1;
+/// H.264 (OpenH264, annex-B bitstream, IDR-first). See ADR-079.
+pub const SCREEN_COMPRESS_H264: u8 = 3;
 
 pub fn is_screen_type(ty: u16) -> bool {
     matches!(ty, TYPE_SCREEN_FRAME | TYPE_SCREEN_CONTROL)
@@ -138,10 +140,20 @@ pub struct ScreenFrame {
     pub seq: u64,
     pub rect: ScreenRect,
     pub format: PixelFormat,
-    pub compressed: bool,
+    /// Wire body codec tag (`SCREEN_COMPRESS_*`); `0` means the body is raw
+    /// pixels. Kept as a tag (not a bool) since ADR-079 added H.264 alongside
+    /// zstd — the receiver dispatches its decoder on this value.
+    pub codec_tag: u8,
     /// Row stride in bytes as produced by the source. `0` means tightly packed.
     pub stride: u32,
     pub bytes: Vec<u8>,
+}
+
+impl ScreenFrame {
+    /// Whether the body still needs a decode pass before presenting.
+    pub fn compressed(&self) -> bool {
+        self.codec_tag != SCREEN_COMPRESS_NONE
+    }
 }
 
 impl ScreenFrame {
@@ -160,7 +172,7 @@ impl ScreenFrame {
             seq,
             rect,
             format,
-            compressed: false,
+            codec_tag: SCREEN_COMPRESS_NONE,
             stride: 0,
             bytes,
         })
@@ -190,11 +202,7 @@ impl ScreenFrame {
         out.extend_from_slice(&self.rect.w.to_be_bytes());
         out.extend_from_slice(&self.rect.h.to_be_bytes());
         out.push(self.format.tag());
-        out.push(if self.compressed {
-            SCREEN_COMPRESS_ZSTD
-        } else {
-            SCREEN_COMPRESS_NONE
-        });
+        out.push(self.codec_tag);
         out.extend_from_slice(&self.stride.to_be_bytes());
         out
     }
@@ -293,11 +301,11 @@ impl ScreenFrame {
         let w = u16::from_be_bytes(payload[21..23].try_into().unwrap());
         let h = u16::from_be_bytes(payload[23..25].try_into().unwrap());
         let format = PixelFormat::from_tag(payload[25])?;
-        let compressed = match payload[26] {
-            SCREEN_COMPRESS_NONE => false,
-            SCREEN_COMPRESS_ZSTD => true,
+        let codec_tag = match payload[26] {
+            tag @ (SCREEN_COMPRESS_NONE | SCREEN_COMPRESS_ZSTD | SCREEN_COMPRESS_H264) => tag,
             _ => return Err(CoreError::ScreenFrame),
         };
+        let compressed = codec_tag != SCREEN_COMPRESS_NONE;
         let stride = u32::from_be_bytes(payload[27..31].try_into().unwrap());
         let rect = ScreenRect::new(x, y, w, h)?;
         // The decoded body is `w*h*bpp`; `w,h` are peer-controlled u16, so this
@@ -326,7 +334,7 @@ impl ScreenFrame {
             seq,
             rect,
             format,
-            compressed,
+            codec_tag,
             stride,
             bytes,
         })
@@ -607,7 +615,7 @@ impl ScreenReceiver {
         }
         // A raw frame must match its rect; the codec already enforced this on
         // the wire, but a locally built frame could still lie.
-        if !frame.compressed && frame.bytes.len() != frame.raw_len() {
+        if !frame.compressed() && frame.bytes.len() != frame.raw_len() {
             return Err(CoreError::ScreenFrame);
         }
         self.last_seq = frame.seq;

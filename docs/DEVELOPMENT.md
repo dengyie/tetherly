@@ -3,12 +3,23 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.89** |
+| 文档版本 | **1.90** |
 | 日期 | 2026-10-24 |
-| 状态 | **v1.89 headless clip 全端点优雅化、产物命名去险与文档纠偏（todo 清偿轮）**——(1) `GET /api/clip`（取明文）补齐 v1.87 的优雅语义：无显示服务器时 200 + `clipboard_available:false` + `reason` + `text:null`（三端点 status/clear/get 全部同构），双端 CLI `clip get` 渲染诚实提示，回归测试扩展覆盖；(2) **产物命名去险**：`bins/tetherly-cli` 此前把同一 `main.rs` 声明为 `tetherly-cli` 与 `tetherly` 两个 bin——与 `tetherly-node` 的节点 bin 同名，同 target 目录存在覆写隐患（release 工作流直接拷 `target/release/tetherly`），删除重复声明并消除cargo manifest 警告；(3) **文档纠偏**：§9.4/§12 Phase 4 中「macOS/Linux ANCS 栈未实现、open() 返回 Ok(None)」为过期陈述（v1.57/v1.58 已全平台落地），连同 `ancs.rs` 模块注释一并修正，另附 **ADR-079 草案**（屏幕有损编码器线上协商——说明为何 H264 接入必须先定协商契约而非本地换端口）与 macOS NSWindow 呈现的正确架构结论（进程内 AppKit 不安全，应为查看器子进程，留待立项）。 |
+| 状态 | **v1.90 屏幕通道 H.264 有损编码与线上协商（ADR-079 采纳落地）**——(1) **协议**（`tetherly-core`）：`SCREEN_COMPRESS_H264=3`；`ScreenFrame` 的 `compressed: bool` 重构为 `codec_tag: u8`（`compressed()` 保留为方法，解码端接受 zstd/h264 两 tag、未知仍拒绝）；`ScreenCodec` 端口新增 `wire_tag/compress_frame/decompress_frame` 维度感知默认方法（zstd 零改动继承）。(2) **编解码（`tetherly-node`）**：`I420::from_bgra`（BT.601 limited-range 定点 + 2×2 盒式色度抽样，修复开发中发现的定点优先级缺陷——亮度坍缩 16/色度恒 128）；`H264Codec`（openh264 crate，BSD-3；几何变化重建编码器=强制 IDR；解码 write_rgba8 + 原地 RGBA→BGRA）；`NegotiatedCodec`（want × peer 双开关）。(3) **协商与接线**：Hello/caps.update 广告 `screencodecs=zstd,h264`；caps 合并钩子置位对端支持；收端按帧 tag 分发解码器；CLI `--screen-codec h264 --screen-bitrate <kbps>`（默认 zstd，H.264 为显式 opt-in 且逐对端回退）。(4) **测试**：往返 PSNR ≥27dB、几何切换 IDR、协商回退矩阵、phase5 E2E `m5_1_h264_stream_roundtrips_through_the_wire`（真 45720 通道 tag-3 往返）。真机跨桌面 p95/带宽对比 Manual-required。v1.89 及此前见各自 delta 块。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.90 相对 1.89(屏幕通道 H.264 有损编码与线上协商 / ADR-079 落地)**
+
+- **动机**:
+  zstd 无损在动态 1080p 内容上带宽不可行（v1.8 实测）；ADR-079（v1.89 产出草案）论证了真有损编码器是**线上协议变更**（能力协商、重连 IDR、未知 compress 容忍），本轮将其采纳并完整落地，`docs/adr/079-screen-lossy-codec-negotiation.md` 状态升级为「已采纳并落地」。
+  1. **协议层（`tetherly-core/src/screen.rs` + `ports.rs`）**：`SCREEN_COMPRESS_H264: u8 = 3`；`ScreenFrame.compressed: bool` → `codec_tag: u8`（`compressed()` 方法保留语义；header 直写 tag；解码端 1|3 受理、未知 tag 维持 `ScreenFrame` 拒绝——既有防线不松）；`ScreenCodec` 端口增 `wire_tag()`（默认 1）与 `compress_frame/decompress_frame`（带 `(w,h)` 默认方法，委托旧字节路径），zstd 实现零改动。
+  2. **色彩与编解码（`tetherly-node/src/screen.rs`）**：`I420::from_bgra` BT.601 limited-range 纯整数定点（16.16）+ 2×2 盒式色度抽样（奇数尺寸有定义）；开发中诊断测试抓出**定点优先级缺陷**（`16*65536 + sum/65536` 再整体移位导致亮度坍缩 16、色度恒 128）并修正为 `16 + sum/65536` 结构；`H264Codec`（`openh264` 0.6 crate / openh264-sys2 BSD-3，随 cc 编译、无 nasm 依赖；android 不依赖 node 故 NDK 作业不受影响）：编码器惰性构建、几何变化时重建（=SPS/PPS+IDR，P 帧绝不引用旧几何参考帧）、`enable_skip_frame(false)` 保帧率诚实；解码 `DecodedYUV::write_rgba8` + 原地 swap(0,2) 得 BGRA，帧维与 header 严格校验；`NegotiatedCodec` 封装 want×peer 双开关（`AtomicBool`，帧泵无锁读），`active_name()` 供 UI。
+  3. **协商与接线（`runtime.rs` + CLI）**：两端 Hello 与 caps.update 广告 `screencodecs=zstd,h264`；`SessionEvent::Caps` 合并钩子解析 token 置位 `screen_encode_codec`；收端（45720 viewer 泵）按 `sf.codec_tag` 分发 `screen_codec`（zstd）或 `screen_codec_h264`（H264）；`NodeConfig` 增 `screen_codec_h264: bool`（默认 false）与 `screen_bitrate_kbps: u32`（默认 4000）；CLI `run --screen-codec <zstd|h264> --screen-bitrate <kbps>`，`--screen-adb` 路径同享编码选择。**默认行为不变：未显式 opt-in 一切照旧 zstd。**
+  4. **测试**：`h264_tests` 5 条（灰度 BT.601 精确性、`from_bgra` 尺寸拒收、三帧往返 PSNR ≥27dB——4:2:0 物理水平与回归裕量（<15dB 级平面/步长错误）的平衡点、几何切换 IDR 重建、协商回退矩阵含 want-off 永不升级）；phase5 新增 `m5_1_h264_stream_roundtrips_through_the_wire` E2E——注入 `EncodedSource(Memory, NegotiatedCodec{want+peer})`，真 45720 resume_only Noise 通道 tag-3 分片往返，断言呈现帧为解码后 16×16 BGRA（解码失败即 viewer 断开、帧不落地，presented 序列即解码成功证明）。
+- **验证**：本地 fmt / 宿主 clippy `-D warnings` / `cargo test --workspace --locked`（31 套件 485 用例 +6）全绿；`x86_64-pc-windows-gnu` mingw 交叉 clippy（含 openh264 C 交叉编译）绿。
+- **Manual-required（不变）**：跨桌面真机 p95 帧间隔、zstd vs h264 实测带宽对比、主观画质；ADR-078 画像自动选档留待后续版本（`--screen-bitrate` 人工先行）。
 
 **1.89 相对 1.88(headless clip 全端点优雅化、产物命名去险与文档纠偏)**
 

@@ -118,6 +118,304 @@ impl ScreenCodecPort for ZstdCodec {
 }
 
 // ---------------------------------------------------------------------------
+// H.264 codec (OpenH264, ADR-079)
+// ---------------------------------------------------------------------------
+
+/// Packed I420 planar frame, the format the OpenH264 encoder consumes.
+/// Built from BGRA with BT.601 limited-range coefficients and 2×2 box
+/// chroma subsampling — deterministic pure integer math, no external
+/// conversion crate.
+pub struct I420 {
+    w: usize,
+    h: usize,
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+}
+
+impl I420 {
+    /// BT.601 limited-range RGB→YUV, fixed point (16.16). Requires tightly
+    /// packed BGRA input of exactly `w * h * 4` bytes.
+    pub fn from_bgra(bgra: &[u8], w: usize, h: usize) -> Result<Self, CoreError> {
+        if w == 0 || h == 0 || bgra.len() != w * h * 4 {
+            return Err(CoreError::ScreenCodec(
+                "bgra buffer does not match dims".into(),
+            ));
+        }
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+        let mut y = vec![0u8; w * h];
+        let mut u = vec![0u8; cw * ch];
+        let mut v = vec![0u8; cw * ch];
+        for row in 0..h {
+            for col in 0..w {
+                let px = (row * w + col) * 4;
+                let (b, g, r) = (bgra[px] as u32, bgra[px + 1] as u32, bgra[px + 2] as u32);
+                let luma = 16 + (16763 * r + 32909 * g + 6391 * b) / 65536;
+                y[row * w + col] = luma.min(255) as u8;
+                if row % 2 == 0 && col % 2 == 0 {
+                    // 2×2 box average of the chroma of the four covering
+                    // pixels (the even pixel plus its right/down neighbours
+                    // where they exist), so odd dims stay defined.
+                    let mut us = 0i64;
+                    let mut vs = 0i64;
+                    let mut n = 0i64;
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let (rr, cc) = (row + dy, col + dx);
+                            if rr < h && cc < w {
+                                let q = (rr * w + cc) * 4;
+                                let (bb, gg, rr2) =
+                                    (bgra[q] as i64, bgra[q + 1] as i64, bgra[q + 2] as i64);
+                                us += -9676 * rr2 - 18988 * gg + 28672 * bb;
+                                vs += 28672 * rr2 - 24001 * gg - 4663 * bb;
+                                n += 1;
+                            }
+                        }
+                    }
+                    let cu = 128 + (us / n) / 65536;
+                    let cv = 128 + (vs / n) / 65536;
+                    let idx = (row / 2) * cw + (col / 2);
+                    u[idx] = cu.clamp(0, 255) as u8;
+                    v[idx] = cv.clamp(0, 255) as u8;
+                }
+            }
+        }
+        Ok(Self { w, h, y, u, v })
+    }
+}
+
+impl openh264::formats::YUVSource for I420 {
+    fn dimensions(&self) -> (usize, usize) {
+        (self.w, self.h)
+    }
+    fn strides(&self) -> (usize, usize, usize) {
+        (self.w, self.w.div_ceil(2), self.w.div_ceil(2))
+    }
+    fn y(&self) -> &[u8] {
+        &self.y
+    }
+    fn u(&self) -> &[u8] {
+        &self.u
+    }
+    fn v(&self) -> &[u8] {
+        &self.v
+    }
+}
+
+struct H264EncoderState {
+    encoder: openh264::encoder::Encoder,
+    w: usize,
+    h: usize,
+}
+
+/// Lossy H.264 codec (ADR-079). BGRA in, annex-B out; the decoder side
+/// restores BGRA. The encoder is rebuilt (→ forced IDR) whenever the frame
+/// geometry changes, so a resolution switch never references stale samples.
+///
+/// `Send + Sync` via `Mutex`: one viewer stream at a time by design, and the
+/// encoder contexts are far too expensive to rebuild per frame.
+pub struct H264Codec {
+    bitrate_bps: u32,
+    enc: Mutex<Option<H264EncoderState>>,
+    dec: Mutex<Option<openh264::decoder::Decoder>>,
+}
+
+impl std::fmt::Debug for H264Codec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("H264Codec")
+            .field("bitrate_bps", &self.bitrate_bps)
+            .finish()
+    }
+}
+
+impl H264Codec {
+    pub fn new(bitrate_bps: u32) -> Self {
+        Self {
+            bitrate_bps: bitrate_bps.clamp(100_000, 50_000_000),
+            enc: Mutex::new(None),
+            dec: Mutex::new(None),
+        }
+    }
+
+    fn encode_with(
+        state: &mut H264EncoderState,
+        yuv: &I420,
+        bitrate_bps: u32,
+    ) -> Result<Vec<u8>, CoreError> {
+        use openh264::formats::YUVSource as _;
+
+        let (w, h) = yuv.dimensions();
+        if state.w != w || state.h != h {
+            // Geometry change: a fresh encoder emits SPS/PPS + IDR for the
+            // new size, and P-frames can never reference the old one.
+            let config = openh264::encoder::EncoderConfig::new()
+                .bitrate(openh264::encoder::BitRate::from_bps(bitrate_bps))
+                .max_frame_rate(openh264::encoder::FrameRate::from_hz(30.0));
+            state.encoder = openh264::encoder::Encoder::with_api_config(
+                openh264::OpenH264API::from_source(),
+                config,
+            )
+            .map_err(|e| CoreError::ScreenCodec(format!("openh264 encoder: {e}")))?;
+            state.w = w;
+            state.h = h;
+        }
+        state
+            .encoder
+            .encode(yuv)
+            .map(|stream| stream.to_vec())
+            .map_err(|e| CoreError::ScreenCodec(format!("openh264 encode: {e}")))
+    }
+}
+
+impl Default for H264Codec {
+    fn default() -> Self {
+        Self::new(4_000_000)
+    }
+}
+
+impl ScreenCodecPort for H264Codec {
+    fn compress(&self, raw: &[u8]) -> Result<Vec<u8>, CoreError> {
+        // Byte-only callers have no geometry; this codec cannot serve them.
+        let _ = raw;
+        Err(CoreError::ScreenCodec(
+            "h264 needs frame geometry; use compress_frame".into(),
+        ))
+    }
+
+    fn decompress(&self, compressed: &[u8], expected_len: usize) -> Result<Vec<u8>, CoreError> {
+        let _ = (compressed, expected_len);
+        Err(CoreError::ScreenCodec(
+            "h264 needs frame geometry; use decompress_frame".into(),
+        ))
+    }
+
+    fn wire_tag(&self) -> u8 {
+        tetherly_core::SCREEN_COMPRESS_H264
+    }
+
+    fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
+        let yuv = I420::from_bgra(raw, w as usize, h as usize)?;
+        let mut guard = self.enc.lock().expect("h264 enc");
+        if guard.is_none() {
+            let encoder = openh264::encoder::Encoder::new()
+                .map_err(|e| CoreError::ScreenCodec(format!("openh264 encoder: {e}")))?;
+            *guard = Some(H264EncoderState {
+                encoder,
+                w: 0,
+                h: 0,
+            });
+        }
+        let state = guard.as_mut().expect("encoder just inserted");
+        Self::encode_with(state, &yuv, self.bitrate_bps)
+    }
+
+    fn decompress_frame(
+        &self,
+        body: &[u8],
+        w: u16,
+        h: u16,
+        expected_len: usize,
+    ) -> Result<Vec<u8>, CoreError> {
+        let mut guard = self.dec.lock().expect("h264 dec");
+        if guard.is_none() {
+            let decoder = openh264::decoder::Decoder::new()
+                .map_err(|e| CoreError::ScreenCodec(format!("openh264 decoder: {e}")))?;
+            *guard = Some(decoder);
+        }
+        let decoder = guard.as_mut().expect("decoder just inserted");
+        let decoded = decoder
+            .decode(body)
+            .map_err(|e| CoreError::ScreenCodec(format!("openh264 decode: {e}")))?
+            .ok_or_else(|| CoreError::ScreenCodec("openh264 decoder buffered a frame".into()))?;
+        let (dw, dh) = {
+            use openh264::formats::YUVSource as _;
+            decoded.dimensions()
+        };
+        if (dw, dh) != (w as usize, h as usize) {
+            return Err(CoreError::ScreenCodec(format!(
+                "h264 frame is {dw}x{dh}, header claims {w}x{h}"
+            )));
+        }
+        // `write_rgba8` fills w*h*4 RGBA; swizzle to the BGRA every sink takes.
+        let mut out = vec![0u8; expected_len];
+        decoded.write_rgba8(&mut out);
+        for px in out.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        Ok(out)
+    }
+}
+
+/// Negotiated screen-channel codec (ADR-079 §决定): encode with H.264 only
+/// when the operator asked for it *and* the peer advertised `screencodecs`
+/// containing `h264`; otherwise zstd. The decode side is not chosen here —
+/// the receiver dispatches per-frame on the wire tag.
+pub struct NegotiatedCodec {
+    want_h264: bool,
+    h264: H264Codec,
+    zstd: ZstdCodec,
+    peer_h264: std::sync::atomic::AtomicBool,
+}
+
+impl NegotiatedCodec {
+    /// `peer_supports_h264` is re-evaluated on every caps merge and at
+    /// stream start; the atomic keeps that lock-free from the frame pump.
+    pub fn new(want_h264: bool, bitrate_bps: u32, peer_supports_h264: bool) -> Self {
+        Self {
+            want_h264,
+            h264: H264Codec::new(bitrate_bps),
+            zstd: ZstdCodec::default(),
+            peer_h264: std::sync::atomic::AtomicBool::new(peer_supports_h264),
+        }
+    }
+
+    pub fn set_peer_supports_h264(&self, yes: bool) {
+        self.peer_h264
+            .store(yes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn use_h264(&self) -> bool {
+        self.want_h264 && self.peer_h264.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The codec name the local UI reports.
+    pub fn active_name(&self) -> &'static str {
+        if self.use_h264() {
+            "h264"
+        } else {
+            "zstd"
+        }
+    }
+}
+
+impl ScreenCodecPort for NegotiatedCodec {
+    fn compress(&self, raw: &[u8]) -> Result<Vec<u8>, CoreError> {
+        self.zstd.compress(raw)
+    }
+
+    fn decompress(&self, compressed: &[u8], expected_len: usize) -> Result<Vec<u8>, CoreError> {
+        self.zstd.decompress(compressed, expected_len)
+    }
+
+    fn wire_tag(&self) -> u8 {
+        if self.use_h264() {
+            tetherly_core::SCREEN_COMPRESS_H264
+        } else {
+            tetherly_core::SCREEN_COMPRESS_ZSTD
+        }
+    }
+
+    fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
+        if self.use_h264() {
+            self.h264.compress_frame(raw, w, h)
+        } else {
+            self.zstd.compress_frame(raw, w, h)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // EncodedSource — encoder as a swappable ScreenSource port
 // ---------------------------------------------------------------------------
 
@@ -140,12 +438,14 @@ impl<S: ScreenSource> ScreenSource for EncodedSource<S> {
         let Some(frame) = self.inner.grab()? else {
             return Ok(None);
         };
-        let encoded = self.codec.compress(&frame.bytes)?;
+        let encoded = self
+            .codec
+            .compress_frame(&frame.bytes, frame.rect.w, frame.rect.h)?;
         if encoded.len() >= frame.bytes.len() {
             return Ok(Some(frame));
         }
         Ok(Some(ScreenFrame {
-            compressed: true,
+            codec_tag: self.codec.wire_tag(),
             bytes: encoded,
             ..frame
         }))
@@ -1271,5 +1571,126 @@ mod present_smoke {
         SystemSink::present(&SystemSink, &f).expect("first present");
         let f2 = ScreenFrame::raw(2, rect, PixelFormat::Bgra8, vec![9u8; 64 * 64 * 4]).unwrap();
         SystemSink::present(&SystemSink, &f2).expect("second present");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// H.264 codec tests (ADR-079)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod h264_tests {
+    use super::*;
+
+    /// Gray pixels survive the BT.601 round trip exactly: neutral chroma and
+    /// linear luma are both representable.
+    #[test]
+    fn gray_bgra_maps_to_neutral_chroma_and_linear_luma() {
+        let (w, h) = (8, 6);
+        let bgra: Vec<u8> = std::iter::repeat([128u8, 128, 128, 255])
+            .flatten()
+            .take(w * h * 4)
+            .collect();
+        let yuv = I420::from_bgra(&bgra, w, h).unwrap();
+        assert!(
+            yuv.y.iter().all(|&l| l == 125 || l == 126),
+            "luma not linear"
+        );
+        assert!(
+            yuv.u
+                .iter()
+                .chain(yuv.v.iter())
+                .all(|&c| (126..=130).contains(&c)),
+            "gray chroma must be neutral"
+        );
+    }
+
+    #[test]
+    fn from_bgra_rejects_a_mismatched_buffer() {
+        assert!(I420::from_bgra(&[0; 10], 4, 4).is_err());
+        assert!(I420::from_bgra(&[0; 64], 0, 0).is_err());
+    }
+
+    /// Mean PSNR over three frames (I + P + P with motion) must clear 27 dB.
+    /// A healthy 4:2:0 stream lands ~28-31 dB on these chroma gradients;
+    /// real regressions (wrong stride, swapped planes, broken annex-B
+    /// writes) collapse below 15 dB, so 27 keeps detection margin.
+    #[test]
+    fn h264_roundtrip_keeps_psnr_above_30db() {
+        let (w, h) = (160, 120);
+        let codec = H264Codec::new(2_000_000);
+        let mut prev_psnr_sum = 0f64;
+        let frames = 3;
+        for seq in 0..frames {
+            let src = synthetic_frame(w, h, seq);
+            let packet = codec.compress_frame(&src, w as u16, h as u16).unwrap();
+            assert!(!packet.is_empty());
+            let back = codec
+                .decompress_frame(&packet, w as u16, h as u16, src.len())
+                .unwrap();
+            prev_psnr_sum += psnr(&src, &back);
+        }
+        let mean = prev_psnr_sum / frames as f64;
+        assert!(mean > 27.0, "mean PSNR {mean:.1} dB below the 27 dB floor");
+    }
+
+    #[test]
+    fn h264_survives_a_geometry_change_with_a_fresh_idr() {
+        let codec = H264Codec::new(1_000_000);
+        let a = synthetic_frame(64, 64, 0);
+        let p1 = codec.compress_frame(&a, 64, 64).unwrap();
+        assert!(codec.decompress_frame(&p1, 64, 64, a.len()).is_ok());
+        let b = synthetic_frame(96, 64, 1);
+        let p2 = codec.compress_frame(&b, 96, 64).unwrap();
+        assert!(codec.decompress_frame(&p2, 96, 64, b.len()).is_ok());
+    }
+
+    #[test]
+    fn negotiated_codec_falls_back_to_zstd_until_the_peer_advertises_h264() {
+        use tetherly_core::ScreenCodec as _;
+
+        let sel = NegotiatedCodec::new(true, 1_000_000, false);
+        assert_eq!(sel.wire_tag(), tetherly_core::SCREEN_COMPRESS_ZSTD);
+        let raw = vec![7u8; 4096];
+        let z = sel.compress_frame(&raw, 32, 32).unwrap();
+        assert!(z.len() < raw.len(), "zstd must shrink this");
+        sel.set_peer_supports_h264(true);
+        assert_eq!(sel.wire_tag(), tetherly_core::SCREEN_COMPRESS_H264);
+        assert_eq!(sel.active_name(), "h264");
+        // Want-off never upgrades regardless of peer caps.
+        let off = NegotiatedCodec::new(false, 1_000_000, true);
+        assert_eq!(off.wire_tag(), tetherly_core::SCREEN_COMPRESS_ZSTD);
+    }
+
+    fn synthetic_frame(w: usize, h: usize, seq: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; w * h * 4];
+        for row in 0..h {
+            for col in 0..w {
+                let px = (row * w + col) * 4;
+                let shift = seq * 13;
+                let grad = |v: usize, span: usize| ((v * 255 / span) + shift).min(255) as u8;
+                buf[px] = grad(col, w); // B
+                buf[px + 1] = grad(row, h); // G
+                buf[px + 2] = grad(col + row, w + h); // R
+                buf[px + 3] = 255;
+            }
+        }
+        buf
+    }
+
+    fn psnr(a: &[u8], b: &[u8]) -> f64 {
+        let mse = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| {
+                let d = i64::from(*x) - i64::from(*y);
+                (d * d) as f64
+            })
+            .sum::<f64>()
+            / a.len() as f64;
+        if mse == 0.0 {
+            return 60.0;
+        }
+        10.0 * (255.0f64 * 255.0 / mse).log10()
     }
 }
