@@ -17,6 +17,7 @@
   1. **修复**：`crates/tetherly-node/src/bin/tetherly.rs` 与 `bins/tetherly-cli/src/main.rs` 的 `main()` 首行在 unix 下执行 `libc::signal(SIGPIPE, SIG_DFL)`——恢复经典语义，下游关管道即静默终止（exit 141），与 `cat`/`ls` 等一致；Windows 无 SIGPIPE 不受影响。
   2. **依赖**：`tetherly-cli` 新增 `[target.'cfg(unix)'.dependencies] libc = "0.2"`（libc 已在 lockfile，零新包入图）；`tetherly` 二进制随 `tetherly-node` 既有 unix libc。
   3. **验证**：本地 `./target/debug/tetherly --help | head -1` 修复前 panic、修复后干净 exit 0；全门重跑绿（fmt / 宿主 clippy / `x86_64-pc-windows-gnu` 交叉 clippy `-D warnings` / 31 套件 479 测试）。
+- **v0.1.8 真机复测结论（LeaseWeb VPS，2026-10-24，迭代闭环）**：EPIPE 修复实证——`send|head`、`offers|head`、`accept --all | head -1` 三处管道截断全部干净退出 rc=0、零 panic 堆栈；8 MiB 文件 sha256 逐字节一致；`clip status` 优雅降级回归确认（200 + `clipboard_available:false` + `clipboard:` 根因标签）；无 PIN 重拨、Host 403 依旧全过。**测试后现场清理**（进程/端口/目录）。v0.1.6→v0.1.8 三轮「真机暴露→修复→发版→复测」迭代闭环，无遗留已知问题。
 - **v0.1.7 真机复测其余结论（LeaseWeb VPS，2026-10-24）**：clip status/clear 优雅降级实证（HTTP 200 + `clipboard_available:false` + 诚实 `clipboard:` 根因标签）；SPAKE2 配对 / notify+OTP（`has_otp:true`）/ 16 MiB 文件 sha256 逐字节一致 / 杀进程无 PIN 重拨 / 链路探测 4/4 零丢包（avg 86.5ms `good`，再度实证 v1.86 档位放宽）/ Host 403 / 日志零明文 / UI 仅 127.0.0.1——全部通过。
 
 **1.87 相对 1.86(headless 剪贴板优雅降级)**
