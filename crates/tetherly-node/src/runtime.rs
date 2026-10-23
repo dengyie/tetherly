@@ -18630,6 +18630,8 @@ mod handoff_engine_tests {
     #[test]
     fn test_handoff_receive_prompt_only_and_inbox_lifecycle() {
         let (node, dir) = temp_handoff_node("inbox");
+        // Record opens instead of launching the user's real browser.
+        node.set_opener(Arc::new(crate::platform::MemoryOpener::new()));
         let peer = DeviceId::from_id_pk(&[9u8; 32]);
 
         // 1. Receive valid URL with default PromptOnly policy

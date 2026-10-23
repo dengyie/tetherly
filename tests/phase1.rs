@@ -128,6 +128,10 @@ async fn pair_phone_desktop() -> (Node, Node, DirGuard, DirGuard) {
     let (desk_dir, g2) = temp_dir("desk");
     let phone = Node::start(cfg(phone_dir, "phone", "android")).unwrap();
     let desk = Node::start(cfg(desk_dir, "desk", "windows")).unwrap();
+    // Record opens instead of launching the user's real browser.
+    let opener = tetherly_node::MemoryOpener::new();
+    phone.set_opener(Arc::new(opener.clone()));
+    desk.set_opener(Arc::new(opener.clone()));
     phone.spawn_listeners().await.unwrap();
     desk.spawn_listeners().await.unwrap();
     let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
