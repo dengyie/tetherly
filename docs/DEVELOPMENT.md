@@ -3,12 +3,21 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.87** |
+| 文档版本 | **1.88** |
 | 日期 | 2026-10-24 |
-| 状态 | **v1.87 headless 剪贴板优雅降级（v0.1.6 真机冒烟暴露缺陷的闭环修复）**——v0.1.6 在荷兰 LeaseWeb 沙盒 VPS 真机冒烟暴露：headless Linux（无 X11/Wayland）上 `GET /api/clip/status` 因 OS 剪贴板端口失败直接 HTTP 500，且 arboard 错误被误标为 `CoreError::Json`（错误链前缀 `json:` 误导排障方向）。修复：新增 `CoreError::Clipboard` 变体（`SystemClip` 全部 arboard 错误改映射至此，根因标签诚实）；`clipboard_status` 优雅降级为 200 + `clipboard_available:false` + `reason`（同步统计在无显示服务器下仍可观）；`clear_clipboard` 对不存在的剪贴板按幂等语义成功（历史照常重置并回报可用性）；双端 CLI `clip status` 渲染 `System Clipboard: unavailable (…)` 行。新增回归测试 `clipboard_status_degrades_gracefully_without_display_server`：CI 矩阵天然覆盖两分支（headless ubuntu-latest=失败分支、macos/windows=可用分支）。v1.86 全部既有修复与验证（含 v0.1.6 真机冒烟全记录）见「1.86 相对 1.85」块。 |
+| 状态 | **v1.88 CLI 管道 SIGPIPE 语义修复（v0.1.7 真机复测暴露缺陷的闭环修复）**——v0.1.7 在荷兰 LeaseWeb 沙盒 VPS 复测时暴露：`tetherly accept --all | head -1` 在下游关闭管道后因 EPIPE 触发 `println!` panic 打屏（Rust 默认忽略 SIGPIPE；传输本身已成功，纯 CLI 健壮性缺陷）。修复：`tetherly` 与 `tetherly-cli` 两个 main() 在 unix 下恢复 SIGPIPE 默认语义（`libc::signal(SIGPIPE, SIG_DFL)`，管道下游关闭即静默退出，与经典工具一致）；`tetherly-cli` 补 unix 目标 `libc` 依赖（lockfile 既有，零新包）。本地验证：`--help | head -1` 干净退出 exit 0。v0.1.7 真机复测其余全过（clip 优雅降级 200 实证、SPAKE2 配对、notify+OTP、16 MiB 文件 sha256 一致、无 PIN 重拨、探测零丢包、Host 403、日志零明文、UI 仅回环）；v1.87/v1.86 详见各自 delta 块。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.88 相对 1.87(CLI 管道 SIGPIPE 语义修复)**
+
+- **动机(v0.1.7 真机复测暴露)**:
+  荷兰 LeaseWeb 沙盒 VPS 复测 v0.1.7 时，`tetherly accept --ui-port 45716 --all | head -1` 触发 `thread 'main' panicked ... failed printing to stdout: Broken pipe (os error 32)`——`head` 取首行后关闭管道，后续 `println!` 撞 EPIPE，而 Rust 运行时默认忽略 SIGPIPE、把写失败变成 panic。功能无损（HTTP 接受与 16 MiB 传输本身成功、sha256 一致），但任何 `| head`/`| grep -m1` 用法都会以崩溃堆栈刷屏，违反 CLI 基本健壮性。
+  1. **修复**：`crates/tetherly-node/src/bin/tetherly.rs` 与 `bins/tetherly-cli/src/main.rs` 的 `main()` 首行在 unix 下执行 `libc::signal(SIGPIPE, SIG_DFL)`——恢复经典语义，下游关管道即静默终止（exit 141），与 `cat`/`ls` 等一致；Windows 无 SIGPIPE 不受影响。
+  2. **依赖**：`tetherly-cli` 新增 `[target.'cfg(unix)'.dependencies] libc = "0.2"`（libc 已在 lockfile，零新包入图）；`tetherly` 二进制随 `tetherly-node` 既有 unix libc。
+  3. **验证**：本地 `./target/debug/tetherly --help | head -1` 修复前 panic、修复后干净 exit 0；全门重跑绿（fmt / 宿主 clippy / `x86_64-pc-windows-gnu` 交叉 clippy `-D warnings` / 31 套件 479 测试）。
+- **v0.1.7 真机复测其余结论（LeaseWeb VPS，2026-10-24）**：clip status/clear 优雅降级实证（HTTP 200 + `clipboard_available:false` + 诚实 `clipboard:` 根因标签）；SPAKE2 配对 / notify+OTP（`has_otp:true`）/ 16 MiB 文件 sha256 逐字节一致 / 杀进程无 PIN 重拨 / 链路探测 4/4 零丢包（avg 86.5ms `good`，再度实证 v1.86 档位放宽）/ Host 403 / 日志零明文 / UI 仅 127.0.0.1——全部通过。
 
 **1.87 相对 1.86(headless 剪贴板优雅降级)**
 

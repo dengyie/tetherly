@@ -3614,6 +3614,12 @@ enum RouteCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // A closed downstream pipe (`tetherly accept | head`) must end the
+    // process quietly like any classic tool, not panic in println!.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
