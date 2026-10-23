@@ -17,7 +17,7 @@
   1. **输入隧道陈旧应答复活竞态（Stale Responder Resurrection Race）**：
      `input_tunnel_attach` 发送 REQ 后立即预置 Controller 会话，因此 `receive_input_tunnel_resp` 收到应答时会话必然已在——若 guard 为空，只可能是隧道已释放/超时。旧实现的 else 分支会凭空重建会话（release 后迟到的 accepted 应答复活隧道并劫持座位），且 session_id 不匹配的应答仍会翻转 `input_seat`。修复：应答必须匹配当前活跃会话 ID 才生效——release 终态化、迟到应答整体丢弃、reject 只拆除其所应答的会话；竞态修复同时消除了 reject 分支的重复锁获取。
   2. **Windows cfg 分支 clippy 违规**：
-     `platform.rs::sample_host` 的 `let mut sample` 在非 unix 目标永不 mutation（`unused_mut`），重构为 `#[cfg(unix)]`/`#[cfg(not(unix))]` 双 `let` + 无 mut 的 `HostSample { total_memory_bytes }` 构造；`store.rs` 带宽画像测试的 `path` 绑定仅在 `#[cfg(unix)]` 权限断言块内使用（`unused variable`），移入块内。
+     `platform.rs::sample_host` 的 `let mut sample` 在非 unix 目标永不 mutation（`unused_mut`），重构为 `#[cfg(unix)]`/`#[cfg(not(unix))]` 双 `let` + 无 mut 的 `HostSample { total_memory_bytes }` 构造；`store.rs` 带宽画像测试的 `path` 绑定仅在 `#[cfg(unix)]` 权限断言块内使用（`unused variable`），移入块内；`tests/phase1.rs` 两处测试守卫 `g2` 仅在 `#[cfg(unix)]` 权限断言内使用（handoff/media 治理测试）——把「文件存在」断言提为跨平台、0o600 断言留在 unix 块，使 `g2` 在全部平台被真实使用。
   3. **链路档位断言确定性治理**：
      `Excellent` 档要求实测平均 RTT < 25ms；共享 CI runner 上 loopback 4 包 burst probe 可跨档落 `Good`。`peer_link_quality_profiling_keepalive_tuning_and_burst_probe_via_loopback_api` 的三处硬断言（probe 报告 / SSE 事件 / 滑窗报告）放宽为「不低于 Good」，4/4 收达、0% 丢包与 RTT 存在性保持严格。
   4. **cargo-deny wildcard 违禁**：

@@ -9146,25 +9146,24 @@ async fn resource_and_url_handoff_pipeline_and_governance_via_loopback_api() {
     assert!(empty_rep["entries"].as_array().unwrap().is_empty());
 
     // 10. Atomic Persistence & POSIX 0o600 Permissions Check
+    let peer_pol_file = g2.path().join("handoff_policy.json");
+    assert!(
+        peer_pol_file.exists(),
+        "handoff_policy.json must exist on disk"
+    );
+    let peer_inbox_file = g2.path().join("handoff_inbox.json");
+    assert!(
+        peer_inbox_file.exists(),
+        "handoff_inbox.json must exist on disk"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let peer_pol_file = g2.path().join("handoff_policy.json");
-        assert!(
-            peer_pol_file.exists(),
-            "handoff_policy.json must exist on disk"
-        );
         let meta_pol = std::fs::metadata(&peer_pol_file).unwrap();
         assert_eq!(
             meta_pol.permissions().mode() & 0o777,
             0o600,
             "handoff_policy.json must have 0o600 permissions"
-        );
-
-        let peer_inbox_file = g2.path().join("handoff_inbox.json");
-        assert!(
-            peer_inbox_file.exists(),
-            "handoff_inbox.json must exist on disk"
         );
         let meta_inbox = std::fs::metadata(&peer_inbox_file).unwrap();
         assert_eq!(
@@ -9516,14 +9515,14 @@ async fn media_playback_control_pipeline_and_state_sync_via_loopback_api() {
     assert!(multi_rep["success_count"].as_u64().unwrap_or(0) >= 1);
 
     // 11. Atomic Persistence & POSIX 0o600 Permissions:
+    let peer_policy_file = g2.path().join("media_policy.json");
+    assert!(
+        peer_policy_file.exists(),
+        "media_policy.json must exist on disk"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let peer_policy_file = g2.path().join("media_policy.json");
-        assert!(
-            peer_policy_file.exists(),
-            "media_policy.json must exist on disk"
-        );
         let meta_pol = std::fs::metadata(&peer_policy_file).unwrap();
         assert_eq!(
             meta_pol.permissions().mode() & 0o777,
