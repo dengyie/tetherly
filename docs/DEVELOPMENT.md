@@ -20,6 +20,8 @@
   4. **ADR-079 草案**：屏幕有损编码（OpenH264 首选、rav1e 暂缓）的线上协商契约——Hello cap `screencodecs=` 交集、`compress=0x03` annex-B、重连强制 IDR、码率接 ADR-078 画像、旧端遇未知 compress 丢帧不拆会话；采纳前 §9.7 维持 zstd 默认链。
 - **边界挂账（经裁定不在本轮直写代码）**：macOS NSWindow 呈现（应立项为查看器子进程，进程内 AppKit 非主线程不安全且本环境无法运行验证）；真 H264/rav1e（等 ADR-079 采纳）；Wayland 键鼠（无成熟 Rust libei 绑定）；Tauri 壳（产品级 UI 决策）；cargo-fuzz（v1.16 已裁定用确定性模糊替代 nightly 依赖）；真机 Manual-required 项（需物理硬件）。
 - **验证**：本地 fmt / 宿主 clippy `-D warnings` / `x86_64-pc-windows-gnu` 交叉 clippy `-D warnings` / `cargo test --workspace --locked`（31 套件 479 用例，回归测试含 get 断言）全绿。
+- **v0.1.9 真机复测（LeaseWeb VPS，2026-10-24）**：clip 三端点（status/get/clear）全部 200 且可用性一致（`clipboard_available:false` + `clipboard:` 根因标签）；SPAKE2 配对 / notify+OTP / 12 MiB 文件 sha256 逐字节一致 / 无 PIN 重拨 / Host 403 / 日志零明文 / `transfers | head` EPIPE 干净退出 rc=0——全过，现场已清理。
+
 
 **1.88 相对 1.87(CLI 管道 SIGPIPE 语义修复)**
 
