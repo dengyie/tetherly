@@ -12168,6 +12168,236 @@ async fn virtual_microphone_intercom_lifecycle_and_governance_via_loopback_api()
     peer.shutdown();
 }
 
+#[tokio::test]
+async fn link_bench_throughput_and_governance_via_loopback_api() {
+    let (host, peer, g1, _g2) = pair_phone_desktop().await;
+    let host_ui = host.spawn_ui().await.expect("host UI spawns");
+    let peer_ui = peer.spawn_ui().await.expect("peer UI spawns");
+    let peer_id = peer.identity().device_id().clone();
+
+    // 1. Connect to Host SSE stream
+    let mut host_sse = tetherly_node::loopback_events_connect(host_ui)
+        .await
+        .expect("connect to host sse stream");
+
+    // 2. Initial Bench Status Check on Host (idle, default policy)
+    let (code_bench, body_bench) = tetherly_node::loopback_get(host_ui, "/api/bench")
+        .await
+        .unwrap();
+    assert_eq!(code_bench, 200);
+    let bench_init: serde_json::Value = serde_json::from_slice(&body_bench).unwrap();
+    assert_eq!(bench_init["ok"], true);
+    assert_eq!(bench_init["active"], false);
+    assert_eq!(bench_init["policy"]["enabled"], true);
+    assert_eq!(bench_init["policy"]["allow_inbound_bench"], true);
+    assert_eq!(bench_init["policy"]["max_duration_secs"], 30);
+    assert_eq!(bench_init["policy"]["max_bandwidth_mbps"], 1000);
+
+    // 3. Host updates bench governance policy via POST /api/bench/policy
+    let pol_req = serde_json::json!({
+        "enabled": true,
+        "allow_inbound_bench": true,
+        "max_duration_secs": 15,
+        "max_bandwidth_mbps": 2000,
+        "allowed_groups": ["lab"]
+    });
+    let (code_set, body_set) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/bench/policy",
+        &serde_json::to_vec(&pol_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_set, 200);
+    let pol_set: serde_json::Value = serde_json::from_slice(&body_set).unwrap();
+    assert_eq!(pol_set["ok"], true);
+    assert_eq!(pol_set["policy"]["max_duration_secs"], 15);
+    assert_eq!(pol_set["policy"]["max_bandwidth_mbps"], 2000);
+
+    // Verify policy file persisted with 0o600 permissions
+    let policy_path = g1.path().join("bench_policy.json");
+    assert!(policy_path.exists(), "bench_policy.json must exist");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(&policy_path).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "bench_policy.json must have 0o600 perms"
+        );
+    }
+
+    // 4. Check SSE event on Host for bench_policy_changed
+    let mut saw_policy_changed = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(Some(raw))) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), host_sse.next_event()).await
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if v["kind"] == "bench_policy_changed" {
+                    saw_policy_changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_policy_changed,
+        "Host must emit bench_policy_changed SSE event"
+    );
+
+    // 5. Clear filters so peer is eligible as bench responder
+    let (code_clear, _body_clear) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/bench/policy",
+        &serde_json::to_vec(&serde_json::json!({
+            "clear_filters": true,
+            "max_duration_secs": 15,
+            "max_bandwidth_mbps": 2000
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_clear, 200);
+
+    // 6. Host starts a push benchmark via POST /api/bench/start
+    let start_req = serde_json::json!({
+        "peer": peer_id.to_string(),
+        "direction": "push",
+        "duration_secs": 2,
+        "chunk_size": 65536
+    });
+    let (code_start, body_start) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/bench/start",
+        &serde_json::to_vec(&start_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code_start, 200);
+    let start_rep: serde_json::Value = serde_json::from_slice(&body_start).unwrap();
+    assert_eq!(start_rep["ok"], true);
+    assert_eq!(start_rep["action"], "start");
+    assert_eq!(start_rep["peer_id"], peer_id.to_string());
+    let session_id = start_rep["session_id"].as_str().unwrap().to_string();
+
+    // 7. Verify active session on Host (initiator)
+    let (code_host_act, body_host_act) = tetherly_node::loopback_get(host_ui, "/api/bench")
+        .await
+        .unwrap();
+    assert_eq!(code_host_act, 200);
+    let host_act: serde_json::Value = serde_json::from_slice(&body_host_act).unwrap();
+    assert_eq!(host_act["active"], true);
+    assert_eq!(host_act["session"]["session_id"], session_id);
+    assert_eq!(host_act["session"]["role"], "initiator");
+    assert_eq!(host_act["session"]["direction"], "push");
+    assert_eq!(host_act["session"]["duration_secs"], 2);
+    assert_eq!(host_act["session"]["chunk_size"], 65536);
+
+    // 8. Verify Peer activated as bench responder
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    let mut peer_active = false;
+    while tokio::time::Instant::now() < deadline {
+        let (code_p, body_p) = tetherly_node::loopback_get(peer_ui, "/api/bench")
+            .await
+            .unwrap();
+        if code_p == 200 {
+            if let Ok(rep) = serde_json::from_slice::<serde_json::Value>(&body_p) {
+                if rep["active"] == true && rep["session"]["session_id"] == session_id {
+                    assert_eq!(rep["session"]["role"], "responder");
+                    peer_active = true;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(peer_active, "Peer must activate bench session as responder");
+
+    // 9. Wait for the benchmark to finish on Host (send window + report round trip)
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut finished = false;
+    while tokio::time::Instant::now() < deadline {
+        let (code_h, body_h) = tetherly_node::loopback_get(host_ui, "/api/bench")
+            .await
+            .unwrap();
+        if code_h == 200 {
+            if let Ok(rep) = serde_json::from_slice::<serde_json::Value>(&body_h) {
+                if rep["active"] == false {
+                    if let Some(report) = rep.get("last_report").filter(|r| !r.is_null()) {
+                        assert_eq!(report["session_id"], session_id);
+                        assert_eq!(report["direction"], "push");
+                        assert!(
+                            report["throughput_mbps"].as_f64().unwrap_or(0.0) > 0.0,
+                            "measured throughput must be positive: {report}"
+                        );
+                        assert!(
+                            report["bytes_transferred"].as_u64().unwrap_or(0) > 0,
+                            "transferred bytes must be positive"
+                        );
+                        assert!(
+                            report["chunks"].as_u64().unwrap_or(0) > 0,
+                            "chunk count must be positive"
+                        );
+                        finished = true;
+                        break;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    assert!(finished, "Host must finalize the benchmark with a report");
+
+    // 10. Verify Peer finalized its responder session as well
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    let mut peer_inactive = false;
+    while tokio::time::Instant::now() < deadline {
+        let (code_p, body_p) = tetherly_node::loopback_get(peer_ui, "/api/bench")
+            .await
+            .unwrap();
+        if code_p == 200 {
+            if let Ok(rep) = serde_json::from_slice::<serde_json::Value>(&body_p) {
+                if rep["active"] == false {
+                    peer_inactive = true;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        peer_inactive,
+        "Peer responder session must finalize after the report"
+    );
+
+    // 11. Security Red Line: Host header 403 Forbidden attack defense
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], host_ui));
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let evil_req =
+        "GET /api/bench HTTP/1.1\r\nHost: evil-attacker-link-bench.com\r\nConnection: close\r\n\r\n";
+    tokio::io::AsyncWriteExt::write_all(&mut stream, evil_req.as_bytes())
+        .await
+        .unwrap();
+    tokio::io::AsyncWriteExt::flush(&mut stream).await.unwrap();
+    let mut raw_resp = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut raw_resp)
+        .await
+        .unwrap();
+    let resp_str = String::from_utf8_lossy(&raw_resp);
+    assert!(
+        resp_str.starts_with("HTTP/1.1 403") || resp_str.starts_with("HTTP/1.0 403"),
+        "Host header attack must be rejected with 403 Forbidden: {resp_str}"
+    );
+
+    // 12. Clean Shutdown
+    host.shutdown();
+    peer.shutdown();
+}
+
 fn tetherly_cli_test_url_encode(s: &str) -> String {
     let mut res = String::new();
     for b in s.as_bytes() {

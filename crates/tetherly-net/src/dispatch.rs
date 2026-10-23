@@ -9,6 +9,7 @@ use tetherly_core::audio_routing::{
     AudioRoutingDetachFrame,
 };
 use tetherly_core::battery::BatteryStateFrame;
+use tetherly_core::bench::{BenchAcceptFrame, BenchDataFrame, BenchReportFrame, BenchRequestFrame};
 use tetherly_core::camera::{
     CameraAnnounceFrame, CameraAttachFrame, CameraDetachFrame, CameraFrameChunk,
 };
@@ -18,7 +19,8 @@ use tetherly_core::frame::{
     NotifyDismiss, NotifyPush, NotifyReply, ResourceHandoffFrame, TextMessage,
     TYPE_ACTION_LIST_REQ, TYPE_ACTION_LIST_RESP, TYPE_ACTION_RESULT, TYPE_ACTION_TRIGGER,
     TYPE_AUDIO_ROUTING_ANNOUNCE, TYPE_AUDIO_ROUTING_ATTACH, TYPE_AUDIO_ROUTING_CHUNK,
-    TYPE_AUDIO_ROUTING_DETACH, TYPE_BATTERY_STATE, TYPE_CAMERA_ANNOUNCE, TYPE_CAMERA_ATTACH,
+    TYPE_AUDIO_ROUTING_DETACH, TYPE_BATTERY_STATE, TYPE_BENCH_ACCEPT, TYPE_BENCH_DATA,
+    TYPE_BENCH_REPORT, TYPE_BENCH_REQUEST, TYPE_CAMERA_ANNOUNCE, TYPE_CAMERA_ATTACH,
     TYPE_CAMERA_DETACH, TYPE_CAMERA_FRAME_CHUNK, TYPE_CAPS_UPDATE, TYPE_CLIP_SET, TYPE_FILE_ACCEPT,
     TYPE_FILE_DONE, TYPE_FILE_OFFER, TYPE_FILE_REJECT, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ,
     TYPE_INPUT_TUNNEL_HEARTBEAT, TYPE_INPUT_TUNNEL_RELEASE, TYPE_INPUT_TUNNEL_REQUEST,
@@ -87,6 +89,10 @@ pub enum SessionEvent {
     MicAttach(MicAttachFrame),
     MicDetach(MicDetachFrame),
     MicAudioChunk(MicAudioChunkFrame),
+    BenchRequest(BenchRequestFrame),
+    BenchAccept(BenchAcceptFrame),
+    BenchData(BenchDataFrame),
+    BenchReport(BenchReportFrame),
     FileOffer(FileOffer),
     FileAccept(FileDecision),
     FileReject(FileDecision),
@@ -214,6 +220,18 @@ impl SessionEvent {
             }
             TYPE_MIC_AUDIO_CHUNK => {
                 SessionEvent::MicAudioChunk(MicAudioChunkFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_BENCH_REQUEST => {
+                SessionEvent::BenchRequest(BenchRequestFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_BENCH_ACCEPT => {
+                SessionEvent::BenchAccept(BenchAcceptFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_BENCH_DATA => {
+                SessionEvent::BenchData(BenchDataFrame::from_payload(&frame.payload)?)
+            }
+            TYPE_BENCH_REPORT => {
+                SessionEvent::BenchReport(BenchReportFrame::from_payload(&frame.payload)?)
             }
             TYPE_FILE_OFFER => SessionEvent::FileOffer(FileOffer::from_payload(&frame.payload)?),
             TYPE_FILE_ACCEPT => {

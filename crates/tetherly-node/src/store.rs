@@ -41,6 +41,7 @@ pub const VIRTUAL_DISPLAY_POLICY_FILE: &str = "virtual_display_policy.json";
 pub const AUDIO_ROUTING_POLICY_FILE: &str = "audio_routing_policy.json";
 pub const CAMERA_POLICY_FILE: &str = "camera_policy.json";
 pub const MICROPHONE_POLICY_FILE: &str = "microphone_policy.json";
+pub const BENCH_POLICY_FILE: &str = "bench_policy.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -2105,6 +2106,113 @@ pub fn save_microphone_policy(dir: &Path, policy: &MicrophonePolicy) -> Result<(
     Ok(())
 }
 
+fn default_bench_max_duration() -> u32 {
+    30
+}
+
+fn default_bench_max_bandwidth() -> u32 {
+    1000
+}
+
+/// Governance policy for cross-device link throughput benchmarking.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BenchPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub allow_inbound_bench: bool,
+    #[serde(default = "default_bench_max_duration")]
+    pub max_duration_secs: u32,
+    /// Soft pacing ceiling (Mbps) applied to outbound benchmark traffic to keep
+    /// the shared LAN link usable for coexisting streaming sessions.
+    #[serde(default = "default_bench_max_bandwidth")]
+    pub max_bandwidth_mbps: u32,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_types: Vec<DeviceType>,
+}
+
+impl Default for BenchPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_inbound_bench: true,
+            max_duration_secs: default_bench_max_duration(),
+            max_bandwidth_mbps: default_bench_max_bandwidth(),
+            allowed_groups: Vec::new(),
+            allowed_tags: Vec::new(),
+            allowed_types: Vec::new(),
+        }
+    }
+}
+
+impl BenchPolicy {
+    /// `as_initiator == false` means this node is the responder receiving an
+    /// inbound benchmark request; that path additionally honors
+    /// `allow_inbound_bench`. Initiating outbound is gated by `enabled` only.
+    pub fn is_peer_eligible(&self, profile: &PeerProfile, as_initiator: bool) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if !as_initiator && !self.allow_inbound_bench {
+            return false;
+        }
+
+        if self.allowed_groups.is_empty()
+            && self.allowed_tags.is_empty()
+            && self.allowed_types.is_empty()
+        {
+            return true;
+        }
+
+        if let Some(group) = &profile.group {
+            if self.allowed_groups.iter().any(|g| g == group) {
+                return true;
+            }
+        }
+
+        if profile.tags.iter().any(|t| self.allowed_tags.contains(t)) {
+            return true;
+        }
+
+        if self.allowed_types.contains(&profile.device_type) {
+            return true;
+        }
+
+        false
+    }
+
+    pub fn sanitize(&mut self) {
+        self.max_duration_secs = self.max_duration_secs.clamp(1, 60);
+        self.max_bandwidth_mbps = self.max_bandwidth_mbps.clamp(1, 10000);
+        self.allowed_groups.retain(|g| !g.trim().is_empty());
+        self.allowed_groups.truncate(32);
+        self.allowed_tags.retain(|t| !t.trim().is_empty());
+        self.allowed_tags.truncate(32);
+        self.allowed_types.truncate(16);
+    }
+}
+
+pub fn load_bench_policy(dir: &Path) -> BenchPolicy {
+    let path = dir.join(BENCH_POLICY_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_bench_policy(dir: &Path, policy: &BenchPolicy) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(BENCH_POLICY_FILE),
+        &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStoreError {
     #[error("io: {0}")]
@@ -3533,6 +3641,98 @@ mod tests {
             ..Default::default()
         };
         assert!(!disabled_all.is_peer_eligible(&prof_ok, true, false));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bench_policy_roundtrip_and_matching() {
+        let dir = std::env::temp_dir().join(format!("tetherly-bench-pol-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Defaults
+        let def = load_bench_policy(&dir);
+        assert!(def.enabled);
+        assert!(def.allow_inbound_bench);
+        assert_eq!(def.max_duration_secs, 30);
+        assert_eq!(def.max_bandwidth_mbps, 1000);
+
+        // 2. Custom policy persistence
+        let mut custom = BenchPolicy {
+            enabled: true,
+            allow_inbound_bench: false,
+            max_duration_secs: 15,
+            max_bandwidth_mbps: 500,
+            allowed_groups: vec!["lab".into()],
+            allowed_tags: vec!["bench".into()],
+            allowed_types: vec![DeviceType::Laptop],
+        };
+        custom.sanitize();
+        save_bench_policy(&dir, &custom).unwrap();
+        let loaded = load_bench_policy(&dir);
+        assert_eq!(loaded.max_duration_secs, 15);
+        assert_eq!(loaded.max_bandwidth_mbps, 500);
+        assert!(!loaded.allow_inbound_bench);
+
+        // 3. Matching
+        let prof_ok = PeerProfile {
+            device_id: "laptop_bench".into(),
+            device_type: DeviceType::Laptop,
+            tags: vec![],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        // Inbound serving is refused while allow_inbound_bench is false.
+        assert!(!loaded.is_peer_eligible(&prof_ok, false));
+        // Initiating outbound is allowed under profile filter (Laptop type).
+        assert!(loaded.is_peer_eligible(&prof_ok, true));
+
+        let prof_group = PeerProfile {
+            device_id: "bench_grp".into(),
+            device_type: DeviceType::Other,
+            tags: vec![],
+            group: Some("lab".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_group, true));
+
+        let prof_tag = PeerProfile {
+            device_id: "bench_tag".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["bench".into()],
+            group: None,
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(loaded.is_peer_eligible(&prof_tag, true));
+
+        let prof_unmatched = PeerProfile {
+            device_id: "iot_unmatched".into(),
+            device_type: DeviceType::Other,
+            tags: vec!["guest".into()],
+            group: Some("visitor".into()),
+            notes: None,
+            updated_ms: 0,
+        };
+        assert!(!loaded.is_peer_eligible(&prof_unmatched, true));
+
+        // 4. Toggle gating
+        let inbound_open = BenchPolicy {
+            allow_inbound_bench: true,
+            ..Default::default()
+        };
+        assert!(inbound_open.is_peer_eligible(&prof_ok, false));
+        assert!(inbound_open.is_peer_eligible(&prof_ok, true));
+
+        let disabled_all = BenchPolicy {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(!disabled_all.is_peer_eligible(&prof_ok, true));
+        assert!(!disabled_all.is_peer_eligible(&prof_ok, false));
 
         let _ = fs::remove_dir_all(&dir);
     }

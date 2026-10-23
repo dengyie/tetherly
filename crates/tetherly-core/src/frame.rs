@@ -63,6 +63,10 @@ pub const TYPE_MIC_ANNOUNCE: u16 = 0x0221;
 pub const TYPE_MIC_ATTACH: u16 = 0x0222;
 pub const TYPE_MIC_DETACH: u16 = 0x0223;
 pub const TYPE_MIC_AUDIO_CHUNK: u16 = 0x0224;
+pub const TYPE_BENCH_REQUEST: u16 = 0x0225;
+pub const TYPE_BENCH_ACCEPT: u16 = 0x0226;
+pub const TYPE_BENCH_DATA: u16 = 0x0227;
+pub const TYPE_BENCH_REPORT: u16 = 0x0228;
 pub const TYPE_FILE_OFFER: u16 = 0x0301;
 pub const TYPE_FILE_ACCEPT: u16 = 0x0302;
 pub const TYPE_FILE_REJECT: u16 = 0x0303;
@@ -178,6 +182,10 @@ pub fn is_known_type(ty: u16) -> bool {
             | TYPE_MIC_ATTACH
             | TYPE_MIC_DETACH
             | TYPE_MIC_AUDIO_CHUNK
+            | TYPE_BENCH_REQUEST
+            | TYPE_BENCH_ACCEPT
+            | TYPE_BENCH_DATA
+            | TYPE_BENCH_REPORT
             | TYPE_FILE_OFFER
             | TYPE_FILE_ACCEPT
             | TYPE_FILE_REJECT

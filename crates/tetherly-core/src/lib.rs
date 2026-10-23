@@ -9,6 +9,7 @@ pub mod allowlist;
 pub mod ancs;
 pub mod audio_routing;
 pub mod battery;
+pub mod bench;
 pub mod bind;
 pub mod camera;
 pub mod clip;
@@ -59,6 +60,10 @@ pub use audio_routing::{
     AudioRoutingValidator, AudioSampleFormat, AudioSpatialPosition, AudioStreamCodec,
 };
 pub use battery::{BatteryStateFrame, BatteryValidator, PowerSource};
+pub use bench::{
+    BenchAcceptFrame, BenchDataFrame, BenchDirection, BenchReportFrame, BenchRequestFrame,
+    BenchRole, BenchValidator,
+};
 pub use bind::{
     classify, classify_v4, is_unspecified_bind, should_listen, should_listen_v4, BindClass,
 };
@@ -85,7 +90,8 @@ pub use frame::{
     FILE_TOKEN_TTL_MS, HANDOFF_TITLE_MAX, HANDOFF_URL_MAX, NOTIFY_TEXT_MAX, TEXT_MESSAGE_MAX,
     TYPE_ACTION_LIST_REQ, TYPE_ACTION_LIST_RESP, TYPE_ACTION_RESULT, TYPE_ACTION_TRIGGER,
     TYPE_AUDIO_ROUTING_ANNOUNCE, TYPE_AUDIO_ROUTING_ATTACH, TYPE_AUDIO_ROUTING_CHUNK,
-    TYPE_AUDIO_ROUTING_DETACH, TYPE_BATTERY_STATE, TYPE_CAMERA_ANNOUNCE, TYPE_CAMERA_ATTACH,
+    TYPE_AUDIO_ROUTING_DETACH, TYPE_BATTERY_STATE, TYPE_BENCH_ACCEPT, TYPE_BENCH_DATA,
+    TYPE_BENCH_REPORT, TYPE_BENCH_REQUEST, TYPE_CAMERA_ANNOUNCE, TYPE_CAMERA_ATTACH,
     TYPE_CAMERA_DETACH, TYPE_CAMERA_FRAME_CHUNK, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ,
     TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_MIC_ANNOUNCE,
     TYPE_MIC_ATTACH, TYPE_MIC_AUDIO_CHUNK, TYPE_MIC_DETACH, TYPE_PING, TYPE_PONG,

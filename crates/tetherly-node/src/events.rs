@@ -695,6 +695,39 @@ pub enum UiEvent {
         allowed_types: Vec<String>,
         timestamp_ms: u64,
     },
+    BenchSessionStarted {
+        session_id: String,
+        peer_id: String,
+        peer_alias: String,
+        role: String,
+        direction: String,
+        duration_secs: u32,
+        chunk_size: u32,
+        timestamp_ms: u64,
+    },
+    BenchSessionFinished {
+        session_id: String,
+        peer_id: String,
+        peer_alias: String,
+        direction: String,
+        duration_ms: u64,
+        bytes_transferred: u64,
+        chunks: u64,
+        throughput_mbps: f64,
+        avg_chunk_latency_us: u64,
+        jitter_us: u64,
+        timestamp_ms: u64,
+    },
+    BenchPolicyChanged {
+        enabled: bool,
+        allow_inbound_bench: bool,
+        max_duration_secs: u32,
+        max_bandwidth_mbps: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    },
 }
 
 impl UiEvent {
@@ -1626,6 +1659,81 @@ impl UiEvent {
             enforce_privacy_indicator,
             default_muted,
             idle_timeout_secs,
+            allowed_groups,
+            allowed_tags,
+            allowed_types,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn bench_session_started(
+        session_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        role: impl Into<String>,
+        direction: impl Into<String>,
+        duration_secs: u32,
+        chunk_size: u32,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::BenchSessionStarted {
+            session_id: session_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            role: role.into(),
+            direction: direction.into(),
+            duration_secs,
+            chunk_size,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn bench_session_finished(
+        session_id: impl Into<String>,
+        peer_id: impl Into<String>,
+        peer_alias: impl Into<String>,
+        direction: impl Into<String>,
+        duration_ms: u64,
+        bytes_transferred: u64,
+        chunks: u64,
+        throughput_mbps: f64,
+        avg_chunk_latency_us: u64,
+        jitter_us: u64,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::BenchSessionFinished {
+            session_id: session_id.into(),
+            peer_id: peer_id.into(),
+            peer_alias: peer_alias.into(),
+            direction: direction.into(),
+            duration_ms,
+            bytes_transferred,
+            chunks,
+            throughput_mbps,
+            avg_chunk_latency_us,
+            jitter_us,
+            timestamp_ms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn bench_policy_changed(
+        enabled: bool,
+        allow_inbound_bench: bool,
+        max_duration_secs: u32,
+        max_bandwidth_mbps: u32,
+        allowed_groups: Vec<String>,
+        allowed_tags: Vec<String>,
+        allowed_types: Vec<String>,
+        timestamp_ms: u64,
+    ) -> Self {
+        UiEvent::BenchPolicyChanged {
+            enabled,
+            allow_inbound_bench,
+            max_duration_secs,
+            max_bandwidth_mbps,
             allowed_groups,
             allowed_tags,
             allowed_types,
