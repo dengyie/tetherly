@@ -403,10 +403,11 @@ proptest! {
                 0 => s.on_peer_connected(),
                 1 => { s.allow(); consent = true; }
                 2 => {
-                    let msg = match cur.byte() % 3 {
+                    let msg = match cur.byte() % 4 {
                         0 => ControlMsg::Start,
                         1 => ControlMsg::Stop,
-                        _ => ControlMsg::Ack { seq: cur.u64() },
+                        2 => ControlMsg::Ack { seq: cur.u64() },
+                        _ => ControlMsg::KeyframeRequest,
                     };
                     let _ = s.on_control(msg);
                 }

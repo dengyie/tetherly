@@ -194,6 +194,7 @@ fn corpus() -> Vec<Vec<u8>> {
         ControlMsg::Start,
         ControlMsg::Stop,
         ControlMsg::Ack { seq: 9 },
+        ControlMsg::KeyframeRequest,
     ] {
         c.push(msg.encode_payload());
     }

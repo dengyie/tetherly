@@ -248,6 +248,11 @@ pub trait ScreenCodec: Send + Sync {
         let _ = (w, h);
         self.decompress(body, expected_len)
     }
+
+    /// On-demand keyframe / IDR request (ADR-081): requests that the next
+    /// encoded frame be an independent keyframe (IDR for H.264).
+    /// Default implementation is a no-op for stateless codecs like zstd.
+    fn force_idr(&self) {}
 }
 
 /// Present one screen frame. In-memory fake for CI; the OS path is Manual.

@@ -3956,6 +3956,10 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             Ok(rep) => json_ok(&rep),
             Err(e) => err(400, &e.to_string()),
         },
+        ("POST", "/api/screen/keyframe") => match node.screen_keyframe_request_reported().await {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(400, &e.to_string()),
+        },
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.

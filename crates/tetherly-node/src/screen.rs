@@ -222,6 +222,7 @@ struct H264EncoderState {
 /// encoder contexts are far too expensive to rebuild per frame.
 pub struct H264Codec {
     bitrate_bps: std::sync::atomic::AtomicU32,
+    force_idr: std::sync::atomic::AtomicBool,
     enc: Mutex<Option<H264EncoderState>>,
     dec: Mutex<Option<openh264::decoder::Decoder>>,
 }
@@ -238,6 +239,7 @@ impl H264Codec {
     pub fn new(bitrate_bps: u32) -> Self {
         Self {
             bitrate_bps: std::sync::atomic::AtomicU32::new(bitrate_bps.clamp(100_000, 50_000_000)),
+            force_idr: std::sync::atomic::AtomicBool::new(false),
             enc: Mutex::new(None),
             dec: Mutex::new(None),
         }
@@ -257,12 +259,22 @@ impl H264Codec {
         self.bitrate_bps.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn encode_with(state: &mut H264EncoderState, yuv: &I420) -> Result<Vec<u8>, CoreError> {
+    /// Force the next encode pass to emit an IDR keyframe (ADR-081).
+    pub fn force_idr(&self) {
+        self.force_idr
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn encode_with(
+        state: &mut H264EncoderState,
+        yuv: &I420,
+        need_idr: bool,
+    ) -> Result<Vec<u8>, CoreError> {
         use openh264::formats::YUVSource as _;
 
         let (w, h) = yuv.dimensions();
-        if state.w != w || state.h != h || state.built_bitrate_bps != state.bitrate_bps {
-            // Geometry or bitrate change: a fresh encoder emits SPS/PPS + IDR
+        if state.w != w || state.h != h || state.built_bitrate_bps != state.bitrate_bps || need_idr {
+            // Geometry, bitrate change, or on-demand IDR request: a fresh encoder emits SPS/PPS + IDR
             // for the new shape/rate, and P-frames never reference the old one.
             let config = openh264::encoder::EncoderConfig::new()
                 .bitrate(openh264::encoder::BitRate::from_bps(state.bitrate_bps))
@@ -310,8 +322,13 @@ impl ScreenCodecPort for H264Codec {
         tetherly_core::SCREEN_COMPRESS_H264
     }
 
+    fn force_idr(&self) {
+        self.force_idr();
+    }
+
     fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
         let yuv = I420::from_bgra(raw, w as usize, h as usize)?;
+        let need_idr = self.force_idr.swap(false, std::sync::atomic::Ordering::Relaxed);
         let mut guard = self.enc.lock().expect("h264 enc");
         if guard.is_none() {
             let encoder = openh264::encoder::Encoder::new()
@@ -326,7 +343,7 @@ impl ScreenCodecPort for H264Codec {
         }
         let state = guard.as_mut().expect("encoder just inserted");
         state.bitrate_bps = self.bitrate_bps();
-        Self::encode_with(state, &yuv)
+        Self::encode_with(state, &yuv, need_idr)
     }
 
     fn decompress_frame(
@@ -416,6 +433,13 @@ impl NegotiatedCodec {
         self.h264.set_bitrate_bps(bps);
     }
 
+    /// Force the next encode pass to emit an IDR keyframe (ADR-081).
+    pub fn force_idr(&self) {
+        if self.use_h264() {
+            self.h264.force_idr();
+        }
+    }
+
     fn use_h264(&self) -> bool {
         self.want_h264 && self.peer_h264.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -445,6 +469,10 @@ impl ScreenCodecPort for NegotiatedCodec {
         } else {
             tetherly_core::SCREEN_COMPRESS_ZSTD
         }
+    }
+
+    fn force_idr(&self) {
+        self.force_idr();
     }
 
     fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {

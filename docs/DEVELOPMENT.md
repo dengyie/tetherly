@@ -3,12 +3,33 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.94** |
-| 日期 | 2026-10-24 |
-| 状态 | **v1.94 拥塞背压停顿死锁修复与起停起拍调优（Pacing vs Starvation Fix）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`）：修复在高 RTT（>=250ms）或低配沙盒 VM（单核/受限 CPU）中，初始大帧耗时引发 `rtt_latest_us >= 250ms` 后、在在途队列排空（`in_flight == 0`）时仍永久处于 `is_congested() == true` 进而导致发送端死锁饥饿（Starvation Deadlock）的问题。将 RTT 拥塞触发条件严格门控为 `self.stats.in_flight > 0 && rtt_latest_us >= 250ms`，使高 RTT 网络退化为单帧在途的**起停起拍（Stop-and-Wait Pacing）**而非完全截断静默；(2) **版本发布与持续集成**：工作区升级至 `0.1.16`，GitHub Actions 矩阵构建 Linux x86_64、Windows、macOS 与 Android Release 工件；(3) **现场实测论证**：LeaseWeb 沙盒 VM 线上验证多帧连续传输、实时双向 Ack 确认与微秒时延追踪。 |
+| 文档版本 | **1.95** |
+| 日期 | 2026-10-25 |
+| 状态 | **v1.95 按需关键帧请求与序列断洞自愈恢复（On-Demand Keyframe / IDR Request & Gap Recovery, ADR-081）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`, `ports.rs`）：线上控制帧 Tag 3 新增 `ControlMsg::KeyframeRequest`；`ScreenStats` 新增 `keyframes_requested` 与 `gaps` 计数；`ScreenReceiver::apply` 自动检测序列断洞跳跃（`frame.seq > last_seq + 1`）；`ScreenCodec` 接口新增 `force_idr()`。(2) **编码与运行时自愈**（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）：`H264Codec` 引入 `force_idr` 原子锁存器，在收到对端 KeyframeRequest 或本地拥塞丢帧时触发重建 `openh264` 编码器，强制生成 SPS/PPS 参数集与 IDR 关键帧；查看端解码损坏时不终止会话，而是发送 KeyframeRequest 并持续监听；(3) **接口与生态**：`/api/screen/keyframe` 路由、`tetherly screen keyframe` CLI 与状态监控透出；(4) **测试与版本**：集成测试 `m5_5_keyframe_request_triggers_idr_recovery` 全绿，工作区升级至 `0.1.17`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.95 相对 1.94(按需关键帧请求与序列断洞自愈恢复 ADR-081)**
+
+- **动机与问题背景**:
+  在 ADR-079 / v1.90 引入 H.264 视频流后，P 帧严重依赖先验参考帧。在 ADR-080 / v1.93-v1.94 拥塞背压丢帧或偶发网络抖动丢包时，参考帧链条断裂会导致 H.264 解码器产生大面积花屏或解码失败。此前查看端遇解码错误直接 `break` 退出循环中断看屏，且接收端无法逆向请求关键帧。
+- **架构解法与落地**:
+  1. **Core 协议与状态机（`crates/tetherly-core/src/screen.rs`, `ports.rs`）**：
+     - 在 14 字节控制帧中定义 Tag 3 为 `ControlMsg::KeyframeRequest`。
+     - `ScreenStats` 增加 `keyframes_requested`（发送端收到请求次数）与 `gaps`（接收端序列断洞次数）。
+     - `ScreenReceiver::apply` 自动检测并累计序列断洞。
+     - `ScreenCodec` trait 扩展 `fn force_idr(&self) {}` 默认方法。
+  2. **Node 编解码与自愈流水线（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）**：
+     - `H264Codec` 新增 `force_idr: AtomicBool`。当被调用 `force_idr()` 时置为 true，下一次 `encode_with` 自动销毁旧编码器并重新生成带完整 SPS/PPS 的 IDR 关键帧。
+     - 发送端在主动触发拥塞背压丢帧（`record_drop()`）或套接字拥塞丢帧时，自动调用 `force_idr()` 预先重置参考底图。
+     - 接收端在 H.264 解码失败时不再中断退学会话，而是向发送端发送 `ControlMsg::KeyframeRequest` 并继续循环；在检测到序列断洞时同样自动触发请求。
+  3. **遥测与 CLI/API 扩展**：
+     - 新增 HTTP 回环端点 `POST /api/screen/keyframe`。
+     - 统一 CLI 新增 `tetherly screen keyframe` 子命令，并在 `tetherly screen status` 中透出 `Keyframe Req` 与 `Gaps` 遥测。
+  4. **测试**：
+     - Core 单元测试 `keyframe_request_and_gap_detection_tracking`。
+     - Phase 5 集成测试 `m5_5_keyframe_request_triggers_idr_recovery` 验证端到端 45720 通道控制帧交互与 IDR 自愈。
 
 **1.94 相对 1.93(拥塞背压停顿死锁修复与起停起拍调优 Pacing vs Starvation)**
 

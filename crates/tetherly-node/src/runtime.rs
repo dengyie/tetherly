@@ -2827,6 +2827,10 @@ pub struct ScreenStatusReport {
     pub rtt_p95_us: Option<u64>,
     #[serde(default)]
     pub is_congested: bool,
+    #[serde(default)]
+    pub keyframes_requested: u64,
+    #[serde(default)]
+    pub gaps: u64,
 }
 
 /// Control result report for remote screen streaming actions (allow, revoke, start, stop).
@@ -19911,6 +19915,11 @@ impl Node {
                                 node.shared.telemetry.record_screen_rx(f_len);
                                 if let Ok(msg) = ControlMsg::from_frame(&frame) {
                                     let now_us = node.shared.clock.unix_us();
+                                    if matches!(msg, ControlMsg::KeyframeRequest) {
+                                        if let Some(sel) = &node.shared.screen_encode_codec {
+                                            sel.force_idr();
+                                        }
+                                    }
                                     let reply = node
                                         .shared
                                         .screen_engine
@@ -20013,6 +20022,7 @@ impl Node {
                                 node.shared.telemetry.record_screen_rx(f_len);
                                 match assembler.push(&frame) {
                                     Ok(Some(sf)) => {
+                                        let codec_tag = sf.codec_tag;
                                         // Decode by the frame's wire tag:
                                         // zstd (1) or H.264 (3, ADR-079).
                                         let present_frame = if sf.compressed() {
@@ -20035,13 +20045,22 @@ impl Node {
                                                     ..sf
                                                 },
                                                 Err(e) => {
-                                                    tracing::warn!(%e, seq = sf.seq, "screen decompress failed; closing viewer");
-                                                    break;
+                                                    tracing::warn!(%e, seq = sf.seq, "screen decompress failed; requesting keyframe recovery");
+                                                    let req = ControlMsg::KeyframeRequest;
+                                                    if let Ok(f) = req.to_frame() {
+                                                        let r_len = (f.payload.len() + 12) as u64;
+                                                        if sess.send_bounded(f).await.is_ok() {
+                                                            node.shared.telemetry.record_screen_tx(r_len);
+                                                        }
+                                                    }
+                                                    continue;
                                                 }
                                             }
                                         } else {
                                             sf
                                         };
+                                        let is_gap = receiver.last_seq() != 0
+                                            && present_frame.seq > receiver.last_seq() + 1;
                                         match receiver.apply(&present_frame) {
                                             Ok(acked) => {
                                                 // The default sink is the
@@ -20054,6 +20073,18 @@ impl Node {
                                                     .lock()
                                                     .expect("screen rx") =
                                                     receiver.stats();
+                                                if is_gap
+                                                    && codec_tag
+                                                        == tetherly_core::SCREEN_COMPRESS_H264
+                                                {
+                                                    let req = ControlMsg::KeyframeRequest;
+                                                    if let Ok(f) = req.to_frame() {
+                                                        let r_len = (f.payload.len() + 12) as u64;
+                                                        if sess.send_bounded(f).await.is_ok() {
+                                                            node.shared.telemetry.record_screen_tx(r_len);
+                                                        }
+                                                    }
+                                                }
                                                 if let Some(seq) = acked {
                                                     let _ = node
                                                         .shared
@@ -20166,10 +20197,13 @@ impl Node {
             // to eliminate bufferbloat and socket stall while maintaining presentation continuity.
             if engine.is_congested() && engine.stats().sent > 0 {
                 engine.record_drop();
+                if let Some(sel) = &self.shared.screen_encode_codec {
+                    sel.force_idr();
+                }
                 warn!(
                     in_flight = engine.in_flight_count(),
                     rtt_latest = ?engine.stats().rtt_latest_us,
-                    "screen channel congested; dropping non-initial capture frame"
+                    "screen channel congested; dropping non-initial capture frame; flagged IDR"
                 );
                 return Ok(false);
             }
@@ -20201,10 +20235,13 @@ impl Node {
             // stall the pump or grow memory without bound. A partial frame is
             // never queued, so the peer's assembler is never left mid-frame.
             if tx.capacity() < frags.len() {
+                if let Some(sel) = &self.shared.screen_encode_codec {
+                    sel.force_idr();
+                }
                 warn!(
                     need = frags.len(),
                     have = tx.capacity(),
-                    "screen queue full; dropping frame"
+                    "screen queue full; dropping frame; flagged IDR"
                 );
                 continue;
             }
@@ -20428,6 +20465,33 @@ impl Node {
         })
     }
 
+    /// Visitor: ask the host to emit an independent keyframe (IDR for H.264, v1.95 / ADR-081).
+    pub async fn screen_keyframe_request(&self) -> Result<(), CoreError> {
+        self.send_screen_control(ControlMsg::KeyframeRequest).await
+    }
+
+    /// Request a keyframe from the host with strongly typed report return.
+    pub async fn screen_keyframe_request_reported(&self) -> Result<ScreenControlReport, CoreError> {
+        self.screen_keyframe_request().await?;
+        let peer = self
+            .shared
+            .screen_peer
+            .lock()
+            .expect("screen_peer")
+            .as_ref()
+            .map(|p| p.to_string());
+        let state = self.screen_state();
+        let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
+        Ok(ScreenControlReport {
+            ok: true,
+            action: "keyframe".to_string(),
+            state: state.as_str().to_string(),
+            allowed,
+            peer,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        })
+    }
+
     /// Comprehensive telemetry and lifecycle status report for remote screen streaming.
     pub async fn screen_status_report(&self) -> ScreenStatusReport {
         let stats = self.screen_stats();
@@ -20467,6 +20531,8 @@ impl Node {
             rtt_latest_us: stats.rtt_latest_us,
             rtt_p95_us: stats.rtt_p95_us,
             is_congested,
+            keyframes_requested: stats.keyframes_requested,
+            gaps: rx_stats.gaps,
         }
     }
 

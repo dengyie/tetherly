@@ -109,6 +109,7 @@ fn control_msg() -> impl Strategy<Value = ControlMsg> {
         Just(ControlMsg::Start),
         Just(ControlMsg::Stop),
         any::<u64>().prop_map(|seq| ControlMsg::Ack { seq }),
+        Just(ControlMsg::KeyframeRequest),
     ]
 }
 

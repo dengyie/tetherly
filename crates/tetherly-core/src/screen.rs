@@ -362,6 +362,8 @@ pub enum ControlMsg {
     Ack {
         seq: u64,
     },
+    /// Viewer asks sender to emit an independent keyframe (IDR for H.264, v1.95 / ADR-081).
+    KeyframeRequest,
 }
 
 /// Control payload layout: magic(4) | proto(1) | tag(1) | seq(8).
@@ -375,6 +377,7 @@ impl ControlMsg {
             ControlMsg::Start => 0,
             ControlMsg::Stop => 1,
             ControlMsg::Ack { .. } => 2,
+            ControlMsg::KeyframeRequest => 3,
         }
     }
 
@@ -421,6 +424,7 @@ impl ControlMsg {
             0 => Ok(ControlMsg::Start),
             1 => Ok(ControlMsg::Stop),
             2 => Ok(ControlMsg::Ack { seq }),
+            3 => Ok(ControlMsg::KeyframeRequest),
             _ => Err(CoreError::ScreenFrame),
         }
     }
@@ -474,6 +478,10 @@ pub struct ScreenStats {
     pub rtt_latest_us: Option<u64>,
     /// 95th-percentile round-trip time in microseconds over recent window.
     pub rtt_p95_us: Option<u64>,
+    /// Number of keyframe requests received/serviced (v1.95 / ADR-081).
+    pub keyframes_requested: u64,
+    /// Number of sequence gaps detected by receiver (v1.95 / ADR-081).
+    pub gaps: u64,
 }
 
 /// Rolling window tracker for screen frame round-trip times (v1.93 / ADR-080).
@@ -660,6 +668,10 @@ impl ScreenSender {
                 self.stats.in_flight = self.in_flight_records.len() as u64;
                 Ok(None)
             }
+            ControlMsg::KeyframeRequest => {
+                self.stats.keyframes_requested = self.stats.keyframes_requested.saturating_add(1);
+                Ok(None)
+            }
         }
     }
 
@@ -755,6 +767,9 @@ impl ScreenReceiver {
         }
         if self.last_seq != 0 && frame.seq > self.last_seq.saturating_add(SCREEN_SEQ_WINDOW) {
             return Err(CoreError::ScreenSeqJump);
+        }
+        if self.last_seq != 0 && frame.seq > self.last_seq.saturating_add(1) {
+            self.stats.gaps = self.stats.gaps.saturating_add(1);
         }
         // A raw frame must match its rect; the codec already enforced this on
         // the wire, but a locally built frame could still lie.
@@ -1073,6 +1088,7 @@ mod tests {
             ControlMsg::Start,
             ControlMsg::Stop,
             ControlMsg::Ack { seq: 9 },
+            ControlMsg::KeyframeRequest,
         ] {
             let wire = msg.to_frame().unwrap();
             assert_eq!(ControlMsg::from_frame(&wire).unwrap(), msg);
@@ -1459,5 +1475,42 @@ mod tests {
             s.is_congested(),
             "in-flight frame with high RTT triggers congestion pacing"
         );
+    }
+
+    #[test]
+    fn keyframe_request_and_gap_detection_tracking() {
+        let mut sender = ScreenSender::new();
+        sender.on_peer_connected();
+        sender.allow();
+        sender.on_control(ControlMsg::Start).unwrap();
+
+        assert_eq!(sender.stats().keyframes_requested, 0);
+        sender.on_control(ControlMsg::KeyframeRequest).unwrap();
+        assert_eq!(sender.stats().keyframes_requested, 1);
+        sender.on_control(ControlMsg::KeyframeRequest).unwrap();
+        assert_eq!(sender.stats().keyframes_requested, 2);
+
+        let mut receiver = ScreenReceiver::new();
+        assert_eq!(receiver.stats().gaps, 0);
+
+        // Frame 1 arrives
+        assert_eq!(receiver.apply(&raw_frame(1)).unwrap(), Some(1));
+        assert_eq!(receiver.stats().gaps, 0);
+
+        // Frame 2 arrives (consecutive, no gap)
+        assert_eq!(receiver.apply(&raw_frame(2)).unwrap(), Some(2));
+        assert_eq!(receiver.stats().gaps, 0);
+
+        // Frame 5 arrives (frames 3 and 4 were dropped -> 1 gap detected)
+        assert_eq!(receiver.apply(&raw_frame(5)).unwrap(), Some(5));
+        assert_eq!(receiver.stats().gaps, 1);
+
+        // Frame 6 arrives (consecutive, no additional gap)
+        assert_eq!(receiver.apply(&raw_frame(6)).unwrap(), Some(6));
+        assert_eq!(receiver.stats().gaps, 1);
+
+        // Frame 9 arrives (frames 7 and 8 dropped -> gap count becomes 2)
+        assert_eq!(receiver.apply(&raw_frame(9)).unwrap(), Some(9));
+        assert_eq!(receiver.stats().gaps, 2);
     }
 }

@@ -1008,3 +1008,125 @@ async fn m5_1_bidirectional_frame_ack_rtt_and_congestion_backpressure() {
     host.shutdown();
     visitor.shutdown();
 }
+
+// --------------------------------------------------------------------------
+// M5.5 — On-demand keyframe (IDR) request & recovery across the wire (ADR-081)
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_5_keyframe_request_triggers_idr_recovery() {
+    let src: Arc<dyn tetherly_core::ScreenSource> = Arc::new(tetherly_node::EncodedSource::new(
+        MemoryScreenSource::new(16, 16).expect("16x16 screen"),
+        Arc::new(tetherly_node::NegotiatedCodec::new(true, 1_000_000, true)),
+    ));
+    let (da, ga) = temp_dir("host-h264-keyframe");
+    let (db, gb) = temp_dir("visitor-h264-keyframe");
+    let host = Node::start(cfg(da, "host", Some(src))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+    wait_screen_port(
+        &host,
+        visitor.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+    wait_screen_port(
+        &visitor,
+        host.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+
+    visitor
+        .open_screen(host.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    host.screen_allow();
+    visitor.screen_start().await.unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_state() == ScreenState::Streaming {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("host never started streaming (h264)");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Host sends 2 frames (seq 1, seq 2)
+    assert!(host.screen_send_frame().await.unwrap());
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for visitor to receive and present 2 frames
+    let start = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 2 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "h264 frames did not arrive, count={}",
+                visitor.screen_sink_snapshot().count()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(host.screen_stats().keyframes_requested, 0);
+
+    // Visitor issues on-demand keyframe request
+    visitor.screen_keyframe_request().await.unwrap();
+
+    // Verify host receives the KeyframeRequest control message
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_stats().keyframes_requested >= 1 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host did not receive keyframe request, count={}",
+                host.screen_stats().keyframes_requested
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host sends frame 3, which must encode as an IDR frame due to force_idr latch
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for visitor to receive frame 3
+    let start = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 3 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "frame 3 did not arrive, count={}",
+                visitor.screen_sink_snapshot().count()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let sink = visitor.screen_sink_snapshot();
+    assert_eq!(sink.presented(), vec![1, 2, 3]);
+
+    // Verify status report reports keyframes_requested
+    let rep = host.screen_status_report().await;
+    assert!(rep.keyframes_requested >= 1);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
