@@ -3,12 +3,23 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.90** |
+| 文档版本 | **1.91** |
 | 日期 | 2026-10-24 |
-| 状态 | **v1.90 屏幕通道 H.264 有损编码与线上协商（ADR-079 采纳落地）**——(1) **协议**（`tetherly-core`）：`SCREEN_COMPRESS_H264=3`；`ScreenFrame` 的 `compressed: bool` 重构为 `codec_tag: u8`（`compressed()` 保留为方法，解码端接受 zstd/h264 两 tag、未知仍拒绝）；`ScreenCodec` 端口新增 `wire_tag/compress_frame/decompress_frame` 维度感知默认方法（zstd 零改动继承）。(2) **编解码（`tetherly-node`）**：`I420::from_bgra`（BT.601 limited-range 定点 + 2×2 盒式色度抽样，修复开发中发现的定点优先级缺陷——亮度坍缩 16/色度恒 128）；`H264Codec`（openh264 crate，BSD-3；几何变化重建编码器=强制 IDR；解码 write_rgba8 + 原地 RGBA→BGRA）；`NegotiatedCodec`（want × peer 双开关）。(3) **协商与接线**：Hello/caps.update 广告 `screencodecs=zstd,h264`；caps 合并钩子置位对端支持；收端按帧 tag 分发解码器；CLI `--screen-codec h264 --screen-bitrate <kbps>`（默认 zstd，H.264 为显式 opt-in 且逐对端回退）。(4) **测试**：往返 PSNR ≥27dB、几何切换 IDR、协商回退矩阵、phase5 E2E `m5_1_h264_stream_roundtrips_through_the_wire`（真 45720 通道 tag-3 往返）。真机跨桌面 p95/带宽对比 Manual-required。v1.89 及此前见各自 delta 块。 |
+| 状态 | **v1.91 macOS 屏幕呈现落地：tetherly-viewer 查看器子进程（v1.89 架构裁定的实现）**——(1) **架构**：AppKit NSWindow 必须活在运行 NSApplication 的主线程，守护进程 tokio 帧泵永不满足——按 v1.89 裁定实现**查看器子进程**：新二进制 `tetherly-viewer`（随主程序同目录分发），stdin 消费长度前缀 BGRA 帧（`u32 w|u32 h|u32 len|body`，8 MiB 预算防损坏流），EOF 即退出。(2) **viewer 内部**：主线程 `NSApplication(sharedApplication)` + Regular 激活策略；读线程→channel→主线程`CFRunLoop::run_in_mode` 30ms 手动泵（不进 `NSApp.run()`，EOF 后必能退出）；首帧定窗（Titled|Closable|Resizable + makeKeyAndOrderFront + activate），后续帧仅刷新；BGRA→CGImage 走 `CGBitmapContextCreate`（借采集侧同款 API 反向：我方缓冲作 backing store）+ `CGBitmapContextCreateImage`；NSImage 构造走原生 `msg_send`（objc2-app-kit 0.3 未给 NSImage 声明线程 trait，标准 alloc 助手不可用，沿 ancs/macos.rs 先例）。(3) **daemon 接线**：`screen/macos.rs::present` 升级——格式/尺寸卫语句前置，惰性 spawn viewer（`current_exe` 同目录解析）、死进程自动重建（kill+None，下帧重生）、任何失败保持 v1.19 的诚实 `ScreenRefused` 语义。(4) **依赖**：`objc2-app-kit` feature 并集（NSApplication/NSControl/NSGraphics/NSImage/NSImageView/NSResponder/NSRunningApplication/NSView/NSWindow，crate 已随 arboard 在 lockfile，零新包）。(5) **测试**：viewer 线协议 3 条单测（整帧/半帧/损坏拒绝）；present 卫语句 2 断言（非 BGRA、体长不符——单测绝不 spawn 弹窗）；**运行时（真 GUI 会话弹窗呈现）Manual-required**，代码经宿主与 CI macos 编译验证。v1.90 及此前见各自 delta 块。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.91 相对 1.90(macOS 屏幕呈现：tetherly-viewer 查看器子进程)**
+
+- **动机**:
+  §9.7 呈现在 macOS 的最后一缺口：CoreGraphics 位图上下文无法触及屏幕，AppKit NSWindow 是唯一出路，而 v1.89 已裁定进程内方案不安全（主线程 + NSApplication 运行循环 vs tokio 帧泵）。本轮按该裁定实现查看器子进程，macOS 采集→呈现全链路代码层面闭环（采集 v1.19、呈现 v1.91，运行时皆 Manual-required）。
+  1. **`tetherly-viewer` 二进制（`crates/tetherly-node/src/bin/tetherly_viewer.rs`，自包含）**：主线程持有全部 AppKit 对象（`MainThreadMarker` 贯穿，`MainThreadOnly::alloc(mtm)` 构造窗口/视图），读线程只搬字节（`SyncSender<Frame>`）——非 Send 的 AppKit 句柄绝不跨线程。运行循环用 `CFRunLoop::run_in_mode(default, 30ms, true)` 手动泵而非 `NSApp.run()`：窗口合成够用且 EOF 后必然退出（`NSApp.run()` 无 delegate 不能停）。非 macOS 目标编译为诚实桩（打印说明退出 2）。
+  2. **帧协议**：`u32be w | u32be h | u32be len | BGRA`；解析器纯函数（3 条单测：完整帧+消费长度、半帧等待、几何不符/超 8 MiB 预算/零维拒绝）；读线程积累缓冲超预算即判损坏流退出——绝不无限膨胀。
+  3. **BGRA→NSImage 链**：`CGBitmapContextCreate`（我方缓冲为 backing store，BGRA8 = PremultipliedFirst|Order32Little 与采集侧同参）→ `CGBitmapContextCreateImage`（copy-on-write 快照）→ 原生 `msg_send` `alloc`+`initWithCGImage:size:` 构造 NSImage（objc2-app-kit 0.3 的 NSImage 无线程 trait 声明，标准 alloc 助手无法命名该类；沿 `ancs/macos.rs` 的 msg_send 先例，全程主线程）→ `NSImageView.setImage` + `window.display`，每帧 autoreleasepool。
+  4. **daemon 接线（`screen/macos.rs::present`）**：卫语句（非 BGRA8 / 体长不符 rect → 诚实拒绝，不 spawn）→ 惰性 spawn（`current_exe().parent()/tetherly-viewer`，release 布局同目录）→ 帧写入；stdin 断写视为 viewer 已关（用户关窗）：kill + 清句柄，下一帧自动重生；任何 spawn/写失败维持 v1.19 的 `ScreenRefused` 诚实语义（headless 会话绝不谎报成功）。
+  5. **测试与验证**：viewer 协议 3 单测 + present 卫语句测试（重写旧 `present_refuses_with_the_real_reason`——旧断言「未实现」已成为历史；单测绝不 spawn 弹窗）；宿主 + CI macos 编译验证；**真 GUI 会话运行 Manual-required**（v0.1.11 产物含 tetherly-viewer，macOS 用户 `run` + 对端 viewer 即可人工验收）。
+- **验证**：本地 fmt / 宿主 clippy `-D warnings` / `x86_64-pc-windows-gnu` 交叉 clippy（非 mac 桩路径）/ `cargo test --workspace --locked`（31 套件 488 用例）全绿。
 
 **1.90 相对 1.89(屏幕通道 H.264 有损编码与线上协商 / ADR-079 落地)**
 

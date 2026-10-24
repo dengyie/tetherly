@@ -195,12 +195,78 @@ impl ScreenSource for MacSource {
     }
 }
 
-/// Present a decoded frame. macOS has no CoreGraphics window, so this is the
-/// honest boundary: state the missing piece plainly.
-pub fn present(_frame: &ScreenFrame) -> Result<(), CoreError> {
-    Err(CoreError::ScreenRefused(
-        "macOS screen present needs an AppKit NSWindow; not implemented (spec defers it)".into(),
-    ))
+/// The daemon side of the viewer subprocess (§9.7 呈现, v1.91). AppKit
+/// windows must live on a main thread running NSApplication — impossible
+/// inside the daemon's tokio frame pump — so `present` spawns
+/// `tetherly-viewer` (installed next to this binary) and pipes decoded BGRA
+/// frames to its stdin. Wire format per frame, big-endian:
+/// `u32 w | u32 h | u32 body_len | BGRA`.
+struct ViewerChild {
+    child: std::process::Child,
+}
+
+static VIEWER: std::sync::Mutex<Option<ViewerChild>> = std::sync::Mutex::new(None);
+
+fn viewer_exe() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("tetherly-viewer")))
+        .unwrap_or_else(|| std::path::PathBuf::from("tetherly-viewer"))
+}
+
+/// Present a decoded frame in the viewer window. Refuses honestly (the old
+/// behaviour) whenever the viewer cannot be spawned or written to: a
+/// headless session must never fake success.
+pub fn present(frame: &ScreenFrame) -> Result<(), CoreError> {
+    if frame.format != PixelFormat::Bgra8 {
+        return Err(CoreError::ScreenRefused(format!(
+            "viewer presents tightly packed BGRA8 only, got {:?}",
+            frame.format
+        )));
+    }
+    if frame.bytes.len() != frame.rect.w as usize * frame.rect.h as usize * 4 {
+        return Err(CoreError::ScreenRefused(
+            "viewer frame body does not match its rect".into(),
+        ));
+    }
+    let mut guard = VIEWER.lock().expect("viewer");
+    if guard.is_none() {
+        let child = std::process::Command::new(viewer_exe())
+            .arg("--title")
+            .arg("Tetherly")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                CoreError::ScreenRefused(format!(
+                    "spawning tetherly-viewer failed ({e}); macOS present needs the AppKit viewer subprocess"
+                ))
+            })?;
+        *guard = Some(ViewerChild { child });
+    }
+    let viewer = guard.as_mut().expect("just inserted");
+    let Some(stdin) = viewer.child.stdin.as_mut() else {
+        *guard = None;
+        return Err(CoreError::ScreenRefused(
+            "viewer stdin vanished; restarting on the next frame".into(),
+        ));
+    };
+    use std::io::Write as _;
+    let mut msg = Vec::with_capacity(12 + frame.bytes.len());
+    msg.extend_from_slice(&(frame.rect.w as u32).to_be_bytes());
+    msg.extend_from_slice(&(frame.rect.h as u32).to_be_bytes());
+    msg.extend_from_slice(&(frame.bytes.len() as u32).to_be_bytes());
+    msg.extend_from_slice(&frame.bytes);
+    if stdin.write_all(&msg).is_err() {
+        // Dead viewer (window closed): drop it so the next frame respawns.
+        let _ = viewer.child.kill();
+        *guard = None;
+        return Err(CoreError::ScreenRefused(
+            "tetherly-viewer went away; it will restart on the next frame".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -251,14 +317,37 @@ mod tests {
         assert!(pack_rows(&[0u8; 8], 16, 1, 2).is_err());
     }
 
+    /// v1.91: present now drives the `tetherly-viewer` subprocess; a valid
+    /// BGRA frame must NOT be refused in principle (it would spawn the
+    /// viewer, which CI and unit tests must not do — that path is verified
+    /// by compilation and Manual-required on a real GUI session). The
+    /// testable contract is the guard rails: wrong pixel format and a body
+    /// that disagrees with the rect refuse honestly, without spawning.
     #[test]
-    fn present_refuses_with_the_real_reason() {
+    fn present_refuses_non_bgra_and_mismatched_bodies() {
         let rect = ScreenRect::new(0, 0, 4, 4).unwrap();
-        let f = ScreenFrame::raw(1, rect, PixelFormat::Bgra8, vec![0u8; 4 * 4 * 4]).unwrap();
-        let err = present(&f).expect_err("macOS present must refuse");
-        match err {
-            CoreError::ScreenRefused(msg) => assert!(msg.contains("NSWindow"), "{msg}"),
-            other => panic!("unexpected error: {other:?}"),
+        let rgba = ScreenFrame::raw(1, rect, PixelFormat::Rgba8, vec![0u8; 4 * 4 * 4]).unwrap();
+        match present(&rgba) {
+            Err(CoreError::ScreenRefused(msg)) => {
+                assert!(msg.contains("BGRA8"), "{msg}");
+            }
+            other => panic!("Rgba8 must refuse, got {other:?}"),
+        }
+        // raw() refuses a mismatched body at construction, so the short-body
+        // frame is built literally to reach the presenter's own guard.
+        let short = ScreenFrame {
+            seq: 2,
+            rect,
+            format: PixelFormat::Bgra8,
+            codec_tag: 0,
+            stride: 0,
+            bytes: vec![0u8; 8],
+        };
+        match present(&short) {
+            Err(CoreError::ScreenRefused(msg)) => {
+                assert!(msg.contains("rect"), "{msg}");
+            }
+            other => panic!("short body must refuse, got {other:?}"),
         }
     }
 }

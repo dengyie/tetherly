@@ -94,6 +94,19 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFCGTypes",
     "CFRunLoop",
 ] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-graphics",
+    "NSApplication",
+    "NSControl",
+    "NSGraphics",
+    "NSImage",
+    "NSImageView",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSView",
+    "NSWindow",
+] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std",
     "CGBitmapContext",
