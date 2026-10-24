@@ -155,6 +155,8 @@ pub struct NodeConfig {
     pub screen_qp_min: u8,
     /// Maximum Quantization Parameter bound for screen streaming (ADR-085).
     pub screen_qp_max: u8,
+    /// Operation mode for 4D autonomous adaptation matrix coordinator (ADR-086).
+    pub screen_matrix_mode: tetherly_core::ScreenMatrixMode,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -207,6 +209,7 @@ impl Default for NodeConfig {
             screen_profile_auto: true,
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
+            screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_sink: None,
             input_sink: None,
         }
@@ -2875,6 +2878,31 @@ pub struct ScreenStatusReport {
     pub qp_min: u8,
     #[serde(default)]
     pub qp_max: u8,
+    #[serde(default)]
+    pub matrix_mode: String,
+    #[serde(default)]
+    pub network_health: String,
+}
+
+/// Status report for 4-dimensional autonomous adaptation matrix coordinator (ADR-086).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ScreenMatrixReport {
+    pub ok: bool,
+    pub mode: String,
+    pub health: String,
+    pub bitrate_bps: u32,
+    pub fps_target: u32,
+    pub scale_pct: u32,
+    pub profile: String,
+    pub qp_min: u8,
+    pub qp_max: u8,
+    pub auto_fps: bool,
+    pub auto_scale: bool,
+    pub consecutive_healthy_acks: u32,
+    pub consecutive_drops: u32,
+    pub in_flight: u64,
+    pub rtt_us: Option<u64>,
+    pub timestamp_ms: u64,
 }
 
 /// Status report for screen streaming content profile and QP quality bounds (ADR-085).
@@ -3342,6 +3370,7 @@ impl Node {
         let screen_profile_auto = cfg.screen_profile_auto;
         let screen_qp_min = cfg.screen_qp_min;
         let screen_qp_max = cfg.screen_qp_max;
+        let screen_matrix_mode = cfg.screen_matrix_mode;
         if let Some(sel) = &screen_encode_codec {
             sel.set_fps(screen_fps);
             sel.set_scale_pct(screen_scale_pct);
@@ -3478,6 +3507,9 @@ impl Node {
                 {
                     s.set_qp_range(screen_qp_min, screen_qp_max);
                 }
+                s.set_matrix_mode(screen_matrix_mode);
+                s.matrix_coordinator_mut().set_auto_fps(screen_fps_auto);
+                s.matrix_coordinator_mut().set_auto_scale(screen_scale_auto);
                 s
             }),
             screen_source,
@@ -20068,7 +20100,7 @@ impl Node {
                                             sel.force_idr();
                                         }
                                     }
-                                    let (reply, dynamic_bitrate) = {
+                                    let (reply, dynamic_bitrate, dynamic_fps, dynamic_scale) = {
                                         let mut engine = node
                                             .shared
                                             .screen_engine
@@ -20076,14 +20108,24 @@ impl Node {
                                             .expect("screen");
                                         let reply = engine.on_control_with_time(msg, now_us);
                                         let bitrate = engine.bitrate_bps();
-                                        (reply, bitrate)
+                                        let fps = engine.fps_target();
+                                        let scale = engine.scale_pct();
+                                        (reply, bitrate, fps, scale)
                                     };
                                     if let Some(sel) = &node.shared.screen_encode_codec {
                                         if sel.bitrate_bps() != dynamic_bitrate {
                                             sel.set_bitrate_bps(dynamic_bitrate);
                                         }
+                                        if sel.fps() != dynamic_fps {
+                                            sel.set_fps(dynamic_fps);
+                                        }
+                                        if sel.scale_pct() != dynamic_scale {
+                                            sel.set_scale_pct(dynamic_scale);
+                                        }
                                     }
                                     node.shared.screen_source.set_bitrate_bps(dynamic_bitrate);
+                                    node.shared.screen_source.set_fps(dynamic_fps);
+                                    node.shared.screen_source.set_scale_pct(dynamic_scale);
                                     let cur_state = node.screen_state();
                                     let cur_allowed = matches!(
                                         cur_state,
@@ -20444,17 +20486,26 @@ impl Node {
                 engine.record_drop_with_time(now_us);
                 engine.consume_pacing(now_us);
                 let new_rate = engine.bitrate_bps();
+                let new_fps = engine.fps_target();
+                let new_scale = engine.scale_pct();
                 self.shared.screen_source.force_idr();
                 if let Some(sel) = &self.shared.screen_encode_codec {
                     sel.force_idr();
                     sel.set_bitrate_bps(new_rate);
+                    sel.set_fps(new_fps);
+                    sel.set_scale_pct(new_scale);
                 }
                 self.shared.screen_source.set_bitrate_bps(new_rate);
+                self.shared.screen_source.set_fps(new_fps);
+                self.shared.screen_source.set_scale_pct(new_scale);
                 warn!(
                     in_flight = engine.in_flight_count(),
                     rtt_latest = ?engine.stats().rtt_latest_us,
                     bitrate_bps = new_rate,
-                    "screen channel congested; dropping non-initial capture frame; flagged IDR and decreased bitrate"
+                    fps_target = new_fps,
+                    scale_pct = new_scale,
+                    health = %engine.network_health().as_str(),
+                    "screen channel congested; dropping non-initial capture frame; flagged IDR and adapted 4D matrix"
                 );
                 return Ok(false);
             }
@@ -20488,22 +20539,28 @@ impl Node {
             // never queued, so the peer's assembler is never left mid-frame.
             if tx.capacity() < frags.len() {
                 let now_us = self.shared.clock.unix_us();
-                let new_rate = {
+                let (new_rate, new_fps, new_scale) = {
                     let mut engine = self.shared.screen_engine.lock().expect("screen");
                     engine.record_drop_with_time(now_us);
-                    engine.bitrate_bps()
+                    (engine.bitrate_bps(), engine.fps_target(), engine.scale_pct())
                 };
                 self.shared.screen_source.force_idr();
                 if let Some(sel) = &self.shared.screen_encode_codec {
                     sel.force_idr();
                     sel.set_bitrate_bps(new_rate);
+                    sel.set_fps(new_fps);
+                    sel.set_scale_pct(new_scale);
                 }
                 self.shared.screen_source.set_bitrate_bps(new_rate);
+                self.shared.screen_source.set_fps(new_fps);
+                self.shared.screen_source.set_scale_pct(new_scale);
                 warn!(
                     need = frags.len(),
                     have = tx.capacity(),
                     bitrate_bps = new_rate,
-                    "screen queue full; dropping frame; flagged IDR and decreased bitrate"
+                    fps_target = new_fps,
+                    scale_pct = new_scale,
+                    "screen queue full; dropping frame; flagged IDR and adapted 4D matrix"
                 );
                 continue;
             }
@@ -20801,6 +20858,8 @@ impl Node {
             profile: stats.content_profile().as_str().to_string(),
             qp_min: stats.qp_min,
             qp_max: stats.qp_max,
+            matrix_mode: stats.matrix_mode().as_str().to_string(),
+            network_health: stats.network_health().as_str().to_string(),
         }
     }
 
@@ -21028,6 +21087,50 @@ impl Node {
     pub fn screen_set_qp_range_reported(&self, min_qp: u8, max_qp: u8) -> ScreenProfileReport {
         self.screen_set_qp_range(min_qp, max_qp);
         self.screen_profile_report()
+    }
+
+    /// Report current 4D autonomous adaptation matrix coordinator state (ADR-086).
+    pub fn screen_matrix_report(&self) -> ScreenMatrixReport {
+        let engine = self.shared.screen_engine.lock().expect("screen");
+        let stats = engine.stats();
+        let coord = engine.matrix_coordinator();
+        ScreenMatrixReport {
+            ok: true,
+            mode: coord.mode().as_str().to_string(),
+            health: coord.health().as_str().to_string(),
+            bitrate_bps: stats.bitrate_bps,
+            fps_target: stats.fps_target,
+            scale_pct: stats.scale_pct,
+            profile: stats.content_profile().as_str().to_string(),
+            qp_min: stats.qp_min,
+            qp_max: stats.qp_max,
+            auto_fps: coord.auto_fps(),
+            auto_scale: coord.auto_scale(),
+            consecutive_healthy_acks: coord.consecutive_healthy_acks(),
+            consecutive_drops: coord.consecutive_drops(),
+            in_flight: stats.in_flight,
+            rtt_us: stats.rtt_latest_us,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Current 4D autonomous adaptation matrix coordinator mode (ADR-086).
+    pub fn screen_matrix_mode(&self) -> tetherly_core::ScreenMatrixMode {
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .matrix_coordinator()
+            .mode()
+    }
+
+    /// Set and report 4D autonomous adaptation matrix coordinator mode (ADR-086).
+    pub fn screen_set_matrix_mode(&self, mode: tetherly_core::ScreenMatrixMode) -> ScreenMatrixReport {
+        {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            engine.set_matrix_mode(mode);
+        }
+        self.screen_matrix_report()
     }
 
     /// Check if target frame pacing interval has elapsed for the outbound screen pump (ADR-083).
@@ -21774,6 +21877,7 @@ mod clipboard_policy_tests {
             screen_profile_auto: true,
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
+            screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -21919,6 +22023,7 @@ mod handoff_engine_tests {
             screen_profile_auto: true,
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
+            screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22095,6 +22200,7 @@ mod media_policy_tests {
             screen_profile_auto: true,
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
+            screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22247,6 +22353,7 @@ mod locator_policy_tests {
             screen_profile_auto: true,
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
+            screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22379,6 +22486,7 @@ mod locator_policy_tests {
             screen_profile_auto: true,
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
+            screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22782,6 +22890,66 @@ mod locator_policy_tests {
         assert_eq!(status.profile, "motion");
         assert_eq!(status.qp_min, 14);
         assert_eq!(status.qp_max, 40);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_screen_matrix_mode_and_reporting() {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-matrix-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.clone(),
+            control_port: 0,
+            file_port: 0,
+            input_port: 0,
+            screen_port: 0,
+            ui_port: 0,
+            name: "matrix-test-node".into(),
+            platform: "test".into(),
+            memory_clip: true,
+            memory_notifier: true,
+            loopback_only: true,
+            advertise: false,
+            reconnect: false,
+            overlay: OverlayConfig::default(),
+            ..Default::default()
+        };
+        let clock = Arc::new(ManualClock::new(30_000));
+        let node = Node::start_with_clock(cfg, clock.clone()).unwrap();
+
+        // 1. Initial report: defaults to Auto mode and Healthy status
+        let initial_rep = node.screen_matrix_report();
+        assert!(initial_rep.ok);
+        assert_eq!(initial_rep.mode, "auto");
+        assert_eq!(initial_rep.health, "healthy");
+        assert_eq!(initial_rep.fps_target, 30);
+        assert_eq!(initial_rep.scale_pct, 100);
+        assert_eq!(node.screen_matrix_mode(), tetherly_core::ScreenMatrixMode::Auto);
+
+        // 2. Set mode to Conservative
+        let rep_cons = node.screen_set_matrix_mode(tetherly_core::ScreenMatrixMode::Conservative);
+        assert!(rep_cons.ok);
+        assert_eq!(rep_cons.mode, "conservative");
+        assert_eq!(node.screen_matrix_mode(), tetherly_core::ScreenMatrixMode::Conservative);
+
+        // 3. Set mode to Manual
+        let rep_manual = node.screen_set_matrix_mode(tetherly_core::ScreenMatrixMode::Manual);
+        assert!(rep_manual.ok);
+        assert_eq!(rep_manual.mode, "manual");
+        assert_eq!(node.screen_matrix_mode(), tetherly_core::ScreenMatrixMode::Manual);
+
+        // 4. Status report reflects active matrix mode and network health
+        let status = node.screen_status_report().await;
+        assert_eq!(status.matrix_mode, "manual");
+        assert_eq!(status.network_health, "healthy");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

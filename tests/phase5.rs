@@ -76,6 +76,7 @@ fn cfg(
         screen_profile_auto: true,
         screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
         screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
+        screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
         screen_sink: None,
         input_sink: None,
     }
@@ -1829,6 +1830,165 @@ async fn m5_9_screen_dynamic_content_profile() {
         tetherly_node::screen_profile_from_profile(Some(50_000_000.0)),
         tetherly_core::ScreenContentProfile::Text
     );
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+// --------------------------------------------------------------------------
+// v2.00 / ADR-086 — Screen streaming 4D autonomous adaptation matrix coordinator.
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_10_screen_4d_matrix_coordinator() {
+    let codec = Arc::new(tetherly_node::NegotiatedCodec::new(true, 2_000_000, true));
+    let src: Arc<dyn tetherly_core::ScreenSource> = Arc::new(tetherly_node::EncodedSource::new(
+        MemoryScreenSource::new(32, 32).expect("32x32 screen"),
+        codec.clone(),
+    ));
+    let (da, ga) = temp_dir("host-matrix-4d");
+    let (db, gb) = temp_dir("visitor-matrix-4d");
+    let host = Node::start(cfg(da, "host", Some(src))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let host_ui = host.spawn_ui().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+    wait_screen_port(
+        &host,
+        visitor.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+    wait_screen_port(
+        &visitor,
+        host.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+
+    visitor
+        .open_screen(host.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    host.screen_allow();
+    visitor.screen_start().await.unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_state() == ScreenState::Streaming {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("host never started streaming (matrix-4d)");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // 1. Initial GET /api/screen/matrix
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/matrix")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_node::ScreenMatrixReport = serde_json::from_slice(&b).unwrap();
+    assert!(rep.ok);
+    assert_eq!(rep.mode, "auto");
+    assert_eq!(rep.health, "healthy");
+    assert_eq!(rep.scale_pct, 100);
+    assert!(rep.auto_fps);
+    assert!(rep.auto_scale);
+
+    // Initial ScreenStatusReport check
+    let s_rep = host.screen_status_report().await;
+    assert_eq!(s_rep.matrix_mode, "auto");
+    assert_eq!(s_rep.network_health, "healthy");
+
+    // 2. Set coordinator mode to Conservative via POST /api/screen/matrix
+    let req_conservative = serde_json::json!({ "mode": "conservative" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/matrix",
+        &serde_json::to_vec(&req_conservative).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep_cons: tetherly_node::ScreenMatrixReport = serde_json::from_slice(&b).unwrap();
+    assert!(rep_cons.ok);
+    assert_eq!(rep_cons.mode, "conservative");
+    assert_eq!(
+        host.screen_matrix_mode(),
+        tetherly_core::ScreenMatrixMode::Conservative
+    );
+
+    // 3. Set coordinator mode to Manual via query string
+    let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/matrix?mode=manual", b"")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep_manual: tetherly_node::ScreenMatrixReport = serde_json::from_slice(&b).unwrap();
+    assert!(rep_manual.ok);
+    assert_eq!(rep_manual.mode, "manual");
+    assert_eq!(
+        host.screen_matrix_mode(),
+        tetherly_core::ScreenMatrixMode::Manual
+    );
+
+    // 4. Set coordinator mode back to Auto
+    let req_auto = serde_json::json!({ "mode": "auto" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/matrix",
+        &serde_json::to_vec(&req_auto).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep_auto: tetherly_node::ScreenMatrixReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep_auto.mode, "auto");
+    assert_eq!(
+        host.screen_matrix_mode(),
+        tetherly_core::ScreenMatrixMode::Auto
+    );
+
+    // 5. Send frames and verify visitor sink presentation and telemetry updates
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        assert!(host.screen_send_frame().await.unwrap());
+    }
+
+    let start = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 4 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "frames did not arrive under 4D coordinator, count={}",
+                visitor.screen_sink_snapshot().count()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let sink = visitor.screen_sink_snapshot();
+    assert_eq!(sink.presented(), vec![1, 2, 3, 4]);
+
+    // 6. Verify matrix report telemetry reflects active session
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/matrix")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let final_rep: tetherly_node::ScreenMatrixReport = serde_json::from_slice(&b).unwrap();
+    assert!(final_rep.ok);
+    assert_eq!(final_rep.mode, "auto");
+    assert_eq!(final_rep.health, "healthy");
 
     host.shutdown();
     visitor.shutdown();

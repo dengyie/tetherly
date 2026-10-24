@@ -77,6 +77,7 @@ fn cfg(dir: PathBuf, ancs: Option<Arc<MemoryAncsTransport>>) -> NodeConfig {
         screen_profile_auto: true,
         screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
         screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
+        screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
         screen_sink: None,
         input_sink: None,
     }

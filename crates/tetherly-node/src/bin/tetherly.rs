@@ -84,6 +84,11 @@ enum Cmd {
         /// Screen streaming quantization parameter (QP) range (ADR-085), formatted as `min..max` (e.g. `12..35`).
         #[arg(long)]
         screen_qp: Option<String>,
+        /// 4D Autonomous Adaptation Coordinator mode (ADR-086): `auto` (default)
+        /// continuously coordinates bitrate, FPS, and scale; `conservative` preserves
+        /// native scale; `manual` disables autonomous adaptations.
+        #[arg(long, default_value = "auto")]
+        screen_matrix: String,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -2054,6 +2059,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or override 4D autonomous adaptation matrix coordinator mode (v2.00 / ADR-086).
+    Matrix {
+        /// Target coordinator mode: `auto`, `conservative`, or `manual`. If omitted, displays current 4D matrix status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3848,6 +3864,7 @@ async fn main() -> Result<()> {
             screen_scale,
             screen_profile,
             screen_qp,
+            screen_matrix,
             file_port,
             input_port,
             screen_port,
@@ -3911,6 +3928,12 @@ async fn main() -> Result<()> {
                     );
                 }
             }
+            cfg.screen_matrix_mode = match screen_matrix.trim().to_lowercase().as_str() {
+                "auto" => tetherly_core::ScreenMatrixMode::Auto,
+                "conservative" => tetherly_core::ScreenMatrixMode::Conservative,
+                "manual" => tetherly_core::ScreenMatrixMode::Manual,
+                _ => anyhow::bail!("--screen-matrix must be `auto`, `conservative`, or `manual`"),
+            };
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
             cfg.screen_codec_h264 = h264;
             let encode_codec: Arc<dyn tetherly_core::ScreenCodec> = if h264 {
@@ -6032,6 +6055,12 @@ async fn main() -> Result<()> {
                             rep.profile, rep.qp_min, rep.qp_max
                         );
                     }
+                    if !rep.matrix_mode.is_empty() {
+                        println!("  Matrix Mode:  {}", rep.matrix_mode);
+                    }
+                    if !rep.network_health.is_empty() {
+                        println!("  Net Health:   {}", rep.network_health);
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -6264,6 +6293,64 @@ async fn main() -> Result<()> {
                                 "manual override"
                             }
                         );
+                    }
+                }
+            }
+            ScreenCmd::Matrix {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    tetherly_node::loopback_post(ui_port, "/api/screen/matrix", &body).await
+                } else {
+                    tetherly_node::loopback_get(ui_port, "/api/screen/matrix").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen matrix query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_node::ScreenMatrixReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    if has_update {
+                        println!(
+                            "Screen 4D matrix coordinator mode updated: {} (health: {})",
+                            rep.mode, rep.health
+                        );
+                    } else {
+                        println!("Screen Streaming 4D Autonomous Adaptation Matrix (ADR-086):");
+                        println!("  Coordinator Mode: {}", rep.mode);
+                        println!("  Network Health:   {}", rep.health);
+                        println!("  Bitrate (kbps):   {}", rep.bitrate_bps / 1000);
+                        println!("  FPS Target:       {}", rep.fps_target);
+                        println!("  Resolution Scale: {}%", rep.scale_pct);
+                        println!("  Content Profile:  {}", rep.profile);
+                        println!("  QP Range:         {} - {}", rep.qp_min, rep.qp_max);
+                        println!("  Healthy Acks:     {}", rep.consecutive_healthy_acks);
+                        println!("  Consec. Drops:    {}", rep.consecutive_drops);
+                        println!("  In Flight:        {}", rep.in_flight);
+                        if let Some(rtt) = rep.rtt_us {
+                            println!("  RTT (latest):     {:.2} ms ({rtt} us)", rtt as f64 / 1000.0);
+                        } else {
+                            println!("  RTT (latest):     (no ack yet)");
+                        }
                     }
                 }
             }

@@ -86,6 +86,7 @@ fn cfg(dir: PathBuf, name: &str, overlay: OverlayConfig) -> NodeConfig {
         screen_profile_auto: true,
         screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
         screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
+        screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
         screen_sink: None,
         input_sink: None,
     }

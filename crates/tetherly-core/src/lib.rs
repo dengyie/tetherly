@@ -148,15 +148,18 @@ pub use recommend::{
 pub use replay::ReplayGuard;
 pub use screen::{
     downscale_bgra8, downscale_frame, is_screen_type, ControlMsg, MemoryScreenSink,
-    MemoryScreenSource, PixelFormat, ScreenAssembler, ScreenContentProfile, ScreenFpsPacer,
-    ScreenFrame, ScreenQualityController, ScreenRateController, ScreenReceiver, ScreenRect,
+    MemoryScreenSource, NetworkHealth, PixelFormat, ScreenAssembler, ScreenContentProfile,
+    ScreenFpsPacer, ScreenFrame, ScreenMatrixCoordinator, ScreenMatrixMode, ScreenMatrixOutcome,
+    ScreenQualityController, ScreenRateController, ScreenReceiver, ScreenRect,
     ScreenScaleController, ScreenSender, ScreenState, ScreenStats, SCREEN_BITRATE_COOLDOWN_US,
     SCREEN_BITRATE_DEFAULT_BPS, SCREEN_BITRATE_MAX_BPS, SCREEN_BITRATE_MIN_BPS,
     SCREEN_BITRATE_STEP_INCREASE_BPS, SCREEN_COMPRESS_H264, SCREEN_COMPRESS_NONE,
     SCREEN_COMPRESS_ZSTD, SCREEN_FPS_DEFAULT, SCREEN_FPS_MAX, SCREEN_FPS_MIN, SCREEN_MAGIC,
-    SCREEN_PROTO, SCREEN_QP_ABSOLUTE_MAX, SCREEN_QP_ABSOLUTE_MIN, SCREEN_QP_MAX_DEFAULT,
-    SCREEN_QP_MIN_DEFAULT, SCREEN_QP_MOTION_DEFAULT, SCREEN_QP_TEXT_DEFAULT,
-    SCREEN_SCALE_DEFAULT_PCT, SCREEN_SCALE_MAX_PCT, SCREEN_SCALE_MIN_PCT, SCREEN_SEQ_WINDOW,
+    SCREEN_MATRIX_CONSECUTIVE_DROPS_CRITICAL, SCREEN_MATRIX_DEMOTE_COOLDOWN_US,
+    SCREEN_MATRIX_HEALTHY_ACKS_REQUIRED, SCREEN_MATRIX_PROMOTE_COOLDOWN_US, SCREEN_PROTO,
+    SCREEN_QP_ABSOLUTE_MAX, SCREEN_QP_ABSOLUTE_MIN, SCREEN_QP_MAX_DEFAULT, SCREEN_QP_MIN_DEFAULT,
+    SCREEN_QP_MOTION_DEFAULT, SCREEN_QP_TEXT_DEFAULT, SCREEN_SCALE_DEFAULT_PCT,
+    SCREEN_SCALE_MAX_PCT, SCREEN_SCALE_MIN_PCT, SCREEN_SEQ_WINDOW,
 };
 pub use session::{
     backoff_delay, commit_trust, dispose_hello, ConnState, HelloDisposition, LockoutTable, PIN_TTL,

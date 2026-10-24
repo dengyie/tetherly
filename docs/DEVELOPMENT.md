@@ -3,12 +3,38 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.99** |
+| 文档版本 | **2.00** |
 | 日期 | 2026-10-25 |
-| 状态 | **v1.99 屏幕流自适应内容模式与量化参数（QP）质量控制器（Screen Streaming Adaptive Content Profile & Quantization Parameter Quality Controller, ADR-085）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`, `ports.rs`）：新增画质简档枚举 `ScreenContentProfile`（Text、Motion、Auto）；实现质量与量化参数控制器 `ScreenQualityController`（QP 刚性范围 0–51 钳位保序、文本默认 12..35 防振铃、动态默认 16..46 吸纳运动熵、支持自定义锁定 `is_custom()`）；完成 4 维多媒体流控矩阵（码率、帧率、分辨率、语义画质/QP）；`ScreenSender` 集成画质控制器与遥测；`ScreenCodec` 与 `ScreenSource` 扩展 `set_content_profile()`, `content_profile()`, `set_qp_range()`, `qp_range()`。(2) **运行时编解码无锁热重构**（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）：`H264Codec` 采用无锁原子状态（`AtomicU8` profile/min_qp/max_qp），底层 OpenH264 根据 Profile 动态绑定 `ScreenContentRealTime` 调色板/字符抗锯齿或 `CameraVideoRealTime` 质量控码模式，热更新自动重建编码器下发新 SPS/PPS 并触发 IDR 恢复帧；`screen_profile_from_profile` 提供链路带宽感知分级推荐（Auto 模式桌面默认偏向 Text 优先保证字形锐度）。(3) **接口与生态**：新增回环 API `GET/POST /api/screen/profile`、CLI 命令 `tetherly screen profile [profile] [--min-qp <qp>] [--max-qp <qp>]`、启动参数 `--screen-profile <auto|text|motion>` 与 `--screen-qp <min..max>`，实时状态透出 `Profile: text (QP: 12..35)`；(4) **测试与版本**：集成测试 `m5_9_screen_dynamic_content_profile` 验证端到端 45720 画质协商、API 热调、QP 钳位与远端呈现，工作区升级至 `0.1.21`。 |
+| 状态 | **v2.00 屏幕流 4 维自主自适应协同调度器（Screen Streaming 4D Autonomous Adaptation Coordinator, ADR-086）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`）：统一带宽码率（ADR-082）、时间帧率（ADR-083）、空间分辨率（ADR-084）与语义画质/QP（ADR-085）4 维流控矩阵，实现闭环自主协同调度器 `ScreenMatrixCoordinator`；构建四级网络健康评估模型 `NetworkHealth`（Healthy、Warning、Congested、Critical）；设计非对称跨层降阶梯队（Level 1 码率乘法递减 -20% -> Level 2 帧率阶梯削减 60->30->24->15 FPS 瞬时砍半套接字排队压强 -> Level 3 严重拥塞时分辨率降采样 100%->75%->50%->25% 缩减像素负载并触发首帧 IDR 恢复）与 400ms 防连续雪崩冷却期；设计 15 次健康确认连续累积与 3.0s 迟滞恢复升阶模型（先升分辨率、再升帧率、最后 AIMD 探测升码率）；提供 Auto（全自动 4D 闭环）、Conservative（锁定 100% 原生分辨率保真）、Manual（被动旁路）三种调度模式。(2) **运行时多维流控同步**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：`ScreenSender` 内置协调器联动丢包与 Ack 确认，推流泵动态同步目标帧率与下采样比例至 `ScreenSource` 与 `ScreenCodec`；(3) **接口与生态**：新增回环 API `GET/POST /api/screen/matrix`、CLI 命令 `tetherly screen matrix [mode]`、启动参数 `--screen-matrix <auto|conservative|manual>`，实时状态透出 `Matrix Mode` 与 `Net Health`；(4) **测试与版本**：单元测试 5 套全绿，Phase 5 集成测试 `m5_10_screen_4d_matrix_coordinator` 验证端到端 45720 传输、API 热切换与 4 维遥测闭环，工作区升级至 `0.1.22`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.00 相对 1.99(屏幕流 4 维自主自适应协同调度器 ADR-086)**
+
+- **动机与问题背景**:
+  在此前的一系列演进中，Tetherly 已陆续完成了带宽码率控制（ADR-082）、微秒帧率定步（ADR-083）、空间分辨率双线性降采样（ADR-084）以及内容语义画质与 QP 控制（ADR-085）。然而，各自为政的单一维度调优在复杂多变的网络和交互环境中极易发生失步与震荡：当网络突发严重拥塞时，若仅依靠码率乘法递减（MD），由于套接字发送缓冲区依然以高帧率（如 60 FPS）持续推包，小包报头开销与拥塞丢包将导致在途队列持续恶化；若盲目并发降分辨率，又可能在瞬时偶发丢包时造成过度模糊与编码重构 IDR 爆码；而在网络恢复阶段，并发提速往往引发二次拥塞震荡。亟需引入统一的 4 维自主自适应协同调度器，对多维流控进行全局闭环跨层仲裁。
+- **架构解法与落地**:
+  1. **Core 协议与 4D 调度状态机（`crates/tetherly-core/src/screen.rs`）**：
+     - 定义四级网络健康评估模型 `NetworkHealth`：`Healthy (0)`（RTT < 120ms, in_flight == 0）、`Warning (1)`（120ms <= RTT < 250ms 或 in_flight 1..3）、`Congested (2)`（250ms <= RTT < 500ms 或 in_flight 4..7 或单次丢包）、`Critical (3)`（RTT >= 500ms 或 in_flight >= 8 或连续丢包 >= 2）。
+     - 定义调度模式 `ScreenMatrixMode`：`Auto (0)`（全自主闭环）、`Conservative (1)`（锁死 100% 原生分辨率，仅自适应码率与 FPS）、`Manual (2)`（被动旁路）。
+     - 实现核心协调器 `ScreenMatrixCoordinator`：
+       - **跨层降阶梯队**：Level 1 触发码率 MD 乘法递减（-20%）；Level 2 阶梯下调时间帧率（$60 \to 30 \to 24 \to 15$ FPS）减半套接字排队压强；Level 3 在进入 `Critical` 状态时平滑下采样空间分辨率（$100\% \to 75\% \to 50\% \to 25\%$）并请求 IDR 恢复；配备 400ms 降阶冷却期（`SCREEN_MATRIX_DEMOTE_COOLDOWN_US`）防止跳水雪崩。
+       - **迟滞升阶梯队**：无拥塞稳定累积 15 次连续健康 Ack（`SCREEN_MATRIX_HEALTHY_ACKS_REQUIRED`）且满 3.0s 迟滞恢复冷却（`SCREEN_MATRIX_PROMOTE_COOLDOWN_US`）后，有序执行升阶：先恢复空间分辨率（保证桌面文字清晰），再提升时间帧率（恢复交互流畅度），最后进入 AIMD 加法码率探测（+150 kbps）。
+     - `ScreenStats` 扩充 `matrix_mode: u8` 与 `network_health: u8`，`ScreenSender` 内置协调器联动丢包与 Ack 确认回路。
+  2. **Node 运行时流控联动与控制（`crates/tetherly-node/src/runtime.rs`, `screen.rs`）**：
+     - `NodeConfig` 新增 `screen_matrix_mode: ScreenMatrixMode`（默认 Auto）。
+     - `NodeSession` 推流泵动态同步目标帧率与下采样比例至 `ScreenSource` 与 `ScreenCodec`。
+     - `Node` 提供 `screen_matrix_report()`、`screen_matrix_mode()`、`screen_set_matrix_mode()` 等方法。
+  3. **回环 API 与 CLI 统一支持**：
+     - 新增 HTTP 路由 `GET /api/screen/matrix` 与 `POST /api/screen/matrix`，支持 JSON `{"mode": "auto" | "conservative" | "manual"}` 或 Query `?mode=...` 热配置。
+     - CLI 新增 `tetherly screen matrix [mode]` 命令，并在 `tetherly screen status` 中透出当前 `Matrix Mode` 与 `Net Health`。
+     - `Cmd::Run` 新增 `--screen-matrix <auto|conservative|manual>` 启动参数。
+     - 遥测 DTO `ScreenStatusReport` 新增 `matrix_mode`、`network_health`，新增强类型 `ScreenMatrixReport`。
+  4. **测试**：
+     - Core 单元测试：`screen_matrix_coordinator_health_state_transitions`、`screen_matrix_coordinator_demotion_ladder_on_drops`、`screen_matrix_coordinator_promotion_ladder_on_sustained_healthy_acks`、`screen_matrix_coordinator_modes_manual_and_conservative`、`screen_sender_4d_autonomous_matrix_closed_loop`。
+     - Node 单元测试：`test_screen_matrix_mode_and_reporting`。
+     - Phase 5 集成测试 `m5_10_screen_4d_matrix_coordinator` 验证 45720 通道握手、API 动态查询与热调、四维流控遥测、推流与远端解码呈现。
 
 **1.99 相对 1.98(屏幕流自适应内容模式与量化参数（QP）质量控制器 ADR-085)**
 

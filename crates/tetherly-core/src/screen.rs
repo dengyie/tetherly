@@ -612,12 +612,26 @@ pub struct ScreenStats {
     pub qp_min: u8,
     /// Maximum quantization parameter boundary (0..=51) (v1.99 / ADR-085).
     pub qp_max: u8,
+    /// 4D Autonomous Adaptation Coordinator mode (0=auto, 1=conservative, 2=manual) (v2.00 / ADR-086).
+    pub matrix_mode: u8,
+    /// Real-time assessed network health state (0=healthy, 1=warning, 2=congested, 3=critical) (v2.00 / ADR-086).
+    pub network_health: u8,
 }
 
 impl ScreenStats {
     /// Active screen content profile resolved from profile tag.
     pub fn content_profile(&self) -> ScreenContentProfile {
         ScreenContentProfile::from_tag(self.profile_tag)
+    }
+
+    /// Autonomous 4D matrix coordinator mode.
+    pub fn matrix_mode(&self) -> ScreenMatrixMode {
+        ScreenMatrixMode::from_tag(self.matrix_mode)
+    }
+
+    /// Real-time assessed network health state.
+    pub fn network_health(&self) -> NetworkHealth {
+        NetworkHealth::from_tag(self.network_health)
     }
 }
 
@@ -1014,6 +1028,378 @@ impl ScreenQualityController {
     }
 }
 
+/// Real-time assessed network health state for autonomous adaptation (v2.00 / ADR-086).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum NetworkHealth {
+    #[default]
+    Healthy = 0,
+    Warning = 1,
+    Congested = 2,
+    Critical = 3,
+}
+
+impl NetworkHealth {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NetworkHealth::Healthy => "healthy",
+            NetworkHealth::Warning => "warning",
+            NetworkHealth::Congested => "congested",
+            NetworkHealth::Critical => "critical",
+        }
+    }
+
+    pub fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            0 => NetworkHealth::Healthy,
+            1 => NetworkHealth::Warning,
+            2 => NetworkHealth::Congested,
+            3 => NetworkHealth::Critical,
+            _ => NetworkHealth::Healthy,
+        }
+    }
+}
+
+/// Operation mode of the 4-dimensional autonomous adaptation coordinator (v2.00 / ADR-086).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ScreenMatrixMode {
+    /// Autonomous 4D cross-layer coordination across bitrate, FPS, scale, and QP.
+    #[default]
+    Auto = 0,
+    /// Conservative mode: adapts bitrate and FPS, preserves native spatial scale.
+    Conservative = 1,
+    /// Manual mode: coordinator passive; parameters modulated only by explicit user/API calls.
+    Manual = 2,
+}
+
+impl ScreenMatrixMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScreenMatrixMode::Auto => "auto",
+            ScreenMatrixMode::Conservative => "conservative",
+            ScreenMatrixMode::Manual => "manual",
+        }
+    }
+
+    pub fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            0 => ScreenMatrixMode::Auto,
+            1 => ScreenMatrixMode::Conservative,
+            2 => ScreenMatrixMode::Manual,
+            _ => ScreenMatrixMode::Auto,
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        let lower = s.trim().to_ascii_lowercase();
+        match lower.as_str() {
+            "auto" | "dynamic" => Some(ScreenMatrixMode::Auto),
+            "conservative" | "preserve_scale" | "scale_locked" => Some(ScreenMatrixMode::Conservative),
+            "manual" | "disabled" | "off" => Some(ScreenMatrixMode::Manual),
+            _ => None,
+        }
+    }
+}
+
+/// Minimum microsecond duration between automatic tier demotions (cooldown) (400ms).
+pub const SCREEN_MATRIX_DEMOTE_COOLDOWN_US: u64 = 400_000;
+/// Minimum microsecond duration of sustained healthy telemetry before promoting a tier (hysteresis) (3.0s).
+pub const SCREEN_MATRIX_PROMOTE_COOLDOWN_US: u64 = 3_000_000;
+/// Minimum consecutive healthy acknowledgements before considering an up-tier promotion.
+pub const SCREEN_MATRIX_HEALTHY_ACKS_REQUIRED: u32 = 15;
+/// Maximum consecutive frame drops before escalating to Critical health tier.
+pub const SCREEN_MATRIX_CONSECUTIVE_DROPS_CRITICAL: u32 = 2;
+
+/// Helper calculating next lower FPS tier during congestion.
+pub fn screen_matrix_next_lower_fps(current_fps: u32) -> u32 {
+    if current_fps > 30 {
+        30
+    } else if current_fps > 24 {
+        24
+    } else if current_fps > 15 {
+        15
+    } else {
+        SCREEN_FPS_MIN
+    }
+}
+
+/// Helper calculating next higher FPS tier during sustained network recovery.
+pub fn screen_matrix_next_higher_fps(current_fps: u32, max_fps: u32) -> u32 {
+    let next = if current_fps < 15 {
+        15
+    } else if current_fps < 24 {
+        24
+    } else if current_fps < 30 {
+        30
+    } else {
+        60
+    };
+    next.min(max_fps)
+}
+
+/// Helper calculating next lower resolution scale tier during critical congestion.
+pub fn screen_matrix_next_lower_scale(current_scale: u32) -> u32 {
+    if current_scale > 75 {
+        75
+    } else if current_scale > 50 {
+        50
+    } else {
+        25
+    }
+}
+
+/// Helper calculating next higher resolution scale tier during sustained network recovery.
+pub fn screen_matrix_next_higher_scale(current_scale: u32) -> u32 {
+    if current_scale < 50 {
+        50
+    } else if current_scale < 75 {
+        75
+    } else {
+        100
+    }
+}
+
+/// Recommendation outcome from evaluating the 4D matrix coordinator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScreenMatrixOutcome {
+    pub health: NetworkHealth,
+    pub new_fps: Option<u32>,
+    pub new_scale_pct: Option<u32>,
+    pub force_idr: bool,
+}
+
+/// 4-Dimensional closed-loop autonomous adaptation coordinator (v2.00 / ADR-086).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenMatrixCoordinator {
+    mode: ScreenMatrixMode,
+    health: NetworkHealth,
+    auto_fps: bool,
+    auto_scale: bool,
+    consecutive_healthy_acks: u32,
+    consecutive_drops: u32,
+    last_tier_change_us: u64,
+}
+
+impl Default for ScreenMatrixCoordinator {
+    fn default() -> Self {
+        Self::new(ScreenMatrixMode::default())
+    }
+}
+
+impl ScreenMatrixCoordinator {
+    pub fn new(mode: ScreenMatrixMode) -> Self {
+        Self {
+            mode,
+            health: NetworkHealth::Healthy,
+            auto_fps: true,
+            auto_scale: true,
+            consecutive_healthy_acks: 0,
+            consecutive_drops: 0,
+            last_tier_change_us: 0,
+        }
+    }
+
+    pub fn mode(&self) -> ScreenMatrixMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenMatrixMode) {
+        self.mode = mode;
+    }
+
+    pub fn health(&self) -> NetworkHealth {
+        self.health
+    }
+
+    pub fn auto_fps(&self) -> bool {
+        self.auto_fps
+    }
+
+    pub fn set_auto_fps(&mut self, auto: bool) {
+        self.auto_fps = auto;
+    }
+
+    pub fn auto_scale(&self) -> bool {
+        self.auto_scale
+    }
+
+    pub fn set_auto_scale(&mut self, auto: bool) {
+        self.auto_scale = auto;
+    }
+
+    pub fn consecutive_healthy_acks(&self) -> u32 {
+        self.consecutive_healthy_acks
+    }
+
+    pub fn consecutive_drops(&self) -> u32 {
+        self.consecutive_drops
+    }
+
+    /// Handle frame drop event with microsecond timestamp.
+    pub fn on_drop(
+        &mut self,
+        now_us: u64,
+        current_fps: u32,
+        current_scale: u32,
+    ) -> ScreenMatrixOutcome {
+        self.consecutive_drops = self.consecutive_drops.saturating_add(1);
+        self.consecutive_healthy_acks = 0;
+
+        if self.consecutive_drops >= SCREEN_MATRIX_CONSECUTIVE_DROPS_CRITICAL {
+            self.health = NetworkHealth::Critical;
+        } else {
+            self.health = NetworkHealth::Congested;
+        }
+
+        if self.mode == ScreenMatrixMode::Manual {
+            return ScreenMatrixOutcome {
+                health: self.health,
+                new_fps: None,
+                new_scale_pct: None,
+                force_idr: false,
+            };
+        }
+
+        let mut outcome = ScreenMatrixOutcome {
+            health: self.health,
+            new_fps: None,
+            new_scale_pct: None,
+            force_idr: false,
+        };
+
+        if now_us.saturating_sub(self.last_tier_change_us) >= SCREEN_MATRIX_DEMOTE_COOLDOWN_US {
+            if self.health == NetworkHealth::Critical {
+                // Demote both scale (if Auto mode) and FPS.
+                if self.mode == ScreenMatrixMode::Auto && self.auto_scale && current_scale > 25 {
+                    let next_scale = screen_matrix_next_lower_scale(current_scale);
+                    outcome.new_scale_pct = Some(next_scale);
+                }
+                if self.auto_fps && current_fps > SCREEN_FPS_MIN {
+                    let next_fps = screen_matrix_next_lower_fps(current_fps);
+                    outcome.new_fps = Some(next_fps);
+                }
+                if outcome.new_scale_pct.is_some() || outcome.new_fps.is_some() {
+                    self.last_tier_change_us = now_us;
+                    outcome.force_idr = true;
+                }
+            } else if self.health == NetworkHealth::Congested {
+                // Demote FPS first to cut socket pressure.
+                if self.auto_fps && current_fps > 15 {
+                    let next_fps = screen_matrix_next_lower_fps(current_fps);
+                    outcome.new_fps = Some(next_fps);
+                    self.last_tier_change_us = now_us;
+                }
+            }
+        }
+
+        outcome
+    }
+
+    /// Handle incoming frame acknowledgment with microsecond RTT and in-flight count.
+    pub fn on_ack(
+        &mut self,
+        now_us: u64,
+        rtt_us: u64,
+        in_flight: u64,
+        current_fps: u32,
+        current_scale: u32,
+        target_max_fps: u32,
+    ) -> ScreenMatrixOutcome {
+        // Assess current network health.
+        if in_flight >= SCREEN_CONGESTION_IN_FLIGHT_THRESHOLD
+            || rtt_us >= 500_000
+            || self.consecutive_drops >= SCREEN_MATRIX_CONSECUTIVE_DROPS_CRITICAL
+        {
+            self.health = NetworkHealth::Critical;
+            self.consecutive_healthy_acks = 0;
+        } else if in_flight >= (SCREEN_CONGESTION_IN_FLIGHT_THRESHOLD / 2)
+            || rtt_us >= SCREEN_CONGESTION_RTT_THRESHOLD_US
+            || self.consecutive_drops > 0
+        {
+            self.health = NetworkHealth::Congested;
+            self.consecutive_healthy_acks = 0;
+        } else if in_flight > 0 || rtt_us >= 120_000 {
+            self.health = NetworkHealth::Warning;
+            self.consecutive_healthy_acks = 0;
+        } else {
+            self.health = NetworkHealth::Healthy;
+            self.consecutive_drops = 0;
+            self.consecutive_healthy_acks = self.consecutive_healthy_acks.saturating_add(1);
+        }
+
+        if self.mode == ScreenMatrixMode::Manual {
+            return ScreenMatrixOutcome {
+                health: self.health,
+                new_fps: None,
+                new_scale_pct: None,
+                force_idr: false,
+            };
+        }
+
+        let mut outcome = ScreenMatrixOutcome {
+            health: self.health,
+            new_fps: None,
+            new_scale_pct: None,
+            force_idr: false,
+        };
+
+        if self.health == NetworkHealth::Healthy {
+            // Check if hysteresis threshold is met for promotion.
+            if self.consecutive_healthy_acks >= SCREEN_MATRIX_HEALTHY_ACKS_REQUIRED
+                && now_us.saturating_sub(self.last_tier_change_us)
+                    >= SCREEN_MATRIX_PROMOTE_COOLDOWN_US
+            {
+                // Recovery Ladder:
+                // 1. Promote resolution scale first (if below 100%).
+                if self.mode == ScreenMatrixMode::Auto && self.auto_scale && current_scale < 100 {
+                    let next_scale = screen_matrix_next_higher_scale(current_scale);
+                    outcome.new_scale_pct = Some(next_scale);
+                    self.consecutive_healthy_acks = 0;
+                    self.last_tier_change_us = now_us;
+                    outcome.force_idr = true;
+                } else if self.auto_fps && current_fps < target_max_fps {
+                    // 2. Once scale is at 100%, promote FPS.
+                    let next_fps = screen_matrix_next_higher_fps(current_fps, target_max_fps);
+                    outcome.new_fps = Some(next_fps);
+                    self.consecutive_healthy_acks = 0;
+                    self.last_tier_change_us = now_us;
+                }
+            }
+        } else if (self.health == NetworkHealth::Critical || self.health == NetworkHealth::Congested)
+            && now_us.saturating_sub(self.last_tier_change_us) >= SCREEN_MATRIX_DEMOTE_COOLDOWN_US
+        {
+            // Under sustained high RTT / in-flight, demote if appropriate.
+            if self.health == NetworkHealth::Critical {
+                if self.mode == ScreenMatrixMode::Auto && self.auto_scale && current_scale > 25 {
+                    let next_scale = screen_matrix_next_lower_scale(current_scale);
+                    outcome.new_scale_pct = Some(next_scale);
+                }
+                if self.auto_fps && current_fps > SCREEN_FPS_MIN {
+                    let next_fps = screen_matrix_next_lower_fps(current_fps);
+                    outcome.new_fps = Some(next_fps);
+                }
+                if outcome.new_scale_pct.is_some() || outcome.new_fps.is_some() {
+                    self.last_tier_change_us = now_us;
+                    outcome.force_idr = true;
+                }
+            } else if self.health == NetworkHealth::Congested && self.auto_fps && current_fps > 15 {
+                let next_fps = screen_matrix_next_lower_fps(current_fps);
+                outcome.new_fps = Some(next_fps);
+                self.last_tier_change_us = now_us;
+            }
+        }
+
+        outcome
+    }
+}
+
 /// Bilinear downscaling for 32-bit BGRA/RGBA buffers with 16.16 fixed-point arithmetic (v1.98 / ADR-084).
 pub fn downscale_bgra8(
     src: &[u8],
@@ -1123,6 +1509,7 @@ pub struct ScreenSender {
     fps_pacer: ScreenFpsPacer,
     scale_controller: ScreenScaleController,
     quality_controller: ScreenQualityController,
+    matrix_coordinator: ScreenMatrixCoordinator,
 }
 
 impl Default for ScreenSender {
@@ -1137,6 +1524,7 @@ impl ScreenSender {
         let fps_pacer = ScreenFpsPacer::default();
         let scale_controller = ScreenScaleController::default();
         let quality_controller = ScreenQualityController::default();
+        let matrix_coordinator = ScreenMatrixCoordinator::default();
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -1144,6 +1532,8 @@ impl ScreenSender {
             profile_tag: quality_controller.profile().tag(),
             qp_min: quality_controller.min_qp(),
             qp_max: quality_controller.max_qp(),
+            matrix_mode: matrix_coordinator.mode().tag(),
+            network_health: matrix_coordinator.health().tag(),
             ..Default::default()
         };
         Self {
@@ -1157,6 +1547,7 @@ impl ScreenSender {
             fps_pacer,
             scale_controller,
             quality_controller,
+            matrix_coordinator,
         }
     }
 
@@ -1292,6 +1683,24 @@ impl ScreenSender {
                     self.rate_controller
                         .on_ack(rtt, self.in_flight_records.len() as u64, now_us);
                     self.stats.bitrate_bps = self.rate_controller.current_bps();
+
+                    let outcome = self.matrix_coordinator.on_ack(
+                        now_us,
+                        rtt,
+                        self.in_flight_records.len() as u64,
+                        self.stats.fps_target,
+                        self.stats.scale_pct,
+                        SCREEN_FPS_MAX,
+                    );
+                    if let Some(new_fps) = outcome.new_fps {
+                        let actual_fps = self.fps_pacer.set_fps(new_fps);
+                        self.stats.fps_target = actual_fps;
+                    }
+                    if let Some(new_scale) = outcome.new_scale_pct {
+                        let actual_scale = self.scale_controller.set_scale_pct(new_scale);
+                        self.stats.scale_pct = actual_scale;
+                    }
+                    self.stats.network_health = outcome.health.tag();
                 }
                 self.stats.in_flight = self.in_flight_records.len() as u64;
                 Ok(None)
@@ -1338,6 +1747,21 @@ impl ScreenSender {
         self.stats.dropped = self.stats.dropped.saturating_add(1);
         self.rate_controller.on_congestion(now_us);
         self.stats.bitrate_bps = self.rate_controller.current_bps();
+
+        let outcome = self.matrix_coordinator.on_drop(
+            now_us,
+            self.stats.fps_target,
+            self.stats.scale_pct,
+        );
+        if let Some(new_fps) = outcome.new_fps {
+            let actual_fps = self.fps_pacer.set_fps(new_fps);
+            self.stats.fps_target = actual_fps;
+        }
+        if let Some(new_scale) = outcome.new_scale_pct {
+            let actual_scale = self.scale_controller.set_scale_pct(new_scale);
+            self.stats.scale_pct = actual_scale;
+        }
+        self.stats.network_health = outcome.health.tag();
     }
 
     /// Explicitly configure target bitrate bounds or manual override (v1.96 / ADR-082).
@@ -1430,6 +1854,33 @@ impl ScreenSender {
     /// Access mutable reference to the internal quality controller.
     pub fn quality_controller_mut(&mut self) -> &mut ScreenQualityController {
         &mut self.quality_controller
+    }
+
+    /// Operation mode of the 4D autonomous adaptation coordinator (v2.00 / ADR-086).
+    pub fn matrix_mode(&self) -> ScreenMatrixMode {
+        self.matrix_coordinator.mode()
+    }
+
+    /// Explicitly configure 4D autonomous adaptation coordinator mode.
+    pub fn set_matrix_mode(&mut self, mode: ScreenMatrixMode) -> ScreenMatrixMode {
+        self.matrix_coordinator.set_mode(mode);
+        self.stats.matrix_mode = mode.tag();
+        mode
+    }
+
+    /// Assessed real-time network health state.
+    pub fn network_health(&self) -> NetworkHealth {
+        self.matrix_coordinator.health()
+    }
+
+    /// Access reference to the internal 4D matrix coordinator.
+    pub fn matrix_coordinator(&self) -> &ScreenMatrixCoordinator {
+        &self.matrix_coordinator
+    }
+
+    /// Access mutable reference to the internal 4D matrix coordinator.
+    pub fn matrix_coordinator_mut(&mut self) -> &mut ScreenMatrixCoordinator {
+        &mut self.matrix_coordinator
     }
 
     /// Check if target frame pacing interval has elapsed.
@@ -2139,6 +2590,134 @@ mod tests {
         for fr in &frags[1..] {
             let _ = a.push(fr);
         }
+    }
+
+    #[test]
+    fn screen_matrix_coordinator_health_state_transitions() {
+        let mut coord = ScreenMatrixCoordinator::default();
+        assert_eq!(coord.health(), NetworkHealth::Healthy);
+        assert_eq!(coord.mode(), ScreenMatrixMode::Auto);
+
+        // Low RTT, 0 inflight -> Healthy
+        let out1 = coord.on_ack(1_000_000, 50_000, 0, 60, 100, 60);
+        assert_eq!(out1.health, NetworkHealth::Healthy);
+
+        // Elevated RTT (150ms) -> Warning
+        let out2 = coord.on_ack(1_100_000, 150_000, 0, 60, 100, 60);
+        assert_eq!(out2.health, NetworkHealth::Warning);
+
+        // High RTT (280ms) -> Congested
+        let out3 = coord.on_ack(1_200_000, 280_000, 0, 60, 100, 60);
+        assert_eq!(out3.health, NetworkHealth::Congested);
+
+        // High in-flight (8) -> Critical
+        let out4 = coord.on_ack(1_300_000, 100_000, 8, 60, 100, 60);
+        assert_eq!(out4.health, NetworkHealth::Critical);
+    }
+
+    #[test]
+    fn screen_matrix_coordinator_demotion_ladder_on_drops() {
+        let mut coord = ScreenMatrixCoordinator::default();
+        let now_us = 10_000_000;
+
+        // 1 drop -> Congested -> demote FPS from 60 to 30
+        let out1 = coord.on_drop(now_us, 60, 100);
+        assert_eq!(out1.health, NetworkHealth::Congested);
+        assert_eq!(out1.new_fps, Some(30));
+        assert_eq!(out1.new_scale_pct, None);
+
+        // 2nd drop (exceeds cooldown: +500ms) -> Critical -> demote scale to 75 and FPS to 24
+        let out2 = coord.on_drop(now_us + 500_000, 30, 100);
+        assert_eq!(out2.health, NetworkHealth::Critical);
+        assert_eq!(out2.new_scale_pct, Some(75));
+        assert_eq!(out2.new_fps, Some(24));
+        assert!(out2.force_idr);
+    }
+
+    #[test]
+    fn screen_matrix_coordinator_promotion_ladder_on_sustained_healthy_acks() {
+        let mut coord = ScreenMatrixCoordinator::default();
+        let mut now_us = 10_000_000;
+
+        // Start degraded at 50% scale, 15 FPS
+        let mut current_scale = 50;
+        let current_fps = 15;
+
+        // Send 14 healthy acks (not yet 15)
+        for _ in 0..14 {
+            now_us += 100_000;
+            let out = coord.on_ack(now_us, 30_000, 0, current_fps, current_scale, 60);
+            assert_eq!(out.new_scale_pct, None);
+            assert_eq!(out.new_fps, None);
+        }
+
+        // 15th ack (+3.5s elapsed): should promote scale first: 50% -> 75%
+        now_us += 3_500_000;
+        let out_promo1 = coord.on_ack(now_us, 30_000, 0, current_fps, current_scale, 60);
+        assert_eq!(out_promo1.new_scale_pct, Some(75));
+        assert!(out_promo1.force_idr);
+        current_scale = 75;
+
+        // Another 15 acks (+3.5s): promote scale 75% -> 100%
+        for _ in 0..14 {
+            now_us += 100_000;
+            let _ = coord.on_ack(now_us, 30_000, 0, current_fps, current_scale, 60);
+        }
+        now_us += 3_500_000;
+        let out_promo2 = coord.on_ack(now_us, 30_000, 0, current_fps, current_scale, 60);
+        assert_eq!(out_promo2.new_scale_pct, Some(100));
+        current_scale = 100;
+
+        // Once scale is 100%, next promotion promotes FPS: 15 -> 24
+        for _ in 0..14 {
+            now_us += 100_000;
+            let _ = coord.on_ack(now_us, 30_000, 0, current_fps, current_scale, 60);
+        }
+        now_us += 3_500_000;
+        let out_promo3 = coord.on_ack(now_us, 30_000, 0, current_fps, current_scale, 60);
+        assert_eq!(out_promo3.new_fps, Some(24));
+        assert_eq!(out_promo3.new_scale_pct, None);
+    }
+
+    #[test]
+    fn screen_matrix_coordinator_modes_manual_and_conservative() {
+        let mut coord_manual = ScreenMatrixCoordinator::new(ScreenMatrixMode::Manual);
+        let out_m = coord_manual.on_drop(1_000_000, 60, 100);
+        assert_eq!(out_m.health, NetworkHealth::Congested);
+        assert_eq!(out_m.new_fps, None);
+        assert_eq!(out_m.new_scale_pct, None);
+
+        let mut coord_cons = ScreenMatrixCoordinator::new(ScreenMatrixMode::Conservative);
+        let out_c1 = coord_cons.on_drop(1_000_000, 60, 100);
+        assert_eq!(out_c1.new_fps, Some(30));
+        assert_eq!(out_c1.new_scale_pct, None); // Conservative never downscales resolution
+
+        let out_c2 = coord_cons.on_drop(2_000_000, 30, 100);
+        assert_eq!(out_c2.health, NetworkHealth::Critical);
+        assert_eq!(out_c2.new_fps, Some(24));
+        assert_eq!(out_c2.new_scale_pct, None); // Still no scale change
+    }
+
+    #[test]
+    fn screen_sender_4d_autonomous_matrix_closed_loop() {
+        let mut sender = ScreenSender::new();
+        assert_eq!(sender.stats().matrix_mode(), ScreenMatrixMode::Auto);
+        assert_eq!(sender.stats().network_health(), NetworkHealth::Healthy);
+        assert_eq!(sender.stats().fps_target, 30);
+        assert_eq!(sender.stats().scale_pct, 100);
+
+        sender.set_fps(60);
+        assert_eq!(sender.stats().fps_target, 60);
+
+        // Record a congestion drop at t=10_000_000
+        sender.record_drop_with_time(10_000_000);
+        assert_eq!(sender.stats().network_health(), NetworkHealth::Congested);
+        assert_eq!(sender.stats().fps_target, 30); // 60 -> 30 demoted
+        assert_eq!(sender.stats().scale_pct, 100);
+
+        // Mode switch check
+        sender.set_matrix_mode(ScreenMatrixMode::Conservative);
+        assert_eq!(sender.stats().matrix_mode(), ScreenMatrixMode::Conservative);
     }
 
     #[test]

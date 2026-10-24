@@ -4119,6 +4119,47 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             let rep = node.screen_profile_report();
             json_ok(&rep)
         }
+        ("GET", "/api/screen/matrix") => {
+            let rep = node.screen_matrix_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/matrix") => {
+            #[derive(serde::Deserialize)]
+            struct MatrixReq {
+                #[serde(default)]
+                mode: Option<String>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<MatrixReq> = if !body.is_empty() {
+                match serde_json::from_slice(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected { mode?: string }"),
+                }
+            } else {
+                None
+            };
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.clone())
+                .or_else(|| qmap.get("mode").cloned())
+                .or_else(|| qmap.get("matrix_mode").cloned());
+
+            if let Some(m_str) = mode_str {
+                match tetherly_core::ScreenMatrixMode::from_str_loose(&m_str) {
+                    Some(mode) => {
+                        let rep = node.screen_set_matrix_mode(mode);
+                        json_ok(&rep)
+                    }
+                    None => err(
+                        400,
+                        "invalid matrix mode: expected auto, conservative, or manual",
+                    ),
+                }
+            } else {
+                let rep = node.screen_matrix_report();
+                json_ok(&rep)
+            }
+        }
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -8008,6 +8049,7 @@ mod tests {
             screen_profile_auto: true,
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
+            screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
