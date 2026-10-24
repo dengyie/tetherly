@@ -143,6 +143,10 @@ pub struct NodeConfig {
     pub screen_fps: u32,
     /// Pick target FPS tier from measured bandwidth profile (ADR-083).
     pub screen_fps_auto: bool,
+    /// Target resolution scale percentage for screen streaming (25..=100) (ADR-084).
+    pub screen_scale_pct: u32,
+    /// Pick target resolution scale percentage tier from measured bandwidth profile (ADR-084).
+    pub screen_scale_auto: bool,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -157,6 +161,10 @@ fn default_screen_bitrate_kbps() -> u32 {
 
 fn default_screen_fps() -> u32 {
     tetherly_core::SCREEN_FPS_DEFAULT
+}
+
+fn default_screen_scale_pct() -> u32 {
+    tetherly_core::SCREEN_SCALE_DEFAULT_PCT
 }
 
 impl Default for NodeConfig {
@@ -185,6 +193,8 @@ impl Default for NodeConfig {
             screen_bitrate_auto: true,
             screen_fps: default_screen_fps(),
             screen_fps_auto: true,
+            screen_scale_pct: default_screen_scale_pct(),
+            screen_scale_auto: true,
             screen_sink: None,
             input_sink: None,
         }
@@ -2845,6 +2855,20 @@ pub struct ScreenStatusReport {
     pub bitrate_bps: u32,
     #[serde(default)]
     pub fps_target: u32,
+    #[serde(default)]
+    pub scale_pct: u32,
+}
+
+/// Status report for screen streaming resolution downscaling (ADR-084).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ScreenScaleReport {
+    pub ok: bool,
+    pub scale_pct: u32,
+    pub min_scale_pct: u32,
+    pub max_scale_pct: u32,
+    #[serde(default)]
+    pub auto_profile: bool,
+    pub timestamp_ms: u64,
 }
 
 /// Status report for screen streaming frame rate / FPS pacing (ADR-083).
@@ -3081,6 +3105,10 @@ struct Shared {
     screen_fps_auto: bool,
     /// One-shot per stream: the first streamed frame picks the FPS tier.
     screen_fps_applied: std::sync::atomic::AtomicBool,
+    /// Whether target resolution scale follows the measured bandwidth profile (ADR-084).
+    screen_scale_auto: bool,
+    /// One-shot per stream: the first streamed frame picks the scale tier.
+    screen_scale_applied: std::sync::atomic::AtomicBool,
     /// Visitor-side output. Defaults to the in-memory observer; production
     /// injects `SystemSink` for real display.
     screen_sink: Arc<dyn ScreenSink>,
@@ -3273,6 +3301,8 @@ impl Node {
         let screen_bitrate_auto = cfg.screen_bitrate_auto;
         let screen_fps = cfg.screen_fps;
         let screen_fps_auto = cfg.screen_fps_auto;
+        let screen_scale_pct = cfg.screen_scale_pct;
+        let screen_scale_auto = cfg.screen_scale_auto;
         let screen_source: Arc<dyn ScreenSource> = cfg.screen_source.clone().unwrap_or_else(|| {
             // Production: real capture → negotiated codec (zstd, or H.264
             // when opted in and the peer advertised it) → wire. Tests inject
@@ -3382,7 +3412,11 @@ impl Node {
             input_peer: Mutex::new(None),
             screen_out: AsyncMutex::new(None),
             screen_peer: Mutex::new(None),
-            screen_engine: Mutex::new(ScreenSender::with_fps(screen_fps)),
+            screen_engine: Mutex::new({
+                let mut s = ScreenSender::with_fps(screen_fps);
+                s.set_scale_pct(screen_scale_pct);
+                s
+            }),
             screen_source,
             screen_observer: Mutex::new(screen_observer),
             screen_ctl: AsyncMutex::new(None),
@@ -3393,6 +3427,8 @@ impl Node {
             screen_bitrate_applied: std::sync::atomic::AtomicBool::new(false),
             screen_fps_auto,
             screen_fps_applied: std::sync::atomic::AtomicBool::new(false),
+            screen_scale_auto,
+            screen_scale_applied: std::sync::atomic::AtomicBool::new(false),
             screen_sink,
             screen_interval: Mutex::new(ScreenIntervalTracker::new()),
             screen_rx_stats: Mutex::new(ScreenStats::default()),
@@ -20186,6 +20222,9 @@ impl Node {
             node.shared
                 .screen_fps_applied
                 .store(false, std::sync::atomic::Ordering::Relaxed);
+            node.shared
+                .screen_scale_applied
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             node.emit(UiEvent::screen_state_changed("idle", false, None));
         });
     }
@@ -20261,6 +20300,27 @@ impl Node {
                 })
             };
             self.screen_set_fps(crate::screen::screen_fps_from_profile(mbps));
+        }
+        // ADR-084 / v1.98: the first frame of a stream also picks the target resolution scale tier
+        // from the viewer's measured bandwidth profile when `screen_scale_auto` is on.
+        if self.shared.screen_scale_auto
+            && !self
+                .shared
+                .screen_scale_applied
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            let mbps = {
+                let peer = self.shared.screen_peer.lock().expect("screen_peer").clone();
+                peer.and_then(|p| {
+                    self.shared
+                        .bandwidth_profiles
+                        .lock()
+                        .expect("bandwidth_profiles")
+                        .get(&p.to_string())
+                        .map(|pr| pr.measured_mbps)
+                })
+            };
+            self.screen_set_scale_pct(crate::screen::screen_scale_from_profile(mbps));
         }
         // Grab can block for a long time (adb pipe reads in particular), so
         // run it on the blocking pool with a hard timeout. On timeout, call
@@ -20648,6 +20708,7 @@ impl Node {
             gaps: rx_stats.gaps,
             bitrate_bps: stats.bitrate_bps,
             fps_target: stats.fps_target,
+            scale_pct: stats.scale_pct,
         }
     }
 
@@ -20749,6 +20810,54 @@ impl Node {
             max_fps: tetherly_core::SCREEN_FPS_MAX,
             interval_us,
             auto_profile: self.shared.screen_fps_auto,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Override screen streaming resolution scale percentage (25..=100) (ADR-084).
+    pub fn screen_set_scale_pct(&self, scale_pct: u32) -> u32 {
+        let actual = {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            engine.set_scale_pct(scale_pct)
+        };
+        if let Some(sel) = &self.shared.screen_encode_codec {
+            sel.set_scale_pct(actual);
+        }
+        self.shared.screen_source.set_scale_pct(actual);
+        actual
+    }
+
+    /// Current target screen streaming resolution scale percentage.
+    pub fn screen_scale_pct(&self) -> u32 {
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .scale_pct()
+    }
+
+    /// Report current screen streaming resolution scale (ADR-084).
+    pub fn screen_scale_report(&self) -> ScreenScaleReport {
+        let scale_pct = self.screen_scale_pct();
+        ScreenScaleReport {
+            ok: true,
+            scale_pct,
+            min_scale_pct: tetherly_core::SCREEN_SCALE_MIN_PCT,
+            max_scale_pct: tetherly_core::SCREEN_SCALE_MAX_PCT,
+            auto_profile: self.shared.screen_scale_auto,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Set and report screen streaming resolution scale percentage (ADR-084).
+    pub fn screen_set_scale_reported(&self, scale_pct: u32) -> ScreenScaleReport {
+        let actual = self.screen_set_scale_pct(scale_pct);
+        ScreenScaleReport {
+            ok: true,
+            scale_pct: actual,
+            min_scale_pct: tetherly_core::SCREEN_SCALE_MIN_PCT,
+            max_scale_pct: tetherly_core::SCREEN_SCALE_MAX_PCT,
+            auto_profile: self.shared.screen_scale_auto,
             timestamp_ms: self.shared.clock.unix_ms(),
         }
     }
@@ -21491,6 +21600,8 @@ mod clipboard_policy_tests {
             screen_bitrate_auto: true,
             screen_fps: default_screen_fps(),
             screen_fps_auto: true,
+            screen_scale_pct: default_screen_scale_pct(),
+            screen_scale_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -21630,6 +21741,8 @@ mod handoff_engine_tests {
             screen_bitrate_auto: true,
             screen_fps: default_screen_fps(),
             screen_fps_auto: true,
+            screen_scale_pct: default_screen_scale_pct(),
+            screen_scale_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -21800,6 +21913,8 @@ mod media_policy_tests {
             screen_bitrate_auto: true,
             screen_fps: default_screen_fps(),
             screen_fps_auto: true,
+            screen_scale_pct: default_screen_scale_pct(),
+            screen_scale_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -21946,6 +22061,8 @@ mod locator_policy_tests {
             screen_bitrate_auto: true,
             screen_fps: default_screen_fps(),
             screen_fps_auto: true,
+            screen_scale_pct: default_screen_scale_pct(),
+            screen_scale_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -22072,6 +22189,8 @@ mod locator_policy_tests {
             screen_bitrate_auto: true,
             screen_fps: default_screen_fps(),
             screen_fps_auto: true,
+            screen_scale_pct: default_screen_scale_pct(),
+            screen_scale_auto: true,
             screen_sink: None,
             input_sink: None,
         };

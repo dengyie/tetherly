@@ -71,6 +71,11 @@ enum Cmd {
         /// number between 5 and 120 (clamped).
         #[arg(long, default_value = "auto")]
         screen_fps: String,
+        /// Screen streaming target resolution scale percentage (ADR-084): `auto` (default)
+        /// selects scale tier from bandwidth profile (50%/75%/100%), or an explicit
+        /// scale percentage between 25 and 100 (clamped).
+        #[arg(long, default_value = "auto")]
+        screen_scale: String,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -2013,6 +2018,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or override the dynamic screen streaming resolution scale percentage (v1.98 / ADR-084).
+    Scale {
+        /// Target scale percentage (25..=100, e.g. 50, 75, 100). If omitted, displays current scale and limits.
+        scale: Option<u32>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3804,6 +3820,7 @@ async fn main() -> Result<()> {
             screen_codec,
             screen_bitrate,
             screen_fps,
+            screen_scale,
             file_port,
             input_port,
             screen_port,
@@ -3831,6 +3848,14 @@ async fn main() -> Result<()> {
                     anyhow::anyhow!("--screen-fps must be `auto` or an integer FPS (5..=120)")
                 })?;
             }
+            cfg.screen_scale_auto = screen_scale.eq_ignore_ascii_case("auto");
+            if !cfg.screen_scale_auto {
+                cfg.screen_scale_pct = screen_scale.trim().parse().map_err(|_| {
+                    anyhow::anyhow!(
+                        "--screen-scale must be `auto` or an integer percentage (25..=100)"
+                    )
+                })?;
+            }
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
             cfg.screen_codec_h264 = h264;
             let encode_codec: Arc<dyn tetherly_core::ScreenCodec> = if h264 {
@@ -3840,6 +3865,7 @@ async fn main() -> Result<()> {
                     false,
                 ));
                 sel.set_fps(cfg.screen_fps);
+                sel.set_scale_pct(cfg.screen_scale_pct);
                 // The daemon's caps-merge hook flips this on when the peer
                 // advertises screencodecs=h264; the CLI only sets the intent.
                 sel.clone()
@@ -5933,6 +5959,12 @@ async fn main() -> Result<()> {
                             rep.bitrate_bps as f64 / 1_000_000.0
                         );
                     }
+                    if rep.fps_target > 0 {
+                        println!("  FPS:          {} FPS", rep.fps_target);
+                    }
+                    if rep.scale_pct > 0 {
+                        println!("  Scale:        {}%", rep.scale_pct);
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -6031,6 +6063,62 @@ async fn main() -> Result<()> {
                                 rep.interval_us as f64 / 1000.0
                             );
                             println!("  Range:     {} FPS - {} FPS", rep.min_fps, rep.max_fps);
+                            println!(
+                                "  Auto-tier: {}",
+                                if rep.auto_profile {
+                                    "enabled (derived from link bandwidth)"
+                                } else {
+                                    "manual override"
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+            ScreenCmd::Scale {
+                scale,
+                json,
+                ui_port,
+            } => {
+                let (code, resp) = match scale {
+                    Some(s) => {
+                        let req = serde_json::json!({ "scale": s });
+                        let body = serde_json::to_vec(&req)?;
+                        tetherly_node::loopback_post(ui_port, "/api/screen/scale", &body).await
+                    }
+                    None => tetherly_node::loopback_get(ui_port, "/api/screen/scale").await,
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen scale query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_node::ScreenScaleReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    match scale {
+                        Some(_) => {
+                            println!(
+                                "Screen target resolution scale set to {}% (allowed: {}%..={}%)",
+                                rep.scale_pct, rep.min_scale_pct, rep.max_scale_pct
+                            );
+                        }
+                        None => {
+                            println!("Screen Streaming Resolution Scale:");
+                            println!("  Current:   {}%", rep.scale_pct);
+                            println!(
+                                "  Range:     {}% - {}%",
+                                rep.min_scale_pct, rep.max_scale_pct
+                            );
                             println!(
                                 "  Auto-tier: {}",
                                 if rep.auto_profile {

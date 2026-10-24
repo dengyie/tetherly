@@ -3,12 +3,41 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.97** |
+| 文档版本 | **1.98** |
 | 日期 | 2026-10-25 |
-| 状态 | **v1.97 屏幕流动态帧率与自适应定步步频控制器（Screen Streaming Dynamic FPS & Adaptive Frame Pacing Controller, ADR-083）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`, `ports.rs`）：新增微秒级帧定步控制器 `ScreenFpsPacer`（5–120 FPS 边界钳位、默认 30 FPS、$\lfloor 1\,000\,000 / \text{fps} \rfloor$ 定步周期）；`ScreenSender` 集成定步判定与槽位消费；`ScreenCodec` 与 `ScreenSource` 接口扩展 `set_fps()` 与 `fps()`。(2) **运行时编解码联动与自动阶梯**（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）：`screen_fps_from_profile` 实现基于实测带宽的 15/24/30/60 FPS 自动阶梯；`H264Codec` 自动感知帧率变化触发 OpenH264 编码器热重建与首帧 IDR 强发；发送泵在 `src.grab()` 抓帧前执行微秒前置定步短路判定（Pre-Grab Pacing Check），避免算力与功耗空转。(3) **接口与生态**：新增回环 API `GET/POST /api/screen/fps`、CLI 命令 `tetherly screen fps [fps]`、守护进程启动参数 `--screen-fps <auto|N>` 与实时状态展示；(4) **测试与版本**：集成测试 `m5_7_screen_dynamic_fps_pacing_and_telemetry` 全绿，工作区升级至 `0.1.19`。 |
+| 状态 | **v1.98 屏幕流动态分辨率自适应降采样控制器（Screen Streaming Dynamic Resolution & Adaptive Downscaling Controller, ADR-084）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`, `ports.rs`）：新增分辨率缩放控制器 `ScreenScaleController`（25%–100% 边界钳位、默认 100% 原画质、偶数几何尺寸刚性安全截断 $W, H \ge 2 \ \& \ \sim 1$）；实现高性能无浮点 16.16 定点数纯整数双线性插值降采样算法 `downscale_bgra8` 与帧缩放封装 `downscale_frame`；`ScreenSender` 集成缩放控制与 `scale_pct` 遥测；`ScreenCodec` 与 `ScreenSource` 接口扩展 `set_scale_pct()` 与 `scale_pct()`。(2) **运行时编解码联动与自动阶梯**（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）：`screen_scale_from_profile` 实现基于实测带宽的分辨率缩放阶梯（< 3 Mbps 降至 50% 降低 75% 像素量消除延迟，3–10 Mbps 缩放至 75%，$\ge$ 10 Mbps 或默认 100% 原生全画质）；`EncodedSource<S>` 抓取 Raw Frame 后在送入编码器前执行预编码降采样；`H264Codec` 自动感知画面几何尺寸变化，触发 OpenH264 编码器平滑重建与首帧 IDR 恢复。(3) **接口与生态**：新增回环 API `GET/POST /api/screen/scale`、CLI 命令 `tetherly screen scale [scale_pct]`、守护进程启动参数 `--screen-scale <auto|N>` 与实时状态透出 `Scale: N%`；(4) **测试与版本**：集成测试 `m5_8_screen_dynamic_resolution_scaling` 验证端到端 45720 缩放推流与呈现，工作区升级至 `0.1.20`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.98 相对 1.97(屏幕流动态分辨率自适应降采样控制器 ADR-084)**
+
+- **动机与问题背景**:
+  在高分屏（如 2K/4K/Retina 屏幕）或算力受限的嵌入式/移动设备上，原生分辨率推流使得 H.264 编码器每帧需处理数以万计的宏块，导致 CPU 占用飙升、编码耗时超标（> 50 ms）。在跨国极弱网或低带宽（< 3 Mbps）环境下，单纯依赖降低码率或帧率会导致严重马赛克，而下采样至 50%（像素总量减少为 1/4）可在极低码率下维持文字清晰锐利与零堆积交互。同时，H.264/AVC 编码要求 YUV420 尺寸必须为偶数（Chroma 2x2 对齐），必须提供偶数安全截断算法与高性能零浮点开销降采样流水线。
+- **架构解法与落地**:
+  1. **Core 协议与缩放控制器（`crates/tetherly-core/src/screen.rs`, `ports.rs`）**：
+     - 定义缩放常数：`SCREEN_SCALE_DEFAULT_PCT (100)`, `SCREEN_SCALE_MIN_PCT (25)`, `SCREEN_SCALE_MAX_PCT (100)`。
+     - 实现核心控制器 `ScreenScaleController`：
+       - **边界钳位**：刚性钳位在 $[25\%, 100\%]$ 区间。
+       - **偶数几何安全截断**：尺寸计算公式 $\max(2, \lfloor (D \times \text{scale\_pct}) / 100 \rfloor \ \& \ \sim 1)$，严格杜绝奇数宽高导致的底层编码器崩溃。
+     - 实现纯整数 16.16 定点数双线性插值算法 `downscale_bgra8` 与帧缩放封装 `downscale_frame`，100% 缩放模式下零拷贝透传。
+     - `ScreenStats` 扩充 `scale_pct: u32` 遥测指标。
+     - `ScreenSender` 集成 `scale_controller`，提供 `set_scale_pct`、`scale_pct`、`scale_controller` 等方法。
+     - `ScreenCodec` 与 `ScreenSource` 扩展 `set_scale_pct(&self, scale_pct: u32)` 与 `scale_pct(&self) -> u32` 抽象方法。
+  2. **Node 编解码热更新与流水线联动（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）**：
+     - 实现带宽测速自动分级阶梯算法 `screen_scale_from_profile`：< 3 Mbps 映射至 50%；3–10 Mbps 映射至 75%；$\ge$ 10 Mbps 或默认映射至 100%。
+     - `EncodedSource<S>::grab()` 在抓取未压缩原始帧后，在送入底层编码器 `compress_frame()` 之前完成预编码下采样。
+     - `H264Codec` 自动感知帧尺寸变化，触发底座 OpenH264 编码器优雅重建，并强制发送新 SPS/PPS 与 IDR 恢复帧。
+     - 运行时发送泵 `screen_send_frame()` 在首次推流时依据实测链路带宽自动分级初始分辨率比例。
+  3. **回环 API 与 CLI 统一支持**：
+     - 新增 HTTP 路由 `GET /api/screen/scale` 与 `POST /api/screen/scale`，支持 JSON `{"scale": number}` 或 Query `?scale=...` 参数热配置。
+     - CLI 新增 `tetherly screen scale [scale_pct]` 命令，并在 `tetherly screen status` 中透出当前缩放比例 `Scale: N%`。
+     - `Cmd::Run` 新增 `--screen-scale <auto|N>` 参数支持启动预设策略。
+     - 遥测 DTO `ScreenStatusReport` 新增 `scale_pct` 字段，新增强类型 `ScreenScaleReport`。
+  4. **测试**：
+     - Core 单元测试 `resolution_scale_controller_and_downscaling`（验证边界钳位、奇偶数尺寸对齐、颜色通道定点插值一致性）。
+     - Node 单元测试与端到端链路验证。
+     - Phase 5 集成测试 `m5_8_screen_dynamic_resolution_scaling` 验证 45720 通道握手、API 动态查询与热调、范围钳位、50% 降采样推流与远端呈现。
 
 **1.97 相对 1.96(屏幕流动态帧率与自适应定步步频控制器 ADR-083)**
 

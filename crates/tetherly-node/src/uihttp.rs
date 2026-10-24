@@ -4016,6 +4016,44 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             let rep = node.screen_set_fps_reported(fps);
             json_ok(&rep)
         }
+        ("GET", "/api/screen/scale") => {
+            let rep = node.screen_scale_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/scale") => {
+            #[derive(serde::Deserialize)]
+            struct ScaleReq {
+                #[serde(default)]
+                scale_pct: Option<u32>,
+                #[serde(default)]
+                scale: Option<u32>,
+                #[serde(default)]
+                pct: Option<u32>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<ScaleReq> = if !body.is_empty() {
+                match serde_json::from_slice(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected { scale_pct: number }"),
+                }
+            } else {
+                None
+            };
+            let scale_val = parsed_body
+                .and_then(|b| b.scale_pct.or(b.scale).or(b.pct))
+                .or_else(|| {
+                    qmap.get("scale_pct")
+                        .or_else(|| qmap.get("scale"))
+                        .or_else(|| qmap.get("pct"))
+                        .and_then(|v| v.parse::<u32>().ok())
+                });
+            let scale = match scale_val {
+                Some(s) => s,
+                None => return err(400, "missing scale parameter (scale_pct or scale or pct)"),
+            };
+            let rep = node.screen_set_scale_reported(scale);
+            json_ok(&rep)
+        }
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -7899,6 +7937,8 @@ mod tests {
             screen_bitrate_auto: true,
             screen_fps: 30,
             screen_fps_auto: true,
+            screen_scale_pct: 100,
+            screen_scale_auto: true,
             screen_sink: None,
             input_sink: None,
         };

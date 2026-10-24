@@ -228,6 +228,14 @@ pub trait ScreenSource: Send + Sync {
     fn fps(&self) -> u32 {
         30
     }
+
+    /// Target dynamic downscaling percentage update (25..=100) (v1.98 / ADR-084).
+    fn set_scale_pct(&self, _scale_pct: u32) {}
+
+    /// Current target downscaling percentage. Defaults to 100 (native).
+    fn scale_pct(&self) -> u32 {
+        100
+    }
 }
 
 /// Transform a raw pixel body to or form the wire format carried in
@@ -283,6 +291,14 @@ pub trait ScreenCodec: Send + Sync {
     /// Current target streaming frame rate.
     fn fps(&self) -> u32 {
         30
+    }
+
+    /// Target dynamic downscaling percentage update for rate-controlled codecs (v1.98 / ADR-084).
+    fn set_scale_pct(&self, _scale_pct: u32) {}
+
+    /// Current target downscaling percentage. Defaults to 100 (native).
+    fn scale_pct(&self) -> u32 {
+        100
     }
 }
 

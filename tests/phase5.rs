@@ -70,6 +70,8 @@ fn cfg(
         screen_bitrate_auto: true,
         screen_fps: 30,
         screen_fps_auto: true,
+        screen_scale_pct: 100,
+        screen_scale_auto: true,
         screen_sink: None,
         input_sink: None,
     }
@@ -1446,6 +1448,179 @@ async fn m5_7_screen_dynamic_fps_pacing_and_telemetry() {
 
     let sink = visitor.screen_sink_snapshot();
     assert_eq!(sink.presented(), vec![1, 2, 3]);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_8_screen_dynamic_resolution_scaling() {
+    let codec = Arc::new(tetherly_node::NegotiatedCodec::new(true, 2_000_000, true));
+    let src: Arc<dyn tetherly_core::ScreenSource> = Arc::new(tetherly_node::EncodedSource::new(
+        MemoryScreenSource::new(32, 32).expect("32x32 screen"),
+        codec.clone(),
+    ));
+    let (da, ga) = temp_dir("host-h264-scale");
+    let (db, gb) = temp_dir("visitor-h264-scale");
+    let host = Node::start(cfg(da, "host", Some(src))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let host_ui = host.spawn_ui().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+    wait_screen_port(
+        &host,
+        visitor.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+    wait_screen_port(
+        &visitor,
+        host.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+
+    visitor
+        .open_screen(host.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    host.screen_allow();
+    visitor.screen_start().await.unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_state() == ScreenState::Streaming {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("host never started streaming (h264-scale)");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // 1. Initial GET /api/screen/scale
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/scale")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_node::ScreenScaleReport = serde_json::from_slice(&b).unwrap();
+    assert!(rep.ok);
+    assert_eq!(rep.min_scale_pct, tetherly_core::SCREEN_SCALE_MIN_PCT);
+    assert_eq!(rep.max_scale_pct, tetherly_core::SCREEN_SCALE_MAX_PCT);
+    assert_eq!(rep.scale_pct, 100);
+    assert_eq!(host.screen_scale_pct(), 100);
+
+    // Initial ScreenStatusReport check
+    let s_rep = host.screen_status_report().await;
+    assert_eq!(s_rep.scale_pct, 100);
+
+    // 2. Override resolution scale to 50% via POST /api/screen/scale
+    let req_50 = serde_json::json!({ "scale": 50 });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/scale",
+        &serde_json::to_vec(&req_50).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep_50: tetherly_node::ScreenScaleReport = serde_json::from_slice(&b).unwrap();
+    assert!(rep_50.ok);
+    assert_eq!(rep_50.scale_pct, 50);
+    assert_eq!(host.screen_scale_pct(), 50);
+    assert_eq!(codec.scale_pct(), 50);
+
+    // Verify ScreenStatusReport reflects scale_pct
+    let s_rep_50 = host.screen_status_report().await;
+    assert_eq!(s_rep_50.scale_pct, 50);
+
+    // 3. Test clamping bounds: request 200% -> clamps to max (100%)
+    let req_max = serde_json::json!({ "scale": 200 });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/scale",
+        &serde_json::to_vec(&req_max).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep_max: tetherly_node::ScreenScaleReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep_max.scale_pct, tetherly_core::SCREEN_SCALE_MAX_PCT);
+    assert_eq!(host.screen_scale_pct(), tetherly_core::SCREEN_SCALE_MAX_PCT);
+
+    // Request 5% -> clamps to min (25%)
+    let req_min = serde_json::json!({ "scale": 5 });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/scale",
+        &serde_json::to_vec(&req_min).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep_min: tetherly_node::ScreenScaleReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep_min.scale_pct, tetherly_core::SCREEN_SCALE_MIN_PCT);
+    assert_eq!(host.screen_scale_pct(), tetherly_core::SCREEN_SCALE_MIN_PCT);
+
+    // Query parameter POST test: /api/screen/scale?scale=75
+    let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/scale?scale=75", b"")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep_75: tetherly_node::ScreenScaleReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep_75.scale_pct, 75);
+    assert_eq!(host.screen_scale_pct(), 75);
+
+    // 4. Send frames under 50% scale
+    host.screen_set_scale_pct(50);
+    assert_eq!(host.screen_scale_pct(), 50);
+
+    // Send 3 frames
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        assert!(host.screen_send_frame().await.unwrap());
+    }
+
+    // 5. Verify frames arrive at visitor sink
+    let start = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 3 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "frames did not arrive under dynamic resolution scaling, count={}",
+                visitor.screen_sink_snapshot().count()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let sink = visitor.screen_sink_snapshot();
+    assert_eq!(sink.presented(), vec![1, 2, 3]);
+
+    // 6. Bandwidth auto-tiering helper validation
+    assert_eq!(tetherly_node::screen_scale_from_profile(None), 100);
+    assert_eq!(
+        tetherly_node::screen_scale_from_profile(Some(1_500_000.0)),
+        50
+    );
+    assert_eq!(
+        tetherly_node::screen_scale_from_profile(Some(6_000_000.0)),
+        75
+    );
+    assert_eq!(
+        tetherly_node::screen_scale_from_profile(Some(25_000_000.0)),
+        100
+    );
 
     host.shutdown();
     visitor.shutdown();

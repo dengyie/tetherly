@@ -64,6 +64,8 @@ fn cfg(dir: PathBuf, name: &str) -> NodeConfig {
         screen_bitrate_auto: true,
         screen_fps: 30,
         screen_fps_auto: true,
+        screen_scale_pct: 100,
+        screen_scale_auto: true,
         screen_sink: None,
         input_sink: None,
     }

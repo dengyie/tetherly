@@ -65,6 +65,15 @@ pub const SCREEN_FPS_MIN: u32 = 5;
 /// Maximum screen streaming frame rate ceiling in frames per second (120 FPS).
 pub const SCREEN_FPS_MAX: u32 = 120;
 
+/// Default screen streaming resolution scale percentage (100% native) (v1.98 / ADR-084).
+pub const SCREEN_SCALE_DEFAULT_PCT: u32 = 100;
+
+/// Minimum screen streaming resolution scale percentage floor (25%).
+pub const SCREEN_SCALE_MIN_PCT: u32 = 25;
+
+/// Maximum screen streaming resolution scale percentage ceiling (100%).
+pub const SCREEN_SCALE_MAX_PCT: u32 = 100;
+
 /// Fragment transport for screen frames too large for one inner frame.
 /// A fragment stream is a `TMF1`-enveloped run of inner frames; the receiver
 /// reassembles before `decode_payload`. A `TMV1`-prefixed payload is a whole
@@ -510,6 +519,8 @@ pub struct ScreenStats {
     pub bitrate_bps: u32,
     /// Target screen streaming frame rate in frames per second (v1.97 / ADR-083).
     pub fps_target: u32,
+    /// Target screen resolution scale percentage (25..=100) (v1.98 / ADR-084).
+    pub scale_pct: u32,
 }
 
 /// Rolling window tracker for screen frame round-trip times (v1.93 / ADR-080).
@@ -737,6 +748,172 @@ impl ScreenFpsPacer {
     }
 }
 
+/// Dynamic screen resolution downscaling controller managing target scale percentage (v1.98 / ADR-084).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenScaleController {
+    scale_pct: u32,
+    min_scale_pct: u32,
+    max_scale_pct: u32,
+}
+
+impl Default for ScreenScaleController {
+    fn default() -> Self {
+        Self::new(SCREEN_SCALE_DEFAULT_PCT)
+    }
+}
+
+impl ScreenScaleController {
+    pub fn new(initial_pct: u32) -> Self {
+        let clamped = initial_pct.clamp(SCREEN_SCALE_MIN_PCT, SCREEN_SCALE_MAX_PCT);
+        Self {
+            scale_pct: clamped,
+            min_scale_pct: SCREEN_SCALE_MIN_PCT,
+            max_scale_pct: SCREEN_SCALE_MAX_PCT,
+        }
+    }
+
+    pub fn with_bounds(initial_pct: u32, min_pct: u32, max_pct: u32) -> Self {
+        let min = min_pct.max(SCREEN_SCALE_MIN_PCT);
+        let max = max_pct.clamp(min, SCREEN_SCALE_MAX_PCT);
+        let clamped = initial_pct.clamp(min, max);
+        Self {
+            scale_pct: clamped,
+            min_scale_pct: min,
+            max_scale_pct: max,
+        }
+    }
+
+    pub fn scale_pct(&self) -> u32 {
+        self.scale_pct
+    }
+
+    pub fn min_scale_pct(&self) -> u32 {
+        self.min_scale_pct
+    }
+
+    pub fn max_scale_pct(&self) -> u32 {
+        self.max_scale_pct
+    }
+
+    pub fn set_scale_pct(&mut self, pct: u32) -> u32 {
+        let clamped = pct.clamp(self.min_scale_pct, self.max_scale_pct);
+        self.scale_pct = clamped;
+        clamped
+    }
+
+    pub fn compute_scaled_dims(&self, orig_w: u16, orig_h: u16) -> (u16, u16) {
+        Self::scale_dims(orig_w, orig_h, self.scale_pct)
+    }
+
+    /// Calculate scaled width and height ensuring even dimensions (minimum 2x2) for YUV/H.264 codecs.
+    pub fn scale_dims(orig_w: u16, orig_h: u16, scale_pct: u32) -> (u16, u16) {
+        let clamped = scale_pct.clamp(SCREEN_SCALE_MIN_PCT, SCREEN_SCALE_MAX_PCT);
+        if clamped >= 100 {
+            return (orig_w, orig_h);
+        }
+        let w = (orig_w as u32 * clamped / 100) as u16;
+        let h = (orig_h as u32 * clamped / 100) as u16;
+        let even_w = (w & !1).max(2);
+        let even_h = (h & !1).max(2);
+        (even_w, even_h)
+    }
+}
+
+/// Bilinear downscaling for 32-bit BGRA/RGBA buffers with 16.16 fixed-point arithmetic (v1.98 / ADR-084).
+pub fn downscale_bgra8(
+    src: &[u8],
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+) -> Vec<u8> {
+    if src_w == dst_w && src_h == dst_h {
+        return src.to_vec();
+    }
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return Vec::new();
+    }
+    let mut dst = vec![0u8; dst_w * dst_h * 4];
+    let x_ratio = ((src_w << 16) / dst_w) as u32;
+    let y_ratio = ((src_h << 16) / dst_h) as u32;
+
+    for dy in 0..dst_h {
+        let sy_fp = (dy as u32) * y_ratio;
+        let sy0 = (sy_fp >> 16) as usize;
+        let sy1 = (sy0 + 1).min(src_h - 1);
+        let y_weight = (sy_fp & 0xffff) >> 8;
+        let y_weight_inv = 256 - y_weight;
+
+        let dst_row_offset = dy * dst_w * 4;
+        let src_row0_offset = sy0 * src_w * 4;
+        let src_row1_offset = sy1 * src_w * 4;
+
+        for dx in 0..dst_w {
+            let sx_fp = (dx as u32) * x_ratio;
+            let sx0 = (sx_fp >> 16) as usize;
+            let sx1 = (sx0 + 1).min(src_w - 1);
+            let x_weight = (sx_fp & 0xffff) >> 8;
+            let x_weight_inv = 256 - x_weight;
+
+            let p00_idx = src_row0_offset + sx0 * 4;
+            let p10_idx = src_row0_offset + sx1 * 4;
+            let p01_idx = src_row1_offset + sx0 * 4;
+            let p11_idx = src_row1_offset + sx1 * 4;
+
+            let dst_idx = dst_row_offset + dx * 4;
+
+            for c in 0..4 {
+                let v00 = src[p00_idx + c] as u32;
+                let v10 = src[p10_idx + c] as u32;
+                let v01 = src[p01_idx + c] as u32;
+                let v11 = src[p11_idx + c] as u32;
+
+                let top = (v00 * x_weight_inv + v10 * x_weight) >> 8;
+                let bottom = (v01 * x_weight_inv + v11 * x_weight) >> 8;
+                let val = (top * y_weight_inv + bottom * y_weight) >> 8;
+
+                dst[dst_idx + c] = val.min(255) as u8;
+            }
+        }
+    }
+    dst
+}
+
+/// Downscale an uncompressed raw ScreenFrame according to target scale percentage (v1.98 / ADR-084).
+pub fn downscale_frame(frame: &ScreenFrame, scale_pct: u32) -> Result<ScreenFrame, CoreError> {
+    let clamped_pct = scale_pct.clamp(SCREEN_SCALE_MIN_PCT, SCREEN_SCALE_MAX_PCT);
+    if clamped_pct >= 100 {
+        return Ok(frame.clone());
+    }
+    if frame.compressed() {
+        return Err(CoreError::ScreenFrame);
+    }
+    let (dst_w, dst_h) = ScreenScaleController::scale_dims(frame.rect.w, frame.rect.h, clamped_pct);
+    if dst_w == frame.rect.w && dst_h == frame.rect.h {
+        return Ok(frame.clone());
+    }
+    let expected_src_len = frame.rect.pixel_bytes(frame.format);
+    if frame.bytes.len() != expected_src_len {
+        return Err(CoreError::ScreenFrame);
+    }
+    let scaled_bytes = downscale_bgra8(
+        &frame.bytes,
+        frame.rect.w as usize,
+        frame.rect.h as usize,
+        dst_w as usize,
+        dst_h as usize,
+    );
+    let new_rect = ScreenRect::new(frame.rect.x, frame.rect.y, dst_w, dst_h)?;
+    Ok(ScreenFrame {
+        seq: frame.seq,
+        rect: new_rect,
+        format: frame.format,
+        codec_tag: frame.codec_tag,
+        stride: dst_w as u32 * frame.format.bpp() as u32,
+        bytes: scaled_bytes,
+    })
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -749,6 +926,7 @@ pub struct ScreenSender {
     rtt_tracker: ScreenRttTracker,
     rate_controller: ScreenRateController,
     fps_pacer: ScreenFpsPacer,
+    scale_controller: ScreenScaleController,
 }
 
 impl Default for ScreenSender {
@@ -761,9 +939,11 @@ impl ScreenSender {
     pub fn new() -> Self {
         let rate_controller = ScreenRateController::default();
         let fps_pacer = ScreenFpsPacer::default();
+        let scale_controller = ScreenScaleController::default();
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
+            scale_pct: scale_controller.scale_pct(),
             ..Default::default()
         };
         Self {
@@ -775,12 +955,19 @@ impl ScreenSender {
             rtt_tracker: ScreenRttTracker::new(SCREEN_IN_FLIGHT_MAX),
             rate_controller,
             fps_pacer,
+            scale_controller,
         }
     }
 
     pub fn with_fps(fps: u32) -> Self {
         let mut sender = Self::new();
         sender.set_fps(fps);
+        sender
+    }
+
+    pub fn with_scale(scale_pct: u32) -> Self {
+        let mut sender = Self::new();
+        sender.set_scale_pct(scale_pct);
         sender
     }
 
@@ -977,6 +1164,28 @@ impl ScreenSender {
     /// Access mutable reference to the internal frame rate pacer.
     pub fn fps_pacer_mut(&mut self) -> &mut ScreenFpsPacer {
         &mut self.fps_pacer
+    }
+
+    /// Target screen resolution scale percentage (v1.98 / ADR-084).
+    pub fn scale_pct(&self) -> u32 {
+        self.stats.scale_pct
+    }
+
+    /// Explicitly configure target screen resolution scale percentage (25..=100).
+    pub fn set_scale_pct(&mut self, pct: u32) -> u32 {
+        let actual = self.scale_controller.set_scale_pct(pct);
+        self.stats.scale_pct = actual;
+        actual
+    }
+
+    /// Access reference to the internal resolution scale controller.
+    pub fn scale_controller(&self) -> &ScreenScaleController {
+        &self.scale_controller
+    }
+
+    /// Access mutable reference to the internal resolution scale controller.
+    pub fn scale_controller_mut(&mut self) -> &mut ScreenScaleController {
+        &mut self.scale_controller
     }
 
     /// Check if target frame pacing interval has elapsed.
@@ -1894,5 +2103,79 @@ mod tests {
         s.on_peer_gone();
         // Reset resets last frame timestamp, allowing immediate next tick
         assert!(s.is_pacing_ready(600_000));
+    }
+
+    #[test]
+    fn resolution_scale_controller_and_downscaling() {
+        let mut ctrl = ScreenScaleController::default();
+        assert_eq!(ctrl.scale_pct(), SCREEN_SCALE_DEFAULT_PCT);
+
+        // 1. Clamping bounds
+        assert_eq!(ctrl.set_scale_pct(150), SCREEN_SCALE_MAX_PCT);
+        assert_eq!(ctrl.scale_pct(), SCREEN_SCALE_MAX_PCT);
+
+        assert_eq!(ctrl.set_scale_pct(10), SCREEN_SCALE_MIN_PCT);
+        assert_eq!(ctrl.scale_pct(), SCREEN_SCALE_MIN_PCT);
+
+        // 2. Dimension calculation with even constraint (minimum 2x2)
+        assert_eq!(
+            ScreenScaleController::scale_dims(1920, 1080, 100),
+            (1920, 1080)
+        );
+        assert_eq!(
+            ScreenScaleController::scale_dims(1920, 1080, 50),
+            (960, 540)
+        );
+        assert_eq!(
+            ScreenScaleController::scale_dims(1920, 1080, 75),
+            (1440, 810)
+        );
+        assert_eq!(
+            ScreenScaleController::scale_dims(1920, 1080, 25),
+            (480, 270)
+        );
+
+        // Odd dimensions rounded to even
+        let (w, h) = ScreenScaleController::scale_dims(1366, 768, 50);
+        assert_eq!(w % 2, 0);
+        assert_eq!(h % 2, 0);
+        assert_eq!((w, h), (682, 384));
+
+        // 3. Downscale raw frame
+        let rect = ScreenRect::new(0, 0, 100, 100).unwrap();
+        let mut bgra = vec![0u8; 100 * 100 * 4];
+        for i in 0..100 * 100 {
+            bgra[i * 4] = 255; // Blue
+            bgra[i * 4 + 1] = 128; // Green
+            bgra[i * 4 + 2] = 64; // Red
+            bgra[i * 4 + 3] = 255; // Alpha
+        }
+        let frame = ScreenFrame::raw(42, rect, PixelFormat::Bgra8, bgra).unwrap();
+
+        // 50% scale -> 50x50 frame
+        let scaled = downscale_frame(&frame, 50).unwrap();
+        assert_eq!(scaled.rect.w, 50);
+        assert_eq!(scaled.rect.h, 50);
+        assert_eq!(scaled.bytes.len(), 50 * 50 * 4);
+        assert_eq!(scaled.seq, 42);
+        // Verify color preservation in downscaled pixels
+        assert_eq!(scaled.bytes[0], 255);
+        assert_eq!(scaled.bytes[1], 128);
+        assert_eq!(scaled.bytes[2], 64);
+        assert_eq!(scaled.bytes[3], 255);
+
+        // 100% scale is a no-op clone
+        let native = downscale_frame(&frame, 100).unwrap();
+        assert_eq!(native.rect.w, 100);
+        assert_eq!(native.rect.h, 100);
+
+        // 4. Sender integration and stats
+        let mut s = ScreenSender::new();
+        assert_eq!(s.scale_pct(), SCREEN_SCALE_DEFAULT_PCT);
+        assert_eq!(s.stats().scale_pct, SCREEN_SCALE_DEFAULT_PCT);
+
+        assert_eq!(s.set_scale_pct(50), 50);
+        assert_eq!(s.scale_pct(), 50);
+        assert_eq!(s.stats().scale_pct, 50);
     }
 }

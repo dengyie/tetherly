@@ -227,6 +227,7 @@ struct H264EncoderState {
 pub struct H264Codec {
     bitrate_bps: std::sync::atomic::AtomicU32,
     fps: std::sync::atomic::AtomicU32,
+    scale_pct: std::sync::atomic::AtomicU32,
     force_idr: std::sync::atomic::AtomicBool,
     enc: Mutex<Option<H264EncoderState>>,
     dec: Mutex<Option<openh264::decoder::Decoder>>,
@@ -237,6 +238,7 @@ impl std::fmt::Debug for H264Codec {
         f.debug_struct("H264Codec")
             .field("bitrate_bps", &self.bitrate_bps)
             .field("fps", &self.fps)
+            .field("scale_pct", &self.scale_pct)
             .finish()
     }
 }
@@ -246,6 +248,7 @@ impl H264Codec {
         Self {
             bitrate_bps: std::sync::atomic::AtomicU32::new(bitrate_bps.clamp(100_000, 50_000_000)),
             fps: std::sync::atomic::AtomicU32::new(tetherly_core::SCREEN_FPS_DEFAULT),
+            scale_pct: std::sync::atomic::AtomicU32::new(tetherly_core::SCREEN_SCALE_DEFAULT_PCT),
             force_idr: std::sync::atomic::AtomicBool::new(false),
             enc: Mutex::new(None),
             dec: Mutex::new(None),
@@ -275,6 +278,20 @@ impl H264Codec {
 
     pub fn fps(&self) -> u32 {
         self.fps.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Hot resolution scale target update (ADR-084 dynamic scaling): clamped between SCREEN_SCALE_MIN_PCT and SCREEN_SCALE_MAX_PCT.
+    pub fn set_scale_pct(&self, pct: u32) {
+        let clamped = pct.clamp(
+            tetherly_core::SCREEN_SCALE_MIN_PCT,
+            tetherly_core::SCREEN_SCALE_MAX_PCT,
+        );
+        self.scale_pct
+            .store(clamped, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn scale_pct(&self) -> u32 {
+        self.scale_pct.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Force the next encode pass to emit an IDR keyframe (ADR-081).
@@ -364,6 +381,14 @@ impl ScreenCodecPort for H264Codec {
 
     fn fps(&self) -> u32 {
         self.fps()
+    }
+
+    fn set_scale_pct(&self, scale_pct: u32) {
+        self.set_scale_pct(scale_pct);
+    }
+
+    fn scale_pct(&self) -> u32 {
+        self.scale_pct()
     }
 
     fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
@@ -466,6 +491,24 @@ pub fn screen_fps_from_profile(measured_mbps: Option<f64>) -> u32 {
     }
 }
 
+/// ADR-084 dynamic resolution scaling auto-tiering: maps measured bandwidth to target resolution scale percentage.
+/// Minimal (< 3 Mbps): 50% scale
+/// Low/Medium (3–10 Mbps): 75% scale
+/// High (>= 10 Mbps) or None / invalid: 100% scale (Native)
+pub fn screen_scale_from_profile(measured_mbps: Option<f64>) -> u32 {
+    let mbps = match measured_mbps {
+        Some(m) if m.is_finite() && m > 0.0 => m,
+        _ => return tetherly_core::SCREEN_SCALE_DEFAULT_PCT,
+    };
+    if mbps < 3.0 {
+        50
+    } else if mbps < 10.0 {
+        75
+    } else {
+        100
+    }
+}
+
 /// Negotiated screen-channel codec (ADR-079 §决定): encode with H.264 only
 /// when the operator asked for it *and* the peer advertised `screencodecs`
 /// containing `h264`; otherwise zstd. The decode side is not chosen here —
@@ -513,6 +556,16 @@ impl NegotiatedCodec {
     /// Current target frame rate in fps.
     pub fn fps(&self) -> u32 {
         self.h264.fps()
+    }
+
+    /// Hot resolution scale retier (ADR-084 dynamic scaling): forwarded to the H.264 encoder.
+    pub fn set_scale_pct(&self, pct: u32) {
+        self.h264.set_scale_pct(pct);
+    }
+
+    /// Current target resolution scale percentage.
+    pub fn scale_pct(&self) -> u32 {
+        self.h264.scale_pct()
     }
 
     /// Force the next encode pass to emit an IDR keyframe (ADR-081).
@@ -573,6 +626,14 @@ impl ScreenCodecPort for NegotiatedCodec {
         self.fps()
     }
 
+    fn set_scale_pct(&self, scale_pct: u32) {
+        self.set_scale_pct(scale_pct);
+    }
+
+    fn scale_pct(&self) -> u32 {
+        self.scale_pct()
+    }
+
     fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
         if self.use_h264() {
             self.h264.compress_frame(raw, w, h)
@@ -592,11 +653,16 @@ impl ScreenCodecPort for NegotiatedCodec {
 pub struct EncodedSource<S> {
     inner: S,
     codec: Arc<dyn ScreenCodecPort>,
+    scale_pct: std::sync::atomic::AtomicU32,
 }
 
 impl<S> EncodedSource<S> {
     pub fn new(inner: S, codec: Arc<dyn ScreenCodecPort>) -> Self {
-        Self { inner, codec }
+        Self {
+            inner,
+            codec,
+            scale_pct: std::sync::atomic::AtomicU32::new(tetherly_core::SCREEN_SCALE_DEFAULT_PCT),
+        }
     }
 
     pub fn codec(&self) -> &Arc<dyn ScreenCodecPort> {
@@ -608,6 +674,12 @@ impl<S: ScreenSource> ScreenSource for EncodedSource<S> {
     fn grab(&self) -> Result<Option<ScreenFrame>, CoreError> {
         let Some(frame) = self.inner.grab()? else {
             return Ok(None);
+        };
+        let scale = self.scale_pct();
+        let frame = if scale < 100 {
+            tetherly_core::screen::downscale_frame(&frame, scale)?
+        } else {
+            frame
         };
         let encoded = self
             .codec
@@ -641,6 +713,21 @@ impl<S: ScreenSource> ScreenSource for EncodedSource<S> {
 
     fn fps(&self) -> u32 {
         self.codec.fps()
+    }
+
+    fn set_scale_pct(&self, scale_pct: u32) {
+        let clamped = scale_pct.clamp(
+            tetherly_core::SCREEN_SCALE_MIN_PCT,
+            tetherly_core::SCREEN_SCALE_MAX_PCT,
+        );
+        self.scale_pct
+            .store(clamped, std::sync::atomic::Ordering::Relaxed);
+        self.codec.set_scale_pct(clamped);
+        self.inner.set_scale_pct(clamped);
+    }
+
+    fn scale_pct(&self) -> u32 {
+        self.scale_pct.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
