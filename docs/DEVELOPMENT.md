@@ -20,6 +20,7 @@
   4. **测试**：`h264_tests` 5 条（灰度 BT.601 精确性、`from_bgra` 尺寸拒收、三帧往返 PSNR ≥27dB——4:2:0 物理水平与回归裕量（<15dB 级平面/步长错误）的平衡点、几何切换 IDR 重建、协商回退矩阵含 want-off 永不升级）；phase5 新增 `m5_1_h264_stream_roundtrips_through_the_wire` E2E——注入 `EncodedSource(Memory, NegotiatedCodec{want+peer})`，真 45720 resume_only Noise 通道 tag-3 分片往返，断言呈现帧为解码后 16×16 BGRA（解码失败即 viewer 断开、帧不落地，presented 序列即解码成功证明）。
 - **验证**：本地 fmt / 宿主 clippy `-D warnings` / `cargo test --workspace --locked`（31 套件 485 用例 +6）全绿；`x86_64-pc-windows-gnu` mingw 交叉 clippy（含 openh264 C 交叉编译）绿。
 - **Manual-required（不变）**：跨桌面真机 p95 帧间隔、zstd vs h264 实测带宽对比、主观画质；ADR-078 画像自动选档留待后续版本（`--screen-bitrate` 人工先行）。
+- **v0.1.10 真机 E2E（LeaseWeb 沙盒 VPS + Xvfb 1280×720，2026-10-24）**：`DISPLAY=:99` 下 X11Source 真实采集 + `--screen-codec h264`，SPAKE2 配对 → viewer start → sender allow → 流建立——**H264 流真实跑通**（sender 29 帧实测发送、viewer 40 帧解码呈现，平均 **152 B/帧**）；同场景同时长 zstd 对照（403 B/帧）——**同画面 H264 省 62%**（低复杂度 xvfb 画面下的保守下限，真实动态桌面差距更大）。附带部署 **8h loopback soak**（v0.1.10 双节点：每 60s notify 往返 + 每 10min 1 MiB 文件 auto-accept + 每 5min RSS/会话快照，日志 `tfl-soak.log`，脚本自限时），结果待 8h 后回收。
 
 **1.89 相对 1.88(headless clip 全端点优雅化、产物命名去险与文档纠偏)**
 
