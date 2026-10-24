@@ -269,7 +269,8 @@ impl H264Codec {
     /// Hot frame rate target update (ADR-083 dynamic FPS): clamped between SCREEN_FPS_MIN and SCREEN_FPS_MAX.
     pub fn set_fps(&self, fps: u32) {
         let clamped = fps.clamp(tetherly_core::SCREEN_FPS_MIN, tetherly_core::SCREEN_FPS_MAX);
-        self.fps.store(clamped, std::sync::atomic::Ordering::Relaxed);
+        self.fps
+            .store(clamped, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn fps(&self) -> u32 {
@@ -367,7 +368,9 @@ impl ScreenCodecPort for H264Codec {
 
     fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
         let yuv = I420::from_bgra(raw, w as usize, h as usize)?;
-        let need_idr = self.force_idr.swap(false, std::sync::atomic::Ordering::Relaxed);
+        let need_idr = self
+            .force_idr
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
         let mut guard = self.enc.lock().expect("h264 enc");
         if guard.is_none() {
             let encoder = openh264::encoder::Encoder::new()

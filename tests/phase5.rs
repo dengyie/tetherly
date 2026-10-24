@@ -1238,7 +1238,10 @@ async fn m5_6_screen_dynamic_rate_adaptation() {
     assert_eq!(c, 200);
     let rep_max: tetherly_node::ScreenBitrateReport = serde_json::from_slice(&b).unwrap();
     assert_eq!(rep_max.bitrate_bps, tetherly_core::SCREEN_BITRATE_MAX_BPS);
-    assert_eq!(host.screen_bitrate_bps(), tetherly_core::SCREEN_BITRATE_MAX_BPS);
+    assert_eq!(
+        host.screen_bitrate_bps(),
+        tetherly_core::SCREEN_BITRATE_MAX_BPS
+    );
 
     // Request 10 kbps -> clamps to min (200 kbps)
     let req_min = serde_json::json!({ "kbps": 10 });
@@ -1252,7 +1255,10 @@ async fn m5_6_screen_dynamic_rate_adaptation() {
     assert_eq!(c, 200);
     let rep_min: tetherly_node::ScreenBitrateReport = serde_json::from_slice(&b).unwrap();
     assert_eq!(rep_min.bitrate_bps, tetherly_core::SCREEN_BITRATE_MIN_BPS);
-    assert_eq!(host.screen_bitrate_bps(), tetherly_core::SCREEN_BITRATE_MIN_BPS);
+    assert_eq!(
+        host.screen_bitrate_bps(),
+        tetherly_core::SCREEN_BITRATE_MIN_BPS
+    );
 
     // Restore to normal rate for transmission
     host.screen_set_bitrate_bps(2_500_000);

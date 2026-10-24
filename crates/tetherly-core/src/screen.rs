@@ -718,7 +718,8 @@ impl ScreenFpsPacer {
     /// Check if enough time has elapsed to send the next frame under the target pacing.
     /// If ready, updates last_frame_us and returns true. If not, returns false.
     pub fn check_and_consume(&mut self, now_us: u64) -> bool {
-        if self.last_frame_us == 0 || now_us.saturating_sub(self.last_frame_us) >= self.interval_us {
+        if self.last_frame_us == 0 || now_us.saturating_sub(self.last_frame_us) >= self.interval_us
+        {
             self.last_frame_us = now_us;
             true
         } else {
@@ -1830,7 +1831,10 @@ mod tests {
             s.on_control_with_time(ControlMsg::Ack { seq: i }, now)
                 .unwrap();
         }
-        assert_eq!(s.bitrate_bps(), 2_560_000 + SCREEN_BITRATE_STEP_INCREASE_BPS);
+        assert_eq!(
+            s.bitrate_bps(),
+            2_560_000 + SCREEN_BITRATE_STEP_INCREASE_BPS
+        );
 
         // 5. Manual override clamps to bounds
         s.set_bitrate_bps(50_000_000);

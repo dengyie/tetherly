@@ -5843,14 +5843,15 @@ async fn main() -> Result<()> {
                 }
             }
             ScreenCmd::Keyframe { json, ui_port } => {
-                let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/screen/keyframe", b"")
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                let (code, resp) =
+                    tetherly_node::loopback_post(ui_port, "/api/screen/keyframe", b"")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                              start one with `tetherly --data-dir <dir> run` first"
-                        )
-                    })?;
+                            )
+                        })?;
                 if code != 200 {
                     anyhow::bail!(
                         "screen keyframe request failed (HTTP {code}): {}",
@@ -5943,8 +5944,7 @@ async fn main() -> Result<()> {
                     Some(k) => {
                         let req = serde_json::json!({ "kbps": k });
                         let body = serde_json::to_vec(&req)?;
-                        tetherly_node::loopback_post(ui_port, "/api/screen/bitrate", &body)
-                            .await
+                        tetherly_node::loopback_post(ui_port, "/api/screen/bitrate", &body).await
                     }
                     None => tetherly_node::loopback_get(ui_port, "/api/screen/bitrate").await,
                 }
@@ -5990,11 +5990,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            ScreenCmd::Fps {
-                fps,
-                json,
-                ui_port,
-            } => {
+            ScreenCmd::Fps { fps, json, ui_port } => {
                 let (code, resp) = match fps {
                     Some(f) => {
                         let req = serde_json::json!({ "fps": f });
@@ -6031,15 +6027,17 @@ async fn main() -> Result<()> {
                             println!("Screen Streaming Frame Rate:");
                             println!(
                                 "  Current:   {} FPS (pacing interval: {:.2} ms)",
-                                rep.fps, rep.interval_us as f64 / 1000.0
+                                rep.fps,
+                                rep.interval_us as f64 / 1000.0
                             );
-                            println!(
-                                "  Range:     {} FPS - {} FPS",
-                                rep.min_fps, rep.max_fps
-                            );
+                            println!("  Range:     {} FPS - {} FPS", rep.min_fps, rep.max_fps);
                             println!(
                                 "  Auto-tier: {}",
-                                if rep.auto_profile { "enabled (derived from link bandwidth)" } else { "manual override" }
+                                if rep.auto_profile {
+                                    "enabled (derived from link bandwidth)"
+                                } else {
+                                    "manual override"
+                                }
                             );
                         }
                     }

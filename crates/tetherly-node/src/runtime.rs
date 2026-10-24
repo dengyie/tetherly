@@ -20756,7 +20756,11 @@ impl Node {
     /// Check if target frame pacing interval has elapsed for the outbound screen pump (ADR-083).
     pub fn screen_is_pacing_ready(&self) -> bool {
         let now_us = self.shared.clock.unix_us();
-        self.shared.screen_engine.lock().expect("screen").is_pacing_ready(now_us)
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .is_pacing_ready(now_us)
     }
 
     /// Comprehensive status report for input sharing.
