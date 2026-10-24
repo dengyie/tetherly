@@ -560,12 +560,16 @@ impl ScreenSender {
     }
 
     /// Whether the screen link is currently congested (v1.93 / ADR-080).
+    /// Congestion is active when in-flight frames reach the queue threshold (>= 8),
+    /// or when round-trip latency exceeds the 250ms interactive threshold while frames
+    /// are in flight (pacing to 1 frame at a time to prevent bufferbloat without stalling).
     pub fn is_congested(&self) -> bool {
         self.stats.in_flight >= SCREEN_CONGESTION_IN_FLIGHT_THRESHOLD
-            || self
-                .stats
-                .rtt_latest_us
-                .is_some_and(|rtt| rtt >= SCREEN_CONGESTION_RTT_THRESHOLD_US)
+            || (self.stats.in_flight > 0
+                && self
+                    .stats
+                    .rtt_latest_us
+                    .is_some_and(|rtt| rtt >= SCREEN_CONGESTION_RTT_THRESHOLD_US))
     }
 
     /// Current in-flight unacknowledged frames count.
@@ -1445,6 +1449,15 @@ mod tests {
         s.on_control_with_time(ControlMsg::Ack { seq: 9 }, 10_000 + 300_000)
             .unwrap();
         assert_eq!(s.stats().rtt_latest_us, Some(300_000));
-        assert!(s.is_congested()); // RTT threshold exceeded
+        assert_eq!(s.in_flight_count(), 0);
+        assert!(!s.is_congested(), "drained queue must not be congested");
+
+        // When a new frame 10 is pushed under high RTT, while it is in-flight, channel becomes congested
+        s.push_with_time(raw_frame(10), 400_000);
+        assert_eq!(s.in_flight_count(), 1);
+        assert!(
+            s.is_congested(),
+            "in-flight frame with high RTT triggers congestion pacing"
+        );
     }
 }

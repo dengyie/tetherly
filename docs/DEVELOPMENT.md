@@ -3,12 +3,23 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.93** |
+| 文档版本 | **1.94** |
 | 日期 | 2026-10-24 |
-| 状态 | **v1.93 双向帧确认（Ack）、在途队列追踪与自适应拥塞背压（ADR-080）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`, `ports.rs`）：`Clock` 特征扩展默认方法 `unix_us(&self) -> u64`，`SystemClock` 直通微秒高精时间戳；`ScreenSender` 建立有界在途帧跟踪队列 `in_flight_records`（容量 `SCREEN_IN_FLIGHT_MAX = 64`），按微秒记录 `(seq, sent_us)`；收到入站 `ControlMsg::Ack { seq }` (tag 2) 时排水所有 `<= seq` 在途记录，并针对当前帧计算单程与往返端到端 RTT 时延；滚动时延蓄水池 `ScreenRttTracker` 维护近 128 个样本评估最新与无浮点开销 p95 时延；自适应拥塞检测 `is_congested()` 在 `in_flight >= SCREEN_CONGESTION_IN_FLIGHT_THRESHOLD (8)` 或 `rtt_latest_us >= SCREEN_CONGESTION_RTT_THRESHOLD_US (250ms)` 时触发；(2) **运行时与帧泵防拥塞节流**（`crates/tetherly-node/src/runtime.rs`）：`attach_screen_server` 入站 Ack 传入微秒时戳驱动状态机；`screen_send_frame` 帧泵在链路拥塞且 `sent > 0` 时自动截断丢弃非初始捕获帧并记录丢弃指标，彻底消灭套接字缓冲膨胀（Bufferbloat）与延迟累积；`ScreenStatusReport` 与 `NodeSession` 扩展 `acked`、`in_flight`、`rtt_latest_us`、`rtt_p95_us` 与 `is_congested`；(3) **回环 API、CLI 与 Web UI 全同构升级**（`uihttp.rs`, `bin/tetherly.rs`, `tetherly-cli`, `ui/index.html`）：`/api/screen`、`ScreenSnap` 快照、`tetherly screen status` 终端排版与 Web UI 实时看板全面呈现帧确认、在途队列、端到端 RTT 与 `[拥塞退避]` 状态；(4) **测试**：Core 帧追踪与拥塞单测，Phase 5 `m5_1_bidirectional_frame_ack_rtt_and_congestion_backpressure` E2E 跨 Noise IK 闭环集成测试全绿，全量 31 套件 **494** 用例全绿。 |
+| 状态 | **v1.94 拥塞背压停顿死锁修复与起停起拍调优（Pacing vs Starvation Fix）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`）：修复在高 RTT（>=250ms）或低配沙盒 VM（单核/受限 CPU）中，初始大帧耗时引发 `rtt_latest_us >= 250ms` 后、在在途队列排空（`in_flight == 0`）时仍永久处于 `is_congested() == true` 进而导致发送端死锁饥饿（Starvation Deadlock）的问题。将 RTT 拥塞触发条件严格门控为 `self.stats.in_flight > 0 && rtt_latest_us >= 250ms`，使高 RTT 网络退化为单帧在途的**起停起拍（Stop-and-Wait Pacing）**而非完全截断静默；(2) **版本发布与持续集成**：工作区升级至 `0.1.16`，GitHub Actions 矩阵构建 Linux x86_64、Windows、macOS 与 Android Release 工件；(3) **现场实测论证**：LeaseWeb 沙盒 VM 线上验证多帧连续传输、实时双向 Ack 确认与微秒时延追踪。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.94 相对 1.93(拥塞背压停顿死锁修复与起停起拍调优 Pacing vs Starvation)**
+
+- **动机与问题定位**:
+  在 LeaseWeb 实验沙盒 VM（0.25 vCPU 配额）部署 v0.1.15 实机验证时发现，初始 1920x1080 关键帧在受限 CPU 上编码采集耗时约 380ms。对端返回 Ack 后，`rtt_latest_us` 记录为 380ms（>= 250ms 阈值）。原 `is_congested()` 实现仅判断 `rtt_latest_us >= 250ms`，导致在在途队列清零（`in_flight == 0`）后，`is_congested()` 依然永久为 `true`。发送端帧泵误判为链路持续拥塞，将后续所有捕获帧全部丢弃（`Dropped: 91+`），导致链路陷入永久死锁（Starvation Deadlock）：不再发新帧 → 无新 Ack → RTT 永不刷新 → 画面永久停滞在第 1 帧。
+- **架构解法**:
+  1. **Core 状态机（`crates/tetherly-core/src/screen.rs`）**：
+     - 修改 `is_congested()` 判定逻辑：只有在 `in_flight > 0` 且 `rtt_latest_us >= 250ms` 时才触发 RTT 拥塞背压。
+     - 当 `in_flight == 0` 时，系统无论历史 RTT 多高均保证可以发出 1 个探测/捕获帧；发出后由于 `in_flight == 1` 且 RTT 高，立即恢复背压直到该帧获得 Ack。这一改进将高延迟/重负载网络中的背压行为从「永久死锁断流」平滑转化为「1 帧在途的起停起拍（Stop-and-Wait Pacing）」，既杜绝了套接字缓冲膨胀（Bufferbloat），又确保帧流不间断流动。
+  2. **单测更新**：
+     - `sender_congestion_detection_and_in_flight_bounds` 扩充断言：验证 Ack 清空队列后高 RTT 下 `is_congested()` 为 false，新帧推入后在途为 1 且 RTT 超标时恢复拥塞背压。
 
 **1.93 相对 1.92(双向帧确认 / 在途队列追踪 / 自适应拥塞背压 ADR-080)**
 
