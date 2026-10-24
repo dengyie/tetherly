@@ -20,6 +20,8 @@
   4. **daemon 接线（`screen/macos.rs::present`）**：卫语句（非 BGRA8 / 体长不符 rect → 诚实拒绝，不 spawn）→ 惰性 spawn（`current_exe().parent()/tetherly-viewer`，release 布局同目录）→ 帧写入；stdin 断写视为 viewer 已关（用户关窗）：kill + 清句柄，下一帧自动重生；任何 spawn/写失败维持 v1.19 的 `ScreenRefused` 诚实语义（headless 会话绝不谎报成功）。
   5. **测试与验证**：viewer 协议 3 单测 + present 卫语句测试（重写旧 `present_refuses_with_the_real_reason`——旧断言「未实现」已成为历史；单测绝不 spawn 弹窗）；宿主 + CI macos 编译验证；**真 GUI 会话运行 Manual-required**（v0.1.11 产物含 tetherly-viewer，macOS 用户 `run` + 对端 viewer 即可人工验收）。
 - **验证**：本地 fmt / 宿主 clippy `-D warnings` / `x86_64-pc-windows-gnu` 交叉 clippy（非 mac 桩路径）/ `cargo test --workspace --locked`（31 套件 488 用例）全绿。
+- **打包落地（v0.1.13，两轮发行修正）**：v0.1.11 tag 先于 release 工作流的 viewer 打包修复（tag 触发用 tag 所指提交的 workflow 文件）→ v0.1.12 暴露第二层：cargo 自动发现按文件名把 bin 命名为 `tetherly_viewer`（下划线），daemon/workflow 均找连字符名——显式 `[[bin]] name = "tetherly-viewer"` 对齐三方后 **v0.1.13 发布 9 产物**（新增 `tetherly-viewer-macos-arm64`）。真机 GUI 会话弹窗验收仍 Manual-required（macOS 用户 `run` + 对端 viewer 流即可人工验证）。
+
 
 **1.90 相对 1.89(屏幕通道 H.264 有损编码与线上协商 / ADR-079 落地)**
 
