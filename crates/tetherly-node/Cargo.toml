@@ -15,6 +15,13 @@ path = "src/lib.rs"
 name = "tetherly"
 path = "src/bin/tetherly.rs"
 
+# Hyphenated on purpose: the daemon resolves the viewer via
+# current_exe's sibling `tetherly-viewer` and the release workflow stages
+# that exact name (auto-discovery would name it tetherly_viewer).
+[[bin]]
+name = "tetherly-viewer"
+path = "src/bin/tetherly_viewer.rs"
+
 [dependencies]
 tetherly-core.workspace = true
 tetherly-crypto.workspace = true
