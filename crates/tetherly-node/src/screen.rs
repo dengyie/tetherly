@@ -624,7 +624,9 @@ pub fn screen_scale_from_profile(measured_mbps: Option<f64>) -> u32 {
 
 /// ADR-085 dynamic content profile auto-tiering: resolves content profile from measured bandwidth or defaults.
 /// In Auto mode, screen streaming defaults to Text profile for desktop/IDE glyph clarity.
-pub fn screen_profile_from_profile(measured_mbps: Option<f64>) -> tetherly_core::ScreenContentProfile {
+pub fn screen_profile_from_profile(
+    measured_mbps: Option<f64>,
+) -> tetherly_core::ScreenContentProfile {
     let _ = measured_mbps;
     tetherly_core::ScreenContentProfile::Text
 }
@@ -2302,12 +2304,18 @@ mod h264_tests {
     #[test]
     fn content_profile_and_qp_bounds_control() {
         let codec = H264Codec::new(2_000_000);
-        assert_eq!(codec.content_profile(), tetherly_core::ScreenContentProfile::Text);
+        assert_eq!(
+            codec.content_profile(),
+            tetherly_core::ScreenContentProfile::Text
+        );
         assert_eq!(codec.qp_range(), tetherly_core::SCREEN_QP_TEXT_DEFAULT);
 
         // Switch to Motion profile updates default QP range to motion defaults
         codec.set_content_profile(tetherly_core::ScreenContentProfile::Motion);
-        assert_eq!(codec.content_profile(), tetherly_core::ScreenContentProfile::Motion);
+        assert_eq!(
+            codec.content_profile(),
+            tetherly_core::ScreenContentProfile::Motion
+        );
         assert_eq!(codec.qp_range(), tetherly_core::SCREEN_QP_MOTION_DEFAULT);
 
         // Custom QP bounds
@@ -2320,9 +2328,15 @@ mod h264_tests {
 
         // NegotiatedCodec forwards profile and QP bounds
         let sel = NegotiatedCodec::new(true, 1_000_000, true);
-        assert_eq!(sel.content_profile(), tetherly_core::ScreenContentProfile::Text);
+        assert_eq!(
+            sel.content_profile(),
+            tetherly_core::ScreenContentProfile::Text
+        );
         sel.set_content_profile(tetherly_core::ScreenContentProfile::Motion);
-        assert_eq!(sel.content_profile(), tetherly_core::ScreenContentProfile::Motion);
+        assert_eq!(
+            sel.content_profile(),
+            tetherly_core::ScreenContentProfile::Motion
+        );
         assert_eq!(sel.qp_range(), tetherly_core::SCREEN_QP_MOTION_DEFAULT);
         sel.set_qp_range(14, 38);
         assert_eq!(sel.qp_range(), (14, 38));

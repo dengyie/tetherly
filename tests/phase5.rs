@@ -1717,12 +1717,21 @@ async fn m5_9_screen_dynamic_content_profile() {
     assert_eq!(c, 200);
     let rep_motion: tetherly_node::ScreenProfileReport = serde_json::from_slice(&b).unwrap();
     assert!(rep_motion.ok);
-    assert_eq!(rep_motion.profile, tetherly_core::ScreenContentProfile::Motion);
+    assert_eq!(
+        rep_motion.profile,
+        tetherly_core::ScreenContentProfile::Motion
+    );
     assert_eq!(rep_motion.min_qp, tetherly_core::SCREEN_QP_MOTION_DEFAULT.0);
     assert_eq!(rep_motion.max_qp, tetherly_core::SCREEN_QP_MOTION_DEFAULT.1);
     assert!(!rep_motion.is_custom_qp);
-    assert_eq!(host.screen_profile(), tetherly_core::ScreenContentProfile::Motion);
-    assert_eq!(codec.content_profile(), tetherly_core::ScreenContentProfile::Motion);
+    assert_eq!(
+        host.screen_profile(),
+        tetherly_core::ScreenContentProfile::Motion
+    );
+    assert_eq!(
+        codec.content_profile(),
+        tetherly_core::ScreenContentProfile::Motion
+    );
 
     // 3. Override QP range to custom bounds
     let req_custom_qp = serde_json::json!({ "min_qp": 10, "max_qp": 26 });
@@ -1779,8 +1788,14 @@ async fn m5_9_screen_dynamic_content_profile() {
     assert_eq!(c, 200);
     let rep_text: tetherly_node::ScreenProfileReport = serde_json::from_slice(&b).unwrap();
     assert_eq!(rep_text.profile, tetherly_core::ScreenContentProfile::Text);
-    assert_eq!(host.screen_profile(), tetherly_core::ScreenContentProfile::Text);
-    assert_eq!(codec.content_profile(), tetherly_core::ScreenContentProfile::Text);
+    assert_eq!(
+        host.screen_profile(),
+        tetherly_core::ScreenContentProfile::Text
+    );
+    assert_eq!(
+        codec.content_profile(),
+        tetherly_core::ScreenContentProfile::Text
+    );
 
     // Send 2 more frames under Text profile
     for _ in 0..2 {

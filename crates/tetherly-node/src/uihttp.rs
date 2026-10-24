@@ -4074,12 +4074,10 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             let parsed_body: Option<ProfileReq> = if !body.is_empty() {
                 match serde_json::from_slice(body) {
                     Ok(b) => Some(b),
-                    Err(_) => {
-                        return err(
-                            400,
-                            "bad json, expected { profile?: string, min_qp?: number, max_qp?: number }",
-                        )
-                    }
+                    Err(_) => return err(
+                        400,
+                        "bad json, expected { profile?: string, min_qp?: number, max_qp?: number }",
+                    ),
                 }
             } else {
                 None

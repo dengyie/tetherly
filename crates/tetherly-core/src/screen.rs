@@ -2467,11 +2467,26 @@ mod tests {
         assert!(!ctrl.custom_qp());
 
         // 5. String parsing and display
-        assert_eq!("text".parse::<ScreenContentProfile>().unwrap(), ScreenContentProfile::Text);
-        assert_eq!("desktop".parse::<ScreenContentProfile>().unwrap(), ScreenContentProfile::Text);
-        assert_eq!("motion".parse::<ScreenContentProfile>().unwrap(), ScreenContentProfile::Motion);
-        assert_eq!("video".parse::<ScreenContentProfile>().unwrap(), ScreenContentProfile::Motion);
-        assert_eq!("auto".parse::<ScreenContentProfile>().unwrap(), ScreenContentProfile::Auto);
+        assert_eq!(
+            "text".parse::<ScreenContentProfile>().unwrap(),
+            ScreenContentProfile::Text
+        );
+        assert_eq!(
+            "desktop".parse::<ScreenContentProfile>().unwrap(),
+            ScreenContentProfile::Text
+        );
+        assert_eq!(
+            "motion".parse::<ScreenContentProfile>().unwrap(),
+            ScreenContentProfile::Motion
+        );
+        assert_eq!(
+            "video".parse::<ScreenContentProfile>().unwrap(),
+            ScreenContentProfile::Motion
+        );
+        assert_eq!(
+            "auto".parse::<ScreenContentProfile>().unwrap(),
+            ScreenContentProfile::Auto
+        );
         assert!("invalid".parse::<ScreenContentProfile>().is_err());
         assert_eq!(ScreenContentProfile::Text.to_string(), "text");
         assert_eq!(ScreenContentProfile::Motion.to_string(), "motion");

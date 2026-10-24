@@ -3892,12 +3892,14 @@ async fn main() -> Result<()> {
             if let Some(qp_str) = screen_qp {
                 let parts: Vec<&str> = qp_str.split("..").collect();
                 if parts.len() == 2 {
-                    let min_qp = parts[0].trim().parse::<u8>().map_err(|_| {
-                        anyhow::anyhow!("--screen-qp invalid min QP (0..=51)")
-                    })?;
-                    let max_qp = parts[1].trim().parse::<u8>().map_err(|_| {
-                        anyhow::anyhow!("--screen-qp invalid max QP (0..=51)")
-                    })?;
+                    let min_qp = parts[0]
+                        .trim()
+                        .parse::<u8>()
+                        .map_err(|_| anyhow::anyhow!("--screen-qp invalid min QP (0..=51)"))?;
+                    let max_qp = parts[1]
+                        .trim()
+                        .parse::<u8>()
+                        .map_err(|_| anyhow::anyhow!("--screen-qp invalid max QP (0..=51)"))?;
                     cfg.screen_qp_min = min_qp.clamp(0, 51);
                     cfg.screen_qp_max = max_qp.clamp(0, 51);
                 } else if let Ok(single) = qp_str.trim().parse::<u8>() {

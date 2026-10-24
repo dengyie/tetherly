@@ -20994,11 +20994,7 @@ impl Node {
 
     /// Current target screen streaming QP range bounds.
     pub fn screen_qp_range(&self) -> (u8, u8) {
-        self.shared
-            .screen_engine
-            .lock()
-            .expect("screen")
-            .qp_range()
+        self.shared.screen_engine.lock().expect("screen").qp_range()
     }
 
     /// Report current screen streaming content profile and QP quality bounds (ADR-085).
@@ -22739,20 +22735,30 @@ mod locator_policy_tests {
         // 1. Initial report: defaults to Auto profile and (12, 35) default QP bounds
         let initial_rep = node.screen_profile_report();
         assert!(initial_rep.ok);
-        assert_eq!(initial_rep.profile, tetherly_core::ScreenContentProfile::Auto);
+        assert_eq!(
+            initial_rep.profile,
+            tetherly_core::ScreenContentProfile::Auto
+        );
         assert_eq!(initial_rep.min_qp, tetherly_core::SCREEN_QP_TEXT_DEFAULT.0);
         assert_eq!(initial_rep.max_qp, tetherly_core::SCREEN_QP_TEXT_DEFAULT.1);
         assert!(!initial_rep.is_custom_qp);
         assert!(initial_rep.auto_profile);
 
         // 2. Set profile override to Motion
-        let rep_motion = node.screen_set_profile_reported(tetherly_core::ScreenContentProfile::Motion);
+        let rep_motion =
+            node.screen_set_profile_reported(tetherly_core::ScreenContentProfile::Motion);
         assert!(rep_motion.ok);
-        assert_eq!(rep_motion.profile, tetherly_core::ScreenContentProfile::Motion);
+        assert_eq!(
+            rep_motion.profile,
+            tetherly_core::ScreenContentProfile::Motion
+        );
         assert_eq!(rep_motion.min_qp, tetherly_core::SCREEN_QP_MOTION_DEFAULT.0);
         assert_eq!(rep_motion.max_qp, tetherly_core::SCREEN_QP_MOTION_DEFAULT.1);
         assert!(!rep_motion.is_custom_qp);
-        assert_eq!(node.screen_profile(), tetherly_core::ScreenContentProfile::Motion);
+        assert_eq!(
+            node.screen_profile(),
+            tetherly_core::ScreenContentProfile::Motion
+        );
 
         // 3. Set custom QP range override
         let rep_custom_qp = node.screen_set_qp_range_reported(10, 28);
