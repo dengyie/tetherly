@@ -3,12 +3,25 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.91** |
+| 文档版本 | **1.92** |
 | 日期 | 2026-10-24 |
-| 状态 | **v1.91 macOS 屏幕呈现落地：tetherly-viewer 查看器子进程（v1.89 架构裁定的实现）**——(1) **架构**：AppKit NSWindow 必须活在运行 NSApplication 的主线程，守护进程 tokio 帧泵永不满足——按 v1.89 裁定实现**查看器子进程**：新二进制 `tetherly-viewer`（随主程序同目录分发），stdin 消费长度前缀 BGRA 帧（`u32 w|u32 h|u32 len|body`，8 MiB 预算防损坏流），EOF 即退出。(2) **viewer 内部**：主线程 `NSApplication(sharedApplication)` + Regular 激活策略；读线程→channel→主线程`CFRunLoop::run_in_mode` 30ms 手动泵（不进 `NSApp.run()`，EOF 后必能退出）；首帧定窗（Titled|Closable|Resizable + makeKeyAndOrderFront + activate），后续帧仅刷新；BGRA→CGImage 走 `CGBitmapContextCreate`（借采集侧同款 API 反向：我方缓冲作 backing store）+ `CGBitmapContextCreateImage`；NSImage 构造走原生 `msg_send`（objc2-app-kit 0.3 未给 NSImage 声明线程 trait，标准 alloc 助手不可用，沿 ancs/macos.rs 先例）。(3) **daemon 接线**：`screen/macos.rs::present` 升级——格式/尺寸卫语句前置，惰性 spawn viewer（`current_exe` 同目录解析）、死进程自动重建（kill+None，下帧重生）、任何失败保持 v1.19 的诚实 `ScreenRefused` 语义。(4) **依赖**：`objc2-app-kit` feature 并集（NSApplication/NSControl/NSGraphics/NSImage/NSImageView/NSResponder/NSRunningApplication/NSView/NSWindow，crate 已随 arboard 在 lockfile，零新包）。(5) **测试**：viewer 线协议 3 条单测（整帧/半帧/损坏拒绝）；present 卫语句 2 断言（非 BGRA、体长不符——单测绝不 spawn 弹窗）；**运行时（真 GUI 会话弹窗呈现）Manual-required**，代码经宿主与 CI macos 编译验证。v1.90 及此前见各自 delta 块。 |
+| 状态 | **v1.92 H.264 码率自动选档（ADR-078 画像闭环）与 mDNS 日志卫生**——(1) **码率档位纯函数**（`screen_bitrate_from_profile`）：视频上限 = 对端实测链路带宽的一半（另一半留给控制/文件/虚网流量），夹紧 [500kbps, 20Mbps]，无画像/非有限值保守回退 4Mbps。(2) **H264Codec 动态码率**：`bitrate_bps` 原子化 + 编码器状态分离「目标码率/建时快照」，码率变化触发编码器重建（= 新 SPS/PPS + **IDR**，P 帧绝不携带旧码率语义）。(3) **三钩子接线**：屏幕会话建立（两处 attach）重置每流一次门闩；流首帧按 `screen_peer` 查 `bandwidth_profiles` 选档；`record_bandwidth_profile`（bench 完成）对流中热调档。(4) **CLI**：`--screen-bitrate` 默认 `auto`（显式数字仍为人工覆盖，`NodeConfig.screen_bitrate_auto`）。(5) **mDNS 日志卫生**：现场 soak 发现 `mdns_sd` 在 IPv6-only/TUN 接口持续刷 ERROR（接口枚举噪音非发现故障），两 main 的 EnvFilter 默认 `mdns_sd=off`（RUST_LOG 可覆盖）。测试：档位边界（None/0/NaN/上限夹紧）、码率变更强制 IDR（annex-B 首 VCL NAL type 断言）、协商器转发，全量 31 套件 **491** 用例。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.92 相对 1.91(H.264 码率自动选档 / ADR-078 画像闭环 与 mDNS 日志卫生)**
+
+- **动机**:
+  v1.90 落地 H.264 时码率为人工 `--screen-bitrate`，文档明言「ADR-078 画像自动选档留待后续」；同日 soak 现场日志暴露 `mdns_sd` 在 IPv6-only/TUN 接口持续刷 ERROR（接口枚举噪音）会淹没真错误。本轮一并闭环。
+  1. **档位纯函数（`crates/tetherly-node/src/screen.rs`）**：`screen_bitrate_from_profile(Option<f64 mbps>) -> u32 bps`——实测带宽减半作视频上限（控制/文件/虚网共享另一半），夹紧 `SCREEN_BITRATE_MIN_BPS=500k` / `MAX=20M`，无画像或非有限值回退 `DEFAULT=4M`；纯函数零依赖，边界全测。
+  2. **H264Codec 动态码率**：`bitrate_bps: AtomicU32`（`set_bitrate_bps` 热更、clamp 100k-50M）；`H264EncoderState` 分离 `bitrate_bps`（目标，首帧与热调写入）与 `built_bitrate_bps`（建时快照）——**目标≠快照即重建编码器**：与几何变化同语义（新 SPS/PPS + IDR，P 帧绝不引用旧码率参考链）。
+  3. **runtime 三钩子**：①`attach_screen_server`（发送端）与 viewer 附着两处 `screen_peer` 置位点重置 `screen_bitrate_applied` 门闩（新流重选档）；②`screen_send_frame` 流首帧（门闩 swap）按 `screen_peer` 查 `shared.bandwidth_profiles` 实测 Mbps 选档——`NodeConfig.screen_bitrate_auto=false`（显式数字）时不介入；③`record_bandwidth_profile`（bench 蒸馏完成）对流中（`is_streaming`）直接以刚测值热调——编码器下帧 IDR 重建。
+  4. **CLI**：`--screen-bitrate` 改 `String` 默认 `auto`（`auto`→`screen_bitrate_auto=true`；数字→kbps+auto=false，非法输入诚实报错退出）；`--screen-adb` 路径改用解析后的 `cfg.screen_bitrate_kbps`。
+  5. **mDNS 日志卫生**：`tetherly` 与 `tetherly-cli` 两 main 的 EnvFilter 追加 `mdns_sd=off` 默认指令（注释说明现场依据；`RUST_LOG=mdns_sd=debug` 可覆盖调试）。
+  6. **测试**：`bitrate_tier_boundaries`（None/0/NaN→默认；10M 链路→5M；0.4M→500k 下限；500M→20M 上限）、`bitrate_change_forces_a_fresh_idr`（首包 IDR→同档 P 帧→调档后**必** IDR，annex-B 首 VCL NAL type=5/1 确定性断言）、`negotiated_codec_forwards_the_tier`。
+- **验证**：本地 fmt / 宿主 clippy `-D warnings` / `x86_64-pc-windows-gnu` 交叉 clippy / `cargo deny` / `cargo test --workspace --locked`（31 套件 **491**）全绿（门须串行执行：并行 cargo 触发 target 锁会产生假失败信号）。
+- **待验证**：VM 真机「bench→流码率热调」链路复测待 8h soak 回收（16:10）后进行（本轮不扰 soak 现场）。
 
 **1.91 相对 1.90(macOS 屏幕呈现：tetherly-viewer 查看器子进程)**
 

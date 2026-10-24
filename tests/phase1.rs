@@ -68,6 +68,7 @@ fn cfg(dir: PathBuf, name: &str, platform: &str) -> NodeConfig {
         screen_codec: None,
         screen_codec_h264: false,
         screen_bitrate_kbps: 4000,
+        screen_bitrate_auto: true,
         screen_sink: None,
         input_sink: None,
     }

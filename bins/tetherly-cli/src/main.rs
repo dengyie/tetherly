@@ -5722,7 +5722,13 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("tetherly=info".parse().unwrap()),
+                .add_directive("tetherly=info".parse().unwrap())
+                // mdns-sd spams ERROR "Cannot find valid addrs for TYPE_SRV"
+                // on IPv6-only and TUN interfaces (sandbox-VPS soak logged it
+                // continuously); it is interface-enumeration noise, not a
+                // discovery failure — default it off so real errors surface.
+                // RUST_LOG still overrides for debugging.
+                .add_directive("mdns_sd=off".parse().unwrap()),
         )
         .init();
     if std::env::var("TETHERLY_INSECURE_LOG").ok().as_deref() == Some("1") {

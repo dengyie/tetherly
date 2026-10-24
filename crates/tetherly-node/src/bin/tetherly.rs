@@ -60,9 +60,12 @@ enum Cmd {
         /// other end did not advertise `screencodecs` containing h264.
         #[arg(long, default_value = "zstd")]
         screen_codec: String,
-        /// H.264 encoder bitrate ceiling in kbit/s (default 4000).
-        #[arg(long, default_value_t = 4000)]
-        screen_bitrate: u32,
+        /// H.264 encoder bitrate ceiling: `auto` (default) picks the tier
+        /// from the peer's measured bandwidth profile (ADR-078, re-tiered
+        /// hot on new benches, conservative 4 Mbps with no profile), or an
+        /// explicit kbit/s number as the manual override.
+        #[arg(long, default_value = "auto")]
+        screen_bitrate: String,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -3631,7 +3634,13 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("tetherly=info".parse().unwrap()),
+                .add_directive("tetherly=info".parse().unwrap())
+                // mdns-sd spams ERROR "Cannot find valid addrs for TYPE_SRV"
+                // on IPv6-only and TUN interfaces (sandbox-VPS soak logged it
+                // continuously); it is interface-enumeration noise, not a
+                // discovery failure — default it off so real errors surface.
+                // RUST_LOG still overrides for debugging.
+                .add_directive("mdns_sd=off".parse().unwrap()),
         )
         .init();
     if std::env::var("TETHERLY_INSECURE_LOG").ok().as_deref() == Some("1") {
@@ -3773,13 +3782,18 @@ async fn main() -> Result<()> {
             cfg.input_sink = Some(Arc::new(std::sync::Mutex::new(
                 tetherly_node::SystemInputSink,
             )));
-            cfg.screen_bitrate_kbps = screen_bitrate;
+            cfg.screen_bitrate_auto = screen_bitrate.eq_ignore_ascii_case("auto");
+            if !cfg.screen_bitrate_auto {
+                cfg.screen_bitrate_kbps = screen_bitrate.trim().parse().map_err(|_| {
+                    anyhow::anyhow!("--screen-bitrate must be `auto` or a kbit/s number")
+                })?;
+            }
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
             cfg.screen_codec_h264 = h264;
             let encode_codec: Arc<dyn tetherly_core::ScreenCodec> = if h264 {
                 let sel = std::sync::Arc::new(tetherly_node::NegotiatedCodec::new(
                     true,
-                    (screen_bitrate as u64).saturating_mul(1000) as u32,
+                    cfg.screen_bitrate_kbps.saturating_mul(1000),
                     false,
                 ));
                 // The daemon's caps-merge hook flips this on when the peer

@@ -136,6 +136,9 @@ pub struct NodeConfig {
     pub screen_codec_h264: bool,
     /// Encoder bitrate ceiling for H.264 screen streaming, kilobits/s.
     pub screen_bitrate_kbps: u32,
+    /// Pick that ceiling from the peer's measured bandwidth profile
+    /// (ADR-078) instead of the manual flag; re-tiers hot on new benches.
+    pub screen_bitrate_auto: bool,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -171,6 +174,7 @@ impl Default for NodeConfig {
             screen_codec: None,
             screen_codec_h264: false,
             screen_bitrate_kbps: default_screen_bitrate_kbps(),
+            screen_bitrate_auto: true,
             screen_sink: None,
             input_sink: None,
         }
@@ -3017,6 +3021,10 @@ struct Shared {
     /// Outbound screen codec selector when the operator opted into H.264
     /// (ADR-079); `None` keeps the zstd-only default path.
     screen_encode_codec: Option<Arc<crate::screen::NegotiatedCodec>>,
+    /// Whether the selector's bitrate follows the ADR-078 profile.
+    screen_bitrate_auto: bool,
+    /// One-shot per stream: the first streamed frame picks the tier.
+    screen_bitrate_applied: std::sync::atomic::AtomicBool,
     /// Visitor-side output. Defaults to the in-memory observer; production
     /// injects `SystemSink` for real display.
     screen_sink: Arc<dyn ScreenSink>,
@@ -3206,6 +3214,7 @@ impl Node {
                 false,
             ))
         });
+        let screen_bitrate_auto = cfg.screen_bitrate_auto;
         let screen_source: Arc<dyn ScreenSource> = cfg.screen_source.clone().unwrap_or_else(|| {
             // Production: real capture → negotiated codec (zstd, or H.264
             // when opted in and the peer advertised it) → wire. Tests inject
@@ -3322,6 +3331,8 @@ impl Node {
             screen_codec,
             screen_codec_h264,
             screen_encode_codec,
+            screen_bitrate_auto,
+            screen_bitrate_applied: std::sync::atomic::AtomicBool::new(false),
             screen_sink,
             screen_interval: Mutex::new(ScreenIntervalTracker::new()),
             screen_rx_stats: Mutex::new(ScreenStats::default()),
@@ -17147,6 +17158,24 @@ impl Node {
         now_ms: u64,
     ) {
         let tier = recommend_streaming_params(measured_mbps).tier;
+        // v1.92: a fresh link measurement re-tiers a live H.264 stream hot
+        // (the encoder rebuilds with an IDR at the new rate).
+        if self.shared.screen_bitrate_auto {
+            if let Some(sel) = &self.shared.screen_encode_codec {
+                if self
+                    .shared
+                    .screen_engine
+                    .lock()
+                    .expect("screen")
+                    .state()
+                    .is_streaming()
+                {
+                    sel.set_bitrate_bps(crate::screen::screen_bitrate_from_profile(Some(
+                        measured_mbps,
+                    )));
+                }
+            }
+        }
         {
             let mut table = self
                 .shared
@@ -19822,6 +19851,10 @@ impl Node {
         let (tx, mut rx) = mpsc::channel::<InnerFrame>(SCREEN_QUEUE_DEPTH);
         *self.shared.screen_out.lock().await = Some(tx);
         *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
+        // A new screen session re-evaluates the ADR-078 bitrate tier.
+        self.shared
+            .screen_bitrate_applied
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         {
             self.shared
                 .screen_engine
@@ -19924,6 +19957,10 @@ impl Node {
         let (ctl_tx, mut ctl_rx) = mpsc::channel::<ControlMsg>(SCREEN_QUEUE_DEPTH);
         *self.shared.screen_ctl.lock().await = Some(ctl_tx);
         *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
+        // A new screen session re-evaluates the ADR-078 bitrate tier.
+        self.shared
+            .screen_bitrate_applied
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.emit(UiEvent::screen_state_changed(
             "connected",
             false,
@@ -20063,6 +20100,30 @@ impl Node {
             .is_streaming()
         {
             return Ok(false);
+        }
+        // ADR-078 / v1.92: the first frame of a stream picks the H.264 tier
+        // from the viewer's measured bandwidth profile (the manual flag
+        // wins when `screen_bitrate_auto` is off).
+        if self.shared.screen_bitrate_auto
+            && !self
+                .shared
+                .screen_bitrate_applied
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Some(sel) = &self.shared.screen_encode_codec {
+                let mbps = {
+                    let peer = self.shared.screen_peer.lock().expect("screen_peer").clone();
+                    peer.and_then(|p| {
+                        self.shared
+                            .bandwidth_profiles
+                            .lock()
+                            .expect("bandwidth_profiles")
+                            .get(&p.to_string())
+                            .map(|pr| pr.measured_mbps)
+                    })
+                };
+                sel.set_bitrate_bps(crate::screen::screen_bitrate_from_profile(mbps));
+            }
         }
         // Grab can block for a long time (adb pipe reads in particular), so
         // run it on the blocking pool with a hard timeout. On timeout, call
@@ -21090,6 +21151,7 @@ mod clipboard_policy_tests {
             screen_codec: None,
             screen_codec_h264: false,
             screen_bitrate_kbps: default_screen_bitrate_kbps(),
+            screen_bitrate_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -21226,6 +21288,7 @@ mod handoff_engine_tests {
             screen_codec: None,
             screen_codec_h264: false,
             screen_bitrate_kbps: default_screen_bitrate_kbps(),
+            screen_bitrate_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -21393,6 +21456,7 @@ mod media_policy_tests {
             screen_codec: None,
             screen_codec_h264: false,
             screen_bitrate_kbps: default_screen_bitrate_kbps(),
+            screen_bitrate_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -21536,6 +21600,7 @@ mod locator_policy_tests {
             screen_codec: None,
             screen_codec_h264: false,
             screen_bitrate_kbps: default_screen_bitrate_kbps(),
+            screen_bitrate_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -21659,6 +21724,7 @@ mod locator_policy_tests {
             screen_codec: None,
             screen_codec_h264: false,
             screen_bitrate_kbps: default_screen_bitrate_kbps(),
+            screen_bitrate_auto: true,
             screen_sink: None,
             input_sink: None,
         };

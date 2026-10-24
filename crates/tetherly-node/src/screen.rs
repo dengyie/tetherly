@@ -207,6 +207,11 @@ struct H264EncoderState {
     encoder: openh264::encoder::Encoder,
     w: usize,
     h: usize,
+    /// Target bitrate for the next build; updated hot by the ADR-078 tier.
+    bitrate_bps: u32,
+    /// Bitrate the *live* encoder was configured with; differs from the
+    /// target → rebuild (= fresh SPS/PPS + IDR), same as a geometry change.
+    built_bitrate_bps: u32,
 }
 
 /// Lossy H.264 codec (ADR-079). BGRA in, annex-B out; the decoder side
@@ -216,7 +221,7 @@ struct H264EncoderState {
 /// `Send + Sync` via `Mutex`: one viewer stream at a time by design, and the
 /// encoder contexts are far too expensive to rebuild per frame.
 pub struct H264Codec {
-    bitrate_bps: u32,
+    bitrate_bps: std::sync::atomic::AtomicU32,
     enc: Mutex<Option<H264EncoderState>>,
     dec: Mutex<Option<openh264::decoder::Decoder>>,
 }
@@ -232,25 +237,35 @@ impl std::fmt::Debug for H264Codec {
 impl H264Codec {
     pub fn new(bitrate_bps: u32) -> Self {
         Self {
-            bitrate_bps: bitrate_bps.clamp(100_000, 50_000_000),
+            bitrate_bps: std::sync::atomic::AtomicU32::new(bitrate_bps.clamp(100_000, 50_000_000)),
             enc: Mutex::new(None),
             dec: Mutex::new(None),
         }
     }
 
-    fn encode_with(
-        state: &mut H264EncoderState,
-        yuv: &I420,
-        bitrate_bps: u32,
-    ) -> Result<Vec<u8>, CoreError> {
+    /// Hot bitrate update (ADR-078 auto-tiering): takes effect on the next
+    /// frame as an encoder rebuild, i.e. an IDR — P-frames never claim a
+    /// rate the stream did not start with.
+    pub fn set_bitrate_bps(&self, bps: u32) {
+        self.bitrate_bps.store(
+            bps.clamp(100_000, 50_000_000),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn bitrate_bps(&self) -> u32 {
+        self.bitrate_bps.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn encode_with(state: &mut H264EncoderState, yuv: &I420) -> Result<Vec<u8>, CoreError> {
         use openh264::formats::YUVSource as _;
 
         let (w, h) = yuv.dimensions();
-        if state.w != w || state.h != h {
-            // Geometry change: a fresh encoder emits SPS/PPS + IDR for the
-            // new size, and P-frames can never reference the old one.
+        if state.w != w || state.h != h || state.built_bitrate_bps != state.bitrate_bps {
+            // Geometry or bitrate change: a fresh encoder emits SPS/PPS + IDR
+            // for the new shape/rate, and P-frames never reference the old one.
             let config = openh264::encoder::EncoderConfig::new()
-                .bitrate(openh264::encoder::BitRate::from_bps(bitrate_bps))
+                .bitrate(openh264::encoder::BitRate::from_bps(state.bitrate_bps))
                 .max_frame_rate(openh264::encoder::FrameRate::from_hz(30.0));
             state.encoder = openh264::encoder::Encoder::with_api_config(
                 openh264::OpenH264API::from_source(),
@@ -259,6 +274,7 @@ impl H264Codec {
             .map_err(|e| CoreError::ScreenCodec(format!("openh264 encoder: {e}")))?;
             state.w = w;
             state.h = h;
+            state.built_bitrate_bps = state.bitrate_bps;
         }
         state
             .encoder
@@ -304,10 +320,13 @@ impl ScreenCodecPort for H264Codec {
                 encoder,
                 w: 0,
                 h: 0,
+                bitrate_bps: self.bitrate_bps(),
+                built_bitrate_bps: 0,
             });
         }
         let state = guard.as_mut().expect("encoder just inserted");
-        Self::encode_with(state, &yuv, self.bitrate_bps)
+        state.bitrate_bps = self.bitrate_bps();
+        Self::encode_with(state, &yuv)
     }
 
     fn decompress_frame(
@@ -347,6 +366,22 @@ impl ScreenCodecPort for H264Codec {
     }
 }
 
+/// ADR-078 / v1.92 auto-tiering: the video ceiling is half the peer's
+/// *measured* link capacity (the other half stays for control, file, and
+/// overlay traffic), clamped to a sane screen band. No profile yet — or a
+/// non-finite one — keeps the conservative default.
+pub const SCREEN_BITRATE_MIN_BPS: u32 = 500_000;
+pub const SCREEN_BITRATE_MAX_BPS: u32 = 20_000_000;
+pub const SCREEN_BITRATE_DEFAULT_BPS: u32 = 4_000_000;
+
+pub fn screen_bitrate_from_profile(measured_mbps: Option<f64>) -> u32 {
+    let half_bps = match measured_mbps {
+        Some(mbps) if mbps.is_finite() && mbps > 0.0 => mbps * 1_000_000.0 / 2.0,
+        _ => return SCREEN_BITRATE_DEFAULT_BPS,
+    };
+    (half_bps as u64).clamp(SCREEN_BITRATE_MIN_BPS as u64, SCREEN_BITRATE_MAX_BPS as u64) as u32
+}
+
 /// Negotiated screen-channel codec (ADR-079 §决定): encode with H.264 only
 /// when the operator asked for it *and* the peer advertised `screencodecs`
 /// containing `h264`; otherwise zstd. The decode side is not chosen here —
@@ -373,6 +408,12 @@ impl NegotiatedCodec {
     pub fn set_peer_supports_h264(&self, yes: bool) {
         self.peer_h264
             .store(yes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Hot bitrate retier (ADR-078): forwarded to the H.264 encoder; the
+    /// zstd path is lossless and ignores it by construction.
+    pub fn set_bitrate_bps(&self, bps: u32) {
+        self.h264.set_bitrate_bps(bps);
     }
 
     fn use_h264(&self) -> bool {
@@ -1660,6 +1701,102 @@ mod h264_tests {
         // Want-off never upgrades regardless of peer caps.
         let off = NegotiatedCodec::new(false, 1_000_000, true);
         assert_eq!(off.wire_tag(), tetherly_core::SCREEN_COMPRESS_ZSTD);
+    }
+
+    #[test]
+    fn bitrate_tier_boundaries() {
+        use super::{
+            screen_bitrate_from_profile, SCREEN_BITRATE_DEFAULT_BPS, SCREEN_BITRATE_MAX_BPS,
+            SCREEN_BITRATE_MIN_BPS,
+        };
+        // No profile / non-finite / zero → conservative default.
+        assert_eq!(
+            screen_bitrate_from_profile(None),
+            SCREEN_BITRATE_DEFAULT_BPS
+        );
+        assert_eq!(
+            screen_bitrate_from_profile(Some(0.0)),
+            SCREEN_BITRATE_DEFAULT_BPS
+        );
+        assert_eq!(
+            screen_bitrate_from_profile(Some(f64::NAN)),
+            SCREEN_BITRATE_DEFAULT_BPS
+        );
+        // Half the measured link, clamped to the screen band.
+        assert_eq!(screen_bitrate_from_profile(Some(10.0)), 5_000_000);
+        assert_eq!(
+            screen_bitrate_from_profile(Some(0.4)),
+            SCREEN_BITRATE_MIN_BPS
+        );
+        assert_eq!(
+            screen_bitrate_from_profile(Some(500.0)),
+            SCREEN_BITRATE_MAX_BPS
+        );
+    }
+
+    #[test]
+    fn bitrate_change_forces_a_fresh_idr() {
+        let (w, h) = (96, 64);
+        let codec = H264Codec::new(2_000_000);
+        let f1 = synthetic_frame(w, h, 0);
+        let f2 = synthetic_frame(w, h, 1);
+        let p1 = codec.compress_frame(&f1, w as u16, h as u16).unwrap();
+        assert_eq!(
+            first_vcl_nal_type(&p1),
+            5,
+            "first packet must open with an IDR"
+        );
+        let p2 = codec.compress_frame(&f2, w as u16, h as u16).unwrap();
+        assert_eq!(first_vcl_nal_type(&p2), 1, "same tier keeps P-frames");
+        codec.set_bitrate_bps(6_000_000);
+        let f3 = synthetic_frame(w, h, 2);
+        let p3 = codec.compress_frame(&f3, w as u16, h as u16).unwrap();
+        assert_eq!(
+            first_vcl_nal_type(&p3),
+            5,
+            "a re-tier must restart with an IDR, never a P-frame at the old rate"
+        );
+    }
+
+    #[test]
+    fn negotiated_codec_forwards_the_tier() {
+        let sel = NegotiatedCodec::new(true, 1_000_000, true);
+        sel.set_bitrate_bps(8_000_000);
+        // Observable behaviour: the selector still encodes (tier forwarded,
+        // no panic), and the choice stays h264.
+        assert_eq!(sel.wire_tag(), tetherly_core::SCREEN_COMPRESS_H264);
+        let raw = synthetic_frame(64, 64, 0);
+        assert!(sel.compress_frame(&raw, 64, 64).unwrap().len() < raw.len());
+    }
+
+    /// Annex-B first VCL NAL type: 5 = IDR, 1 = non-IDR. SPS/PPS/SEI (7/8/6)
+    /// are skipped until a slice NAL appears.
+    fn first_vcl_nal_type(packet: &[u8]) -> u8 {
+        let mut i = 0;
+        while i + 4 <= packet.len() {
+            let start = if packet[i..].starts_with(&[0, 0, 0, 1]) {
+                i + 4
+            } else if packet[i..].starts_with(&[0, 0, 1]) {
+                i + 3
+            } else {
+                i += 1;
+                continue;
+            };
+            let ty = packet[start] & 0x1f;
+            if matches!(ty, 1 | 5) {
+                return ty;
+            }
+            // Skip this NAL: scan to the next start code.
+            let mut j = start + 1;
+            while j + 3 <= packet.len() {
+                if packet[j..].starts_with(&[0, 0, 1]) {
+                    break;
+                }
+                j += 1;
+            }
+            i = j;
+        }
+        panic!("no VCL NAL found in packet");
     }
 
     fn synthetic_frame(w: usize, h: usize, seq: usize) -> Vec<u8> {
