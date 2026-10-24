@@ -73,6 +73,10 @@ fn cfg(dir: PathBuf, name: &str, platform: &str) -> NodeConfig {
         screen_fps_auto: true,
         screen_scale_pct: 100,
         screen_scale_auto: true,
+        screen_profile: tetherly_core::ScreenContentProfile::Auto,
+        screen_profile_auto: true,
+        screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
+        screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
         screen_sink: None,
         input_sink: None,
     }

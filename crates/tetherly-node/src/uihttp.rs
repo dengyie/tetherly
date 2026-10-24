@@ -4054,6 +4054,73 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             let rep = node.screen_set_scale_reported(scale);
             json_ok(&rep)
         }
+        ("GET", "/api/screen/profile") => {
+            let rep = node.screen_profile_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/profile") => {
+            #[derive(serde::Deserialize)]
+            struct ProfileReq {
+                #[serde(default)]
+                profile: Option<String>,
+                #[serde(default)]
+                min_qp: Option<u8>,
+                #[serde(default)]
+                max_qp: Option<u8>,
+                #[serde(default)]
+                qp: Option<u8>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<ProfileReq> = if !body.is_empty() {
+                match serde_json::from_slice(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => {
+                        return err(
+                            400,
+                            "bad json, expected { profile?: string, min_qp?: number, max_qp?: number }",
+                        )
+                    }
+                }
+            } else {
+                None
+            };
+            let profile_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.profile.clone())
+                .or_else(|| qmap.get("profile").cloned())
+                .or_else(|| qmap.get("mode").cloned());
+            let min_qp = parsed_body
+                .as_ref()
+                .and_then(|b| b.min_qp)
+                .or_else(|| qmap.get("min_qp").and_then(|v| v.parse::<u8>().ok()));
+            let max_qp = parsed_body
+                .as_ref()
+                .and_then(|b| b.max_qp)
+                .or_else(|| qmap.get("max_qp").and_then(|v| v.parse::<u8>().ok()));
+            let single_qp = parsed_body
+                .as_ref()
+                .and_then(|b| b.qp)
+                .or_else(|| qmap.get("qp").and_then(|v| v.parse::<u8>().ok()));
+
+            if let Some(prof_str) = profile_str {
+                match prof_str.parse::<tetherly_core::ScreenContentProfile>() {
+                    Ok(p) => {
+                        node.screen_set_profile(p);
+                    }
+                    Err(_) => return err(400, "invalid profile: expected text, motion, or auto"),
+                }
+            }
+            if let Some(qp) = single_qp {
+                node.screen_set_qp_range(qp, qp);
+            } else if min_qp.is_some() || max_qp.is_some() {
+                let current_range = node.screen_qp_range();
+                let new_min = min_qp.unwrap_or(current_range.0);
+                let new_max = max_qp.unwrap_or(current_range.1);
+                node.screen_set_qp_range(new_min, new_max);
+            }
+            let rep = node.screen_profile_report();
+            json_ok(&rep)
+        }
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -7939,6 +8006,10 @@ mod tests {
             screen_fps_auto: true,
             screen_scale_pct: 100,
             screen_scale_auto: true,
+            screen_profile: tetherly_core::ScreenContentProfile::Auto,
+            screen_profile_auto: true,
+            screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
+            screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_sink: None,
             input_sink: None,
         };
@@ -8886,6 +8957,100 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/camera HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_profile_and_qp_endpoints() {
+        let (node, dir) = temp_test_node("screen_profile");
+        let port = bind_and_spawn(node.clone(), 0).await.unwrap();
+
+        // 1. GET /api/screen/profile
+        let (code, body) = loopback_get(port, "/api/screen/profile").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["profile"], "auto");
+        assert_eq!(rep["min_qp"], 12);
+        assert_eq!(rep["max_qp"], 35);
+        assert_eq!(rep["is_custom_qp"], false);
+        assert_eq!(rep["auto_profile"], true);
+
+        // 2. POST /api/screen/profile with JSON {"profile": "motion"}
+        let update_prof = serde_json::json!({ "profile": "motion" });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/profile",
+            &serde_json::to_vec(&update_prof).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["profile"], "motion");
+        assert_eq!(rep["min_qp"], 16);
+        assert_eq!(rep["max_qp"], 46);
+        assert_eq!(rep["is_custom_qp"], false);
+
+        // 3. POST /api/screen/profile with custom QP range
+        let update_qp = serde_json::json!({ "min_qp": 10, "max_qp": 28 });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/profile",
+            &serde_json::to_vec(&update_qp).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["min_qp"], 10);
+        assert_eq!(rep["max_qp"], 28);
+        assert_eq!(rep["is_custom_qp"], true);
+
+        // 4. POST /api/screen/profile with single QP
+        let update_single_qp = serde_json::json!({ "qp": 22 });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/profile",
+            &serde_json::to_vec(&update_single_qp).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["min_qp"], 22);
+        assert_eq!(rep["max_qp"], 22);
+        assert_eq!(rep["is_custom_qp"], true);
+
+        // 5. POST /api/screen/profile with query param ?profile=text
+        let (code, body) = loopback_post(port, "/api/screen/profile?profile=text", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["profile"], "text");
+
+        // 6. Invalid profile returns 400
+        let (code, _) = loopback_post(port, "/api/screen/profile?profile=invalid_xyz", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+
+        // 7. Host header 403 test on /api/screen/profile
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/profile HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();

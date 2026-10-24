@@ -3,12 +3,41 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.98** |
+| 文档版本 | **1.99** |
 | 日期 | 2026-10-25 |
-| 状态 | **v1.98 屏幕流动态分辨率自适应降采样控制器（Screen Streaming Dynamic Resolution & Adaptive Downscaling Controller, ADR-084）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`, `ports.rs`）：新增分辨率缩放控制器 `ScreenScaleController`（25%–100% 边界钳位、默认 100% 原画质、偶数几何尺寸刚性安全截断 $W, H \ge 2 \ \& \ \sim 1$）；实现高性能无浮点 16.16 定点数纯整数双线性插值降采样算法 `downscale_bgra8` 与帧缩放封装 `downscale_frame`；`ScreenSender` 集成缩放控制与 `scale_pct` 遥测；`ScreenCodec` 与 `ScreenSource` 接口扩展 `set_scale_pct()` 与 `scale_pct()`。(2) **运行时编解码联动与自动阶梯**（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）：`screen_scale_from_profile` 实现基于实测带宽的分辨率缩放阶梯（< 3 Mbps 降至 50% 降低 75% 像素量消除延迟，3–10 Mbps 缩放至 75%，$\ge$ 10 Mbps 或默认 100% 原生全画质）；`EncodedSource<S>` 抓取 Raw Frame 后在送入编码器前执行预编码降采样；`H264Codec` 自动感知画面几何尺寸变化，触发 OpenH264 编码器平滑重建与首帧 IDR 恢复。(3) **接口与生态**：新增回环 API `GET/POST /api/screen/scale`、CLI 命令 `tetherly screen scale [scale_pct]`、守护进程启动参数 `--screen-scale <auto|N>` 与实时状态透出 `Scale: N%`；(4) **测试与版本**：集成测试 `m5_8_screen_dynamic_resolution_scaling` 验证端到端 45720 缩放推流与呈现，工作区升级至 `0.1.20`。 |
+| 状态 | **v1.99 屏幕流自适应内容模式与量化参数（QP）质量控制器（Screen Streaming Adaptive Content Profile & Quantization Parameter Quality Controller, ADR-085）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`, `ports.rs`）：新增画质简档枚举 `ScreenContentProfile`（Text、Motion、Auto）；实现质量与量化参数控制器 `ScreenQualityController`（QP 刚性范围 0–51 钳位保序、文本默认 12..35 防振铃、动态默认 16..46 吸纳运动熵、支持自定义锁定 `is_custom()`）；完成 4 维多媒体流控矩阵（码率、帧率、分辨率、语义画质/QP）；`ScreenSender` 集成画质控制器与遥测；`ScreenCodec` 与 `ScreenSource` 扩展 `set_content_profile()`, `content_profile()`, `set_qp_range()`, `qp_range()`。(2) **运行时编解码无锁热重构**（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）：`H264Codec` 采用无锁原子状态（`AtomicU8` profile/min_qp/max_qp），底层 OpenH264 根据 Profile 动态绑定 `ScreenContentRealTime` 调色板/字符抗锯齿或 `CameraVideoRealTime` 质量控码模式，热更新自动重建编码器下发新 SPS/PPS 并触发 IDR 恢复帧；`screen_profile_from_profile` 提供链路带宽感知分级推荐（Auto 模式桌面默认偏向 Text 优先保证字形锐度）。(3) **接口与生态**：新增回环 API `GET/POST /api/screen/profile`、CLI 命令 `tetherly screen profile [profile] [--min-qp <qp>] [--max-qp <qp>]`、启动参数 `--screen-profile <auto|text|motion>` 与 `--screen-qp <min..max>`，实时状态透出 `Profile: text (QP: 12..35)`；(4) **测试与版本**：集成测试 `m5_9_screen_dynamic_content_profile` 验证端到端 45720 画质协商、API 热调、QP 钳位与远端呈现，工作区升级至 `0.1.21`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.99 相对 1.98(屏幕流自适应内容模式与量化参数（QP）质量控制器 ADR-085)**
+
+- **动机与问题背景**:
+  传统视频流控仅涵盖带宽码率（ADR-082）、定步帧率（ADR-083）与几何分辨率（ADR-084）三维控制。然而在桌面远程交互中，内容语义具有极端的二元分化：IDE 代码/终端等文本场景需要杜绝高频振铃效应（ringing artifacts）与字体字符模糊；而视频全屏或游戏等动态场景运动熵极高，需要允许适度的高频细节平滑以防止编码器缓冲区耗尽或延迟激增。此外，H.264 的量化参数（QP，0..=51）若缺乏上下限约束，在弱网或突发丢包时极易被拉升至极高值导致文本不可读。亟需构建第 4 维语义画质与 QP 控制器，闭环完整的 4 维多媒体流控矩阵。
+- **架构解法与落地**:
+  1. **Core 协议与质量控制器（`crates/tetherly-core/src/screen.rs`, `ports.rs`）**：
+     - 定义内容模式枚举 `ScreenContentProfile`：`Text (0)`、`Motion (1)`、`Auto (2)`。
+     - 定义 QP 边界与推荐常数：全局范围 `[0, 51]`；文本模式推荐 `[12, 35]`；动态模式推荐 `[16, 46]`；基准范围 `[12, 42]`。
+     - 实现核心控制器 `ScreenQualityController`：
+       - **QP 钳位与保序算法**：$\min' = \mathrm{clamp}(\min, 0, 51)$，$\max' = \mathrm{clamp}(\max, \min', 51)$。
+       - **自适应与自定义保持**：Profile 切换时若未指定自定义 QP 则自动加载该模式的推荐范围；显式指定 QP 时设置 `custom_qp = true` 并提供 `is_custom()` 状态检查。
+     - `ScreenStats` 扩充 `profile: ScreenContentProfile`、`min_qp: u8`、`max_qp: u8` 指标。
+     - `ScreenSender` 集成 `quality_controller`，提供 `set_content_profile`、`set_qp_range`、`content_profile`、`qp_range` 等方法。
+     - `ScreenCodec` 与 `ScreenSource` 扩展 `set_content_profile`、`content_profile`、`set_qp_range`、`qp_range` 抽象端口。
+  2. **Node 编解码热更新与无锁并发控制（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）**：
+     - `H264Codec` 引入 `profile_tag: AtomicU8`、`min_qp: AtomicU8`、`max_qp: AtomicU8` 实现原子无锁读取。
+     - 底层 OpenH264 编码配置根据 Profile 动态切换：`Text`/`Auto` 模式启用 `UsageType::ScreenContentRealTime` 调色板与字形抗模糊优化；`Motion` 模式启用 `UsageType::CameraVideoRealTime` 并开启 `RateControlMode::Quality`；同时设置 `iMinQp` 与 `iMaxQp`。
+     - 参数变更时标记编码器脏状态，平滑热重构并下发新 SPS/PPS 头及首帧 IDR 恢复关键帧。
+     - 实现自动分级辅助函数 `screen_profile_from_profile`，首帧依据对端带宽历史数据自适应对齐。
+  3. **回环 API 与 CLI 统一支持**：
+     - 新增 HTTP 路由 `GET /api/screen/profile` 与 `POST /api/screen/profile`，支持 JSON `{"profile": "text", "min_qp": 10, "max_qp": 30}` 或 Query `?profile=...&min_qp=...` 热配置。
+     - CLI 新增 `tetherly screen profile [profile] [--min-qp <qp>] [--max-qp <qp>]` 命令，并在 `tetherly screen status` 中透出当前画质简档与 QP 范围。
+     - `Cmd::Run` 新增 `--screen-profile <auto|text|motion>` 与 `--screen-qp <min..max>` 启动参数。
+     - 遥测 DTO `ScreenStatusReport` 新增 `profile`、`qp_min`、`qp_max`，新增强类型 `ScreenProfileReport`。
+  4. **测试**：
+     - Core 单元测试 `screen_content_profile_and_quality_controller`。
+     - Node 单元测试 `test_screen_content_profile_and_qp_bounds_runtime` 与 `test_uihttp_screen_profile_and_qp_endpoints`。
+     - Phase 5 集成测试 `m5_9_screen_dynamic_content_profile` 验证 45720 通道握手、API 动态查询与热调、QP 范围钳位、模式切换、推流与远端解码呈现。
 
 **1.98 相对 1.97(屏幕流动态分辨率自适应降采样控制器 ADR-084)**
 

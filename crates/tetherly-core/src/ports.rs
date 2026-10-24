@@ -236,6 +236,22 @@ pub trait ScreenSource: Send + Sync {
     fn scale_pct(&self) -> u32 {
         100
     }
+
+    /// Target dynamic content profile update (v1.99 / ADR-085).
+    fn set_content_profile(&self, _profile: crate::screen::ScreenContentProfile) {}
+
+    /// Current target content profile. Defaults to Text.
+    fn content_profile(&self) -> crate::screen::ScreenContentProfile {
+        crate::screen::ScreenContentProfile::Text
+    }
+
+    /// Target dynamic quantization parameter range update (v1.99 / ADR-085).
+    fn set_qp_range(&self, _min_qp: u8, _max_qp: u8) {}
+
+    /// Current target quantization parameter range. Defaults to SCREEN_QP_TEXT_DEFAULT.
+    fn qp_range(&self) -> (u8, u8) {
+        crate::screen::SCREEN_QP_TEXT_DEFAULT
+    }
 }
 
 /// Transform a raw pixel body to or form the wire format carried in
@@ -299,6 +315,22 @@ pub trait ScreenCodec: Send + Sync {
     /// Current target downscaling percentage. Defaults to 100 (native).
     fn scale_pct(&self) -> u32 {
         100
+    }
+
+    /// Dynamic content profile update for rate/quality-controlled codecs (v1.99 / ADR-085).
+    fn set_content_profile(&self, _profile: crate::screen::ScreenContentProfile) {}
+
+    /// Current target content profile. Defaults to Text.
+    fn content_profile(&self) -> crate::screen::ScreenContentProfile {
+        crate::screen::ScreenContentProfile::Text
+    }
+
+    /// Dynamic quantization parameter range update for codecs (v1.99 / ADR-085).
+    fn set_qp_range(&self, _min_qp: u8, _max_qp: u8) {}
+
+    /// Current target quantization parameter range.
+    fn qp_range(&self) -> (u8, u8) {
+        crate::screen::SCREEN_QP_TEXT_DEFAULT
     }
 }
 

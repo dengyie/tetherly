@@ -76,6 +76,14 @@ enum Cmd {
         /// scale percentage between 25 and 100 (clamped).
         #[arg(long, default_value = "auto")]
         screen_scale: String,
+        /// Screen streaming content profile (ADR-085): `auto` (default) selects
+        /// Text profile for desktop/IDE clarity, `text` enforces strict QP limits
+        /// for code and text, `motion` optimizes for video and fluid animations.
+        #[arg(long, default_value = "auto")]
+        screen_profile: String,
+        /// Screen streaming quantization parameter (QP) range (ADR-085), formatted as `min..max` (e.g. `12..35`).
+        #[arg(long)]
+        screen_qp: Option<String>,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -2029,6 +2037,23 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or override dynamic screen streaming content profile and QP bounds (v1.99 / ADR-085).
+    Profile {
+        /// Target profile: `auto`, `text`, or `motion`. If omitted, displays current profile and QP range.
+        profile: Option<String>,
+        /// Optional minimum Quantization Parameter bound (0..=51).
+        #[arg(long)]
+        min_qp: Option<u8>,
+        /// Optional maximum Quantization Parameter bound (0..=51).
+        #[arg(long)]
+        max_qp: Option<u8>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3821,6 +3846,8 @@ async fn main() -> Result<()> {
             screen_bitrate,
             screen_fps,
             screen_scale,
+            screen_profile,
+            screen_qp,
             file_port,
             input_port,
             screen_port,
@@ -3856,6 +3883,32 @@ async fn main() -> Result<()> {
                     )
                 })?;
             }
+            cfg.screen_profile_auto = screen_profile.eq_ignore_ascii_case("auto");
+            if !cfg.screen_profile_auto {
+                cfg.screen_profile = screen_profile.trim().parse().map_err(|_| {
+                    anyhow::anyhow!("--screen-profile must be `auto`, `text`, or `motion`")
+                })?;
+            }
+            if let Some(qp_str) = screen_qp {
+                let parts: Vec<&str> = qp_str.split("..").collect();
+                if parts.len() == 2 {
+                    let min_qp = parts[0].trim().parse::<u8>().map_err(|_| {
+                        anyhow::anyhow!("--screen-qp invalid min QP (0..=51)")
+                    })?;
+                    let max_qp = parts[1].trim().parse::<u8>().map_err(|_| {
+                        anyhow::anyhow!("--screen-qp invalid max QP (0..=51)")
+                    })?;
+                    cfg.screen_qp_min = min_qp.clamp(0, 51);
+                    cfg.screen_qp_max = max_qp.clamp(0, 51);
+                } else if let Ok(single) = qp_str.trim().parse::<u8>() {
+                    cfg.screen_qp_min = single.clamp(0, 51);
+                    cfg.screen_qp_max = single.clamp(0, 51);
+                } else {
+                    anyhow::bail!(
+                        "--screen-qp must be `min..max` (e.g. `12..35`) or a single integer (0..=51)"
+                    );
+                }
+            }
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
             cfg.screen_codec_h264 = h264;
             let encode_codec: Arc<dyn tetherly_core::ScreenCodec> = if h264 {
@@ -3866,6 +3919,12 @@ async fn main() -> Result<()> {
                 ));
                 sel.set_fps(cfg.screen_fps);
                 sel.set_scale_pct(cfg.screen_scale_pct);
+                sel.set_content_profile(cfg.screen_profile);
+                if cfg.screen_qp_min != tetherly_core::SCREEN_QP_MIN_DEFAULT
+                    || cfg.screen_qp_max != tetherly_core::SCREEN_QP_MAX_DEFAULT
+                {
+                    sel.set_qp_range(cfg.screen_qp_min, cfg.screen_qp_max);
+                }
                 // The daemon's caps-merge hook flips this on when the peer
                 // advertises screencodecs=h264; the CLI only sets the intent.
                 sel.clone()
@@ -5965,6 +6024,12 @@ async fn main() -> Result<()> {
                     if rep.scale_pct > 0 {
                         println!("  Scale:        {}%", rep.scale_pct);
                     }
+                    if !rep.profile.is_empty() {
+                        println!(
+                            "  Profile:      {} (QP {}-{})",
+                            rep.profile, rep.qp_min, rep.qp_max
+                        );
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -6128,6 +6193,75 @@ async fn main() -> Result<()> {
                                 }
                             );
                         }
+                    }
+                }
+            }
+            ScreenCmd::Profile {
+                profile,
+                min_qp,
+                max_qp,
+                json,
+                ui_port,
+            } => {
+                let has_update = profile.is_some() || min_qp.is_some() || max_qp.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(p) = profile {
+                        req.insert("profile".into(), serde_json::json!(p));
+                    }
+                    if let Some(min) = min_qp {
+                        req.insert("min_qp".into(), serde_json::json!(min));
+                    }
+                    if let Some(max) = max_qp {
+                        req.insert("max_qp".into(), serde_json::json!(max));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    tetherly_node::loopback_post(ui_port, "/api/screen/profile", &body).await
+                } else {
+                    tetherly_node::loopback_get(ui_port, "/api/screen/profile").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen profile query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_node::ScreenProfileReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    if has_update {
+                        println!(
+                            "Screen content profile updated: {} (QP range: {}..={}, custom={})",
+                            rep.profile, rep.min_qp, rep.max_qp, rep.is_custom_qp
+                        );
+                    } else {
+                        println!("Screen Streaming Content Profile & Quality:");
+                        println!("  Profile:     {}", rep.profile);
+                        println!("  QP Range:    {} - {}", rep.min_qp, rep.max_qp);
+                        println!(
+                            "  Custom QP:   {}",
+                            if rep.is_custom_qp {
+                                "yes"
+                            } else {
+                                "no (profile default)"
+                            }
+                        );
+                        println!(
+                            "  Auto-tier:   {}",
+                            if rep.auto_profile {
+                                "enabled (auto-selects profile on stream start)"
+                            } else {
+                                "manual override"
+                            }
+                        );
                     }
                 }
             }

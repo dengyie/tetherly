@@ -74,6 +74,91 @@ pub const SCREEN_SCALE_MIN_PCT: u32 = 25;
 /// Maximum screen streaming resolution scale percentage ceiling (100%).
 pub const SCREEN_SCALE_MAX_PCT: u32 = 100;
 
+/// Default quantization parameter minimum bound (v1.99 / ADR-085).
+pub const SCREEN_QP_MIN_DEFAULT: u8 = 12;
+
+/// Default quantization parameter maximum bound (v1.99 / ADR-085).
+pub const SCREEN_QP_MAX_DEFAULT: u8 = 36;
+
+/// Absolute quantization parameter minimum floor in H.264 (0 = lossless).
+pub const SCREEN_QP_ABSOLUTE_MIN: u8 = 0;
+
+/// Absolute quantization parameter maximum ceiling in H.264 (51 = maximum compression).
+pub const SCREEN_QP_ABSOLUTE_MAX: u8 = 51;
+
+/// Default quantization parameter range for text/productivity profile: (min_qp=12, max_qp=35).
+pub const SCREEN_QP_TEXT_DEFAULT: (u8, u8) = (12, 35);
+
+/// Default quantization parameter range for motion/video profile: (min_qp=16, max_qp=46).
+pub const SCREEN_QP_MOTION_DEFAULT: (u8, u8) = (16, 46);
+
+/// Content optimization profile for screen streaming (v1.99 / ADR-085).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum ScreenContentProfile {
+    /// Text / Code / Terminal / Desktop productivity optimized.
+    /// Preserves sharp character glyphs, high contrast edges, and prevents text blur.
+    /// Maps to OpenH264 ScreenContentRealTime.
+    #[default]
+    Text = 0,
+    /// Fluid motion / Video / Animation / 3D graphics optimized.
+    /// Tolerates higher spatial quantization under high entropy to maintain smooth framerate.
+    /// Maps to OpenH264 CameraVideoRealTime.
+    Motion = 1,
+    /// Automatic detection / adaptive profile selection based on network and screen activity.
+    Auto = 2,
+}
+
+impl ScreenContentProfile {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Motion => "motion",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub const fn tag(&self) -> u8 {
+        *self as u8
+    }
+
+    pub const fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => Self::Motion,
+            2 => Self::Auto,
+            _ => Self::Text,
+        }
+    }
+
+    pub fn default_qp_range(&self) -> (u8, u8) {
+        match self {
+            Self::Text | Self::Auto => SCREEN_QP_TEXT_DEFAULT,
+            Self::Motion => SCREEN_QP_MOTION_DEFAULT,
+        }
+    }
+}
+
+impl std::fmt::Display for ScreenContentProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for ScreenContentProfile {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "text" | "desktop" | "code" => Ok(Self::Text),
+            "motion" | "video" | "media" => Ok(Self::Motion),
+            "auto" | "default" => Ok(Self::Auto),
+            other => Err(format!(
+                "unknown screen content profile: {other} (expected: text, motion, auto)"
+            )),
+        }
+    }
+}
+
 /// Fragment transport for screen frames too large for one inner frame.
 /// A fragment stream is a `TMF1`-enveloped run of inner frames; the receiver
 /// reassembles before `decode_payload`. A `TMV1`-prefixed payload is a whole
@@ -521,6 +606,19 @@ pub struct ScreenStats {
     pub fps_target: u32,
     /// Target screen resolution scale percentage (25..=100) (v1.98 / ADR-084).
     pub scale_pct: u32,
+    /// Active screen content profile tag (0=text, 1=motion, 2=auto) (v1.99 / ADR-085).
+    pub profile_tag: u8,
+    /// Minimum quantization parameter boundary (0..=51) (v1.99 / ADR-085).
+    pub qp_min: u8,
+    /// Maximum quantization parameter boundary (0..=51) (v1.99 / ADR-085).
+    pub qp_max: u8,
+}
+
+impl ScreenStats {
+    /// Active screen content profile resolved from profile tag.
+    pub fn content_profile(&self) -> ScreenContentProfile {
+        ScreenContentProfile::from_tag(self.profile_tag)
+    }
 }
 
 /// Rolling window tracker for screen frame round-trip times (v1.93 / ADR-080).
@@ -819,6 +917,103 @@ impl ScreenScaleController {
     }
 }
 
+/// Dynamic screen quality & content profile controller (v1.99 / ADR-085).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenQualityController {
+    profile: ScreenContentProfile,
+    min_qp: u8,
+    max_qp: u8,
+    custom_qp: bool,
+}
+
+impl Default for ScreenQualityController {
+    fn default() -> Self {
+        Self::new(ScreenContentProfile::default())
+    }
+}
+
+impl ScreenQualityController {
+    pub fn new(profile: ScreenContentProfile) -> Self {
+        let (min_qp, max_qp) = profile.default_qp_range();
+        Self {
+            profile,
+            min_qp,
+            max_qp,
+            custom_qp: false,
+        }
+    }
+
+    pub fn with_qp(profile: ScreenContentProfile, min_qp: u8, max_qp: u8) -> Self {
+        let min = min_qp.clamp(SCREEN_QP_ABSOLUTE_MIN, SCREEN_QP_ABSOLUTE_MAX);
+        let max = max_qp.clamp(min, SCREEN_QP_ABSOLUTE_MAX);
+        Self {
+            profile,
+            min_qp: min,
+            max_qp: max,
+            custom_qp: true,
+        }
+    }
+
+    pub fn profile(&self) -> ScreenContentProfile {
+        self.profile
+    }
+
+    pub fn set_profile(&mut self, profile: ScreenContentProfile) -> ScreenContentProfile {
+        self.profile = profile;
+        if !self.custom_qp {
+            let (min, max) = profile.default_qp_range();
+            self.min_qp = min;
+            self.max_qp = max;
+        }
+        self.profile
+    }
+
+    pub fn min_qp(&self) -> u8 {
+        self.min_qp
+    }
+
+    pub fn max_qp(&self) -> u8 {
+        self.max_qp
+    }
+
+    pub fn qp_range(&self) -> (u8, u8) {
+        (self.min_qp, self.max_qp)
+    }
+
+    pub fn set_qp_range(&mut self, min_qp: u8, max_qp: u8) -> (u8, u8) {
+        let min = min_qp.clamp(SCREEN_QP_ABSOLUTE_MIN, SCREEN_QP_ABSOLUTE_MAX);
+        let max = max_qp.clamp(min, SCREEN_QP_ABSOLUTE_MAX);
+        self.min_qp = min;
+        self.max_qp = max;
+        self.custom_qp = true;
+        (min, max)
+    }
+
+    pub fn reset_default_qp(&mut self) -> (u8, u8) {
+        let (min, max) = self.profile.default_qp_range();
+        self.min_qp = min;
+        self.max_qp = max;
+        self.custom_qp = false;
+        (min, max)
+    }
+
+    pub fn custom_qp(&self) -> bool {
+        self.custom_qp
+    }
+
+    pub fn is_custom(&self) -> bool {
+        self.custom_qp
+    }
+
+    /// Resolve effective content profile for encoder configuration (translating Auto to Text for desktop sharing).
+    pub fn effective_profile(&self) -> ScreenContentProfile {
+        match self.profile {
+            ScreenContentProfile::Auto => ScreenContentProfile::Text,
+            other => other,
+        }
+    }
+}
+
 /// Bilinear downscaling for 32-bit BGRA/RGBA buffers with 16.16 fixed-point arithmetic (v1.98 / ADR-084).
 pub fn downscale_bgra8(
     src: &[u8],
@@ -927,6 +1122,7 @@ pub struct ScreenSender {
     rate_controller: ScreenRateController,
     fps_pacer: ScreenFpsPacer,
     scale_controller: ScreenScaleController,
+    quality_controller: ScreenQualityController,
 }
 
 impl Default for ScreenSender {
@@ -940,10 +1136,14 @@ impl ScreenSender {
         let rate_controller = ScreenRateController::default();
         let fps_pacer = ScreenFpsPacer::default();
         let scale_controller = ScreenScaleController::default();
+        let quality_controller = ScreenQualityController::default();
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
             scale_pct: scale_controller.scale_pct(),
+            profile_tag: quality_controller.profile().tag(),
+            qp_min: quality_controller.min_qp(),
+            qp_max: quality_controller.max_qp(),
             ..Default::default()
         };
         Self {
@@ -956,6 +1156,7 @@ impl ScreenSender {
             rate_controller,
             fps_pacer,
             scale_controller,
+            quality_controller,
         }
     }
 
@@ -968,6 +1169,12 @@ impl ScreenSender {
     pub fn with_scale(scale_pct: u32) -> Self {
         let mut sender = Self::new();
         sender.set_scale_pct(scale_pct);
+        sender
+    }
+
+    pub fn with_profile(profile: ScreenContentProfile) -> Self {
+        let mut sender = Self::new();
+        sender.set_content_profile(profile);
         sender
     }
 
@@ -1186,6 +1393,43 @@ impl ScreenSender {
     /// Access mutable reference to the internal resolution scale controller.
     pub fn scale_controller_mut(&mut self) -> &mut ScreenScaleController {
         &mut self.scale_controller
+    }
+
+    /// Active screen content profile (v1.99 / ADR-085).
+    pub fn content_profile(&self) -> ScreenContentProfile {
+        self.quality_controller.profile()
+    }
+
+    /// Explicitly configure target screen content profile.
+    pub fn set_content_profile(&mut self, profile: ScreenContentProfile) -> ScreenContentProfile {
+        let actual = self.quality_controller.set_profile(profile);
+        self.stats.profile_tag = actual.tag();
+        self.stats.qp_min = self.quality_controller.min_qp();
+        self.stats.qp_max = self.quality_controller.max_qp();
+        actual
+    }
+
+    /// Access quantization parameter range (min_qp, max_qp).
+    pub fn qp_range(&self) -> (u8, u8) {
+        self.quality_controller.qp_range()
+    }
+
+    /// Explicitly configure quantization parameter bounds.
+    pub fn set_qp_range(&mut self, min_qp: u8, max_qp: u8) -> (u8, u8) {
+        let range = self.quality_controller.set_qp_range(min_qp, max_qp);
+        self.stats.qp_min = range.0;
+        self.stats.qp_max = range.1;
+        range
+    }
+
+    /// Access reference to the internal quality controller.
+    pub fn quality_controller(&self) -> &ScreenQualityController {
+        &self.quality_controller
+    }
+
+    /// Access mutable reference to the internal quality controller.
+    pub fn quality_controller_mut(&mut self) -> &mut ScreenQualityController {
+        &mut self.quality_controller
     }
 
     /// Check if target frame pacing interval has elapsed.
@@ -2177,5 +2421,83 @@ mod tests {
         assert_eq!(s.set_scale_pct(50), 50);
         assert_eq!(s.scale_pct(), 50);
         assert_eq!(s.stats().scale_pct, 50);
+    }
+
+    #[test]
+    fn quality_controller_and_content_profiles() {
+        let mut ctrl = ScreenQualityController::default();
+        assert_eq!(ctrl.profile(), ScreenContentProfile::Text);
+        assert_eq!(ctrl.min_qp(), SCREEN_QP_TEXT_DEFAULT.0);
+        assert_eq!(ctrl.max_qp(), SCREEN_QP_TEXT_DEFAULT.1);
+        assert_eq!(ctrl.qp_range(), SCREEN_QP_TEXT_DEFAULT);
+        assert_eq!(ctrl.effective_profile(), ScreenContentProfile::Text);
+        assert!(!ctrl.custom_qp());
+
+        // 1. Switch to Motion profile updates default QP range to motion defaults
+        assert_eq!(
+            ctrl.set_profile(ScreenContentProfile::Motion),
+            ScreenContentProfile::Motion
+        );
+        assert_eq!(ctrl.profile(), ScreenContentProfile::Motion);
+        assert_eq!(ctrl.min_qp(), SCREEN_QP_MOTION_DEFAULT.0);
+        assert_eq!(ctrl.max_qp(), SCREEN_QP_MOTION_DEFAULT.1);
+        assert_eq!(ctrl.effective_profile(), ScreenContentProfile::Motion);
+
+        // 2. Switch to Auto profile resolves effective profile to Text for desktop sharing
+        assert_eq!(
+            ctrl.set_profile(ScreenContentProfile::Auto),
+            ScreenContentProfile::Auto
+        );
+        assert_eq!(ctrl.effective_profile(), ScreenContentProfile::Text);
+        assert_eq!(ctrl.qp_range(), SCREEN_QP_TEXT_DEFAULT);
+
+        // 3. Custom QP range configuration and clamping
+        let custom = ctrl.set_qp_range(10, 30);
+        assert_eq!(custom, (10, 30));
+        assert_eq!(ctrl.qp_range(), (10, 30));
+        assert!(ctrl.custom_qp());
+
+        // Clamping invalid inputs (min > max clamped, bounds 0..51)
+        let clamped = ctrl.set_qp_range(60, 20);
+        assert_eq!(clamped, (51, 51));
+
+        // 4. Reset default QP restores profile defaults
+        let reset = ctrl.reset_default_qp();
+        assert_eq!(reset, SCREEN_QP_TEXT_DEFAULT);
+        assert!(!ctrl.custom_qp());
+
+        // 5. String parsing and display
+        assert_eq!("text".parse::<ScreenContentProfile>().unwrap(), ScreenContentProfile::Text);
+        assert_eq!("desktop".parse::<ScreenContentProfile>().unwrap(), ScreenContentProfile::Text);
+        assert_eq!("motion".parse::<ScreenContentProfile>().unwrap(), ScreenContentProfile::Motion);
+        assert_eq!("video".parse::<ScreenContentProfile>().unwrap(), ScreenContentProfile::Motion);
+        assert_eq!("auto".parse::<ScreenContentProfile>().unwrap(), ScreenContentProfile::Auto);
+        assert!("invalid".parse::<ScreenContentProfile>().is_err());
+        assert_eq!(ScreenContentProfile::Text.to_string(), "text");
+        assert_eq!(ScreenContentProfile::Motion.to_string(), "motion");
+        assert_eq!(ScreenContentProfile::Auto.to_string(), "auto");
+
+        // 6. Sender integration and stats
+        let mut s = ScreenSender::new();
+        assert_eq!(s.content_profile(), ScreenContentProfile::Text);
+        assert_eq!(s.stats().content_profile(), ScreenContentProfile::Text);
+        assert_eq!(s.stats().profile_tag, 0);
+        assert_eq!(s.stats().qp_min, SCREEN_QP_TEXT_DEFAULT.0);
+        assert_eq!(s.stats().qp_max, SCREEN_QP_TEXT_DEFAULT.1);
+
+        assert_eq!(
+            s.set_content_profile(ScreenContentProfile::Motion),
+            ScreenContentProfile::Motion
+        );
+        assert_eq!(s.content_profile(), ScreenContentProfile::Motion);
+        assert_eq!(s.stats().profile_tag, 1);
+        assert_eq!(s.stats().content_profile(), ScreenContentProfile::Motion);
+        assert_eq!(s.stats().qp_min, SCREEN_QP_MOTION_DEFAULT.0);
+        assert_eq!(s.stats().qp_max, SCREEN_QP_MOTION_DEFAULT.1);
+
+        s.set_qp_range(8, 28);
+        assert_eq!(s.qp_range(), (8, 28));
+        assert_eq!(s.stats().qp_min, 8);
+        assert_eq!(s.stats().qp_max, 28);
     }
 }

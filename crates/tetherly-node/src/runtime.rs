@@ -147,6 +147,14 @@ pub struct NodeConfig {
     pub screen_scale_pct: u32,
     /// Pick target resolution scale percentage tier from measured bandwidth profile (ADR-084).
     pub screen_scale_auto: bool,
+    /// Content optimization profile for screen streaming (ADR-085).
+    pub screen_profile: tetherly_core::ScreenContentProfile,
+    /// Pick content profile automatically (ADR-085).
+    pub screen_profile_auto: bool,
+    /// Minimum Quantization Parameter bound for screen streaming (ADR-085).
+    pub screen_qp_min: u8,
+    /// Maximum Quantization Parameter bound for screen streaming (ADR-085).
+    pub screen_qp_max: u8,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -195,6 +203,10 @@ impl Default for NodeConfig {
             screen_fps_auto: true,
             screen_scale_pct: default_screen_scale_pct(),
             screen_scale_auto: true,
+            screen_profile: tetherly_core::ScreenContentProfile::Auto,
+            screen_profile_auto: true,
+            screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
+            screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_sink: None,
             input_sink: None,
         }
@@ -2857,6 +2869,25 @@ pub struct ScreenStatusReport {
     pub fps_target: u32,
     #[serde(default)]
     pub scale_pct: u32,
+    #[serde(default)]
+    pub profile: String,
+    #[serde(default)]
+    pub qp_min: u8,
+    #[serde(default)]
+    pub qp_max: u8,
+}
+
+/// Status report for screen streaming content profile and QP quality bounds (ADR-085).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ScreenProfileReport {
+    pub ok: bool,
+    pub profile: tetherly_core::ScreenContentProfile,
+    pub min_qp: u8,
+    pub max_qp: u8,
+    pub is_custom_qp: bool,
+    #[serde(default)]
+    pub auto_profile: bool,
+    pub timestamp_ms: u64,
 }
 
 /// Status report for screen streaming resolution downscaling (ADR-084).
@@ -3109,6 +3140,10 @@ struct Shared {
     screen_scale_auto: bool,
     /// One-shot per stream: the first streamed frame picks the scale tier.
     screen_scale_applied: std::sync::atomic::AtomicBool,
+    /// Whether target content profile follows the measured bandwidth profile (ADR-085).
+    screen_profile_auto: bool,
+    /// One-shot per stream: the first streamed frame picks the profile tier.
+    screen_profile_applied: std::sync::atomic::AtomicBool,
     /// Visitor-side output. Defaults to the in-memory observer; production
     /// injects `SystemSink` for real display.
     screen_sink: Arc<dyn ScreenSink>,
@@ -3303,6 +3338,20 @@ impl Node {
         let screen_fps_auto = cfg.screen_fps_auto;
         let screen_scale_pct = cfg.screen_scale_pct;
         let screen_scale_auto = cfg.screen_scale_auto;
+        let screen_profile = cfg.screen_profile;
+        let screen_profile_auto = cfg.screen_profile_auto;
+        let screen_qp_min = cfg.screen_qp_min;
+        let screen_qp_max = cfg.screen_qp_max;
+        if let Some(sel) = &screen_encode_codec {
+            sel.set_fps(screen_fps);
+            sel.set_scale_pct(screen_scale_pct);
+            sel.set_content_profile(screen_profile);
+            if screen_qp_min != tetherly_core::SCREEN_QP_MIN_DEFAULT
+                || screen_qp_max != tetherly_core::SCREEN_QP_MAX_DEFAULT
+            {
+                sel.set_qp_range(screen_qp_min, screen_qp_max);
+            }
+        }
         let screen_source: Arc<dyn ScreenSource> = cfg.screen_source.clone().unwrap_or_else(|| {
             // Production: real capture → negotiated codec (zstd, or H.264
             // when opted in and the peer advertised it) → wire. Tests inject
@@ -3316,6 +3365,14 @@ impl Node {
                 codec,
             ))
         });
+        screen_source.set_fps(screen_fps);
+        screen_source.set_scale_pct(screen_scale_pct);
+        screen_source.set_content_profile(screen_profile);
+        if screen_qp_min != tetherly_core::SCREEN_QP_MIN_DEFAULT
+            || screen_qp_max != tetherly_core::SCREEN_QP_MAX_DEFAULT
+        {
+            screen_source.set_qp_range(screen_qp_min, screen_qp_max);
+        }
         let screen_codec: Arc<dyn ScreenCodec> = cfg
             .screen_codec
             .clone()
@@ -3415,6 +3472,12 @@ impl Node {
             screen_engine: Mutex::new({
                 let mut s = ScreenSender::with_fps(screen_fps);
                 s.set_scale_pct(screen_scale_pct);
+                s.set_content_profile(screen_profile);
+                if screen_qp_min != tetherly_core::SCREEN_QP_MIN_DEFAULT
+                    || screen_qp_max != tetherly_core::SCREEN_QP_MAX_DEFAULT
+                {
+                    s.set_qp_range(screen_qp_min, screen_qp_max);
+                }
                 s
             }),
             screen_source,
@@ -3429,6 +3492,8 @@ impl Node {
             screen_fps_applied: std::sync::atomic::AtomicBool::new(false),
             screen_scale_auto,
             screen_scale_applied: std::sync::atomic::AtomicBool::new(false),
+            screen_profile_auto,
+            screen_profile_applied: std::sync::atomic::AtomicBool::new(false),
             screen_sink,
             screen_interval: Mutex::new(ScreenIntervalTracker::new()),
             screen_rx_stats: Mutex::new(ScreenStats::default()),
@@ -20225,6 +20290,9 @@ impl Node {
             node.shared
                 .screen_scale_applied
                 .store(false, std::sync::atomic::Ordering::Relaxed);
+            node.shared
+                .screen_profile_applied
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             node.emit(UiEvent::screen_state_changed("idle", false, None));
         });
     }
@@ -20321,6 +20389,27 @@ impl Node {
                 })
             };
             self.screen_set_scale_pct(crate::screen::screen_scale_from_profile(mbps));
+        }
+        // ADR-085 / v1.99: the first frame of a stream also picks the content profile
+        // from the viewer's measured bandwidth profile when `screen_profile_auto` is on.
+        if self.shared.screen_profile_auto
+            && !self
+                .shared
+                .screen_profile_applied
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            let mbps = {
+                let peer = self.shared.screen_peer.lock().expect("screen_peer").clone();
+                peer.and_then(|p| {
+                    self.shared
+                        .bandwidth_profiles
+                        .lock()
+                        .expect("bandwidth_profiles")
+                        .get(&p.to_string())
+                        .map(|pr| pr.measured_mbps)
+                })
+            };
+            self.screen_set_profile(crate::screen::screen_profile_from_profile(mbps));
         }
         // Grab can block for a long time (adb pipe reads in particular), so
         // run it on the blocking pool with a hard timeout. On timeout, call
@@ -20709,6 +20798,9 @@ impl Node {
             bitrate_bps: stats.bitrate_bps,
             fps_target: stats.fps_target,
             scale_pct: stats.scale_pct,
+            profile: stats.content_profile().as_str().to_string(),
+            qp_min: stats.qp_min,
+            qp_max: stats.qp_max,
         }
     }
 
@@ -20860,6 +20952,86 @@ impl Node {
             auto_profile: self.shared.screen_scale_auto,
             timestamp_ms: self.shared.clock.unix_ms(),
         }
+    }
+
+    /// Override screen streaming content profile (Text, Motion, Auto) (ADR-085).
+    pub fn screen_set_profile(
+        &self,
+        profile: tetherly_core::ScreenContentProfile,
+    ) -> tetherly_core::ScreenContentProfile {
+        let actual = {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            engine.set_content_profile(profile)
+        };
+        if let Some(sel) = &self.shared.screen_encode_codec {
+            sel.set_content_profile(actual);
+        }
+        self.shared.screen_source.set_content_profile(actual);
+        actual
+    }
+
+    /// Override screen streaming quantization parameter (QP) range bounds (ADR-085).
+    pub fn screen_set_qp_range(&self, min_qp: u8, max_qp: u8) -> (u8, u8) {
+        let (min, max) = {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            engine.set_qp_range(min_qp, max_qp)
+        };
+        if let Some(sel) = &self.shared.screen_encode_codec {
+            sel.set_qp_range(min, max);
+        }
+        self.shared.screen_source.set_qp_range(min, max);
+        (min, max)
+    }
+
+    /// Current target screen streaming content profile.
+    pub fn screen_profile(&self) -> tetherly_core::ScreenContentProfile {
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .content_profile()
+    }
+
+    /// Current target screen streaming QP range bounds.
+    pub fn screen_qp_range(&self) -> (u8, u8) {
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .qp_range()
+    }
+
+    /// Report current screen streaming content profile and QP quality bounds (ADR-085).
+    pub fn screen_profile_report(&self) -> ScreenProfileReport {
+        let (profile, min_qp, max_qp, is_custom_qp) = {
+            let engine = self.shared.screen_engine.lock().expect("screen");
+            let qc = engine.quality_controller();
+            (qc.profile(), qc.min_qp(), qc.max_qp(), qc.is_custom())
+        };
+        ScreenProfileReport {
+            ok: true,
+            profile,
+            min_qp,
+            max_qp,
+            is_custom_qp,
+            auto_profile: self.shared.screen_profile_auto,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Set and report screen streaming content profile (ADR-085).
+    pub fn screen_set_profile_reported(
+        &self,
+        profile: tetherly_core::ScreenContentProfile,
+    ) -> ScreenProfileReport {
+        self.screen_set_profile(profile);
+        self.screen_profile_report()
+    }
+
+    /// Set and report screen streaming QP range bounds (ADR-085).
+    pub fn screen_set_qp_range_reported(&self, min_qp: u8, max_qp: u8) -> ScreenProfileReport {
+        self.screen_set_qp_range(min_qp, max_qp);
+        self.screen_profile_report()
     }
 
     /// Check if target frame pacing interval has elapsed for the outbound screen pump (ADR-083).
@@ -21602,6 +21774,10 @@ mod clipboard_policy_tests {
             screen_fps_auto: true,
             screen_scale_pct: default_screen_scale_pct(),
             screen_scale_auto: true,
+            screen_profile: tetherly_core::ScreenContentProfile::Auto,
+            screen_profile_auto: true,
+            screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
+            screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_sink: None,
             input_sink: None,
         };
@@ -21743,6 +21919,10 @@ mod handoff_engine_tests {
             screen_fps_auto: true,
             screen_scale_pct: default_screen_scale_pct(),
             screen_scale_auto: true,
+            screen_profile: tetherly_core::ScreenContentProfile::Auto,
+            screen_profile_auto: true,
+            screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
+            screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_sink: None,
             input_sink: None,
         };
@@ -21915,6 +22095,10 @@ mod media_policy_tests {
             screen_fps_auto: true,
             screen_scale_pct: default_screen_scale_pct(),
             screen_scale_auto: true,
+            screen_profile: tetherly_core::ScreenContentProfile::Auto,
+            screen_profile_auto: true,
+            screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
+            screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_sink: None,
             input_sink: None,
         };
@@ -22063,6 +22247,10 @@ mod locator_policy_tests {
             screen_fps_auto: true,
             screen_scale_pct: default_screen_scale_pct(),
             screen_scale_auto: true,
+            screen_profile: tetherly_core::ScreenContentProfile::Auto,
+            screen_profile_auto: true,
+            screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
+            screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_sink: None,
             input_sink: None,
         };
@@ -22191,6 +22379,10 @@ mod locator_policy_tests {
             screen_fps_auto: true,
             screen_scale_pct: default_screen_scale_pct(),
             screen_scale_auto: true,
+            screen_profile: tetherly_core::ScreenContentProfile::Auto,
+            screen_profile_auto: true,
+            screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
+            screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_sink: None,
             input_sink: None,
         };
@@ -22509,6 +22701,81 @@ mod locator_policy_tests {
         // 4. Status report includes fps_target
         let status = node.screen_status_report().await;
         assert_eq!(status.fps_target, 5);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_screen_content_profile_and_qp_bounds_runtime() {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-profile-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.clone(),
+            control_port: 0,
+            file_port: 0,
+            input_port: 0,
+            screen_port: 0,
+            ui_port: 0,
+            name: "profile-test-node".into(),
+            platform: "test".into(),
+            memory_clip: true,
+            memory_notifier: true,
+            loopback_only: true,
+            advertise: false,
+            reconnect: false,
+            overlay: OverlayConfig::default(),
+            ..Default::default()
+        };
+        let clock = Arc::new(ManualClock::new(20_000));
+        let node = Node::start_with_clock(cfg, clock.clone()).unwrap();
+
+        // 1. Initial report: defaults to Auto profile and (12, 35) default QP bounds
+        let initial_rep = node.screen_profile_report();
+        assert!(initial_rep.ok);
+        assert_eq!(initial_rep.profile, tetherly_core::ScreenContentProfile::Auto);
+        assert_eq!(initial_rep.min_qp, tetherly_core::SCREEN_QP_TEXT_DEFAULT.0);
+        assert_eq!(initial_rep.max_qp, tetherly_core::SCREEN_QP_TEXT_DEFAULT.1);
+        assert!(!initial_rep.is_custom_qp);
+        assert!(initial_rep.auto_profile);
+
+        // 2. Set profile override to Motion
+        let rep_motion = node.screen_set_profile_reported(tetherly_core::ScreenContentProfile::Motion);
+        assert!(rep_motion.ok);
+        assert_eq!(rep_motion.profile, tetherly_core::ScreenContentProfile::Motion);
+        assert_eq!(rep_motion.min_qp, tetherly_core::SCREEN_QP_MOTION_DEFAULT.0);
+        assert_eq!(rep_motion.max_qp, tetherly_core::SCREEN_QP_MOTION_DEFAULT.1);
+        assert!(!rep_motion.is_custom_qp);
+        assert_eq!(node.screen_profile(), tetherly_core::ScreenContentProfile::Motion);
+
+        // 3. Set custom QP range override
+        let rep_custom_qp = node.screen_set_qp_range_reported(10, 28);
+        assert!(rep_custom_qp.ok);
+        assert_eq!(rep_custom_qp.min_qp, 10);
+        assert_eq!(rep_custom_qp.max_qp, 28);
+        assert!(rep_custom_qp.is_custom_qp);
+        assert_eq!(node.screen_qp_range(), (10, 28));
+
+        // 4. Clamping bounds verification
+        let rep_clamped = node.screen_set_qp_range_reported(60, 20); // min > max -> clamped
+        assert_eq!(rep_clamped.min_qp, 51);
+        assert_eq!(rep_clamped.max_qp, 51);
+
+        let rep_reset = node.screen_set_qp_range_reported(14, 40);
+        assert_eq!(rep_reset.min_qp, 14);
+        assert_eq!(rep_reset.max_qp, 40);
+
+        // 5. Status report reflects active profile and QP bounds
+        let status = node.screen_status_report().await;
+        assert_eq!(status.profile, "motion");
+        assert_eq!(status.qp_min, 14);
+        assert_eq!(status.qp_max, 40);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

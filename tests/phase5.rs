@@ -72,6 +72,10 @@ fn cfg(
         screen_fps_auto: true,
         screen_scale_pct: 100,
         screen_scale_auto: true,
+        screen_profile: tetherly_core::ScreenContentProfile::Auto,
+        screen_profile_auto: true,
+        screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
+        screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
         screen_sink: None,
         input_sink: None,
     }
@@ -1620,6 +1624,195 @@ async fn m5_8_screen_dynamic_resolution_scaling() {
     assert_eq!(
         tetherly_node::screen_scale_from_profile(Some(25_000_000.0)),
         100
+    );
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+// --------------------------------------------------------------------------
+// v1.99 / ADR-085 — Screen dynamic content profiles & QP quality controller.
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_9_screen_dynamic_content_profile() {
+    let codec = Arc::new(tetherly_node::NegotiatedCodec::new(true, 2_000_000, true));
+    let src: Arc<dyn tetherly_core::ScreenSource> = Arc::new(tetherly_node::EncodedSource::new(
+        MemoryScreenSource::new(32, 32).expect("32x32 screen"),
+        codec.clone(),
+    ));
+    let (da, ga) = temp_dir("host-h264-profile");
+    let (db, gb) = temp_dir("visitor-h264-profile");
+    let host = Node::start(cfg(da, "host", Some(src))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let host_ui = host.spawn_ui().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+    wait_screen_port(
+        &host,
+        visitor.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+    wait_screen_port(
+        &visitor,
+        host.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+
+    visitor
+        .open_screen(host.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    host.screen_allow();
+    visitor.screen_start().await.unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_state() == ScreenState::Streaming {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("host never started streaming (h264-profile)");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // 1. Initial GET /api/screen/profile
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/profile")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_node::ScreenProfileReport = serde_json::from_slice(&b).unwrap();
+    assert!(rep.ok);
+    assert_eq!(rep.profile, tetherly_core::ScreenContentProfile::Auto);
+    assert_eq!(rep.min_qp, tetherly_core::SCREEN_QP_TEXT_DEFAULT.0);
+    assert_eq!(rep.max_qp, tetherly_core::SCREEN_QP_TEXT_DEFAULT.1);
+    assert!(!rep.is_custom_qp);
+    assert!(rep.auto_profile);
+
+    // Initial ScreenStatusReport check
+    let s_rep = host.screen_status_report().await;
+    assert_eq!(s_rep.profile, "auto");
+    assert_eq!(s_rep.qp_min, tetherly_core::SCREEN_QP_TEXT_DEFAULT.0);
+    assert_eq!(s_rep.qp_max, tetherly_core::SCREEN_QP_TEXT_DEFAULT.1);
+
+    // 2. Override profile to Motion via POST /api/screen/profile
+    let req_motion = serde_json::json!({ "profile": "motion" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/profile",
+        &serde_json::to_vec(&req_motion).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep_motion: tetherly_node::ScreenProfileReport = serde_json::from_slice(&b).unwrap();
+    assert!(rep_motion.ok);
+    assert_eq!(rep_motion.profile, tetherly_core::ScreenContentProfile::Motion);
+    assert_eq!(rep_motion.min_qp, tetherly_core::SCREEN_QP_MOTION_DEFAULT.0);
+    assert_eq!(rep_motion.max_qp, tetherly_core::SCREEN_QP_MOTION_DEFAULT.1);
+    assert!(!rep_motion.is_custom_qp);
+    assert_eq!(host.screen_profile(), tetherly_core::ScreenContentProfile::Motion);
+    assert_eq!(codec.content_profile(), tetherly_core::ScreenContentProfile::Motion);
+
+    // 3. Override QP range to custom bounds
+    let req_custom_qp = serde_json::json!({ "min_qp": 10, "max_qp": 26 });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/profile",
+        &serde_json::to_vec(&req_custom_qp).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep_qp: tetherly_node::ScreenProfileReport = serde_json::from_slice(&b).unwrap();
+    assert!(rep_qp.ok);
+    assert_eq!(rep_qp.min_qp, 10);
+    assert_eq!(rep_qp.max_qp, 26);
+    assert!(rep_qp.is_custom_qp);
+    assert_eq!(host.screen_qp_range(), (10, 26));
+    assert_eq!(codec.qp_range(), (10, 26));
+
+    // Verify ScreenStatusReport reflects updated profile and QP
+    let s_rep_custom = host.screen_status_report().await;
+    assert_eq!(s_rep_custom.profile, "motion");
+    assert_eq!(s_rep_custom.qp_min, 10);
+    assert_eq!(s_rep_custom.qp_max, 26);
+
+    // 4. Send 3 frames under Motion profile with custom QP
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        assert!(host.screen_send_frame().await.unwrap());
+    }
+
+    // 5. Verify frames arrive at visitor sink
+    let start = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 3 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "frames did not arrive under dynamic content profile, count={}",
+                visitor.screen_sink_snapshot().count()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let sink = visitor.screen_sink_snapshot();
+    assert_eq!(sink.presented(), vec![1, 2, 3]);
+
+    // 6. Switch profile to Text via query parameter
+    let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/profile?profile=text", b"")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep_text: tetherly_node::ScreenProfileReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep_text.profile, tetherly_core::ScreenContentProfile::Text);
+    assert_eq!(host.screen_profile(), tetherly_core::ScreenContentProfile::Text);
+    assert_eq!(codec.content_profile(), tetherly_core::ScreenContentProfile::Text);
+
+    // Send 2 more frames under Text profile
+    for _ in 0..2 {
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        assert!(host.screen_send_frame().await.unwrap());
+    }
+
+    let start = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 5 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "frames did not arrive under text profile, count={}",
+                visitor.screen_sink_snapshot().count()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let sink2 = visitor.screen_sink_snapshot();
+    assert_eq!(sink2.presented(), vec![1, 2, 3, 4, 5]);
+
+    // 7. Auto profile helper verification
+    assert_eq!(
+        tetherly_node::screen_profile_from_profile(None),
+        tetherly_core::ScreenContentProfile::Text
+    );
+    assert_eq!(
+        tetherly_node::screen_profile_from_profile(Some(50_000_000.0)),
+        tetherly_core::ScreenContentProfile::Text
     );
 
     host.shutdown();

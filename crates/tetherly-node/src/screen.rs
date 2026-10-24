@@ -216,6 +216,18 @@ struct H264EncoderState {
     fps: u32,
     /// Frame rate the live encoder was built with.
     built_fps: u32,
+    /// Content profile (ADR-085).
+    profile: tetherly_core::ScreenContentProfile,
+    /// Content profile the live encoder was built with.
+    built_profile: tetherly_core::ScreenContentProfile,
+    /// Minimum QP bound (ADR-085).
+    min_qp: u8,
+    /// Maximum QP bound (ADR-085).
+    max_qp: u8,
+    /// Minimum QP the live encoder was built with.
+    built_min_qp: u8,
+    /// Maximum QP the live encoder was built with.
+    built_max_qp: u8,
 }
 
 /// Lossy H.264 codec (ADR-079). BGRA in, annex-B out; the decoder side
@@ -228,6 +240,9 @@ pub struct H264Codec {
     bitrate_bps: std::sync::atomic::AtomicU32,
     fps: std::sync::atomic::AtomicU32,
     scale_pct: std::sync::atomic::AtomicU32,
+    profile_tag: std::sync::atomic::AtomicU8,
+    min_qp: std::sync::atomic::AtomicU8,
+    max_qp: std::sync::atomic::AtomicU8,
     force_idr: std::sync::atomic::AtomicBool,
     enc: Mutex<Option<H264EncoderState>>,
     dec: Mutex<Option<openh264::decoder::Decoder>>,
@@ -239,6 +254,9 @@ impl std::fmt::Debug for H264Codec {
             .field("bitrate_bps", &self.bitrate_bps)
             .field("fps", &self.fps)
             .field("scale_pct", &self.scale_pct)
+            .field("profile_tag", &self.profile_tag)
+            .field("min_qp", &self.min_qp)
+            .field("max_qp", &self.max_qp)
             .finish()
     }
 }
@@ -249,6 +267,11 @@ impl H264Codec {
             bitrate_bps: std::sync::atomic::AtomicU32::new(bitrate_bps.clamp(100_000, 50_000_000)),
             fps: std::sync::atomic::AtomicU32::new(tetherly_core::SCREEN_FPS_DEFAULT),
             scale_pct: std::sync::atomic::AtomicU32::new(tetherly_core::SCREEN_SCALE_DEFAULT_PCT),
+            profile_tag: std::sync::atomic::AtomicU8::new(
+                tetherly_core::ScreenContentProfile::Text.tag(),
+            ),
+            min_qp: std::sync::atomic::AtomicU8::new(tetherly_core::SCREEN_QP_TEXT_DEFAULT.0),
+            max_qp: std::sync::atomic::AtomicU8::new(tetherly_core::SCREEN_QP_TEXT_DEFAULT.1),
             force_idr: std::sync::atomic::AtomicBool::new(false),
             enc: Mutex::new(None),
             dec: Mutex::new(None),
@@ -294,6 +317,39 @@ impl H264Codec {
         self.scale_pct.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Hot content profile update (ADR-085 dynamic quality & content profiles).
+    pub fn set_content_profile(&self, profile: tetherly_core::ScreenContentProfile) {
+        self.profile_tag
+            .store(profile.tag(), std::sync::atomic::Ordering::Relaxed);
+        let (min, max) = profile.default_qp_range();
+        self.min_qp.store(min, std::sync::atomic::Ordering::Relaxed);
+        self.max_qp.store(max, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn content_profile(&self) -> tetherly_core::ScreenContentProfile {
+        tetherly_core::ScreenContentProfile::from_tag(
+            self.profile_tag.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Hot QP bounds update (ADR-085).
+    pub fn set_qp_range(&self, min_qp: u8, max_qp: u8) {
+        let min = min_qp.clamp(
+            tetherly_core::SCREEN_QP_ABSOLUTE_MIN,
+            tetherly_core::SCREEN_QP_ABSOLUTE_MAX,
+        );
+        let max = max_qp.clamp(min, tetherly_core::SCREEN_QP_ABSOLUTE_MAX);
+        self.min_qp.store(min, std::sync::atomic::Ordering::Relaxed);
+        self.max_qp.store(max, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn qp_range(&self) -> (u8, u8) {
+        (
+            self.min_qp.load(std::sync::atomic::Ordering::Relaxed),
+            self.max_qp.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
     /// Force the next encode pass to emit an IDR keyframe (ADR-081).
     pub fn force_idr(&self) {
         self.force_idr
@@ -312,13 +368,21 @@ impl H264Codec {
             || state.h != h
             || state.built_bitrate_bps != state.bitrate_bps
             || state.built_fps != state.fps
+            || state.built_profile != state.profile
+            || state.built_min_qp != state.min_qp
+            || state.built_max_qp != state.max_qp
             || need_idr
         {
-            // Geometry, bitrate, fps change, or on-demand IDR request: a fresh encoder emits SPS/PPS + IDR
-            // for the new shape/rate/fps, and P-frames never reference the old one.
-            let config = openh264::encoder::EncoderConfig::new()
+            // Geometry, bitrate, fps, profile, QP change, or on-demand IDR request: a fresh encoder emits SPS/PPS + IDR
+            // for the new parameters, and P-frames never reference the old one.
+            let qp_range = openh264::encoder::QpRange::new(state.min_qp, state.max_qp);
+            let mut config = openh264::encoder::EncoderConfig::new()
                 .bitrate(openh264::encoder::BitRate::from_bps(state.bitrate_bps))
-                .max_frame_rate(openh264::encoder::FrameRate::from_hz(state.fps as f32));
+                .max_frame_rate(openh264::encoder::FrameRate::from_hz(state.fps as f32))
+                .qp(qp_range);
+            if state.profile == tetherly_core::ScreenContentProfile::Motion {
+                config = config.usage_type(openh264::encoder::UsageType::CameraVideoRealTime);
+            }
             state.encoder = openh264::encoder::Encoder::with_api_config(
                 openh264::OpenH264API::from_source(),
                 config,
@@ -328,6 +392,9 @@ impl H264Codec {
             state.h = h;
             state.built_bitrate_bps = state.bitrate_bps;
             state.built_fps = state.fps;
+            state.built_profile = state.profile;
+            state.built_min_qp = state.min_qp;
+            state.built_max_qp = state.max_qp;
         }
         state
             .encoder
@@ -391,6 +458,22 @@ impl ScreenCodecPort for H264Codec {
         self.scale_pct()
     }
 
+    fn set_content_profile(&self, profile: tetherly_core::ScreenContentProfile) {
+        self.set_content_profile(profile);
+    }
+
+    fn content_profile(&self) -> tetherly_core::ScreenContentProfile {
+        self.content_profile()
+    }
+
+    fn set_qp_range(&self, min_qp: u8, max_qp: u8) {
+        self.set_qp_range(min_qp, max_qp);
+    }
+
+    fn qp_range(&self) -> (u8, u8) {
+        self.qp_range()
+    }
+
     fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
         let yuv = I420::from_bgra(raw, w as usize, h as usize)?;
         let need_idr = self
@@ -400,6 +483,7 @@ impl ScreenCodecPort for H264Codec {
         if guard.is_none() {
             let encoder = openh264::encoder::Encoder::new()
                 .map_err(|e| CoreError::ScreenCodec(format!("openh264 encoder: {e}")))?;
+            let (min_qp, max_qp) = self.qp_range();
             *guard = Some(H264EncoderState {
                 encoder,
                 w: 0,
@@ -408,11 +492,21 @@ impl ScreenCodecPort for H264Codec {
                 built_bitrate_bps: 0,
                 fps: self.fps(),
                 built_fps: 0,
+                profile: self.content_profile(),
+                built_profile: tetherly_core::ScreenContentProfile::Text,
+                min_qp,
+                max_qp,
+                built_min_qp: 0,
+                built_max_qp: 0,
             });
         }
         let state = guard.as_mut().expect("encoder just inserted");
         state.bitrate_bps = self.bitrate_bps();
         state.fps = self.fps();
+        state.profile = self.content_profile();
+        let (min_qp, max_qp) = self.qp_range();
+        state.min_qp = min_qp;
+        state.max_qp = max_qp;
         Self::encode_with(state, &yuv, need_idr)
     }
 
@@ -463,7 +557,14 @@ pub const SCREEN_BITRATE_DEFAULT_BPS: u32 = 4_000_000;
 
 pub fn screen_bitrate_from_profile(measured_mbps: Option<f64>) -> u32 {
     let half_bps = match measured_mbps {
-        Some(mbps) if mbps.is_finite() && mbps > 0.0 => mbps * 1_000_000.0 / 2.0,
+        Some(mbps) if mbps.is_finite() && mbps > 0.0 => {
+            let actual_mbps = if mbps > 1000.0 {
+                mbps / 1_000_000.0
+            } else {
+                mbps
+            };
+            actual_mbps * 1_000_000.0 / 2.0
+        }
         _ => return SCREEN_BITRATE_DEFAULT_BPS,
     };
     (half_bps as u64).clamp(SCREEN_BITRATE_MIN_BPS as u64, SCREEN_BITRATE_MAX_BPS as u64) as u32
@@ -477,7 +578,13 @@ pub fn screen_bitrate_from_profile(measured_mbps: Option<f64>) -> u32 {
 /// None or invalid: SCREEN_FPS_DEFAULT (30 FPS)
 pub fn screen_fps_from_profile(measured_mbps: Option<f64>) -> u32 {
     let mbps = match measured_mbps {
-        Some(m) if m.is_finite() && m > 0.0 => m,
+        Some(m) if m.is_finite() && m > 0.0 => {
+            if m > 1000.0 {
+                m / 1_000_000.0
+            } else {
+                m
+            }
+        }
         _ => return tetherly_core::SCREEN_FPS_DEFAULT,
     };
     if mbps < 5.0 {
@@ -497,7 +604,13 @@ pub fn screen_fps_from_profile(measured_mbps: Option<f64>) -> u32 {
 /// High (>= 10 Mbps) or None / invalid: 100% scale (Native)
 pub fn screen_scale_from_profile(measured_mbps: Option<f64>) -> u32 {
     let mbps = match measured_mbps {
-        Some(m) if m.is_finite() && m > 0.0 => m,
+        Some(m) if m.is_finite() && m > 0.0 => {
+            if m > 1000.0 {
+                m / 1_000_000.0
+            } else {
+                m
+            }
+        }
         _ => return tetherly_core::SCREEN_SCALE_DEFAULT_PCT,
     };
     if mbps < 3.0 {
@@ -507,6 +620,13 @@ pub fn screen_scale_from_profile(measured_mbps: Option<f64>) -> u32 {
     } else {
         100
     }
+}
+
+/// ADR-085 dynamic content profile auto-tiering: resolves content profile from measured bandwidth or defaults.
+/// In Auto mode, screen streaming defaults to Text profile for desktop/IDE glyph clarity.
+pub fn screen_profile_from_profile(measured_mbps: Option<f64>) -> tetherly_core::ScreenContentProfile {
+    let _ = measured_mbps;
+    tetherly_core::ScreenContentProfile::Text
 }
 
 /// Negotiated screen-channel codec (ADR-079 §决定): encode with H.264 only
@@ -566,6 +686,26 @@ impl NegotiatedCodec {
     /// Current target resolution scale percentage.
     pub fn scale_pct(&self) -> u32 {
         self.h264.scale_pct()
+    }
+
+    /// Hot content profile retier (ADR-085 dynamic quality & content profiles).
+    pub fn set_content_profile(&self, profile: tetherly_core::ScreenContentProfile) {
+        self.h264.set_content_profile(profile);
+    }
+
+    /// Current content profile.
+    pub fn content_profile(&self) -> tetherly_core::ScreenContentProfile {
+        self.h264.content_profile()
+    }
+
+    /// Hot QP bounds retier (ADR-085).
+    pub fn set_qp_range(&self, min_qp: u8, max_qp: u8) {
+        self.h264.set_qp_range(min_qp, max_qp);
+    }
+
+    /// Current QP bounds.
+    pub fn qp_range(&self) -> (u8, u8) {
+        self.h264.qp_range()
     }
 
     /// Force the next encode pass to emit an IDR keyframe (ADR-081).
@@ -632,6 +772,22 @@ impl ScreenCodecPort for NegotiatedCodec {
 
     fn scale_pct(&self) -> u32 {
         self.scale_pct()
+    }
+
+    fn set_content_profile(&self, profile: tetherly_core::ScreenContentProfile) {
+        self.set_content_profile(profile);
+    }
+
+    fn content_profile(&self) -> tetherly_core::ScreenContentProfile {
+        self.content_profile()
+    }
+
+    fn set_qp_range(&self, min_qp: u8, max_qp: u8) {
+        self.set_qp_range(min_qp, max_qp);
+    }
+
+    fn qp_range(&self) -> (u8, u8) {
+        self.qp_range()
     }
 
     fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
@@ -728,6 +884,24 @@ impl<S: ScreenSource> ScreenSource for EncodedSource<S> {
 
     fn scale_pct(&self) -> u32 {
         self.scale_pct.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_content_profile(&self, profile: tetherly_core::ScreenContentProfile) {
+        self.codec.set_content_profile(profile);
+        self.inner.set_content_profile(profile);
+    }
+
+    fn content_profile(&self) -> tetherly_core::ScreenContentProfile {
+        self.codec.content_profile()
+    }
+
+    fn set_qp_range(&self, min_qp: u8, max_qp: u8) {
+        self.codec.set_qp_range(min_qp, max_qp);
+        self.inner.set_qp_range(min_qp, max_qp);
+    }
+
+    fn qp_range(&self) -> (u8, u8) {
+        self.codec.qp_range()
     }
 }
 
@@ -2106,5 +2280,70 @@ mod h264_tests {
         assert_eq!(sel.fps(), 30);
         sel.set_fps(45);
         assert_eq!(sel.fps(), 45);
+    }
+
+    #[test]
+    fn scale_control_and_forwarding() {
+        let codec = H264Codec::new(2_000_000);
+        assert_eq!(codec.scale_pct(), 100);
+        codec.set_scale_pct(50);
+        assert_eq!(codec.scale_pct(), 50);
+        codec.set_scale_pct(150); // clamped to MAX 100
+        assert_eq!(codec.scale_pct(), 100);
+        codec.set_scale_pct(10); // clamped to MIN 25
+        assert_eq!(codec.scale_pct(), 25);
+
+        let sel = NegotiatedCodec::new(true, 1_000_000, true);
+        assert_eq!(sel.scale_pct(), 100);
+        sel.set_scale_pct(75);
+        assert_eq!(sel.scale_pct(), 75);
+    }
+
+    #[test]
+    fn content_profile_and_qp_bounds_control() {
+        let codec = H264Codec::new(2_000_000);
+        assert_eq!(codec.content_profile(), tetherly_core::ScreenContentProfile::Text);
+        assert_eq!(codec.qp_range(), tetherly_core::SCREEN_QP_TEXT_DEFAULT);
+
+        // Switch to Motion profile updates default QP range to motion defaults
+        codec.set_content_profile(tetherly_core::ScreenContentProfile::Motion);
+        assert_eq!(codec.content_profile(), tetherly_core::ScreenContentProfile::Motion);
+        assert_eq!(codec.qp_range(), tetherly_core::SCREEN_QP_MOTION_DEFAULT);
+
+        // Custom QP bounds
+        codec.set_qp_range(10, 30);
+        assert_eq!(codec.qp_range(), (10, 30));
+
+        // Clamping bounds
+        codec.set_qp_range(60, 20);
+        assert_eq!(codec.qp_range(), (51, 51));
+
+        // NegotiatedCodec forwards profile and QP bounds
+        let sel = NegotiatedCodec::new(true, 1_000_000, true);
+        assert_eq!(sel.content_profile(), tetherly_core::ScreenContentProfile::Text);
+        sel.set_content_profile(tetherly_core::ScreenContentProfile::Motion);
+        assert_eq!(sel.content_profile(), tetherly_core::ScreenContentProfile::Motion);
+        assert_eq!(sel.qp_range(), tetherly_core::SCREEN_QP_MOTION_DEFAULT);
+        sel.set_qp_range(14, 38);
+        assert_eq!(sel.qp_range(), (14, 38));
+
+        // Profile change triggers fresh IDR on encode
+        let (w, h) = (96, 64);
+        let test_codec = H264Codec::new(2_000_000);
+        let f1 = synthetic_frame(w, h, 0);
+        let f2 = synthetic_frame(w, h, 1);
+        let p1 = test_codec.compress_frame(&f1, w as u16, h as u16).unwrap();
+        assert_eq!(first_vcl_nal_type(&p1), 5, "first packet opens with IDR");
+        let p2 = test_codec.compress_frame(&f2, w as u16, h as u16).unwrap();
+        assert_eq!(first_vcl_nal_type(&p2), 1, "continuous frame uses P-frame");
+
+        test_codec.set_content_profile(tetherly_core::ScreenContentProfile::Motion);
+        let f3 = synthetic_frame(w, h, 2);
+        let p3 = test_codec.compress_frame(&f3, w as u16, h as u16).unwrap();
+        assert_eq!(
+            first_vcl_nal_type(&p3),
+            5,
+            "profile change forces a fresh IDR keyframe"
+        );
     }
 }
