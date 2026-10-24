@@ -761,9 +761,11 @@ impl ScreenSender {
     pub fn new() -> Self {
         let rate_controller = ScreenRateController::default();
         let fps_pacer = ScreenFpsPacer::default();
-        let mut stats = ScreenStats::default();
-        stats.bitrate_bps = rate_controller.current_bps();
-        stats.fps_target = fps_pacer.fps_target();
+        let stats = ScreenStats {
+            bitrate_bps: rate_controller.current_bps(),
+            fps_target: fps_pacer.fps_target(),
+            ..Default::default()
+        };
         Self {
             next_seq: 1,
             state: ScreenState::Idle,
