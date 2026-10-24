@@ -3,12 +3,41 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.96** |
+| 文档版本 | **1.97** |
 | 日期 | 2026-10-25 |
-| 状态 | **v1.96 屏幕流动态速率自适应与 AIMD 码率控制器（Screen Streaming Dynamic Rate Adaptation & AIMD Bitrate Controller, ADR-082）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`, `ports.rs`）：新增 AIMD 速率自适应控制器 `ScreenRateController`（拥塞乘法退避 20%、稳定通道加法探测 150 kbps、400ms 冷却抑震荡）；`ScreenSender` 深度集成并在 `on_ack`、`record_drop` 时驱动码率调整；`ScreenCodec` 与 `ScreenSource` 接口扩展 `set_bitrate_bps()` 与 `bitrate_bps()`。(2) **运行时编解码联动**（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）：`H264Codec`、`NegotiatedCodec` 与 `EncodedSource` 实现码率热更新并与底层 `openh264` 编码器平滑联动；发送泵与信令接收主循环动态同步码率。(3) **接口与生态**：新增回环 API `GET/POST /api/screen/bitrate`、CLI 命令 `tetherly screen bitrate` 与状态实时展示；(4) **测试与版本**：集成测试 `m5_6_screen_dynamic_rate_adaptation` 全绿，工作区升级至 `0.1.18`。 |
+| 状态 | **v1.97 屏幕流动态帧率与自适应定步步频控制器（Screen Streaming Dynamic FPS & Adaptive Frame Pacing Controller, ADR-083）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`, `ports.rs`）：新增微秒级帧定步控制器 `ScreenFpsPacer`（5–120 FPS 边界钳位、默认 30 FPS、$\lfloor 1\,000\,000 / \text{fps} \rfloor$ 定步周期）；`ScreenSender` 集成定步判定与槽位消费；`ScreenCodec` 与 `ScreenSource` 接口扩展 `set_fps()` 与 `fps()`。(2) **运行时编解码联动与自动阶梯**（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）：`screen_fps_from_profile` 实现基于实测带宽的 15/24/30/60 FPS 自动阶梯；`H264Codec` 自动感知帧率变化触发 OpenH264 编码器热重建与首帧 IDR 强发；发送泵在 `src.grab()` 抓帧前执行微秒前置定步短路判定（Pre-Grab Pacing Check），避免算力与功耗空转。(3) **接口与生态**：新增回环 API `GET/POST /api/screen/fps`、CLI 命令 `tetherly screen fps [fps]`、守护进程启动参数 `--screen-fps <auto|N>` 与实时状态展示；(4) **测试与版本**：集成测试 `m5_7_screen_dynamic_fps_pacing_and_telemetry` 全绿，工作区升级至 `0.1.19`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.97 相对 1.96(屏幕流动态帧率与自适应定步步频控制器 ADR-083)**
+
+- **动机与问题背景**:
+  此前屏幕推流发送泵以固定 16ms 定时器驱动捕获。在弱网或低帧率配置下，操作系统级桌面图像截取（DXGI 映射、adb 抓流、X11 SHM 拷贝）依然全速运行，随后才在排队或拥塞检测中被丢弃，造成严重的 CPU/GPU 算力和电池电量浪费。同时，缺乏链路感知的动态帧率阶梯分级、微秒级定步控制器以及运行时热调优接口。
+- **架构解法与落地**:
+  1. **Core 协议与定步状态机（`crates/tetherly-core/src/screen.rs`, `ports.rs`）**：
+     - 定义帧率常数：`SCREEN_FPS_DEFAULT (30)`, `SCREEN_FPS_MIN (5)`, `SCREEN_FPS_MAX (120)`。
+     - 实现微秒级定步状态机 `ScreenFpsPacer`：
+       - **边界钳位**：刚性钳位在 $[5\text{ FPS}, 120\text{ FPS}]$ 区间。
+       - **定步周期**：微秒级精确计算 $\text{interval\_us} = \lfloor 1\,000\,000 / \text{fps} \rfloor$。
+       - **状态控制**：提供 `check_and_consume`、`is_ready`、`set_fps` 等方法。
+     - `ScreenStats` 扩充 `fps_target: u32` 遥测指标。
+     - `ScreenSender` 集成 `ScreenFpsPacer`，提供 `set_fps`、`is_pacing_ready` 与 `consume_pacing`。
+     - `ScreenCodec` 与 `ScreenSource` 扩展 `set_fps(&self, fps: u32)` 与 `fps(&self) -> u32` 抽象方法。
+  2. **Node 编解码热更新与发送泵联动（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）**：
+     - 实现带宽测速自动分级阶梯算法 `screen_fps_from_profile`：< 5 Mbps 映射至 15 FPS；5–15 Mbps 映射至 24 FPS；15–40 Mbps 映射至 30 FPS；$\ge$ 40 Mbps 映射至 60 FPS。
+     - `H264Codec` 与 `NegotiatedCodec`、`EncodedSource` 实现 `set_fps` 与 `fps`；帧率变更时平滑重构底座 OpenH264 编码器并强制触发首帧 IDR 关键帧。
+     - 运行时发送泵 `screen_send_frame()` 在抓帧前执行微秒前置定步判定（Pre-Grab Pacing Check），未就绪直接短路返回，从根源杜绝算力空转；在帧成功入队后消费定步时间槽。
+     - 守护进程推流循环集成 `screen_is_pacing_ready` 短路判定。
+  3. **回环 API 与 CLI 统一支持**：
+     - 新增 HTTP 路由 `GET /api/screen/fps` 与 `POST /api/screen/fps`，支持 JSON `{"fps": number}` 或 Query `?fps=...` 参数热配置。
+     - CLI 新增 `tetherly screen fps [fps]` 命令，并在 `tetherly screen status` 中透出当前目标帧率与定步周期。
+     - `Cmd::Run` 新增 `--screen-fps <auto|N>` 参数支持启动配置。
+     - 遥测 DTO `ScreenStatusReport` 新增 `fps_target` 字段，新增强类型 `ScreenFpsReport`。
+  4. **测试**：
+     - Core 单元测试 `fps_pacer_and_frame_rate_throttling`。
+     - Node 单元测试 `fps_tier_boundaries`、`fps_control_and_forwarding`、`test_screen_fps_pacing_and_reporting`。
+     - Phase 5 集成测试 `m5_7_screen_dynamic_fps_pacing_and_telemetry` 验证端到端 45720 通道握手、定步阻断、运行时 60 FPS / 5 FPS 热调优、上下限边界钳位与 H.264 解码呈现。
 
 **1.96 相对 1.95(屏幕流动态速率自适应与 AIMD 码率控制器 ADR-082)**
 

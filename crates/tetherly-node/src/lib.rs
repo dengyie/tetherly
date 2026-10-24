@@ -44,13 +44,15 @@ pub use runtime::{
     PeerMessageHistoryReport, PeerMessageSendItem, PeerMessageSendReport, PeerPingReport,
     PeerProfileUpdateReport, PeerProfilesReport, PeerTagsReport, PeerUnblockReport,
     PeersCapsReport, PinReport, ProcessMetrics, ResumeMarkerDto, ResumeMarkersReport,
-    RouteEntryDto, RouteMutateReport, RoutesReport, ScreenBitrateReport, ScreenControlReport, ScreenStatusReport,
+    RouteEntryDto, RouteMutateReport, RoutesReport, ScreenBitrateReport, ScreenControlReport,
+    ScreenFpsReport, ScreenStatusReport,
     StorageCleanReport, StorageReport, SystemReport, TransferDirection, TransferPhase,
     TransferStats, TransfersReport, UserCommand, VirtualDisplayDecisionReport,
     VirtualDisplayPolicyReport, VirtualDisplayPolicyUpdate, VirtualDisplayStatusReport,
 };
 pub use screen::{
-    AdbSource, EncodedSource, H264Codec, NegotiatedCodec, SystemSink, SystemSource, ZstdCodec,
+    screen_bitrate_from_profile, screen_fps_from_profile, AdbSource, EncodedSource, H264Codec,
+    NegotiatedCodec, SystemSink, SystemSource, ZstdCodec,
 };
 pub use telemetry::{ChannelTrafficDto, ProtocolMessagesDto, TrafficReport, TrafficTelemetry};
 

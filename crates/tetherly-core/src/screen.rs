@@ -56,6 +56,15 @@ pub const SCREEN_BITRATE_STEP_INCREASE_BPS: u32 = 150_000;
 /// Minimum interval between multiplicative rate decreases in microseconds (400ms).
 pub const SCREEN_BITRATE_COOLDOWN_US: u64 = 400_000;
 
+/// Default screen streaming frame rate in frames per second (30 FPS) (v1.97 / ADR-083).
+pub const SCREEN_FPS_DEFAULT: u32 = 30;
+
+/// Minimum screen streaming frame rate floor in frames per second (5 FPS).
+pub const SCREEN_FPS_MIN: u32 = 5;
+
+/// Maximum screen streaming frame rate ceiling in frames per second (120 FPS).
+pub const SCREEN_FPS_MAX: u32 = 120;
+
 /// Fragment transport for screen frames too large for one inner frame.
 /// A fragment stream is a `TMF1`-enveloped run of inner frames; the receiver
 /// reassembles before `decode_payload`. A `TMV1`-prefixed payload is a whole
@@ -499,6 +508,8 @@ pub struct ScreenStats {
     pub gaps: u64,
     /// Target video bitrate in bits per second (v1.96 / ADR-082).
     pub bitrate_bps: u32,
+    /// Target screen streaming frame rate in frames per second (v1.97 / ADR-083).
+    pub fps_target: u32,
 }
 
 /// Rolling window tracker for screen frame round-trip times (v1.93 / ADR-080).
@@ -638,6 +649,93 @@ impl ScreenRateController {
     }
 }
 
+/// Dynamic screen frame pacing controller managing target frame rates and inter-frame pacing intervals (v1.97 / ADR-083).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenFpsPacer {
+    fps_target: u32,
+    min_fps: u32,
+    max_fps: u32,
+    interval_us: u64,
+    last_frame_us: u64,
+}
+
+impl Default for ScreenFpsPacer {
+    fn default() -> Self {
+        Self::new(SCREEN_FPS_DEFAULT)
+    }
+}
+
+impl ScreenFpsPacer {
+    pub fn new(initial_fps: u32) -> Self {
+        let clamped = initial_fps.clamp(SCREEN_FPS_MIN, SCREEN_FPS_MAX);
+        let interval = 1_000_000u64 / (clamped as u64);
+        Self {
+            fps_target: clamped,
+            min_fps: SCREEN_FPS_MIN,
+            max_fps: SCREEN_FPS_MAX,
+            interval_us: interval,
+            last_frame_us: 0,
+        }
+    }
+
+    pub fn with_bounds(initial_fps: u32, min_fps: u32, max_fps: u32) -> Self {
+        let min = min_fps.max(SCREEN_FPS_MIN);
+        let max = max_fps.clamp(min, SCREEN_FPS_MAX);
+        let clamped = initial_fps.clamp(min, max);
+        let interval = 1_000_000u64 / (clamped as u64);
+        Self {
+            fps_target: clamped,
+            min_fps: min,
+            max_fps: max,
+            interval_us: interval,
+            last_frame_us: 0,
+        }
+    }
+
+    pub fn fps_target(&self) -> u32 {
+        self.fps_target
+    }
+
+    pub fn interval_us(&self) -> u64 {
+        self.interval_us
+    }
+
+    pub fn min_fps(&self) -> u32 {
+        self.min_fps
+    }
+
+    pub fn max_fps(&self) -> u32 {
+        self.max_fps
+    }
+
+    pub fn set_fps(&mut self, fps: u32) -> u32 {
+        let clamped = fps.clamp(self.min_fps, self.max_fps);
+        self.fps_target = clamped;
+        self.interval_us = 1_000_000u64 / (clamped as u64);
+        clamped
+    }
+
+    /// Check if enough time has elapsed to send the next frame under the target pacing.
+    /// If ready, updates last_frame_us and returns true. If not, returns false.
+    pub fn check_and_consume(&mut self, now_us: u64) -> bool {
+        if self.last_frame_us == 0 || now_us.saturating_sub(self.last_frame_us) >= self.interval_us {
+            self.last_frame_us = now_us;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Peek if enough time has elapsed without consuming the tick.
+    pub fn is_ready(&self, now_us: u64) -> bool {
+        self.last_frame_us == 0 || now_us.saturating_sub(self.last_frame_us) >= self.interval_us
+    }
+
+    pub fn reset(&mut self) {
+        self.last_frame_us = 0;
+    }
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -649,6 +747,7 @@ pub struct ScreenSender {
     in_flight_records: VecDeque<(u64, u64)>,
     rtt_tracker: ScreenRttTracker,
     rate_controller: ScreenRateController,
+    fps_pacer: ScreenFpsPacer,
 }
 
 impl Default for ScreenSender {
@@ -660,8 +759,10 @@ impl Default for ScreenSender {
 impl ScreenSender {
     pub fn new() -> Self {
         let rate_controller = ScreenRateController::default();
+        let fps_pacer = ScreenFpsPacer::default();
         let mut stats = ScreenStats::default();
         stats.bitrate_bps = rate_controller.current_bps();
+        stats.fps_target = fps_pacer.fps_target();
         Self {
             next_seq: 1,
             state: ScreenState::Idle,
@@ -670,7 +771,14 @@ impl ScreenSender {
             in_flight_records: VecDeque::new(),
             rtt_tracker: ScreenRttTracker::new(SCREEN_IN_FLIGHT_MAX),
             rate_controller,
+            fps_pacer,
         }
+    }
+
+    pub fn with_fps(fps: u32) -> Self {
+        let mut sender = Self::new();
+        sender.set_fps(fps);
+        sender
     }
 
     pub fn state(&self) -> ScreenState {
@@ -727,6 +835,7 @@ impl ScreenSender {
         self.in_flight_records.clear();
         self.rtt_tracker.clear();
         self.stats.in_flight = 0;
+        self.fps_pacer.reset();
     }
 
     /// Apply a controller instruction. Returns the reply to send back, if any.
@@ -758,6 +867,7 @@ impl ScreenSender {
                 self.pending.clear();
                 self.in_flight_records.clear();
                 self.stats.in_flight = 0;
+                self.fps_pacer.reset();
                 Ok(None)
             }
             ControlMsg::Ack { seq } => {
@@ -844,6 +954,38 @@ impl ScreenSender {
         self.stats.bitrate_bps
     }
 
+    /// Target streaming frame rate in frames per second (v1.97 / ADR-083).
+    pub fn fps_target(&self) -> u32 {
+        self.stats.fps_target
+    }
+
+    /// Explicitly configure target streaming frame rate in frames per second.
+    pub fn set_fps(&mut self, fps: u32) -> u32 {
+        let actual = self.fps_pacer.set_fps(fps);
+        self.stats.fps_target = actual;
+        actual
+    }
+
+    /// Access reference to the internal frame rate pacer.
+    pub fn fps_pacer(&self) -> &ScreenFpsPacer {
+        &self.fps_pacer
+    }
+
+    /// Access mutable reference to the internal frame rate pacer.
+    pub fn fps_pacer_mut(&mut self) -> &mut ScreenFpsPacer {
+        &mut self.fps_pacer
+    }
+
+    /// Check if target frame pacing interval has elapsed.
+    pub fn is_pacing_ready(&self, now_us: u64) -> bool {
+        self.fps_pacer.is_ready(now_us)
+    }
+
+    /// Check and consume a pacing tick if target frame pacing interval has elapsed.
+    pub fn consume_pacing(&mut self, now_us: u64) -> bool {
+        self.fps_pacer.check_and_consume(now_us)
+    }
+
     pub fn drain(&mut self) -> Vec<ScreenFrame> {
         self.pending.drain(..).collect()
     }
@@ -857,6 +999,7 @@ impl ScreenSender {
         self.in_flight_records.clear();
         self.rtt_tracker.clear();
         self.stats.in_flight = 0;
+        self.fps_pacer.reset();
     }
 }
 
@@ -1695,5 +1838,55 @@ mod tests {
 
         s.set_bitrate_bps(10_000);
         assert_eq!(s.bitrate_bps(), SCREEN_BITRATE_MIN_BPS);
+    }
+
+    #[test]
+    fn fps_pacer_and_frame_rate_throttling() {
+        let mut pacer = ScreenFpsPacer::default();
+        assert_eq!(pacer.fps_target(), SCREEN_FPS_DEFAULT);
+        assert_eq!(pacer.interval_us(), 1_000_000 / 30);
+
+        // 1. Clamping bounds: upper limit (120 FPS) and lower limit (5 FPS)
+        assert_eq!(pacer.set_fps(200), SCREEN_FPS_MAX);
+        assert_eq!(pacer.fps_target(), SCREEN_FPS_MAX);
+        assert_eq!(pacer.interval_us(), 1_000_000 / 120);
+
+        assert_eq!(pacer.set_fps(1), SCREEN_FPS_MIN);
+        assert_eq!(pacer.fps_target(), SCREEN_FPS_MIN);
+        assert_eq!(pacer.interval_us(), 1_000_000 / 5);
+
+        // Set to 30 FPS (interval = 33_333 us)
+        pacer.set_fps(30);
+        assert_eq!(pacer.fps_target(), 30);
+        let interval = pacer.interval_us();
+
+        // 2. Initial frame tick consumes immediately
+        assert!(pacer.is_ready(100_000));
+        assert!(pacer.check_and_consume(100_000));
+
+        // 3. Early tick before interval elapses is throttled
+        assert!(!pacer.is_ready(100_000 + 15_000));
+        assert!(!pacer.check_and_consume(100_000 + 15_000));
+
+        // 4. Tick after interval elapses is permitted
+        assert!(pacer.is_ready(100_000 + interval));
+        assert!(pacer.check_and_consume(100_000 + interval));
+
+        // 5. Sender integration and stats
+        let mut s = ScreenSender::new();
+        assert_eq!(s.fps_target(), SCREEN_FPS_DEFAULT);
+        assert_eq!(s.stats().fps_target, SCREEN_FPS_DEFAULT);
+
+        assert_eq!(s.set_fps(60), 60);
+        assert_eq!(s.fps_target(), 60);
+        assert_eq!(s.stats().fps_target, 60);
+
+        assert!(s.consume_pacing(500_000));
+        assert!(!s.consume_pacing(500_000 + 5_000));
+        assert!(s.consume_pacing(500_000 + 17_000));
+
+        s.on_peer_gone();
+        // Reset resets last frame timestamp, allowing immediate next tick
+        assert!(s.is_pacing_ready(600_000));
     }
 }

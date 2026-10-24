@@ -66,6 +66,11 @@ enum Cmd {
         /// explicit kbit/s number as the manual override.
         #[arg(long, default_value = "auto")]
         screen_bitrate: String,
+        /// Screen streaming target frame rate (ADR-083): `auto` (default) picks
+        /// target FPS from bandwidth tiers (15/24/30/60 FPS), or an explicit FPS
+        /// number between 5 and 120 (clamped).
+        #[arg(long, default_value = "auto")]
+        screen_fps: String,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -1997,6 +2002,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or override the dynamic screen streaming frame rate / FPS (v1.97 / ADR-083).
+    Fps {
+        /// Target FPS (e.g. 15, 30, 60). If omitted, displays current FPS and pacing interval.
+        fps: Option<u32>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3787,6 +3803,7 @@ async fn main() -> Result<()> {
             screen_adb,
             screen_codec,
             screen_bitrate,
+            screen_fps,
             file_port,
             input_port,
             screen_port,
@@ -3808,6 +3825,12 @@ async fn main() -> Result<()> {
                     anyhow::anyhow!("--screen-bitrate must be `auto` or a kbit/s number")
                 })?;
             }
+            cfg.screen_fps_auto = screen_fps.eq_ignore_ascii_case("auto");
+            if !cfg.screen_fps_auto {
+                cfg.screen_fps = screen_fps.trim().parse().map_err(|_| {
+                    anyhow::anyhow!("--screen-fps must be `auto` or an integer FPS (5..=120)")
+                })?;
+            }
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
             cfg.screen_codec_h264 = h264;
             let encode_codec: Arc<dyn tetherly_core::ScreenCodec> = if h264 {
@@ -3816,6 +3839,7 @@ async fn main() -> Result<()> {
                     cfg.screen_bitrate_kbps.saturating_mul(1000),
                     false,
                 ));
+                sel.set_fps(cfg.screen_fps);
                 // The daemon's caps-merge hook flips this on when the peer
                 // advertises screencodecs=h264; the CLI only sets the intent.
                 sel.clone()
@@ -3900,6 +3924,9 @@ async fn main() -> Result<()> {
                 let mut backoff = std::time::Duration::from_millis(250);
                 loop {
                     tick.tick().await;
+                    if !pump.screen_is_pacing_ready() {
+                        continue;
+                    }
                     match pump.screen_send_frame().await {
                         Ok(_) => backoff = std::time::Duration::from_millis(250),
                         Err(e) => {
@@ -5958,6 +5985,61 @@ async fn main() -> Result<()> {
                                 rep.max_bps / 1000,
                                 rep.min_bps as f64 / 1_000_000.0,
                                 rep.max_bps as f64 / 1_000_000.0
+                            );
+                        }
+                    }
+                }
+            }
+            ScreenCmd::Fps {
+                fps,
+                json,
+                ui_port,
+            } => {
+                let (code, resp) = match fps {
+                    Some(f) => {
+                        let req = serde_json::json!({ "fps": f });
+                        let body = serde_json::to_vec(&req)?;
+                        tetherly_node::loopback_post(ui_port, "/api/screen/fps", &body).await
+                    }
+                    None => tetherly_node::loopback_get(ui_port, "/api/screen/fps").await,
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen fps query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_node::ScreenFpsReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    match fps {
+                        Some(_) => {
+                            println!(
+                                "Screen target frame rate set to {} FPS (pacing interval: {:.2} ms)",
+                                rep.fps, rep.interval_us as f64 / 1000.0
+                            );
+                        }
+                        None => {
+                            println!("Screen Streaming Frame Rate:");
+                            println!(
+                                "  Current:   {} FPS (pacing interval: {:.2} ms)",
+                                rep.fps, rep.interval_us as f64 / 1000.0
+                            );
+                            println!(
+                                "  Range:     {} FPS - {} FPS",
+                                rep.min_fps, rep.max_fps
+                            );
+                            println!(
+                                "  Auto-tier: {}",
+                                if rep.auto_profile { "enabled (derived from link bandwidth)" } else { "manual override" }
                             );
                         }
                     }

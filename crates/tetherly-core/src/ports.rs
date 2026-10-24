@@ -220,6 +220,14 @@ pub trait ScreenSource: Send + Sync {
 
     /// Dynamic bitrate update propagation into the source codec (ADR-082).
     fn set_bitrate_bps(&self, _bps: u32) {}
+
+    /// Target streaming frame rate update propagation (v1.97 / ADR-083).
+    fn set_fps(&self, _fps: u32) {}
+
+    /// Current target streaming frame rate.
+    fn fps(&self) -> u32 {
+        30
+    }
 }
 
 /// Transform a raw pixel body to or form the wire format carried in
@@ -267,6 +275,14 @@ pub trait ScreenCodec: Send + Sync {
     /// Current target bitrate in bps for rate-controlled codecs. Defaults to 0 for unthrottled/lossless.
     fn bitrate_bps(&self) -> u32 {
         0
+    }
+
+    /// Target streaming frame rate update propagation for rate-controlled codecs (v1.97 / ADR-083).
+    fn set_fps(&self, _fps: u32) {}
+
+    /// Current target streaming frame rate.
+    fn fps(&self) -> u32 {
+        30
     }
 }
 

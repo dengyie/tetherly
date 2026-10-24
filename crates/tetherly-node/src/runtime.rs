@@ -139,6 +139,10 @@ pub struct NodeConfig {
     /// Pick that ceiling from the peer's measured bandwidth profile
     /// (ADR-078) instead of the manual flag; re-tiers hot on new benches.
     pub screen_bitrate_auto: bool,
+    /// Target frame rate in FPS for screen streaming (ADR-083).
+    pub screen_fps: u32,
+    /// Pick target FPS tier from measured bandwidth profile (ADR-083).
+    pub screen_fps_auto: bool,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -149,6 +153,10 @@ pub struct NodeConfig {
 
 fn default_screen_bitrate_kbps() -> u32 {
     4000
+}
+
+fn default_screen_fps() -> u32 {
+    tetherly_core::SCREEN_FPS_DEFAULT
 }
 
 impl Default for NodeConfig {
@@ -175,6 +183,8 @@ impl Default for NodeConfig {
             screen_codec_h264: false,
             screen_bitrate_kbps: default_screen_bitrate_kbps(),
             screen_bitrate_auto: true,
+            screen_fps: default_screen_fps(),
+            screen_fps_auto: true,
             screen_sink: None,
             input_sink: None,
         }
@@ -2833,6 +2843,21 @@ pub struct ScreenStatusReport {
     pub gaps: u64,
     #[serde(default)]
     pub bitrate_bps: u32,
+    #[serde(default)]
+    pub fps_target: u32,
+}
+
+/// Status report for screen streaming frame rate / FPS pacing (ADR-083).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ScreenFpsReport {
+    pub ok: bool,
+    pub fps: u32,
+    pub min_fps: u32,
+    pub max_fps: u32,
+    pub interval_us: u64,
+    #[serde(default)]
+    pub auto_profile: bool,
+    pub timestamp_ms: u64,
 }
 
 /// Status report for screen streaming bitrate (ADR-082).
@@ -3052,6 +3077,10 @@ struct Shared {
     screen_bitrate_auto: bool,
     /// One-shot per stream: the first streamed frame picks the tier.
     screen_bitrate_applied: std::sync::atomic::AtomicBool,
+    /// Whether target FPS follows the measured bandwidth profile (ADR-083).
+    screen_fps_auto: bool,
+    /// One-shot per stream: the first streamed frame picks the FPS tier.
+    screen_fps_applied: std::sync::atomic::AtomicBool,
     /// Visitor-side output. Defaults to the in-memory observer; production
     /// injects `SystemSink` for real display.
     screen_sink: Arc<dyn ScreenSink>,
@@ -3242,6 +3271,8 @@ impl Node {
             ))
         });
         let screen_bitrate_auto = cfg.screen_bitrate_auto;
+        let screen_fps = cfg.screen_fps;
+        let screen_fps_auto = cfg.screen_fps_auto;
         let screen_source: Arc<dyn ScreenSource> = cfg.screen_source.clone().unwrap_or_else(|| {
             // Production: real capture → negotiated codec (zstd, or H.264
             // when opted in and the peer advertised it) → wire. Tests inject
@@ -3351,7 +3382,7 @@ impl Node {
             input_peer: Mutex::new(None),
             screen_out: AsyncMutex::new(None),
             screen_peer: Mutex::new(None),
-            screen_engine: Mutex::new(ScreenSender::new()),
+            screen_engine: Mutex::new(ScreenSender::with_fps(screen_fps)),
             screen_source,
             screen_observer: Mutex::new(screen_observer),
             screen_ctl: AsyncMutex::new(None),
@@ -3360,6 +3391,8 @@ impl Node {
             screen_encode_codec,
             screen_bitrate_auto,
             screen_bitrate_applied: std::sync::atomic::AtomicBool::new(false),
+            screen_fps_auto,
+            screen_fps_applied: std::sync::atomic::AtomicBool::new(false),
             screen_sink,
             screen_interval: Mutex::new(ScreenIntervalTracker::new()),
             screen_rx_stats: Mutex::new(ScreenStats::default()),
@@ -20147,6 +20180,12 @@ impl Node {
             receiver.on_peer_gone();
             *node.shared.screen_peer.lock().expect("screen_peer") = None;
             *node.shared.screen_ctl.lock().await = None;
+            node.shared
+                .screen_bitrate_applied
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            node.shared
+                .screen_fps_applied
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             node.emit(UiEvent::screen_state_changed("idle", false, None));
         });
     }
@@ -20164,6 +20203,17 @@ impl Node {
             .expect("screen")
             .state()
             .is_streaming()
+        {
+            return Ok(false);
+        }
+        // ADR-083 / v1.97: Frame pacing check. Skip capture if pacing interval has not elapsed.
+        let now_us = self.shared.clock.unix_us();
+        if !self
+            .shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .is_pacing_ready(now_us)
         {
             return Ok(false);
         }
@@ -20190,6 +20240,27 @@ impl Node {
                 };
                 sel.set_bitrate_bps(crate::screen::screen_bitrate_from_profile(mbps));
             }
+        }
+        // ADR-083 / v1.97: the first frame of a stream also picks the target FPS tier
+        // from the viewer's measured bandwidth profile when `screen_fps_auto` is on.
+        if self.shared.screen_fps_auto
+            && !self
+                .shared
+                .screen_fps_applied
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            let mbps = {
+                let peer = self.shared.screen_peer.lock().expect("screen_peer").clone();
+                peer.and_then(|p| {
+                    self.shared
+                        .bandwidth_profiles
+                        .lock()
+                        .expect("bandwidth_profiles")
+                        .get(&p.to_string())
+                        .map(|pr| pr.measured_mbps)
+                })
+            };
+            self.screen_set_fps(crate::screen::screen_fps_from_profile(mbps));
         }
         // Grab can block for a long time (adb pipe reads in particular), so
         // run it on the blocking pool with a hard timeout. On timeout, call
@@ -20222,6 +20293,7 @@ impl Node {
             // On drop, AIMD multiplicative decrease cuts bitrate by 20% and arms an immediate IDR.
             if engine.is_congested() && engine.stats().sent > 0 {
                 engine.record_drop_with_time(now_us);
+                engine.consume_pacing(now_us);
                 let new_rate = engine.bitrate_bps();
                 self.shared.screen_source.force_idr();
                 if let Some(sel) = &self.shared.screen_encode_codec {
@@ -20240,6 +20312,7 @@ impl Node {
             if engine.push_with_time(frame, now_us).is_none() {
                 return Ok(false);
             }
+            engine.consume_pacing(now_us);
             engine.drain()
         };
         self.shared
@@ -20574,6 +20647,7 @@ impl Node {
             keyframes_requested: stats.keyframes_requested,
             gaps: rx_stats.gaps,
             bitrate_bps: stats.bitrate_bps,
+            fps_target: stats.fps_target,
         }
     }
 
@@ -20625,6 +20699,64 @@ impl Node {
             max_bps: tetherly_core::SCREEN_BITRATE_MAX_BPS,
             timestamp_ms: self.shared.clock.unix_ms(),
         }
+    }
+
+    /// Override screen streaming target frame rate in FPS (ADR-083). Clamped to [SCREEN_FPS_MIN, SCREEN_FPS_MAX].
+    pub fn screen_set_fps(&self, fps: u32) -> u32 {
+        let actual = {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            engine.set_fps(fps)
+        };
+        if let Some(sel) = &self.shared.screen_encode_codec {
+            sel.set_fps(actual);
+        }
+        self.shared.screen_source.set_fps(actual);
+        actual
+    }
+
+    /// Current target screen streaming frame rate in FPS.
+    pub fn screen_fps(&self) -> u32 {
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .fps_target()
+    }
+
+    /// Report current screen streaming frame rate (ADR-083).
+    pub fn screen_fps_report(&self) -> ScreenFpsReport {
+        let fps = self.screen_fps();
+        let interval_us = 1_000_000u64 / (fps.max(1) as u64);
+        ScreenFpsReport {
+            ok: true,
+            fps,
+            min_fps: tetherly_core::SCREEN_FPS_MIN,
+            max_fps: tetherly_core::SCREEN_FPS_MAX,
+            interval_us,
+            auto_profile: self.shared.screen_fps_auto,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Set and report screen streaming target frame rate in FPS (ADR-083).
+    pub fn screen_set_fps_reported(&self, fps: u32) -> ScreenFpsReport {
+        let actual = self.screen_set_fps(fps);
+        let interval_us = 1_000_000u64 / (actual.max(1) as u64);
+        ScreenFpsReport {
+            ok: true,
+            fps: actual,
+            min_fps: tetherly_core::SCREEN_FPS_MIN,
+            max_fps: tetherly_core::SCREEN_FPS_MAX,
+            interval_us,
+            auto_profile: self.shared.screen_fps_auto,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Check if target frame pacing interval has elapsed for the outbound screen pump (ADR-083).
+    pub fn screen_is_pacing_ready(&self) -> bool {
+        let now_us = self.shared.clock.unix_us();
+        self.shared.screen_engine.lock().expect("screen").is_pacing_ready(now_us)
     }
 
     /// Comprehensive status report for input sharing.
@@ -21353,6 +21485,8 @@ mod clipboard_policy_tests {
             screen_codec_h264: false,
             screen_bitrate_kbps: default_screen_bitrate_kbps(),
             screen_bitrate_auto: true,
+            screen_fps: default_screen_fps(),
+            screen_fps_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -21490,6 +21624,8 @@ mod handoff_engine_tests {
             screen_codec_h264: false,
             screen_bitrate_kbps: default_screen_bitrate_kbps(),
             screen_bitrate_auto: true,
+            screen_fps: default_screen_fps(),
+            screen_fps_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -21658,6 +21794,8 @@ mod media_policy_tests {
             screen_codec_h264: false,
             screen_bitrate_kbps: default_screen_bitrate_kbps(),
             screen_bitrate_auto: true,
+            screen_fps: default_screen_fps(),
+            screen_fps_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -21802,6 +21940,8 @@ mod locator_policy_tests {
             screen_codec_h264: false,
             screen_bitrate_kbps: default_screen_bitrate_kbps(),
             screen_bitrate_auto: true,
+            screen_fps: default_screen_fps(),
+            screen_fps_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -21926,6 +22066,8 @@ mod locator_policy_tests {
             screen_codec_h264: false,
             screen_bitrate_kbps: default_screen_bitrate_kbps(),
             screen_bitrate_auto: true,
+            screen_fps: default_screen_fps(),
+            screen_fps_auto: true,
             screen_sink: None,
             input_sink: None,
         };
@@ -22182,6 +22324,68 @@ mod locator_policy_tests {
             .dispatch_notification_banner("测试通知 3", "已恢复正常通知", Some("Slack"), false)
             .unwrap();
         assert!(res_norm3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_screen_fps_pacing_and_reporting() {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-fps-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.clone(),
+            control_port: 0,
+            file_port: 0,
+            input_port: 0,
+            screen_port: 0,
+            ui_port: 0,
+            name: "fps-test-node".into(),
+            platform: "test".into(),
+            memory_clip: true,
+            memory_notifier: true,
+            loopback_only: true,
+            advertise: false,
+            reconnect: false,
+            overlay: OverlayConfig::default(),
+            ..Default::default()
+        };
+        let clock = Arc::new(ManualClock::new(10_000));
+        let node = Node::start_with_clock(cfg, clock.clone()).unwrap();
+
+        // 1. Initial report: defaults to 30 FPS
+        let initial_rep = node.screen_fps_report();
+        assert!(initial_rep.ok);
+        assert_eq!(initial_rep.fps, 30);
+        assert_eq!(initial_rep.min_fps, 5);
+        assert_eq!(initial_rep.max_fps, 120);
+        assert_eq!(initial_rep.interval_us, 33_333);
+
+        // 2. Set FPS override
+        let rep_60 = node.screen_set_fps_reported(60);
+        assert!(rep_60.ok);
+        assert_eq!(rep_60.fps, 60);
+        assert_eq!(rep_60.interval_us, 16_666);
+        assert_eq!(node.screen_fps(), 60);
+
+        // 3. Clamping bounds
+        let rep_clamp_high = node.screen_set_fps_reported(200);
+        assert_eq!(rep_clamp_high.fps, 120);
+        assert_eq!(rep_clamp_high.interval_us, 8_333);
+
+        let rep_clamp_low = node.screen_set_fps_reported(1);
+        assert_eq!(rep_clamp_low.fps, 5);
+        assert_eq!(rep_clamp_low.interval_us, 200_000);
+
+        // 4. Status report includes fps_target
+        let status = node.screen_status_report().await;
+        assert_eq!(status.fps_target, 5);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

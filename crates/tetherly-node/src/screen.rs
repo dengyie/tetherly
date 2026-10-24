@@ -212,6 +212,10 @@ struct H264EncoderState {
     /// Bitrate the *live* encoder was configured with; differs from the
     /// target → rebuild (= fresh SPS/PPS + IDR), same as a geometry change.
     built_bitrate_bps: u32,
+    /// Target frame rate in FPS (ADR-083).
+    fps: u32,
+    /// Frame rate the live encoder was built with.
+    built_fps: u32,
 }
 
 /// Lossy H.264 codec (ADR-079). BGRA in, annex-B out; the decoder side
@@ -222,6 +226,7 @@ struct H264EncoderState {
 /// encoder contexts are far too expensive to rebuild per frame.
 pub struct H264Codec {
     bitrate_bps: std::sync::atomic::AtomicU32,
+    fps: std::sync::atomic::AtomicU32,
     force_idr: std::sync::atomic::AtomicBool,
     enc: Mutex<Option<H264EncoderState>>,
     dec: Mutex<Option<openh264::decoder::Decoder>>,
@@ -231,6 +236,7 @@ impl std::fmt::Debug for H264Codec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("H264Codec")
             .field("bitrate_bps", &self.bitrate_bps)
+            .field("fps", &self.fps)
             .finish()
     }
 }
@@ -239,6 +245,7 @@ impl H264Codec {
     pub fn new(bitrate_bps: u32) -> Self {
         Self {
             bitrate_bps: std::sync::atomic::AtomicU32::new(bitrate_bps.clamp(100_000, 50_000_000)),
+            fps: std::sync::atomic::AtomicU32::new(tetherly_core::SCREEN_FPS_DEFAULT),
             force_idr: std::sync::atomic::AtomicBool::new(false),
             enc: Mutex::new(None),
             dec: Mutex::new(None),
@@ -259,6 +266,16 @@ impl H264Codec {
         self.bitrate_bps.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Hot frame rate target update (ADR-083 dynamic FPS): clamped between SCREEN_FPS_MIN and SCREEN_FPS_MAX.
+    pub fn set_fps(&self, fps: u32) {
+        let clamped = fps.clamp(tetherly_core::SCREEN_FPS_MIN, tetherly_core::SCREEN_FPS_MAX);
+        self.fps.store(clamped, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn fps(&self) -> u32 {
+        self.fps.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Force the next encode pass to emit an IDR keyframe (ADR-081).
     pub fn force_idr(&self) {
         self.force_idr
@@ -273,12 +290,17 @@ impl H264Codec {
         use openh264::formats::YUVSource as _;
 
         let (w, h) = yuv.dimensions();
-        if state.w != w || state.h != h || state.built_bitrate_bps != state.bitrate_bps || need_idr {
-            // Geometry, bitrate change, or on-demand IDR request: a fresh encoder emits SPS/PPS + IDR
-            // for the new shape/rate, and P-frames never reference the old one.
+        if state.w != w
+            || state.h != h
+            || state.built_bitrate_bps != state.bitrate_bps
+            || state.built_fps != state.fps
+            || need_idr
+        {
+            // Geometry, bitrate, fps change, or on-demand IDR request: a fresh encoder emits SPS/PPS + IDR
+            // for the new shape/rate/fps, and P-frames never reference the old one.
             let config = openh264::encoder::EncoderConfig::new()
                 .bitrate(openh264::encoder::BitRate::from_bps(state.bitrate_bps))
-                .max_frame_rate(openh264::encoder::FrameRate::from_hz(30.0));
+                .max_frame_rate(openh264::encoder::FrameRate::from_hz(state.fps as f32));
             state.encoder = openh264::encoder::Encoder::with_api_config(
                 openh264::OpenH264API::from_source(),
                 config,
@@ -287,6 +309,7 @@ impl H264Codec {
             state.w = w;
             state.h = h;
             state.built_bitrate_bps = state.bitrate_bps;
+            state.built_fps = state.fps;
         }
         state
             .encoder
@@ -334,6 +357,14 @@ impl ScreenCodecPort for H264Codec {
         self.bitrate_bps()
     }
 
+    fn set_fps(&self, fps: u32) {
+        self.set_fps(fps);
+    }
+
+    fn fps(&self) -> u32 {
+        self.fps()
+    }
+
     fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
         let yuv = I420::from_bgra(raw, w as usize, h as usize)?;
         let need_idr = self.force_idr.swap(false, std::sync::atomic::Ordering::Relaxed);
@@ -347,10 +378,13 @@ impl ScreenCodecPort for H264Codec {
                 h: 0,
                 bitrate_bps: self.bitrate_bps(),
                 built_bitrate_bps: 0,
+                fps: self.fps(),
+                built_fps: 0,
             });
         }
         let state = guard.as_mut().expect("encoder just inserted");
         state.bitrate_bps = self.bitrate_bps();
+        state.fps = self.fps();
         Self::encode_with(state, &yuv, need_idr)
     }
 
@@ -407,6 +441,28 @@ pub fn screen_bitrate_from_profile(measured_mbps: Option<f64>) -> u32 {
     (half_bps as u64).clamp(SCREEN_BITRATE_MIN_BPS as u64, SCREEN_BITRATE_MAX_BPS as u64) as u32
 }
 
+/// ADR-083 dynamic FPS auto-tiering: maps measured bandwidth to target FPS tiers.
+/// Minimal (< 5 Mbps): 15 FPS
+/// Low (5–15 Mbps): 24 FPS
+/// Medium (15–40 Mbps): 30 FPS
+/// High (>= 40 Mbps): 60 FPS
+/// None or invalid: SCREEN_FPS_DEFAULT (30 FPS)
+pub fn screen_fps_from_profile(measured_mbps: Option<f64>) -> u32 {
+    let mbps = match measured_mbps {
+        Some(m) if m.is_finite() && m > 0.0 => m,
+        _ => return tetherly_core::SCREEN_FPS_DEFAULT,
+    };
+    if mbps < 5.0 {
+        15
+    } else if mbps < 15.0 {
+        24
+    } else if mbps < 40.0 {
+        30
+    } else {
+        60
+    }
+}
+
 /// Negotiated screen-channel codec (ADR-079 §决定): encode with H.264 only
 /// when the operator asked for it *and* the peer advertised `screencodecs`
 /// containing `h264`; otherwise zstd. The decode side is not chosen here —
@@ -444,6 +500,16 @@ impl NegotiatedCodec {
     /// Current target bitrate in bps.
     pub fn bitrate_bps(&self) -> u32 {
         self.h264.bitrate_bps()
+    }
+
+    /// Hot frame rate retier (ADR-083 dynamic FPS): forwarded to the H.264 encoder.
+    pub fn set_fps(&self, fps: u32) {
+        self.h264.set_fps(fps);
+    }
+
+    /// Current target frame rate in fps.
+    pub fn fps(&self) -> u32 {
+        self.h264.fps()
     }
 
     /// Force the next encode pass to emit an IDR keyframe (ADR-081).
@@ -494,6 +560,14 @@ impl ScreenCodecPort for NegotiatedCodec {
 
     fn bitrate_bps(&self) -> u32 {
         self.bitrate_bps()
+    }
+
+    fn set_fps(&self, fps: u32) {
+        self.set_fps(fps);
+    }
+
+    fn fps(&self) -> u32 {
+        self.fps()
     }
 
     fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
@@ -555,6 +629,15 @@ impl<S: ScreenSource> ScreenSource for EncodedSource<S> {
 
     fn set_bitrate_bps(&self, bps: u32) {
         self.codec.set_bitrate_bps(bps);
+    }
+
+    fn set_fps(&self, fps: u32) {
+        self.codec.set_fps(fps);
+        self.inner.set_fps(fps);
+    }
+
+    fn fps(&self) -> u32 {
+        self.codec.fps()
     }
 }
 
@@ -1894,5 +1977,44 @@ mod h264_tests {
             return 60.0;
         }
         10.0 * (255.0f64 * 255.0 / mse).log10()
+    }
+
+    #[test]
+    fn fps_tier_boundaries() {
+        use super::screen_fps_from_profile;
+        use tetherly_core::SCREEN_FPS_DEFAULT;
+
+        // No profile / non-finite / zero → default (30 fps)
+        assert_eq!(screen_fps_from_profile(None), SCREEN_FPS_DEFAULT);
+        assert_eq!(screen_fps_from_profile(Some(0.0)), SCREEN_FPS_DEFAULT);
+        assert_eq!(screen_fps_from_profile(Some(f64::NAN)), SCREEN_FPS_DEFAULT);
+        assert_eq!(screen_fps_from_profile(Some(-5.0)), SCREEN_FPS_DEFAULT);
+
+        // Tier thresholds
+        assert_eq!(screen_fps_from_profile(Some(2.5)), 15);
+        assert_eq!(screen_fps_from_profile(Some(4.99)), 15);
+        assert_eq!(screen_fps_from_profile(Some(5.0)), 24);
+        assert_eq!(screen_fps_from_profile(Some(14.9)), 24);
+        assert_eq!(screen_fps_from_profile(Some(15.0)), 30);
+        assert_eq!(screen_fps_from_profile(Some(39.9)), 30);
+        assert_eq!(screen_fps_from_profile(Some(40.0)), 60);
+        assert_eq!(screen_fps_from_profile(Some(100.0)), 60);
+    }
+
+    #[test]
+    fn fps_control_and_forwarding() {
+        let codec = H264Codec::new(2_000_000);
+        assert_eq!(codec.fps(), 30);
+        codec.set_fps(60);
+        assert_eq!(codec.fps(), 60);
+        codec.set_fps(150); // clamped to MAX 120
+        assert_eq!(codec.fps(), 120);
+        codec.set_fps(2); // clamped to MIN 5
+        assert_eq!(codec.fps(), 5);
+
+        let sel = NegotiatedCodec::new(true, 1_000_000, true);
+        assert_eq!(sel.fps(), 30);
+        sel.set_fps(45);
+        assert_eq!(sel.fps(), 45);
     }
 }

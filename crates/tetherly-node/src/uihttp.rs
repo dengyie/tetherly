@@ -3987,6 +3987,35 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             let rep = node.screen_set_bitrate_reported(kbps);
             json_ok(&rep)
         }
+        ("GET", "/api/screen/fps") => {
+            let rep = node.screen_fps_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/fps") => {
+            #[derive(serde::Deserialize)]
+            struct FpsReq {
+                #[serde(default)]
+                fps: Option<u32>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<FpsReq> = if !body.is_empty() {
+                match serde_json::from_slice(body) {
+                    Ok(b) => Some(b),
+                    Err(_) => return err(400, "bad json, expected { fps: number }"),
+                }
+            } else {
+                None
+            };
+            let fps_val = parsed_body
+                .and_then(|b| b.fps)
+                .or_else(|| qmap.get("fps").and_then(|v| v.parse::<u32>().ok()));
+            let fps = match fps_val {
+                Some(f) => f,
+                None => return err(400, "missing fps parameter"),
+            };
+            let rep = node.screen_set_fps_reported(fps);
+            json_ok(&rep)
+        }
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -7868,6 +7897,8 @@ mod tests {
             screen_codec_h264: false,
             screen_bitrate_kbps: 4000,
             screen_bitrate_auto: true,
+            screen_fps: 30,
+            screen_fps_auto: true,
             screen_sink: None,
             input_sink: None,
         };

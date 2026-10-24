@@ -68,6 +68,8 @@ fn cfg(
         screen_codec_h264: false,
         screen_bitrate_kbps: 4000,
         screen_bitrate_auto: true,
+        screen_fps: 30,
+        screen_fps_auto: true,
         screen_sink: None,
         input_sink: None,
     }
@@ -251,6 +253,7 @@ async fn m5_1_consent_then_start_flows_frames_monotonic() {
 
     // Push 5 frames.
     for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(35)).await;
         let sent = host.screen_send_frame().await.unwrap();
         assert!(sent, "frame should queue while streaming");
     }
@@ -340,6 +343,7 @@ async fn m5_1_h264_stream_roundtrips_through_the_wire() {
     }
 
     for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(35)).await;
         assert!(host.screen_send_frame().await.unwrap());
     }
     let start = std::time::Instant::now();
@@ -607,6 +611,7 @@ async fn screen_and_input_lifecycle_and_peer_targeting_via_loopback_api() {
 
     // Host pushes 2 frames
     assert!(host.screen_send_frame().await.unwrap());
+    tokio::time::sleep(Duration::from_millis(35)).await;
     assert!(host.screen_send_frame().await.unwrap());
 
     // Verify GET /api/screen reflects frames sent
@@ -836,6 +841,7 @@ async fn screen_and_input_lifecycle_governance_and_events_via_loopback_api() {
 
     // Host pushes 2 frames
     assert!(host.screen_send_frame().await.unwrap());
+    tokio::time::sleep(Duration::from_millis(35)).await;
     assert!(host.screen_send_frame().await.unwrap());
 
     // Verify GET /api/screen reflects frames sent and active peer
@@ -958,6 +964,7 @@ async fn m5_1_bidirectional_frame_ack_rtt_and_congestion_backpressure() {
 
     // Push 3 frames
     for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(35)).await;
         let sent = host.screen_send_frame().await.unwrap();
         assert!(sent, "frame should queue while streaming");
     }
@@ -1063,6 +1070,7 @@ async fn m5_5_keyframe_request_triggers_idr_recovery() {
 
     // Host sends 2 frames (seq 1, seq 2)
     assert!(host.screen_send_frame().await.unwrap());
+    tokio::time::sleep(Duration::from_millis(35)).await;
     assert!(host.screen_send_frame().await.unwrap());
 
     // Wait for visitor to receive and present 2 frames
@@ -1101,6 +1109,7 @@ async fn m5_5_keyframe_request_triggers_idr_recovery() {
     }
 
     // Host sends frame 3, which must encode as an IDR frame due to force_idr latch
+    tokio::time::sleep(Duration::from_millis(35)).await;
     assert!(host.screen_send_frame().await.unwrap());
 
     // Wait for visitor to receive frame 3
@@ -1251,6 +1260,7 @@ async fn m5_6_screen_dynamic_rate_adaptation() {
 
     // 5. Send frames through reconfigured encoder and verify delivery & presentation
     for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(35)).await;
         assert!(host.screen_send_frame().await.unwrap());
     }
 
@@ -1262,6 +1272,166 @@ async fn m5_6_screen_dynamic_rate_adaptation() {
         if start.elapsed() > Duration::from_secs(5) {
             panic!(
                 "frames did not arrive under dynamic rate, count={}",
+                visitor.screen_sink_snapshot().count()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let sink = visitor.screen_sink_snapshot();
+    assert_eq!(sink.presented(), vec![1, 2, 3]);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+// --------------------------------------------------------------------------
+// M5.7 — Dynamic FPS & Adaptive Frame Pacing Controller (v1.97 / ADR-083)
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_7_screen_dynamic_fps_pacing_and_telemetry() {
+    let codec = Arc::new(tetherly_node::NegotiatedCodec::new(true, 2_000_000, true));
+    let src: Arc<dyn tetherly_core::ScreenSource> = Arc::new(tetherly_node::EncodedSource::new(
+        MemoryScreenSource::new(16, 16).expect("16x16 screen"),
+        codec.clone(),
+    ));
+    let (da, ga) = temp_dir("host-h264-fps");
+    let (db, gb) = temp_dir("visitor-h264-fps");
+    let host = Node::start(cfg(da, "host", Some(src))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let host_ui = host.spawn_ui().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+    wait_screen_port(
+        &host,
+        visitor.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+    wait_screen_port(
+        &visitor,
+        host.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+
+    visitor
+        .open_screen(host.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    host.screen_allow();
+    visitor.screen_start().await.unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_state() == ScreenState::Streaming {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("host never started streaming (h264-fps)");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // 1. Initial GET /api/screen/fps
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/fps")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_node::ScreenFpsReport = serde_json::from_slice(&b).unwrap();
+    assert!(rep.ok);
+    assert_eq!(rep.min_fps, tetherly_core::SCREEN_FPS_MIN);
+    assert_eq!(rep.max_fps, tetherly_core::SCREEN_FPS_MAX);
+    assert_eq!(rep.fps, 30);
+    assert_eq!(rep.interval_us, 33_333);
+    assert_eq!(host.screen_fps(), 30);
+
+    // 2. Override target frame rate to 60 FPS via POST /api/screen/fps
+    let req_60 = serde_json::json!({ "fps": 60 });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/fps",
+        &serde_json::to_vec(&req_60).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep_60: tetherly_node::ScreenFpsReport = serde_json::from_slice(&b).unwrap();
+    assert!(rep_60.ok);
+    assert_eq!(rep_60.fps, 60);
+    assert_eq!(rep_60.interval_us, 16_666);
+    assert_eq!(host.screen_fps(), 60);
+    assert_eq!(codec.fps(), 60);
+
+    // 3. Verify ScreenStatusReport reflects updated fps_target
+    let s_rep = host.screen_status_report().await;
+    assert_eq!(s_rep.fps_target, 60);
+
+    // 4. Test clamping bounds: request 240 FPS -> clamps to max (120 FPS)
+    let req_max = serde_json::json!({ "fps": 240 });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/fps",
+        &serde_json::to_vec(&req_max).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep_max: tetherly_node::ScreenFpsReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep_max.fps, tetherly_core::SCREEN_FPS_MAX);
+    assert_eq!(rep_max.interval_us, 8_333);
+    assert_eq!(host.screen_fps(), tetherly_core::SCREEN_FPS_MAX);
+
+    // Request 1 FPS -> clamps to min (5 FPS, 200ms interval)
+    let req_min = serde_json::json!({ "fps": 1 });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/fps",
+        &serde_json::to_vec(&req_min).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep_min: tetherly_node::ScreenFpsReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep_min.fps, tetherly_core::SCREEN_FPS_MIN);
+    assert_eq!(rep_min.interval_us, 200_000);
+    assert_eq!(host.screen_fps(), tetherly_core::SCREEN_FPS_MIN);
+
+    // 5. Test frame pacing enforcement under 5 FPS (200ms pacing interval)
+    // First frame succeeds and consumes pacing slot
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Immediate second call should be throttled by pacing check (returns Ok(false))
+    let throttled = host.screen_send_frame().await.unwrap();
+    assert!(!throttled, "immediate frame should be throttled by pacer");
+
+    // Reconfigure to 60 FPS (16.6ms interval) for smooth streaming
+    host.screen_set_fps(60);
+    assert_eq!(host.screen_fps(), 60);
+
+    // Wait slightly more than 1 frame interval (25ms) and send next frames
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(host.screen_send_frame().await.unwrap());
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // 6. Verify frames arrive at visitor sink
+    let start = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 3 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "frames did not arrive under dynamic fps pacing, count={}",
                 visitor.screen_sink_snapshot().count()
             );
         }
