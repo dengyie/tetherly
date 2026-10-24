@@ -21,7 +21,11 @@
   5. **mDNS 日志卫生**：`tetherly` 与 `tetherly-cli` 两 main 的 EnvFilter 追加 `mdns_sd=off` 默认指令（注释说明现场依据；`RUST_LOG=mdns_sd=debug` 可覆盖调试）。
   6. **测试**：`bitrate_tier_boundaries`（None/0/NaN→默认；10M 链路→5M；0.4M→500k 下限；500M→20M 上限）、`bitrate_change_forces_a_fresh_idr`（首包 IDR→同档 P 帧→调档后**必** IDR，annex-B 首 VCL NAL type=5/1 确定性断言）、`negotiated_codec_forwards_the_tier`。
 - **验证**：本地 fmt / 宿主 clippy `-D warnings` / `x86_64-pc-windows-gnu` 交叉 clippy / `cargo deny` / `cargo test --workspace --locked`（31 套件 **491**）全绿（门须串行执行：并行 cargo 触发 target 锁会产生假失败信号）。
-- **待验证**：VM 真机「bench→流码率热调」链路复测待 8h soak 回收（16:10）后进行（本轮不扰 soak 现场）。
+- **v0.1.14 真机 E2E 验证（LeaseWeb 沙盒 VPS + Xvfb 1280×720，2026-10-24）**：8h soak 现场回收完毕后，部署官方发布之 `v0.1.14` Linux x86_64 二进制，端到端验证「bench 实测带宽 → H.264 码率热调档」全链路：
+  - 双节点以 `--screen-codec h264 --screen-bitrate auto` 启动，SPAKE2 PIN 配对成功，两端 `live_peers=1` / `trusted_peers=1`，caps 成功协商 `screencodecs=zstd,h264`。
+  - 屏幕会话拉起：默认以 4,000,000 bps（4 Mbps）启动 H.264 编码，X11Source 采集并持续发射，Node B 解码呈现（首阶段 241 帧发送 / 253 帧呈现，线缆仅 6,120 字节）。
+  - 动态热调测验：在流运行中触发真实链路压测（`tetherly bench start --peer <peer> --duration 3`），测得吞吐 3.45 Mbps（1.23 MiB，79 chunks，RTT 38ms）。
+  - 自动选档与 IDR 闭环：压测完成入表触发 `record_bandwidth_profile`，运行时钩子自动重估并以一半带宽选档为 1,725,000 bps（1.725 Mbps）；`H264Codec` 下一帧原子检测目标码率变更并重建编码器（强制输出 IDR 关键帧）；码率动态调降后视频流无缝平滑过渡，帧数持续平稳递增至 691 帧（发送）/ 703 帧（呈现），线缆累计仅 12,420 字节（解压还原达 2.59 GB BGRA 数据），两端零 PANIC、零 ERROR；`mdns_sd=off` 确保日志极致卫生；测试完成后沙盒 VM 进程与临时目录已全部安全收容清理。
 
 **1.91 相对 1.90(macOS 屏幕呈现：tetherly-viewer 查看器子进程)**
 
