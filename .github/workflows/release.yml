@@ -98,6 +98,11 @@ jobs:
           mkdir -p dist
           cp "target/release/tetherly${ext}" "dist/tetherly-${{ matrix.name }}${ext}"
           cp "target/release/tetherly-cli${ext}" "dist/tetherly-cli-${{ matrix.name }}${ext}"
+          # The AppKit viewer subprocess only exists on macOS (elsewhere the
+          # bin is an honest stub); ship it where it can present.
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            cp "target/release/tetherly-viewer" "dist/tetherly-viewer-${{ matrix.name }}"
+          fi
           ls -l dist
       - uses: actions/upload-artifact@v7
         with:
