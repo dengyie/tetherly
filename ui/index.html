@@ -3301,9 +3301,13 @@ function render(s) {
     let txt = "状态: " + (st.state || "idle");
     if (st.allowed) txt += " · 已授权";
     if (st.active_peer) txt += " · 对端: " + st.active_peer;
-    txt += " · 已发 " + (st.sent || 0) + " 帧 / 收 " + (st.received || 0) + " 帧";
+    txt += " · 已发 " + (st.sent || 0) + " 帧 / 确认 " + (st.acked || 0) + " / 收 " + (st.received || 0) + " 帧";
+    if (st.in_flight) txt += " · 在途 " + st.in_flight + " 帧";
+    if (st.rtt_latest_us != null) txt += " · RTT " + (st.rtt_latest_us / 1000).toFixed(1) + "ms";
     if (st.bytes) txt += " (" + formatBytes(st.bytes) + ")";
+    if (st.dropped) txt += " · 丢弃 " + st.dropped;
     if (st.refused) txt += " · 拒绝 " + st.refused;
+    if (st.is_congested) txt += " · [拥塞退避]";
     sc.textContent = txt;
   }
   const inp = $("input");
@@ -3323,9 +3327,13 @@ async function updateScreenStatus() {
       if (rep.allowed) txt += " · 已授权";
       if (rep.channel_open) txt += " · 通道已开";
       if (rep.active_peer) txt += " · 对端: " + rep.active_peer;
-      txt += " · 已发 " + (rep.sent || 0) + " 帧 / 收 " + (rep.received || 0) + " 帧";
+      txt += " · 已发 " + (rep.sent || 0) + " 帧 / 确认 " + (rep.acked || 0) + " / 收 " + (rep.received || 0) + " 帧";
+      if (rep.in_flight) txt += " · 在途 " + rep.in_flight + " 帧";
+      if (rep.rtt_latest_us != null) txt += " · RTT " + (rep.rtt_latest_us / 1000).toFixed(1) + "ms";
       if (rep.bytes) txt += " (" + formatBytes(rep.bytes) + ")";
+      if (rep.dropped) txt += " · 丢弃 " + rep.dropped;
       if (rep.refused) txt += " · 拒绝 " + rep.refused;
+      if (rep.is_congested) txt += " · [拥塞退避]";
       sc.textContent = txt;
     }
   } catch (e) {}

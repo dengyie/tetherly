@@ -500,6 +500,13 @@ struct ScreenSnap {
     refused: u64,
     /// p95 host-side frame interval in microseconds. Null until measurable.
     p95_frame_interval_us: Option<u64>,
+    acked: u64,
+    in_flight: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rtt_latest_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rtt_p95_us: Option<u64>,
+    is_congested: bool,
 }
 
 #[derive(Serialize)]
@@ -7742,10 +7749,15 @@ async fn snapshot(node: &Node) -> Snapshot {
                 state: node.screen_state().as_str().to_string(),
                 sent: s.sent,
                 received: r.received,
-                dropped: r.dropped,
+                dropped: s.dropped,
                 bytes: s.bytes + r.bytes,
                 refused: s.refused,
                 p95_frame_interval_us: node.screen_latency_p95_us(),
+                acked: s.acked,
+                in_flight: s.in_flight,
+                rtt_latest_us: s.rtt_latest_us,
+                rtt_p95_us: s.rtt_p95_us,
+                is_congested: node.is_screen_congested(),
             }
         },
         input_channel: node.input_channel_open().await,

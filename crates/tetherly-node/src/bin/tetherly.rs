@@ -5824,6 +5824,8 @@ async fn main() -> Result<()> {
                     }
                     println!("  Frames Sent:  {}", rep.sent);
                     println!("  Frames Recv:  {}", rep.received);
+                    println!("  Frames Acked: {}", rep.acked);
+                    println!("  In Flight:    {}", rep.in_flight);
                     println!("  Dropped:      {}", rep.dropped);
                     println!("  Refused:      {}", rep.refused);
                     println!("  Bytes Sent:   {}", rep.bytes);
@@ -5834,6 +5836,19 @@ async fn main() -> Result<()> {
                         }
                         None => println!("  p95 Interval: (not yet measurable)"),
                     }
+                    match rep.rtt_latest_us {
+                        Some(us) => {
+                            println!("  RTT (latest): {:.2} ms ({us} us)", us as f64 / 1000.0);
+                        }
+                        None => println!("  RTT (latest): (no ack yet)"),
+                    }
+                    match rep.rtt_p95_us {
+                        Some(us) => {
+                            println!("  RTT (p95):    {:.2} ms ({us} us)", us as f64 / 1000.0);
+                        }
+                        None => println!("  RTT (p95):    (no ack yet)"),
+                    }
+                    println!("  Congested:    {}", rep.is_congested);
                 }
             }
         },

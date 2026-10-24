@@ -3,12 +3,35 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.92** |
+| 文档版本 | **1.93** |
 | 日期 | 2026-10-24 |
-| 状态 | **v1.92 H.264 码率自动选档（ADR-078 画像闭环）与 mDNS 日志卫生**——(1) **码率档位纯函数**（`screen_bitrate_from_profile`）：视频上限 = 对端实测链路带宽的一半（另一半留给控制/文件/虚网流量），夹紧 [500kbps, 20Mbps]，无画像/非有限值保守回退 4Mbps。(2) **H264Codec 动态码率**：`bitrate_bps` 原子化 + 编码器状态分离「目标码率/建时快照」，码率变化触发编码器重建（= 新 SPS/PPS + **IDR**，P 帧绝不携带旧码率语义）。(3) **三钩子接线**：屏幕会话建立（两处 attach）重置每流一次门闩；流首帧按 `screen_peer` 查 `bandwidth_profiles` 选档；`record_bandwidth_profile`（bench 完成）对流中热调档。(4) **CLI**：`--screen-bitrate` 默认 `auto`（显式数字仍为人工覆盖，`NodeConfig.screen_bitrate_auto`）。(5) **mDNS 日志卫生**：现场 soak 发现 `mdns_sd` 在 IPv6-only/TUN 接口持续刷 ERROR（接口枚举噪音非发现故障），两 main 的 EnvFilter 默认 `mdns_sd=off`（RUST_LOG 可覆盖）。测试：档位边界（None/0/NaN/上限夹紧）、码率变更强制 IDR（annex-B 首 VCL NAL type 断言）、协商器转发，全量 31 套件 **491** 用例。 |
+| 状态 | **v1.93 双向帧确认（Ack）、在途队列追踪与自适应拥塞背压（ADR-080）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`, `ports.rs`）：`Clock` 特征扩展默认方法 `unix_us(&self) -> u64`，`SystemClock` 直通微秒高精时间戳；`ScreenSender` 建立有界在途帧跟踪队列 `in_flight_records`（容量 `SCREEN_IN_FLIGHT_MAX = 64`），按微秒记录 `(seq, sent_us)`；收到入站 `ControlMsg::Ack { seq }` (tag 2) 时排水所有 `<= seq` 在途记录，并针对当前帧计算单程与往返端到端 RTT 时延；滚动时延蓄水池 `ScreenRttTracker` 维护近 128 个样本评估最新与无浮点开销 p95 时延；自适应拥塞检测 `is_congested()` 在 `in_flight >= SCREEN_CONGESTION_IN_FLIGHT_THRESHOLD (8)` 或 `rtt_latest_us >= SCREEN_CONGESTION_RTT_THRESHOLD_US (250ms)` 时触发；(2) **运行时与帧泵防拥塞节流**（`crates/tetherly-node/src/runtime.rs`）：`attach_screen_server` 入站 Ack 传入微秒时戳驱动状态机；`screen_send_frame` 帧泵在链路拥塞且 `sent > 0` 时自动截断丢弃非初始捕获帧并记录丢弃指标，彻底消灭套接字缓冲膨胀（Bufferbloat）与延迟累积；`ScreenStatusReport` 与 `NodeSession` 扩展 `acked`、`in_flight`、`rtt_latest_us`、`rtt_p95_us` 与 `is_congested`；(3) **回环 API、CLI 与 Web UI 全同构升级**（`uihttp.rs`, `bin/tetherly.rs`, `tetherly-cli`, `ui/index.html`）：`/api/screen`、`ScreenSnap` 快照、`tetherly screen status` 终端排版与 Web UI 实时看板全面呈现帧确认、在途队列、端到端 RTT 与 `[拥塞退避]` 状态；(4) **测试**：Core 帧追踪与拥塞单测，Phase 5 `m5_1_bidirectional_frame_ack_rtt_and_congestion_backpressure` E2E 跨 Noise IK 闭环集成测试全绿，全量 31 套件 **494** 用例全绿。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.93 相对 1.92(双向帧确认 / 在途队列追踪 / 自适应拥塞背压 ADR-080)**
+
+- **动机**:
+  远程屏幕传输（45720）此前虽在接收端生成 `ControlMsg::Ack { seq }` (tag 2)，但发送端仅静默丢弃，缺乏端到端确认闭环；在弱网或突发丢包时，无反馈驱动易产生套接字拥塞缓冲区膨胀（Bufferbloat）与画面延迟累积。本轮实现端到端闭环确认、实时微秒级 RTT 测量与自适应拥塞背压（ADR-080）。
+  1. **Core 协议状态机（`crates/tetherly-core/src/screen.rs`, `ports.rs`）**：
+     - `Clock` 特征扩展默认方法 `unix_us(&self) -> u64`，`SystemClock` 直通微秒高精时间戳，`ManualClock` 兼容步进。
+     - `ScreenSender` 建立有界在途帧跟踪队列 `in_flight_records`（容量 `SCREEN_IN_FLIGHT_MAX = 64`），按微秒记录 `(seq, sent_us)`。
+     - 累计确认与采样机制：收到 `ControlMsg::Ack { seq }` 时，排水所有 `<= seq` 在途记录，并提取当前确认帧计算单程/往返 RTT 时延。
+     - 滚动时延蓄水池 `ScreenRttTracker`：维护近 128 个 RTT 样本，计算最新 RTT 与无浮点开销的 p95 时延。
+     - 自适应拥塞检测（`is_congested()`）：当 `in_flight >= SCREEN_CONGESTION_IN_FLIGHT_THRESHOLD (8)` 或 `rtt_latest_us >= SCREEN_CONGESTION_RTT_THRESHOLD_US (250ms)` 时触发。
+     - 发送端提供 `record_drop()` 计数器，精准统计背压丢弃帧。
+  2. **Node 运行时与帧泵自适应背压（`crates/tetherly-node/src/runtime.rs`）**：
+     - `attach_screen_server`（发送端会话）：收到入站 `ControlMsg::Ack { seq }` 时传入 `node.shared.clock.unix_us()` 调用 `on_control_with_time` 驱动状态机更新。
+     - `screen_send_frame`：帧泵在捕获帧入队前评估 `engine.is_congested() && engine.stats().sent > 0`；链路拥塞时自动截断丢弃非初始捕获帧并记录丢弃指标，防止套接字阻塞与延迟恶化。
+     - `ScreenStatusReport` 遥测 DTO 与 `NodeSession`：新增 `acked`、`in_flight`、`rtt_latest_us`、`rtt_p95_us` 与 `is_congested`，并通过 `is_screen_congested()` 提供状态查询。
+  3. **回环 API、CLI 与 Web UI 全同构升级（`uihttp.rs`, `bin/tetherly.rs`, `tetherly-cli`, `ui/index.html`）**：
+     - `/api/screen` 与 SSE 快照 `ScreenSnap` 全面透出 5 项全新确认与拥塞遥测指标。
+     - `tetherly screen status`（Node 二进制与独立 CLI）新增 `Frames Acked`、`In Flight`、`RTT (latest)`、`RTT (p95)` 与 `Congested` 终端高亮呈现。
+     - Web 控制台实时看板在状态栏动态展示帧确认数、在途帧数、实时 RTT 及 `[拥塞退避]` 告警徽标。
+  4. **测试**：
+     - Core 单测：`sender_tracks_in_flight_and_computes_rtt_on_ack`、`sender_congestion_detection_and_in_flight_bounds`。
+     - Phase 5 集成测试：`m5_1_bidirectional_frame_ack_rtt_and_congestion_backpressure` 验证跨真实 Noise IK 传输栈的帧发送、接收端呈现、逆向 Ack 回传、RTT 计算、在途队列清空与 `/api/screen` 遥测全流程闭环。全量 31 套件 **494** 用例全绿。
 
 **1.92 相对 1.91(H.264 码率自动选档 / ADR-078 画像闭环 与 mDNS 日志卫生)**
 

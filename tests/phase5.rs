@@ -925,3 +925,86 @@ async fn screen_and_input_lifecycle_governance_and_events_via_loopback_api() {
     host.shutdown();
     visitor.shutdown();
 }
+
+// --------------------------------------------------------------------------
+// M5.1-ack-rtt — Bi-directional frame acknowledgment, RTT telemetry,
+// and congestion control backpressure (v1.93 / ADR-080)
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_1_bidirectional_frame_ack_rtt_and_congestion_backpressure() {
+    let (host, visitor, _ga, _gb) = pair_view().await;
+    let host_id = host.identity().device_id().clone();
+
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    // Host consents locally
+    host.screen_allow();
+    assert_eq!(host.screen_state(), ScreenState::Allowed);
+
+    // Visitor starts streaming
+    visitor.screen_start().await.unwrap();
+
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_state() == ScreenState::Streaming {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("host never started streaming");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Push 3 frames
+    for _ in 0..3 {
+        let sent = host.screen_send_frame().await.unwrap();
+        assert!(sent, "frame should queue while streaming");
+    }
+
+    // Wait for frames to be presented by the visitor and Acknowledged back to the host
+    let start = std::time::Instant::now();
+    loop {
+        let h_stats = host.screen_stats();
+        if h_stats.acked >= 3 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host did not receive acks in time: acked={}, sent={}, in_flight={}",
+                h_stats.acked, h_stats.sent, h_stats.in_flight
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let h_stats = host.screen_stats();
+    assert_eq!(h_stats.sent, 3);
+    assert!(h_stats.acked >= 3, "expected at least 3 acked frames");
+    assert_eq!(h_stats.last_acked_seq, 3);
+    assert_eq!(
+        h_stats.in_flight, 0,
+        "in_flight should drain to 0 after all acks"
+    );
+    assert!(
+        h_stats.rtt_latest_us.is_some(),
+        "rtt_latest_us must be recorded"
+    );
+    assert!(
+        !host.is_screen_congested(),
+        "channel should not be congested"
+    );
+
+    // Telemetry DTO validation via screen_status_report
+    let rep = host.screen_status_report().await;
+    assert!(rep.ok);
+    assert_eq!(rep.state, "streaming");
+    assert_eq!(rep.sent, 3);
+    assert_eq!(rep.acked, 3);
+    assert_eq!(rep.in_flight, 0);
+    assert!(rep.rtt_latest_us.is_some());
+    assert!(!rep.is_congested);
+
+    host.shutdown();
+    visitor.shutdown();
+}

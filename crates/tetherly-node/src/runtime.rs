@@ -2817,6 +2817,16 @@ pub struct ScreenStatusReport {
     pub p95_frame_interval_us: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_peer: Option<String>,
+    #[serde(default)]
+    pub acked: u64,
+    #[serde(default)]
+    pub in_flight: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_latest_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_p95_us: Option<u64>,
+    #[serde(default)]
+    pub is_congested: bool,
 }
 
 /// Control result report for remote screen streaming actions (allow, revoke, start, stop).
@@ -19900,12 +19910,13 @@ impl Node {
                                 let f_len = (frame.payload.len() + 12) as u64;
                                 node.shared.telemetry.record_screen_rx(f_len);
                                 if let Ok(msg) = ControlMsg::from_frame(&frame) {
+                                    let now_us = node.shared.clock.unix_us();
                                     let reply = node
                                         .shared
                                         .screen_engine
                                         .lock()
                                         .expect("screen")
-                                        .on_control(msg);
+                                        .on_control_with_time(msg, now_us);
                                     let cur_state = node.screen_state();
                                     let cur_allowed = matches!(
                                         cur_state,
@@ -20149,7 +20160,20 @@ impl Node {
         };
         let outbound = {
             let mut engine = self.shared.screen_engine.lock().expect("screen");
-            if engine.push(frame).is_none() {
+            let now_us = self.shared.clock.unix_us();
+            // Congestion control / adaptive backpressure (ADR-080):
+            // When link is congested (in_flight >= 4 or RTT >= 250ms), drop non-initial frames
+            // to eliminate bufferbloat and socket stall while maintaining presentation continuity.
+            if engine.is_congested() && engine.stats().sent > 0 {
+                engine.record_drop();
+                warn!(
+                    in_flight = engine.in_flight_count(),
+                    rtt_latest = ?engine.stats().rtt_latest_us,
+                    "screen channel congested; dropping non-initial capture frame"
+                );
+                return Ok(false);
+            }
+            if engine.push_with_time(frame, now_us).is_none() {
                 return Ok(false);
             }
             engine.drain()
@@ -20419,6 +20443,12 @@ impl Node {
             .as_ref()
             .map(|p| p.to_string());
         let state = self.screen_state();
+        let is_congested = self
+            .shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .is_congested();
         ScreenStatusReport {
             ok: true,
             state: state.as_str().to_string(),
@@ -20432,6 +20462,11 @@ impl Node {
             rx_bytes: rx_stats.bytes,
             p95_frame_interval_us: p95,
             active_peer,
+            acked: stats.acked,
+            in_flight: stats.in_flight,
+            rtt_latest_us: stats.rtt_latest_us,
+            rtt_p95_us: stats.rtt_p95_us,
+            is_congested,
         }
     }
 
@@ -20533,6 +20568,15 @@ impl Node {
 
     pub fn screen_stats(&self) -> ScreenStats {
         self.shared.screen_engine.lock().expect("screen").stats()
+    }
+
+    /// Whether the host screen channel is currently congested (ADR-080).
+    pub fn is_screen_congested(&self) -> bool {
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .is_congested()
     }
 
     /// Visitor-side receiver counters. All zeros until this node views a peer.

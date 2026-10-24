@@ -7,6 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub trait Clock: Send + Sync {
     fn unix_ms(&self) -> u64;
+    fn unix_us(&self) -> u64 {
+        self.unix_ms() * 1000
+    }
     fn now(&self) -> SystemTime {
         UNIX_EPOCH + std::time::Duration::from_millis(self.unix_ms())
     }
@@ -19,6 +22,13 @@ impl Clock for SystemClock {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    fn unix_us(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
             .unwrap_or(0)
     }
 }

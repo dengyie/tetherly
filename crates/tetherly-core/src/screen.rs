@@ -31,6 +31,16 @@ pub const SCREEN_SEQ_WINDOW: u64 = 65_536;
 /// realistic zstd-compressed frame sits far below it.
 pub const SCREEN_PAYLOAD_MAX: usize = 8 * 1024 * 1024;
 
+/// Maximum in-flight frame tracking entries kept by ScreenSender.
+pub const SCREEN_IN_FLIGHT_MAX: usize = 64;
+
+/// In-flight frame count threshold indicating link congestion (v1.93 / ADR-080).
+/// At 30fps pacing, 8 unacked frames equals ~267ms of queued video latency.
+pub const SCREEN_CONGESTION_IN_FLIGHT_THRESHOLD: u64 = 8;
+
+/// RTT threshold in microseconds indicating link congestion (250ms).
+pub const SCREEN_CONGESTION_RTT_THRESHOLD_US: u64 = 250_000;
+
 /// Fragment transport for screen frames too large for one inner frame.
 /// A fragment stream is a `TMF1`-enveloped run of inner frames; the receiver
 /// reassembles before `decode_payload`. A `TMV1`-prefixed payload is a whole
@@ -454,6 +464,57 @@ pub struct ScreenStats {
     pub bytes: u64,
     /// Control messages refused because consent had not been given.
     pub refused: u64,
+    /// Number of frames acknowledged by the receiver (v1.93 / ADR-080).
+    pub acked: u64,
+    /// Highest sequence number acknowledged so far.
+    pub last_acked_seq: u64,
+    /// Current number of frames in flight (sent but not yet acked).
+    pub in_flight: u64,
+    /// Latest measured round-trip time in microseconds.
+    pub rtt_latest_us: Option<u64>,
+    /// 95th-percentile round-trip time in microseconds over recent window.
+    pub rtt_p95_us: Option<u64>,
+}
+
+/// Rolling window tracker for screen frame round-trip times (v1.93 / ADR-080).
+#[derive(Debug, Clone)]
+pub struct ScreenRttTracker {
+    samples: VecDeque<u64>,
+    capacity: usize,
+}
+
+impl ScreenRttTracker {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            samples: VecDeque::with_capacity(capacity.min(256)),
+            capacity: capacity.max(8),
+        }
+    }
+
+    pub fn record(&mut self, sample_us: u64) {
+        if self.samples.len() >= self.capacity {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(sample_us);
+    }
+
+    pub fn latest(&self) -> Option<u64> {
+        self.samples.back().copied()
+    }
+
+    pub fn p95_us(&self) -> Option<u64> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let mut sorted: Vec<u64> = self.samples.iter().copied().collect();
+        sorted.sort_unstable();
+        let idx = ((sorted.len() as f64 * 0.95).ceil() as usize).saturating_sub(1);
+        Some(sorted[idx.min(sorted.len() - 1)])
+    }
+
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
 }
 
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
@@ -463,6 +524,9 @@ pub struct ScreenSender {
     state: ScreenState,
     stats: ScreenStats,
     pending: VecDeque<ScreenFrame>,
+    /// Track (seq, sent_time_us) of frames in-flight (max SCREEN_IN_FLIGHT_MAX).
+    in_flight_records: VecDeque<(u64, u64)>,
+    rtt_tracker: ScreenRttTracker,
 }
 
 impl Default for ScreenSender {
@@ -478,6 +542,8 @@ impl ScreenSender {
             state: ScreenState::Idle,
             stats: ScreenStats::default(),
             pending: VecDeque::new(),
+            in_flight_records: VecDeque::new(),
+            rtt_tracker: ScreenRttTracker::new(SCREEN_IN_FLIGHT_MAX),
         }
     }
 
@@ -491,6 +557,20 @@ impl ScreenSender {
 
     pub fn next_seq(&self) -> u64 {
         self.next_seq
+    }
+
+    /// Whether the screen link is currently congested (v1.93 / ADR-080).
+    pub fn is_congested(&self) -> bool {
+        self.stats.in_flight >= SCREEN_CONGESTION_IN_FLIGHT_THRESHOLD
+            || self
+                .stats
+                .rtt_latest_us
+                .is_some_and(|rtt| rtt >= SCREEN_CONGESTION_RTT_THRESHOLD_US)
+    }
+
+    /// Current in-flight unacknowledged frames count.
+    pub fn in_flight_count(&self) -> u64 {
+        self.stats.in_flight
     }
 
     /// A trusted peer reached the channel. Idempotent while already past Idle.
@@ -514,11 +594,23 @@ impl ScreenSender {
             _ => ScreenState::Requested,
         };
         self.pending.clear();
+        self.in_flight_records.clear();
+        self.rtt_tracker.clear();
+        self.stats.in_flight = 0;
     }
 
     /// Apply a controller instruction. Returns the reply to send back, if any.
     /// A `Start` before `allow` is counted as refused and does not stream.
     pub fn on_control(&mut self, msg: ControlMsg) -> Result<Option<ControlMsg>, CoreError> {
+        self.on_control_with_time(msg, 0)
+    }
+
+    /// Apply a controller instruction with a monotonic clock timestamp in microseconds.
+    pub fn on_control_with_time(
+        &mut self,
+        msg: ControlMsg,
+        now_us: u64,
+    ) -> Result<Option<ControlMsg>, CoreError> {
         match msg {
             ControlMsg::Start => {
                 if !matches!(self.state, ScreenState::Allowed | ScreenState::Streaming) {
@@ -534,14 +626,46 @@ impl ScreenSender {
                     other => other,
                 };
                 self.pending.clear();
+                self.in_flight_records.clear();
+                self.stats.in_flight = 0;
                 Ok(None)
             }
-            ControlMsg::Ack { .. } => Ok(None),
+            ControlMsg::Ack { seq } => {
+                if seq > self.stats.last_acked_seq {
+                    self.stats.last_acked_seq = seq;
+                }
+                self.stats.acked = self.stats.acked.saturating_add(1);
+
+                // Drain acknowledged frames up to `seq` and calculate RTT if timestamps exist
+                let mut matched_rtt = None;
+                while let Some(&(f_seq, sent_us)) = self.in_flight_records.front() {
+                    if f_seq <= seq {
+                        self.in_flight_records.pop_front();
+                        if f_seq == seq && now_us >= sent_us && sent_us > 0 {
+                            matched_rtt = Some(now_us - sent_us);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(rtt) = matched_rtt {
+                    self.rtt_tracker.record(rtt);
+                    self.stats.rtt_latest_us = Some(rtt);
+                    self.stats.rtt_p95_us = self.rtt_tracker.p95_us();
+                }
+                self.stats.in_flight = self.in_flight_records.len() as u64;
+                Ok(None)
+            }
         }
     }
 
     /// Queue a frame while streaming. Returns the assigned sequence number.
     pub fn push(&mut self, frame: ScreenFrame) -> Option<u64> {
+        self.push_with_time(frame, 0)
+    }
+
+    /// Queue a frame while streaming with a monotonic send timestamp in microseconds.
+    pub fn push_with_time(&mut self, frame: ScreenFrame, now_us: u64) -> Option<u64> {
         if self.state != ScreenState::Streaming {
             return None;
         }
@@ -549,8 +673,20 @@ impl ScreenSender {
         self.next_seq = self.next_seq.saturating_add(1);
         self.stats.sent = self.stats.sent.saturating_add(1);
         self.stats.bytes = self.stats.bytes.saturating_add(frame.bytes.len() as u64);
+
+        if self.in_flight_records.len() >= SCREEN_IN_FLIGHT_MAX {
+            self.in_flight_records.pop_front();
+        }
+        self.in_flight_records.push_back((seq, now_us));
+        self.stats.in_flight = self.in_flight_records.len() as u64;
+
         self.pending.push_back(ScreenFrame { seq, ..frame });
         Some(seq)
+    }
+
+    /// Record a frame dropped on sender side (e.g. due to congestion or backpressure).
+    pub fn record_drop(&mut self) {
+        self.stats.dropped = self.stats.dropped.saturating_add(1);
     }
 
     pub fn drain(&mut self) -> Vec<ScreenFrame> {
@@ -563,6 +699,9 @@ impl ScreenSender {
         self.state = ScreenState::Idle;
         self.next_seq = 1;
         self.pending.clear();
+        self.in_flight_records.clear();
+        self.rtt_tracker.clear();
+        self.stats.in_flight = 0;
     }
 }
 
@@ -1242,5 +1381,70 @@ mod tests {
         for fr in &frags[1..] {
             let _ = a.push(fr);
         }
+    }
+
+    #[test]
+    fn sender_tracks_in_flight_and_computes_rtt_on_ack() {
+        let mut s = ScreenSender::new();
+        s.on_peer_connected();
+        s.allow();
+        s.on_control(ControlMsg::Start).unwrap();
+
+        // Push 3 frames with timestamps (t = 1000, 2000, 3000 us)
+        assert_eq!(s.push_with_time(raw_frame(1), 1000), Some(1));
+        assert_eq!(s.push_with_time(raw_frame(2), 2000), Some(2));
+        assert_eq!(s.push_with_time(raw_frame(3), 3000), Some(3));
+
+        assert_eq!(s.stats().sent, 3);
+        assert_eq!(s.stats().in_flight, 3);
+        assert_eq!(s.in_flight_count(), 3);
+        assert!(!s.is_congested());
+
+        // Ack frame 2 at t = 2050 us (RTT for frame 2 = 50 us; frame 1 is also cumulatively acknowledged)
+        s.on_control_with_time(ControlMsg::Ack { seq: 2 }, 2050)
+            .unwrap();
+        assert_eq!(s.stats().acked, 1);
+        assert_eq!(s.stats().last_acked_seq, 2);
+        assert_eq!(s.stats().in_flight, 1); // Only frame 3 remains in-flight
+        assert_eq!(s.stats().rtt_latest_us, Some(50));
+        assert_eq!(s.stats().rtt_p95_us, Some(50));
+
+        // Ack frame 3 at t = 3100 us (RTT for frame 3 = 100 us)
+        s.on_control_with_time(ControlMsg::Ack { seq: 3 }, 3100)
+            .unwrap();
+        assert_eq!(s.stats().acked, 2);
+        assert_eq!(s.stats().last_acked_seq, 3);
+        assert_eq!(s.stats().in_flight, 0);
+        assert_eq!(s.stats().rtt_latest_us, Some(100));
+        assert_eq!(s.stats().rtt_p95_us, Some(100));
+        assert!(!s.is_congested());
+    }
+
+    #[test]
+    fn sender_congestion_detection_and_in_flight_bounds() {
+        let mut s = ScreenSender::new();
+        s.on_peer_connected();
+        s.allow();
+        s.on_control(ControlMsg::Start).unwrap();
+
+        // Push up to congestion threshold (8 frames)
+        for i in 1..=8 {
+            s.push_with_time(raw_frame(i), i * 1000);
+        }
+        assert_eq!(s.in_flight_count(), 8);
+        assert!(s.is_congested()); // In-flight threshold reached
+
+        // Ack frame 8: clears in-flight queue, RTT = 20 us
+        s.on_control_with_time(ControlMsg::Ack { seq: 8 }, 8020)
+            .unwrap();
+        assert_eq!(s.in_flight_count(), 0);
+        assert!(!s.is_congested());
+
+        // Push frame 9, ack with high RTT (300ms)
+        s.push_with_time(raw_frame(9), 10_000);
+        s.on_control_with_time(ControlMsg::Ack { seq: 9 }, 10_000 + 300_000)
+            .unwrap();
+        assert_eq!(s.stats().rtt_latest_us, Some(300_000));
+        assert!(s.is_congested()); // RTT threshold exceeded
     }
 }

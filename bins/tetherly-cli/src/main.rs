@@ -7806,11 +7806,19 @@ async fn main() -> Result<()> {
                     let active_peer = v.get("active_peer").and_then(|s| s.as_str());
                     let sent = v.get("sent").and_then(|n| n.as_u64()).unwrap_or(0);
                     let received = v.get("received").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let acked = v.get("acked").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let in_flight = v.get("in_flight").and_then(|n| n.as_u64()).unwrap_or(0);
                     let dropped = v.get("dropped").and_then(|n| n.as_u64()).unwrap_or(0);
                     let refused = v.get("refused").and_then(|n| n.as_u64()).unwrap_or(0);
                     let bytes = v.get("bytes").and_then(|n| n.as_u64()).unwrap_or(0);
                     let rx_bytes = v.get("rx_bytes").and_then(|n| n.as_u64()).unwrap_or(0);
                     let p95 = v.get("p95_frame_interval_us").and_then(|n| n.as_u64());
+                    let rtt_latest = v.get("rtt_latest_us").and_then(|n| n.as_u64());
+                    let rtt_p95 = v.get("rtt_p95_us").and_then(|n| n.as_u64());
+                    let congested = v
+                        .get("is_congested")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
 
                     println!("Screen Channel Status:");
                     println!("  State:        {state}");
@@ -7821,6 +7829,8 @@ async fn main() -> Result<()> {
                     }
                     println!("  Frames Sent:  {sent}");
                     println!("  Frames Recv:  {received}");
+                    println!("  Frames Acked: {acked}");
+                    println!("  In Flight:    {in_flight}");
                     println!("  Dropped:      {dropped}");
                     println!("  Refused:      {refused}");
                     println!("  Bytes Sent:   {bytes}");
@@ -7831,6 +7841,19 @@ async fn main() -> Result<()> {
                         }
                         None => println!("  p95 Interval: (not yet measurable)"),
                     }
+                    match rtt_latest {
+                        Some(us) => {
+                            println!("  RTT (latest): {:.2} ms ({us} us)", us as f64 / 1000.0);
+                        }
+                        None => println!("  RTT (latest): (no ack yet)"),
+                    }
+                    match rtt_p95 {
+                        Some(us) => {
+                            println!("  RTT (p95):    {:.2} ms ({us} us)", us as f64 / 1000.0);
+                        }
+                        None => println!("  RTT (p95):    (no ack yet)"),
+                    }
+                    println!("  Congested:    {congested}");
                 }
             }
         },
