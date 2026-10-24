@@ -3,12 +3,36 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **1.95** |
+| 文档版本 | **1.96** |
 | 日期 | 2026-10-25 |
-| 状态 | **v1.95 按需关键帧请求与序列断洞自愈恢复（On-Demand Keyframe / IDR Request & Gap Recovery, ADR-081）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`, `ports.rs`）：线上控制帧 Tag 3 新增 `ControlMsg::KeyframeRequest`；`ScreenStats` 新增 `keyframes_requested` 与 `gaps` 计数；`ScreenReceiver::apply` 自动检测序列断洞跳跃（`frame.seq > last_seq + 1`）；`ScreenCodec` 接口新增 `force_idr()`。(2) **编码与运行时自愈**（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）：`H264Codec` 引入 `force_idr` 原子锁存器，在收到对端 KeyframeRequest 或本地拥塞丢帧时触发重建 `openh264` 编码器，强制生成 SPS/PPS 参数集与 IDR 关键帧；查看端解码损坏时不终止会话，而是发送 KeyframeRequest 并持续监听；(3) **接口与生态**：`/api/screen/keyframe` 路由、`tetherly screen keyframe` CLI 与状态监控透出；(4) **测试与版本**：集成测试 `m5_5_keyframe_request_triggers_idr_recovery` 全绿，工作区升级至 `0.1.17`。 |
+| 状态 | **v1.96 屏幕流动态速率自适应与 AIMD 码率控制器（Screen Streaming Dynamic Rate Adaptation & AIMD Bitrate Controller, ADR-082）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`, `ports.rs`）：新增 AIMD 速率自适应控制器 `ScreenRateController`（拥塞乘法退避 20%、稳定通道加法探测 150 kbps、400ms 冷却抑震荡）；`ScreenSender` 深度集成并在 `on_ack`、`record_drop` 时驱动码率调整；`ScreenCodec` 与 `ScreenSource` 接口扩展 `set_bitrate_bps()` 与 `bitrate_bps()`。(2) **运行时编解码联动**（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）：`H264Codec`、`NegotiatedCodec` 与 `EncodedSource` 实现码率热更新并与底层 `openh264` 编码器平滑联动；发送泵与信令接收主循环动态同步码率。(3) **接口与生态**：新增回环 API `GET/POST /api/screen/bitrate`、CLI 命令 `tetherly screen bitrate` 与状态实时展示；(4) **测试与版本**：集成测试 `m5_6_screen_dynamic_rate_adaptation` 全绿，工作区升级至 `0.1.18`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**1.96 相对 1.95(屏幕流动态速率自适应与 AIMD 码率控制器 ADR-082)**
+
+- **动机与问题背景**:
+  此前屏幕推流码率仅在流建立时由测速简档决定（固定 4 Mbps 或静态探测值）。在跨国弱网、蜂窝与 Wi-Fi 抖动环境中，静态码率在网络恶化时无法主动下调，持续导致高在途拥塞与丢帧；在链路恢复后又无法探顶带宽。此外缺乏运行时的动态码率覆盖与调优能力。
+- **架构解法与落地**:
+  1. **Core 协议与 AIMD 控制器（`crates/tetherly-core/src/screen.rs`, `ports.rs`）**：
+     - 定义码率边界常数：`SCREEN_BITRATE_MIN_BPS (200k)`, `SCREEN_BITRATE_MAX_BPS (20M)`, `SCREEN_BITRATE_DEFAULT_BPS (4M)`, `SCREEN_BITRATE_STEP_INCREASE_BPS (150k)`, `SCREEN_BITRATE_COOLDOWN_US (400ms)`。
+     - 实现 `ScreenRateController`：
+       - **乘法减（MD）**：网络拥塞信号（`in_flight >= 4`、`RTT >= 250ms` 或发送端丢帧）发生时将码率下调至 80%（$-20\%$），并施加 400ms 冷却时间防止连续下切。
+       - **加法增（AI）**：链路健康（`in_flight == 0` 且 `RTT < 120ms`）连续 5 帧正常确认时，平滑向上探测 $+150\text{ kbps}$。
+       - **边界钳位**：刚性钳位在 $[200\text{ kbps}, 20\text{ Mbps}]$ 区间内。
+     - `ScreenCodec` 与 `ScreenSource` 扩展 `set_bitrate_bps(&self, bps: u32)` 与 `bitrate_bps(&self) -> u32` 抽象方法。
+  2. **Node 编解码热更新与发送泵联动（`crates/tetherly-node/src/screen.rs`, `runtime.rs`）**：
+     - `H264Codec` 与 `NegotiatedCodec` 维护原子码率，下次编码触发平滑重构下发 SPS/PPS，P 帧永不越界引用旧配置。
+     - `EncodedSource<S>` 自动透传码率变更至内部编码器。
+     - 运行时发送泵在帧确认（`on_control_with_time` 处理 `ControlMsg::Ack`）以及拥塞丢帧（`record_drop_with_time`）时，实时将控制器的最新码率推送至活跃编码器。
+  3. **回环 API 与 CLI 统一支持**：
+     - 新增 HTTP 路由 `GET /api/screen/bitrate` 与 `POST /api/screen/bitrate`，支持 `kbps` 或 `bps` 参数热配置。
+     - CLI 新增 `tetherly screen bitrate [kbps]` 命令，并在 `tetherly screen status` 中透出当前码率与 Mbps 换算值。
+     - 遥测 DTO `ScreenStatusReport` 新增 `bitrate_bps` 字段，新增强类型 `ScreenBitrateReport`。
+  4. **测试**：
+     - Core 单元测试 `rate_controller_aimd_adaptation`。
+     - Phase 5 集成测试 `m5_6_screen_dynamic_rate_adaptation` 验证真实信道握手、API 动态调优、边界钳位与 H.264 解码呈现。
 
 **1.95 相对 1.94(按需关键帧请求与序列断洞自愈恢复 ADR-081)**
 

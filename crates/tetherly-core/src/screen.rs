@@ -41,6 +41,21 @@ pub const SCREEN_CONGESTION_IN_FLIGHT_THRESHOLD: u64 = 8;
 /// RTT threshold in microseconds indicating link congestion (250ms).
 pub const SCREEN_CONGESTION_RTT_THRESHOLD_US: u64 = 250_000;
 
+/// Default video bitrate in bits per second (4 Mbps) (v1.96 / ADR-082).
+pub const SCREEN_BITRATE_DEFAULT_BPS: u32 = 4_000_000;
+
+/// Minimum video bitrate floor in bits per second (200 kbps).
+pub const SCREEN_BITRATE_MIN_BPS: u32 = 200_000;
+
+/// Maximum video bitrate ceiling in bits per second (20 Mbps).
+pub const SCREEN_BITRATE_MAX_BPS: u32 = 20_000_000;
+
+/// Additive Increase step for rate controller (150 kbps).
+pub const SCREEN_BITRATE_STEP_INCREASE_BPS: u32 = 150_000;
+
+/// Minimum interval between multiplicative rate decreases in microseconds (400ms).
+pub const SCREEN_BITRATE_COOLDOWN_US: u64 = 400_000;
+
 /// Fragment transport for screen frames too large for one inner frame.
 /// A fragment stream is a `TMF1`-enveloped run of inner frames; the receiver
 /// reassembles before `decode_payload`. A `TMV1`-prefixed payload is a whole
@@ -482,6 +497,8 @@ pub struct ScreenStats {
     pub keyframes_requested: u64,
     /// Number of sequence gaps detected by receiver (v1.95 / ADR-081).
     pub gaps: u64,
+    /// Target video bitrate in bits per second (v1.96 / ADR-082).
+    pub bitrate_bps: u32,
 }
 
 /// Rolling window tracker for screen frame round-trip times (v1.93 / ADR-080).
@@ -525,6 +542,102 @@ impl ScreenRttTracker {
     }
 }
 
+/// Dynamic video rate controller using AIMD (Additive Increase, Multiplicative Decrease)
+/// adaptation based on live RTT, frame loss, and in-flight queue telemetry (v1.96 / ADR-082).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenRateController {
+    current_bps: u32,
+    min_bps: u32,
+    max_bps: u32,
+    last_decrease_us: u64,
+    consecutive_good_frames: u32,
+}
+
+impl Default for ScreenRateController {
+    fn default() -> Self {
+        Self::new(SCREEN_BITRATE_DEFAULT_BPS)
+    }
+}
+
+impl ScreenRateController {
+    pub fn new(initial_bps: u32) -> Self {
+        let clamped = initial_bps.clamp(SCREEN_BITRATE_MIN_BPS, SCREEN_BITRATE_MAX_BPS);
+        Self {
+            current_bps: clamped,
+            min_bps: SCREEN_BITRATE_MIN_BPS,
+            max_bps: SCREEN_BITRATE_MAX_BPS,
+            last_decrease_us: 0,
+            consecutive_good_frames: 0,
+        }
+    }
+
+    pub fn with_bounds(initial_bps: u32, min_bps: u32, max_bps: u32) -> Self {
+        let min = min_bps.max(SCREEN_BITRATE_MIN_BPS);
+        let max = max_bps.clamp(min, SCREEN_BITRATE_MAX_BPS);
+        let clamped = initial_bps.clamp(min, max);
+        Self {
+            current_bps: clamped,
+            min_bps: min,
+            max_bps: max,
+            last_decrease_us: 0,
+            consecutive_good_frames: 0,
+        }
+    }
+
+    pub fn current_bps(&self) -> u32 {
+        self.current_bps
+    }
+
+    pub fn set_manual_bps(&mut self, bps: u32) {
+        self.current_bps = bps.clamp(self.min_bps, self.max_bps);
+        self.consecutive_good_frames = 0;
+    }
+
+    /// Trigger multiplicative decrease on congestion signals (RTT spike, packet drop, or gap).
+    /// Returns true if bitrate was decreased.
+    pub fn on_congestion(&mut self, now_us: u64) -> bool {
+        self.consecutive_good_frames = 0;
+        if self.last_decrease_us != 0
+            && now_us.saturating_sub(self.last_decrease_us) < SCREEN_BITRATE_COOLDOWN_US
+        {
+            return false;
+        }
+        self.last_decrease_us = now_us;
+        let old = self.current_bps;
+        // Multiplicative decrease (MD): scale down to 80%
+        let decreased = ((self.current_bps as u64 * 80) / 100) as u32;
+        self.current_bps = decreased.max(self.min_bps);
+        self.current_bps != old
+    }
+
+    /// Process a frame acknowledgment with measured RTT and in-flight count.
+    /// Returns true if bitrate changed.
+    pub fn on_ack(&mut self, rtt_us: u64, in_flight: u64, now_us: u64) -> bool {
+        if in_flight >= SCREEN_CONGESTION_IN_FLIGHT_THRESHOLD
+            || rtt_us >= SCREEN_CONGESTION_RTT_THRESHOLD_US
+        {
+            return self.on_congestion(now_us);
+        }
+
+        // Low latency and clear network: accumulate consecutive good frames
+        if in_flight == 0 && rtt_us < 120_000 {
+            self.consecutive_good_frames = self.consecutive_good_frames.saturating_add(1);
+            if self.consecutive_good_frames >= 5 {
+                self.consecutive_good_frames = 0;
+                let old = self.current_bps;
+                self.current_bps = self
+                    .current_bps
+                    .saturating_add(SCREEN_BITRATE_STEP_INCREASE_BPS)
+                    .min(self.max_bps);
+                return self.current_bps != old;
+            }
+        } else {
+            self.consecutive_good_frames = 0;
+        }
+        false
+    }
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -535,6 +648,7 @@ pub struct ScreenSender {
     /// Track (seq, sent_time_us) of frames in-flight (max SCREEN_IN_FLIGHT_MAX).
     in_flight_records: VecDeque<(u64, u64)>,
     rtt_tracker: ScreenRttTracker,
+    rate_controller: ScreenRateController,
 }
 
 impl Default for ScreenSender {
@@ -545,13 +659,17 @@ impl Default for ScreenSender {
 
 impl ScreenSender {
     pub fn new() -> Self {
+        let rate_controller = ScreenRateController::default();
+        let mut stats = ScreenStats::default();
+        stats.bitrate_bps = rate_controller.current_bps();
         Self {
             next_seq: 1,
             state: ScreenState::Idle,
-            stats: ScreenStats::default(),
+            stats,
             pending: VecDeque::new(),
             in_flight_records: VecDeque::new(),
             rtt_tracker: ScreenRttTracker::new(SCREEN_IN_FLIGHT_MAX),
+            rate_controller,
         }
     }
 
@@ -664,6 +782,9 @@ impl ScreenSender {
                     self.rtt_tracker.record(rtt);
                     self.stats.rtt_latest_us = Some(rtt);
                     self.stats.rtt_p95_us = self.rtt_tracker.p95_us();
+                    self.rate_controller
+                        .on_ack(rtt, self.in_flight_records.len() as u64, now_us);
+                    self.stats.bitrate_bps = self.rate_controller.current_bps();
                 }
                 self.stats.in_flight = self.in_flight_records.len() as u64;
                 Ok(None)
@@ -702,7 +823,25 @@ impl ScreenSender {
 
     /// Record a frame dropped on sender side (e.g. due to congestion or backpressure).
     pub fn record_drop(&mut self) {
+        self.record_drop_with_time(0);
+    }
+
+    /// Record a frame dropped on sender side with timestamp for rate adaptation cooldown.
+    pub fn record_drop_with_time(&mut self, now_us: u64) {
         self.stats.dropped = self.stats.dropped.saturating_add(1);
+        self.rate_controller.on_congestion(now_us);
+        self.stats.bitrate_bps = self.rate_controller.current_bps();
+    }
+
+    /// Explicitly configure target bitrate bounds or manual override (v1.96 / ADR-082).
+    pub fn set_bitrate_bps(&mut self, bps: u32) {
+        self.rate_controller.set_manual_bps(bps);
+        self.stats.bitrate_bps = self.rate_controller.current_bps();
+    }
+
+    /// Current target video bitrate in bits per second.
+    pub fn bitrate_bps(&self) -> u32 {
+        self.stats.bitrate_bps
     }
 
     pub fn drain(&mut self) -> Vec<ScreenFrame> {
@@ -1512,5 +1651,49 @@ mod tests {
         // Frame 9 arrives (frames 7 and 8 dropped -> gap count becomes 2)
         assert_eq!(receiver.apply(&raw_frame(9)).unwrap(), Some(9));
         assert_eq!(receiver.stats().gaps, 2);
+    }
+
+    #[test]
+    fn rate_controller_aimd_adaptation() {
+        let mut s = ScreenSender::new();
+        s.on_peer_connected();
+        s.allow();
+        s.on_control(ControlMsg::Start).unwrap();
+
+        assert_eq!(s.bitrate_bps(), SCREEN_BITRATE_DEFAULT_BPS);
+        assert_eq!(s.stats().bitrate_bps, SCREEN_BITRATE_DEFAULT_BPS);
+
+        // 1. High RTT congestion triggers Multiplicative Decrease (80% of 4_000_000 = 3_200_000)
+        s.push_with_time(raw_frame(1), 1_000);
+        s.on_control_with_time(ControlMsg::Ack { seq: 1 }, 1_000 + 300_000)
+            .unwrap();
+        assert_eq!(s.bitrate_bps(), 3_200_000);
+
+        // 2. Cooldown damping: another high RTT within 400ms does NOT decrease again
+        s.push_with_time(raw_frame(2), 310_000);
+        s.on_control_with_time(ControlMsg::Ack { seq: 2 }, 310_000 + 260_000)
+            .unwrap();
+        assert_eq!(s.bitrate_bps(), 3_200_000);
+
+        // 3. Sender drop past cooldown triggers another decrease (80% of 3_200_000 = 2_560_000)
+        s.record_drop_with_time(1_000_000);
+        assert_eq!(s.bitrate_bps(), 2_560_000);
+
+        // 4. Clean network (low RTT, in_flight=0): 5 consecutive good frames trigger Additive Increase (+150k)
+        let mut now = 1_500_000;
+        for i in 3..8 {
+            s.push_with_time(raw_frame(i), now);
+            now += 50_000;
+            s.on_control_with_time(ControlMsg::Ack { seq: i }, now)
+                .unwrap();
+        }
+        assert_eq!(s.bitrate_bps(), 2_560_000 + SCREEN_BITRATE_STEP_INCREASE_BPS);
+
+        // 5. Manual override clamps to bounds
+        s.set_bitrate_bps(50_000_000);
+        assert_eq!(s.bitrate_bps(), SCREEN_BITRATE_MAX_BPS);
+
+        s.set_bitrate_bps(10_000);
+        assert_eq!(s.bitrate_bps(), SCREEN_BITRATE_MIN_BPS);
     }
 }

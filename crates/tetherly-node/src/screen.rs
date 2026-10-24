@@ -326,6 +326,14 @@ impl ScreenCodecPort for H264Codec {
         self.force_idr();
     }
 
+    fn set_bitrate_bps(&self, bps: u32) {
+        self.set_bitrate_bps(bps);
+    }
+
+    fn bitrate_bps(&self) -> u32 {
+        self.bitrate_bps()
+    }
+
     fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
         let yuv = I420::from_bgra(raw, w as usize, h as usize)?;
         let need_idr = self.force_idr.swap(false, std::sync::atomic::Ordering::Relaxed);
@@ -427,10 +435,15 @@ impl NegotiatedCodec {
             .store(yes, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Hot bitrate retier (ADR-078): forwarded to the H.264 encoder; the
+    /// Hot bitrate retier (ADR-078 / ADR-082): forwarded to the H.264 encoder; the
     /// zstd path is lossless and ignores it by construction.
     pub fn set_bitrate_bps(&self, bps: u32) {
         self.h264.set_bitrate_bps(bps);
+    }
+
+    /// Current target bitrate in bps.
+    pub fn bitrate_bps(&self) -> u32 {
+        self.h264.bitrate_bps()
     }
 
     /// Force the next encode pass to emit an IDR keyframe (ADR-081).
@@ -475,6 +488,14 @@ impl ScreenCodecPort for NegotiatedCodec {
         self.force_idr();
     }
 
+    fn set_bitrate_bps(&self, bps: u32) {
+        self.set_bitrate_bps(bps);
+    }
+
+    fn bitrate_bps(&self) -> u32 {
+        self.bitrate_bps()
+    }
+
     fn compress_frame(&self, raw: &[u8], w: u16, h: u16) -> Result<Vec<u8>, CoreError> {
         if self.use_h264() {
             self.h264.compress_frame(raw, w, h)
@@ -500,6 +521,10 @@ impl<S> EncodedSource<S> {
     pub fn new(inner: S, codec: Arc<dyn ScreenCodecPort>) -> Self {
         Self { inner, codec }
     }
+
+    pub fn codec(&self) -> &Arc<dyn ScreenCodecPort> {
+        &self.codec
+    }
 }
 
 impl<S: ScreenSource> ScreenSource for EncodedSource<S> {
@@ -518,6 +543,18 @@ impl<S: ScreenSource> ScreenSource for EncodedSource<S> {
             bytes: encoded,
             ..frame
         }))
+    }
+
+    fn interrupt(&self) {
+        self.inner.interrupt();
+    }
+
+    fn force_idr(&self) {
+        self.codec.force_idr();
+    }
+
+    fn set_bitrate_bps(&self, bps: u32) {
+        self.codec.set_bitrate_bps(bps);
     }
 }
 

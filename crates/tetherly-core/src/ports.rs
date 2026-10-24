@@ -214,6 +214,12 @@ pub trait ScreenSource: Send + Sync {
     /// EOF); the next `grab` must behave as if the source had just been
     /// created. Default: nothing to do (sources that cannot hang).
     fn interrupt(&self) {}
+
+    /// Best-effort on-demand keyframe / IDR request propagation into the source codec.
+    fn force_idr(&self) {}
+
+    /// Dynamic bitrate update propagation into the source codec (ADR-082).
+    fn set_bitrate_bps(&self, _bps: u32) {}
 }
 
 /// Transform a raw pixel body to or form the wire format carried in
@@ -253,6 +259,15 @@ pub trait ScreenCodec: Send + Sync {
     /// encoded frame be an independent keyframe (IDR for H.264).
     /// Default implementation is a no-op for stateless codecs like zstd.
     fn force_idr(&self) {}
+
+    /// Dynamic target bitrate update (ADR-082): updates the target bitrate of rate-controlled codecs (H.264).
+    /// Default implementation is a no-op for stateless/lossless codecs like zstd.
+    fn set_bitrate_bps(&self, _bps: u32) {}
+
+    /// Current target bitrate in bps for rate-controlled codecs. Defaults to 0 for unthrottled/lossless.
+    fn bitrate_bps(&self) -> u32 {
+        0
+    }
 }
 
 /// Present one screen frame. In-memory fake for CI; the OS path is Manual.

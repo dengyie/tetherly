@@ -44,7 +44,7 @@ pub use runtime::{
     PeerMessageHistoryReport, PeerMessageSendItem, PeerMessageSendReport, PeerPingReport,
     PeerProfileUpdateReport, PeerProfilesReport, PeerTagsReport, PeerUnblockReport,
     PeersCapsReport, PinReport, ProcessMetrics, ResumeMarkerDto, ResumeMarkersReport,
-    RouteEntryDto, RouteMutateReport, RoutesReport, ScreenControlReport, ScreenStatusReport,
+    RouteEntryDto, RouteMutateReport, RoutesReport, ScreenBitrateReport, ScreenControlReport, ScreenStatusReport,
     StorageCleanReport, StorageReport, SystemReport, TransferDirection, TransferPhase,
     TransferStats, TransfersReport, UserCommand, VirtualDisplayDecisionReport,
     VirtualDisplayPolicyReport, VirtualDisplayPolicyUpdate, VirtualDisplayStatusReport,

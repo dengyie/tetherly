@@ -1130,3 +1130,149 @@ async fn m5_5_keyframe_request_triggers_idr_recovery() {
     drop(ga);
     drop(gb);
 }
+
+// --------------------------------------------------------------------------
+// M5.6 — Dynamic AIMD rate adaptation and runtime bitrate control (v1.96 / ADR-082)
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_6_screen_dynamic_rate_adaptation() {
+    let codec = Arc::new(tetherly_node::NegotiatedCodec::new(true, 2_000_000, true));
+    let src: Arc<dyn tetherly_core::ScreenSource> = Arc::new(tetherly_node::EncodedSource::new(
+        MemoryScreenSource::new(16, 16).expect("16x16 screen"),
+        codec.clone(),
+    ));
+    let (da, ga) = temp_dir("host-h264-bitrate");
+    let (db, gb) = temp_dir("visitor-h264-bitrate");
+    let host = Node::start(cfg(da, "host", Some(src))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let host_ui = host.spawn_ui().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+    wait_screen_port(
+        &host,
+        visitor.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+    wait_screen_port(
+        &visitor,
+        host.identity().device_id(),
+        Duration::from_secs(3),
+    )
+    .await;
+
+    visitor
+        .open_screen(host.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    host.screen_allow();
+    visitor.screen_start().await.unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_state() == ScreenState::Streaming {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("host never started streaming (h264-bitrate)");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // 1. Initial GET /api/screen/bitrate
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/bitrate")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_node::ScreenBitrateReport = serde_json::from_slice(&b).unwrap();
+    assert!(rep.ok);
+    assert_eq!(rep.min_bps, tetherly_core::SCREEN_BITRATE_MIN_BPS);
+    assert_eq!(rep.max_bps, tetherly_core::SCREEN_BITRATE_MAX_BPS);
+    assert_eq!(host.screen_bitrate_bps(), rep.bitrate_bps);
+
+    // 2. Override bitrate to 3500 kbps (3.5 Mbps) via POST /api/screen/bitrate
+    let req = serde_json::json!({ "kbps": 3500 });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/bitrate",
+        &serde_json::to_vec(&req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_node::ScreenBitrateReport = serde_json::from_slice(&b).unwrap();
+    assert!(rep.ok);
+    assert_eq!(rep.bitrate_kbps, 3500);
+    assert_eq!(rep.bitrate_bps, 3_500_000);
+    assert_eq!(host.screen_bitrate_bps(), 3_500_000);
+    assert_eq!(codec.bitrate_bps(), 3_500_000);
+
+    // 3. Verify ScreenStatusReport reflects updated bitrate
+    let s_rep = host.screen_status_report().await;
+    assert_eq!(s_rep.bitrate_bps, 3_500_000);
+
+    // 4. Test clamping bounds: request 50_000 kbps -> clamps to max (20_000 kbps)
+    let req_max = serde_json::json!({ "kbps": 50000 });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/bitrate",
+        &serde_json::to_vec(&req_max).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep_max: tetherly_node::ScreenBitrateReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep_max.bitrate_bps, tetherly_core::SCREEN_BITRATE_MAX_BPS);
+    assert_eq!(host.screen_bitrate_bps(), tetherly_core::SCREEN_BITRATE_MAX_BPS);
+
+    // Request 10 kbps -> clamps to min (200 kbps)
+    let req_min = serde_json::json!({ "kbps": 10 });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/bitrate",
+        &serde_json::to_vec(&req_min).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rep_min: tetherly_node::ScreenBitrateReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep_min.bitrate_bps, tetherly_core::SCREEN_BITRATE_MIN_BPS);
+    assert_eq!(host.screen_bitrate_bps(), tetherly_core::SCREEN_BITRATE_MIN_BPS);
+
+    // Restore to normal rate for transmission
+    host.screen_set_bitrate_bps(2_500_000);
+    assert_eq!(host.screen_bitrate_bps(), 2_500_000);
+
+    // 5. Send frames through reconfigured encoder and verify delivery & presentation
+    for _ in 0..3 {
+        assert!(host.screen_send_frame().await.unwrap());
+    }
+
+    let start = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 3 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "frames did not arrive under dynamic rate, count={}",
+                visitor.screen_sink_snapshot().count()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let sink = visitor.screen_sink_snapshot();
+    assert_eq!(sink.presented(), vec![1, 2, 3]);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}

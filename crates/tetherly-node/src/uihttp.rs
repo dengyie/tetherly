@@ -3960,6 +3960,33 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             Ok(rep) => json_ok(&rep),
             Err(e) => err(400, &e.to_string()),
         },
+        ("GET", "/api/screen/bitrate") => {
+            let rep = node.screen_bitrate_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/bitrate") => {
+            #[derive(serde::Deserialize)]
+            struct BitrateReq {
+                #[serde(default)]
+                kbps: Option<u32>,
+                #[serde(default)]
+                bps: Option<u32>,
+            }
+            let req: BitrateReq = if !body.is_empty() {
+                match serde_json::from_slice(body) {
+                    Ok(b) => b,
+                    Err(_) => return err(400, "bad json"),
+                }
+            } else {
+                return err(400, "missing bitrate parameter (kbps or bps)");
+            };
+            let kbps = req.kbps.or_else(|| req.bps.map(|b| b / 1000)).unwrap_or(0);
+            if kbps == 0 {
+                return err(400, "bitrate must be greater than 0");
+            }
+            let rep = node.screen_set_bitrate_reported(kbps);
+            json_ok(&rep)
+        }
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.

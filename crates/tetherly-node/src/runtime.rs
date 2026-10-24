@@ -2831,6 +2831,19 @@ pub struct ScreenStatusReport {
     pub keyframes_requested: u64,
     #[serde(default)]
     pub gaps: u64,
+    #[serde(default)]
+    pub bitrate_bps: u32,
+}
+
+/// Status report for screen streaming bitrate (ADR-082).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ScreenBitrateReport {
+    pub ok: bool,
+    pub bitrate_bps: u32,
+    pub bitrate_kbps: u32,
+    pub min_bps: u32,
+    pub max_bps: u32,
+    pub timestamp_ms: u64,
 }
 
 /// Control result report for remote screen streaming actions (allow, revoke, start, stop).
@@ -19916,16 +19929,27 @@ impl Node {
                                 if let Ok(msg) = ControlMsg::from_frame(&frame) {
                                     let now_us = node.shared.clock.unix_us();
                                     if matches!(msg, ControlMsg::KeyframeRequest) {
+                                        node.shared.screen_source.force_idr();
                                         if let Some(sel) = &node.shared.screen_encode_codec {
                                             sel.force_idr();
                                         }
                                     }
-                                    let reply = node
-                                        .shared
-                                        .screen_engine
-                                        .lock()
-                                        .expect("screen")
-                                        .on_control_with_time(msg, now_us);
+                                    let (reply, dynamic_bitrate) = {
+                                        let mut engine = node
+                                            .shared
+                                            .screen_engine
+                                            .lock()
+                                            .expect("screen");
+                                        let reply = engine.on_control_with_time(msg, now_us);
+                                        let bitrate = engine.bitrate_bps();
+                                        (reply, bitrate)
+                                    };
+                                    if let Some(sel) = &node.shared.screen_encode_codec {
+                                        if sel.bitrate_bps() != dynamic_bitrate {
+                                            sel.set_bitrate_bps(dynamic_bitrate);
+                                        }
+                                    }
+                                    node.shared.screen_source.set_bitrate_bps(dynamic_bitrate);
                                     let cur_state = node.screen_state();
                                     let cur_allowed = matches!(
                                         cur_state,
@@ -20192,18 +20216,24 @@ impl Node {
         let outbound = {
             let mut engine = self.shared.screen_engine.lock().expect("screen");
             let now_us = self.shared.clock.unix_us();
-            // Congestion control / adaptive backpressure (ADR-080):
+            // Congestion control / adaptive backpressure (ADR-080 / ADR-082):
             // When link is congested (in_flight >= 4 or RTT >= 250ms), drop non-initial frames
             // to eliminate bufferbloat and socket stall while maintaining presentation continuity.
+            // On drop, AIMD multiplicative decrease cuts bitrate by 20% and arms an immediate IDR.
             if engine.is_congested() && engine.stats().sent > 0 {
-                engine.record_drop();
+                engine.record_drop_with_time(now_us);
+                let new_rate = engine.bitrate_bps();
+                self.shared.screen_source.force_idr();
                 if let Some(sel) = &self.shared.screen_encode_codec {
                     sel.force_idr();
+                    sel.set_bitrate_bps(new_rate);
                 }
+                self.shared.screen_source.set_bitrate_bps(new_rate);
                 warn!(
                     in_flight = engine.in_flight_count(),
                     rtt_latest = ?engine.stats().rtt_latest_us,
-                    "screen channel congested; dropping non-initial capture frame; flagged IDR"
+                    bitrate_bps = new_rate,
+                    "screen channel congested; dropping non-initial capture frame; flagged IDR and decreased bitrate"
                 );
                 return Ok(false);
             }
@@ -20235,13 +20265,23 @@ impl Node {
             // stall the pump or grow memory without bound. A partial frame is
             // never queued, so the peer's assembler is never left mid-frame.
             if tx.capacity() < frags.len() {
+                let now_us = self.shared.clock.unix_us();
+                let new_rate = {
+                    let mut engine = self.shared.screen_engine.lock().expect("screen");
+                    engine.record_drop_with_time(now_us);
+                    engine.bitrate_bps()
+                };
+                self.shared.screen_source.force_idr();
                 if let Some(sel) = &self.shared.screen_encode_codec {
                     sel.force_idr();
+                    sel.set_bitrate_bps(new_rate);
                 }
+                self.shared.screen_source.set_bitrate_bps(new_rate);
                 warn!(
                     need = frags.len(),
                     have = tx.capacity(),
-                    "screen queue full; dropping frame; flagged IDR"
+                    bitrate_bps = new_rate,
+                    "screen queue full; dropping frame; flagged IDR and decreased bitrate"
                 );
                 continue;
             }
@@ -20533,6 +20573,57 @@ impl Node {
             is_congested,
             keyframes_requested: stats.keyframes_requested,
             gaps: rx_stats.gaps,
+            bitrate_bps: stats.bitrate_bps,
+        }
+    }
+
+    /// Override screen streaming target bitrate in bps (ADR-082). Clamped to [MIN, MAX].
+    pub fn screen_set_bitrate_bps(&self, bps: u32) -> u32 {
+        let actual = {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            engine.set_bitrate_bps(bps);
+            engine.bitrate_bps()
+        };
+        if let Some(sel) = &self.shared.screen_encode_codec {
+            sel.set_bitrate_bps(actual);
+        }
+        self.shared.screen_source.set_bitrate_bps(actual);
+        actual
+    }
+
+    /// Current target screen streaming bitrate in bps.
+    pub fn screen_bitrate_bps(&self) -> u32 {
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .bitrate_bps()
+    }
+
+    /// Report current screen streaming bitrate (ADR-082).
+    pub fn screen_bitrate_report(&self) -> ScreenBitrateReport {
+        let bps = self.screen_bitrate_bps();
+        ScreenBitrateReport {
+            ok: true,
+            bitrate_bps: bps,
+            bitrate_kbps: bps / 1000,
+            min_bps: tetherly_core::SCREEN_BITRATE_MIN_BPS,
+            max_bps: tetherly_core::SCREEN_BITRATE_MAX_BPS,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Set and report screen streaming target bitrate in kbps (ADR-082).
+    pub fn screen_set_bitrate_reported(&self, kbps: u32) -> ScreenBitrateReport {
+        let bps = kbps.saturating_mul(1000);
+        let actual_bps = self.screen_set_bitrate_bps(bps);
+        ScreenBitrateReport {
+            ok: true,
+            bitrate_bps: actual_bps,
+            bitrate_kbps: actual_bps / 1000,
+            min_bps: tetherly_core::SCREEN_BITRATE_MIN_BPS,
+            max_bps: tetherly_core::SCREEN_BITRATE_MAX_BPS,
+            timestamp_ms: self.shared.clock.unix_ms(),
         }
     }
 

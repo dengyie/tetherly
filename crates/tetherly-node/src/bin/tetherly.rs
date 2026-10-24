@@ -1986,6 +1986,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or override the dynamic screen streaming bitrate (v1.96 / ADR-082).
+    Bitrate {
+        /// Target bitrate in kbps (e.g. 2000 for 2 Mbps). If omitted, displays current bitrate and limits.
+        kbps: Option<u32>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -5887,6 +5898,69 @@ async fn main() -> Result<()> {
                     println!("  Congested:    {}", rep.is_congested);
                     println!("  Keyframe Req: {}", rep.keyframes_requested);
                     println!("  Gaps:         {}", rep.gaps);
+                    if rep.bitrate_bps > 0 {
+                        println!(
+                            "  Bitrate:      {} kbps ({:.2} Mbps)",
+                            rep.bitrate_bps / 1000,
+                            rep.bitrate_bps as f64 / 1_000_000.0
+                        );
+                    }
+                }
+            }
+            ScreenCmd::Bitrate {
+                kbps,
+                json,
+                ui_port,
+            } => {
+                let (code, resp) = match kbps {
+                    Some(k) => {
+                        let req = serde_json::json!({ "kbps": k });
+                        let body = serde_json::to_vec(&req)?;
+                        tetherly_node::loopback_post(ui_port, "/api/screen/bitrate", &body)
+                            .await
+                    }
+                    None => tetherly_node::loopback_get(ui_port, "/api/screen/bitrate").await,
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen bitrate query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_node::ScreenBitrateReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    match kbps {
+                        Some(_) => {
+                            println!(
+                                "Screen target bitrate set to {} kbps ({} bps)",
+                                rep.bitrate_kbps, rep.bitrate_bps
+                            );
+                        }
+                        None => {
+                            println!("Screen Streaming Bitrate:");
+                            println!(
+                                "  Current: {} kbps ({:.2} Mbps)",
+                                rep.bitrate_kbps,
+                                rep.bitrate_bps as f64 / 1_000_000.0
+                            );
+                            println!(
+                                "  Range:   {} kbps - {} kbps ({:.1} Mbps - {:.1} Mbps)",
+                                rep.min_bps / 1000,
+                                rep.max_bps / 1000,
+                                rep.min_bps as f64 / 1_000_000.0,
+                                rep.max_bps as f64 / 1_000_000.0
+                            );
+                        }
+                    }
                 }
             }
         },
