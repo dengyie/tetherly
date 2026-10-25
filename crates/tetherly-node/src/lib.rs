@@ -51,15 +51,15 @@ pub use runtime::{
     TransferStats, TransfersReport, UserCommand, VirtualDisplayDecisionReport,
     VirtualDisplayPolicyReport, VirtualDisplayPolicyUpdate, VirtualDisplayStatusReport,
 };
-pub use tetherly_core::{
-    ScreenFecMode, ScreenFecReport, ScreenPacerMode, ScreenPacerReport, ScreenPacerStats,
-};
 pub use screen::{
     screen_bitrate_from_profile, screen_fps_from_profile, screen_profile_from_profile,
     screen_scale_from_profile, AdbSource, EncodedSource, H264Codec, NegotiatedCodec, SystemSink,
     SystemSource, ZstdCodec,
 };
 pub use telemetry::{ChannelTrafficDto, ProtocolMessagesDto, TrafficReport, TrafficTelemetry};
+pub use tetherly_core::{
+    ScreenFecMode, ScreenFecReport, ScreenPacerMode, ScreenPacerReport, ScreenPacerStats,
+};
 
 #[cfg(windows)]
 pub use screen::DxgiSource;

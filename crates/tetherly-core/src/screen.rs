@@ -3437,11 +3437,7 @@ impl ScreenPacketPacer {
 
     /// Computes relative departure delay offsets (in microseconds) for a batch of N packets
     /// belonging to a single video frame, smoothing micro-bursts across the frame interval.
-    pub fn compute_packet_delays(
-        &mut self,
-        packet_count: usize,
-        fps_target: u32,
-    ) -> Vec<u64> {
+    pub fn compute_packet_delays(&mut self, packet_count: usize, fps_target: u32) -> Vec<u64> {
         if packet_count == 0 {
             return Vec::new();
         }
@@ -3492,7 +3488,11 @@ impl ScreenPacketPacer {
         self.stats.bursts_smoothed = self.stats.bursts_smoothed.saturating_add(1);
         self.stats.packets_paced = self.stats.packets_paced.saturating_add(packet_count as u64);
         self.stats.total_delay_us = self.stats.total_delay_us.saturating_add(burst_delay_sum);
-        if let Some(avg) = self.stats.total_delay_us.checked_div(self.stats.packets_paced) {
+        if let Some(avg) = self
+            .stats
+            .total_delay_us
+            .checked_div(self.stats.packets_paced)
+        {
             self.stats.avg_delay_us = avg;
         }
 
@@ -6340,11 +6340,26 @@ mod tests {
     #[test]
     fn screen_packet_pacer_burst_smoothing_and_modes() {
         // 1. Parsing and serialization
-        assert_eq!("auto".parse::<ScreenPacerMode>().unwrap(), ScreenPacerMode::Auto);
-        assert_eq!("aggressive".parse::<ScreenPacerMode>().unwrap(), ScreenPacerMode::Aggressive);
-        assert_eq!("agg".parse::<ScreenPacerMode>().unwrap(), ScreenPacerMode::Aggressive);
-        assert_eq!("disabled".parse::<ScreenPacerMode>().unwrap(), ScreenPacerMode::Disabled);
-        assert_eq!("off".parse::<ScreenPacerMode>().unwrap(), ScreenPacerMode::Disabled);
+        assert_eq!(
+            "auto".parse::<ScreenPacerMode>().unwrap(),
+            ScreenPacerMode::Auto
+        );
+        assert_eq!(
+            "aggressive".parse::<ScreenPacerMode>().unwrap(),
+            ScreenPacerMode::Aggressive
+        );
+        assert_eq!(
+            "agg".parse::<ScreenPacerMode>().unwrap(),
+            ScreenPacerMode::Aggressive
+        );
+        assert_eq!(
+            "disabled".parse::<ScreenPacerMode>().unwrap(),
+            ScreenPacerMode::Disabled
+        );
+        assert_eq!(
+            "off".parse::<ScreenPacerMode>().unwrap(),
+            ScreenPacerMode::Disabled
+        );
         assert!("invalid".parse::<ScreenPacerMode>().is_err());
         assert_eq!(ScreenPacerMode::from_tag(0), ScreenPacerMode::Auto);
         assert_eq!(ScreenPacerMode::from_tag(1), ScreenPacerMode::Aggressive);

@@ -8850,29 +8850,20 @@ async fn main() -> Result<()> {
                     let v: serde_json::Value = serde_json::from_slice(&resp)
                         .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
                     let m = v.get("mode").and_then(|s| s.as_str()).unwrap_or("unknown");
-                    let packets_paced = v
-                        .get("packets_paced")
-                        .and_then(|n| n.as_u64())
-                        .unwrap_or(0);
+                    let packets_paced =
+                        v.get("packets_paced").and_then(|n| n.as_u64()).unwrap_or(0);
                     let bursts_smoothed = v
                         .get("bursts_smoothed")
                         .and_then(|n| n.as_u64())
                         .unwrap_or(0);
-                    let avg_delay_us = v
-                        .get("avg_delay_us")
-                        .and_then(|n| n.as_u64())
-                        .unwrap_or(0);
-                    let last_delay_us = v
-                        .get("last_delay_us")
-                        .and_then(|n| n.as_u64())
-                        .unwrap_or(0);
+                    let avg_delay_us = v.get("avg_delay_us").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let last_delay_us =
+                        v.get("last_delay_us").and_then(|n| n.as_u64()).unwrap_or(0);
 
                     if has_update {
                         println!("Screen microsecond packet pacer mode updated: {m}");
                     } else {
-                        println!(
-                            "Screen Microsecond Packet Pacing & Burst Shaper (ADR-091):"
-                        );
+                        println!("Screen Microsecond Packet Pacing & Burst Shaper (ADR-091):");
                         println!("  Pacer Mode:           {m}");
                         println!("  Packets Paced:        {packets_paced}");
                         println!("  Bursts Smoothed:      {bursts_smoothed}");

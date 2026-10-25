@@ -4054,12 +4054,13 @@ async fn main() -> Result<()> {
                     )
                 }
             };
-            cfg.screen_pacer_mode = match screen_pacer.trim().parse::<tetherly_core::ScreenPacerMode>() {
+            cfg.screen_pacer_mode = match screen_pacer
+                .trim()
+                .parse::<tetherly_core::ScreenPacerMode>()
+            {
                 Ok(mode) => mode,
                 Err(_) => {
-                    anyhow::bail!(
-                        "--screen-pacer must be `auto`, `aggressive`, or `disabled`"
-                    )
+                    anyhow::bail!("--screen-pacer must be `auto`, `aggressive`, or `disabled`")
                 }
             };
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
@@ -6790,14 +6791,9 @@ async fn main() -> Result<()> {
                     let rep: tetherly_core::ScreenPacerReport = serde_json::from_slice(&resp)
                         .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
                     if has_update {
-                        println!(
-                            "Screen microsecond packet pacer mode updated: {}",
-                            rep.mode
-                        );
+                        println!("Screen microsecond packet pacer mode updated: {}", rep.mode);
                     } else {
-                        println!(
-                            "Screen Microsecond Packet Pacing & Burst Shaper (ADR-091):"
-                        );
+                        println!("Screen Microsecond Packet Pacing & Burst Shaper (ADR-091):");
                         println!("  Pacer Mode:           {}", rep.mode);
                         println!("  Packets Paced:        {}", rep.packets_paced);
                         println!("  Bursts Smoothed:      {}", rep.bursts_smoothed);
