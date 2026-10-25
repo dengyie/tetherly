@@ -78,6 +78,7 @@ fn cfg(
         screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
         screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
         screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
+        screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
         screen_sink: None,
         input_sink: None,
     }
@@ -2141,6 +2142,210 @@ async fn m5_11_screen_playout_dejitter_buffer() {
     let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
     assert_eq!(status_rep.playout_mode, "adaptive");
     assert!(status_rep.playout_delay_ms > 0.0);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_12_screen_hardware_cursor_decoupling() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial cursor status on visitor: defaults to Decoupled mode (ADR-088)
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/cursor")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_node::ScreenCursorReport = serde_json::from_slice(&b).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.mode, "decoupled");
+    assert_eq!(init_rep.updates_sent, 0);
+    assert_eq!(init_rep.updates_received, 0);
+
+    // 2. Dynamic mode configuration via POST /api/screen/cursor
+    let embed_payload = serde_json::json!({ "mode": "embedded" });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/cursor",
+        &serde_json::to_vec(&embed_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let embed_rep: tetherly_node::ScreenCursorReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(embed_rep.mode, "embedded");
+
+    let hidden_payload = serde_json::json!({ "mode": "hidden" });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/cursor",
+        &serde_json::to_vec(&hidden_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let hidden_rep: tetherly_node::ScreenCursorReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(hidden_rep.mode, "hidden");
+
+    // Restore to decoupled
+    let dec_payload = serde_json::json!({ "mode": "decoupled" });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/cursor",
+        &serde_json::to_vec(&dec_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let dec_rep: tetherly_node::ScreenCursorReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(dec_rep.mode, "decoupled");
+
+    // 3. Visitor opens screen channel, host allows, and visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Send video frame from host
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // 5. Send decoupled cursor updates from host
+    // Update 1: (120, 240, true, Hand)
+    let up1 = tetherly_core::ScreenCursorUpdate {
+        seq: 0,
+        x: 120,
+        y: 240,
+        visible: true,
+        shape: tetherly_core::CursorShape::Hand,
+        hotspot_x: 0,
+        hotspot_y: 0,
+        width: 0,
+        height: 0,
+        custom_rgba: None,
+    };
+    let sent1 = host.screen_send_cursor(up1).await.unwrap();
+    assert!(
+        sent1,
+        "first cursor update should be queued and transmitted"
+    );
+
+    // Update 2: redundant update at same position/shape -> should be dropped by deduplication
+    let up2 = tetherly_core::ScreenCursorUpdate {
+        seq: 0,
+        x: 120,
+        y: 240,
+        visible: true,
+        shape: tetherly_core::CursorShape::Hand,
+        hotspot_x: 0,
+        hotspot_y: 0,
+        width: 0,
+        height: 0,
+        custom_rgba: None,
+    };
+    let sent2 = host.screen_send_cursor(up2).await.unwrap();
+    assert!(!sent2, "redundant cursor update should be deduplicated");
+
+    // Advance clock/sleep to exceed SCREEN_CURSOR_MIN_INTERVAL_US (8ms)
+    tokio::time::sleep(Duration::from_millis(15)).await;
+
+    // Update 3: moved position (350, 480, true, IBeam)
+    let up3 = tetherly_core::ScreenCursorUpdate {
+        seq: 0,
+        x: 350,
+        y: 480,
+        visible: true,
+        shape: tetherly_core::CursorShape::IBeam,
+        hotspot_x: 0,
+        hotspot_y: 0,
+        width: 0,
+        height: 0,
+        custom_rgba: None,
+    };
+    let sent3 = host.screen_send_cursor(up3).await.unwrap();
+    assert!(sent3, "new cursor position should be transmitted");
+
+    // 6. Wait for visitor to receive cursor updates
+    let wait_cursor = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/cursor")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let cur_rep: tetherly_node::ScreenCursorReport = serde_json::from_slice(&b).unwrap();
+        if cur_rep.updates_received >= 2 {
+            assert_eq!(cur_rep.x, 350);
+            assert_eq!(cur_rep.y, 480);
+            assert!(cur_rep.visible);
+            assert_eq!(cur_rep.shape, "ibeam");
+            break;
+        }
+        if wait_cursor.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "visitor did not receive cursor updates in time: {:?}",
+                cur_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 7. Verify host and visitor screen status reports include cursor telemetry
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_status.cursor_mode, "decoupled");
+    assert_eq!(host_status.cursor_updates_sent, 2);
+
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let visitor_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(visitor_status.cursor_mode, "decoupled");
+    assert_eq!(visitor_status.cursor_x, 350);
+    assert_eq!(visitor_status.cursor_y, 480);
+    assert!(visitor_status.cursor_visible);
+    assert_eq!(visitor_status.cursor_shape, "ibeam");
+    assert_eq!(visitor_status.cursor_updates_received, 2);
 
     host.shutdown();
     visitor.shutdown();

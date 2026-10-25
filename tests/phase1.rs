@@ -79,6 +79,7 @@ fn cfg(dir: PathBuf, name: &str, platform: &str) -> NodeConfig {
         screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
         screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
         screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
+        screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
         screen_sink: None,
         input_sink: None,
     }

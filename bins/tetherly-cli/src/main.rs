@@ -2013,6 +2013,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming hardware cursor decoupling (v2.02 / ADR-088).
+    Cursor {
+        /// Target cursor mode: `decoupled`, `embedded`, or `hidden`. If omitted, displays current cursor status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -7929,6 +7940,22 @@ async fn main() -> Result<()> {
                         .get("playout_buffered")
                         .and_then(|n| n.as_u64())
                         .unwrap_or(0);
+                    let cursor_mode = v.get("cursor_mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let cursor_x = v.get("cursor_x").and_then(|n| n.as_i64()).unwrap_or(0);
+                    let cursor_y = v.get("cursor_y").and_then(|n| n.as_i64()).unwrap_or(0);
+                    let cursor_visible = v
+                        .get("cursor_visible")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
+                    let cursor_shape = v.get("cursor_shape").and_then(|s| s.as_str()).unwrap_or("");
+                    let cursor_updates_sent = v
+                        .get("cursor_updates_sent")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let cursor_updates_received = v
+                        .get("cursor_updates_received")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
 
                     println!("Screen Channel Status:");
                     println!("  State:        {state}");
@@ -7992,6 +8019,18 @@ async fn main() -> Result<()> {
                         println!(
                             "  Playout Mode: {} ({:.1} ms delay, {:.2} ms jitter, {} buf)",
                             playout_mode, playout_delay_ms, playout_jitter_ms, playout_buffered
+                        );
+                    }
+                    if !cursor_mode.is_empty() {
+                        println!(
+                            "  Cursor Mode:  {} (pos: {},{}, vis: {}, shape: {}, tx: {}, rx: {})",
+                            cursor_mode,
+                            cursor_x,
+                            cursor_y,
+                            cursor_visible,
+                            cursor_shape,
+                            cursor_updates_sent,
+                            cursor_updates_received
                         );
                     }
                 }
@@ -8461,6 +8500,75 @@ async fn main() -> Result<()> {
                                 c as f64 / 1000.0
                             );
                         }
+                    }
+                }
+            }
+            ScreenCmd::Cursor {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    loopback_post(ui_port, "/api/screen/cursor", &body).await
+                } else {
+                    loopback_get(ui_port, "/api/screen/cursor").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    bail!(
+                        "screen cursor query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let m = v.get("mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let x = v.get("x").and_then(|n| n.as_i64()).unwrap_or(0);
+                    let y = v.get("y").and_then(|n| n.as_i64()).unwrap_or(0);
+                    let visible = v.get("visible").and_then(|b| b.as_bool()).unwrap_or(false);
+                    let shape = v.get("shape").and_then(|s| s.as_str()).unwrap_or("");
+                    let sent = v.get("updates_sent").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let received = v
+                        .get("updates_received")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let dedup = v
+                        .get("updates_dropped_dedup")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let rate = v
+                        .get("updates_dropped_rate")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+
+                    if has_update {
+                        println!("Screen hardware cursor decoupling mode updated: {m}");
+                    } else {
+                        println!(
+                            "Screen Streaming Hardware Cursor Decoupling Controller (ADR-088):"
+                        );
+                        println!("  Cursor Mode:         {m}");
+                        println!("  Current Position:    ({x}, {y})");
+                        println!("  Cursor Visible:      {visible}");
+                        println!("  Cursor Shape:        {shape}");
+                        println!("  Updates Sent:        {sent}");
+                        println!("  Updates Received:    {received}");
+                        println!("  Dropped (Dedup):     {dedup}");
+                        println!("  Dropped (Rate):      {rate}");
                     }
                 }
             }

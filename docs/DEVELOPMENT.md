@@ -3,12 +3,39 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.01** |
+| 文档版本 | **2.02** |
 | 日期 | 2026-10-25 |
-| 状态 | **v2.01 屏幕流接收端播放抖动缓冲区与自适应平滑控制器（Screen Playout Jitter Buffer & Dejittering Controller, ADR-087）与双端 CLI 全同构**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`）：在接收端解码渲染前端构建自适应播放抖动缓冲区 `ScreenPlayoutBuffer`，遵循 RFC 3550 EWMA 平滑抖动估计递推；提供三种工作模式 `ScreenPlayoutMode`（Adaptive / ZeroLatency / Smooth），根据实时抖动动态计算目标时延垫片并提供硬边界钳制（5ms .. 300ms）；实现微秒级时间戳定步出队放映算法，超前帧定步等待、落后超时帧（>80ms）激进丢弃追赶（Anti-Drift）以及缓冲区容量溢出（>12帧）熔断丢弃；在 `ScreenReceiver` 接入抖动缓冲区，将网络 ACK 立即回传与渲染呈现完全解耦；(2) **双端 CLI 全同构与生态**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `runtime.rs`, `uihttp.rs`）：彻底消除 CLI 差异，实现 `tetherly` 与 `tetherly-cli` 对 `screen` 所有子命令（allow/revoke/start/stop/keyframe/status/bitrate/fps/scale/profile/matrix/playout）的 100% 全同构；新增 REST API `GET/POST /api/screen/playout`，扩展 `ScreenStatusReport` 透出播放模式、目标延迟、实时抖动与缓冲帧数；(3) **测试与版本**：单元测试与 Phase 5 端到端集成测试 `m5_11_screen_playout_dejitter_buffer` 全绿，工作区升级至 `0.1.23`。 |
+| 状态 | **v2.02 屏幕流硬件光标解耦与高频指针同步控制器（Screen Hardware Cursor Decoupling Controller, ADR-088）与双端 CLI 全同构**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`）：将光标渲染彻底从主视频编解码渲染流水线解耦；新增独立通道数据帧 `TYPE_SCREEN_CURSOR = 0x0503`（魔数 `TMCU`，协议版本 1，32 字节紧凑定长头），支持标准光标类型 `CursorShape`（Arrow/IBeam/Hand/Wait 等）与可选自定义 RGBA8 贴图传输；引入三种工作模式 `ScreenCursorMode`（Decoupled / Embedded / Hidden）；实现 `ScreenCursorController` 高频（8ms / ~125Hz）定步控制器与冗余坐标去重降频机制，语义突变（形状/可见性/自定义贴图）即时无阻塞放行；在 `ScreenSender` 与 `ScreenReceiver` 接入硬件光标状态机，消除视频降采样（50%）与降帧率（15 FPS）下的光标模糊拉丝与操作滞后感；(2) **双端 CLI 全同构与生态**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `runtime.rs`, `uihttp.rs`）：持续保证 `tetherly` 与 `tetherly-cli` 100% 同构，新增 `screen cursor [mode]` 子命令与 `--screen-cursor` 启动参数；新增 REST API `GET/POST /api/screen/cursor`，扩展 `ScreenStatusReport` 透出光标模式、位置坐标、形状与吞吐计数；(3) **测试与版本**：单元测试与 Phase 5 端到端集成测试 `m5_12_screen_hardware_cursor_decoupling` 全绿，工作区升级至 `0.1.24`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.02 相对 2.01(屏幕流硬件光标解耦与高频指针同步控制器 ADR-088 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **光标与视频帧耦合导致的橡皮筋延迟（Rubber-banding Latency）**: 在传统远程桌面流中，光标随屏幕位图一同进行采集（DXGI/X11）、双线性缩放、有损 H.264 编码、分包打包、网络传输、解码与播放缓冲区排队（总延迟达 25~60ms）。用户在客户端移动鼠标时，远端光标呈现明显的滞后迟钝与橡皮筋感。
+  2. **自适应下采样与有损压缩下的光标畸变与振铃伪影**: 在网络弱网自适应（ADR-084 / ADR-086）下，空间分辨率降低到 50% 或 25%，并伴随 H.264 较高的 QP 值。光标细线条在有损压缩下严重模糊、发虚、产生振铃伪影，严重损害文本选择（IBeam）与精细操作体验。
+  3. **动态降帧率场景下的光标严重卡顿**: 当自适应调度器触发降帧（如 15 FPS 或 24 FPS）时，嵌入在视频中的光标更新率同步骤降，产生强烈的跳帧与步进卡顿感。
+  4. **高频指针广播导致的带宽浪费与信道拥塞风险**: 若毫无节制地广播鼠标位置（如 1000Hz 游戏鼠标），大量小包将挤占传输队列并造成网络抖动。必须设计智能的去重与定步节流机制。
+- **架构解法与落地**:
+  1. **Core 独立光标通道与协议状态机（`crates/tetherly-core/src/screen.rs`）**:
+     - 新增独立数据帧类型 `TYPE_SCREEN_CURSOR = 0x0503`，魔数 `TMCU`（Tetherly Mouse Cursor Update），协议版本 1。
+     - 设计 32 字节紧凑定长头：`magic(4) | proto(1) | seq(8) | x(4) | y(4) | visible(1) | shape(1) | hotspot_x(2) | hotspot_y(2) | width(2) | height(2) | has_custom(1) | reserved(2)`，支持可选自定义 RGBA8 贴图传输（上限 16KB）。
+     - 支持 12 种标准语义形状 `CursorShape`（Arrow, IBeam, Hand, Crosshair, SizeAll, SizeNS, SizeWE, SizeNESW, SizeNWSE, Wait, NotAllowed, Custom）。
+     - 提供三种工作模式 `ScreenCursorMode`：`Decoupled (0)`（独立高频原生渲染）、`Embedded (1)`（传统嵌入画面）、`Hidden (2)`（隐藏远端光标）。
+     - 实现 `ScreenCursorController`：8ms（~125Hz）高频定步控制器与坐标去重；当发生语义突变（形状改变、显示/隐藏、自定义位图变更）时即时放行无阻，兼顾超低带宽消耗与 1ms 级别的本地瞬时交互响应。
+     - 在 `ScreenSender` 与 `ScreenReceiver` 接入硬件光标状态机，使光标位置更新完全跳过视频帧的采集、缩放、编码与播放抖动排队流水线。
+  2. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - `tetherly` 与 `tetherly-cli` 全同构支持 `screen cursor [mode]`（get / set），支持 `--json` 与 `--ui-port`。
+     - `tetherly run` 新增 `--screen-cursor <decoupled|embedded|hidden>` 启动选项。
+     - `screen status` 丰富输出当前光标模式、位置坐标、可见性与形状语义。
+  3. **Node 运行时与回环 REST API（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）**:
+     - 新增 REST 路由 `GET /api/screen/cursor` 与 `POST /api/screen/cursor`。
+     - 遥测 DTO `ScreenStatusReport` 新增 `cursor_mode`、`cursor_x`、`cursor_y`、`cursor_visible`、`cursor_shape` 字段；新增强类型 `ScreenCursorReport`。
+     - 在推流会话与接收端分发循环中增加独立帧通道快速旁路路由。
+  4. **测试与验证**:
+     - Core 单元测试 3 套，Node 单元测试 2 套。
+     - Phase 5 端到端集成测试 `m5_12_screen_hardware_cursor_decoupling` 验证 QUIC 45720 传输、高频光标收发、去重机制、节流限制与 REST API 热切换。
 
 **2.01 相对 2.00(屏幕流接收端播放抖动缓冲区与自适应平滑控制器 ADR-087 与双端 CLI 全同构)**
 

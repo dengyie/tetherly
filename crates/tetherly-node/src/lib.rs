@@ -45,9 +45,9 @@ pub use runtime::{
     PeerProfileUpdateReport, PeerProfilesReport, PeerTagsReport, PeerUnblockReport,
     PeersCapsReport, PinReport, ProcessMetrics, ResumeMarkerDto, ResumeMarkersReport,
     RouteEntryDto, RouteMutateReport, RoutesReport, ScreenBitrateReport, ScreenControlReport,
-    ScreenFpsReport, ScreenMatrixReport, ScreenPlayoutReport, ScreenProfileReport,
-    ScreenScaleReport, ScreenStatusReport, StorageCleanReport, StorageReport, SystemReport,
-    TransferDirection, TransferPhase, TransferStats, TransfersReport, UserCommand,
+    ScreenCursorReport, ScreenFpsReport, ScreenMatrixReport, ScreenPlayoutReport,
+    ScreenProfileReport, ScreenScaleReport, ScreenStatusReport, StorageCleanReport, StorageReport,
+    SystemReport, TransferDirection, TransferPhase, TransferStats, TransfersReport, UserCommand,
     VirtualDisplayDecisionReport, VirtualDisplayPolicyReport, VirtualDisplayPolicyUpdate,
     VirtualDisplayStatusReport,
 };

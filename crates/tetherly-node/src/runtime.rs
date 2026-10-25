@@ -59,14 +59,14 @@ use tetherly_core::{
     MemoryTrustStore, MicAnnounceFrame, MicAttachFrame, MicAudioChunkFrame, MicCodec,
     MicDetachFrame, MicMode, MicRole, MicValidator, NotificationPayload, NotificationUrgency,
     Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource, ReplyView,
-    ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenFrame, ScreenPlayoutAction,
-    ScreenPlayoutMode, ScreenPlayoutStats, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource,
-    ScreenState, ScreenStats, SensitiveContentGuard, TcpLimiter, TopologyStateFrame,
-    TopologySyncReqFrame, TopologyValidator, TrustStore, VirtualDisplayAnnounceFrame,
-    VirtualDisplayAttachFrame, VirtualDisplayCodec, VirtualDisplayDetachFrame,
-    VirtualDisplayFrameAck, VirtualDisplayMode, VirtualDisplayPixelFormat, VirtualDisplayRole,
-    VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS,
-    OVERLAY_PROBE_MS,
+    ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenCursorMode, ScreenCursorStats,
+    ScreenCursorUpdate, ScreenFrame, ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats,
+    ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats,
+    SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
+    TrustStore, VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
+    VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
+    VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
+    DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -160,6 +160,8 @@ pub struct NodeConfig {
     pub screen_matrix_mode: tetherly_core::ScreenMatrixMode,
     /// Operation mode for screen receiver playout buffer and adaptive dejitterizer (ADR-087).
     pub screen_playout_mode: tetherly_core::ScreenPlayoutMode,
+    /// Operation mode for screen hardware cursor decoupling (ADR-088).
+    pub screen_cursor_mode: tetherly_core::ScreenCursorMode,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -214,6 +216,7 @@ impl Default for NodeConfig {
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
+            screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_sink: None,
             input_sink: None,
         }
@@ -2896,6 +2899,36 @@ pub struct ScreenStatusReport {
     pub playout_buffered: usize,
     #[serde(default)]
     pub playout_dropped_late: u64,
+    #[serde(default)]
+    pub cursor_mode: String,
+    #[serde(default)]
+    pub cursor_x: i32,
+    #[serde(default)]
+    pub cursor_y: i32,
+    #[serde(default)]
+    pub cursor_visible: bool,
+    #[serde(default)]
+    pub cursor_shape: String,
+    #[serde(default)]
+    pub cursor_updates_sent: u64,
+    #[serde(default)]
+    pub cursor_updates_received: u64,
+}
+
+/// Status report for hardware cursor decoupling (ADR-088).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ScreenCursorReport {
+    pub ok: bool,
+    pub mode: String,
+    pub x: i32,
+    pub y: i32,
+    pub visible: bool,
+    pub shape: String,
+    pub updates_sent: u64,
+    pub updates_received: u64,
+    pub updates_dropped_dedup: u64,
+    pub updates_dropped_rate: u64,
+    pub timestamp_ms: u64,
 }
 
 /// Status report for receiver playout buffer and adaptive jitter dejitterizer (ADR-087).
@@ -3217,6 +3250,10 @@ struct Shared {
     screen_playout_mode: Mutex<ScreenPlayoutMode>,
     /// Playout buffer dejittering metrics for incoming screen streams (ADR-087).
     screen_playout_stats: Mutex<ScreenPlayoutStats>,
+    /// Hardware cursor decoupling mode for screen streams (ADR-088).
+    screen_cursor_mode: Mutex<ScreenCursorMode>,
+    /// Hardware cursor metrics for screen streams (ADR-088).
+    screen_cursor_stats: Mutex<ScreenCursorStats>,
     shutdown: watch::Sender<bool>,
     overlay: Mutex<OverlayStatus>,
     /// ANCS ingress. Present only when a transport was attached.
@@ -3408,6 +3445,7 @@ impl Node {
         let screen_qp_max = cfg.screen_qp_max;
         let screen_matrix_mode = cfg.screen_matrix_mode;
         let screen_playout_mode = cfg.screen_playout_mode;
+        let screen_cursor_mode = cfg.screen_cursor_mode;
         if let Some(sel) = &screen_encode_codec {
             sel.set_fps(screen_fps);
             sel.set_scale_pct(screen_scale_pct);
@@ -3583,6 +3621,8 @@ impl Node {
                 dropped_overflow_frames: 0,
                 custom_delay: false,
             }),
+            screen_cursor_mode: Mutex::new(screen_cursor_mode),
+            screen_cursor_stats: Mutex::new(ScreenCursorStats::default()),
             shutdown,
             overlay: Mutex::new(initial_overlay),
             ancs: Mutex::new(ancs),
@@ -20245,7 +20285,9 @@ impl Node {
             .screen_playout_mode
             .lock()
             .expect("playout mode");
+        let initial_cursor_mode = *self.shared.screen_cursor_mode.lock().expect("cursor mode");
         let mut receiver = ScreenReceiver::with_playout_mode(initial_playout_mode);
+        receiver.set_cursor_mode(initial_cursor_mode);
         let mut assembler = ScreenAssembler::new();
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
@@ -20262,6 +20304,10 @@ impl Node {
                         let target_mode = *node.shared.screen_playout_mode.lock().expect("playout mode");
                         if receiver.playout_mode() != target_mode {
                             receiver.set_playout_mode(target_mode);
+                        }
+                        let target_cursor_mode = *node.shared.screen_cursor_mode.lock().expect("cursor mode");
+                        if receiver.cursor_mode() != target_cursor_mode {
+                            receiver.set_cursor_mode(target_cursor_mode);
                         }
                         let now_us = node.shared.clock.unix_us();
                         let mut played = false;
@@ -20295,6 +20341,14 @@ impl Node {
                             Ok(frame) => {
                                 let f_len = (frame.payload.len() + 12) as u64;
                                 node.shared.telemetry.record_screen_rx(f_len);
+                                if frame.ty == tetherly_core::TYPE_SCREEN_CURSOR {
+                                    if let Ok(update) = tetherly_core::ScreenCursorUpdate::from_frame(&frame) {
+                                        receiver.on_cursor(update);
+                                        *node.shared.screen_cursor_stats.lock().expect("cursor stats") = receiver.cursor_stats();
+                                        *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
+                                    }
+                                    continue;
+                                }
                                 match assembler.push(&frame) {
                                     Ok(Some(sf)) => {
                                         let codec_tag = sf.codec_tag;
@@ -20412,6 +20466,11 @@ impl Node {
                 .screen_playout_stats
                 .lock()
                 .expect("playout stats") = receiver.playout_stats();
+            *node
+                .shared
+                .screen_cursor_stats
+                .lock()
+                .expect("cursor stats") = receiver.cursor_stats();
             *node.shared.screen_peer.lock().expect("screen_peer") = None;
             *node.shared.screen_ctl.lock().await = None;
             node.shared
@@ -20937,6 +20996,12 @@ impl Node {
             .screen_playout_stats
             .lock()
             .expect("playout stats");
+        let cursor_mode = *self.shared.screen_cursor_mode.lock().expect("cursor mode");
+        let cursor_stats = *self
+            .shared
+            .screen_cursor_stats
+            .lock()
+            .expect("cursor stats");
         ScreenStatusReport {
             ok: true,
             state: state.as_str().to_string(),
@@ -20971,6 +21036,13 @@ impl Node {
                 / 100.0,
             playout_buffered: playout_stats.buffered_frames,
             playout_dropped_late: playout_stats.dropped_late_frames,
+            cursor_mode: cursor_mode.as_str().to_string(),
+            cursor_x: cursor_stats.current_x,
+            cursor_y: cursor_stats.current_y,
+            cursor_visible: cursor_stats.current_visible,
+            cursor_shape: cursor_stats.current_shape.as_str().to_string(),
+            cursor_updates_sent: cursor_stats.updates_sent,
+            cursor_updates_received: cursor_stats.updates_received,
         }
     }
 
@@ -21319,6 +21391,85 @@ impl Node {
         }
         drop(stats);
         self.screen_playout_report()
+    }
+
+    /// Report current hardware cursor decoupling status and metrics (ADR-088).
+    pub fn screen_cursor_report(&self) -> ScreenCursorReport {
+        let mode = *self.shared.screen_cursor_mode.lock().expect("cursor mode");
+        let stats = *self
+            .shared
+            .screen_cursor_stats
+            .lock()
+            .expect("cursor stats");
+        ScreenCursorReport {
+            ok: true,
+            mode: mode.as_str().to_string(),
+            x: stats.current_x,
+            y: stats.current_y,
+            visible: stats.current_visible,
+            shape: stats.current_shape.as_str().to_string(),
+            updates_sent: stats.updates_sent,
+            updates_received: stats.updates_received,
+            updates_dropped_dedup: stats.updates_dropped_dedup,
+            updates_dropped_rate: stats.updates_dropped_rate,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Current hardware cursor decoupling mode (ADR-088).
+    pub fn screen_cursor_mode(&self) -> tetherly_core::ScreenCursorMode {
+        *self.shared.screen_cursor_mode.lock().expect("cursor mode")
+    }
+
+    /// Set and report hardware cursor decoupling mode (ADR-088).
+    pub fn screen_set_cursor_mode(
+        &self,
+        mode: tetherly_core::ScreenCursorMode,
+    ) -> ScreenCursorReport {
+        *self.shared.screen_cursor_mode.lock().expect("cursor mode") = mode;
+        let mut stats = self
+            .shared
+            .screen_cursor_stats
+            .lock()
+            .expect("cursor stats");
+        stats.mode = mode;
+        drop(stats);
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .set_cursor_mode(mode);
+        self.screen_cursor_report()
+    }
+
+    /// Inject or push a cursor update from source to the remote screen visitor (ADR-088).
+    pub async fn screen_send_cursor(&self, update: ScreenCursorUpdate) -> Result<bool, CoreError> {
+        let update_opt = {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            let now_us = self.shared.clock.unix_us();
+            let res = engine.push_cursor_update_with_time(update, now_us);
+            *self
+                .shared
+                .screen_cursor_stats
+                .lock()
+                .expect("cursor stats") = engine.cursor_stats();
+            res
+        };
+        let Some(up) = update_opt else {
+            return Ok(false);
+        };
+        let frame = up.to_frame()?;
+        let tx = self
+            .shared
+            .screen_out
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| CoreError::Json("screen channel closed".into()))?;
+        if tx.try_send(frame).is_err() {
+            return Err(CoreError::Json("screen peer gone".into()));
+        }
+        Ok(true)
     }
 
     /// Check if target frame pacing interval has elapsed for the outbound screen pump (ADR-083).
@@ -22067,6 +22218,7 @@ mod clipboard_policy_tests {
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
+            screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_sink: None,
             input_sink: None,
         };
@@ -22214,6 +22366,7 @@ mod handoff_engine_tests {
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
+            screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_sink: None,
             input_sink: None,
         };
@@ -22392,6 +22545,7 @@ mod media_policy_tests {
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
+            screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_sink: None,
             input_sink: None,
         };
@@ -22546,6 +22700,7 @@ mod locator_policy_tests {
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
+            screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_sink: None,
             input_sink: None,
         };
@@ -22680,6 +22835,7 @@ mod locator_policy_tests {
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
+            screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_sink: None,
             input_sink: None,
         };
@@ -23239,6 +23395,83 @@ mod locator_policy_tests {
         assert_eq!(status.playout_delay_ms, 35.0);
         assert_eq!(status.playout_buffered, 0);
         assert_eq!(status.playout_dropped_late, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_screen_cursor_mode_and_reporting() {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-cursor-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.clone(),
+            control_port: 0,
+            file_port: 0,
+            input_port: 0,
+            screen_port: 0,
+            ui_port: 0,
+            name: "cursor-test-node".into(),
+            platform: "test".into(),
+            memory_clip: true,
+            memory_notifier: true,
+            loopback_only: true,
+            advertise: false,
+            reconnect: false,
+            overlay: OverlayConfig::default(),
+            ..Default::default()
+        };
+        let clock = Arc::new(ManualClock::new(50_000));
+        let node = Node::start_with_clock(cfg, clock.clone()).unwrap();
+
+        // 1. Initial report: defaults to Decoupled mode (ADR-088)
+        let initial_rep = node.screen_cursor_report();
+        assert!(initial_rep.ok);
+        assert_eq!(initial_rep.mode, "decoupled");
+        assert_eq!(initial_rep.x, 0);
+        assert_eq!(initial_rep.y, 0);
+        assert!(!initial_rep.visible);
+        assert_eq!(initial_rep.shape, "arrow");
+        assert_eq!(initial_rep.updates_sent, 0);
+        assert_eq!(initial_rep.updates_received, 0);
+        assert_eq!(initial_rep.updates_dropped_dedup, 0);
+        assert_eq!(initial_rep.updates_dropped_rate, 0);
+        assert_eq!(
+            node.screen_cursor_mode(),
+            tetherly_core::ScreenCursorMode::Decoupled
+        );
+
+        // 2. Set mode to Embedded
+        let rep_embedded = node.screen_set_cursor_mode(tetherly_core::ScreenCursorMode::Embedded);
+        assert!(rep_embedded.ok);
+        assert_eq!(rep_embedded.mode, "embedded");
+        assert_eq!(
+            node.screen_cursor_mode(),
+            tetherly_core::ScreenCursorMode::Embedded
+        );
+
+        // 3. Set mode to Hidden
+        let rep_hidden = node.screen_set_cursor_mode(tetherly_core::ScreenCursorMode::Hidden);
+        assert!(rep_hidden.ok);
+        assert_eq!(rep_hidden.mode, "hidden");
+        assert_eq!(
+            node.screen_cursor_mode(),
+            tetherly_core::ScreenCursorMode::Hidden
+        );
+
+        // 4. Status report reflects active cursor mode and telemetry
+        let status = node.screen_status_report().await;
+        assert_eq!(status.cursor_mode, "hidden");
+        assert_eq!(status.cursor_x, 0);
+        assert_eq!(status.cursor_y, 0);
+        assert!(!status.cursor_visible);
+        assert_eq!(status.cursor_shape, "arrow");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

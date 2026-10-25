@@ -4199,6 +4199,45 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 json_ok(&rep)
             }
         }
+        // Hardware cursor decoupling (v2.02 / ADR-088).
+        ("GET", "/api/screen/cursor") => {
+            let rep = node.screen_cursor_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/cursor") => {
+            #[derive(serde::Deserialize)]
+            struct CursorBody {
+                mode: Option<String>,
+                cursor_mode: Option<String>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<CursorBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.clone().or_else(|| b.cursor_mode.clone()))
+                .or_else(|| qmap.get("mode").cloned())
+                .or_else(|| qmap.get("cursor_mode").cloned());
+
+            if let Some(m_str) = mode_str {
+                match tetherly_core::ScreenCursorMode::parse(&m_str) {
+                    Some(mode) => {
+                        let rep = node.screen_set_cursor_mode(mode);
+                        json_ok(&rep)
+                    }
+                    None => err(
+                        400,
+                        "invalid cursor mode: expected decoupled, embedded, or hidden",
+                    ),
+                }
+            } else {
+                let rep = node.screen_cursor_report();
+                json_ok(&rep)
+            }
+        }
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -8090,6 +8129,7 @@ mod tests {
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
+            screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_sink: None,
             input_sink: None,
         };
@@ -9190,6 +9230,67 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/screen/playout HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_cursor_endpoints() {
+        let (node, dir) = temp_test_node("screen_cursor");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/cursor
+        let (code, body) = loopback_get(port, "/api/screen/cursor").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["mode"], "decoupled");
+        assert_eq!(rep["x"], 0);
+        assert_eq!(rep["y"], 0);
+        assert_eq!(rep["visible"], false);
+        assert_eq!(rep["shape"], "arrow");
+        assert_eq!(rep["updates_sent"], 0);
+        assert_eq!(rep["updates_received"], 0);
+
+        // 2. POST /api/screen/cursor with JSON {"mode": "embedded"}
+        let update_embedded = serde_json::json!({ "mode": "embedded" });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/cursor",
+            &serde_json::to_vec(&update_embedded).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["mode"], "embedded");
+
+        // 3. POST /api/screen/cursor with query param ?mode=hidden
+        let (code, body) = loopback_post(port, "/api/screen/cursor?mode=hidden", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["mode"], "hidden");
+
+        // 4. Invalid mode returns 400
+        let (code, _) = loopback_post(port, "/api/screen/cursor?mode=invalid_xyz", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+
+        // 5. Host header 403 test on /api/screen/cursor
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/cursor HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();

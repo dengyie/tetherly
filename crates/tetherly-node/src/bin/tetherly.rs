@@ -94,6 +94,11 @@ enum Cmd {
         /// buffering latency for interactive tasks; `smooth` cushions jitter for video/animation.
         #[arg(long, default_value = "adaptive")]
         screen_playout: String,
+        /// Screen Hardware Cursor Decoupling mode (ADR-088): `decoupled` (default)
+        /// streams cursor position, shape, and visibility out-of-band at 125Hz;
+        /// `embedded` renders cursor directly into video frames; `hidden` suppresses remote cursor.
+        #[arg(long, default_value = "decoupled")]
+        screen_cursor: String,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -2086,6 +2091,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming hardware cursor decoupling (v2.02 / ADR-088).
+    Cursor {
+        /// Target cursor mode: `decoupled`, `embedded`, or `hidden`. If omitted, displays current cursor status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3882,6 +3898,7 @@ async fn main() -> Result<()> {
             screen_qp,
             screen_matrix,
             screen_playout,
+            screen_cursor,
             file_port,
             input_port,
             screen_port,
@@ -3959,6 +3976,16 @@ async fn main() -> Result<()> {
                 "smooth" | "video" => tetherly_core::ScreenPlayoutMode::Smooth,
                 _ => {
                     anyhow::bail!("--screen-playout must be `adaptive`, `zerolatency`, or `smooth`")
+                }
+            };
+            cfg.screen_cursor_mode = match screen_cursor.trim().to_lowercase().as_str() {
+                "decoupled" | "decouple" | "hw" | "hardware" => {
+                    tetherly_core::ScreenCursorMode::Decoupled
+                }
+                "embedded" | "video" | "embed" => tetherly_core::ScreenCursorMode::Embedded,
+                "hidden" | "hide" | "none" => tetherly_core::ScreenCursorMode::Hidden,
+                _ => {
+                    anyhow::bail!("--screen-cursor must be `decoupled`, `embedded`, or `hidden`")
                 }
             };
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
@@ -6097,6 +6124,18 @@ async fn main() -> Result<()> {
                             rep.playout_buffered
                         );
                     }
+                    if !rep.cursor_mode.is_empty() {
+                        println!(
+                            "  Cursor Mode:  {} (pos: {},{}, vis: {}, shape: {}, tx: {}, rx: {})",
+                            rep.cursor_mode,
+                            rep.cursor_x,
+                            rep.cursor_y,
+                            rep.cursor_visible,
+                            rep.cursor_shape,
+                            rep.cursor_updates_sent,
+                            rep.cursor_updates_received
+                        );
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -6454,6 +6493,59 @@ async fn main() -> Result<()> {
                                 c as f64 / 1000.0
                             );
                         }
+                    }
+                }
+            }
+            ScreenCmd::Cursor {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    tetherly_node::loopback_post(ui_port, "/api/screen/cursor", &body).await
+                } else {
+                    tetherly_node::loopback_get(ui_port, "/api/screen/cursor").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen cursor query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_node::ScreenCursorReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    if has_update {
+                        println!(
+                            "Screen hardware cursor decoupling mode updated: {}",
+                            rep.mode
+                        );
+                    } else {
+                        println!(
+                            "Screen Streaming Hardware Cursor Decoupling Controller (ADR-088):"
+                        );
+                        println!("  Cursor Mode:         {}", rep.mode);
+                        println!("  Current Position:    ({}, {})", rep.x, rep.y);
+                        println!("  Cursor Visible:      {}", rep.visible);
+                        println!("  Cursor Shape:        {}", rep.shape);
+                        println!("  Updates Sent:        {}", rep.updates_sent);
+                        println!("  Updates Received:    {}", rep.updates_received);
+                        println!("  Dropped (Dedup):     {}", rep.updates_dropped_dedup);
+                        println!("  Dropped (Rate):      {}", rep.updates_dropped_rate);
                     }
                 }
             }

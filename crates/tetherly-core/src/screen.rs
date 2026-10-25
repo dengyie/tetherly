@@ -15,9 +15,20 @@ use std::collections::VecDeque;
 /// Screen channel inner types. Not listed in the JSON control-plane table.
 pub const TYPE_SCREEN_FRAME: u16 = 0x0501;
 pub const TYPE_SCREEN_CONTROL: u16 = 0x0502;
+/// Screen cursor channel inner type (v2.02 / ADR-088).
+pub const TYPE_SCREEN_CURSOR: u16 = 0x0503;
 
 pub const SCREEN_MAGIC: [u8; 4] = *b"TMV1";
 pub const SCREEN_PROTO: u8 = 1;
+
+pub const CURSOR_MAGIC: [u8; 4] = *b"TMCU";
+pub const CURSOR_PROTO: u8 = 1;
+
+/// Maximum payload bytes for a custom cursor bitmap (64x64 RGBA8 = 16,384 bytes).
+pub const CURSOR_BITMAP_MAX_BYTES: usize = 64 * 64 * 4;
+
+/// Minimum interval between outbound cursor position packets in microseconds (~125 Hz).
+pub const SCREEN_CURSOR_MIN_INTERVAL_US: u64 = 8_000;
 
 /// Drop-and-ignore anything older, and refuse a forward jump this large.
 /// Same shape as the input window: the wire is a live stream, not a log.
@@ -190,7 +201,10 @@ pub const SCREEN_COMPRESS_ZSTD: u8 = 1;
 pub const SCREEN_COMPRESS_H264: u8 = 3;
 
 pub fn is_screen_type(ty: u16) -> bool {
-    matches!(ty, TYPE_SCREEN_FRAME | TYPE_SCREEN_CONTROL)
+    matches!(
+        ty,
+        TYPE_SCREEN_FRAME | TYPE_SCREEN_CONTROL | TYPE_SCREEN_CURSOR
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,6 +562,228 @@ impl ControlMsg {
     }
 }
 
+/// Standard mouse cursor shape categories (v2.02 / ADR-088).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum CursorShape {
+    #[default]
+    Arrow = 0,
+    IBeam = 1,
+    Hand = 2,
+    Crosshair = 3,
+    SizeAll = 4,
+    SizeNS = 5,
+    SizeWE = 6,
+    SizeNESW = 7,
+    SizeNWSE = 8,
+    Wait = 9,
+    NotAllowed = 10,
+    Custom = 11,
+}
+
+impl CursorShape {
+    pub fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => CursorShape::IBeam,
+            2 => CursorShape::Hand,
+            3 => CursorShape::Crosshair,
+            4 => CursorShape::SizeAll,
+            5 => CursorShape::SizeNS,
+            6 => CursorShape::SizeWE,
+            7 => CursorShape::SizeNESW,
+            8 => CursorShape::SizeNWSE,
+            9 => CursorShape::Wait,
+            10 => CursorShape::NotAllowed,
+            11 => CursorShape::Custom,
+            _ => CursorShape::Arrow,
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "arrow" | "default" => Some(CursorShape::Arrow),
+            "ibeam" | "text" => Some(CursorShape::IBeam),
+            "hand" | "pointer" => Some(CursorShape::Hand),
+            "crosshair" => Some(CursorShape::Crosshair),
+            "sizeall" | "move" => Some(CursorShape::SizeAll),
+            "sizens" | "vresize" => Some(CursorShape::SizeNS),
+            "sizewe" | "hresize" => Some(CursorShape::SizeWE),
+            "sizenesw" => Some(CursorShape::SizeNESW),
+            "sizenwse" => Some(CursorShape::SizeNWSE),
+            "wait" | "busy" => Some(CursorShape::Wait),
+            "notallowed" | "forbidden" => Some(CursorShape::NotAllowed),
+            "custom" => Some(CursorShape::Custom),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CursorShape::Arrow => "arrow",
+            CursorShape::IBeam => "ibeam",
+            CursorShape::Hand => "hand",
+            CursorShape::Crosshair => "crosshair",
+            CursorShape::SizeAll => "size_all",
+            CursorShape::SizeNS => "size_ns",
+            CursorShape::SizeWE => "size_we",
+            CursorShape::SizeNESW => "size_nesw",
+            CursorShape::SizeNWSE => "size_nwse",
+            CursorShape::Wait => "wait",
+            CursorShape::NotAllowed => "not_allowed",
+            CursorShape::Custom => "custom",
+        }
+    }
+}
+
+/// Hardware cursor decoupling mode (v2.02 / ADR-088).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum ScreenCursorMode {
+    /// Decoupled high-frequency cursor stream with zero video encoding latency (v2.02 / ADR-088).
+    #[default]
+    Decoupled = 0,
+    /// Legacy mode: cursor is captured and burned directly into video frames.
+    Embedded = 1,
+    /// Suppressed mode: cursor is hidden / ignored on receiver presentation.
+    Hidden = 2,
+}
+
+impl ScreenCursorMode {
+    pub fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => ScreenCursorMode::Embedded,
+            2 => ScreenCursorMode::Hidden,
+            _ => ScreenCursorMode::Decoupled,
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "decoupled" | "hardware" | "hw" | "async" => Some(ScreenCursorMode::Decoupled),
+            "embedded" | "video" | "burn" => Some(ScreenCursorMode::Embedded),
+            "hidden" | "none" | "off" => Some(ScreenCursorMode::Hidden),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScreenCursorMode::Decoupled => "decoupled",
+            ScreenCursorMode::Embedded => "embedded",
+            ScreenCursorMode::Hidden => "hidden",
+        }
+    }
+}
+
+/// Decoupled high-frequency mouse cursor update (v2.02 / ADR-088).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenCursorUpdate {
+    pub seq: u64,
+    pub x: i32,
+    pub y: i32,
+    pub visible: bool,
+    pub shape: CursorShape,
+    pub hotspot_x: u16,
+    pub hotspot_y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub custom_rgba: Option<Vec<u8>>,
+}
+
+impl ScreenCursorUpdate {
+    /// Fixed header length before optional custom bitmap payload (32 bytes).
+    pub const HEADER_LEN: usize = 32;
+
+    pub fn encode_payload(&self) -> Result<Vec<u8>, CoreError> {
+        let custom_bytes = self.custom_rgba.as_deref().unwrap_or(&[]);
+        if custom_bytes.len() > CURSOR_BITMAP_MAX_BYTES {
+            return Err(CoreError::ScreenTooLarge);
+        }
+        let mut out = Vec::with_capacity(Self::HEADER_LEN + custom_bytes.len());
+        out.extend_from_slice(&CURSOR_MAGIC);
+        out.push(CURSOR_PROTO);
+        out.extend_from_slice(&self.seq.to_be_bytes());
+        out.extend_from_slice(&self.x.to_be_bytes());
+        out.extend_from_slice(&self.y.to_be_bytes());
+        out.push(if self.visible { 1 } else { 0 });
+        out.push(self.shape.tag());
+        out.extend_from_slice(&self.hotspot_x.to_be_bytes());
+        out.extend_from_slice(&self.hotspot_y.to_be_bytes());
+        out.extend_from_slice(&self.width.to_be_bytes());
+        out.extend_from_slice(&self.height.to_be_bytes());
+        out.push(if self.custom_rgba.is_some() { 1 } else { 0 });
+        out.extend_from_slice(custom_bytes);
+        Ok(out)
+    }
+
+    pub fn decode_payload(payload: &[u8]) -> Result<Self, CoreError> {
+        if payload.len() < Self::HEADER_LEN {
+            return Err(CoreError::TruncatedFrame);
+        }
+        if payload[0..4] != CURSOR_MAGIC {
+            return Err(CoreError::ScreenFrame);
+        }
+        if payload[4] != CURSOR_PROTO {
+            return Err(CoreError::UnsupportedProto);
+        }
+        let seq = u64::from_be_bytes(payload[5..13].try_into().unwrap());
+        let x = i32::from_be_bytes(payload[13..17].try_into().unwrap());
+        let y = i32::from_be_bytes(payload[17..21].try_into().unwrap());
+        let visible = payload[21] != 0;
+        let shape = CursorShape::from_tag(payload[22]);
+        let hotspot_x = u16::from_be_bytes(payload[23..25].try_into().unwrap());
+        let hotspot_y = u16::from_be_bytes(payload[25..27].try_into().unwrap());
+        let width = u16::from_be_bytes(payload[27..29].try_into().unwrap());
+        let height = u16::from_be_bytes(payload[29..31].try_into().unwrap());
+        let has_custom = payload[31] != 0;
+        let custom_rgba = if has_custom {
+            let bytes = payload[Self::HEADER_LEN..].to_vec();
+            let expected_len = (width as usize) * (height as usize) * 4;
+            if bytes.len() != expected_len || bytes.len() > CURSOR_BITMAP_MAX_BYTES {
+                return Err(CoreError::ScreenFrame);
+            }
+            Some(bytes)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            seq,
+            x,
+            y,
+            visible,
+            shape,
+            hotspot_x,
+            hotspot_y,
+            width,
+            height,
+            custom_rgba,
+        })
+    }
+
+    pub fn to_frame(&self) -> Result<InnerFrame, CoreError> {
+        let payload = self.encode_payload()?;
+        InnerFrame::new(TYPE_SCREEN_CURSOR, payload)
+    }
+
+    pub fn from_frame(frame: &InnerFrame) -> Result<Self, CoreError> {
+        if frame.ty != TYPE_SCREEN_CURSOR {
+            return Err(CoreError::ScreenFrame);
+        }
+        Self::decode_payload(&frame.payload)
+    }
+}
+
 /// Where a screen session currently sits. `Allowed` is only ever reached by a
 /// local, explicit action (`allow`), never by anything a peer sends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -622,6 +858,20 @@ pub struct ScreenStats {
     pub playout_delay_us: u32,
     /// Measured interarrival jitter in microseconds (v2.01 / ADR-087).
     pub playout_jitter_us: u32,
+    /// Hardware cursor decoupling mode (0=decoupled, 1=embedded, 2=hidden) (v2.02 / ADR-088).
+    pub cursor_mode: u8,
+    /// Last observed cursor X position in screen pixels (v2.02 / ADR-088).
+    pub cursor_x: i32,
+    /// Last observed cursor Y position in screen pixels (v2.02 / ADR-088).
+    pub cursor_y: i32,
+    /// Last observed cursor visibility (v2.02 / ADR-088).
+    pub cursor_visible: bool,
+    /// Last observed cursor shape tag (v2.02 / ADR-088).
+    pub cursor_shape: u8,
+    /// Total cursor updates sent by host (v2.02 / ADR-088).
+    pub cursor_updates_sent: u64,
+    /// Total cursor updates received by client (v2.02 / ADR-088).
+    pub cursor_updates_received: u64,
 }
 
 impl ScreenStats {
@@ -643,6 +893,16 @@ impl ScreenStats {
     /// Receiver playout dejitter mode.
     pub fn playout_mode(&self) -> ScreenPlayoutMode {
         ScreenPlayoutMode::from_tag(self.playout_mode)
+    }
+
+    /// Hardware cursor decoupling mode.
+    pub fn cursor_mode(&self) -> ScreenCursorMode {
+        ScreenCursorMode::from_tag(self.cursor_mode)
+    }
+
+    /// Cursor shape.
+    pub fn cursor_shape(&self) -> CursorShape {
+        CursorShape::from_tag(self.cursor_shape)
     }
 }
 
@@ -1802,6 +2062,160 @@ impl ScreenPlayoutBuffer {
     }
 }
 
+/// Telemetry and counters for screen cursor stream (v2.02 / ADR-088).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScreenCursorStats {
+    pub mode: ScreenCursorMode,
+    pub updates_sent: u64,
+    pub updates_received: u64,
+    pub updates_dropped_dedup: u64,
+    pub updates_dropped_rate: u64,
+    pub current_x: i32,
+    pub current_y: i32,
+    pub current_visible: bool,
+    pub current_shape: CursorShape,
+}
+
+/// Controller governing hardware cursor position deduplication, rate-limiting, and shape caching (v2.02 / ADR-088).
+#[derive(Debug, Clone)]
+pub struct ScreenCursorController {
+    mode: ScreenCursorMode,
+    next_seq: u64,
+    last_x: i32,
+    last_y: i32,
+    last_visible: bool,
+    last_shape: CursorShape,
+    last_sent_us: u64,
+    min_interval_us: u64,
+    stats: ScreenCursorStats,
+}
+
+impl Default for ScreenCursorController {
+    fn default() -> Self {
+        Self::new(ScreenCursorMode::default())
+    }
+}
+
+impl ScreenCursorController {
+    pub fn new(mode: ScreenCursorMode) -> Self {
+        Self {
+            mode,
+            next_seq: 1,
+            last_x: 0,
+            last_y: 0,
+            last_visible: true,
+            last_shape: CursorShape::Arrow,
+            last_sent_us: 0,
+            min_interval_us: SCREEN_CURSOR_MIN_INTERVAL_US,
+            stats: ScreenCursorStats {
+                mode,
+                current_visible: true,
+                current_shape: CursorShape::Arrow,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn mode(&self) -> ScreenCursorMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenCursorMode) -> ScreenCursorMode {
+        self.mode = mode;
+        self.stats.mode = mode;
+        mode
+    }
+
+    pub fn min_interval_us(&self) -> u64 {
+        self.min_interval_us
+    }
+
+    pub fn set_min_interval_us(&mut self, interval_us: u64) {
+        self.min_interval_us = interval_us;
+    }
+
+    pub fn stats(&self) -> ScreenCursorStats {
+        self.stats
+    }
+
+    pub fn reset(&mut self) {
+        self.next_seq = 1;
+        self.last_sent_us = 0;
+    }
+
+    /// Evaluates candidate cursor parameters and produces an outbound ScreenCursorUpdate
+    /// if decoupled mode is active and parameters pass deduplication and rate-limiting.
+    pub fn create_update(
+        &mut self,
+        x: i32,
+        y: i32,
+        visible: bool,
+        shape: CursorShape,
+        hotspot: (u16, u16),
+        dimensions: (u16, u16),
+        custom_rgba: Option<Vec<u8>>,
+        now_us: u64,
+    ) -> Option<ScreenCursorUpdate> {
+        if self.mode != ScreenCursorMode::Decoupled {
+            return None;
+        }
+
+        // 1. Deduplication: identical position, visibility, and shape without new custom bitmap
+        if self.stats.updates_sent > 0
+            && x == self.last_x
+            && y == self.last_y
+            && visible == self.last_visible
+            && shape == self.last_shape
+            && custom_rgba.is_none()
+        {
+            self.stats.updates_dropped_dedup = self.stats.updates_dropped_dedup.saturating_add(1);
+            return None;
+        }
+
+        // 2. High-frequency rate limiting for position moves:
+        // Position changes are rate-limited to min_interval_us (e.g. 8ms / 125Hz).
+        // Shape or visibility changes or custom bitmaps always bypass rate-limiting.
+        let is_semantic_change =
+            shape != self.last_shape || visible != self.last_visible || custom_rgba.is_some();
+        if !is_semantic_change
+            && now_us > 0
+            && self.last_sent_us > 0
+            && now_us.saturating_sub(self.last_sent_us) < self.min_interval_us
+        {
+            self.stats.updates_dropped_rate = self.stats.updates_dropped_rate.saturating_add(1);
+            return None;
+        }
+
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+
+        self.last_x = x;
+        self.last_y = y;
+        self.last_visible = visible;
+        self.last_shape = shape;
+        self.last_sent_us = now_us;
+
+        self.stats.updates_sent = self.stats.updates_sent.saturating_add(1);
+        self.stats.current_x = x;
+        self.stats.current_y = y;
+        self.stats.current_visible = visible;
+        self.stats.current_shape = shape;
+
+        Some(ScreenCursorUpdate {
+            seq,
+            x,
+            y,
+            visible,
+            shape,
+            hotspot_x: hotspot.0,
+            hotspot_y: hotspot.1,
+            width: dimensions.0,
+            height: dimensions.1,
+            custom_rgba,
+        })
+    }
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -1817,6 +2231,7 @@ pub struct ScreenSender {
     scale_controller: ScreenScaleController,
     quality_controller: ScreenQualityController,
     matrix_coordinator: ScreenMatrixCoordinator,
+    cursor_controller: ScreenCursorController,
 }
 
 impl Default for ScreenSender {
@@ -1832,6 +2247,7 @@ impl ScreenSender {
         let scale_controller = ScreenScaleController::default();
         let quality_controller = ScreenQualityController::default();
         let matrix_coordinator = ScreenMatrixCoordinator::default();
+        let cursor_controller = ScreenCursorController::default();
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -1841,6 +2257,9 @@ impl ScreenSender {
             qp_max: quality_controller.max_qp(),
             matrix_mode: matrix_coordinator.mode().tag(),
             network_health: matrix_coordinator.health().tag(),
+            cursor_mode: cursor_controller.mode().tag(),
+            cursor_visible: true,
+            cursor_shape: CursorShape::Arrow.tag(),
             ..Default::default()
         };
         Self {
@@ -1855,6 +2274,7 @@ impl ScreenSender {
             scale_controller,
             quality_controller,
             matrix_coordinator,
+            cursor_controller,
         }
     }
 
@@ -2198,6 +2618,84 @@ impl ScreenSender {
         self.fps_pacer.check_and_consume(now_us)
     }
 
+    /// Hardware cursor decoupling mode (v2.02 / ADR-088).
+    pub fn cursor_mode(&self) -> ScreenCursorMode {
+        self.cursor_controller.mode()
+    }
+
+    /// Explicitly configure hardware cursor decoupling mode.
+    pub fn set_cursor_mode(&mut self, mode: ScreenCursorMode) -> ScreenCursorMode {
+        self.cursor_controller.set_mode(mode);
+        self.stats.cursor_mode = mode.tag();
+        mode
+    }
+
+    /// Access reference to internal cursor controller.
+    pub fn cursor_controller(&self) -> &ScreenCursorController {
+        &self.cursor_controller
+    }
+
+    /// Access mutable reference to internal cursor controller.
+    pub fn cursor_controller_mut(&mut self) -> &mut ScreenCursorController {
+        &mut self.cursor_controller
+    }
+
+    /// Push high-frequency cursor update. Returns ScreenCursorUpdate if candidate passed dedup and rate-limiting.
+    pub fn push_cursor_with_time(
+        &mut self,
+        x: i32,
+        y: i32,
+        visible: bool,
+        shape: CursorShape,
+        hotspot: (u16, u16),
+        dimensions: (u16, u16),
+        custom_rgba: Option<Vec<u8>>,
+        now_us: u64,
+    ) -> Option<ScreenCursorUpdate> {
+        if self.state != ScreenState::Streaming {
+            return None;
+        }
+        let update = self.cursor_controller.create_update(
+            x,
+            y,
+            visible,
+            shape,
+            hotspot,
+            dimensions,
+            custom_rgba,
+            now_us,
+        )?;
+        self.stats.cursor_x = x;
+        self.stats.cursor_y = y;
+        self.stats.cursor_visible = visible;
+        self.stats.cursor_shape = shape.tag();
+        self.stats.cursor_updates_sent = self.cursor_controller.stats().updates_sent;
+        Some(update)
+    }
+
+    /// Access snapshot of cursor controller statistics.
+    pub fn cursor_stats(&self) -> ScreenCursorStats {
+        self.cursor_controller.stats()
+    }
+
+    /// Push high-frequency cursor update from existing ScreenCursorUpdate.
+    pub fn push_cursor_update_with_time(
+        &mut self,
+        update: ScreenCursorUpdate,
+        now_us: u64,
+    ) -> Option<ScreenCursorUpdate> {
+        self.push_cursor_with_time(
+            update.x,
+            update.y,
+            update.visible,
+            update.shape,
+            (update.hotspot_x, update.hotspot_y),
+            (update.width, update.height),
+            update.custom_rgba,
+            now_us,
+        )
+    }
+
     pub fn drain(&mut self) -> Vec<ScreenFrame> {
         self.pending.drain(..).collect()
     }
@@ -2212,6 +2710,7 @@ impl ScreenSender {
         self.rtt_tracker.clear();
         self.stats.in_flight = 0;
         self.fps_pacer.reset();
+        self.cursor_controller.reset();
     }
 }
 
@@ -2222,6 +2721,8 @@ pub struct ScreenReceiver {
     stats: ScreenStats,
     trace: VecDeque<u64>,
     playout_buffer: ScreenPlayoutBuffer,
+    cursor_controller: ScreenCursorController,
+    last_cursor: Option<ScreenCursorUpdate>,
 }
 
 impl Default for ScreenReceiver {
@@ -2232,20 +2733,38 @@ impl Default for ScreenReceiver {
 
 impl ScreenReceiver {
     pub fn new() -> Self {
+        let cursor_controller = ScreenCursorController::default();
+        let stats = ScreenStats {
+            cursor_mode: cursor_controller.mode().tag(),
+            cursor_visible: true,
+            cursor_shape: CursorShape::Arrow.tag(),
+            ..Default::default()
+        };
         Self {
             last_seq: 0,
-            stats: ScreenStats::default(),
+            stats,
             trace: VecDeque::with_capacity(SCREEN_TRACE_MAX),
             playout_buffer: ScreenPlayoutBuffer::default(),
+            cursor_controller,
+            last_cursor: None,
         }
     }
 
     pub fn with_playout_mode(mode: ScreenPlayoutMode) -> Self {
+        let cursor_controller = ScreenCursorController::default();
+        let stats = ScreenStats {
+            cursor_mode: cursor_controller.mode().tag(),
+            cursor_visible: true,
+            cursor_shape: CursorShape::Arrow.tag(),
+            ..Default::default()
+        };
         Self {
             last_seq: 0,
-            stats: ScreenStats::default(),
+            stats,
             trace: VecDeque::with_capacity(SCREEN_TRACE_MAX),
             playout_buffer: ScreenPlayoutBuffer::new(mode),
+            cursor_controller,
+            last_cursor: None,
         }
     }
 
@@ -2259,6 +2778,16 @@ impl ScreenReceiver {
         st.playout_mode = pstats.mode as u8;
         st.playout_delay_us = pstats.target_delay_us.min(u32::MAX as u64) as u32;
         st.playout_jitter_us = pstats.current_jitter_us.min(u32::MAX as u64) as u32;
+        let cstats = self.cursor_controller.stats();
+        st.cursor_mode = cstats.mode.tag();
+        st.cursor_updates_sent = cstats.updates_sent;
+        st.cursor_updates_received = self.stats.cursor_updates_received;
+        if let Some(ref cur) = self.last_cursor {
+            st.cursor_x = cur.x;
+            st.cursor_y = cur.y;
+            st.cursor_visible = cur.visible;
+            st.cursor_shape = cur.shape.tag();
+        }
         st
     }
 
@@ -2295,6 +2824,46 @@ impl ScreenReceiver {
     /// Pop due frame for presentation at current clock timestamp `now_us`.
     pub fn pop_playout(&mut self, now_us: u64) -> ScreenPlayoutAction {
         self.playout_buffer.pop_frame(now_us)
+    }
+
+    /// Hardware cursor decoupling mode (v2.02 / ADR-088).
+    pub fn cursor_mode(&self) -> ScreenCursorMode {
+        self.cursor_controller.mode()
+    }
+
+    /// Set hardware cursor decoupling mode.
+    pub fn set_cursor_mode(&mut self, mode: ScreenCursorMode) -> ScreenCursorMode {
+        self.cursor_controller.set_mode(mode);
+        self.stats.cursor_mode = mode.tag();
+        mode
+    }
+
+    /// Handle incoming high-frequency cursor update frame.
+    pub fn on_cursor(&mut self, update: ScreenCursorUpdate) {
+        self.stats.cursor_x = update.x;
+        self.stats.cursor_y = update.y;
+        self.stats.cursor_visible = update.visible;
+        self.stats.cursor_shape = update.shape.tag();
+        self.stats.cursor_updates_received = self.stats.cursor_updates_received.saturating_add(1);
+        self.last_cursor = Some(update);
+    }
+
+    /// Current cursor state as received from host.
+    pub fn current_cursor(&self) -> Option<&ScreenCursorUpdate> {
+        self.last_cursor.as_ref()
+    }
+
+    /// Receiver cursor telemetry statistics.
+    pub fn cursor_stats(&self) -> ScreenCursorStats {
+        let mut st = self.cursor_controller.stats();
+        st.updates_received = self.stats.cursor_updates_received;
+        if let Some(ref cur) = self.last_cursor {
+            st.current_x = cur.x;
+            st.current_y = cur.y;
+            st.current_visible = cur.visible;
+            st.current_shape = cur.shape;
+        }
+        st
     }
 
     /// Most recently accepted sequence numbers, oldest first.
@@ -2337,6 +2906,8 @@ impl ScreenReceiver {
         self.last_seq = 0;
         self.trace.clear();
         self.playout_buffer.reset();
+        self.last_cursor = None;
+        self.cursor_controller.reset();
     }
 }
 
@@ -3592,5 +4163,245 @@ mod tests {
         // On peer gone resets playout queue
         recv.on_peer_gone();
         assert_eq!(recv.playout_stats().buffered_frames, 0);
+    }
+
+    #[test]
+    fn screen_cursor_update_codec_and_roundtrip() {
+        // 1. Basic standard cursor without custom bitmap
+        let update1 = ScreenCursorUpdate {
+            seq: 42,
+            x: 1024,
+            y: 768,
+            visible: true,
+            shape: CursorShape::Hand,
+            hotspot_x: 6,
+            hotspot_y: 2,
+            width: 32,
+            height: 32,
+            custom_rgba: None,
+        };
+
+        let payload = update1.encode_payload().unwrap();
+        assert_eq!(payload.len(), ScreenCursorUpdate::HEADER_LEN);
+        let decoded1 = ScreenCursorUpdate::decode_payload(&payload).unwrap();
+        assert_eq!(decoded1, update1);
+
+        // InnerFrame conversion
+        let frame = update1.to_frame().unwrap();
+        assert_eq!(frame.ty, TYPE_SCREEN_CURSOR);
+        let decoded_frame = ScreenCursorUpdate::from_frame(&frame).unwrap();
+        assert_eq!(decoded_frame, update1);
+
+        // 2. Custom cursor with RGBA bitmap payload
+        let custom_bytes = vec![255u8; 16 * 16 * 4];
+        let update2 = ScreenCursorUpdate {
+            seq: 99,
+            x: 500,
+            y: 300,
+            visible: true,
+            shape: CursorShape::Custom,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: 16,
+            height: 16,
+            custom_rgba: Some(custom_bytes.clone()),
+        };
+
+        let payload2 = update2.encode_payload().unwrap();
+        assert_eq!(
+            payload2.len(),
+            ScreenCursorUpdate::HEADER_LEN + custom_bytes.len()
+        );
+        let decoded2 = ScreenCursorUpdate::decode_payload(&payload2).unwrap();
+        assert_eq!(decoded2, update2);
+
+        // 3. Negative coordinates (multi-monitor topology)
+        let update3 = ScreenCursorUpdate {
+            seq: 101,
+            x: -1920,
+            y: -1080,
+            visible: false,
+            shape: CursorShape::IBeam,
+            hotspot_x: 4,
+            hotspot_y: 8,
+            width: 16,
+            height: 24,
+            custom_rgba: None,
+        };
+        let payload3 = update3.encode_payload().unwrap();
+        let decoded3 = ScreenCursorUpdate::decode_payload(&payload3).unwrap();
+        assert_eq!(decoded3.x, -1920);
+        assert_eq!(decoded3.y, -1080);
+        assert_eq!(decoded3.visible, false);
+        assert_eq!(decoded3.shape, CursorShape::IBeam);
+    }
+
+    #[test]
+    fn screen_cursor_controller_dedup_and_rate_limiting() {
+        let mut ctrl = ScreenCursorController::new(ScreenCursorMode::Decoupled);
+        assert_eq!(ctrl.mode(), ScreenCursorMode::Decoupled);
+        assert_eq!(ctrl.min_interval_us(), SCREEN_CURSOR_MIN_INTERVAL_US);
+
+        // 1. First update succeeds
+        let u1 = ctrl.create_update(
+            100,
+            100,
+            true,
+            CursorShape::Arrow,
+            (0, 0),
+            (32, 32),
+            None,
+            10_000,
+        );
+        assert!(u1.is_some());
+        assert_eq!(u1.unwrap().seq, 1);
+        assert_eq!(ctrl.stats().updates_sent, 1);
+
+        // 2. Exact position deduplication drops redundant call
+        let u2 = ctrl.create_update(
+            100,
+            100,
+            true,
+            CursorShape::Arrow,
+            (0, 0),
+            (32, 32),
+            None,
+            10_000 + 50_000,
+        );
+        assert!(u2.is_none());
+        assert_eq!(ctrl.stats().updates_dropped_dedup, 1);
+
+        // 3. Movement before min_interval_us (8ms) elapses is rate-limited
+        let u3 = ctrl.create_update(
+            105,
+            102,
+            true,
+            CursorShape::Arrow,
+            (0, 0),
+            (32, 32),
+            None,
+            10_000 + 4_000, // only 4ms elapsed
+        );
+        assert!(u3.is_none());
+        assert_eq!(ctrl.stats().updates_dropped_rate, 1);
+
+        // 4. Movement after min_interval_us elapses succeeds
+        let u4 = ctrl.create_update(
+            110,
+            105,
+            true,
+            CursorShape::Arrow,
+            (0, 0),
+            (32, 32),
+            None,
+            10_000 + 10_000, // 10ms elapsed >= 8ms
+        );
+        assert!(u4.is_some());
+        assert_eq!(u4.unwrap().seq, 2);
+        assert_eq!(ctrl.stats().updates_sent, 2);
+
+        // 5. Shape change bypasses rate limiting immediately
+        let u5 = ctrl.create_update(
+            112,
+            106,
+            true,
+            CursorShape::Hand, // shape changed!
+            (6, 2),
+            (32, 32),
+            None,
+            10_000 + 11_000, // only 1ms after last send
+        );
+        assert!(u5.is_some());
+        assert_eq!(u5.unwrap().shape, CursorShape::Hand);
+        assert_eq!(ctrl.stats().updates_sent, 3);
+
+        // 6. Embedded mode produces no outbound cursor updates
+        ctrl.set_mode(ScreenCursorMode::Embedded);
+        let u6 = ctrl.create_update(
+            200,
+            200,
+            true,
+            CursorShape::Arrow,
+            (0, 0),
+            (32, 32),
+            None,
+            1_000_000,
+        );
+        assert!(u6.is_none());
+    }
+
+    #[test]
+    fn screen_cursor_sender_and_receiver_integration() {
+        let mut sender = ScreenSender::new();
+        let mut receiver = ScreenReceiver::new();
+
+        // 1. Initial default mode is decoupled
+        assert_eq!(sender.cursor_mode(), ScreenCursorMode::Decoupled);
+        assert_eq!(receiver.cursor_mode(), ScreenCursorMode::Decoupled);
+
+        // Cursor push before streaming returns None
+        assert!(sender
+            .push_cursor_with_time(
+                50,
+                50,
+                true,
+                CursorShape::Arrow,
+                (0, 0),
+                (32, 32),
+                None,
+                1000
+            )
+            .is_none());
+
+        // Connect, allow, and start streaming
+        sender.on_peer_connected();
+        sender.allow();
+        sender.on_control(ControlMsg::Start).unwrap();
+        assert!(sender.state().is_streaming());
+
+        // 2. Push cursor update on sender
+        let update = sender
+            .push_cursor_with_time(
+                300,
+                400,
+                true,
+                CursorShape::IBeam,
+                (4, 8),
+                (16, 24),
+                None,
+                20_000,
+            )
+            .expect("should produce update");
+
+        assert_eq!(update.x, 300);
+        assert_eq!(update.y, 400);
+        assert_eq!(update.shape, CursorShape::IBeam);
+        assert_eq!(sender.stats().cursor_updates_sent, 1);
+        assert_eq!(sender.stats().cursor_x, 300);
+        assert_eq!(sender.stats().cursor_y, 400);
+
+        // 3. Receive cursor update on receiver
+        receiver.on_cursor(update.clone());
+        assert_eq!(receiver.stats().cursor_updates_received, 1);
+        assert_eq!(receiver.stats().cursor_x, 300);
+        assert_eq!(receiver.stats().cursor_y, 400);
+        assert_eq!(receiver.stats().cursor_shape, CursorShape::IBeam.tag());
+        assert_eq!(receiver.current_cursor(), Some(&update));
+
+        // 4. Mode switching updates stats
+        sender.set_cursor_mode(ScreenCursorMode::Hidden);
+        assert_eq!(sender.cursor_mode(), ScreenCursorMode::Hidden);
+        assert_eq!(sender.stats().cursor_mode, ScreenCursorMode::Hidden.tag());
+
+        receiver.set_cursor_mode(ScreenCursorMode::Embedded);
+        assert_eq!(receiver.cursor_mode(), ScreenCursorMode::Embedded);
+        assert_eq!(
+            receiver.stats().cursor_mode,
+            ScreenCursorMode::Embedded.tag()
+        );
+
+        // 5. On peer gone resets receiver cursor
+        receiver.on_peer_gone();
+        assert_eq!(receiver.current_cursor(), None);
     }
 }
