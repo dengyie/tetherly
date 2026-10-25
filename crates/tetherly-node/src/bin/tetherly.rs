@@ -108,6 +108,11 @@ enum Cmd {
         /// adapts Cauchy RS redundancy to loss; `conservative` (10%); `aggressive` (25%); `disabled` (0%).
         #[arg(long, default_value = "auto")]
         screen_fec: String,
+        /// Screen Streaming Microsecond Packet Pacing and Burst Shaper mode (ADR-091):
+        /// `auto` (default) burst 4 pkts, smooth over 80% frame interval;
+        /// `aggressive` burst 2 pkts, smooth over 100% frame interval; `disabled` passthrough.
+        #[arg(long, default_value = "auto")]
+        screen_pacer: String,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -2133,6 +2138,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming microsecond packet pacing and burst shaper (v2.05 / ADR-091).
+    Pacer {
+        /// Target pacer mode: `auto`, `aggressive`, or `disabled`. If omitted, displays current pacer status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3932,6 +3948,7 @@ async fn main() -> Result<()> {
             screen_cursor,
             screen_squelch,
             screen_fec,
+            screen_pacer,
             file_port,
             input_port,
             screen_port,
@@ -4034,6 +4051,14 @@ async fn main() -> Result<()> {
                 Err(_) => {
                     anyhow::bail!(
                         "--screen-fec must be `auto`, `conservative`, `aggressive`, or `disabled`"
+                    )
+                }
+            };
+            cfg.screen_pacer_mode = match screen_pacer.trim().parse::<tetherly_core::ScreenPacerMode>() {
+                Ok(mode) => mode,
+                Err(_) => {
+                    anyhow::bail!(
+                        "--screen-pacer must be `auto`, `aggressive`, or `disabled`"
                     )
                 }
             };
@@ -6200,6 +6225,15 @@ async fn main() -> Result<()> {
                             rep.fec_unrecoverable_blocks
                         );
                     }
+                    if !rep.pacer_mode.is_empty() {
+                        println!(
+                            "  Pacer Mode:   {} (paced_packets: {}, bursts_smoothed: {}, avg_delay: {} us)",
+                            rep.pacer_mode,
+                            rep.pacer_packets_paced,
+                            rep.pacer_bursts_smoothed,
+                            rep.pacer_avg_delay_us
+                        );
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -6719,6 +6753,56 @@ async fn main() -> Result<()> {
                         println!("  Blocks Decoded:       {}", rep.blocks_decoded);
                         println!("  Recovered Shards:     {}", rep.recovered_shards);
                         println!("  Unrecoverable Blocks: {}", rep.unrecoverable_blocks);
+                    }
+                }
+            }
+            ScreenCmd::Pacer {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    tetherly_node::loopback_post(ui_port, "/api/screen/pacer", &body).await
+                } else {
+                    tetherly_node::loopback_get(ui_port, "/api/screen/pacer").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen pacer query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_core::ScreenPacerReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    if has_update {
+                        println!(
+                            "Screen microsecond packet pacer mode updated: {}",
+                            rep.mode
+                        );
+                    } else {
+                        println!(
+                            "Screen Microsecond Packet Pacing & Burst Shaper (ADR-091):"
+                        );
+                        println!("  Pacer Mode:           {}", rep.mode);
+                        println!("  Packets Paced:        {}", rep.packets_paced);
+                        println!("  Bursts Smoothed:      {}", rep.bursts_smoothed);
+                        println!("  Average Delay:        {} us", rep.avg_delay_us);
+                        println!("  Last Packet Delay:    {} us", rep.last_delay_us);
                     }
                 }
             }

@@ -911,9 +911,22 @@ pub struct ScreenStats {
     pub fec_recovered_shards: u64,
     /// Total FEC blocks that experienced unrecoverable loss exceeding parity budget (v2.04 / ADR-090).
     pub fec_unrecoverable_blocks: u64,
+    /// Microsecond packet pacer mode tag (0=auto, 1=aggressive, 2=disabled) (v2.05 / ADR-091).
+    pub pacer_mode: u8,
+    /// Total packets passed through the microsecond pacer (v2.05 / ADR-091).
+    pub pacer_packets_paced: u64,
+    /// Total micro-bursts smoothed across the frame interval (v2.05 / ADR-091).
+    pub pacer_bursts_smoothed: u64,
+    /// Average packet pacing delay in microseconds (v2.05 / ADR-091).
+    pub pacer_avg_delay_us: u64,
 }
 
 impl ScreenStats {
+    /// Microsecond packet pacer mode.
+    pub fn pacer_mode(&self) -> ScreenPacerMode {
+        ScreenPacerMode::from_tag(self.pacer_mode)
+    }
+
     /// Forward error correction (FEC) mode.
     pub fn fec_mode(&self) -> ScreenFecMode {
         ScreenFecMode::from_tag(self.fec_mode)
@@ -3307,6 +3320,186 @@ impl ScreenFecAssembler {
     }
 }
 
+pub const SCREEN_PACER_BURST_AUTO: usize = 4;
+pub const SCREEN_PACER_BURST_AGGRESSIVE: usize = 2;
+pub const SCREEN_PACER_MAX_DELAY_US: u64 = 50_000;
+
+/// Screen streaming packet pacing mode (v2.05 / ADR-091).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ScreenPacerMode {
+    #[default]
+    Auto = 0,
+    Aggressive = 1,
+    Disabled = 2,
+}
+
+impl ScreenPacerMode {
+    pub const fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => Self::Aggressive,
+            2 => Self::Disabled,
+            _ => Self::Auto,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Aggressive => "aggressive",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+impl std::str::FromStr for ScreenPacerMode {
+    type Err = CoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "aggressive" | "agg" => Ok(Self::Aggressive),
+            "disabled" | "off" | "none" => Ok(Self::Disabled),
+            _ => Err(CoreError::ScreenFrame),
+        }
+    }
+}
+
+impl std::fmt::Display for ScreenPacerMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Statistics and counters for screen packet pacing (v2.05 / ADR-091).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScreenPacerStats {
+    pub mode: ScreenPacerMode,
+    pub packets_paced: u64,
+    pub bursts_smoothed: u64,
+    pub total_delay_us: u64,
+    pub avg_delay_us: u64,
+    pub last_delay_us: u64,
+}
+
+/// JSON report DTO for screen packet pacing (v2.05 / ADR-091).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenPacerReport {
+    pub ok: bool,
+    pub mode: String,
+    pub packets_paced: u64,
+    pub bursts_smoothed: u64,
+    pub avg_delay_us: u64,
+    pub last_delay_us: u64,
+    pub timestamp_ms: u64,
+}
+
+/// Screen streaming microsecond-level packet pacer & burst shaper (v2.05 / ADR-091).
+#[derive(Debug, Clone)]
+pub struct ScreenPacketPacer {
+    mode: ScreenPacerMode,
+    stats: ScreenPacerStats,
+}
+
+impl Default for ScreenPacketPacer {
+    fn default() -> Self {
+        Self::new(ScreenPacerMode::Auto)
+    }
+}
+
+impl ScreenPacketPacer {
+    pub fn new(mode: ScreenPacerMode) -> Self {
+        Self {
+            mode,
+            stats: ScreenPacerStats {
+                mode,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn mode(&self) -> ScreenPacerMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenPacerMode) -> ScreenPacerMode {
+        self.mode = mode;
+        self.stats.mode = mode;
+        mode
+    }
+
+    pub fn stats(&self) -> ScreenPacerStats {
+        self.stats
+    }
+
+    /// Computes relative departure delay offsets (in microseconds) for a batch of N packets
+    /// belonging to a single video frame, smoothing micro-bursts across the frame interval.
+    pub fn compute_packet_delays(
+        &mut self,
+        packet_count: usize,
+        fps_target: u32,
+    ) -> Vec<u64> {
+        if packet_count == 0 {
+            return Vec::new();
+        }
+        if self.mode == ScreenPacerMode::Disabled {
+            self.stats.packets_paced = self.stats.packets_paced.saturating_add(packet_count as u64);
+            return vec![0u64; packet_count];
+        }
+
+        let burst_limit = match self.mode {
+            ScreenPacerMode::Auto => SCREEN_PACER_BURST_AUTO,
+            ScreenPacerMode::Aggressive => SCREEN_PACER_BURST_AGGRESSIVE,
+            ScreenPacerMode::Disabled => packet_count,
+        };
+
+        if packet_count <= burst_limit {
+            self.stats.packets_paced = self.stats.packets_paced.saturating_add(packet_count as u64);
+            return vec![0u64; packet_count];
+        }
+
+        // Frame duration in microseconds
+        let fps = fps_target.clamp(5, 120) as u64;
+        let frame_duration_us = 1_000_000u64 / fps;
+
+        // Pacing budget: 80% of frame duration in Auto, 100% in Aggressive
+        let budget_us = match self.mode {
+            ScreenPacerMode::Auto => (frame_duration_us * 8) / 10,
+            ScreenPacerMode::Aggressive => frame_duration_us,
+            ScreenPacerMode::Disabled => 0,
+        };
+
+        let paced_shards = packet_count - burst_limit;
+        let step_us = (budget_us / (paced_shards as u64 + 1)).min(SCREEN_PACER_MAX_DELAY_US);
+
+        let mut delays = Vec::with_capacity(packet_count);
+        let mut burst_delay_sum = 0u64;
+
+        for i in 0..packet_count {
+            if i < burst_limit {
+                delays.push(0);
+            } else {
+                let delay = ((i - burst_limit + 1) as u64 * step_us).min(SCREEN_PACER_MAX_DELAY_US);
+                delays.push(delay);
+                burst_delay_sum = burst_delay_sum.saturating_add(delay);
+                self.stats.last_delay_us = delay;
+            }
+        }
+
+        self.stats.bursts_smoothed = self.stats.bursts_smoothed.saturating_add(1);
+        self.stats.packets_paced = self.stats.packets_paced.saturating_add(packet_count as u64);
+        self.stats.total_delay_us = self.stats.total_delay_us.saturating_add(burst_delay_sum);
+        if let Some(avg) = self.stats.total_delay_us.checked_div(self.stats.packets_paced) {
+            self.stats.avg_delay_us = avg;
+        }
+
+        delays
+    }
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -3325,6 +3518,7 @@ pub struct ScreenSender {
     cursor_controller: ScreenCursorController,
     squelch_controller: ScreenSquelchController,
     fec_controller: ScreenFecController,
+    packet_pacer: ScreenPacketPacer,
 }
 
 impl Default for ScreenSender {
@@ -3343,6 +3537,7 @@ impl ScreenSender {
         let cursor_controller = ScreenCursorController::default();
         let squelch_controller = ScreenSquelchController::default();
         let fec_controller = ScreenFecController::default();
+        let packet_pacer = ScreenPacketPacer::default();
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -3362,6 +3557,10 @@ impl ScreenSender {
             fec_redundancy_pct: fec_controller.stats().redundancy_pct,
             fec_recovered_shards: 0,
             fec_unrecoverable_blocks: 0,
+            pacer_mode: packet_pacer.mode().tag(),
+            pacer_packets_paced: 0,
+            pacer_bursts_smoothed: 0,
+            pacer_avg_delay_us: 0,
             ..Default::default()
         };
         Self {
@@ -3379,7 +3578,14 @@ impl ScreenSender {
             cursor_controller,
             squelch_controller,
             fec_controller,
+            packet_pacer,
         }
+    }
+
+    pub fn with_pacer(pacer: ScreenPacerMode) -> Self {
+        let mut sender = Self::new();
+        sender.set_pacer_mode(pacer);
+        sender
     }
 
     pub fn with_fec(fec: ScreenFecMode) -> Self {
@@ -3905,6 +4111,45 @@ impl ScreenSender {
         self.fec_controller.stats()
     }
 
+    /// Screen packet pacing mode (v2.05 / ADR-091).
+    pub fn pacer_mode(&self) -> ScreenPacerMode {
+        self.packet_pacer.mode()
+    }
+
+    /// Explicitly configure screen packet pacing mode.
+    pub fn set_pacer_mode(&mut self, mode: ScreenPacerMode) -> ScreenPacerMode {
+        let actual = self.packet_pacer.set_mode(mode);
+        self.stats.pacer_mode = actual.tag();
+        actual
+    }
+
+    /// Access reference to internal packet pacer.
+    pub fn packet_pacer(&self) -> &ScreenPacketPacer {
+        &self.packet_pacer
+    }
+
+    /// Access mutable reference to internal packet pacer.
+    pub fn packet_pacer_mut(&mut self) -> &mut ScreenPacketPacer {
+        &mut self.packet_pacer
+    }
+
+    /// Real-time packet pacer statistics.
+    pub fn pacer_stats(&self) -> ScreenPacerStats {
+        self.packet_pacer.stats()
+    }
+
+    /// Computes packet departure delay offsets (in microseconds) for smoothing bursts.
+    pub fn compute_packet_delays(&mut self, packet_count: usize) -> Vec<u64> {
+        let delays = self
+            .packet_pacer
+            .compute_packet_delays(packet_count, self.fps_pacer.fps_target());
+        let st = self.packet_pacer.stats();
+        self.stats.pacer_packets_paced = st.packets_paced;
+        self.stats.pacer_bursts_smoothed = st.bursts_smoothed;
+        self.stats.pacer_avg_delay_us = st.avg_delay_us;
+        delays
+    }
+
     /// Convert a ScreenFrame into outbound InnerFrames.
     /// If FEC mode is active (redundancy > 0), encodes payload into Cauchy RS shards (TYPE_SCREEN_FEC).
     /// Otherwise, falls back to standard fragmentation (TYPE_SCREEN_FRAME).
@@ -3965,6 +4210,7 @@ impl ScreenSender {
         self.cursor_controller.reset();
         self.squelch_controller = ScreenSquelchController::new(self.squelch_controller.mode());
         self.fec_controller = ScreenFecController::new(self.fec_controller.mode());
+        self.packet_pacer = ScreenPacketPacer::new(self.packet_pacer.mode());
         self.stats.is_squelched = false;
         self.stats.squelched_frames = 0;
     }
@@ -6089,5 +6335,67 @@ mod tests {
         assert_eq!(rf.seq, frame.seq);
         assert_eq!(rf.bytes.len(), frame.bytes.len());
         assert_eq!(receiver.stats().fec_recovered_shards, 1);
+    }
+
+    #[test]
+    fn screen_packet_pacer_burst_smoothing_and_modes() {
+        // 1. Parsing and serialization
+        assert_eq!("auto".parse::<ScreenPacerMode>().unwrap(), ScreenPacerMode::Auto);
+        assert_eq!("aggressive".parse::<ScreenPacerMode>().unwrap(), ScreenPacerMode::Aggressive);
+        assert_eq!("agg".parse::<ScreenPacerMode>().unwrap(), ScreenPacerMode::Aggressive);
+        assert_eq!("disabled".parse::<ScreenPacerMode>().unwrap(), ScreenPacerMode::Disabled);
+        assert_eq!("off".parse::<ScreenPacerMode>().unwrap(), ScreenPacerMode::Disabled);
+        assert!("invalid".parse::<ScreenPacerMode>().is_err());
+        assert_eq!(ScreenPacerMode::from_tag(0), ScreenPacerMode::Auto);
+        assert_eq!(ScreenPacerMode::from_tag(1), ScreenPacerMode::Aggressive);
+        assert_eq!(ScreenPacerMode::from_tag(2), ScreenPacerMode::Disabled);
+
+        // 2. Auto mode pacing (burst limit = 4, target 30 FPS -> frame_duration 33333 us, budget = 26666 us)
+        let mut pacer = ScreenPacketPacer::new(ScreenPacerMode::Auto);
+        assert_eq!(pacer.mode(), ScreenPacerMode::Auto);
+
+        // Under burst limit: 3 packets -> all zero delay
+        let delays_under = pacer.compute_packet_delays(3, 30);
+        assert_eq!(delays_under, vec![0, 0, 0]);
+        assert_eq!(pacer.stats().packets_paced, 3);
+        assert_eq!(pacer.stats().bursts_smoothed, 0);
+
+        // Over burst limit: 8 packets -> 4 burst packets at 0, 4 paced packets with increasing delay
+        let delays_over = pacer.compute_packet_delays(8, 30);
+        assert_eq!(delays_over.len(), 8);
+        assert_eq!(&delays_over[0..4], &[0, 0, 0, 0]);
+        assert!(delays_over[4] > 0);
+        assert!(delays_over[5] > delays_over[4]);
+        assert!(delays_over[6] > delays_over[5]);
+        assert!(delays_over[7] > delays_over[6]);
+        assert!(delays_over[7] <= SCREEN_PACER_MAX_DELAY_US);
+        assert_eq!(pacer.stats().bursts_smoothed, 1);
+        assert_eq!(pacer.stats().packets_paced, 11);
+        assert!(pacer.stats().avg_delay_us > 0);
+
+        // 3. Aggressive mode (burst limit = 2)
+        pacer.set_mode(ScreenPacerMode::Aggressive);
+        let agg_delays = pacer.compute_packet_delays(5, 60);
+        assert_eq!(agg_delays.len(), 5);
+        assert_eq!(&agg_delays[0..2], &[0, 0]);
+        assert!(agg_delays[2] > 0);
+        assert!(agg_delays[3] > agg_delays[2]);
+        assert!(agg_delays[4] > agg_delays[3]);
+
+        // 4. Disabled mode -> all 0
+        pacer.set_mode(ScreenPacerMode::Disabled);
+        let dis_delays = pacer.compute_packet_delays(10, 30);
+        assert_eq!(dis_delays, vec![0; 10]);
+
+        // 5. Sender integration test
+        let mut sender = ScreenSender::new();
+        assert_eq!(sender.pacer_mode(), ScreenPacerMode::Auto);
+        let sender_delays = sender.compute_packet_delays(6);
+        assert_eq!(sender_delays.len(), 6);
+        assert_eq!(&sender_delays[0..4], &[0, 0, 0, 0]);
+        assert!(sender_delays[4] > 0);
+        assert_eq!(sender.stats().pacer_mode, ScreenPacerMode::Auto.tag());
+        assert_eq!(sender.stats().pacer_bursts_smoothed, 1);
+        assert_eq!(sender.stats().pacer_packets_paced, 6);
     }
 }

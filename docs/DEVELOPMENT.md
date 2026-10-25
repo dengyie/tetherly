@@ -3,12 +3,33 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.04** |
+| 文档版本 | **2.05** |
 | 日期 | 2026-10-25 |
-| 状态 | **v2.04 屏幕流前向纠错（FEC）与自适应冗余保护流水线（Screen Forward Error Correction & Adaptive Redundancy Protection Pipeline, ADR-090）与双端 CLI 全同构**——(1) **协议与数学引擎**（`crates/tetherly-core/src/screen.rs`）：基于有限域 $GF(2^8)$（$P(x) = x^8 + x^4 + x^3 + x^2 + 1$）与柯西生成矩阵（Cauchy Generator Matrix）构建满足 MDS 严格可分特性的线速前向纠错编解码引擎（`ScreenFecBlock`、`ScreenFecEncoder`、`ScreenFecDecoder`），支持高斯消元求逆 0-RTT 自愈重构；设计 24 字节定长线缆分片头（`TYPE_SCREEN_FEC = 0x0504`，魔数 `TFEC`）；实现自适应冗余控制器 `ScreenFecController`，支持 Auto（动态阶梯 0% ~ 30%）、Conservative（10%）、Aggressive（25%）与 Disabled（0% 透传）四种模式；与 ADR-086 4 维自主自适应矩阵协同器（`network_health()`）深度绑定；在接收端引入零往返抗丢恢复器 `ScreenFecAssembler`；(2) **双端 CLI 全同构与生态**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `runtime.rs`, `uihttp.rs`）：持续保证 `tetherly` 与 `tetherly-cli` 100% 同构，新增 `screen fec [mode]` 子命令与 `--screen-fec` 启动参数；新增 REST API `GET/POST /api/screen/fec`，扩展 `ScreenStatusReport` 透出 FEC 模式、冗余比例与重构遥测；(3) **测试与版本**：单元测试与 Phase 5 端到端集成测试 `m5_14_screen_adaptive_fec_protection` 全绿，工作区升级至 `0.1.26`。 |
+| 状态 | **v2.05 屏幕流微秒级报文定步与令牌桶突发整形器（Screen Streaming Microsecond Packet Pacing & Token-Bucket Burst Shaper, ADR-091）与双端 CLI 全同构**——(1) **协议与定步引擎**（`crates/tetherly-core/src/screen.rs`）：设计微秒级定步与令牌桶突发平滑整形器（`ScreenPacketPacer`、`ScreenPacerStats`、`ScreenPacerReport`、`ScreenPacerMode`），消除关键帧（IDR）与复杂大帧切片后线速微突发（Micro-Burst）引发的路由队列尾丢弃（Queue Tail-Drop）；支持 Auto（允许 4 包初始突发，剩余分片在帧周期 80% 内均匀发散）、Aggressive（允许 2 包初始突发，在帧周期 100% 内发散）与 Disabled（零延时透传）三种模式；引入 50ms 延时硬上限熔断（`SCREEN_PACER_MAX_DELAY_US = 50_000`）；(2) **异步发射管线与运行时**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：深度集成至 `ScreenSender` 与 `Node::send_screen_frames`，利用 Tokio 协程微秒级非阻塞发散报文；新增 REST API `GET/POST /api/screen/pacer`，扩展 `ScreenStatusReport` 透出 `pacer_mode`、`pacer_packets_paced`、`pacer_bursts_smoothed`、`pacer_avg_delay_us` 遥测；(3) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：`tetherly` 与 `tetherly-cli` 全同构支持 `screen pacer [mode]`、`tetherly run --screen-pacer` 与状态打印；(4) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_15_screen_packet_pacing_and_burst_shaping` 全绿，版本升级至 `0.1.27`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.05 相对 2.04(屏幕流微秒级报文定步与令牌桶突发整形器 ADR-091 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **消除突发微暴流（Micro-Burst）引发的网络队列尾丢弃**: 屏幕流大画面或关键帧（IDR）切片通常产生 10 ~ 100+ 个数据分片，网卡线速瞬间倾泻会压满沿途交换机、家用 Wi-Fi 路由器与蜂窝基站队列，引发随机尾丢弃与 RTT 抖动剧烈抬升。
+  2. **平衡首包交互呈现时延与后续平滑发散**: 桌面交互高度注重手感，从首包强制延迟会损害响应速度。引入令牌桶初始突发配额（$M=4$ 或 $M=2$），初始分片零延迟直出唤醒对端，后续分片在帧周期预算内均分发散。
+  3. **防积压延时硬上限熔断**: 超大关键帧切片延时若无限递增，会导致整帧跨越下一帧周期，引发严重积压与播放撕裂。引入 50ms 硬时延熔断上限保护。
+- **架构解法与落地**:
+  1. **Core 微秒定步与突发整形器（`crates/tetherly-core/src/screen.rs`）**:
+     - 实现 `ScreenPacketPacer`、`ScreenPacerMode`（Auto/Aggressive/Disabled）、`ScreenPacerStats` 与 `ScreenPacerReport`。
+     - 实现 `compute_packet_delays`，根据帧率计算帧周期预算 $T_f = 1,000,000 / \text{fps}$，计算分片递增微秒发射偏移。
+  2. **Node 异步非阻塞发射流水线与调度（`crates/tetherly-node/src/runtime.rs`）**:
+     - 在 `send_screen_frames` 异步发送链路中，结合 Tokio `sleep(Duration::from_micros(step))` 依次发散各分片，消除网络微突发。
+     - `Node` 增加 `screen_pacer_mode()`、`screen_set_pacer_mode()`、`screen_pacer_report()` 运行时接口。
+  3. **回环 REST API（`crates/tetherly-node/src/uihttp.rs`）**:
+     - 新增 `GET /api/screen/pacer` 与 `POST /api/screen/pacer`，支持 JSON 和 query 参数控制。
+     - `ScreenStatusReport` 扩充定步遥测字段。
+  4. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - 支持 `screen pacer [mode]` 子命令、`tetherly run --screen-pacer` 启动参数与 `screen status` 状态监控。
+  5. **测试与验证**:
+     - 核心单元测试、REST API 单元测试及 Phase 5 端到端集成测试 `m5_15_screen_packet_pacing_and_burst_shaping` 全绿。
 
 **2.04 相对 2.03(屏幕流前向纠错与自适应冗余保护流水线 ADR-090 与双端 CLI 全同构)**
 

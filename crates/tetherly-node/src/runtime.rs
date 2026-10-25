@@ -61,8 +61,9 @@ use tetherly_core::{
     Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource, ReplyView,
     ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenCursorMode, ScreenCursorStats,
     ScreenCursorUpdate, ScreenDamageTracker, ScreenFecMode, ScreenFecReport, ScreenFecShard,
-    ScreenFrame, ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats, ScreenReceiver,
-    ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState, ScreenStats,
+    ScreenFrame, ScreenPacerMode, ScreenPacerReport, ScreenPlayoutAction,
+    ScreenPlayoutMode, ScreenPlayoutStats, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource,
+    ScreenSquelchMode, ScreenState, ScreenStats,
     SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
     TrustStore, VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
     VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
@@ -167,6 +168,8 @@ pub struct NodeConfig {
     pub screen_squelch_mode: tetherly_core::ScreenSquelchMode,
     /// Operation mode for screen forward error correction (FEC) and adaptive redundancy protection (ADR-090).
     pub screen_fec_mode: tetherly_core::ScreenFecMode,
+    /// Operation mode for screen streaming microsecond packet pacing and token-bucket burst shaper (ADR-091).
+    pub screen_pacer_mode: tetherly_core::ScreenPacerMode,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -224,6 +227,7 @@ impl Default for NodeConfig {
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
+            screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_sink: None,
             input_sink: None,
         }
@@ -2934,6 +2938,14 @@ pub struct ScreenStatusReport {
     pub fec_recovered_shards: u64,
     #[serde(default)]
     pub fec_unrecoverable_blocks: u64,
+    #[serde(default)]
+    pub pacer_mode: String,
+    #[serde(default)]
+    pub pacer_packets_paced: u64,
+    #[serde(default)]
+    pub pacer_bursts_smoothed: u64,
+    #[serde(default)]
+    pub pacer_avg_delay_us: u64,
 }
 
 /// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
@@ -3294,6 +3306,8 @@ struct Shared {
     screen_squelch_mode: Mutex<ScreenSquelchMode>,
     /// Forward error correction (FEC) mode for screen streams (ADR-090).
     screen_fec_mode: Mutex<ScreenFecMode>,
+    /// Microsecond packet pacing and burst shaper mode for screen streams (ADR-091).
+    screen_pacer_mode: Mutex<ScreenPacerMode>,
     /// Damage tracker for screen frames (ADR-089).
     screen_damage_tracker: Mutex<ScreenDamageTracker>,
     /// Previous frame bytes for difference detection (ADR-089).
@@ -3492,6 +3506,7 @@ impl Node {
         let screen_cursor_mode = cfg.screen_cursor_mode;
         let screen_squelch_mode = cfg.screen_squelch_mode;
         let screen_fec_mode = cfg.screen_fec_mode;
+        let screen_pacer_mode = cfg.screen_pacer_mode;
         if let Some(sel) = &screen_encode_codec {
             sel.set_fps(screen_fps);
             sel.set_scale_pct(screen_scale_pct);
@@ -3633,6 +3648,7 @@ impl Node {
                 s.matrix_coordinator_mut().set_auto_scale(screen_scale_auto);
                 s.set_squelch_mode(screen_squelch_mode);
                 s.set_fec_mode(screen_fec_mode);
+                s.set_pacer_mode(screen_pacer_mode);
                 s
             }),
             screen_source,
@@ -3673,6 +3689,7 @@ impl Node {
             screen_cursor_stats: Mutex::new(ScreenCursorStats::default()),
             screen_squelch_mode: Mutex::new(screen_squelch_mode),
             screen_fec_mode: Mutex::new(screen_fec_mode),
+            screen_pacer_mode: Mutex::new(screen_pacer_mode),
             screen_damage_tracker: Mutex::new(ScreenDamageTracker::new()),
             screen_prev_frame: Mutex::new(None),
             shutdown,
@@ -20790,7 +20807,7 @@ impl Node {
             .clone()
             .ok_or_else(|| CoreError::Json("screen channel closed".into()))?;
         for f in frames {
-            let frags = {
+            let (frags, delays_us) = {
                 let mut engine = self.shared.screen_engine.lock().expect("screen");
                 let loss_ratio = match engine.network_health() {
                     tetherly_core::NetworkHealth::Healthy => 0.0,
@@ -20798,7 +20815,9 @@ impl Node {
                     tetherly_core::NetworkHealth::Congested => 0.05,
                     tetherly_core::NetworkHealth::Critical => 0.10,
                 };
-                engine.encode_frame_to_inner_frames(&f, loss_ratio)?
+                let frags = engine.encode_frame_to_inner_frames(&f, loss_ratio)?;
+                let delays = engine.compute_packet_delays(frags.len());
+                (frags, delays)
             };
             // Live video: under backpressure drop the whole frame rather than
             // stall the pump or grow memory without bound. A partial frame is
@@ -20834,7 +20853,15 @@ impl Node {
                 );
                 continue;
             }
-            for frag in frags {
+            let mut prev_delay = 0u64;
+            for (idx, frag) in frags.into_iter().enumerate() {
+                if let Some(&delay_us) = delays_us.get(idx) {
+                    let step = delay_us.saturating_sub(prev_delay);
+                    if step > 0 {
+                        tokio::time::sleep(std::time::Duration::from_micros(step)).await;
+                    }
+                    prev_delay = delay_us;
+                }
                 if tx.try_send(frag).is_err() {
                     return Err(CoreError::Json("screen peer gone".into()));
                 }
@@ -21167,6 +21194,10 @@ impl Node {
             fec_redundancy_pct: stats.fec_redundancy_pct,
             fec_recovered_shards: rx_stats.fec_recovered_shards,
             fec_unrecoverable_blocks: rx_stats.fec_unrecoverable_blocks,
+            pacer_mode: stats.pacer_mode().as_str().to_string(),
+            pacer_packets_paced: stats.pacer_packets_paced,
+            pacer_bursts_smoothed: stats.pacer_bursts_smoothed,
+            pacer_avg_delay_us: stats.pacer_avg_delay_us,
         }
     }
 
@@ -21708,6 +21739,42 @@ impl Node {
             .expect("screen")
             .set_fec_mode(mode);
         self.screen_fec_report()
+    }
+
+    /// Report current packet pacing and burst shaper metrics and state (v2.05 / ADR-091).
+    pub fn screen_pacer_report(&self) -> ScreenPacerReport {
+        let mode = *self.shared.screen_pacer_mode.lock().expect("pacer mode");
+        let stats = self
+            .shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .pacer_stats();
+        ScreenPacerReport {
+            ok: true,
+            mode: mode.as_str().to_string(),
+            packets_paced: stats.packets_paced,
+            bursts_smoothed: stats.bursts_smoothed,
+            avg_delay_us: stats.avg_delay_us,
+            last_delay_us: stats.last_delay_us,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Current screen packet pacing mode (v2.05 / ADR-091).
+    pub fn screen_pacer_mode(&self) -> tetherly_core::ScreenPacerMode {
+        *self.shared.screen_pacer_mode.lock().expect("pacer mode")
+    }
+
+    /// Set and report screen packet pacing mode (v2.05 / ADR-091).
+    pub fn screen_set_pacer_mode(&self, mode: tetherly_core::ScreenPacerMode) -> ScreenPacerReport {
+        *self.shared.screen_pacer_mode.lock().expect("pacer mode") = mode;
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .set_pacer_mode(mode);
+        self.screen_pacer_report()
     }
 
     /// Comprehensive status report for input sharing.
@@ -22449,6 +22516,7 @@ mod clipboard_policy_tests {
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
+            screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22599,6 +22667,7 @@ mod handoff_engine_tests {
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
+            screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22780,6 +22849,7 @@ mod media_policy_tests {
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
+            screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22937,6 +23007,7 @@ mod locator_policy_tests {
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
+            screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23074,6 +23145,7 @@ mod locator_policy_tests {
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
+            screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_sink: None,
             input_sink: None,
         };

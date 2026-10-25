@@ -81,6 +81,7 @@ fn cfg(
         screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
         screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
         screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
+        screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
         screen_sink: None,
         input_sink: None,
     }
@@ -2668,6 +2669,144 @@ async fn m5_14_screen_adaptive_fec_protection() {
     assert_eq!(c, 200);
     let visitor_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
     assert_eq!(visitor_status.fec_unrecoverable_blocks, 0);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_15_screen_packet_pacing_and_burst_shaping() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial Pacer query on host: defaults to Auto mode (ADR-091)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/pacer")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenPacerReport = serde_json::from_slice(&b).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.mode, "auto");
+    assert_eq!(init_rep.packets_paced, 0);
+    assert_eq!(init_rep.bursts_smoothed, 0);
+
+    // 2. Dynamic Pacer mode configuration via POST /api/screen/pacer
+    let agg_payload = serde_json::json!({ "mode": "aggressive" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/pacer",
+        &serde_json::to_vec(&agg_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let agg_rep: tetherly_core::ScreenPacerReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(agg_rep.mode, "aggressive");
+
+    let dis_payload = serde_json::json!({ "mode": "disabled" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/pacer",
+        &serde_json::to_vec(&dis_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let dis_rep: tetherly_core::ScreenPacerReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(dis_rep.mode, "disabled");
+
+    // Set back to Auto mode
+    let auto_payload = serde_json::json!({ "mode": "auto" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/pacer",
+        &serde_json::to_vec(&auto_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let auto_rep: tetherly_core::ScreenPacerReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(auto_rep.mode, "auto");
+
+    // 3. Visitor opens screen channel, host allows, and visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Send video frame from host under Auto Pacing mode
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received paced frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Verify Pacer telemetry on host
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/pacer")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_pacer: tetherly_core::ScreenPacerReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_pacer.mode, "auto");
+    assert!(
+        host_pacer.packets_paced >= 1,
+        "expected packets_paced >= 1, got {}",
+        host_pacer.packets_paced
+    );
+
+    // 6. Verify status report contains Pacer telemetry fields
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_status.pacer_mode, "auto");
+    assert!(host_status.pacer_packets_paced >= 1);
 
     host.shutdown();
     visitor.shutdown();

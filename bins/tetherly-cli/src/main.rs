@@ -2046,6 +2046,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming microsecond packet pacing and burst shaper (v2.05 / ADR-091).
+    Pacer {
+        /// Target pacer mode: `auto`, `aggressive`, or `disabled`. If omitted, displays current pacer status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -8000,6 +8011,19 @@ async fn main() -> Result<()> {
                         .get("fec_unrecoverable_blocks")
                         .and_then(|n| n.as_u64())
                         .unwrap_or(0);
+                    let pacer_mode = v.get("pacer_mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let pacer_packets_paced = v
+                        .get("pacer_packets_paced")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let pacer_bursts_smoothed = v
+                        .get("pacer_bursts_smoothed")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let pacer_avg_delay_us = v
+                        .get("pacer_avg_delay_us")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
 
                     println!("Screen Channel Status:");
                     println!("  State:        {state}");
@@ -8087,6 +8111,12 @@ async fn main() -> Result<()> {
                         println!(
                             "  FEC Mode:     {} (redundancy: {}%, recovered: {}, unrecoverable: {})",
                             fec_mode, fec_redundancy_pct, fec_recovered_shards, fec_unrecoverable_blocks
+                        );
+                    }
+                    if !pacer_mode.is_empty() {
+                        println!(
+                            "  Pacer Mode:   {} (paced_packets: {}, bursts_smoothed: {}, avg_delay: {} us)",
+                            pacer_mode, pacer_packets_paced, pacer_bursts_smoothed, pacer_avg_delay_us
                         );
                     }
                 }
@@ -8783,6 +8813,71 @@ async fn main() -> Result<()> {
                         println!("  Blocks Decoded:       {blocks_decoded}");
                         println!("  Recovered Shards:     {recovered_shards}");
                         println!("  Unrecoverable Blocks: {unrecoverable_blocks}");
+                    }
+                }
+            }
+            ScreenCmd::Pacer {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    loopback_post(ui_port, "/api/screen/pacer", &body).await
+                } else {
+                    loopback_get(ui_port, "/api/screen/pacer").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen pacer query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    let m = v.get("mode").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let packets_paced = v
+                        .get("packets_paced")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let bursts_smoothed = v
+                        .get("bursts_smoothed")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let avg_delay_us = v
+                        .get("avg_delay_us")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let last_delay_us = v
+                        .get("last_delay_us")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+
+                    if has_update {
+                        println!("Screen microsecond packet pacer mode updated: {m}");
+                    } else {
+                        println!(
+                            "Screen Microsecond Packet Pacing & Burst Shaper (ADR-091):"
+                        );
+                        println!("  Pacer Mode:           {m}");
+                        println!("  Packets Paced:        {packets_paced}");
+                        println!("  Bursts Smoothed:      {bursts_smoothed}");
+                        println!("  Average Delay:        {avg_delay_us} us");
+                        println!("  Last Packet Delay:    {last_delay_us} us");
                     }
                 }
             }

@@ -82,6 +82,7 @@ fn cfg(dir: PathBuf, name: &str, platform: &str) -> NodeConfig {
         screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
         screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
         screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
+        screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
         screen_sink: None,
         input_sink: None,
     }
