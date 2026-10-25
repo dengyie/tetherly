@@ -21,6 +21,8 @@ pub const TYPE_SCREEN_CONTROL: u16 = 0x0502;
 pub const TYPE_SCREEN_CURSOR: u16 = 0x0503;
 /// Screen forward error correction (FEC) channel inner type (v2.04 / ADR-090).
 pub const TYPE_SCREEN_FEC: u16 = 0x0504;
+/// Screen selective negative acknowledgment (NACK) channel inner type (v2.07 / ADR-093).
+pub const TYPE_SCREEN_NACK: u16 = 0x0505;
 
 pub const SCREEN_MAGIC: [u8; 4] = *b"TMV1";
 pub const SCREEN_PROTO: u8 = 1;
@@ -33,6 +35,15 @@ pub const FEC_PROTO: u8 = 1;
 pub const FEC_HEADER_LEN: usize = 24;
 pub const FEC_MAX_DATA_SHARDS: usize = 32;
 pub const FEC_MAX_PARITY_SHARDS: usize = 16;
+
+pub const SCREEN_NACK_MAGIC: [u8; 5] = *b"TNACK";
+pub const SCREEN_NACK_PROTO: u8 = 1;
+pub const SCREEN_NACK_HEADER_LEN: usize = 36;
+pub const SCREEN_HARQ_MAX_RETRIES_AUTO: u8 = 2;
+pub const SCREEN_HARQ_MAX_RETRIES_AGGRESSIVE: u8 = 3;
+pub const SCREEN_HARQ_MAX_RETRIES_CONSERVATIVE: u8 = 1;
+pub const SCREEN_HARQ_DEFAULT_BUFFER_CAPACITY: usize = 256;
+pub const SCREEN_HARQ_MAX_AGE_US: u64 = 300_000;
 
 /// Maximum payload bytes for a custom cursor bitmap (64x64 RGBA8 = 16,384 bytes).
 pub const CURSOR_BITMAP_MAX_BYTES: usize = 64 * 64 * 4;
@@ -228,7 +239,11 @@ pub const SCREEN_COMPRESS_H264: u8 = 3;
 pub fn is_screen_type(ty: u16) -> bool {
     matches!(
         ty,
-        TYPE_SCREEN_FRAME | TYPE_SCREEN_CONTROL | TYPE_SCREEN_CURSOR | TYPE_SCREEN_FEC
+        TYPE_SCREEN_FRAME
+            | TYPE_SCREEN_CONTROL
+            | TYPE_SCREEN_CURSOR
+            | TYPE_SCREEN_FEC
+            | TYPE_SCREEN_NACK
     )
 }
 
@@ -927,9 +942,24 @@ pub struct ScreenStats {
     pub trendline_slope_us: f64,
     /// Total bufferbloat overuse events detected (v2.06 / ADR-092).
     pub trendline_overuse_count: u64,
+    /// Hybrid ARQ (HARQ) selective retransmission mode tag (0=auto, 1=aggressive, 2=conservative, 3=disabled) (v2.07 / ADR-093).
+    pub harq_mode: u8,
+    /// Cumulative count of NACK requests sent by receiver (v2.07 / ADR-093).
+    pub harq_nacks_sent: u64,
+    /// Cumulative count of NACK requests received by sender (v2.07 / ADR-093).
+    pub harq_nacks_received: u64,
+    /// Total video shards/fragments retransmitted by sender (v2.07 / ADR-093).
+    pub harq_shards_retransmitted: u64,
+    /// Total frames successfully recovered via selective retransmission (v2.07 / ADR-093).
+    pub harq_recovered_frames: u64,
 }
 
 impl ScreenStats {
+    /// Hybrid ARQ (HARQ) selective retransmission mode.
+    pub fn harq_mode(&self) -> ScreenHarqMode {
+        ScreenHarqMode::from_tag(self.harq_mode)
+    }
+
     /// Delay-based trendline filter mode.
     pub fn trendline_mode(&self) -> ScreenTrendlineMode {
         ScreenTrendlineMode::from_tag(self.trendline_mode)
@@ -3331,6 +3361,51 @@ impl ScreenFecAssembler {
         self.unrecoverable_blocks_total
     }
 
+    /// Generate selective NACK for any missing shards in the current FEC block (v2.07 / ADR-093).
+    pub fn generate_nack(&self, rtt_estimate_us: u64) -> Option<ScreenNack> {
+        if self.received_shards.is_empty() {
+            return None;
+        }
+        let first = &self.received_shards[0];
+        let k = first.k_data_shards as usize;
+        let m = first.m_parity_shards as usize;
+        let total = k + m;
+        let mut missing = Vec::new();
+        let mut mask = 0u64;
+
+        for i in 0..total {
+            let is_parity = i >= k;
+            let shard_idx = if is_parity { (i - k) as u8 } else { i as u8 };
+            let present = self
+                .received_shards
+                .iter()
+                .any(|s| s.is_parity == is_parity && s.shard_index == shard_idx);
+            if !present {
+                if i < 64 {
+                    mask |= 1u64 << i;
+                }
+                missing.push(i as u16);
+            }
+        }
+
+        if missing.is_empty() {
+            return None;
+        }
+
+        let missing_data = missing.iter().filter(|&&idx| (idx as usize) < k).count();
+        let fallback = missing_data > m;
+
+        Some(ScreenNack {
+            frame_seq: self.current_seq,
+            block_id: self.current_block_id,
+            missing_mask: mask,
+            missing_indices: missing,
+            is_fec: true,
+            requires_keyframe_fallback: fallback,
+            rtt_estimate_us,
+        })
+    }
+
     pub fn reset(&mut self) {
         self.current_seq = 0;
         self.current_block_id = 0;
@@ -3885,6 +3960,450 @@ impl ScreenTrendlineFilter {
     }
 }
 
+/// Hybrid ARQ (HARQ) selective retransmission mode (v2.07 / ADR-093).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenHarqMode {
+    #[default]
+    Auto = 0,
+    Aggressive = 1,
+    Conservative = 2,
+    Disabled = 3,
+}
+
+impl ScreenHarqMode {
+    pub const fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => ScreenHarqMode::Aggressive,
+            2 => ScreenHarqMode::Conservative,
+            3 => ScreenHarqMode::Disabled,
+            _ => ScreenHarqMode::Auto,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ScreenHarqMode::Auto => "auto",
+            ScreenHarqMode::Aggressive => "aggressive",
+            ScreenHarqMode::Conservative => "conservative",
+            ScreenHarqMode::Disabled => "disabled",
+        }
+    }
+}
+
+impl fmt::Display for ScreenHarqMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ScreenHarqMode {
+    type Err = CoreError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(ScreenHarqMode::Auto),
+            "aggressive" | "agg" => Ok(ScreenHarqMode::Aggressive),
+            "conservative" | "cons" => Ok(ScreenHarqMode::Conservative),
+            "disabled" | "off" | "none" => Ok(ScreenHarqMode::Disabled),
+            _ => Err(CoreError::ScreenRefused("unknown screen harq mode".into())),
+        }
+    }
+}
+
+pub const SCREEN_NACK_FLAG_FEC: u8 = 0x01;
+pub const SCREEN_NACK_FLAG_KEYFRAME_FALLBACK: u8 = 0x02;
+
+/// Fine-grained selective negative acknowledgment (NACK) requesting retransmission
+/// of missing fragments or shards before playout deadline (v2.07 / ADR-093).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenNack {
+    pub frame_seq: u64,
+    pub block_id: u16,
+    pub missing_mask: u64,
+    pub missing_indices: Vec<u16>,
+    pub is_fec: bool,
+    pub requires_keyframe_fallback: bool,
+    pub rtt_estimate_us: u64,
+}
+
+impl ScreenNack {
+    pub fn new(frame_seq: u64, block_id: u16, is_fec: bool) -> Self {
+        Self {
+            frame_seq,
+            block_id,
+            missing_mask: 0,
+            missing_indices: Vec::new(),
+            is_fec,
+            requires_keyframe_fallback: false,
+            rtt_estimate_us: 0,
+        }
+    }
+
+    pub fn with_missing(mut self, indices: &[u16]) -> Self {
+        for &idx in indices {
+            if idx < 64 {
+                self.missing_mask |= 1u64 << idx;
+            }
+            if !self.missing_indices.contains(&idx) {
+                self.missing_indices.push(idx);
+            }
+        }
+        self.missing_indices.sort_unstable();
+        self
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let count = self.missing_indices.len().min(u16::MAX as usize) as u16;
+        let mut buf = Vec::with_capacity(SCREEN_NACK_HEADER_LEN + (count as usize) * 2);
+        buf.extend_from_slice(&SCREEN_NACK_MAGIC);
+        buf.push(SCREEN_NACK_PROTO);
+        let mut flags = 0u8;
+        if self.is_fec {
+            flags |= SCREEN_NACK_FLAG_FEC;
+        }
+        if self.requires_keyframe_fallback {
+            flags |= SCREEN_NACK_FLAG_KEYFRAME_FALLBACK;
+        }
+        buf.push(flags);
+        buf.push(0u8); // reserved
+        buf.extend_from_slice(&self.frame_seq.to_be_bytes());
+        buf.extend_from_slice(&self.block_id.to_be_bytes());
+        buf.extend_from_slice(&self.missing_mask.to_be_bytes());
+        buf.extend_from_slice(&count.to_be_bytes());
+        for &idx in &self.missing_indices[..count as usize] {
+            buf.extend_from_slice(&idx.to_be_bytes());
+        }
+        buf.extend_from_slice(&self.rtt_estimate_us.to_be_bytes());
+        buf
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, CoreError> {
+        if payload.len() < SCREEN_NACK_HEADER_LEN {
+            return Err(CoreError::ScreenFrame);
+        }
+        if &payload[..5] != SCREEN_NACK_MAGIC {
+            return Err(CoreError::ScreenFrame);
+        }
+        if payload[5] != SCREEN_NACK_PROTO {
+            return Err(CoreError::ScreenFrame);
+        }
+        let flags = payload[6];
+        let is_fec = (flags & SCREEN_NACK_FLAG_FEC) != 0;
+        let requires_keyframe_fallback = (flags & SCREEN_NACK_FLAG_KEYFRAME_FALLBACK) != 0;
+        let frame_seq = u64::from_be_bytes(
+            payload[8..16]
+                .try_into()
+                .map_err(|_| CoreError::ScreenFrame)?,
+        );
+        let block_id = u16::from_be_bytes(
+            payload[16..18]
+                .try_into()
+                .map_err(|_| CoreError::ScreenFrame)?,
+        );
+        let missing_mask = u64::from_be_bytes(
+            payload[18..26]
+                .try_into()
+                .map_err(|_| CoreError::ScreenFrame)?,
+        );
+        let count = u16::from_be_bytes(
+            payload[26..28]
+                .try_into()
+                .map_err(|_| CoreError::ScreenFrame)?,
+        ) as usize;
+
+        let required_len = SCREEN_NACK_HEADER_LEN + count * 2;
+        if payload.len() < required_len {
+            return Err(CoreError::ScreenFrame);
+        }
+
+        let mut offset = 28;
+        let mut missing_indices = Vec::with_capacity(count);
+        for _ in 0..count {
+            let idx = u16::from_be_bytes(
+                payload[offset..offset + 2]
+                    .try_into()
+                    .map_err(|_| CoreError::ScreenFrame)?,
+            );
+            missing_indices.push(idx);
+            offset += 2;
+        }
+
+        let rtt_estimate_us = u64::from_be_bytes(
+            payload[offset..offset + 8]
+                .try_into()
+                .map_err(|_| CoreError::ScreenFrame)?,
+        );
+
+        Ok(Self {
+            frame_seq,
+            block_id,
+            missing_mask,
+            missing_indices,
+            is_fec,
+            requires_keyframe_fallback,
+            rtt_estimate_us,
+        })
+    }
+
+    pub fn to_inner_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_SCREEN_NACK, self.encode())
+    }
+
+    pub fn to_inner(&self) -> Result<InnerFrame, CoreError> {
+        self.to_inner_frame()
+    }
+
+    pub fn from_inner_frame(frame: &InnerFrame) -> Result<Self, CoreError> {
+        if frame.ty != TYPE_SCREEN_NACK {
+            return Err(CoreError::ScreenFrame);
+        }
+        Self::decode(&frame.payload)
+    }
+
+    pub fn from_inner(frame: &InnerFrame) -> Result<Self, CoreError> {
+        Self::from_inner_frame(frame)
+    }
+}
+
+/// Telemetry statistics for Hybrid ARQ & selective retransmission (v2.07 / ADR-093).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScreenHarqStats {
+    pub mode: ScreenHarqMode,
+    pub nacks_sent: u64,
+    pub nacks_received: u64,
+    pub shards_retransmitted: u64,
+    pub recovered_frames: u64,
+    pub retransmit_timeouts: u64,
+    pub buffer_occupancy: usize,
+    pub buffer_capacity: usize,
+}
+
+/// DTO report for REST API and CLI status (v2.07 / ADR-093).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScreenHarqReport {
+    pub ok: bool,
+    pub mode: ScreenHarqMode,
+    pub nacks_sent: u64,
+    pub nacks_received: u64,
+    pub shards_retransmitted: u64,
+    pub recovered_frames: u64,
+    pub retransmit_timeouts: u64,
+    pub buffer_occupancy: usize,
+    pub buffer_capacity: usize,
+    pub timestamp_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RetransmitEntry {
+    pub frame: InnerFrame,
+    pub sent_at_us: u64,
+    pub retx_count: u8,
+    pub frame_seq: u64,
+    pub shard_index: u16,
+    pub is_fec: bool,
+}
+
+/// Sender-side bounded sliding buffer of recently transmitted shards for selective NACK recovery.
+#[derive(Debug, Clone)]
+pub struct ScreenRetransmitBuffer {
+    mode: ScreenHarqMode,
+    capacity: usize,
+    entries: VecDeque<RetransmitEntry>,
+    stats: ScreenHarqStats,
+}
+
+impl Default for ScreenRetransmitBuffer {
+    fn default() -> Self {
+        Self::new(ScreenHarqMode::Auto)
+    }
+}
+
+impl ScreenRetransmitBuffer {
+    pub fn new(mode: ScreenHarqMode) -> Self {
+        Self {
+            mode,
+            capacity: SCREEN_HARQ_DEFAULT_BUFFER_CAPACITY,
+            entries: VecDeque::with_capacity(SCREEN_HARQ_DEFAULT_BUFFER_CAPACITY),
+            stats: ScreenHarqStats {
+                mode,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn mode(&self) -> ScreenHarqMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenHarqMode) {
+        self.mode = mode;
+        self.stats.mode = mode;
+        if mode == ScreenHarqMode::Disabled {
+            self.entries.clear();
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn stats(&self) -> ScreenHarqStats {
+        let mut s = self.stats;
+        s.mode = self.mode;
+        s.buffer_occupancy = self.entries.len();
+        s.buffer_capacity = self.capacity;
+        s
+    }
+
+    pub fn record_outbound(
+        &mut self,
+        frame: &InnerFrame,
+        frame_seq: u64,
+        shard_index: u16,
+        is_fec: bool,
+        now_us: u64,
+    ) {
+        if self.mode == ScreenHarqMode::Disabled {
+            return;
+        }
+
+        let cutoff = now_us.saturating_sub(SCREEN_HARQ_MAX_AGE_US);
+        while let Some(front) = self.entries.front() {
+            if front.sent_at_us < cutoff || self.entries.len() >= self.capacity {
+                self.entries.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        self.entries.push_back(RetransmitEntry {
+            frame: frame.clone(),
+            sent_at_us: now_us,
+            retx_count: 0,
+            frame_seq,
+            shard_index,
+            is_fec,
+        });
+        self.stats.buffer_occupancy = self.entries.len();
+        self.stats.buffer_capacity = self.capacity;
+    }
+
+    pub fn handle_nack(&mut self, nack: &ScreenNack, now_us: u64) -> Vec<InnerFrame> {
+        if self.mode == ScreenHarqMode::Disabled {
+            return Vec::new();
+        }
+        self.stats.nacks_received = self.stats.nacks_received.saturating_add(1);
+
+        let max_retries = match self.mode {
+            ScreenHarqMode::Auto => SCREEN_HARQ_MAX_RETRIES_AUTO,
+            ScreenHarqMode::Aggressive => SCREEN_HARQ_MAX_RETRIES_AGGRESSIVE,
+            ScreenHarqMode::Conservative => SCREEN_HARQ_MAX_RETRIES_CONSERVATIVE,
+            ScreenHarqMode::Disabled => 0,
+        };
+
+        let mut to_resend = Vec::new();
+        let cutoff = now_us.saturating_sub(SCREEN_HARQ_MAX_AGE_US);
+
+        let mut requested_indices = nack.missing_indices.clone();
+        if requested_indices.is_empty() && nack.missing_mask != 0 {
+            for i in 0..64 {
+                if (nack.missing_mask & (1u64 << i)) != 0 {
+                    requested_indices.push(i as u16);
+                }
+            }
+        }
+
+        for idx in requested_indices {
+            let mut found = false;
+            for entry in self.entries.iter_mut() {
+                if entry.frame_seq == nack.frame_seq
+                    && entry.is_fec == nack.is_fec
+                    && entry.shard_index == idx
+                {
+                    found = true;
+                    if entry.retx_count < max_retries && entry.sent_at_us >= cutoff {
+                        entry.retx_count += 1;
+                        self.stats.shards_retransmitted =
+                            self.stats.shards_retransmitted.saturating_add(1);
+                        to_resend.push(entry.frame.clone());
+                    } else {
+                        self.stats.retransmit_timeouts =
+                            self.stats.retransmit_timeouts.saturating_add(1);
+                    }
+                    break;
+                }
+            }
+            if !found {
+                self.stats.retransmit_timeouts = self.stats.retransmit_timeouts.saturating_add(1);
+            }
+        }
+
+        self.stats.buffer_occupancy = self.entries.len();
+        to_resend
+    }
+
+    /// Automatically inspect outbound InnerFrame (either TYPE_SCREEN_FEC or TYPE_SCREEN_FRAME)
+    /// and record it into the bounded sliding window retransmit buffer.
+    pub fn record_outbound_frame(&mut self, frame: &InnerFrame, now_us: u64) {
+        if self.mode == ScreenHarqMode::Disabled {
+            return;
+        }
+        if frame.ty == TYPE_SCREEN_FEC {
+            if let Ok(shard) = ScreenFecShard::from_inner_frame(frame) {
+                let shard_index = if shard.is_parity {
+                    shard.k_data_shards as u16 + shard.shard_index as u16
+                } else {
+                    shard.shard_index as u16
+                };
+                self.record_outbound(frame, shard.frame_seq, shard_index, true, now_us);
+            }
+        } else if frame.ty == TYPE_SCREEN_FRAME {
+            if frame.payload.starts_with(&SCREEN_MAGIC) {
+                if let Ok(sf) = ScreenFrame::from_frame(frame) {
+                    self.record_outbound(frame, sf.seq, 0, false, now_us);
+                }
+            } else if frame.payload.starts_with(&SCREEN_FRAG_MAGIC)
+                && frame.payload.len() >= SCREEN_FRAG_HEADER
+            {
+                let idx = u32::from_be_bytes(frame.payload[8..12].try_into().unwrap()) as u16;
+                let seq = u64::from_be_bytes(frame.payload[16..24].try_into().unwrap());
+                self.record_outbound(frame, seq, idx, false, now_us);
+            }
+        }
+    }
+
+    pub fn report(&self) -> ScreenHarqReport {
+        ScreenHarqReport {
+            ok: true,
+            mode: self.mode,
+            nacks_sent: self.stats.nacks_sent,
+            nacks_received: self.stats.nacks_received,
+            shards_retransmitted: self.stats.shards_retransmitted,
+            recovered_frames: self.stats.recovered_frames,
+            retransmit_timeouts: self.stats.retransmit_timeouts,
+            buffer_occupancy: self.entries.len(),
+            buffer_capacity: self.capacity,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.stats.buffer_occupancy = 0;
+    }
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -3905,6 +4424,7 @@ pub struct ScreenSender {
     fec_controller: ScreenFecController,
     packet_pacer: ScreenPacketPacer,
     trendline_filter: ScreenTrendlineFilter,
+    retransmit_buffer: ScreenRetransmitBuffer,
 }
 
 impl Default for ScreenSender {
@@ -3925,6 +4445,7 @@ impl ScreenSender {
         let fec_controller = ScreenFecController::default();
         let packet_pacer = ScreenPacketPacer::default();
         let trendline_filter = ScreenTrendlineFilter::default();
+        let retransmit_buffer = ScreenRetransmitBuffer::new(ScreenHarqMode::Auto);
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -3952,6 +4473,11 @@ impl ScreenSender {
             trendline_state: trendline_filter.state().tag(),
             trendline_slope_us: 0.0,
             trendline_overuse_count: 0,
+            harq_mode: retransmit_buffer.mode().tag(),
+            harq_nacks_sent: 0,
+            harq_nacks_received: 0,
+            harq_shards_retransmitted: 0,
+            harq_recovered_frames: 0,
             ..Default::default()
         };
         Self {
@@ -3971,7 +4497,14 @@ impl ScreenSender {
             fec_controller,
             packet_pacer,
             trendline_filter,
+            retransmit_buffer,
         }
+    }
+
+    pub fn with_harq(harq: ScreenHarqMode) -> Self {
+        let mut sender = Self::new();
+        sender.set_harq_mode(harq);
+        sender
     }
 
     pub fn with_trendline(trendline: ScreenTrendlineMode) -> Self {
@@ -4022,7 +4555,54 @@ impl ScreenSender {
         s.trendline_state = self.trendline_filter.state().tag();
         s.trendline_slope_us = self.trendline_filter.stats().current_slope_us_per_frame;
         s.trendline_overuse_count = self.trendline_filter.stats().overuse_count;
+        let h_stats = self.retransmit_buffer.stats();
+        s.harq_mode = self.retransmit_buffer.mode().tag();
+        s.harq_nacks_sent = h_stats.nacks_sent;
+        s.harq_nacks_received = h_stats.nacks_received;
+        s.harq_shards_retransmitted = h_stats.shards_retransmitted;
+        s.harq_recovered_frames = h_stats.recovered_frames;
         s
+    }
+
+    pub fn harq_mode(&self) -> ScreenHarqMode {
+        self.retransmit_buffer.mode()
+    }
+
+    pub fn set_harq_mode(&mut self, mode: ScreenHarqMode) {
+        self.retransmit_buffer.set_mode(mode);
+        self.stats.harq_mode = mode.tag();
+    }
+
+    pub fn harq_stats(&self) -> ScreenHarqStats {
+        self.retransmit_buffer.stats()
+    }
+
+    pub fn harq_report(&self) -> ScreenHarqReport {
+        self.retransmit_buffer.report()
+    }
+
+    pub fn retransmit_buffer(&self) -> &ScreenRetransmitBuffer {
+        &self.retransmit_buffer
+    }
+
+    pub fn retransmit_buffer_mut(&mut self) -> &mut ScreenRetransmitBuffer {
+        &mut self.retransmit_buffer
+    }
+
+    pub fn handle_nack(&mut self, nack: &ScreenNack, now_us: u64) -> Vec<InnerFrame> {
+        let frames = self.retransmit_buffer.handle_nack(nack, now_us);
+        let st = self.retransmit_buffer.stats();
+        self.stats.harq_nacks_received = st.nacks_received;
+        self.stats.harq_shards_retransmitted = st.shards_retransmitted;
+        if nack.requires_keyframe_fallback {
+            self.squelch_controller.force_wake(now_us);
+            self.stats.is_squelched = false;
+        }
+        frames
+    }
+
+    pub fn record_outbound_frame(&mut self, frame: &InnerFrame, now_us: u64) {
+        self.retransmit_buffer.record_outbound_frame(frame, now_us);
     }
 
     pub fn trendline_mode(&self) -> ScreenTrendlineMode {
@@ -4616,20 +5196,24 @@ impl ScreenSender {
         delays
     }
 
-    /// Convert a ScreenFrame into outbound InnerFrames.
-    /// If FEC mode is active (redundancy > 0), encodes payload into Cauchy RS shards (TYPE_SCREEN_FEC).
-    /// Otherwise, falls back to standard fragmentation (TYPE_SCREEN_FRAME).
-    pub fn encode_frame_to_inner_frames(
+    /// Convert a ScreenFrame into outbound InnerFrames with monotonic send timestamp (microseconds).
+    /// Outbound frames are tracked in the sender's sliding window HARQ retransmission buffer.
+    pub fn encode_frame_to_inner_frames_with_time(
         &mut self,
         frame: &ScreenFrame,
         packet_loss_ratio: f32,
+        now_us: u64,
     ) -> Result<Vec<InnerFrame>, CoreError> {
         let payload = frame.encode_payload()?;
         let m_parity = self
             .fec_controller
             .calculate_parity_shards(1, packet_loss_ratio);
         if m_parity == 0 {
-            return frame.to_frames();
+            let frames = frame.to_frames()?;
+            for f in &frames {
+                self.retransmit_buffer.record_outbound_frame(f, now_us);
+            }
+            return Ok(frames);
         }
 
         // Split payload into shards that comfortably fit within INNER_PAYLOAD_MAX
@@ -4637,7 +5221,11 @@ impl ScreenSender {
         let k = payload.len().div_ceil(shard_chunk_max).max(1);
         if k > FEC_MAX_DATA_SHARDS {
             // If too large for single FEC block, fallback to standard fragmentation
-            return frame.to_frames();
+            let frames = frame.to_frames()?;
+            for f in &frames {
+                self.retransmit_buffer.record_outbound_frame(f, now_us);
+            }
+            return Ok(frames);
         }
 
         let mut data_buffers = Vec::with_capacity(k);
@@ -4649,14 +5237,33 @@ impl ScreenSender {
             .fec_controller
             .calculate_parity_shards(k, packet_loss_ratio);
         if m == 0 {
-            return frame.to_frames();
+            let frames = frame.to_frames()?;
+            for f in &frames {
+                self.retransmit_buffer.record_outbound_frame(f, now_us);
+            }
+            return Ok(frames);
         }
 
         let shards = ScreenFecEncoder::encode_block(frame.seq, 0, &data_buffers, m)?;
         self.fec_controller.record_block_encoded(k, m);
         self.stats.fec_redundancy_pct = self.fec_controller.stats().redundancy_pct;
 
-        Ok(shards.iter().map(|s| s.to_inner_frame()).collect())
+        let frames: Vec<InnerFrame> = shards.iter().map(|s| s.to_inner_frame()).collect();
+        for f in &frames {
+            self.retransmit_buffer.record_outbound_frame(f, now_us);
+        }
+        Ok(frames)
+    }
+
+    /// Convert a ScreenFrame into outbound InnerFrames.
+    /// If FEC mode is active (redundancy > 0), encodes payload into Cauchy RS shards (TYPE_SCREEN_FEC).
+    /// Otherwise, falls back to standard fragmentation (TYPE_SCREEN_FRAME).
+    pub fn encode_frame_to_inner_frames(
+        &mut self,
+        frame: &ScreenFrame,
+        packet_loss_ratio: f32,
+    ) -> Result<Vec<InnerFrame>, CoreError> {
+        self.encode_frame_to_inner_frames_with_time(frame, packet_loss_ratio, 0)
     }
 
     pub fn drain(&mut self) -> Vec<ScreenFrame> {
@@ -4677,8 +5284,13 @@ impl ScreenSender {
         self.squelch_controller = ScreenSquelchController::new(self.squelch_controller.mode());
         self.fec_controller = ScreenFecController::new(self.fec_controller.mode());
         self.packet_pacer = ScreenPacketPacer::new(self.packet_pacer.mode());
+        self.retransmit_buffer.clear();
         self.stats.is_squelched = false;
         self.stats.squelched_frames = 0;
+        self.stats.harq_nacks_sent = 0;
+        self.stats.harq_nacks_received = 0;
+        self.stats.harq_shards_retransmitted = 0;
+        self.stats.harq_recovered_frames = 0;
     }
 }
 
@@ -4692,6 +5304,9 @@ pub struct ScreenReceiver {
     cursor_controller: ScreenCursorController,
     last_cursor: Option<ScreenCursorUpdate>,
     fec_assembler: ScreenFecAssembler,
+    harq_mode: ScreenHarqMode,
+    harq_stats: ScreenHarqStats,
+    nack_history: VecDeque<(u64, u16, u64)>,
 }
 
 impl Default for ScreenReceiver {
@@ -4703,10 +5318,16 @@ impl Default for ScreenReceiver {
 impl ScreenReceiver {
     pub fn new() -> Self {
         let cursor_controller = ScreenCursorController::default();
+        let harq_mode = ScreenHarqMode::Auto;
+        let harq_stats = ScreenHarqStats {
+            mode: harq_mode,
+            ..Default::default()
+        };
         let stats = ScreenStats {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
             cursor_shape: CursorShape::Arrow.tag(),
+            harq_mode: harq_mode.tag(),
             ..Default::default()
         };
         Self {
@@ -4717,15 +5338,24 @@ impl ScreenReceiver {
             cursor_controller,
             last_cursor: None,
             fec_assembler: ScreenFecAssembler::new(),
+            harq_mode,
+            harq_stats,
+            nack_history: VecDeque::with_capacity(64),
         }
     }
 
     pub fn with_playout_mode(mode: ScreenPlayoutMode) -> Self {
         let cursor_controller = ScreenCursorController::default();
+        let harq_mode = ScreenHarqMode::Auto;
+        let harq_stats = ScreenHarqStats {
+            mode: harq_mode,
+            ..Default::default()
+        };
         let stats = ScreenStats {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
             cursor_shape: CursorShape::Arrow.tag(),
+            harq_mode: harq_mode.tag(),
             ..Default::default()
         };
         Self {
@@ -4736,7 +5366,16 @@ impl ScreenReceiver {
             cursor_controller,
             last_cursor: None,
             fec_assembler: ScreenFecAssembler::new(),
+            harq_mode,
+            harq_stats,
+            nack_history: VecDeque::with_capacity(64),
         }
+    }
+
+    pub fn with_harq_mode(mode: ScreenHarqMode) -> Self {
+        let mut r = Self::new();
+        r.set_harq_mode(mode);
+        r
     }
 
     pub fn last_seq(&self) -> u64 {
@@ -4761,6 +5400,11 @@ impl ScreenReceiver {
         }
         st.fec_recovered_shards = self.fec_assembler.recovered_shards();
         st.fec_unrecoverable_blocks = self.fec_assembler.unrecoverable_blocks();
+        st.harq_mode = self.harq_mode.tag();
+        st.harq_nacks_sent = self.harq_stats.nacks_sent;
+        st.harq_nacks_received = self.harq_stats.nacks_received;
+        st.harq_shards_retransmitted = self.harq_stats.shards_retransmitted;
+        st.harq_recovered_frames = self.harq_stats.recovered_frames;
         st
     }
 
@@ -4787,6 +5431,108 @@ impl ScreenReceiver {
     /// Playout buffer stats and telemetry.
     pub fn playout_stats(&self) -> ScreenPlayoutStats {
         self.playout_buffer.stats()
+    }
+
+    /// Screen HARQ mode (v2.07 / ADR-093).
+    pub fn harq_mode(&self) -> ScreenHarqMode {
+        self.harq_mode
+    }
+
+    /// Explicitly configure screen HARQ mode.
+    pub fn set_harq_mode(&mut self, mode: ScreenHarqMode) {
+        self.harq_mode = mode;
+        self.harq_stats.mode = mode;
+        self.stats.harq_mode = mode.tag();
+        if mode == ScreenHarqMode::Disabled {
+            self.nack_history.clear();
+        }
+    }
+
+    /// Snapshot of receiver-side HARQ statistics.
+    pub fn harq_stats(&self) -> ScreenHarqStats {
+        self.harq_stats
+    }
+
+    /// Structured receiver-side HARQ status report.
+    pub fn harq_report(&self) -> ScreenHarqReport {
+        ScreenHarqReport {
+            ok: true,
+            mode: self.harq_mode,
+            nacks_sent: self.harq_stats.nacks_sent,
+            nacks_received: self.harq_stats.nacks_received,
+            shards_retransmitted: self.harq_stats.shards_retransmitted,
+            recovered_frames: self.harq_stats.recovered_frames,
+            retransmit_timeouts: self.harq_stats.retransmit_timeouts,
+            buffer_occupancy: 0,
+            buffer_capacity: SCREEN_HARQ_DEFAULT_BUFFER_CAPACITY,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        }
+    }
+
+    /// Generate selective NACK on missing FEC shards with RTT pacing debounce.
+    pub fn generate_nack_on_fec(
+        &mut self,
+        now_us: u64,
+        rtt_estimate_us: u64,
+    ) -> Option<ScreenNack> {
+        if self.harq_mode == ScreenHarqMode::Disabled {
+            return None;
+        }
+        let nack = self.fec_assembler.generate_nack(rtt_estimate_us)?;
+        let min_interval_us = rtt_estimate_us.max(20_000);
+        if self.nack_history.iter().any(|&(seq, blk, t)| {
+            seq == nack.frame_seq
+                && blk == nack.block_id
+                && now_us.saturating_sub(t) < min_interval_us
+        }) {
+            return None;
+        }
+        if self.nack_history.len() >= 64 {
+            self.nack_history.pop_front();
+        }
+        self.nack_history
+            .push_back((nack.frame_seq, nack.block_id, now_us));
+        self.harq_stats.nacks_sent = self.harq_stats.nacks_sent.saturating_add(1);
+        self.stats.harq_nacks_sent = self.harq_stats.nacks_sent;
+        Some(nack)
+    }
+
+    /// Generate selective NACK on missing standard fragments with RTT pacing debounce.
+    pub fn generate_nack_on_frag(
+        &mut self,
+        assembler: &ScreenAssembler,
+        now_us: u64,
+        rtt_estimate_us: u64,
+    ) -> Option<ScreenNack> {
+        if self.harq_mode == ScreenHarqMode::Disabled {
+            return None;
+        }
+        let nack = assembler.generate_nack(rtt_estimate_us)?;
+        let min_interval_us = rtt_estimate_us.max(20_000);
+        if self.nack_history.iter().any(|&(seq, blk, t)| {
+            seq == nack.frame_seq
+                && blk == nack.block_id
+                && now_us.saturating_sub(t) < min_interval_us
+        }) {
+            return None;
+        }
+        if self.nack_history.len() >= 64 {
+            self.nack_history.pop_front();
+        }
+        self.nack_history
+            .push_back((nack.frame_seq, nack.block_id, now_us));
+        self.harq_stats.nacks_sent = self.harq_stats.nacks_sent.saturating_add(1);
+        self.stats.harq_nacks_sent = self.harq_stats.nacks_sent;
+        Some(nack)
+    }
+
+    /// Record a frame successfully recovered via HARQ retransmission.
+    pub fn record_recovered_frame(&mut self) {
+        self.harq_stats.recovered_frames = self.harq_stats.recovered_frames.saturating_add(1);
+        self.stats.harq_recovered_frames = self.harq_stats.recovered_frames;
     }
 
     /// Push an accepted frame to the playout buffer with its arrival timestamp (microseconds).
@@ -4904,6 +5650,15 @@ impl ScreenReceiver {
         self.last_cursor = None;
         self.cursor_controller.reset();
         self.fec_assembler.reset();
+        self.nack_history.clear();
+        self.harq_stats = ScreenHarqStats {
+            mode: self.harq_mode,
+            ..Default::default()
+        };
+        self.stats.harq_nacks_sent = 0;
+        self.stats.harq_nacks_received = 0;
+        self.stats.harq_shards_retransmitted = 0;
+        self.stats.harq_recovered_frames = 0;
     }
 }
 
@@ -4929,6 +5684,45 @@ pub struct ScreenAssembler {
 impl ScreenAssembler {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether assembler is currently holding an incomplete fragment stream.
+    pub fn is_incomplete(&self) -> bool {
+        !self.mask.is_empty() && self.accepted < self.count
+    }
+
+    /// Sequence number of current frame stream being assembled.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// Generate selective NACK for missing fragment chunks in current stream (v2.07 / ADR-093).
+    pub fn generate_nack(&self, rtt_estimate_us: u64) -> Option<ScreenNack> {
+        if self.mask.is_empty() || self.accepted >= self.count || self.count == 0 {
+            return None;
+        }
+        let mut missing_indices = Vec::new();
+        let mut missing_mask = 0u64;
+        for (i, &arrived) in self.mask.iter().enumerate() {
+            if !arrived {
+                missing_indices.push(i as u16);
+                if i < 64 {
+                    missing_mask |= 1u64 << i;
+                }
+            }
+        }
+        if missing_indices.is_empty() {
+            return None;
+        }
+        Some(ScreenNack {
+            frame_seq: self.seq,
+            block_id: 0,
+            missing_mask,
+            missing_indices,
+            is_fec: false,
+            requires_keyframe_fallback: false,
+            rtt_estimate_us,
+        })
     }
 
     /// Feed one inner frame. Returns the complete frame when the last fragment
@@ -5008,7 +5802,7 @@ impl ScreenAssembler {
         Ok(Some(frame))
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.seq = 0;
         self.total = 0;
         self.count = 0;
@@ -7029,4 +7823,231 @@ mod tests {
             ScreenBandwidthUsageState::Normal.tag()
         );
     }
+}
+
+#[test]
+fn screen_harq_selective_nack_retransmission_pipeline() {
+    // 1. Parsing and enum tags for ScreenHarqMode
+    assert_eq!(
+        "auto".parse::<ScreenHarqMode>().unwrap(),
+        ScreenHarqMode::Auto
+    );
+    assert_eq!(
+        "aggressive".parse::<ScreenHarqMode>().unwrap(),
+        ScreenHarqMode::Aggressive
+    );
+    assert_eq!(
+        "agg".parse::<ScreenHarqMode>().unwrap(),
+        ScreenHarqMode::Aggressive
+    );
+    assert_eq!(
+        "conservative".parse::<ScreenHarqMode>().unwrap(),
+        ScreenHarqMode::Conservative
+    );
+    assert_eq!(
+        "cons".parse::<ScreenHarqMode>().unwrap(),
+        ScreenHarqMode::Conservative
+    );
+    assert_eq!(
+        "disabled".parse::<ScreenHarqMode>().unwrap(),
+        ScreenHarqMode::Disabled
+    );
+    assert_eq!(
+        "off".parse::<ScreenHarqMode>().unwrap(),
+        ScreenHarqMode::Disabled
+    );
+    assert!("unknown".parse::<ScreenHarqMode>().is_err());
+
+    assert_eq!(ScreenHarqMode::from_tag(0), ScreenHarqMode::Auto);
+    assert_eq!(ScreenHarqMode::from_tag(1), ScreenHarqMode::Aggressive);
+    assert_eq!(ScreenHarqMode::from_tag(2), ScreenHarqMode::Conservative);
+    assert_eq!(ScreenHarqMode::from_tag(3), ScreenHarqMode::Disabled);
+    assert_eq!(ScreenHarqMode::Auto.as_str(), "auto");
+    assert_eq!(ScreenHarqMode::Aggressive.as_str(), "aggressive");
+    assert_eq!(ScreenHarqMode::Conservative.as_str(), "conservative");
+    assert_eq!(ScreenHarqMode::Disabled.as_str(), "disabled");
+
+    // 2. ScreenNack wire protocol encode & decode round-trip
+    let nack = ScreenNack {
+        frame_seq: 42,
+        block_id: 3,
+        missing_mask: 0b1010,
+        missing_indices: vec![1, 3],
+        is_fec: true,
+        requires_keyframe_fallback: false,
+        rtt_estimate_us: 25_000,
+    };
+    let encoded = nack.encode();
+    assert_eq!(&encoded[0..5], &SCREEN_NACK_MAGIC);
+    assert_eq!(encoded[5], SCREEN_NACK_PROTO);
+
+    let decoded = ScreenNack::decode(&encoded).expect("decode nack");
+    assert_eq!(decoded.frame_seq, 42);
+    assert_eq!(decoded.block_id, 3);
+    assert_eq!(decoded.missing_mask, 0b1010);
+    assert_eq!(decoded.missing_indices, vec![1, 3]);
+    assert!(decoded.is_fec);
+    assert!(!decoded.requires_keyframe_fallback);
+    assert_eq!(decoded.rtt_estimate_us, 25_000);
+
+    // Corrupt magic rejection
+    let mut corrupt = encoded.clone();
+    corrupt[0] = b'X';
+    assert!(ScreenNack::decode(&corrupt).is_err());
+
+    // Corrupt length rejection
+    assert!(ScreenNack::decode(&encoded[0..20]).is_err());
+
+    // InnerFrame packaging round-trip
+    let inner = nack.to_inner().expect("to inner");
+    assert_eq!(inner.ty, TYPE_SCREEN_NACK);
+    let decoded_inner = ScreenNack::decode(&inner.payload).expect("decode inner payload");
+    assert_eq!(decoded_inner, nack);
+
+    // 3. ScreenRetransmitBuffer sliding window and selective retry limits
+    let mut buf = ScreenRetransmitBuffer::new(ScreenHarqMode::Auto);
+    assert_eq!(
+        buf.stats().buffer_capacity,
+        SCREEN_HARQ_DEFAULT_BUFFER_CAPACITY
+    );
+    assert_eq!(buf.len(), 0);
+
+    let shard0 = ScreenFecShard {
+        frame_seq: 100,
+        block_id: 1,
+        k_data_shards: 4,
+        m_parity_shards: 2,
+        shard_index: 0,
+        is_parity: false,
+        data: vec![10; 100],
+    };
+    let shard1 = ScreenFecShard {
+        shard_index: 1,
+        data: vec![20; 100],
+        ..shard0.clone()
+    };
+    let shard2 = ScreenFecShard {
+        shard_index: 2,
+        data: vec![30; 100],
+        ..shard0.clone()
+    };
+
+    let f0 = shard0.to_inner_frame();
+    let f1 = shard1.to_inner_frame();
+    let f2 = shard2.to_inner_frame();
+
+    buf.record_outbound_frame(&f0, 1_000_000);
+    buf.record_outbound_frame(&f1, 1_000_000);
+    buf.record_outbound_frame(&f2, 1_000_000);
+    assert_eq!(buf.len(), 3);
+
+    // NACK requesting missing shard 1
+    let req_shard1 = ScreenNack {
+        frame_seq: 100,
+        block_id: 1,
+        missing_mask: 0b0010,
+        missing_indices: vec![1],
+        is_fec: true,
+        requires_keyframe_fallback: false,
+        rtt_estimate_us: 10_000,
+    };
+    let retx = buf.handle_nack(&req_shard1, 1_015_000);
+    assert_eq!(retx.len(), 1);
+    let retx_shard = ScreenFecShard::from_inner_frame(&retx[0]).unwrap();
+    assert_eq!(retx_shard.shard_index, 1);
+    assert_eq!(retx_shard.data, vec![20; 100]);
+    assert_eq!(buf.stats().shards_retransmitted, 1);
+    assert_eq!(buf.stats().nacks_received, 1);
+
+    // Second retry under Auto mode (retry ceiling = 2)
+    let retx2 = buf.handle_nack(&req_shard1, 1_030_000);
+    assert_eq!(retx2.len(), 1);
+    assert_eq!(buf.stats().shards_retransmitted, 2);
+
+    // Third retry exceeds Auto mode ceiling (2) -> refused/timeouts incremented
+    let retx3 = buf.handle_nack(&req_shard1, 1_045_000);
+    assert_eq!(retx3.len(), 0);
+    assert_eq!(buf.stats().retransmit_timeouts, 1);
+
+    // Age expiration (> 300ms)
+    let req_shard0 = ScreenNack {
+        frame_seq: 100,
+        block_id: 1,
+        missing_mask: 0b0001,
+        missing_indices: vec![0],
+        is_fec: true,
+        requires_keyframe_fallback: false,
+        rtt_estimate_us: 10_000,
+    };
+    let retx_expired = buf.handle_nack(&req_shard0, 1_400_000); // 400ms later
+    assert_eq!(retx_expired.len(), 0);
+    assert_eq!(buf.stats().retransmit_timeouts, 2);
+
+    // 4. Receiver NACK generation and RTT debounce
+    let mut receiver = ScreenReceiver::with_harq_mode(ScreenHarqMode::Auto);
+    assert_eq!(receiver.harq_mode(), ScreenHarqMode::Auto);
+
+    // Ingest shard 0 (k=2, m=1), missing shard 1
+    let r_shard0 = ScreenFecShard {
+        frame_seq: 200,
+        block_id: 0,
+        k_data_shards: 2,
+        m_parity_shards: 1,
+        shard_index: 0,
+        is_parity: false,
+        data: vec![55; 100],
+    };
+    let _ = receiver.on_fec_shard(r_shard0);
+
+    let nack1 = receiver.generate_nack_on_fec(2_000_000, 20_000);
+    assert!(nack1.is_some());
+    let nack1 = nack1.unwrap();
+    assert_eq!(nack1.frame_seq, 200);
+    assert_eq!(nack1.block_id, 0);
+    assert_eq!(nack1.missing_indices, vec![1, 2]); // missing shard 1 and parity 0 (idx 2)
+    assert_eq!(receiver.harq_stats().nacks_sent, 1);
+
+    // Immediate duplicate NACK within RTT window (< 20ms) is debounced
+    let nack_dup = receiver.generate_nack_on_fec(2_005_000, 20_000);
+    assert!(nack_dup.is_none());
+    assert_eq!(receiver.harq_stats().nacks_sent, 1);
+
+    // After RTT window passes (> 20ms) -> NACK allowed again
+    let nack2 = receiver.generate_nack_on_fec(2_025_000, 20_000);
+    assert!(nack2.is_some());
+    assert_eq!(receiver.harq_stats().nacks_sent, 2);
+
+    // 5. Sender end-to-end integration
+    let mut sender = ScreenSender::with_harq(ScreenHarqMode::Auto);
+    let sf = ScreenFrame {
+        seq: 300,
+        bytes: vec![123; 500],
+        rect: ScreenRect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+        },
+        format: PixelFormat::Bgra8,
+        codec_tag: SCREEN_COMPRESS_NONE,
+        stride: 40,
+    };
+    let encoded_frames = sender
+        .encode_frame_to_inner_frames_with_time(&sf, 0.05, 3_000_000)
+        .expect("encode with time");
+    assert!(!encoded_frames.is_empty());
+    assert!(sender.retransmit_buffer().len() > 0);
+
+    let fallback_nack = ScreenNack {
+        frame_seq: 300,
+        block_id: 0,
+        missing_mask: 0b1111,
+        missing_indices: vec![0, 1, 2, 3],
+        is_fec: true,
+        requires_keyframe_fallback: true,
+        rtt_estimate_us: 15_000,
+    };
+    let _ = sender.handle_nack(&fallback_nack, 3_010_000);
+    assert_eq!(sender.stats().harq_nacks_received, 1);
+    assert!(!sender.stats().is_squelched);
 }

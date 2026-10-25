@@ -3,12 +3,37 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.06** |
+| 文档版本 | **2.07** |
 | 日期 | 2026-10-25 |
-| 状态 | **v2.06 屏幕流基于时延梯度的拥塞控制器与缓冲膨胀趋势线滤波器（Screen Streaming Delay-Based Congestion Controller & Early Bufferbloat Trendline Filter, ADR-092）与双端 CLI 全同构**——(1) **协议与趋势线滤波引擎**（`crates/tetherly-core/src/screen.rs`）：设计基于最小二乘法（OLS）线性回归的延迟梯度趋势线滤波器（`ScreenTrendlineFilter`、`ScreenTrendlineStats`、`ScreenTrendlineReport`、`ScreenTrendlineMode`、`ScreenBandwidthUsageState`），消除传统基于丢包拥塞控制对网络中间节点大队列积压（Bufferbloat）的反应迟钝缺陷；支持 Auto（自适应 RTT 缩放阈值 $\gamma$）、Aggressive（低延时敏感阈值 $6.0 \mu s/\text{frame}$）、Conservative（抗无线噪波阈值 $25.0 \mu s/\text{frame}$）与 Disabled 四种模式；在连续 3 帧判定队列积压（Overusing）或消解（Underusing）时触发状态机跃迁；(2) **发射端自适应联动与运行时**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：深度集成至 `ScreenSender::on_control_with_time` 帧确认驱动流水线，实时更新 `ScreenStats` 遥测；新增 REST API `GET/POST /api/screen/trendline`，扩展 `ScreenStatusReport` 透出 `trendline_mode`、`trendline_state`、`trendline_slope_us`、`trendline_overuse_count`；(3) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：`tetherly` 与 `tetherly-cli` 全同构支持 `screen trendline [mode]`、`tetherly run --screen-trendline` 与状态打印；(4) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_16_screen_delay_based_trendline_filter` 全绿，版本升级至 `0.1.28`。 |
+| 状态 | **v2.07 屏幕流选择性重传（NACK）与混合纠错（HARQ）流水线（Screen Streaming Selective NACK Retransmission & Hybrid ARQ Pipeline, ADR-093）与双端 CLI 全同构**——(1) **协议与混合纠错引擎**（`crates/tetherly-core/src/screen.rs`）：统一前向纠错（FEC，ADR-090）与选择性重传（NACK），设计专用线协议帧（`TYPE_SCREEN_NACK = 0x0505`、`TNACK` 协议魔数、36 字节紧凑报头、64 位掩码与动态缺失索引）；支持 Auto（自适应重试 2 次）、Aggressive（极速重试 3 次）、Conservative（保守重试 1 次）与 Disabled 四种模式；接收端引入播放截止期限（Playout Deadline）约束与超期自适应 IDR 关键帧回退（Fallback），并实现 RTT 周期防抖洪泛抑制；发送端维护 256 容量、300ms 最大存活期的轻量滑动重传环形队列（`ScreenRetransmitBuffer`）；(2) **发送端与接收端运行时联动**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：`attach_screen_host` 捕获 `TYPE_SCREEN_NACK` 提取重传帧并触发自适应 IDR 降级刷新，`attach_screen_client` 定时触发 NACK 生成与补传分片译码；新增 REST API `GET/POST /api/screen/harq`，扩展 `ScreenStatusReport` 透出 `harq_mode`、`harq_shards_retransmitted`、`harq_recovered_frames`；(3) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：`tetherly` 与 `tetherly-cli` 全同构支持 `screen harq [mode]`、`tetherly run --screen-harq` 与状态打印；(4) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_17_screen_selective_nack_and_hybrid_arq` 全绿，版本升级至 `0.1.29`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.07 相对 2.06(屏幕流选择性重传 NACK 与混合纠错 HARQ 流水线 ADR-093 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **突破纯 FEC 与纯 ARQ 的弱网局限**: 纯 FEC 仅能抵御额定冗余之内的随机丢包，一旦遭遇突发丢包（超出 $m$ 个分片），传统方案只能全帧申请 IDR 关键帧刷新，造成数百 KB 巨帧突发拥塞与画面明显撕裂；而全量 TCP 累积重传又会引入队头阻塞。必须将 FEC 与选择性微秒级 NACK 重传深度融合（Hybrid ARQ）。
+  2. **播放截止期限约束（Deadline Bounding）与 IDR 降级回退**: 屏幕交互对时延极度敏感。当预估重传到达时刻 $t_{\text{now}} + \text{RTT}$ 超出播放抖动缓冲区截止期限时，放弃无谓的旧分片重传，在 NACK 中置位 `requires_keyframe_fallback` 快速通知发送端编码器立即下发自适应关键帧。
+  3. **发送端滑动窗口环形缓存与 NACK 洪泛抑制**: 发送端维护 256 容量、300ms 最大生命周期的重传环形队列，对单分片重试次数设置严格天花板（Auto=2, Aggressive=3, Conservative=1）；接收端采用 $\max(\text{RTT}, 20\text{ms})$ 防抖周期，杜绝重传风暴。
+- **架构解法与落地**:
+  1. **Core 混合纠错与线协议（`crates/tetherly-core/src/screen.rs`）**:
+     - 定义 `ScreenHarqMode`、`ScreenNack`、`ScreenRetransmitBuffer`、`ScreenHarqStats` 与 `ScreenHarqReport`。
+     - 定义线协议常量：`TYPE_SCREEN_NACK = 0x0505`、`SCREEN_NACK_MAGIC = *b"TNACK"`、`SCREEN_NACK_PROTO = 0x01`、`SCREEN_NACK_HEADER_LEN = 36`。
+     - 发送端 `ScreenRetransmitBuffer` 实现微秒级出站帧记录、过期驱逐与基于掩码/索引的按需切片提取。
+     - 接收端 `ScreenReceiver` 实现基于播放期限的 NACK 组装、RTT 周期防抖抑制与已重传帧的顺利重组统计（`recovered_frames`）。
+  2. **Node 守护进程与端到端传输（`crates/tetherly-node/src/runtime.rs`）**:
+     - `NodeConfig` 与 `SharedNodeState` 引入 `screen_harq_mode: ScreenHarqMode`。
+     - `attach_screen_host` 接收链路处理 `TYPE_SCREEN_NACK`，重传指定分片并根据标志位触发 `force_idr()`。
+     - `attach_screen_client` 定时触发丢包分片探测与 NACK 回传，收到重传分片后顺利重组并记录遥测。
+     - 暴露 `screen_harq_mode()`、`screen_set_harq_mode()`、`screen_harq_report()` 运行时接口。
+  3. **回环 REST API（`crates/tetherly-node/src/uihttp.rs`）**:
+     - 新增 `GET /api/screen/harq` 与 `POST /api/screen/harq`。
+     - `ScreenStatusReport` 扩充 `harq_mode`、`harq_shards_retransmitted`、`harq_recovered_frames`。
+  4. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - 支持 `screen harq [mode]` 子命令、`tetherly run --screen-harq` 启动参数与 `screen status` 状态监控。
+  5. **测试与验证**:
+     - 核心单元测试、REST API 单元测试及 Phase 5 端到端集成测试 `m5_17_screen_selective_nack_and_hybrid_arq` 全绿。
 
 **2.06 相对 2.05(屏幕流基于时延梯度的拥塞控制器与缓冲膨胀趋势线滤波器 ADR-092 与双端 CLI 全同构)**
 

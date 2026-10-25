@@ -2068,6 +2068,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming selective NACK and Hybrid ARQ (HARQ) pipeline (v2.07 / ADR-093).
+    Harq {
+        /// Target HARQ mode: `auto`, `aggressive`, `conservative`, or `disabled`. If omitted, displays current HARQ status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -8051,6 +8062,27 @@ async fn main() -> Result<()> {
                         .get("trendline_overuse_count")
                         .and_then(|n| n.as_u64())
                         .unwrap_or(0);
+                    let harq_mode = v.get("harq_mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let harq_nacks_sent = v
+                        .get("harq_nacks_sent")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let harq_nacks_received = v
+                        .get("harq_nacks_received")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let harq_shards_retransmitted = v
+                        .get("harq_shards_retransmitted")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let harq_recovered_frames = v
+                        .get("harq_recovered_frames")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let harq_buffer_occupancy = v
+                        .get("harq_buffer_occupancy")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
 
                     println!("Screen Channel Status:");
                     println!("  State:        {state}");
@@ -8150,6 +8182,18 @@ async fn main() -> Result<()> {
                         println!(
                             "  Trendline:    {} [state: {}] (slope: {:.2} us/frame, overuse_cnt: {})",
                             trendline_mode, trendline_state, trendline_slope_us, trendline_overuse_count
+                        );
+                    }
+                    if !harq_mode.is_empty() {
+                        println!(
+                            "  HARQ:         {} (sent_nacks: {}, rcvd_nacks: {}, retx_shards: {}, recovered: {}, buf: {}/{})",
+                            harq_mode,
+                            harq_nacks_sent,
+                            harq_nacks_received,
+                            harq_shards_retransmitted,
+                            harq_recovered_frames,
+                            harq_buffer_occupancy,
+                            tetherly_core::SCREEN_HARQ_DEFAULT_BUFFER_CAPACITY
                         );
                     }
                 }
@@ -8970,6 +9014,80 @@ async fn main() -> Result<()> {
                         println!("  Accumulated Delay:    {accumulated_delay} us");
                         println!("  Overuse Events:       {overuse_count}");
                         println!("  Underuse Events:      {underuse_count}");
+                    }
+                }
+            }
+            ScreenCmd::Harq {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    loopback_post(ui_port, "/api/screen/harq", &body).await
+                } else {
+                    loopback_get(ui_port, "/api/screen/harq").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen harq query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    let m = v.get("mode").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let nacks_sent = v.get("nacks_sent").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let nacks_received = v
+                        .get("nacks_received")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let shards_retransmitted = v
+                        .get("shards_retransmitted")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let recovered_frames = v
+                        .get("recovered_frames")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let retransmit_timeouts = v
+                        .get("retransmit_timeouts")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let buffer_occupancy = v
+                        .get("buffer_occupancy")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let buffer_capacity = v
+                        .get("buffer_capacity")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(tetherly_core::SCREEN_HARQ_DEFAULT_BUFFER_CAPACITY as u64);
+
+                    if has_update {
+                        println!("Screen HARQ selective retransmission mode updated: {m}");
+                    } else {
+                        println!("Screen Selective NACK & Hybrid ARQ (HARQ) Pipeline (ADR-093):");
+                        println!("  HARQ Mode:            {m}");
+                        println!("  NACKs Sent:           {nacks_sent}");
+                        println!("  NACKs Received:       {nacks_received}");
+                        println!("  Shards Retransmitted: {shards_retransmitted}");
+                        println!("  Recovered Frames:     {recovered_frames}");
+                        println!("  Retransmit Timeouts:  {retransmit_timeouts}");
+                        println!("  Buffer Occupancy:     {buffer_occupancy}/{buffer_capacity}");
                     }
                 }
             }

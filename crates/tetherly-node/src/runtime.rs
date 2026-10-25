@@ -61,14 +61,15 @@ use tetherly_core::{
     Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource, ReplyView,
     ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenCursorMode, ScreenCursorStats,
     ScreenCursorUpdate, ScreenDamageTracker, ScreenFecMode, ScreenFecReport, ScreenFecShard,
-    ScreenFrame, ScreenPacerMode, ScreenPacerReport, ScreenPlayoutAction, ScreenPlayoutMode,
-    ScreenPlayoutStats, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode,
-    ScreenState, ScreenStats, ScreenTrendlineMode, ScreenTrendlineReport, SensitiveContentGuard,
-    TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator, TrustStore,
-    VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
-    VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
-    VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
-    DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS, TYPE_SCREEN_FEC,
+    ScreenFrame, ScreenHarqMode, ScreenHarqReport, ScreenNack, ScreenPacerMode, ScreenPacerReport,
+    ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats, ScreenReceiver, ScreenSender,
+    ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState, ScreenStats, ScreenTrendlineMode,
+    ScreenTrendlineReport, SensitiveContentGuard, TcpLimiter, TopologyStateFrame,
+    TopologySyncReqFrame, TopologyValidator, TrustStore, VirtualDisplayAnnounceFrame,
+    VirtualDisplayAttachFrame, VirtualDisplayCodec, VirtualDisplayDetachFrame,
+    VirtualDisplayFrameAck, VirtualDisplayMode, VirtualDisplayPixelFormat, VirtualDisplayRole,
+    VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS,
+    OVERLAY_PROBE_MS, TYPE_SCREEN_FEC, TYPE_SCREEN_NACK,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -172,6 +173,8 @@ pub struct NodeConfig {
     pub screen_pacer_mode: tetherly_core::ScreenPacerMode,
     /// Operation mode for screen streaming delay-based trendline bufferbloat filter (ADR-092).
     pub screen_trendline_mode: tetherly_core::ScreenTrendlineMode,
+    /// Operation mode for screen streaming selective NACK and Hybrid ARQ (HARQ) pipeline (ADR-093).
+    pub screen_harq_mode: tetherly_core::ScreenHarqMode,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -231,6 +234,7 @@ impl Default for NodeConfig {
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
+            screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
             screen_sink: None,
             input_sink: None,
         }
@@ -2957,6 +2961,20 @@ pub struct ScreenStatusReport {
     pub trendline_slope_us: f64,
     #[serde(default)]
     pub trendline_overuse_count: u64,
+    #[serde(default)]
+    pub harq_mode: String,
+    #[serde(default)]
+    pub harq_nacks_sent: u64,
+    #[serde(default)]
+    pub harq_nacks_received: u64,
+    #[serde(default)]
+    pub harq_shards_retransmitted: u64,
+    #[serde(default)]
+    pub harq_recovered_frames: u64,
+    #[serde(default)]
+    pub harq_retransmit_timeouts: u64,
+    #[serde(default)]
+    pub harq_buffer_occupancy: usize,
 }
 
 /// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
@@ -3321,6 +3339,8 @@ struct Shared {
     screen_pacer_mode: Mutex<ScreenPacerMode>,
     /// Delay-based trendline bufferbloat filter mode for screen streams (ADR-092).
     screen_trendline_mode: Mutex<ScreenTrendlineMode>,
+    /// Hybrid ARQ (HARQ) selective retransmission mode for screen streams (ADR-093).
+    screen_harq_mode: Mutex<ScreenHarqMode>,
     /// Damage tracker for screen frames (ADR-089).
     screen_damage_tracker: Mutex<ScreenDamageTracker>,
     /// Previous frame bytes for difference detection (ADR-089).
@@ -3521,6 +3541,7 @@ impl Node {
         let screen_fec_mode = cfg.screen_fec_mode;
         let screen_pacer_mode = cfg.screen_pacer_mode;
         let screen_trendline_mode = cfg.screen_trendline_mode;
+        let screen_harq_mode = cfg.screen_harq_mode;
         if let Some(sel) = &screen_encode_codec {
             sel.set_fps(screen_fps);
             sel.set_scale_pct(screen_scale_pct);
@@ -3664,6 +3685,7 @@ impl Node {
                 s.set_fec_mode(screen_fec_mode);
                 s.set_pacer_mode(screen_pacer_mode);
                 s.set_trendline_mode(screen_trendline_mode);
+                s.set_harq_mode(screen_harq_mode);
                 s
             }),
             screen_source,
@@ -3706,6 +3728,7 @@ impl Node {
             screen_fec_mode: Mutex::new(screen_fec_mode),
             screen_pacer_mode: Mutex::new(screen_pacer_mode),
             screen_trendline_mode: Mutex::new(screen_trendline_mode),
+            screen_harq_mode: Mutex::new(screen_harq_mode),
             screen_damage_tracker: Mutex::new(ScreenDamageTracker::new()),
             screen_prev_frame: Mutex::new(None),
             shutdown,
@@ -20272,6 +20295,32 @@ impl Node {
                             Ok(frame) => {
                                 let f_len = (frame.payload.len() + 12) as u64;
                                 node.shared.telemetry.record_screen_rx(f_len);
+                                if frame.ty == TYPE_SCREEN_NACK {
+                                    if let Ok(nack) = ScreenNack::decode(&frame.payload) {
+                                        let now_us = node.shared.clock.unix_us();
+                                        let retransmit_frames = {
+                                            let mut engine = node
+                                                .shared
+                                                .screen_engine
+                                                .lock()
+                                                .expect("screen");
+                                            engine.handle_nack(&nack, now_us)
+                                        };
+                                        if nack.requires_keyframe_fallback {
+                                            node.shared.screen_source.force_idr();
+                                            if let Some(sel) = &node.shared.screen_encode_codec {
+                                                sel.force_idr();
+                                            }
+                                        }
+                                        for r_frame in retransmit_frames {
+                                            let r_len = (r_frame.payload.len() + 12) as u64;
+                                            if sess.send_bounded(r_frame).await.is_ok() {
+                                                node.shared.telemetry.record_screen_tx(r_len);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
                                 if let Ok(msg) = ControlMsg::from_frame(&frame) {
                                     let now_us = node.shared.clock.unix_us();
                                     if matches!(msg, ControlMsg::KeyframeRequest) {
@@ -20372,8 +20421,10 @@ impl Node {
             .lock()
             .expect("playout mode");
         let initial_cursor_mode = *self.shared.screen_cursor_mode.lock().expect("cursor mode");
+        let initial_harq_mode = *self.shared.screen_harq_mode.lock().expect("harq mode");
         let mut receiver = ScreenReceiver::with_playout_mode(initial_playout_mode);
         receiver.set_cursor_mode(initial_cursor_mode);
+        receiver.set_harq_mode(initial_harq_mode);
         let mut assembler = ScreenAssembler::new();
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
@@ -20394,6 +20445,10 @@ impl Node {
                         let target_cursor_mode = *node.shared.screen_cursor_mode.lock().expect("cursor mode");
                         if receiver.cursor_mode() != target_cursor_mode {
                             receiver.set_cursor_mode(target_cursor_mode);
+                        }
+                        let target_harq_mode = *node.shared.screen_harq_mode.lock().expect("harq mode");
+                        if receiver.harq_mode() != target_harq_mode {
+                            receiver.set_harq_mode(target_harq_mode);
                         }
                         let now_us = node.shared.clock.unix_us();
                         let mut played = false;
@@ -20461,7 +20516,36 @@ impl Node {
                                         }
                                     }
                                 };
+                                if assembled_opt.is_none() {
+                                    let now_us = node.shared.clock.unix_us();
+                                    let rtt_estimate_us = node
+                                        .shared
+                                        .screen_engine
+                                        .lock()
+                                        .map(|e| e.stats().rtt_latest_us.unwrap_or(20_000))
+                                        .unwrap_or(20_000);
+                                    let nack_opt = if frame.ty == TYPE_SCREEN_FEC {
+                                        receiver.generate_nack_on_fec(now_us, rtt_estimate_us)
+                                    } else {
+                                        receiver.generate_nack_on_frag(&assembler, now_us, rtt_estimate_us)
+                                    };
+                                    if let Some(nack) = nack_opt {
+                                        *node.shared.screen_rx_stats.lock().expect("screen rx") =
+                                            receiver.stats();
+                                        if let Ok(nack_frame) = nack.to_inner() {
+                                            let n_len = (nack_frame.payload.len() + 12) as u64;
+                                            if sess.send_bounded(nack_frame).await.is_ok() {
+                                                node.shared.telemetry.record_screen_tx(n_len);
+                                            }
+                                        }
+                                    }
+                                }
                                 if let Some(sf) = assembled_opt {
+                                    if receiver.harq_stats().nacks_sent > 0 {
+                                        receiver.record_recovered_frame();
+                                        *node.shared.screen_rx_stats.lock().expect("screen rx") =
+                                            receiver.stats();
+                                    }
                                     let codec_tag = sf.codec_tag;
                                     // Decode by the frame's wire tag:
                                     // zstd (1) or H.264 (3, ADR-079).
@@ -20824,6 +20908,7 @@ impl Node {
             .ok_or_else(|| CoreError::Json("screen channel closed".into()))?;
         for f in frames {
             let (frags, delays_us) = {
+                let now_us = self.shared.clock.unix_us();
                 let mut engine = self.shared.screen_engine.lock().expect("screen");
                 let loss_ratio = match engine.network_health() {
                     tetherly_core::NetworkHealth::Healthy => 0.0,
@@ -20831,7 +20916,8 @@ impl Node {
                     tetherly_core::NetworkHealth::Congested => 0.05,
                     tetherly_core::NetworkHealth::Critical => 0.10,
                 };
-                let frags = engine.encode_frame_to_inner_frames(&f, loss_ratio)?;
+                let frags =
+                    engine.encode_frame_to_inner_frames_with_time(&f, loss_ratio, now_us)?;
                 let delays = engine.compute_packet_delays(frags.len());
                 (frags, delays)
             };
@@ -21162,6 +21248,8 @@ impl Node {
             .lock()
             .expect("cursor stats");
         let fec_mode = *self.shared.screen_fec_mode.lock().expect("fec mode");
+        let harq_mode = *self.shared.screen_harq_mode.lock().expect("harq mode");
+        let harq_report = self.screen_harq_report();
         ScreenStatusReport {
             ok: true,
             state: state.as_str().to_string(),
@@ -21218,6 +21306,13 @@ impl Node {
             trendline_state: stats.trendline_state().to_string(),
             trendline_slope_us: stats.trendline_slope_us,
             trendline_overuse_count: stats.trendline_overuse_count,
+            harq_mode: harq_mode.as_str().to_string(),
+            harq_nacks_sent: rx_stats.harq_nacks_sent,
+            harq_nacks_received: stats.harq_nacks_received,
+            harq_shards_retransmitted: stats.harq_shards_retransmitted,
+            harq_recovered_frames: rx_stats.harq_recovered_frames,
+            harq_retransmit_timeouts: harq_report.retransmit_timeouts,
+            harq_buffer_occupancy: harq_report.buffer_occupancy,
         }
     }
 
@@ -21849,6 +21944,39 @@ impl Node {
             .expect("screen")
             .set_trendline_mode(mode);
         self.screen_trendline_report()
+    }
+
+    /// Report current screen selective NACK and Hybrid ARQ (HARQ) metrics and state (v2.07 / ADR-093).
+    pub fn screen_harq_report(&self) -> ScreenHarqReport {
+        let mode = *self.shared.screen_harq_mode.lock().expect("harq mode");
+        let mut rep = self
+            .shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .harq_report();
+        rep.mode = mode;
+        let rx_stats = *self.shared.screen_rx_stats.lock().expect("rx stats");
+        rep.nacks_sent = rx_stats.harq_nacks_sent;
+        rep.recovered_frames = rx_stats.harq_recovered_frames;
+        rep.timestamp_ms = self.shared.clock.unix_ms();
+        rep
+    }
+
+    /// Current screen HARQ selective retransmission mode (v2.07 / ADR-093).
+    pub fn screen_harq_mode(&self) -> tetherly_core::ScreenHarqMode {
+        *self.shared.screen_harq_mode.lock().expect("harq mode")
+    }
+
+    /// Set and report screen HARQ selective retransmission mode (v2.07 / ADR-093).
+    pub fn screen_set_harq_mode(&self, mode: tetherly_core::ScreenHarqMode) -> ScreenHarqReport {
+        *self.shared.screen_harq_mode.lock().expect("harq mode") = mode;
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .set_harq_mode(mode);
+        self.screen_harq_report()
     }
 
     /// Comprehensive status report for input sharing.
@@ -22592,6 +22720,7 @@ mod clipboard_policy_tests {
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
+            screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22744,6 +22873,7 @@ mod handoff_engine_tests {
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
+            screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22927,6 +23057,7 @@ mod media_policy_tests {
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
+            screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23086,6 +23217,7 @@ mod locator_policy_tests {
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
+            screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23225,6 +23357,7 @@ mod locator_policy_tests {
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
+            screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23951,6 +24084,94 @@ mod locator_policy_tests {
         let status = node.screen_status_report().await;
         assert_eq!(status.trendline_mode, "disabled");
         assert_eq!(status.trendline_state, "normal");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_screen_harq_mode_and_reporting() {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-harq-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.clone(),
+            control_port: 0,
+            file_port: 0,
+            input_port: 0,
+            screen_port: 0,
+            ui_port: 0,
+            name: "harq-test-node".into(),
+            platform: "test".into(),
+            memory_clip: true,
+            memory_notifier: true,
+            loopback_only: true,
+            advertise: false,
+            reconnect: false,
+            overlay: OverlayConfig::default(),
+            screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
+            ..Default::default()
+        };
+        let clock = Arc::new(ManualClock::new(50_000));
+        let node = Node::start_with_clock(cfg, clock.clone()).unwrap();
+
+        // 1. Initial report: defaults to Auto mode (ADR-093)
+        let initial_rep = node.screen_harq_report();
+        assert!(initial_rep.ok);
+        assert_eq!(initial_rep.mode, tetherly_core::ScreenHarqMode::Auto);
+        assert_eq!(initial_rep.nacks_sent, 0);
+        assert_eq!(initial_rep.nacks_received, 0);
+        assert_eq!(initial_rep.shards_retransmitted, 0);
+        assert_eq!(initial_rep.recovered_frames, 0);
+        assert_eq!(initial_rep.retransmit_timeouts, 0);
+        assert_eq!(initial_rep.buffer_occupancy, 0);
+        assert_eq!(
+            initial_rep.buffer_capacity,
+            tetherly_core::SCREEN_HARQ_DEFAULT_BUFFER_CAPACITY
+        );
+        assert_eq!(node.screen_harq_mode(), tetherly_core::ScreenHarqMode::Auto);
+
+        // 2. Set mode to Aggressive
+        let rep_agg = node.screen_set_harq_mode(tetherly_core::ScreenHarqMode::Aggressive);
+        assert!(rep_agg.ok);
+        assert_eq!(rep_agg.mode, tetherly_core::ScreenHarqMode::Aggressive);
+        assert_eq!(
+            node.screen_harq_mode(),
+            tetherly_core::ScreenHarqMode::Aggressive
+        );
+
+        // 3. Set mode to Conservative
+        let rep_cons = node.screen_set_harq_mode(tetherly_core::ScreenHarqMode::Conservative);
+        assert!(rep_cons.ok);
+        assert_eq!(rep_cons.mode, tetherly_core::ScreenHarqMode::Conservative);
+        assert_eq!(
+            node.screen_harq_mode(),
+            tetherly_core::ScreenHarqMode::Conservative
+        );
+
+        // 4. Set mode to Disabled
+        let rep_dis = node.screen_set_harq_mode(tetherly_core::ScreenHarqMode::Disabled);
+        assert!(rep_dis.ok);
+        assert_eq!(rep_dis.mode, tetherly_core::ScreenHarqMode::Disabled);
+        assert_eq!(
+            node.screen_harq_mode(),
+            tetherly_core::ScreenHarqMode::Disabled
+        );
+
+        // 5. Status report reflects active HARQ mode and metrics
+        let status = node.screen_status_report().await;
+        assert_eq!(status.harq_mode, "disabled");
+        assert_eq!(status.harq_nacks_sent, 0);
+        assert_eq!(status.harq_nacks_received, 0);
+        assert_eq!(status.harq_shards_retransmitted, 0);
+        assert_eq!(status.harq_recovered_frames, 0);
+        assert_eq!(status.harq_retransmit_timeouts, 0);
+        assert_eq!(status.harq_buffer_occupancy, 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
