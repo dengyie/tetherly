@@ -23917,6 +23917,7 @@ mod locator_policy_tests {
             node.screen_set_trendline_mode(tetherly_core::ScreenTrendlineMode::Aggressive);
         assert!(rep_agg.ok);
         assert_eq!(rep_agg.mode, tetherly_core::ScreenTrendlineMode::Aggressive);
+        assert!((rep_agg.threshold_us_per_frame - 6.0).abs() < 0.01);
         assert_eq!(
             node.screen_trendline_mode(),
             tetherly_core::ScreenTrendlineMode::Aggressive
@@ -23930,6 +23931,7 @@ mod locator_policy_tests {
             rep_cons.mode,
             tetherly_core::ScreenTrendlineMode::Conservative
         );
+        assert!((rep_cons.threshold_us_per_frame - 25.0).abs() < 0.01);
         assert_eq!(
             node.screen_trendline_mode(),
             tetherly_core::ScreenTrendlineMode::Conservative
@@ -23939,6 +23941,7 @@ mod locator_policy_tests {
         let rep_dis = node.screen_set_trendline_mode(tetherly_core::ScreenTrendlineMode::Disabled);
         assert!(rep_dis.ok);
         assert_eq!(rep_dis.mode, tetherly_core::ScreenTrendlineMode::Disabled);
+        assert_eq!(rep_dis.threshold_us_per_frame, 0.0);
         assert_eq!(
             node.screen_trendline_mode(),
             tetherly_core::ScreenTrendlineMode::Disabled

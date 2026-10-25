@@ -3697,6 +3697,14 @@ impl Default for ScreenTrendlineFilter {
 
 impl ScreenTrendlineFilter {
     pub fn new(mode: ScreenTrendlineMode) -> Self {
+        let threshold = match mode {
+            ScreenTrendlineMode::Auto => SCREEN_TRENDLINE_DEFAULT_THRESHOLD_US_PER_FRAME,
+            ScreenTrendlineMode::Aggressive => SCREEN_TRENDLINE_AGGRESSIVE_THRESHOLD_US_PER_FRAME,
+            ScreenTrendlineMode::Conservative => {
+                SCREEN_TRENDLINE_CONSERVATIVE_THRESHOLD_US_PER_FRAME
+            }
+            ScreenTrendlineMode::Disabled => 0.0,
+        };
         Self {
             mode,
             state: ScreenBandwidthUsageState::Normal,
@@ -3709,6 +3717,7 @@ impl ScreenTrendlineFilter {
             consecutive_underuse: 0,
             stats: ScreenTrendlineStats {
                 mode,
+                threshold_us_per_frame: threshold,
                 ..Default::default()
             },
         }
@@ -3721,6 +3730,14 @@ impl ScreenTrendlineFilter {
     pub fn set_mode(&mut self, mode: ScreenTrendlineMode) {
         self.mode = mode;
         self.stats.mode = mode;
+        self.stats.threshold_us_per_frame = match mode {
+            ScreenTrendlineMode::Auto => SCREEN_TRENDLINE_DEFAULT_THRESHOLD_US_PER_FRAME,
+            ScreenTrendlineMode::Aggressive => SCREEN_TRENDLINE_AGGRESSIVE_THRESHOLD_US_PER_FRAME,
+            ScreenTrendlineMode::Conservative => {
+                SCREEN_TRENDLINE_CONSERVATIVE_THRESHOLD_US_PER_FRAME
+            }
+            ScreenTrendlineMode::Disabled => 0.0,
+        };
         if mode == ScreenTrendlineMode::Disabled {
             self.state = ScreenBandwidthUsageState::Normal;
             self.stats.state = ScreenBandwidthUsageState::Normal;
