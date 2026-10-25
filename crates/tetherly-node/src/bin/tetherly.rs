@@ -89,6 +89,11 @@ enum Cmd {
         /// native scale; `manual` disables autonomous adaptations.
         #[arg(long, default_value = "auto")]
         screen_matrix: String,
+        /// Screen Streaming Receiver Playout Buffer mode (ADR-087): `adaptive` (default)
+        /// dynamically adapts target buffer delay based on EWMA jitter; `zerolatency` minimizes
+        /// buffering latency for interactive tasks; `smooth` cushions jitter for video/animation.
+        #[arg(long, default_value = "adaptive")]
+        screen_playout: String,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -3876,6 +3881,7 @@ async fn main() -> Result<()> {
             screen_profile,
             screen_qp,
             screen_matrix,
+            screen_playout,
             file_port,
             input_port,
             screen_port,
@@ -3944,6 +3950,16 @@ async fn main() -> Result<()> {
                 "conservative" => tetherly_core::ScreenMatrixMode::Conservative,
                 "manual" => tetherly_core::ScreenMatrixMode::Manual,
                 _ => anyhow::bail!("--screen-matrix must be `auto`, `conservative`, or `manual`"),
+            };
+            cfg.screen_playout_mode = match screen_playout.trim().to_lowercase().as_str() {
+                "adaptive" | "auto" => tetherly_core::ScreenPlayoutMode::Adaptive,
+                "zerolatency" | "zero_latency" | "low_latency" | "interactive" => {
+                    tetherly_core::ScreenPlayoutMode::ZeroLatency
+                }
+                "smooth" | "video" => tetherly_core::ScreenPlayoutMode::Smooth,
+                _ => {
+                    anyhow::bail!("--screen-playout must be `adaptive`, `zerolatency`, or `smooth`")
+                }
             };
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
             cfg.screen_codec_h264 = h264;
