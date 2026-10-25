@@ -4085,7 +4085,7 @@ impl ScreenNack {
         if payload.len() < SCREEN_NACK_HEADER_LEN {
             return Err(CoreError::ScreenFrame);
         }
-        if &payload[..5] != SCREEN_NACK_MAGIC {
+        if payload[..5] != SCREEN_NACK_MAGIC {
             return Err(CoreError::ScreenFrame);
         }
         if payload[5] != SCREEN_NACK_PROTO {
@@ -8036,7 +8036,7 @@ fn screen_harq_selective_nack_retransmission_pipeline() {
         .encode_frame_to_inner_frames_with_time(&sf, 0.05, 3_000_000)
         .expect("encode with time");
     assert!(!encoded_frames.is_empty());
-    assert!(sender.retransmit_buffer().len() > 0);
+    assert!(!sender.retransmit_buffer().is_empty());
 
     let fallback_nack = ScreenNack {
         frame_seq: 300,
