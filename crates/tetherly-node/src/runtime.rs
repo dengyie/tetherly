@@ -59,13 +59,14 @@ use tetherly_core::{
     MemoryTrustStore, MicAnnounceFrame, MicAttachFrame, MicAudioChunkFrame, MicCodec,
     MicDetachFrame, MicMode, MicRole, MicValidator, NotificationPayload, NotificationUrgency,
     Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource, ReplyView,
-    ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenFrame, ScreenReceiver,
-    ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats, SensitiveContentGuard,
-    TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator, TrustStore,
-    VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
-    VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
-    VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
-    DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS,
+    ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenFrame, ScreenPlayoutAction,
+    ScreenPlayoutMode, ScreenPlayoutStats, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource,
+    ScreenState, ScreenStats, SensitiveContentGuard, TcpLimiter, TopologyStateFrame,
+    TopologySyncReqFrame, TopologyValidator, TrustStore, VirtualDisplayAnnounceFrame,
+    VirtualDisplayAttachFrame, VirtualDisplayCodec, VirtualDisplayDetachFrame,
+    VirtualDisplayFrameAck, VirtualDisplayMode, VirtualDisplayPixelFormat, VirtualDisplayRole,
+    VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS,
+    OVERLAY_PROBE_MS,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -157,6 +158,8 @@ pub struct NodeConfig {
     pub screen_qp_max: u8,
     /// Operation mode for 4D autonomous adaptation matrix coordinator (ADR-086).
     pub screen_matrix_mode: tetherly_core::ScreenMatrixMode,
+    /// Operation mode for screen receiver playout buffer and adaptive dejitterizer (ADR-087).
+    pub screen_playout_mode: tetherly_core::ScreenPlayoutMode,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -210,6 +213,7 @@ impl Default for NodeConfig {
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
+            screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_sink: None,
             input_sink: None,
         }
@@ -2837,7 +2841,7 @@ pub struct RouteMutateReport {
 }
 
 /// Comprehensive status report for remote screen streaming.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct ScreenStatusReport {
     pub ok: bool,
     pub state: String,
@@ -2882,6 +2886,34 @@ pub struct ScreenStatusReport {
     pub matrix_mode: String,
     #[serde(default)]
     pub network_health: String,
+    #[serde(default)]
+    pub playout_mode: String,
+    #[serde(default)]
+    pub playout_delay_ms: f64,
+    #[serde(default)]
+    pub playout_jitter_ms: f64,
+    #[serde(default)]
+    pub playout_buffered: usize,
+    #[serde(default)]
+    pub playout_dropped_late: u64,
+}
+
+/// Status report for receiver playout buffer and adaptive jitter dejitterizer (ADR-087).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ScreenPlayoutReport {
+    pub ok: bool,
+    pub mode: String,
+    pub target_delay_ms: f64,
+    pub current_jitter_ms: f64,
+    pub target_delay_us: u64,
+    pub current_jitter_us: u64,
+    pub buffered_frames: usize,
+    pub played_frames: u64,
+    pub dropped_late_frames: u64,
+    pub dropped_overflow_frames: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_delay_us: Option<u64>,
+    pub timestamp_ms: u64,
 }
 
 /// Status report for 4-dimensional autonomous adaptation matrix coordinator (ADR-086).
@@ -3181,6 +3213,10 @@ struct Shared {
     /// Visitor-side receiver counters (received/dropped/bytes). Written by the
     /// screen-client task so the UI can show what actually arrived.
     screen_rx_stats: Mutex<ScreenStats>,
+    /// Playout buffer dejittering mode for incoming screen streams (ADR-087).
+    screen_playout_mode: Mutex<ScreenPlayoutMode>,
+    /// Playout buffer dejittering metrics for incoming screen streams (ADR-087).
+    screen_playout_stats: Mutex<ScreenPlayoutStats>,
     shutdown: watch::Sender<bool>,
     overlay: Mutex<OverlayStatus>,
     /// ANCS ingress. Present only when a transport was attached.
@@ -3371,6 +3407,7 @@ impl Node {
         let screen_qp_min = cfg.screen_qp_min;
         let screen_qp_max = cfg.screen_qp_max;
         let screen_matrix_mode = cfg.screen_matrix_mode;
+        let screen_playout_mode = cfg.screen_playout_mode;
         if let Some(sel) = &screen_encode_codec {
             sel.set_fps(screen_fps);
             sel.set_scale_pct(screen_scale_pct);
@@ -3529,6 +3566,23 @@ impl Node {
             screen_sink,
             screen_interval: Mutex::new(ScreenIntervalTracker::new()),
             screen_rx_stats: Mutex::new(ScreenStats::default()),
+            screen_playout_mode: Mutex::new(screen_playout_mode),
+            screen_playout_stats: Mutex::new(ScreenPlayoutStats {
+                mode: screen_playout_mode,
+                target_delay_us: match screen_playout_mode {
+                    ScreenPlayoutMode::Adaptive => {
+                        tetherly_core::SCREEN_PLAYOUT_ADAPTIVE_BASE_DELAY_US
+                    }
+                    ScreenPlayoutMode::ZeroLatency => tetherly_core::SCREEN_PLAYOUT_MIN_DELAY_US,
+                    ScreenPlayoutMode::Smooth => tetherly_core::SCREEN_PLAYOUT_SMOOTH_BASE_DELAY_US,
+                },
+                current_jitter_us: 0,
+                buffered_frames: 0,
+                played_frames: 0,
+                dropped_late_frames: 0,
+                dropped_overflow_frames: 0,
+                custom_delay: false,
+            }),
             shutdown,
             overlay: Mutex::new(initial_overlay),
             ancs: Mutex::new(ancs),
@@ -20186,16 +20240,37 @@ impl Node {
             false,
             Some(peer_id.to_string()),
         ));
-        let mut receiver = ScreenReceiver::new();
+        let initial_playout_mode = *self
+            .shared
+            .screen_playout_mode
+            .lock()
+            .expect("playout mode");
+        let mut receiver = ScreenReceiver::with_playout_mode(initial_playout_mode);
         let mut assembler = ScreenAssembler::new();
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
+        let mut playout_ticker = tokio::time::interval(std::time::Duration::from_millis(5));
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = stop.changed() => {
                         if *stop.borrow() {
                             break;
+                        }
+                    }
+                    _ = playout_ticker.tick() => {
+                        let target_mode = *node.shared.screen_playout_mode.lock().expect("playout mode");
+                        if receiver.playout_mode() != target_mode {
+                            receiver.set_playout_mode(target_mode);
+                        }
+                        let now_us = node.shared.clock.unix_us();
+                        let mut played = false;
+                        while let ScreenPlayoutAction::Play(ready_frame) = receiver.pop_playout(now_us) {
+                            let _ = node.shared.screen_sink.present(&ready_frame);
+                            played = true;
+                        }
+                        if played || receiver.playout_stats().buffered_frames > 0 {
+                            *node.shared.screen_playout_stats.lock().expect("playout stats") = receiver.playout_stats();
                         }
                     }
                     ctl = ctl_rx.recv() => {
@@ -20286,10 +20361,21 @@ impl Node {
                                                     }
                                                 }
                                                 if let Some(seq) = acked {
-                                                    let _ = node
+                                                    let arrival_us = node.shared.clock.unix_us();
+                                                    receiver.push_playout(present_frame, arrival_us);
+                                                    while let ScreenPlayoutAction::Play(ready_frame) = receiver.pop_playout(arrival_us) {
+                                                        let _ = node
+                                                            .shared
+                                                            .screen_sink
+                                                            .present(&ready_frame);
+                                                    }
+                                                    *node
                                                         .shared
-                                                        .screen_sink
-                                                        .present(&present_frame);
+                                                        .screen_playout_stats
+                                                        .lock()
+                                                        .expect("playout stats") =
+                                                        receiver.playout_stats();
+
                                                     let ack = ControlMsg::Ack { seq };
                                                     if let Ok(f) = ack.to_frame() {
                                                         let a_len = (f.payload.len() + 12) as u64;
@@ -20321,6 +20407,11 @@ impl Node {
                 }
             }
             receiver.on_peer_gone();
+            *node
+                .shared
+                .screen_playout_stats
+                .lock()
+                .expect("playout stats") = receiver.playout_stats();
             *node.shared.screen_peer.lock().expect("screen_peer") = None;
             *node.shared.screen_ctl.lock().await = None;
             node.shared
@@ -20542,7 +20633,11 @@ impl Node {
                 let (new_rate, new_fps, new_scale) = {
                     let mut engine = self.shared.screen_engine.lock().expect("screen");
                     engine.record_drop_with_time(now_us);
-                    (engine.bitrate_bps(), engine.fps_target(), engine.scale_pct())
+                    (
+                        engine.bitrate_bps(),
+                        engine.fps_target(),
+                        engine.scale_pct(),
+                    )
                 };
                 self.shared.screen_source.force_idr();
                 if let Some(sel) = &self.shared.screen_encode_codec {
@@ -20832,6 +20927,16 @@ impl Node {
             .lock()
             .expect("screen")
             .is_congested();
+        let playout_mode = *self
+            .shared
+            .screen_playout_mode
+            .lock()
+            .expect("playout mode");
+        let playout_stats = *self
+            .shared
+            .screen_playout_stats
+            .lock()
+            .expect("playout stats");
         ScreenStatusReport {
             ok: true,
             state: state.as_str().to_string(),
@@ -20860,6 +20965,12 @@ impl Node {
             qp_max: stats.qp_max,
             matrix_mode: stats.matrix_mode().as_str().to_string(),
             network_health: stats.network_health().as_str().to_string(),
+            playout_mode: playout_mode.as_str().to_string(),
+            playout_delay_ms: (playout_stats.target_delay_us as f64 / 1000.0 * 10.0).round() / 10.0,
+            playout_jitter_ms: (playout_stats.current_jitter_us as f64 / 1000.0 * 100.0).round()
+                / 100.0,
+            playout_buffered: playout_stats.buffered_frames,
+            playout_dropped_late: playout_stats.dropped_late_frames,
         }
     }
 
@@ -21125,12 +21236,89 @@ impl Node {
     }
 
     /// Set and report 4D autonomous adaptation matrix coordinator mode (ADR-086).
-    pub fn screen_set_matrix_mode(&self, mode: tetherly_core::ScreenMatrixMode) -> ScreenMatrixReport {
+    pub fn screen_set_matrix_mode(
+        &self,
+        mode: tetherly_core::ScreenMatrixMode,
+    ) -> ScreenMatrixReport {
         {
             let mut engine = self.shared.screen_engine.lock().expect("screen");
             engine.set_matrix_mode(mode);
         }
         self.screen_matrix_report()
+    }
+
+    /// Report current receiver playout buffer and dejittering metrics (ADR-087).
+    pub fn screen_playout_report(&self) -> ScreenPlayoutReport {
+        let mode = *self
+            .shared
+            .screen_playout_mode
+            .lock()
+            .expect("playout mode");
+        let stats = *self
+            .shared
+            .screen_playout_stats
+            .lock()
+            .expect("playout stats");
+        ScreenPlayoutReport {
+            ok: true,
+            mode: mode.as_str().to_string(),
+            target_delay_ms: (stats.target_delay_us as f64 / 1000.0 * 10.0).round() / 10.0,
+            current_jitter_ms: (stats.current_jitter_us as f64 / 1000.0 * 100.0).round() / 10.0,
+            target_delay_us: stats.target_delay_us,
+            current_jitter_us: stats.current_jitter_us,
+            buffered_frames: stats.buffered_frames,
+            played_frames: stats.played_frames,
+            dropped_late_frames: stats.dropped_late_frames,
+            dropped_overflow_frames: stats.dropped_overflow_frames,
+            custom_delay_us: if stats.custom_delay {
+                Some(stats.target_delay_us)
+            } else {
+                None
+            },
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Current receiver playout buffer mode (ADR-087).
+    pub fn screen_playout_mode(&self) -> tetherly_core::ScreenPlayoutMode {
+        *self
+            .shared
+            .screen_playout_mode
+            .lock()
+            .expect("playout mode")
+    }
+
+    /// Set and report receiver playout buffer mode (ADR-087).
+    pub fn screen_set_playout_mode(
+        &self,
+        mode: tetherly_core::ScreenPlayoutMode,
+    ) -> ScreenPlayoutReport {
+        *self
+            .shared
+            .screen_playout_mode
+            .lock()
+            .expect("playout mode") = mode;
+        let mut stats = self
+            .shared
+            .screen_playout_stats
+            .lock()
+            .expect("playout stats");
+        stats.mode = mode;
+        if !stats.custom_delay {
+            stats.target_delay_us = match mode {
+                tetherly_core::ScreenPlayoutMode::Adaptive => {
+                    tetherly_core::SCREEN_PLAYOUT_ADAPTIVE_BASE_DELAY_US
+                }
+                tetherly_core::ScreenPlayoutMode::ZeroLatency => {
+                    tetherly_core::SCREEN_PLAYOUT_MIN_DELAY_US
+                }
+                tetherly_core::ScreenPlayoutMode::Smooth => {
+                    tetherly_core::SCREEN_PLAYOUT_SMOOTH_BASE_DELAY_US
+                }
+            };
+        }
+        drop(stats);
+        self.screen_playout_report()
     }
 
     /// Check if target frame pacing interval has elapsed for the outbound screen pump (ADR-083).
@@ -21878,6 +22066,7 @@ mod clipboard_policy_tests {
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
+            screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_sink: None,
             input_sink: None,
         };
@@ -22024,6 +22213,7 @@ mod handoff_engine_tests {
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
+            screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_sink: None,
             input_sink: None,
         };
@@ -22201,6 +22391,7 @@ mod media_policy_tests {
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
+            screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_sink: None,
             input_sink: None,
         };
@@ -22354,6 +22545,7 @@ mod locator_policy_tests {
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
+            screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_sink: None,
             input_sink: None,
         };
@@ -22487,6 +22679,7 @@ mod locator_policy_tests {
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
+            screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_sink: None,
             input_sink: None,
         };
@@ -22932,24 +23125,120 @@ mod locator_policy_tests {
         assert_eq!(initial_rep.health, "healthy");
         assert_eq!(initial_rep.fps_target, 30);
         assert_eq!(initial_rep.scale_pct, 100);
-        assert_eq!(node.screen_matrix_mode(), tetherly_core::ScreenMatrixMode::Auto);
+        assert_eq!(
+            node.screen_matrix_mode(),
+            tetherly_core::ScreenMatrixMode::Auto
+        );
 
         // 2. Set mode to Conservative
         let rep_cons = node.screen_set_matrix_mode(tetherly_core::ScreenMatrixMode::Conservative);
         assert!(rep_cons.ok);
         assert_eq!(rep_cons.mode, "conservative");
-        assert_eq!(node.screen_matrix_mode(), tetherly_core::ScreenMatrixMode::Conservative);
+        assert_eq!(
+            node.screen_matrix_mode(),
+            tetherly_core::ScreenMatrixMode::Conservative
+        );
 
         // 3. Set mode to Manual
         let rep_manual = node.screen_set_matrix_mode(tetherly_core::ScreenMatrixMode::Manual);
         assert!(rep_manual.ok);
         assert_eq!(rep_manual.mode, "manual");
-        assert_eq!(node.screen_matrix_mode(), tetherly_core::ScreenMatrixMode::Manual);
+        assert_eq!(
+            node.screen_matrix_mode(),
+            tetherly_core::ScreenMatrixMode::Manual
+        );
 
         // 4. Status report reflects active matrix mode and network health
         let status = node.screen_status_report().await;
         assert_eq!(status.matrix_mode, "manual");
         assert_eq!(status.network_health, "healthy");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_screen_playout_mode_and_reporting() {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-playout-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.clone(),
+            control_port: 0,
+            file_port: 0,
+            input_port: 0,
+            screen_port: 0,
+            ui_port: 0,
+            name: "playout-test-node".into(),
+            platform: "test".into(),
+            memory_clip: true,
+            memory_notifier: true,
+            loopback_only: true,
+            advertise: false,
+            reconnect: false,
+            overlay: OverlayConfig::default(),
+            ..Default::default()
+        };
+        let clock = Arc::new(ManualClock::new(40_000));
+        let node = Node::start_with_clock(cfg, clock.clone()).unwrap();
+
+        // 1. Initial report: defaults to Adaptive mode with 15ms base delay
+        let initial_rep = node.screen_playout_report();
+        assert!(initial_rep.ok);
+        assert_eq!(initial_rep.mode, "adaptive");
+        assert_eq!(
+            initial_rep.target_delay_us,
+            tetherly_core::SCREEN_PLAYOUT_ADAPTIVE_BASE_DELAY_US
+        );
+        assert_eq!(initial_rep.target_delay_ms, 15.0);
+        assert_eq!(initial_rep.current_jitter_us, 0);
+        assert_eq!(initial_rep.buffered_frames, 0);
+        assert_eq!(initial_rep.played_frames, 0);
+        assert_eq!(initial_rep.dropped_late_frames, 0);
+        assert_eq!(
+            node.screen_playout_mode(),
+            tetherly_core::ScreenPlayoutMode::Adaptive
+        );
+
+        // 2. Set mode to ZeroLatency
+        let rep_zero = node.screen_set_playout_mode(tetherly_core::ScreenPlayoutMode::ZeroLatency);
+        assert!(rep_zero.ok);
+        assert_eq!(rep_zero.mode, "zerolatency");
+        assert_eq!(
+            rep_zero.target_delay_us,
+            tetherly_core::SCREEN_PLAYOUT_MIN_DELAY_US
+        );
+        assert_eq!(rep_zero.target_delay_ms, 5.0);
+        assert_eq!(
+            node.screen_playout_mode(),
+            tetherly_core::ScreenPlayoutMode::ZeroLatency
+        );
+
+        // 3. Set mode to Smooth
+        let rep_smooth = node.screen_set_playout_mode(tetherly_core::ScreenPlayoutMode::Smooth);
+        assert!(rep_smooth.ok);
+        assert_eq!(rep_smooth.mode, "smooth");
+        assert_eq!(
+            rep_smooth.target_delay_us,
+            tetherly_core::SCREEN_PLAYOUT_SMOOTH_BASE_DELAY_US
+        );
+        assert_eq!(rep_smooth.target_delay_ms, 35.0);
+        assert_eq!(
+            node.screen_playout_mode(),
+            tetherly_core::ScreenPlayoutMode::Smooth
+        );
+
+        // 4. Status report reflects active playout mode and metrics
+        let status = node.screen_status_report().await;
+        assert_eq!(status.playout_mode, "smooth");
+        assert_eq!(status.playout_delay_ms, 35.0);
+        assert_eq!(status.playout_buffered, 0);
+        assert_eq!(status.playout_dropped_late, 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

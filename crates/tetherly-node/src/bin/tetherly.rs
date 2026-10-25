@@ -2070,6 +2070,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming receiver playout buffer and adaptive dejitterizer (v2.01 / ADR-087).
+    Playout {
+        /// Target playout dejitter mode: `adaptive`, `zerolatency`, or `smooth`. If omitted, displays current playout buffer status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -6061,6 +6072,15 @@ async fn main() -> Result<()> {
                     if !rep.network_health.is_empty() {
                         println!("  Net Health:   {}", rep.network_health);
                     }
+                    if !rep.playout_mode.is_empty() {
+                        println!(
+                            "  Playout Mode: {} ({:.1} ms delay, {:.2} ms jitter, {} buf)",
+                            rep.playout_mode,
+                            rep.playout_delay_ms,
+                            rep.playout_jitter_ms,
+                            rep.playout_buffered
+                        );
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -6347,9 +6367,76 @@ async fn main() -> Result<()> {
                         println!("  Consec. Drops:    {}", rep.consecutive_drops);
                         println!("  In Flight:        {}", rep.in_flight);
                         if let Some(rtt) = rep.rtt_us {
-                            println!("  RTT (latest):     {:.2} ms ({rtt} us)", rtt as f64 / 1000.0);
+                            println!(
+                                "  RTT (latest):     {:.2} ms ({rtt} us)",
+                                rtt as f64 / 1000.0
+                            );
                         } else {
                             println!("  RTT (latest):     (no ack yet)");
+                        }
+                    }
+                }
+            }
+            ScreenCmd::Playout {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    tetherly_node::loopback_post(ui_port, "/api/screen/playout", &body).await
+                } else {
+                    tetherly_node::loopback_get(ui_port, "/api/screen/playout").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen playout query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_node::ScreenPlayoutReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    if has_update {
+                        println!(
+                            "Screen receiver playout mode updated: {} (target delay: {:.1} ms)",
+                            rep.mode, rep.target_delay_ms
+                        );
+                    } else {
+                        println!(
+                            "Screen Streaming Receiver Playout Buffer & Dejitterizer (ADR-087):"
+                        );
+                        println!("  Playout Mode:        {}", rep.mode);
+                        println!(
+                            "  Target Delay:        {:.1} ms ({} us)",
+                            rep.target_delay_ms, rep.target_delay_us
+                        );
+                        println!(
+                            "  Interarrival Jitter: {:.2} ms ({} us)",
+                            rep.current_jitter_ms, rep.current_jitter_us
+                        );
+                        println!("  Buffered Frames:     {}", rep.buffered_frames);
+                        println!("  Played Frames:       {}", rep.played_frames);
+                        println!("  Late Dropped:        {}", rep.dropped_late_frames);
+                        println!("  Overflow Dropped:    {}", rep.dropped_overflow_frames);
+                        if let Some(c) = rep.custom_delay_us {
+                            println!(
+                                "  Custom Delay:        {:.1} ms ({c} us)",
+                                c as f64 / 1000.0
+                            );
                         }
                     }
                 }

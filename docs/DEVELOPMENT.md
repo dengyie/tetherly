@@ -3,12 +3,36 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.00** |
+| 文档版本 | **2.01** |
 | 日期 | 2026-10-25 |
-| 状态 | **v2.00 屏幕流 4 维自主自适应协同调度器（Screen Streaming 4D Autonomous Adaptation Coordinator, ADR-086）**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`）：统一带宽码率（ADR-082）、时间帧率（ADR-083）、空间分辨率（ADR-084）与语义画质/QP（ADR-085）4 维流控矩阵，实现闭环自主协同调度器 `ScreenMatrixCoordinator`；构建四级网络健康评估模型 `NetworkHealth`（Healthy、Warning、Congested、Critical）；设计非对称跨层降阶梯队（Level 1 码率乘法递减 -20% -> Level 2 帧率阶梯削减 60->30->24->15 FPS 瞬时砍半套接字排队压强 -> Level 3 严重拥塞时分辨率降采样 100%->75%->50%->25% 缩减像素负载并触发首帧 IDR 恢复）与 400ms 防连续雪崩冷却期；设计 15 次健康确认连续累积与 3.0s 迟滞恢复升阶模型（先升分辨率、再升帧率、最后 AIMD 探测升码率）；提供 Auto（全自动 4D 闭环）、Conservative（锁定 100% 原生分辨率保真）、Manual（被动旁路）三种调度模式。(2) **运行时多维流控同步**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：`ScreenSender` 内置协调器联动丢包与 Ack 确认，推流泵动态同步目标帧率与下采样比例至 `ScreenSource` 与 `ScreenCodec`；(3) **接口与生态**：新增回环 API `GET/POST /api/screen/matrix`、CLI 命令 `tetherly screen matrix [mode]`、启动参数 `--screen-matrix <auto|conservative|manual>`，实时状态透出 `Matrix Mode` 与 `Net Health`；(4) **测试与版本**：单元测试 5 套全绿，Phase 5 集成测试 `m5_10_screen_4d_matrix_coordinator` 验证端到端 45720 传输、API 热切换与 4 维遥测闭环，工作区升级至 `0.1.22`。 |
+| 状态 | **v2.01 屏幕流接收端播放抖动缓冲区与自适应平滑控制器（Screen Playout Jitter Buffer & Dejittering Controller, ADR-087）与双端 CLI 全同构**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`）：在接收端解码渲染前端构建自适应播放抖动缓冲区 `ScreenPlayoutBuffer`，遵循 RFC 3550 EWMA 平滑抖动估计递推；提供三种工作模式 `ScreenPlayoutMode`（Adaptive / ZeroLatency / Smooth），根据实时抖动动态计算目标时延垫片并提供硬边界钳制（5ms .. 300ms）；实现微秒级时间戳定步出队放映算法，超前帧定步等待、落后超时帧（>80ms）激进丢弃追赶（Anti-Drift）以及缓冲区容量溢出（>12帧）熔断丢弃；在 `ScreenReceiver` 接入抖动缓冲区，将网络 ACK 立即回传与渲染呈现完全解耦；(2) **双端 CLI 全同构与生态**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `runtime.rs`, `uihttp.rs`）：彻底消除 CLI 差异，实现 `tetherly` 与 `tetherly-cli` 对 `screen` 所有子命令（allow/revoke/start/stop/keyframe/status/bitrate/fps/scale/profile/matrix/playout）的 100% 全同构；新增 REST API `GET/POST /api/screen/playout`，扩展 `ScreenStatusReport` 透出播放模式、目标延迟、实时抖动与缓冲帧数；(3) **测试与版本**：单元测试与 Phase 5 端到端集成测试 `m5_11_screen_playout_dejitter_buffer` 全绿，工作区升级至 `0.1.23`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.01 相对 2.00(屏幕流接收端播放抖动缓冲区与自适应平滑控制器 ADR-087 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **网络到达延迟突变（Jitter）与渲染微卡顿**: 在公网、跨国无线或 Overlay 网络中，物理信道时延波动频繁。发送端即便匀速发包，网络抖动也会导致帧到达呈现突发聚集（Frame Bursting）或到达空洞（Frame Starvation）。接收端若采用无缓冲直接渲染，会引发严重的视觉微卡顿（Micro-Stuttering）与绘制队列突发抖动。
+  2. **极速交互与画面平滑度的权衡张力**: 远程桌面场景中，打字敲代码与鼠标移动需要极限低延迟（<10ms），而全屏视频与平滑滚动则需要匀速连贯的播放时延垫片。需要自适应可调控的抖动控制策略。
+  3. **累积延迟漂移与队列溢出**: 突发网络阻塞后堆积的多帧若机械顺序播放，会导致接收端画面永久滞后于主机。必须设计超时（>80ms）主动丢帧（Anti-Drift）与队列上限（12帧）熔断保护机制。
+  4. **双端 CLI 同构性缺失**: 此前独立客户端 `tetherly-cli` 缺乏 `screen` 维度的控制与遥测指令，与服务端自带 CLI `tetherly` 存在割裂，必须实现 100% 对等的同构子命令集。
+- **架构解法与落地**:
+  1. **Core 协议与自适应抖动控制器（`crates/tetherly-core/src/screen.rs`）**:
+     - 引入 RFC 3550 规范的 EWMA 抖动估计递推公式 $J_i = J_{i-1} + \frac{D(i-1, i) - J_{i-1}}{16}$。
+     - 定义工作模式 `ScreenPlayoutMode`：`Adaptive (0)`（$D_{\text{target}} = \text{clamp}(15\,\text{ms} + 2 \times J, 5\,\text{ms}, 300\,\text{ms})$）、`ZeroLatency (1)`（$D_{\text{target}} = \text{clamp}(5\,\text{ms} + J/4, 5\,\text{ms}, 30\,\text{ms})$）、`Smooth (2)`（$D_{\text{target}} = \text{clamp}(35\,\text{ms} + 3 \times J, 30\,\text{ms}, 300\,\text{ms})$）。
+     - 实现微秒定步放映出队状态机 `ScreenPlayoutAction`（`Play`、`Wait(dur)`、`DropLate`）与容量满溢熔断（`SCREEN_PLAYOUT_MAX_CAPACITY = 12`）。
+     - 在 `ScreenReceiver` 接入抖动缓冲区，将网络 ACK 立即回传与渲染呈现完全解耦，确保发送端 RTT 估算与拥塞控制精确无误。
+  2. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - `tetherly-cli` 补全 `screen` 所有控制子命令：`allow`、`revoke`、`start`、`stop`、`keyframe`、`status`、`bitrate`、`fps`、`scale`、`profile`、`matrix`、`playout`。
+     - 双端输出格式、参数选项（`--json`、`--ui-port`）与错误提示完全镜像对齐。
+  3. **Node 运行时与回环 REST API（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）**:
+     - 新增 HTTP 路由 `GET /api/screen/playout` 与 `POST /api/screen/playout`，支持 JSON 与 Query 参数热调优。
+     - `ScreenStatusReport` 新增 `playout_mode`、`playout_delay_ms`、`playout_jitter_ms`、`playout_buffered`、`playout_dropped_late` 字段。
+     - 在 `attach_screen_client` 中引入 5ms 定步驱动轮询循环，实现平滑出队与显示渲染。
+  4. **测试与验证**:
+     - Core 单元测试 4 套，Node 单元测试 2 套。
+     - Phase 5 集成测试 `m5_11_screen_playout_dejitter_buffer` 验证端到端 45720 传输、API 热切换与定步帧呈现。
 
 **2.00 相对 1.99(屏幕流 4 维自主自适应协同调度器 ADR-086)**
 

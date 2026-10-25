@@ -77,6 +77,7 @@ fn cfg(
         screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
         screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
         screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
+        screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
         screen_sink: None,
         input_sink: None,
     }
@@ -1989,6 +1990,157 @@ async fn m5_10_screen_4d_matrix_coordinator() {
     assert!(final_rep.ok);
     assert_eq!(final_rep.mode, "auto");
     assert_eq!(final_rep.health, "healthy");
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+// --------------------------------------------------------------------------
+// M5.11-playout-dejitter — Receiver Playout Jitter Buffer & Dejittering
+// Controller (v2.01 / ADR-087)
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_11_screen_playout_dejitter_buffer() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial playout status on visitor: defaults to Adaptive mode
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/playout")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_node::ScreenPlayoutReport = serde_json::from_slice(&b).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.mode, "adaptive");
+    assert_eq!(init_rep.target_delay_ms, 15.0);
+    assert_eq!(init_rep.buffered_frames, 0);
+
+    // 2. Dynamic mode configuration via POST /api/screen/playout
+    let zero_payload = serde_json::json!({ "mode": "zerolatency" });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/playout",
+        &serde_json::to_vec(&zero_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let zero_rep: tetherly_node::ScreenPlayoutReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(zero_rep.mode, "zerolatency");
+    assert_eq!(zero_rep.target_delay_ms, 5.0);
+
+    let smooth_payload = serde_json::json!({ "mode": "smooth" });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/playout",
+        &serde_json::to_vec(&smooth_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let smooth_rep: tetherly_node::ScreenPlayoutReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(smooth_rep.mode, "smooth");
+    assert_eq!(smooth_rep.target_delay_ms, 35.0);
+
+    // Restore to adaptive
+    let auto_payload = serde_json::json!({ "mode": "adaptive" });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/playout",
+        &serde_json::to_vec(&auto_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let adapt_rep: tetherly_node::ScreenPlayoutReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(adapt_rep.mode, "adaptive");
+    assert_eq!(adapt_rep.target_delay_ms, 15.0);
+
+    // 3. Visitor opens screen channel, host allows, and visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Send 4 frames from host
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        assert!(host.screen_send_frame().await.unwrap());
+    }
+
+    // 5. Wait for frames to pass through playout buffer and be presented to visitor sink
+    let wait_recv = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 4 {
+            break;
+        }
+        if wait_recv.elapsed() > Duration::from_secs(6) {
+            panic!(
+                "frames did not play out through jitter buffer in time, presented count={}",
+                visitor.screen_sink_snapshot().count()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let sink = visitor.screen_sink_snapshot();
+    assert_eq!(sink.presented(), vec![1, 2, 3, 4]);
+
+    // 6. Verify visitor GET /api/screen/playout reflects played frames
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/playout")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let final_rep: tetherly_node::ScreenPlayoutReport = serde_json::from_slice(&b).unwrap();
+    assert!(final_rep.ok);
+    assert_eq!(final_rep.mode, "adaptive");
+    assert!(final_rep.played_frames >= 4);
+
+    // 7. Verify visitor GET /api/screen includes playout metrics
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(status_rep.playout_mode, "adaptive");
+    assert!(status_rep.playout_delay_ms > 0.0);
 
     host.shutdown();
     visitor.shutdown();

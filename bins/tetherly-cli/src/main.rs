@@ -1923,8 +1923,89 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Request an immediate on-demand keyframe (IDR) from the screen host (v1.95 / ADR-081).
+    Keyframe {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Show remote screen channel status, counters and frame intervals.
     Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Inspect or override the dynamic screen streaming bitrate (v1.96 / ADR-082).
+    Bitrate {
+        /// Target bitrate in kbps (e.g. 2000 for 2 Mbps). If omitted, displays current bitrate and limits.
+        kbps: Option<u32>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Inspect or override the dynamic screen streaming frame rate / FPS (v1.97 / ADR-083).
+    Fps {
+        /// Target FPS (e.g. 15, 30, 60). If omitted, displays current FPS and pacing interval.
+        fps: Option<u32>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Inspect or override the dynamic screen streaming resolution scale percentage (v1.98 / ADR-084).
+    Scale {
+        /// Target scale percentage (25..=100, e.g. 50, 75, 100). If omitted, displays current scale and limits.
+        scale: Option<u32>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Inspect or override dynamic screen streaming content profile and QP bounds (v1.99 / ADR-085).
+    Profile {
+        /// Target profile: `auto`, `text`, or `motion`. If omitted, displays current profile and QP range.
+        profile: Option<String>,
+        /// Optional minimum Quantization Parameter bound (0..=51).
+        #[arg(long)]
+        min_qp: Option<u8>,
+        /// Optional maximum Quantization Parameter bound (0..=51).
+        #[arg(long)]
+        max_qp: Option<u8>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Inspect or override 4D autonomous adaptation matrix coordinator mode (v2.00 / ADR-086).
+    Matrix {
+        /// Target coordinator mode: `auto`, `conservative`, or `manual`. If omitted, displays current 4D matrix status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Inspect or configure screen streaming receiver playout buffer and adaptive dejitterizer (v2.01 / ADR-087).
+    Playout {
+        /// Target playout dejitter mode: `adaptive`, `zerolatency`, or `smooth`. If omitted, displays current playout buffer status.
+        mode: Option<String>,
         /// Output raw JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -7819,6 +7900,35 @@ async fn main() -> Result<()> {
                         .get("is_congested")
                         .and_then(|b| b.as_bool())
                         .unwrap_or(false);
+                    let keyframes_requested = v
+                        .get("keyframes_requested")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let gaps = v.get("gaps").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let bitrate_bps = v.get("bitrate_bps").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let fps_target = v.get("fps_target").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let scale_pct = v.get("scale_pct").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let profile = v.get("profile").and_then(|s| s.as_str()).unwrap_or("");
+                    let qp_min = v.get("qp_min").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let qp_max = v.get("qp_max").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let matrix_mode = v.get("matrix_mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let network_health = v
+                        .get("network_health")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("");
+                    let playout_mode = v.get("playout_mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let playout_delay_ms = v
+                        .get("playout_delay_ms")
+                        .and_then(|n| n.as_f64())
+                        .unwrap_or(0.0);
+                    let playout_jitter_ms = v
+                        .get("playout_jitter_ms")
+                        .and_then(|n| n.as_f64())
+                        .unwrap_or(0.0);
+                    let playout_buffered = v
+                        .get("playout_buffered")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
 
                     println!("Screen Channel Status:");
                     println!("  State:        {state}");
@@ -7854,6 +7964,504 @@ async fn main() -> Result<()> {
                         None => println!("  RTT (p95):    (no ack yet)"),
                     }
                     println!("  Congested:    {congested}");
+                    println!("  Keyframe Req: {keyframes_requested}");
+                    println!("  Gaps:         {gaps}");
+                    if bitrate_bps > 0 {
+                        println!(
+                            "  Bitrate:      {} kbps ({:.2} Mbps)",
+                            bitrate_bps / 1000,
+                            bitrate_bps as f64 / 1_000_000.0
+                        );
+                    }
+                    if fps_target > 0 {
+                        println!("  FPS:          {fps_target} FPS");
+                    }
+                    if scale_pct > 0 {
+                        println!("  Scale:        {scale_pct}%");
+                    }
+                    if !profile.is_empty() {
+                        println!("  Profile:      {profile} (QP {qp_min}-{qp_max})");
+                    }
+                    if !matrix_mode.is_empty() {
+                        println!("  Matrix Mode:  {matrix_mode}");
+                    }
+                    if !network_health.is_empty() {
+                        println!("  Net Health:   {network_health}");
+                    }
+                    if !playout_mode.is_empty() {
+                        println!(
+                            "  Playout Mode: {} ({:.1} ms delay, {:.2} ms jitter, {} buf)",
+                            playout_mode, playout_delay_ms, playout_jitter_ms, playout_buffered
+                        );
+                    }
+                }
+            }
+            ScreenCmd::Keyframe { json, ui_port } => {
+                let (code, resp) = loopback_post(ui_port, "/api/screen/keyframe", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                if code != 200 {
+                    bail!(
+                        "screen keyframe request failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let total = v
+                        .get("keyframes_requested")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    println!(
+                        "On-demand IDR keyframe requested from screen host. Total requested: {total}"
+                    );
+                }
+            }
+            ScreenCmd::Bitrate {
+                kbps,
+                json,
+                ui_port,
+            } => {
+                let (code, resp) = match kbps {
+                    Some(k) => {
+                        let req = serde_json::json!({ "kbps": k });
+                        let body = serde_json::to_vec(&req)?;
+                        loopback_post(ui_port, "/api/screen/bitrate", &body).await
+                    }
+                    None => loopback_get(ui_port, "/api/screen/bitrate").await,
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    bail!(
+                        "screen bitrate query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let bitrate_kbps = v.get("bitrate_kbps").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let bitrate_bps = v.get("bitrate_bps").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let min_bps = v.get("min_bps").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let max_bps = v.get("max_bps").and_then(|n| n.as_u64()).unwrap_or(0);
+                    match kbps {
+                        Some(_) => {
+                            println!(
+                                "Screen target bitrate set to {} kbps ({} bps)",
+                                bitrate_kbps, bitrate_bps
+                            );
+                        }
+                        None => {
+                            println!("Screen Streaming Bitrate:");
+                            println!(
+                                "  Current: {} kbps ({:.2} Mbps)",
+                                bitrate_kbps,
+                                bitrate_bps as f64 / 1_000_000.0
+                            );
+                            println!(
+                                "  Range:   {} kbps - {} kbps ({:.1} Mbps - {:.1} Mbps)",
+                                min_bps / 1000,
+                                max_bps / 1000,
+                                min_bps as f64 / 1_000_000.0,
+                                max_bps as f64 / 1_000_000.0
+                            );
+                        }
+                    }
+                }
+            }
+            ScreenCmd::Fps { fps, json, ui_port } => {
+                let (code, resp) = match fps {
+                    Some(f) => {
+                        let req = serde_json::json!({ "fps": f });
+                        let body = serde_json::to_vec(&req)?;
+                        loopback_post(ui_port, "/api/screen/fps", &body).await
+                    }
+                    None => loopback_get(ui_port, "/api/screen/fps").await,
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    bail!(
+                        "screen fps query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let cur_fps = v.get("fps").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let interval_us = v.get("interval_us").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let min_fps = v.get("min_fps").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let max_fps = v.get("max_fps").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let auto_profile = v
+                        .get("auto_profile")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
+                    match fps {
+                        Some(_) => {
+                            println!(
+                                "Screen target frame rate set to {} FPS (pacing interval: {:.2} ms)",
+                                cur_fps, interval_us as f64 / 1000.0
+                            );
+                        }
+                        None => {
+                            println!("Screen Streaming Frame Rate:");
+                            println!(
+                                "  Current:   {} FPS (pacing interval: {:.2} ms)",
+                                cur_fps,
+                                interval_us as f64 / 1000.0
+                            );
+                            println!("  Range:     {} FPS - {} FPS", min_fps, max_fps);
+                            println!(
+                                "  Auto-tier: {}",
+                                if auto_profile {
+                                    "enabled (derived from link bandwidth)"
+                                } else {
+                                    "manual override"
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+            ScreenCmd::Scale {
+                scale,
+                json,
+                ui_port,
+            } => {
+                let (code, resp) = match scale {
+                    Some(s) => {
+                        let req = serde_json::json!({ "scale": s });
+                        let body = serde_json::to_vec(&req)?;
+                        loopback_post(ui_port, "/api/screen/scale", &body).await
+                    }
+                    None => loopback_get(ui_port, "/api/screen/scale").await,
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    bail!(
+                        "screen scale query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let scale_pct = v.get("scale_pct").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let min_scale_pct =
+                        v.get("min_scale_pct").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let max_scale_pct =
+                        v.get("max_scale_pct").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let auto_profile = v
+                        .get("auto_profile")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
+                    match scale {
+                        Some(_) => {
+                            println!(
+                                "Screen target resolution scale set to {}% (allowed: {}%..={}%)",
+                                scale_pct, min_scale_pct, max_scale_pct
+                            );
+                        }
+                        None => {
+                            println!("Screen Streaming Resolution Scale:");
+                            println!("  Current:   {}%", scale_pct);
+                            println!("  Range:     {}% - {}%", min_scale_pct, max_scale_pct);
+                            println!(
+                                "  Auto-tier: {}",
+                                if auto_profile {
+                                    "enabled (derived from link bandwidth)"
+                                } else {
+                                    "manual override"
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+            ScreenCmd::Profile {
+                profile,
+                min_qp,
+                max_qp,
+                json,
+                ui_port,
+            } => {
+                let has_update = profile.is_some() || min_qp.is_some() || max_qp.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(p) = profile {
+                        req.insert("profile".into(), serde_json::json!(p));
+                    }
+                    if let Some(min) = min_qp {
+                        req.insert("min_qp".into(), serde_json::json!(min));
+                    }
+                    if let Some(max) = max_qp {
+                        req.insert("max_qp".into(), serde_json::json!(max));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    loopback_post(ui_port, "/api/screen/profile", &body).await
+                } else {
+                    loopback_get(ui_port, "/api/screen/profile").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    bail!(
+                        "screen profile query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let p = v.get("profile").and_then(|s| s.as_str()).unwrap_or("");
+                    let min = v.get("min_qp").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let max = v.get("max_qp").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let is_custom_qp = v
+                        .get("is_custom_qp")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
+                    let auto_profile = v
+                        .get("auto_profile")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
+                    if has_update {
+                        println!(
+                            "Screen content profile updated: {} (QP range: {}..={}, custom={})",
+                            p, min, max, is_custom_qp
+                        );
+                    } else {
+                        println!("Screen Streaming Content Profile & Quality:");
+                        println!("  Profile:     {}", p);
+                        println!("  QP Range:    {} - {}", min, max);
+                        println!(
+                            "  Custom QP:   {}",
+                            if is_custom_qp {
+                                "yes"
+                            } else {
+                                "no (profile default)"
+                            }
+                        );
+                        println!(
+                            "  Auto-tier:   {}",
+                            if auto_profile {
+                                "enabled (auto-selects profile on stream start)"
+                            } else {
+                                "manual override"
+                            }
+                        );
+                    }
+                }
+            }
+            ScreenCmd::Matrix {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    loopback_post(ui_port, "/api/screen/matrix", &body).await
+                } else {
+                    loopback_get(ui_port, "/api/screen/matrix").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    bail!(
+                        "screen matrix query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let m = v.get("mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let health = v.get("health").and_then(|s| s.as_str()).unwrap_or("");
+                    let bitrate_bps = v.get("bitrate_bps").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let fps_target = v.get("fps_target").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let scale_pct = v.get("scale_pct").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let profile = v.get("profile").and_then(|s| s.as_str()).unwrap_or("");
+                    let qp_min = v.get("qp_min").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let qp_max = v.get("qp_max").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let healthy_acks = v
+                        .get("consecutive_healthy_acks")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let drops = v
+                        .get("consecutive_drops")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let in_flight = v.get("in_flight").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let rtt_us = v.get("rtt_us").and_then(|n| n.as_u64());
+
+                    if has_update {
+                        println!(
+                            "Screen 4D matrix coordinator mode updated: {} (health: {})",
+                            m, health
+                        );
+                    } else {
+                        println!("Screen Streaming 4D Autonomous Adaptation Matrix (ADR-086):");
+                        println!("  Coordinator Mode: {}", m);
+                        println!("  Network Health:   {}", health);
+                        println!("  Bitrate (kbps):   {}", bitrate_bps / 1000);
+                        println!("  FPS Target:       {}", fps_target);
+                        println!("  Resolution Scale: {}%", scale_pct);
+                        println!("  Content Profile:  {}", profile);
+                        println!("  QP Range:         {} - {}", qp_min, qp_max);
+                        println!("  Healthy Acks:     {}", healthy_acks);
+                        println!("  Consec. Drops:    {}", drops);
+                        println!("  In Flight:        {}", in_flight);
+                        if let Some(rtt) = rtt_us {
+                            println!(
+                                "  RTT (latest):     {:.2} ms ({rtt} us)",
+                                rtt as f64 / 1000.0
+                            );
+                        } else {
+                            println!("  RTT (latest):     (no ack yet)");
+                        }
+                    }
+                }
+            }
+            ScreenCmd::Playout {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    loopback_post(ui_port, "/api/screen/playout", &body).await
+                } else {
+                    loopback_get(ui_port, "/api/screen/playout").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    bail!(
+                        "screen playout query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let m = v.get("mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let target_delay_ms = v
+                        .get("target_delay_ms")
+                        .and_then(|n| n.as_f64())
+                        .unwrap_or(0.0);
+                    let current_jitter_ms = v
+                        .get("current_jitter_ms")
+                        .and_then(|n| n.as_f64())
+                        .unwrap_or(0.0);
+                    let target_delay_us = v
+                        .get("target_delay_us")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let current_jitter_us = v
+                        .get("current_jitter_us")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let buffered_frames = v
+                        .get("buffered_frames")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let played_frames =
+                        v.get("played_frames").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let dropped_late = v
+                        .get("dropped_late_frames")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let dropped_overflow = v
+                        .get("dropped_overflow_frames")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let custom_delay_us = v.get("custom_delay_us").and_then(|n| n.as_u64());
+
+                    if has_update {
+                        println!(
+                            "Screen receiver playout mode updated: {} (target delay: {:.1} ms)",
+                            m, target_delay_ms
+                        );
+                    } else {
+                        println!(
+                            "Screen Streaming Receiver Playout Buffer & Dejitterizer (ADR-087):"
+                        );
+                        println!("  Playout Mode:        {}", m);
+                        println!(
+                            "  Target Delay:        {:.1} ms ({} us)",
+                            target_delay_ms, target_delay_us
+                        );
+                        println!(
+                            "  Interarrival Jitter: {:.2} ms ({} us)",
+                            current_jitter_ms, current_jitter_us
+                        );
+                        println!("  Buffered Frames:     {}", buffered_frames);
+                        println!("  Played Frames:       {}", played_frames);
+                        println!("  Late Dropped:        {}", dropped_late);
+                        println!("  Overflow Dropped:    {}", dropped_overflow);
+                        if let Some(c) = custom_delay_us {
+                            println!(
+                                "  Custom Delay:        {:.1} ms ({c} us)",
+                                c as f64 / 1000.0
+                            );
+                        }
+                    }
                 }
             }
         },

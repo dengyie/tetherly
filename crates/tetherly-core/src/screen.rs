@@ -616,6 +616,12 @@ pub struct ScreenStats {
     pub matrix_mode: u8,
     /// Real-time assessed network health state (0=healthy, 1=warning, 2=congested, 3=critical) (v2.00 / ADR-086).
     pub network_health: u8,
+    /// Receiver playout dejitter mode (0=adaptive, 1=zerolatency, 2=smooth) (v2.01 / ADR-087).
+    pub playout_mode: u8,
+    /// Target playout buffer delay in microseconds (v2.01 / ADR-087).
+    pub playout_delay_us: u32,
+    /// Measured interarrival jitter in microseconds (v2.01 / ADR-087).
+    pub playout_jitter_us: u32,
 }
 
 impl ScreenStats {
@@ -632,6 +638,11 @@ impl ScreenStats {
     /// Real-time assessed network health state.
     pub fn network_health(&self) -> NetworkHealth {
         NetworkHealth::from_tag(self.network_health)
+    }
+
+    /// Receiver playout dejitter mode.
+    pub fn playout_mode(&self) -> ScreenPlayoutMode {
+        ScreenPlayoutMode::from_tag(self.playout_mode)
     }
 }
 
@@ -1101,7 +1112,9 @@ impl ScreenMatrixMode {
         let lower = s.trim().to_ascii_lowercase();
         match lower.as_str() {
             "auto" | "dynamic" => Some(ScreenMatrixMode::Auto),
-            "conservative" | "preserve_scale" | "scale_locked" => Some(ScreenMatrixMode::Conservative),
+            "conservative" | "preserve_scale" | "scale_locked" => {
+                Some(ScreenMatrixMode::Conservative)
+            }
             "manual" | "disabled" | "off" => Some(ScreenMatrixMode::Manual),
             _ => None,
         }
@@ -1372,7 +1385,8 @@ impl ScreenMatrixCoordinator {
                     self.last_tier_change_us = now_us;
                 }
             }
-        } else if (self.health == NetworkHealth::Critical || self.health == NetworkHealth::Congested)
+        } else if (self.health == NetworkHealth::Critical
+            || self.health == NetworkHealth::Congested)
             && now_us.saturating_sub(self.last_tier_change_us) >= SCREEN_MATRIX_DEMOTE_COOLDOWN_US
         {
             // Under sustained high RTT / in-flight, demote if appropriate.
@@ -1493,6 +1507,299 @@ pub fn downscale_frame(frame: &ScreenFrame, scale_pct: u32) -> Result<ScreenFram
         stride: dst_w as u32 * frame.format.bpp() as u32,
         bytes: scaled_bytes,
     })
+}
+
+/// Minimum playout target delay in microseconds (5ms) for ScreenPlayoutBuffer (v2.01 / ADR-087).
+pub const SCREEN_PLAYOUT_MIN_DELAY_US: u64 = 5_000;
+/// Maximum playout target delay in microseconds (300ms) for ScreenPlayoutBuffer (v2.01 / ADR-087).
+pub const SCREEN_PLAYOUT_MAX_DELAY_US: u64 = 300_000;
+/// Default base target delay for adaptive mode in microseconds (15ms).
+pub const SCREEN_PLAYOUT_ADAPTIVE_BASE_DELAY_US: u64 = 15_000;
+/// Default base target delay for smooth mode in microseconds (35ms).
+pub const SCREEN_PLAYOUT_SMOOTH_BASE_DELAY_US: u64 = 35_000;
+/// Maximum queue capacity for receiver playout buffer (frames).
+pub const SCREEN_PLAYOUT_MAX_CAPACITY: usize = 12;
+/// Late frame drop threshold in microseconds (80ms): frames scheduled further in the past are dropped to eliminate latency drift.
+pub const SCREEN_PLAYOUT_LATE_THRESHOLD_US: u64 = 80_000;
+
+/// Receiver playout dejittering and presentation mode (v2.01 / ADR-087).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ScreenPlayoutMode {
+    /// Adaptive dejittering: automatically adjusts target playout delay based on interarrival jitter.
+    #[default]
+    Adaptive = 0,
+    /// Zero-latency: minimal buffering (0-1 frame) and aggressive late-frame dropping for ultra-responsive interaction.
+    ZeroLatency = 1,
+    /// Smooth: conservative buffering (+35ms base cushion) prioritizing steady cadence for video/scrolling.
+    Smooth = 2,
+}
+
+impl ScreenPlayoutMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScreenPlayoutMode::Adaptive => "adaptive",
+            ScreenPlayoutMode::ZeroLatency => "zerolatency",
+            ScreenPlayoutMode::Smooth => "smooth",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "adaptive" | "auto" => Some(ScreenPlayoutMode::Adaptive),
+            "zerolatency" | "zero" | "zero-latency" | "low-latency" => {
+                Some(ScreenPlayoutMode::ZeroLatency)
+            }
+            "smooth" | "buffered" => Some(ScreenPlayoutMode::Smooth),
+            _ => None,
+        }
+    }
+
+    pub fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => ScreenPlayoutMode::ZeroLatency,
+            2 => ScreenPlayoutMode::Smooth,
+            _ => ScreenPlayoutMode::Adaptive,
+        }
+    }
+}
+
+/// Action returned by ScreenPlayoutBuffer when checking for frames ready to be presented.
+#[derive(Debug)]
+pub enum ScreenPlayoutAction {
+    /// Frame is ready for presentation.
+    Play(ScreenFrame),
+    /// No frame is due yet; sleep or wait until this microsecond timestamp.
+    WaitUntil(u64),
+    /// Playout buffer is empty.
+    Empty,
+}
+
+/// Statistics and telemetry for receiver playout buffer (v2.01 / ADR-087).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScreenPlayoutStats {
+    pub mode: ScreenPlayoutMode,
+    pub target_delay_us: u64,
+    pub current_jitter_us: u64,
+    pub buffered_frames: usize,
+    pub played_frames: u64,
+    pub dropped_late_frames: u64,
+    pub dropped_overflow_frames: u64,
+    pub custom_delay: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PlayoutEntry {
+    frame: ScreenFrame,
+    arrival_us: u64,
+    scheduled_playout_us: u64,
+}
+
+/// Receiver playout buffer and adaptive jitter dejitterizer (v2.01 / ADR-087).
+///
+/// Absorbs network packet delay variation (jitter), calculates interarrival jitter using
+/// RFC 3550 exponential moving average, schedules presentation timestamps to eliminate
+/// micro-stutter, and drops late or overflowing frames to prevent latency drift.
+#[derive(Debug, Clone)]
+pub struct ScreenPlayoutBuffer {
+    mode: ScreenPlayoutMode,
+    custom_target_delay_us: Option<u64>,
+    queue: VecDeque<PlayoutEntry>,
+    last_arrival_us: u64,
+    last_scheduled_playout_us: u64,
+    jitter_us: u64,
+    target_delay_us: u64,
+    max_capacity: usize,
+    late_threshold_us: u64,
+    played_count: u64,
+    dropped_late_count: u64,
+    dropped_overflow_count: u64,
+}
+
+impl Default for ScreenPlayoutBuffer {
+    fn default() -> Self {
+        Self::new(ScreenPlayoutMode::default())
+    }
+}
+
+impl ScreenPlayoutBuffer {
+    pub fn new(mode: ScreenPlayoutMode) -> Self {
+        let initial_delay = match mode {
+            ScreenPlayoutMode::Adaptive => SCREEN_PLAYOUT_ADAPTIVE_BASE_DELAY_US,
+            ScreenPlayoutMode::ZeroLatency => SCREEN_PLAYOUT_MIN_DELAY_US,
+            ScreenPlayoutMode::Smooth => SCREEN_PLAYOUT_SMOOTH_BASE_DELAY_US,
+        };
+        Self {
+            mode,
+            custom_target_delay_us: None,
+            queue: VecDeque::with_capacity(SCREEN_PLAYOUT_MAX_CAPACITY),
+            last_arrival_us: 0,
+            last_scheduled_playout_us: 0,
+            jitter_us: 0,
+            target_delay_us: initial_delay,
+            max_capacity: SCREEN_PLAYOUT_MAX_CAPACITY,
+            late_threshold_us: SCREEN_PLAYOUT_LATE_THRESHOLD_US,
+            played_count: 0,
+            dropped_late_count: 0,
+            dropped_overflow_count: 0,
+        }
+    }
+
+    pub fn mode(&self) -> ScreenPlayoutMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenPlayoutMode) {
+        self.mode = mode;
+        self.recompute_target_delay();
+    }
+
+    pub fn set_custom_target_delay_us(&mut self, delay_us: Option<u64>) {
+        self.custom_target_delay_us =
+            delay_us.map(|d| d.clamp(SCREEN_PLAYOUT_MIN_DELAY_US, SCREEN_PLAYOUT_MAX_DELAY_US));
+        self.recompute_target_delay();
+    }
+
+    pub fn custom_target_delay_us(&self) -> Option<u64> {
+        self.custom_target_delay_us
+    }
+
+    pub fn target_delay_us(&self) -> u64 {
+        self.target_delay_us
+    }
+
+    pub fn current_jitter_us(&self) -> u64 {
+        self.jitter_us
+    }
+
+    pub fn queue_len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Earliest arrival timestamp among currently buffered frames.
+    pub fn oldest_arrival_us(&self) -> Option<u64> {
+        self.queue.front().map(|e| e.arrival_us)
+    }
+
+    /// Next scheduled playout timestamp among currently buffered frames.
+    pub fn next_scheduled_playout_us(&self) -> Option<u64> {
+        self.queue.front().map(|e| e.scheduled_playout_us)
+    }
+
+    fn recompute_target_delay(&mut self) {
+        if let Some(custom) = self.custom_target_delay_us {
+            self.target_delay_us = custom;
+            return;
+        }
+        let calculated = match self.mode {
+            ScreenPlayoutMode::Adaptive => SCREEN_PLAYOUT_ADAPTIVE_BASE_DELAY_US
+                .saturating_add(self.jitter_us.saturating_mul(2)),
+            ScreenPlayoutMode::ZeroLatency => {
+                SCREEN_PLAYOUT_MIN_DELAY_US.saturating_add(self.jitter_us / 4)
+            }
+            ScreenPlayoutMode::Smooth => {
+                SCREEN_PLAYOUT_SMOOTH_BASE_DELAY_US.saturating_add(self.jitter_us.saturating_mul(3))
+            }
+        };
+        self.target_delay_us =
+            calculated.clamp(SCREEN_PLAYOUT_MIN_DELAY_US, SCREEN_PLAYOUT_MAX_DELAY_US);
+    }
+
+    /// Push an incoming reassembled and decoded frame with its arrival timestamp (microseconds).
+    pub fn push_frame(&mut self, frame: ScreenFrame, arrival_us: u64) {
+        // 1. Calculate interarrival jitter (RFC 3550 style).
+        if self.last_arrival_us > 0 && arrival_us >= self.last_arrival_us {
+            let arrival_interval = arrival_us - self.last_arrival_us;
+            let nominal_interval = 33_333u64;
+            let diff = arrival_interval.abs_diff(nominal_interval);
+            let current = self.jitter_us as i64;
+            let sample = diff as i64;
+            let next = current + (sample - current) / 16;
+            self.jitter_us = next.max(0) as u64;
+        }
+        self.last_arrival_us = arrival_us;
+        self.recompute_target_delay();
+
+        // 2. Schedule playout time.
+        let min_playout = arrival_us.saturating_add(self.target_delay_us);
+        let scheduled_playout_us =
+            if self.last_scheduled_playout_us > 0 && self.last_scheduled_playout_us >= arrival_us {
+                let spaced = self.last_scheduled_playout_us.saturating_add(10_000);
+                let max_allowed = arrival_us.saturating_add(self.target_delay_us.saturating_mul(2));
+                spaced.clamp(min_playout, max_allowed)
+            } else {
+                min_playout
+            };
+        self.last_scheduled_playout_us = scheduled_playout_us;
+
+        // 3. Overflow protection: if queue exceeds capacity, drop the oldest frame.
+        if self.queue.len() >= self.max_capacity {
+            self.queue.pop_front();
+            self.dropped_overflow_count = self.dropped_overflow_count.saturating_add(1);
+        }
+
+        self.queue.push_back(PlayoutEntry {
+            frame,
+            arrival_us,
+            scheduled_playout_us,
+        });
+    }
+
+    /// Check the playout queue at the given `now_us` clock time.
+    /// Returns `Play(frame)` if due, `WaitUntil(ts)` if pending, or `Empty`.
+    pub fn pop_frame(&mut self, now_us: u64) -> ScreenPlayoutAction {
+        // Late frame dropping: if front frame is older than now_us - late_threshold and newer frames exist, drop it.
+        while let Some(front) = self.queue.front() {
+            if self.queue.len() > 1
+                && now_us
+                    > front
+                        .scheduled_playout_us
+                        .saturating_add(self.late_threshold_us)
+            {
+                self.queue.pop_front();
+                self.dropped_late_count = self.dropped_late_count.saturating_add(1);
+            } else {
+                break;
+            }
+        }
+
+        match self.queue.front() {
+            Some(entry) => {
+                if now_us >= entry.scheduled_playout_us {
+                    let entry = self.queue.pop_front().expect("front exists");
+                    self.played_count = self.played_count.saturating_add(1);
+                    ScreenPlayoutAction::Play(entry.frame)
+                } else {
+                    ScreenPlayoutAction::WaitUntil(entry.scheduled_playout_us)
+                }
+            }
+            None => ScreenPlayoutAction::Empty,
+        }
+    }
+
+    /// Reset playout queue and pacing state on disconnect or peer gone.
+    pub fn reset(&mut self) {
+        self.queue.clear();
+        self.last_arrival_us = 0;
+        self.last_scheduled_playout_us = 0;
+    }
+
+    /// Return playout buffer stats and telemetry.
+    pub fn stats(&self) -> ScreenPlayoutStats {
+        ScreenPlayoutStats {
+            mode: self.mode,
+            target_delay_us: self.target_delay_us,
+            current_jitter_us: self.jitter_us,
+            buffered_frames: self.queue.len(),
+            played_frames: self.played_count,
+            dropped_late_frames: self.dropped_late_count,
+            dropped_overflow_frames: self.dropped_overflow_count,
+            custom_delay: self.custom_target_delay_us.is_some(),
+        }
+    }
 }
 
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
@@ -1748,11 +2055,9 @@ impl ScreenSender {
         self.rate_controller.on_congestion(now_us);
         self.stats.bitrate_bps = self.rate_controller.current_bps();
 
-        let outcome = self.matrix_coordinator.on_drop(
-            now_us,
-            self.stats.fps_target,
-            self.stats.scale_pct,
-        );
+        let outcome =
+            self.matrix_coordinator
+                .on_drop(now_us, self.stats.fps_target, self.stats.scale_pct);
         if let Some(new_fps) = outcome.new_fps {
             let actual_fps = self.fps_pacer.set_fps(new_fps);
             self.stats.fps_target = actual_fps;
@@ -1916,6 +2221,7 @@ pub struct ScreenReceiver {
     last_seq: u64,
     stats: ScreenStats,
     trace: VecDeque<u64>,
+    playout_buffer: ScreenPlayoutBuffer,
 }
 
 impl Default for ScreenReceiver {
@@ -1930,6 +2236,16 @@ impl ScreenReceiver {
             last_seq: 0,
             stats: ScreenStats::default(),
             trace: VecDeque::with_capacity(SCREEN_TRACE_MAX),
+            playout_buffer: ScreenPlayoutBuffer::default(),
+        }
+    }
+
+    pub fn with_playout_mode(mode: ScreenPlayoutMode) -> Self {
+        Self {
+            last_seq: 0,
+            stats: ScreenStats::default(),
+            trace: VecDeque::with_capacity(SCREEN_TRACE_MAX),
+            playout_buffer: ScreenPlayoutBuffer::new(mode),
         }
     }
 
@@ -1938,7 +2254,47 @@ impl ScreenReceiver {
     }
 
     pub fn stats(&self) -> ScreenStats {
-        self.stats
+        let mut st = self.stats;
+        let pstats = self.playout_buffer.stats();
+        st.playout_mode = pstats.mode as u8;
+        st.playout_delay_us = pstats.target_delay_us.min(u32::MAX as u64) as u32;
+        st.playout_jitter_us = pstats.current_jitter_us.min(u32::MAX as u64) as u32;
+        st
+    }
+
+    /// Access playout buffer reference.
+    pub fn playout_buffer(&self) -> &ScreenPlayoutBuffer {
+        &self.playout_buffer
+    }
+
+    /// Access mutable playout buffer reference.
+    pub fn playout_buffer_mut(&mut self) -> &mut ScreenPlayoutBuffer {
+        &mut self.playout_buffer
+    }
+
+    /// Current playout mode.
+    pub fn playout_mode(&self) -> ScreenPlayoutMode {
+        self.playout_buffer.mode()
+    }
+
+    /// Set playout mode.
+    pub fn set_playout_mode(&mut self, mode: ScreenPlayoutMode) {
+        self.playout_buffer.set_mode(mode);
+    }
+
+    /// Playout buffer stats and telemetry.
+    pub fn playout_stats(&self) -> ScreenPlayoutStats {
+        self.playout_buffer.stats()
+    }
+
+    /// Push an accepted frame to the playout buffer with its arrival timestamp (microseconds).
+    pub fn push_playout(&mut self, frame: ScreenFrame, arrival_us: u64) {
+        self.playout_buffer.push_frame(frame, arrival_us);
+    }
+
+    /// Pop due frame for presentation at current clock timestamp `now_us`.
+    pub fn pop_playout(&mut self, now_us: u64) -> ScreenPlayoutAction {
+        self.playout_buffer.pop_frame(now_us)
     }
 
     /// Most recently accepted sequence numbers, oldest first.
@@ -1980,6 +2336,7 @@ impl ScreenReceiver {
     pub fn on_peer_gone(&mut self) {
         self.last_seq = 0;
         self.trace.clear();
+        self.playout_buffer.reset();
     }
 }
 
@@ -3093,5 +3450,147 @@ mod tests {
         assert_eq!(s.qp_range(), (8, 28));
         assert_eq!(s.stats().qp_min, 8);
         assert_eq!(s.stats().qp_max, 28);
+    }
+
+    #[test]
+    fn screen_playout_modes_and_target_delays() {
+        let mut buf = ScreenPlayoutBuffer::new(ScreenPlayoutMode::Adaptive);
+        assert_eq!(buf.mode(), ScreenPlayoutMode::Adaptive);
+        assert_eq!(buf.target_delay_us(), SCREEN_PLAYOUT_ADAPTIVE_BASE_DELAY_US);
+
+        // Switch to ZeroLatency
+        buf.set_mode(ScreenPlayoutMode::ZeroLatency);
+        assert_eq!(buf.mode(), ScreenPlayoutMode::ZeroLatency);
+        assert_eq!(buf.target_delay_us(), SCREEN_PLAYOUT_MIN_DELAY_US);
+
+        // Switch to Smooth
+        buf.set_mode(ScreenPlayoutMode::Smooth);
+        assert_eq!(buf.mode(), ScreenPlayoutMode::Smooth);
+        assert_eq!(buf.target_delay_us(), SCREEN_PLAYOUT_SMOOTH_BASE_DELAY_US);
+
+        // Custom delay override
+        buf.set_custom_target_delay_us(Some(50_000));
+        assert_eq!(buf.custom_target_delay_us(), Some(50_000));
+        assert_eq!(buf.target_delay_us(), 50_000);
+
+        // Clear custom delay restores mode default
+        buf.set_custom_target_delay_us(None);
+        assert_eq!(buf.custom_target_delay_us(), None);
+        assert_eq!(buf.target_delay_us(), SCREEN_PLAYOUT_SMOOTH_BASE_DELAY_US);
+
+        // Parsing and string conversion
+        assert_eq!(
+            ScreenPlayoutMode::parse("adaptive"),
+            Some(ScreenPlayoutMode::Adaptive)
+        );
+        assert_eq!(
+            ScreenPlayoutMode::parse("auto"),
+            Some(ScreenPlayoutMode::Adaptive)
+        );
+        assert_eq!(
+            ScreenPlayoutMode::parse("zerolatency"),
+            Some(ScreenPlayoutMode::ZeroLatency)
+        );
+        assert_eq!(
+            ScreenPlayoutMode::parse("zero"),
+            Some(ScreenPlayoutMode::ZeroLatency)
+        );
+        assert_eq!(
+            ScreenPlayoutMode::parse("smooth"),
+            Some(ScreenPlayoutMode::Smooth)
+        );
+        assert_eq!(ScreenPlayoutMode::parse("invalid"), None);
+
+        assert_eq!(ScreenPlayoutMode::from_tag(0), ScreenPlayoutMode::Adaptive);
+        assert_eq!(
+            ScreenPlayoutMode::from_tag(1),
+            ScreenPlayoutMode::ZeroLatency
+        );
+        assert_eq!(ScreenPlayoutMode::from_tag(2), ScreenPlayoutMode::Smooth);
+    }
+
+    #[test]
+    fn screen_playout_jitter_calculation_and_pacing() {
+        let mut buf = ScreenPlayoutBuffer::new(ScreenPlayoutMode::Adaptive);
+
+        // 1. Initial frame arrival at t=100_000 us
+        let f1 = raw_frame(1);
+        buf.push_frame(f1, 100_000);
+        assert_eq!(buf.queue_len(), 1);
+        assert_eq!(buf.current_jitter_us(), 0);
+        // Initial playout deadline = 100_000 + 15_000 = 115_000 us
+        assert_eq!(buf.next_scheduled_playout_us(), Some(115_000));
+
+        // Pop before scheduled playout returns WaitUntil
+        match buf.pop_frame(110_000) {
+            ScreenPlayoutAction::WaitUntil(ts) => assert_eq!(ts, 115_000),
+            other => panic!("expected WaitUntil, got {other:?}"),
+        }
+
+        // Pop at or after scheduled playout returns Play
+        match buf.pop_frame(115_000) {
+            ScreenPlayoutAction::Play(f) => assert_eq!(f.seq, 1),
+            other => panic!("expected Play, got {other:?}"),
+        }
+        assert_eq!(buf.queue_len(), 0);
+
+        // 2. Second frame arrives with severe jitter (gap of 90ms instead of nominal 33.3ms)
+        let f2 = raw_frame(2);
+        buf.push_frame(f2, 190_000);
+        // Interarrival = 90_000, nominal = 33_333, diff = 56_667. Jitter updated via EWMA.
+        assert!(buf.current_jitter_us() > 0);
+        // Adaptive target delay expands beyond base 15ms due to jitter
+        assert!(buf.target_delay_us() > SCREEN_PLAYOUT_ADAPTIVE_BASE_DELAY_US);
+    }
+
+    #[test]
+    fn screen_playout_late_frame_dropping_and_overflow() {
+        let mut buf = ScreenPlayoutBuffer::new(ScreenPlayoutMode::ZeroLatency);
+
+        // Push 3 frames
+        buf.push_frame(raw_frame(1), 10_000);
+        buf.push_frame(raw_frame(2), 20_000);
+        buf.push_frame(raw_frame(3), 30_000);
+
+        // Advance clock way past late threshold (e.g. t = 500_000 us)
+        // Frames 1 and 2 are hopelessly late; pop should drop late frames and play frame 3
+        match buf.pop_frame(500_000) {
+            ScreenPlayoutAction::Play(f) => assert_eq!(f.seq, 3),
+            other => panic!("expected Play frame 3, got {other:?}"),
+        }
+        let st = buf.stats();
+        assert_eq!(st.dropped_late_frames, 2);
+        assert_eq!(st.played_frames, 1);
+
+        // Overflow test: push 15 frames into max_capacity 12 buffer
+        for i in 10..25 {
+            buf.push_frame(raw_frame(i), 1_000_000 + (i - 10) * 10_000);
+        }
+        assert_eq!(buf.queue_len(), 12);
+        assert_eq!(buf.stats().dropped_overflow_frames, 3);
+    }
+
+    #[test]
+    fn screen_receiver_playout_buffer_integration() {
+        let mut recv = ScreenReceiver::with_playout_mode(ScreenPlayoutMode::Smooth);
+        assert_eq!(recv.playout_mode(), ScreenPlayoutMode::Smooth);
+
+        let f = raw_frame(1);
+        let accepted = recv.apply(&f).unwrap();
+        assert_eq!(accepted, Some(1));
+
+        recv.push_playout(f, 50_000);
+        assert_eq!(recv.playout_stats().buffered_frames, 1);
+
+        let stats = recv.stats();
+        assert_eq!(stats.playout_mode, ScreenPlayoutMode::Smooth as u8);
+        assert_eq!(
+            stats.playout_delay_us,
+            SCREEN_PLAYOUT_SMOOTH_BASE_DELAY_US as u32
+        );
+
+        // On peer gone resets playout queue
+        recv.on_peer_gone();
+        assert_eq!(recv.playout_stats().buffered_frames, 0);
     }
 }

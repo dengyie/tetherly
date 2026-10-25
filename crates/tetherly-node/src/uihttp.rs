@@ -4160,6 +4160,45 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 json_ok(&rep)
             }
         }
+        // Playout buffer & adaptive jitter dejitterizer (v2.01 / ADR-087).
+        ("GET", "/api/screen/playout") => {
+            let rep = node.screen_playout_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/playout") => {
+            #[derive(serde::Deserialize)]
+            struct PlayoutBody {
+                mode: Option<String>,
+                playout_mode: Option<String>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<PlayoutBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.clone().or_else(|| b.playout_mode.clone()))
+                .or_else(|| qmap.get("mode").cloned())
+                .or_else(|| qmap.get("playout_mode").cloned());
+
+            if let Some(m_str) = mode_str {
+                match tetherly_core::ScreenPlayoutMode::parse(&m_str) {
+                    Some(mode) => {
+                        let rep = node.screen_set_playout_mode(mode);
+                        json_ok(&rep)
+                    }
+                    None => err(
+                        400,
+                        "invalid playout mode: expected adaptive, zerolatency, or smooth",
+                    ),
+                }
+            } else {
+                let rep = node.screen_playout_report();
+                json_ok(&rep)
+            }
+        }
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -8050,6 +8089,7 @@ mod tests {
             screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
             screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
+            screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_sink: None,
             input_sink: None,
         };
@@ -9091,6 +9131,65 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/screen/profile HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_playout_endpoints() {
+        let (node, dir) = temp_test_node("screen_playout");
+        let port = bind_and_spawn(node.clone(), 0).await.unwrap();
+
+        // 1. GET /api/screen/playout
+        let (code, body) = loopback_get(port, "/api/screen/playout").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["mode"], "adaptive");
+        assert_eq!(rep["target_delay_ms"], 15.0);
+        assert_eq!(rep["buffered_frames"], 0);
+
+        // 2. POST /api/screen/playout with JSON {"mode": "zerolatency"}
+        let update_zero = serde_json::json!({ "mode": "zerolatency" });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/playout",
+            &serde_json::to_vec(&update_zero).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["mode"], "zerolatency");
+        assert_eq!(rep["target_delay_ms"], 5.0);
+
+        // 3. POST /api/screen/playout with query param ?mode=smooth
+        let (code, body) = loopback_post(port, "/api/screen/playout?mode=smooth", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["mode"], "smooth");
+        assert_eq!(rep["target_delay_ms"], 35.0);
+
+        // 4. Invalid mode returns 400
+        let (code, _) = loopback_post(port, "/api/screen/playout?mode=invalid_xyz", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+
+        // 5. Host header 403 test on /api/screen/playout
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/playout HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();
