@@ -2145,6 +2145,7 @@ impl ScreenCursorController {
 
     /// Evaluates candidate cursor parameters and produces an outbound ScreenCursorUpdate
     /// if decoupled mode is active and parameters pass deduplication and rate-limiting.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_update(
         &mut self,
         x: i32,
@@ -2641,6 +2642,7 @@ impl ScreenSender {
     }
 
     /// Push high-frequency cursor update. Returns ScreenCursorUpdate if candidate passed dedup and rate-limiting.
+    #[allow(clippy::too_many_arguments)]
     pub fn push_cursor_with_time(
         &mut self,
         x: i32,
@@ -4232,7 +4234,7 @@ mod tests {
         let decoded3 = ScreenCursorUpdate::decode_payload(&payload3).unwrap();
         assert_eq!(decoded3.x, -1920);
         assert_eq!(decoded3.y, -1080);
-        assert_eq!(decoded3.visible, false);
+        assert!(!decoded3.visible);
         assert_eq!(decoded3.shape, CursorShape::IBeam);
     }
 
