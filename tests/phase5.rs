@@ -80,6 +80,7 @@ fn cfg(
         screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
         screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
         screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
+        screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
         screen_sink: None,
         input_sink: None,
     }
@@ -2481,7 +2482,10 @@ async fn m5_13_screen_dirty_rect_squelch() {
         custom_rgba: None,
     };
     let sent_cur = host.screen_send_cursor(cur_update).await.unwrap();
-    assert!(sent_cur, "decoupled cursor update sent during static screen");
+    assert!(
+        sent_cur,
+        "decoupled cursor update sent during static screen"
+    );
 
     // Wait for cursor update on visitor
     let wait_cursor = std::time::Instant::now();
@@ -2509,6 +2513,161 @@ async fn m5_13_screen_dirty_rect_squelch() {
     assert_eq!(c, 200);
     let host_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
     assert_eq!(host_status.squelch_mode, "auto");
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_14_screen_adaptive_fec_protection() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial FEC query on host: defaults to Auto mode (ADR-090)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/fec")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenFecReport = serde_json::from_slice(&b).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.mode, "auto");
+    assert_eq!(init_rep.redundancy_pct, 0);
+    assert_eq!(init_rep.blocks_encoded, 0);
+    assert_eq!(init_rep.recovered_shards, 0);
+    assert_eq!(init_rep.unrecoverable_blocks, 0);
+
+    // 2. Dynamic FEC mode configuration via POST /api/screen/fec
+    let cons_payload = serde_json::json!({ "mode": "conservative" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/fec",
+        &serde_json::to_vec(&cons_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let cons_rep: tetherly_core::ScreenFecReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(cons_rep.mode, "conservative");
+    assert_eq!(cons_rep.redundancy_pct, 10);
+
+    let dis_payload = serde_json::json!({ "mode": "disabled" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/fec",
+        &serde_json::to_vec(&dis_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let dis_rep: tetherly_core::ScreenFecReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(dis_rep.mode, "disabled");
+    assert_eq!(dis_rep.redundancy_pct, 0);
+
+    // Set to aggressive (25% redundancy) for active Cauchy RS shard generation
+    let agg_payload = serde_json::json!({ "mode": "aggressive" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/fec",
+        &serde_json::to_vec(&agg_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let agg_rep: tetherly_core::ScreenFecReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(agg_rep.mode, "aggressive");
+    assert_eq!(agg_rep.redundancy_pct, 25);
+
+    // 3. Visitor opens screen channel, host allows, and visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Send video frame from host under Aggressive FEC mode
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor and assemble via FEC
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received frame under aggressive FEC protection");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Verify FEC telemetry on host
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/fec")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_fec: tetherly_core::ScreenFecReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_fec.mode, "aggressive");
+    assert_eq!(host_fec.redundancy_pct, 25);
+    assert!(host_fec.blocks_encoded >= 1, "expected blocks_encoded >= 1");
+    assert!(
+        host_fec.data_shards_sent >= 1,
+        "expected data_shards_sent >= 1"
+    );
+    assert!(
+        host_fec.parity_shards_sent >= 1,
+        "expected parity_shards_sent >= 1"
+    );
+
+    // 6. Verify status report contains FEC telemetry fields
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_status.fec_mode, "aggressive");
+    assert_eq!(host_status.fec_redundancy_pct, 25);
+
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let visitor_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(visitor_status.fec_unrecoverable_blocks, 0);
 
     host.shutdown();
     visitor.shutdown();

@@ -104,6 +104,10 @@ enum Cmd {
         /// `aggressive` squelches after 150ms with 5.0s heartbeats; `disabled` pushes continuous frames.
         #[arg(long, default_value = "auto")]
         screen_squelch: String,
+        /// Screen Forward Error Correction mode (ADR-090): `auto` (default)
+        /// adapts Cauchy RS redundancy to loss; `conservative` (10%); `aggressive` (25%); `disabled` (0%).
+        #[arg(long, default_value = "auto")]
+        screen_fec: String,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -2118,6 +2122,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming forward error correction (FEC) and adaptive redundancy (v2.04 / ADR-090).
+    Fec {
+        /// Target FEC mode: `auto`, `conservative`, `aggressive`, or `disabled`. If omitted, displays current FEC status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3916,6 +3931,7 @@ async fn main() -> Result<()> {
             screen_playout,
             screen_cursor,
             screen_squelch,
+            screen_fec,
             file_port,
             input_port,
             screen_port,
@@ -4011,6 +4027,14 @@ async fn main() -> Result<()> {
                 "disabled" | "off" | "none" => tetherly_core::ScreenSquelchMode::Disabled,
                 _ => {
                     anyhow::bail!("--screen-squelch must be `auto`, `aggressive`, or `disabled`")
+                }
+            };
+            cfg.screen_fec_mode = match screen_fec.trim().parse::<tetherly_core::ScreenFecMode>() {
+                Ok(mode) => mode,
+                Err(_) => {
+                    anyhow::bail!(
+                        "--screen-fec must be `auto`, `conservative`, `aggressive`, or `disabled`"
+                    )
                 }
             };
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
@@ -6164,9 +6188,16 @@ async fn main() -> Result<()> {
                     if !rep.squelch_mode.is_empty() {
                         println!(
                             "  Squelch Mode: {} (squelched={}, suppressed_frames={})",
-                            rep.squelch_mode,
-                            rep.is_squelched,
-                            rep.squelched_frames
+                            rep.squelch_mode, rep.is_squelched, rep.squelched_frames
+                        );
+                    }
+                    if !rep.fec_mode.is_empty() {
+                        println!(
+                            "  FEC Mode:     {} (redundancy: {}%, recovered: {}, unrecoverable: {})",
+                            rep.fec_mode,
+                            rep.fec_redundancy_pct,
+                            rep.fec_recovered_shards,
+                            rep.fec_unrecoverable_blocks
                         );
                     }
                 }
@@ -6630,8 +6661,64 @@ async fn main() -> Result<()> {
                         println!("  Frames Passed:       {}", rep.frames_passed);
                         println!("  Frames Squelched:    {}", rep.frames_squelched);
                         println!("  Keepalive Frames:    {}", rep.keepalive_frames);
-                        println!("  Last Dirty Ratio:    {:.2}%", rep.last_dirty_ratio * 100.0);
+                        println!(
+                            "  Last Dirty Ratio:    {:.2}%",
+                            rep.last_dirty_ratio * 100.0
+                        );
                         println!("  Static Frames Run:   {}", rep.consecutive_static_frames);
+                    }
+                }
+            }
+            ScreenCmd::Fec {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    tetherly_node::loopback_post(ui_port, "/api/screen/fec", &body).await
+                } else {
+                    tetherly_node::loopback_get(ui_port, "/api/screen/fec").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen fec query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_core::ScreenFecReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    if has_update {
+                        println!(
+                            "Screen forward error correction mode updated: {} (redundancy: {}%)",
+                            rep.mode, rep.redundancy_pct
+                        );
+                    } else {
+                        println!(
+                            "Screen Forward Error Correction (FEC) & Adaptive Redundancy Protection (ADR-090):"
+                        );
+                        println!("  FEC Mode:             {}", rep.mode);
+                        println!("  Redundancy:           {}%", rep.redundancy_pct);
+                        println!("  Blocks Encoded:       {}", rep.blocks_encoded);
+                        println!("  Data Shards Sent:     {}", rep.data_shards_sent);
+                        println!("  Parity Shards Sent:   {}", rep.parity_shards_sent);
+                        println!("  Blocks Decoded:       {}", rep.blocks_decoded);
+                        println!("  Recovered Shards:     {}", rep.recovered_shards);
+                        println!("  Unrecoverable Blocks: {}", rep.unrecoverable_blocks);
                     }
                 }
             }

@@ -19,12 +19,20 @@ pub const TYPE_SCREEN_FRAME: u16 = 0x0501;
 pub const TYPE_SCREEN_CONTROL: u16 = 0x0502;
 /// Screen cursor channel inner type (v2.02 / ADR-088).
 pub const TYPE_SCREEN_CURSOR: u16 = 0x0503;
+/// Screen forward error correction (FEC) channel inner type (v2.04 / ADR-090).
+pub const TYPE_SCREEN_FEC: u16 = 0x0504;
 
 pub const SCREEN_MAGIC: [u8; 4] = *b"TMV1";
 pub const SCREEN_PROTO: u8 = 1;
 
 pub const CURSOR_MAGIC: [u8; 4] = *b"TMCU";
 pub const CURSOR_PROTO: u8 = 1;
+
+pub const FEC_MAGIC: [u8; 4] = *b"TFEC";
+pub const FEC_PROTO: u8 = 1;
+pub const FEC_HEADER_LEN: usize = 24;
+pub const FEC_MAX_DATA_SHARDS: usize = 32;
+pub const FEC_MAX_PARITY_SHARDS: usize = 16;
 
 /// Maximum payload bytes for a custom cursor bitmap (64x64 RGBA8 = 16,384 bytes).
 pub const CURSOR_BITMAP_MAX_BYTES: usize = 64 * 64 * 4;
@@ -220,7 +228,7 @@ pub const SCREEN_COMPRESS_H264: u8 = 3;
 pub fn is_screen_type(ty: u16) -> bool {
     matches!(
         ty,
-        TYPE_SCREEN_FRAME | TYPE_SCREEN_CONTROL | TYPE_SCREEN_CURSOR
+        TYPE_SCREEN_FRAME | TYPE_SCREEN_CONTROL | TYPE_SCREEN_CURSOR | TYPE_SCREEN_FEC
     )
 }
 
@@ -895,9 +903,22 @@ pub struct ScreenStats {
     pub is_squelched: bool,
     /// Cumulative count of video frames squelched/suppressed (v2.03 / ADR-089).
     pub squelched_frames: u64,
+    /// Forward error correction (FEC) mode tag (0=auto, 1=conservative, 2=aggressive, 3=disabled) (v2.04 / ADR-090).
+    pub fec_mode: u8,
+    /// Active FEC redundancy percentage (0..=35%) (v2.04 / ADR-090).
+    pub fec_redundancy_pct: u8,
+    /// Total FEC lost shards successfully reconstructed by receiver (v2.04 / ADR-090).
+    pub fec_recovered_shards: u64,
+    /// Total FEC blocks that experienced unrecoverable loss exceeding parity budget (v2.04 / ADR-090).
+    pub fec_unrecoverable_blocks: u64,
 }
 
 impl ScreenStats {
+    /// Forward error correction (FEC) mode.
+    pub fn fec_mode(&self) -> ScreenFecMode {
+        ScreenFecMode::from_tag(self.fec_mode)
+    }
+
     /// Squelch controller mode.
     pub fn squelch_mode(&self) -> ScreenSquelchMode {
         ScreenSquelchMode::from_tag(self.squelch_mode)
@@ -2316,7 +2337,12 @@ pub struct ScreenDamageRect {
 
 impl ScreenDamageRect {
     pub const fn new(x: u16, y: u16, width: u16, height: u16) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 }
 
@@ -2412,7 +2438,8 @@ impl ScreenDamageTracker {
                 let mut block_dirty = false;
                 for y in y_start..y_end {
                     let offset = (y as usize) * stride + (x_start as usize) * 4;
-                    if prev_rgba[offset..offset + row_bytes] != curr_rgba[offset..offset + row_bytes]
+                    if prev_rgba[offset..offset + row_bytes]
+                        != curr_rgba[offset..offset + row_bytes]
                     {
                         block_dirty = true;
                         break;
@@ -2627,8 +2654,7 @@ impl ScreenSquelchController {
                     self.stats.keepalive_frames = self.stats.keepalive_frames.saturating_add(1);
                     ScreenSquelchDecision::SendFrame
                 } else {
-                    self.stats.frames_squelched =
-                        self.stats.frames_squelched.saturating_add(1);
+                    self.stats.frames_squelched = self.stats.frames_squelched.saturating_add(1);
                     ScreenSquelchDecision::SquelchSkip
                 }
             } else {
@@ -2639,6 +2665,645 @@ impl ScreenSquelchController {
                 ScreenSquelchDecision::SendFrame
             }
         }
+    }
+}
+
+/// Multiplication in GF(2^8) with irreducible polynomial 0x11D (x^8 + x^4 + x^3 + x^2 + 1) (v2.04 / ADR-090).
+pub fn gf_mul(mut a: u8, mut b: u8) -> u8 {
+    let mut p = 0u8;
+    for _ in 0..8 {
+        if (b & 1) != 0 {
+            p ^= a;
+        }
+        let hi = a & 0x80;
+        a <<= 1;
+        if hi != 0 {
+            a ^= 0x1d;
+        }
+        b >>= 1;
+    }
+    p
+}
+
+/// Multiplicative inverse in GF(2^8) using Fermat's Little Theorem (a^254 = a^-1) (v2.04 / ADR-090).
+pub fn gf_inv(a: u8) -> u8 {
+    if a == 0 {
+        return 0;
+    }
+    let mut res = 1u8;
+    let mut base = a;
+    let mut exp = 254;
+    while exp > 0 {
+        if (exp & 1) != 0 {
+            res = gf_mul(res, base);
+        }
+        base = gf_mul(base, base);
+        exp >>= 1;
+    }
+    res
+}
+
+/// Division in GF(2^8): a / b = a * inv(b) (v2.04 / ADR-090).
+pub fn gf_div(a: u8, b: u8) -> u8 {
+    if b == 0 {
+        0
+    } else {
+        gf_mul(a, gf_inv(b))
+    }
+}
+
+/// Cauchy matrix coefficient at row (parity index `r`) and col (data index `c`) (v2.04 / ADR-090).
+/// X_c = c, Y_r = k + r. Since X_c != Y_r in 0..255, X_c ^ Y_r is non-zero.
+pub fn cauchy_coeff(r: usize, c: usize, k: usize) -> u8 {
+    let x = c as u8;
+    let y = (k + r) as u8;
+    gf_inv(x ^ y)
+}
+
+/// Forward error correction (FEC) operating mode (v2.04 / ADR-090).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum ScreenFecMode {
+    /// Dynamically scales redundancy percentage (0%~30%) based on measured loss & network health.
+    #[default]
+    Auto = 0,
+    /// Fixed baseline 10% redundancy protection for predictable packet loss.
+    Conservative = 1,
+    /// High-protection 25% redundancy for lossy wireless or mobile cellular links.
+    Aggressive = 2,
+    /// Passthrough mode with zero parity shards generated or transmitted.
+    Disabled = 3,
+}
+
+impl ScreenFecMode {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Conservative => "conservative",
+            Self::Aggressive => "aggressive",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub const fn tag(&self) -> u8 {
+        *self as u8
+    }
+
+    pub const fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => Self::Conservative,
+            2 => Self::Aggressive,
+            3 => Self::Disabled,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "conservative" | "cons" | "low" => Some(Self::Conservative),
+            "aggressive" | "agg" | "aggro" | "high" => Some(Self::Aggressive),
+            "disabled" | "off" | "none" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+}
+
+impl std::str::FromStr for ScreenFecMode {
+    type Err = CoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_str_loose(s).ok_or(CoreError::ScreenFrame)
+    }
+}
+
+/// Telemetry metrics for forward error correction (v2.04 / ADR-090).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScreenFecStats {
+    pub mode: ScreenFecMode,
+    pub redundancy_pct: u8,
+    pub blocks_encoded: u64,
+    pub data_shards_sent: u64,
+    pub parity_shards_sent: u64,
+    pub blocks_decoded: u64,
+    pub recovered_shards: u64,
+    pub unrecoverable_blocks: u64,
+}
+
+/// JSON report DTO for forward error correction inspection (v2.04 / ADR-090).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenFecReport {
+    pub ok: bool,
+    pub mode: String,
+    pub redundancy_pct: u8,
+    pub blocks_encoded: u64,
+    pub data_shards_sent: u64,
+    pub parity_shards_sent: u64,
+    pub blocks_decoded: u64,
+    pub recovered_shards: u64,
+    pub unrecoverable_blocks: u64,
+    pub timestamp_ms: u64,
+}
+
+/// Individual forward error correction shard (data or parity) (v2.04 / ADR-090).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenFecShard {
+    pub frame_seq: u64,
+    pub block_id: u16,
+    pub k_data_shards: u8,
+    pub m_parity_shards: u8,
+    pub shard_index: u8,
+    pub is_parity: bool,
+    pub data: Vec<u8>,
+}
+
+impl ScreenFecShard {
+    pub fn encode_header(&self) -> [u8; FEC_HEADER_LEN] {
+        let mut hdr = [0u8; FEC_HEADER_LEN];
+        hdr[0..4].copy_from_slice(&FEC_MAGIC);
+        hdr[4] = FEC_PROTO;
+        hdr[5] = 0; // flags
+        hdr[6..8].copy_from_slice(&[0, 0]); // reserved
+        hdr[8..16].copy_from_slice(&self.frame_seq.to_be_bytes());
+        hdr[16..18].copy_from_slice(&self.block_id.to_be_bytes());
+        hdr[18] = self.k_data_shards;
+        hdr[19] = self.m_parity_shards;
+        hdr[20] = self.shard_index;
+        hdr[21] = if self.is_parity { 1 } else { 0 };
+        hdr[22..24].copy_from_slice(&(self.data.len() as u16).to_be_bytes());
+        hdr
+    }
+
+    pub fn to_inner_frame(&self) -> InnerFrame {
+        let hdr = self.encode_header();
+        let mut payload = Vec::with_capacity(FEC_HEADER_LEN + self.data.len());
+        payload.extend_from_slice(&hdr);
+        payload.extend_from_slice(&self.data);
+        InnerFrame {
+            ty: TYPE_SCREEN_FEC,
+            flags: FLAG_MUST_UNDERSTAND,
+            msg_id: 0,
+            payload,
+        }
+    }
+
+    pub fn from_inner_frame(frame: &InnerFrame) -> Result<Self, CoreError> {
+        if frame.ty != TYPE_SCREEN_FEC {
+            return Err(CoreError::ScreenFrame);
+        }
+        if frame.payload.len() < FEC_HEADER_LEN {
+            return Err(CoreError::TruncatedFrame);
+        }
+        if frame.payload[0..4] != FEC_MAGIC {
+            return Err(CoreError::ScreenFrame);
+        }
+        if frame.payload[4] != FEC_PROTO {
+            return Err(CoreError::UnsupportedProto);
+        }
+        let frame_seq = u64::from_be_bytes(frame.payload[8..16].try_into().unwrap());
+        let block_id = u16::from_be_bytes(frame.payload[16..18].try_into().unwrap());
+        let k_data_shards = frame.payload[18];
+        let m_parity_shards = frame.payload[19];
+        let shard_index = frame.payload[20];
+        let is_parity = frame.payload[21] != 0;
+        let shard_len = u16::from_be_bytes(frame.payload[22..24].try_into().unwrap()) as usize;
+        if frame.payload.len() < FEC_HEADER_LEN + shard_len {
+            return Err(CoreError::TruncatedFrame);
+        }
+        let data = frame.payload[FEC_HEADER_LEN..FEC_HEADER_LEN + shard_len].to_vec();
+        Ok(Self {
+            frame_seq,
+            block_id,
+            k_data_shards,
+            m_parity_shards,
+            shard_index,
+            is_parity,
+            data,
+        })
+    }
+}
+
+/// Cauchy Reed-Solomon encoder over GF(2^8) (v2.04 / ADR-090).
+pub struct ScreenFecEncoder;
+
+impl ScreenFecEncoder {
+    /// Encodes a list of data buffers into K data shards + M parity shards.
+    /// Each data shard payload is formatted as: 2-byte orig_len + raw bytes,
+    /// then padded to maximum shard size S for Galois field matrix encoding.
+    #[allow(clippy::needless_range_loop)]
+    pub fn encode_block(
+        frame_seq: u64,
+        block_id: u16,
+        data_buffers: &[Vec<u8>],
+        m_parity: usize,
+    ) -> Result<Vec<ScreenFecShard>, CoreError> {
+        let k = data_buffers.len();
+        if k == 0 || k > FEC_MAX_DATA_SHARDS || m_parity > FEC_MAX_PARITY_SHARDS {
+            return Err(CoreError::ScreenFrame);
+        }
+
+        // Format each data shard: 2-byte orig_len (big-endian) + data
+        let mut formatted_data: Vec<Vec<u8>> = Vec::with_capacity(k);
+        let mut max_shard_len = 0;
+        for buf in data_buffers {
+            let orig_len = buf.len();
+            if orig_len > u16::MAX as usize {
+                return Err(CoreError::ScreenTooLarge);
+            }
+            let mut shard_bytes = Vec::with_capacity(2 + orig_len);
+            shard_bytes.extend_from_slice(&(orig_len as u16).to_be_bytes());
+            shard_bytes.extend_from_slice(buf);
+            max_shard_len = max_shard_len.max(shard_bytes.len());
+            formatted_data.push(shard_bytes);
+        }
+
+        // Pad all formatted shards to max_shard_len
+        for shard in &mut formatted_data {
+            if shard.len() < max_shard_len {
+                shard.resize(max_shard_len, 0);
+            }
+        }
+
+        let mut shards = Vec::with_capacity(k + m_parity);
+
+        // Add K data shards
+        for (idx, shard_data) in formatted_data.iter().enumerate() {
+            shards.push(ScreenFecShard {
+                frame_seq,
+                block_id,
+                k_data_shards: k as u8,
+                m_parity_shards: m_parity as u8,
+                shard_index: idx as u8,
+                is_parity: false,
+                data: shard_data.clone(),
+            });
+        }
+
+        // Generate M Cauchy parity shards
+        for r in 0..m_parity {
+            let mut parity_buf = vec![0u8; max_shard_len];
+            for c in 0..k {
+                let coeff = cauchy_coeff(r, c, k);
+                let data_shard = &formatted_data[c];
+                for b in 0..max_shard_len {
+                    parity_buf[b] ^= gf_mul(coeff, data_shard[b]);
+                }
+            }
+            shards.push(ScreenFecShard {
+                frame_seq,
+                block_id,
+                k_data_shards: k as u8,
+                m_parity_shards: m_parity as u8,
+                shard_index: r as u8,
+                is_parity: true,
+                data: parity_buf,
+            });
+        }
+
+        Ok(shards)
+    }
+}
+
+/// Cauchy Reed-Solomon decoder over GF(2^8) (v2.04 / ADR-090).
+pub struct ScreenFecDecoder;
+
+impl ScreenFecDecoder {
+    /// Attempts to decode/reconstruct the original K data buffers from received shards.
+    /// Returns:
+    /// - Ok(Some(recovered_data_buffers)) if all K shards are present or successfully recovered.
+    /// - Ok(None) if fewer than K distinct shards have arrived so far (unrecoverable without more shards).
+    /// - Err(CoreError) if shards are corrupted or have invalid parameters.
+    #[allow(clippy::needless_range_loop)]
+    pub fn decode_block(shards: &[ScreenFecShard]) -> Result<Option<Vec<Vec<u8>>>, CoreError> {
+        if shards.is_empty() {
+            return Ok(None);
+        }
+        let k = shards[0].k_data_shards as usize;
+        let m = shards[0].m_parity_shards as usize;
+        if k == 0 || k > FEC_MAX_DATA_SHARDS || m > FEC_MAX_PARITY_SHARDS {
+            return Err(CoreError::ScreenFrame);
+        }
+
+        let mut data_shards_map: std::collections::BTreeMap<u8, Vec<u8>> =
+            std::collections::BTreeMap::new();
+        let mut parity_shards_map: std::collections::BTreeMap<u8, Vec<u8>> =
+            std::collections::BTreeMap::new();
+
+        for shard in shards {
+            if shard.is_parity {
+                if (shard.shard_index as usize) < m {
+                    parity_shards_map.insert(shard.shard_index, shard.data.clone());
+                }
+            } else if (shard.shard_index as usize) < k {
+                data_shards_map.insert(shard.shard_index, shard.data.clone());
+            }
+        }
+
+        // Fast path: all K data shards arrived intact!
+        if data_shards_map.len() == k {
+            let mut out = Vec::with_capacity(k);
+            for idx in 0..k {
+                let shard_buf = data_shards_map.get(&(idx as u8)).unwrap();
+                if shard_buf.len() < 2 {
+                    return Err(CoreError::TruncatedFrame);
+                }
+                let orig_len = u16::from_be_bytes(shard_buf[0..2].try_into().unwrap()) as usize;
+                if shard_buf.len() < 2 + orig_len {
+                    return Err(CoreError::TruncatedFrame);
+                }
+                out.push(shard_buf[2..2 + orig_len].to_vec());
+            }
+            return Ok(Some(out));
+        }
+
+        // Missing data shards
+        let total_received = data_shards_map.len() + parity_shards_map.len();
+        if total_received < k {
+            // Cannot recover yet: fewer than K total shards
+            return Ok(None);
+        }
+
+        let mut missing_indices = Vec::new();
+        for idx in 0..k {
+            if !data_shards_map.contains_key(&(idx as u8)) {
+                missing_indices.push(idx);
+            }
+        }
+        let num_missing = missing_indices.len();
+        if parity_shards_map.len() < num_missing {
+            // Too many lost shards to recover with available parity
+            return Ok(None);
+        }
+
+        // Select num_missing parity shards
+        let selected_parity: Vec<(usize, Vec<u8>)> = parity_shards_map
+            .into_iter()
+            .take(num_missing)
+            .map(|(idx, data)| (idx as usize, data))
+            .collect();
+
+        let shard_len = shards[0].data.len();
+
+        // Construct linear system: A * X = V
+        // A is num_missing x num_missing matrix in GF(2^8)
+        let mut a: Vec<Vec<u8>> = Vec::with_capacity(num_missing);
+        let mut v: Vec<Vec<u8>> = Vec::with_capacity(num_missing);
+
+        for (p_idx, p_data) in selected_parity.iter() {
+            let mut a_row = Vec::with_capacity(num_missing);
+            for &m_idx in &missing_indices {
+                a_row.push(cauchy_coeff(*p_idx, m_idx, k));
+            }
+            a.push(a_row);
+
+            let mut v_row = p_data.clone();
+            if v_row.len() < shard_len {
+                v_row.resize(shard_len, 0);
+            }
+
+            // Subtract (XOR) the contributions from already available data shards
+            for (&c_idx, c_data) in &data_shards_map {
+                let coeff = cauchy_coeff(*p_idx, c_idx as usize, k);
+                for b in 0..shard_len {
+                    let byte_val = if b < c_data.len() { c_data[b] } else { 0 };
+                    v_row[b] ^= gf_mul(coeff, byte_val);
+                }
+            }
+            v.push(v_row);
+        }
+
+        // Solve A * X = V via Gaussian Elimination over GF(2^8)
+        for i in 0..num_missing {
+            // Find pivot
+            let mut pivot = i;
+            while pivot < num_missing && a[pivot][i] == 0 {
+                pivot += 1;
+            }
+            if pivot == num_missing {
+                return Err(CoreError::ScreenFrame); // Singular matrix
+            }
+            if pivot != i {
+                a.swap(i, pivot);
+                v.swap(i, pivot);
+            }
+
+            // Scale row i so A[i][i] = 1
+            let inv_diag = gf_inv(a[i][i]);
+            for col in i..num_missing {
+                a[i][col] = gf_mul(a[i][col], inv_diag);
+            }
+            for b in 0..shard_len {
+                v[i][b] = gf_mul(v[i][b], inv_diag);
+            }
+
+            // Eliminate other rows
+            for r in 0..num_missing {
+                if r != i && a[r][i] != 0 {
+                    let factor = a[r][i];
+                    for col in i..num_missing {
+                        a[r][col] ^= gf_mul(factor, a[i][col]);
+                    }
+                    for b in 0..shard_len {
+                        let scaled_v = gf_mul(factor, v[i][b]);
+                        v[r][b] ^= scaled_v;
+                    }
+                }
+            }
+        }
+
+        // v[i] now contains the reconstructed missing data shard for missing_indices[i]
+        for (i, &m_idx) in missing_indices.iter().enumerate() {
+            data_shards_map.insert(m_idx as u8, v[i].clone());
+        }
+
+        // Unpack original data payloads
+        let mut out = Vec::with_capacity(k);
+        for idx in 0..k {
+            let shard_buf = data_shards_map.get(&(idx as u8)).unwrap();
+            if shard_buf.len() < 2 {
+                return Err(CoreError::TruncatedFrame);
+            }
+            let orig_len = u16::from_be_bytes(shard_buf[0..2].try_into().unwrap()) as usize;
+            if shard_buf.len() < 2 + orig_len {
+                return Err(CoreError::TruncatedFrame);
+            }
+            out.push(shard_buf[2..2 + orig_len].to_vec());
+        }
+
+        Ok(Some(out))
+    }
+}
+
+/// Adaptive controller for forward error correction redundancy (v2.04 / ADR-090).
+#[derive(Debug, Clone, Default)]
+pub struct ScreenFecController {
+    mode: ScreenFecMode,
+    stats: ScreenFecStats,
+}
+
+impl ScreenFecController {
+    pub fn new(mode: ScreenFecMode) -> Self {
+        let redundancy_pct = match mode {
+            ScreenFecMode::Auto => 0,
+            ScreenFecMode::Conservative => 10,
+            ScreenFecMode::Aggressive => 25,
+            ScreenFecMode::Disabled => 0,
+        };
+        Self {
+            mode,
+            stats: ScreenFecStats {
+                mode,
+                redundancy_pct,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn mode(&self) -> ScreenFecMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenFecMode) -> ScreenFecMode {
+        self.mode = mode;
+        self.stats.mode = mode;
+        self.stats.redundancy_pct = match mode {
+            ScreenFecMode::Auto => 0,
+            ScreenFecMode::Conservative => 10,
+            ScreenFecMode::Aggressive => 25,
+            ScreenFecMode::Disabled => 0,
+        };
+        mode
+    }
+
+    pub fn stats(&self) -> ScreenFecStats {
+        self.stats
+    }
+
+    /// Calculate required parity shards M for a block of K data shards based on current mode and packet loss rate.
+    pub fn calculate_parity_shards(&mut self, k: usize, packet_loss_ratio: f32) -> usize {
+        if k == 0 || self.mode == ScreenFecMode::Disabled {
+            self.stats.redundancy_pct = 0;
+            return 0;
+        }
+
+        let redundancy_pct = match self.mode {
+            ScreenFecMode::Disabled => 0,
+            ScreenFecMode::Conservative => 10,
+            ScreenFecMode::Aggressive => 25,
+            ScreenFecMode::Auto => {
+                if packet_loss_ratio < 0.005 {
+                    0
+                } else if packet_loss_ratio < 0.03 {
+                    10
+                } else if packet_loss_ratio < 0.08 {
+                    20
+                } else {
+                    30
+                }
+            }
+        };
+
+        self.stats.redundancy_pct = redundancy_pct;
+
+        if redundancy_pct == 0 {
+            0
+        } else {
+            let m = ((k as f32) * (redundancy_pct as f32) / 100.0).ceil() as usize;
+            m.clamp(1, FEC_MAX_PARITY_SHARDS)
+        }
+    }
+
+    pub fn record_block_encoded(&mut self, k: usize, m: usize) {
+        self.stats.blocks_encoded = self.stats.blocks_encoded.saturating_add(1);
+        self.stats.data_shards_sent = self.stats.data_shards_sent.saturating_add(k as u64);
+        self.stats.parity_shards_sent = self.stats.parity_shards_sent.saturating_add(m as u64);
+    }
+
+    pub fn record_block_decoded(&mut self, recovered_count: usize) {
+        self.stats.blocks_decoded = self.stats.blocks_decoded.saturating_add(1);
+        self.stats.recovered_shards = self
+            .stats
+            .recovered_shards
+            .saturating_add(recovered_count as u64);
+    }
+
+    pub fn record_unrecoverable(&mut self) {
+        self.stats.unrecoverable_blocks = self.stats.unrecoverable_blocks.saturating_add(1);
+    }
+}
+
+/// Tracks and reconstructs incoming ScreenFrame from TYPE_SCREEN_FEC inner frames (v2.04 / ADR-090).
+#[derive(Debug, Default)]
+pub struct ScreenFecAssembler {
+    current_seq: u64,
+    current_block_id: u16,
+    received_shards: Vec<ScreenFecShard>,
+    recovered_shards_total: u64,
+    unrecoverable_blocks_total: u64,
+}
+
+impl ScreenFecAssembler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push_shard(&mut self, shard: ScreenFecShard) -> Result<Option<ScreenFrame>, CoreError> {
+        // Stream rollover or new frame sequence
+        if shard.frame_seq != self.current_seq || shard.block_id != self.current_block_id {
+            if self.current_seq != 0 && !self.received_shards.is_empty() {
+                // If previous block never finished, count as unrecoverable
+                self.unrecoverable_blocks_total = self.unrecoverable_blocks_total.saturating_add(1);
+            }
+            self.current_seq = shard.frame_seq;
+            self.current_block_id = shard.block_id;
+            self.received_shards.clear();
+        }
+
+        // Dedup shard
+        if !self
+            .received_shards
+            .iter()
+            .any(|s| s.is_parity == shard.is_parity && s.shard_index == shard.shard_index)
+        {
+            self.received_shards.push(shard);
+        }
+
+        match ScreenFecDecoder::decode_block(&self.received_shards)? {
+            Some(data_buffers) => {
+                let k = self.received_shards[0].k_data_shards as usize;
+                let data_arrived = self.received_shards.iter().filter(|s| !s.is_parity).count();
+                if data_arrived < k {
+                    let recovered = k - data_arrived;
+                    self.recovered_shards_total =
+                        self.recovered_shards_total.saturating_add(recovered as u64);
+                }
+                self.received_shards.clear();
+
+                // Concatenate data buffers
+                let mut full_payload = Vec::new();
+                for buf in data_buffers {
+                    full_payload.extend_from_slice(&buf);
+                }
+                let frame = ScreenFrame::decode_payload(&full_payload)?;
+                Ok(Some(frame))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn recovered_shards(&self) -> u64 {
+        self.recovered_shards_total
+    }
+
+    pub fn unrecoverable_blocks(&self) -> u64 {
+        self.unrecoverable_blocks_total
+    }
+
+    pub fn reset(&mut self) {
+        self.current_seq = 0;
+        self.current_block_id = 0;
+        self.received_shards.clear();
     }
 }
 
@@ -2659,6 +3324,7 @@ pub struct ScreenSender {
     matrix_coordinator: ScreenMatrixCoordinator,
     cursor_controller: ScreenCursorController,
     squelch_controller: ScreenSquelchController,
+    fec_controller: ScreenFecController,
 }
 
 impl Default for ScreenSender {
@@ -2676,6 +3342,7 @@ impl ScreenSender {
         let matrix_coordinator = ScreenMatrixCoordinator::default();
         let cursor_controller = ScreenCursorController::default();
         let squelch_controller = ScreenSquelchController::default();
+        let fec_controller = ScreenFecController::default();
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -2691,6 +3358,10 @@ impl ScreenSender {
             squelch_mode: squelch_controller.mode().tag(),
             is_squelched: squelch_controller.is_squelched(),
             squelched_frames: 0,
+            fec_mode: fec_controller.mode().tag(),
+            fec_redundancy_pct: fec_controller.stats().redundancy_pct,
+            fec_recovered_shards: 0,
+            fec_unrecoverable_blocks: 0,
             ..Default::default()
         };
         Self {
@@ -2707,7 +3378,14 @@ impl ScreenSender {
             matrix_coordinator,
             cursor_controller,
             squelch_controller,
+            fec_controller,
         }
+    }
+
+    pub fn with_fec(fec: ScreenFecMode) -> Self {
+        let mut sender = Self::new();
+        sender.set_fec_mode(fec);
+        sender
     }
 
     pub fn with_fps(fps: u32) -> Self {
@@ -2733,7 +3411,10 @@ impl ScreenSender {
     }
 
     pub fn stats(&self) -> ScreenStats {
-        self.stats
+        let mut s = self.stats;
+        s.fec_mode = self.fec_controller.mode().tag();
+        s.fec_redundancy_pct = self.fec_controller.stats().redundancy_pct;
+        s
     }
 
     pub fn next_seq(&self) -> u64 {
@@ -3196,6 +3877,77 @@ impl ScreenSender {
         self.stats.is_squelched = false;
     }
 
+    /// Screen forward error correction (FEC) mode (v2.04 / ADR-090).
+    pub fn fec_mode(&self) -> ScreenFecMode {
+        self.fec_controller.mode()
+    }
+
+    /// Explicitly configure screen forward error correction (FEC) mode.
+    pub fn set_fec_mode(&mut self, mode: ScreenFecMode) -> ScreenFecMode {
+        let actual = self.fec_controller.set_mode(mode);
+        self.stats.fec_mode = actual.tag();
+        self.stats.fec_redundancy_pct = self.fec_controller.stats().redundancy_pct;
+        actual
+    }
+
+    /// Access reference to internal FEC controller.
+    pub fn fec_controller(&self) -> &ScreenFecController {
+        &self.fec_controller
+    }
+
+    /// Access mutable reference to internal FEC controller.
+    pub fn fec_controller_mut(&mut self) -> &mut ScreenFecController {
+        &mut self.fec_controller
+    }
+
+    /// Real-time FEC controller telemetry and statistics.
+    pub fn fec_stats(&self) -> ScreenFecStats {
+        self.fec_controller.stats()
+    }
+
+    /// Convert a ScreenFrame into outbound InnerFrames.
+    /// If FEC mode is active (redundancy > 0), encodes payload into Cauchy RS shards (TYPE_SCREEN_FEC).
+    /// Otherwise, falls back to standard fragmentation (TYPE_SCREEN_FRAME).
+    pub fn encode_frame_to_inner_frames(
+        &mut self,
+        frame: &ScreenFrame,
+        packet_loss_ratio: f32,
+    ) -> Result<Vec<InnerFrame>, CoreError> {
+        let payload = frame.encode_payload()?;
+        let m_parity = self
+            .fec_controller
+            .calculate_parity_shards(1, packet_loss_ratio);
+        if m_parity == 0 {
+            return frame.to_frames();
+        }
+
+        // Split payload into shards that comfortably fit within INNER_PAYLOAD_MAX
+        let shard_chunk_max = INNER_PAYLOAD_MAX - FEC_HEADER_LEN - 32;
+        let k = payload.len().div_ceil(shard_chunk_max).max(1);
+        if k > FEC_MAX_DATA_SHARDS {
+            // If too large for single FEC block, fallback to standard fragmentation
+            return frame.to_frames();
+        }
+
+        let mut data_buffers = Vec::with_capacity(k);
+        for chunk in payload.chunks(shard_chunk_max) {
+            data_buffers.push(chunk.to_vec());
+        }
+
+        let m = self
+            .fec_controller
+            .calculate_parity_shards(k, packet_loss_ratio);
+        if m == 0 {
+            return frame.to_frames();
+        }
+
+        let shards = ScreenFecEncoder::encode_block(frame.seq, 0, &data_buffers, m)?;
+        self.fec_controller.record_block_encoded(k, m);
+        self.stats.fec_redundancy_pct = self.fec_controller.stats().redundancy_pct;
+
+        Ok(shards.iter().map(|s| s.to_inner_frame()).collect())
+    }
+
     pub fn drain(&mut self) -> Vec<ScreenFrame> {
         self.pending.drain(..).collect()
     }
@@ -3212,6 +3964,7 @@ impl ScreenSender {
         self.fps_pacer.reset();
         self.cursor_controller.reset();
         self.squelch_controller = ScreenSquelchController::new(self.squelch_controller.mode());
+        self.fec_controller = ScreenFecController::new(self.fec_controller.mode());
         self.stats.is_squelched = false;
         self.stats.squelched_frames = 0;
     }
@@ -3226,6 +3979,7 @@ pub struct ScreenReceiver {
     playout_buffer: ScreenPlayoutBuffer,
     cursor_controller: ScreenCursorController,
     last_cursor: Option<ScreenCursorUpdate>,
+    fec_assembler: ScreenFecAssembler,
 }
 
 impl Default for ScreenReceiver {
@@ -3250,6 +4004,7 @@ impl ScreenReceiver {
             playout_buffer: ScreenPlayoutBuffer::default(),
             cursor_controller,
             last_cursor: None,
+            fec_assembler: ScreenFecAssembler::new(),
         }
     }
 
@@ -3268,6 +4023,7 @@ impl ScreenReceiver {
             playout_buffer: ScreenPlayoutBuffer::new(mode),
             cursor_controller,
             last_cursor: None,
+            fec_assembler: ScreenFecAssembler::new(),
         }
     }
 
@@ -3291,6 +4047,8 @@ impl ScreenReceiver {
             st.cursor_visible = cur.visible;
             st.cursor_shape = cur.shape.tag();
         }
+        st.fec_recovered_shards = self.fec_assembler.recovered_shards();
+        st.fec_unrecoverable_blocks = self.fec_assembler.unrecoverable_blocks();
         st
     }
 
@@ -3369,6 +4127,28 @@ impl ScreenReceiver {
         st
     }
 
+    /// Access reference to internal FEC assembler (v2.04 / ADR-090).
+    pub fn fec_assembler(&self) -> &ScreenFecAssembler {
+        &self.fec_assembler
+    }
+
+    /// Access mutable reference to internal FEC assembler (v2.04 / ADR-090).
+    pub fn fec_assembler_mut(&mut self) -> &mut ScreenFecAssembler {
+        &mut self.fec_assembler
+    }
+
+    /// Handle incoming forward error correction (FEC) shard packet (v2.04 / ADR-090).
+    /// If shard satisfies K data shards or reconstruction threshold, assembles and returns ScreenFrame.
+    pub fn on_fec_shard(
+        &mut self,
+        shard: ScreenFecShard,
+    ) -> Result<Option<ScreenFrame>, CoreError> {
+        let res = self.fec_assembler.push_shard(shard);
+        self.stats.fec_recovered_shards = self.fec_assembler.recovered_shards();
+        self.stats.fec_unrecoverable_blocks = self.fec_assembler.unrecoverable_blocks();
+        res
+    }
+
     /// Most recently accepted sequence numbers, oldest first.
     pub fn trace(&self) -> Vec<u64> {
         self.trace.iter().copied().collect()
@@ -3411,6 +4191,7 @@ impl ScreenReceiver {
         self.playout_buffer.reset();
         self.last_cursor = None;
         self.cursor_controller.reset();
+        self.fec_assembler.reset();
     }
 }
 
@@ -4913,8 +5694,8 @@ mod tests {
         let mut tracker = ScreenDamageTracker::new();
         let w = 128u32;
         let h = 128u32;
-        let block_w = (w + SCREEN_DAMAGE_BLOCK_SIZE as u32 - 1) / SCREEN_DAMAGE_BLOCK_SIZE as u32;
-        let block_h = (h + SCREEN_DAMAGE_BLOCK_SIZE as u32 - 1) / SCREEN_DAMAGE_BLOCK_SIZE as u32;
+        let block_w = w.div_ceil(SCREEN_DAMAGE_BLOCK_SIZE as u32);
+        let block_h = h.div_ceil(SCREEN_DAMAGE_BLOCK_SIZE as u32);
         let total_blocks = (block_w * block_h) as usize;
         assert_eq!(total_blocks, 16);
 
@@ -4962,14 +5743,32 @@ mod tests {
     #[test]
     fn screen_squelch_modes_and_decisions() {
         // 1. Parsing and serialization
-        assert_eq!("auto".parse::<ScreenSquelchMode>().unwrap(), ScreenSquelchMode::Auto);
-        assert_eq!("aggressive".parse::<ScreenSquelchMode>().unwrap(), ScreenSquelchMode::Aggressive);
-        assert_eq!("agg".parse::<ScreenSquelchMode>().unwrap(), ScreenSquelchMode::Aggressive);
-        assert_eq!("disabled".parse::<ScreenSquelchMode>().unwrap(), ScreenSquelchMode::Disabled);
-        assert_eq!("off".parse::<ScreenSquelchMode>().unwrap(), ScreenSquelchMode::Disabled);
+        assert_eq!(
+            "auto".parse::<ScreenSquelchMode>().unwrap(),
+            ScreenSquelchMode::Auto
+        );
+        assert_eq!(
+            "aggressive".parse::<ScreenSquelchMode>().unwrap(),
+            ScreenSquelchMode::Aggressive
+        );
+        assert_eq!(
+            "agg".parse::<ScreenSquelchMode>().unwrap(),
+            ScreenSquelchMode::Aggressive
+        );
+        assert_eq!(
+            "disabled".parse::<ScreenSquelchMode>().unwrap(),
+            ScreenSquelchMode::Disabled
+        );
+        assert_eq!(
+            "off".parse::<ScreenSquelchMode>().unwrap(),
+            ScreenSquelchMode::Disabled
+        );
         assert!("invalid".parse::<ScreenSquelchMode>().is_err());
         assert_eq!(ScreenSquelchMode::from_tag(0), ScreenSquelchMode::Auto);
-        assert_eq!(ScreenSquelchMode::from_tag(1), ScreenSquelchMode::Aggressive);
+        assert_eq!(
+            ScreenSquelchMode::from_tag(1),
+            ScreenSquelchMode::Aggressive
+        );
         assert_eq!(ScreenSquelchMode::from_tag(2), ScreenSquelchMode::Disabled);
 
         // 2. Auto mode lifecycle
@@ -5102,10 +5901,193 @@ mod tests {
         assert_eq!(s.stats().squelched_frames, 1);
 
         // 4. On-demand IDR keyframe wakes squelch
-        s.on_control_with_time(ControlMsg::KeyframeRequest, 1_605_000).unwrap();
+        s.on_control_with_time(ControlMsg::KeyframeRequest, 1_605_000)
+            .unwrap();
         assert!(!s.stats().is_squelched);
         let seq = s.push_with_damage_time(frame.clone(), false, 0.0, 1_610_000);
         assert_eq!(seq, Some(3));
     }
-}
 
+    #[test]
+    fn gf_arithmetic_and_cauchy_matrix() {
+        // 1. Inverses over GF(2^8)
+        for a in 1..=255u8 {
+            let inv = gf_inv(a);
+            assert_ne!(inv, 0);
+            assert_eq!(gf_mul(a, inv), 1, "gf_mul failed for a={a}");
+        }
+        assert_eq!(gf_inv(0), 0);
+
+        // 2. Division
+        assert_eq!(gf_div(100, 100), 1);
+        assert_eq!(gf_div(42, 1), 42);
+        assert_eq!(gf_div(0, 50), 0);
+
+        // 3. Cauchy matrix non-zero and invertible submatrices
+        let k = 4;
+        let m = 2;
+        for r in 0..m {
+            for c in 0..k {
+                let coeff = cauchy_coeff(r, c, k);
+                assert_ne!(coeff, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn screen_fec_encoder_decoder_recovery() {
+        let frame_seq = 42;
+        let block_id = 1;
+        let data_shards = vec![
+            b"Hello World - Shard 0 payload".to_vec(),
+            b"Second buffer of variable length 12345".to_vec(),
+            b"Short".to_vec(),
+            b"The fourth and final data shard in this FEC test block!".to_vec(),
+        ];
+        let k = data_shards.len(); // 4
+        let m = 2; // 2 parity shards (can tolerate any 2 lost shards)
+
+        let shards = ScreenFecEncoder::encode_block(frame_seq, block_id, &data_shards, m).unwrap();
+        assert_eq!(shards.len(), k + m); // 6 shards total
+
+        // Case A: Zero loss (all data shards present)
+        let dec_a = ScreenFecDecoder::decode_block(&shards[0..k]).unwrap();
+        assert_eq!(dec_a, Some(data_shards.clone()));
+
+        // Case B: 1 data shard lost (shard 1 missing, replaced by parity shard 0)
+        let loss_1 = vec![
+            shards[0].clone(),
+            shards[2].clone(),
+            shards[3].clone(),
+            shards[4].clone(), // parity 0
+        ];
+        let dec_b = ScreenFecDecoder::decode_block(&loss_1).unwrap();
+        assert_eq!(dec_b, Some(data_shards.clone()));
+
+        // Case C: 2 data shards lost (shards 0 and 3 missing, parity 0 and 1 present)
+        let loss_2 = vec![
+            shards[1].clone(),
+            shards[2].clone(),
+            shards[4].clone(), // parity 0
+            shards[5].clone(), // parity 1
+        ];
+        let dec_c = ScreenFecDecoder::decode_block(&loss_2).unwrap();
+        assert_eq!(dec_c, Some(data_shards.clone()));
+
+        // Case D: 3 data shards lost (only 3 total shards received, need 4) -> unrecoverable (None)
+        let loss_3 = vec![shards[1].clone(), shards[4].clone(), shards[5].clone()];
+        let dec_d = ScreenFecDecoder::decode_block(&loss_3).unwrap();
+        assert_eq!(dec_d, None);
+    }
+
+    #[test]
+    fn screen_fec_shard_wire_codec() {
+        let shard = ScreenFecShard {
+            frame_seq: 12345678,
+            block_id: 7,
+            k_data_shards: 4,
+            m_parity_shards: 2,
+            shard_index: 1,
+            is_parity: true,
+            data: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02],
+        };
+
+        let inner = shard.to_inner_frame();
+        assert_eq!(inner.ty, TYPE_SCREEN_FEC);
+
+        let decoded = ScreenFecShard::from_inner_frame(&inner).unwrap();
+        assert_eq!(decoded, shard);
+    }
+
+    #[test]
+    fn screen_fec_controller_redundancy_adaptation() {
+        // 1. Parsing & Modes
+        assert_eq!(
+            "auto".parse::<ScreenFecMode>().unwrap(),
+            ScreenFecMode::Auto
+        );
+        assert_eq!(
+            "conservative".parse::<ScreenFecMode>().unwrap(),
+            ScreenFecMode::Conservative
+        );
+        assert_eq!(
+            "aggressive".parse::<ScreenFecMode>().unwrap(),
+            ScreenFecMode::Aggressive
+        );
+        assert_eq!(
+            "disabled".parse::<ScreenFecMode>().unwrap(),
+            ScreenFecMode::Disabled
+        );
+
+        // 2. Disabled mode
+        let mut ctrl = ScreenFecController::new(ScreenFecMode::Disabled);
+        assert_eq!(ctrl.calculate_parity_shards(4, 0.10), 0);
+        assert_eq!(ctrl.stats().redundancy_pct, 0);
+
+        // 3. Conservative mode (10%)
+        let mut cons = ScreenFecController::new(ScreenFecMode::Conservative);
+        assert_eq!(cons.calculate_parity_shards(10, 0.0), 1);
+        assert_eq!(cons.stats().redundancy_pct, 10);
+
+        // 4. Aggressive mode (25%)
+        let mut agg = ScreenFecController::new(ScreenFecMode::Aggressive);
+        assert_eq!(agg.calculate_parity_shards(8, 0.0), 2);
+        assert_eq!(agg.stats().redundancy_pct, 25);
+
+        // 5. Auto mode adaptation
+        let mut auto = ScreenFecController::new(ScreenFecMode::Auto);
+        // < 0.5% loss -> 0% redundancy
+        assert_eq!(auto.calculate_parity_shards(10, 0.002), 0);
+        // 0.5%~3% loss -> 10% redundancy
+        assert_eq!(auto.calculate_parity_shards(10, 0.015), 1);
+        // 3%~8% loss -> 20% redundancy
+        assert_eq!(auto.calculate_parity_shards(10, 0.05), 2);
+        // >= 8% loss -> 30% redundancy
+        assert_eq!(auto.calculate_parity_shards(10, 0.12), 3);
+    }
+
+    #[test]
+    fn screen_fec_assembler_and_sender_receiver_flow() {
+        let mut sender = ScreenSender::new();
+        sender.set_fec_mode(ScreenFecMode::Aggressive);
+        sender.on_peer_connected();
+        sender.allow();
+        sender.on_control(ControlMsg::Start).unwrap();
+
+        let rect = ScreenRect::new(0, 0, 100, 100).unwrap();
+        let frame =
+            ScreenFrame::raw(10, rect, PixelFormat::Bgra8, vec![0x77; 100 * 100 * 4]).unwrap();
+
+        // Encode frame to FEC inner frames
+        let inners = sender.encode_frame_to_inner_frames(&frame, 0.0).unwrap();
+        assert!(!inners.is_empty());
+        assert_eq!(inners[0].ty, TYPE_SCREEN_FEC);
+
+        let shards: Vec<ScreenFecShard> = inners
+            .iter()
+            .map(|f| ScreenFecShard::from_inner_frame(f).unwrap())
+            .collect();
+
+        // Receiver assembly with 1 dropped data shard
+        let mut receiver = ScreenReceiver::new();
+        assert_eq!(receiver.stats().fec_recovered_shards, 0);
+
+        let mut reconstructed_frame = None;
+        for (i, shard) in shards.into_iter().enumerate() {
+            // Intentionally skip shard 0 (simulate network loss)
+            if i == 0 {
+                continue;
+            }
+            if let Some(f) = receiver.on_fec_shard(shard).unwrap() {
+                reconstructed_frame = Some(f);
+                break;
+            }
+        }
+
+        assert!(reconstructed_frame.is_some());
+        let rf = reconstructed_frame.unwrap();
+        assert_eq!(rf.seq, frame.seq);
+        assert_eq!(rf.bytes.len(), frame.bytes.len());
+        assert_eq!(receiver.stats().fec_recovered_shards, 1);
+    }
+}

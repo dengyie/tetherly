@@ -81,6 +81,7 @@ fn cfg(dir: PathBuf, ancs: Option<Arc<MemoryAncsTransport>>) -> NodeConfig {
         screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
         screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
         screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
+        screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
         screen_sink: None,
         input_sink: None,
     }

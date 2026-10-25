@@ -60,13 +60,14 @@ use tetherly_core::{
     MicDetachFrame, MicMode, MicRole, MicValidator, NotificationPayload, NotificationUrgency,
     Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource, ReplyView,
     ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenCursorMode, ScreenCursorStats,
-    ScreenCursorUpdate, ScreenDamageTracker, ScreenFrame, ScreenPlayoutAction, ScreenPlayoutMode,
-    ScreenPlayoutStats, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode,
-    ScreenState, ScreenStats, SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
+    ScreenCursorUpdate, ScreenDamageTracker, ScreenFecMode, ScreenFecReport, ScreenFecShard,
+    ScreenFrame, ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats, ScreenReceiver,
+    ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState, ScreenStats,
+    SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
     TrustStore, VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
     VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
     VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
-    DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS,
+    DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS, TYPE_SCREEN_FEC,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -164,6 +165,8 @@ pub struct NodeConfig {
     pub screen_cursor_mode: tetherly_core::ScreenCursorMode,
     /// Operation mode for screen damage detection and static frame adaptive squelch (ADR-089).
     pub screen_squelch_mode: tetherly_core::ScreenSquelchMode,
+    /// Operation mode for screen forward error correction (FEC) and adaptive redundancy protection (ADR-090).
+    pub screen_fec_mode: tetherly_core::ScreenFecMode,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -220,6 +223,7 @@ impl Default for NodeConfig {
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
+            screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_sink: None,
             input_sink: None,
         }
@@ -2922,6 +2926,14 @@ pub struct ScreenStatusReport {
     pub is_squelched: bool,
     #[serde(default)]
     pub squelched_frames: u64,
+    #[serde(default)]
+    pub fec_mode: String,
+    #[serde(default)]
+    pub fec_redundancy_pct: u8,
+    #[serde(default)]
+    pub fec_recovered_shards: u64,
+    #[serde(default)]
+    pub fec_unrecoverable_blocks: u64,
 }
 
 /// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
@@ -3280,6 +3292,8 @@ struct Shared {
     screen_cursor_stats: Mutex<ScreenCursorStats>,
     /// Adaptive squelch mode for screen streams (ADR-089).
     screen_squelch_mode: Mutex<ScreenSquelchMode>,
+    /// Forward error correction (FEC) mode for screen streams (ADR-090).
+    screen_fec_mode: Mutex<ScreenFecMode>,
     /// Damage tracker for screen frames (ADR-089).
     screen_damage_tracker: Mutex<ScreenDamageTracker>,
     /// Previous frame bytes for difference detection (ADR-089).
@@ -3477,6 +3491,7 @@ impl Node {
         let screen_playout_mode = cfg.screen_playout_mode;
         let screen_cursor_mode = cfg.screen_cursor_mode;
         let screen_squelch_mode = cfg.screen_squelch_mode;
+        let screen_fec_mode = cfg.screen_fec_mode;
         if let Some(sel) = &screen_encode_codec {
             sel.set_fps(screen_fps);
             sel.set_scale_pct(screen_scale_pct);
@@ -3617,6 +3632,7 @@ impl Node {
                 s.matrix_coordinator_mut().set_auto_fps(screen_fps_auto);
                 s.matrix_coordinator_mut().set_auto_scale(screen_scale_auto);
                 s.set_squelch_mode(screen_squelch_mode);
+                s.set_fec_mode(screen_fec_mode);
                 s
             }),
             screen_source,
@@ -3656,6 +3672,7 @@ impl Node {
             screen_cursor_mode: Mutex::new(screen_cursor_mode),
             screen_cursor_stats: Mutex::new(ScreenCursorStats::default()),
             screen_squelch_mode: Mutex::new(screen_squelch_mode),
+            screen_fec_mode: Mutex::new(screen_fec_mode),
             screen_damage_tracker: Mutex::new(ScreenDamageTracker::new()),
             screen_prev_frame: Mutex::new(None),
             shutdown,
@@ -20385,106 +20402,125 @@ impl Node {
                                     }
                                     continue;
                                 }
-                                match assembler.push(&frame) {
-                                    Ok(Some(sf)) => {
-                                        let codec_tag = sf.codec_tag;
-                                        // Decode by the frame's wire tag:
-                                        // zstd (1) or H.264 (3, ADR-079).
-                                        let present_frame = if sf.compressed() {
-                                            let codec = if sf.codec_tag
-                                                == tetherly_core::SCREEN_COMPRESS_H264
-                                            {
-                                                node.shared.screen_codec_h264.clone()
-                                            } else {
-                                                node.shared.screen_codec.clone()
-                                            };
-                                            match codec.decompress_frame(
-                                                &sf.bytes,
-                                                sf.rect.w,
-                                                sf.rect.h,
-                                                sf.raw_len(),
-                                            ) {
-                                                Ok(raw) => ScreenFrame {
-                                                    bytes: raw,
-                                                    codec_tag: tetherly_core::SCREEN_COMPRESS_NONE,
-                                                    ..sf
-                                                },
-                                                Err(e) => {
-                                                    tracing::warn!(%e, seq = sf.seq, "screen decompress failed; requesting keyframe recovery");
-                                                    let req = ControlMsg::KeyframeRequest;
-                                                    if let Ok(f) = req.to_frame() {
-                                                        let r_len = (f.payload.len() + 12) as u64;
-                                                        if sess.send_bounded(f).await.is_ok() {
-                                                            node.shared.telemetry.record_screen_tx(r_len);
-                                                        }
-                                                    }
-                                                    continue;
-                                                }
-                                            }
-                                        } else {
-                                            sf
-                                        };
-                                        let is_gap = receiver.last_seq() != 0
-                                            && present_frame.seq > receiver.last_seq() + 1;
-                                        match receiver.apply(&present_frame) {
-                                            Ok(acked) => {
-                                                // The default sink is the
-                                                // observer itself (shared
-                                                // inner), so presenting once
-                                                // updates the CI snapshot too.
-                                                *node
-                                                    .shared
-                                                    .screen_rx_stats
-                                                    .lock()
-                                                    .expect("screen rx") =
-                                                    receiver.stats();
-                                                if is_gap
-                                                    && codec_tag
-                                                        == tetherly_core::SCREEN_COMPRESS_H264
-                                                {
-                                                    let req = ControlMsg::KeyframeRequest;
-                                                    if let Ok(f) = req.to_frame() {
-                                                        let r_len = (f.payload.len() + 12) as u64;
-                                                        if sess.send_bounded(f).await.is_ok() {
-                                                            node.shared.telemetry.record_screen_tx(r_len);
-                                                        }
-                                                    }
-                                                }
-                                                if let Some(seq) = acked {
-                                                    let arrival_us = node.shared.clock.unix_us();
-                                                    receiver.push_playout(present_frame, arrival_us);
-                                                    while let ScreenPlayoutAction::Play(ready_frame) = receiver.pop_playout(arrival_us) {
-                                                        let _ = node
-                                                            .shared
-                                                            .screen_sink
-                                                            .present(&ready_frame);
-                                                    }
-                                                    *node
-                                                        .shared
-                                                        .screen_playout_stats
-                                                        .lock()
-                                                        .expect("playout stats") =
-                                                        receiver.playout_stats();
-
-                                                    let ack = ControlMsg::Ack { seq };
-                                                    if let Ok(f) = ack.to_frame() {
-                                                        let a_len = (f.payload.len() + 12) as u64;
-                                                        if sess.send_bounded(f).await.is_ok() {
-                                                            node.shared.telemetry.record_screen_tx(a_len);
-                                                        }
-                                                    }
-                                                }
+                                let assembled_opt = if frame.ty == TYPE_SCREEN_FEC {
+                                    match ScreenFecShard::from_inner_frame(&frame) {
+                                        Ok(shard) => match receiver.on_fec_shard(shard) {
+                                            Ok(opt) => {
+                                                *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
+                                                opt
                                             }
                                             Err(e) => {
-                                                tracing::warn!(%e, "screen receiver rejected frame; closing viewer");
+                                                tracing::warn!(%e, "screen fec assembler error; closing viewer");
                                                 break;
                                             }
+                                        },
+                                        Err(e) => {
+                                            tracing::warn!(%e, "invalid screen fec shard frame");
+                                            continue;
                                         }
                                     }
-                                    Ok(None) => {}
-                                    Err(e) => {
-                                        tracing::warn!(%e, "screen assembler error; closing viewer");
-                                        break;
+                                } else {
+                                    match assembler.push(&frame) {
+                                        Ok(opt) => opt,
+                                        Err(e) => {
+                                            tracing::warn!(%e, "screen assembler error; closing viewer");
+                                            break;
+                                        }
+                                    }
+                                };
+                                if let Some(sf) = assembled_opt {
+                                    let codec_tag = sf.codec_tag;
+                                    // Decode by the frame's wire tag:
+                                    // zstd (1) or H.264 (3, ADR-079).
+                                    let present_frame = if sf.compressed() {
+                                        let codec = if sf.codec_tag
+                                            == tetherly_core::SCREEN_COMPRESS_H264
+                                        {
+                                            node.shared.screen_codec_h264.clone()
+                                        } else {
+                                            node.shared.screen_codec.clone()
+                                        };
+                                        match codec.decompress_frame(
+                                            &sf.bytes,
+                                            sf.rect.w,
+                                            sf.rect.h,
+                                            sf.raw_len(),
+                                        ) {
+                                            Ok(raw) => ScreenFrame {
+                                                bytes: raw,
+                                                codec_tag: tetherly_core::SCREEN_COMPRESS_NONE,
+                                                ..sf
+                                            },
+                                            Err(e) => {
+                                                tracing::warn!(%e, seq = sf.seq, "screen decompress failed; requesting keyframe recovery");
+                                                let req = ControlMsg::KeyframeRequest;
+                                                if let Ok(f) = req.to_frame() {
+                                                    let r_len = (f.payload.len() + 12) as u64;
+                                                    if sess.send_bounded(f).await.is_ok() {
+                                                        node.shared.telemetry.record_screen_tx(r_len);
+                                                    }
+                                                }
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        sf
+                                    };
+                                    let is_gap = receiver.last_seq() != 0
+                                        && present_frame.seq > receiver.last_seq() + 1;
+                                    match receiver.apply(&present_frame) {
+                                        Ok(acked) => {
+                                            // The default sink is the
+                                            // observer itself (shared
+                                            // inner), so presenting once
+                                            // updates the CI snapshot too.
+                                            *node
+                                                .shared
+                                                .screen_rx_stats
+                                                .lock()
+                                                .expect("screen rx") =
+                                                receiver.stats();
+                                            if is_gap
+                                                && codec_tag
+                                                    == tetherly_core::SCREEN_COMPRESS_H264
+                                            {
+                                                let req = ControlMsg::KeyframeRequest;
+                                                if let Ok(f) = req.to_frame() {
+                                                    let r_len = (f.payload.len() + 12) as u64;
+                                                    if sess.send_bounded(f).await.is_ok() {
+                                                        node.shared.telemetry.record_screen_tx(r_len);
+                                                    }
+                                                }
+                                            }
+                                            if let Some(seq) = acked {
+                                                let arrival_us = node.shared.clock.unix_us();
+                                                receiver.push_playout(present_frame, arrival_us);
+                                                while let ScreenPlayoutAction::Play(ready_frame) = receiver.pop_playout(arrival_us) {
+                                                    let _ = node
+                                                        .shared
+                                                        .screen_sink
+                                                        .present(&ready_frame);
+                                                }
+                                                *node
+                                                    .shared
+                                                    .screen_playout_stats
+                                                    .lock()
+                                                    .expect("playout stats") =
+                                                    receiver.playout_stats();
+
+                                                let ack = ControlMsg::Ack { seq };
+                                                if let Ok(f) = ack.to_frame() {
+                                                    let a_len = (f.payload.len() + 12) as u64;
+                                                    if sess.send_bounded(f).await.is_ok() {
+                                                        node.shared.telemetry.record_screen_tx(a_len);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(%e, "screen receiver rejected frame; closing viewer");
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -20699,7 +20735,11 @@ impl Node {
             // ADR-089 Screen Damage Detection & Adaptive Squelch:
             let (is_dirty, dirty_ratio) = {
                 let mut prev_guard = self.shared.screen_prev_frame.lock().expect("prev frame");
-                let mut tracker = self.shared.screen_damage_tracker.lock().expect("damage tracker");
+                let mut tracker = self
+                    .shared
+                    .screen_damage_tracker
+                    .lock()
+                    .expect("damage tracker");
                 let (width, height) = (frame.rect.w as u32, frame.rect.h as u32);
                 let report = match &*prev_guard {
                     None => {
@@ -20750,7 +20790,16 @@ impl Node {
             .clone()
             .ok_or_else(|| CoreError::Json("screen channel closed".into()))?;
         for f in frames {
-            let frags = f.to_frames()?;
+            let frags = {
+                let mut engine = self.shared.screen_engine.lock().expect("screen");
+                let loss_ratio = match engine.network_health() {
+                    tetherly_core::NetworkHealth::Healthy => 0.0,
+                    tetherly_core::NetworkHealth::Warning => 0.015,
+                    tetherly_core::NetworkHealth::Congested => 0.05,
+                    tetherly_core::NetworkHealth::Critical => 0.10,
+                };
+                engine.encode_frame_to_inner_frames(&f, loss_ratio)?
+            };
             // Live video: under backpressure drop the whole frame rather than
             // stall the pump or grow memory without bound. A partial frame is
             // never queued, so the peer's assembler is never left mid-frame.
@@ -21069,6 +21118,7 @@ impl Node {
             .screen_cursor_stats
             .lock()
             .expect("cursor stats");
+        let fec_mode = *self.shared.screen_fec_mode.lock().expect("fec mode");
         ScreenStatusReport {
             ok: true,
             state: state.as_str().to_string(),
@@ -21113,6 +21163,10 @@ impl Node {
             squelch_mode: stats.squelch_mode().as_str().to_string(),
             is_squelched: stats.is_squelched,
             squelched_frames: stats.squelched_frames,
+            fec_mode: fec_mode.as_str().to_string(),
+            fec_redundancy_pct: stats.fec_redundancy_pct,
+            fec_recovered_shards: rx_stats.fec_recovered_shards,
+            fec_unrecoverable_blocks: rx_stats.fec_unrecoverable_blocks,
         }
     }
 
@@ -21554,7 +21608,11 @@ impl Node {
 
     /// Report current screen static frame adaptive squelch status and metrics (ADR-089).
     pub fn screen_squelch_report(&self) -> ScreenSquelchReport {
-        let mode = *self.shared.screen_squelch_mode.lock().expect("squelch mode");
+        let mode = *self
+            .shared
+            .screen_squelch_mode
+            .lock()
+            .expect("squelch mode");
         let stats = self
             .shared
             .screen_engine
@@ -21577,7 +21635,11 @@ impl Node {
 
     /// Current screen static frame adaptive squelch mode (ADR-089).
     pub fn screen_squelch_mode(&self) -> tetherly_core::ScreenSquelchMode {
-        *self.shared.screen_squelch_mode.lock().expect("squelch mode")
+        *self
+            .shared
+            .screen_squelch_mode
+            .lock()
+            .expect("squelch mode")
     }
 
     /// Set and report screen static frame adaptive squelch mode (ADR-089).
@@ -21585,7 +21647,11 @@ impl Node {
         &self,
         mode: tetherly_core::ScreenSquelchMode,
     ) -> ScreenSquelchReport {
-        *self.shared.screen_squelch_mode.lock().expect("squelch mode") = mode;
+        *self
+            .shared
+            .screen_squelch_mode
+            .lock()
+            .expect("squelch mode") = mode;
         self.shared
             .screen_engine
             .lock()
@@ -21602,6 +21668,46 @@ impl Node {
             .lock()
             .expect("screen")
             .force_wake_squelch(now_us);
+    }
+
+    /// Report current forward error correction (FEC) protection metrics and state (v2.04 / ADR-090).
+    pub fn screen_fec_report(&self) -> ScreenFecReport {
+        let mode = *self.shared.screen_fec_mode.lock().expect("fec mode");
+        let stats = self
+            .shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .fec_stats();
+        let rx_stats = self.screen_rx_stats();
+        ScreenFecReport {
+            ok: true,
+            mode: mode.as_str().to_string(),
+            redundancy_pct: stats.redundancy_pct,
+            blocks_encoded: stats.blocks_encoded,
+            data_shards_sent: stats.data_shards_sent,
+            parity_shards_sent: stats.parity_shards_sent,
+            blocks_decoded: rx_stats.fec_recovered_shards + rx_stats.fec_unrecoverable_blocks,
+            recovered_shards: rx_stats.fec_recovered_shards,
+            unrecoverable_blocks: rx_stats.fec_unrecoverable_blocks,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Current screen forward error correction mode (v2.04 / ADR-090).
+    pub fn screen_fec_mode(&self) -> tetherly_core::ScreenFecMode {
+        *self.shared.screen_fec_mode.lock().expect("fec mode")
+    }
+
+    /// Set and report screen forward error correction mode (v2.04 / ADR-090).
+    pub fn screen_set_fec_mode(&self, mode: tetherly_core::ScreenFecMode) -> ScreenFecReport {
+        *self.shared.screen_fec_mode.lock().expect("fec mode") = mode;
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .set_fec_mode(mode);
+        self.screen_fec_report()
     }
 
     /// Comprehensive status report for input sharing.
@@ -22342,6 +22448,7 @@ mod clipboard_policy_tests {
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
+            screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22491,6 +22598,7 @@ mod handoff_engine_tests {
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
+            screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22671,6 +22779,7 @@ mod media_policy_tests {
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
+            screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22827,6 +22936,7 @@ mod locator_policy_tests {
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
+            screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22963,6 +23073,7 @@ mod locator_policy_tests {
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
+            screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_sink: None,
             input_sink: None,
         };

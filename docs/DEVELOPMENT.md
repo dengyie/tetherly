@@ -3,12 +3,37 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.03** |
+| 文档版本 | **2.04** |
 | 日期 | 2026-10-25 |
-| 状态 | **v2.03 屏幕流脏区差分检测与静止画面自适应静噪控制器（Screen Damage Region Dirty-Rect Detection & Static Frame Adaptive Squelch Controller, ADR-089）与双端 CLI 全同构**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`）：基于 $32 \times 32$ 像素宏块网格差分与 64 位宽双字指针比对构建极速脏区追踪引擎 `ScreenDamageTracker`，精准定位屏幕更新最小外包矩形 `ScreenDamageRect`，统计脏区像素比与宏块变动；设计 `ScreenSquelchController` 状态机支持三种工作模式 `ScreenSquelchMode`（`Auto` 500ms 延迟 / 2.0s 保活、`Aggressive` 150ms 延迟 / 5.0s 保活、`Disabled` 旁路透传），在画面静止时主动跳过昂贵的视频帧编码与发送（0 FPS / 0 kbps），消除 80%~95% 桌面空闲算力与网络带宽浪费；引入 `ScreenSquelchDecision`（`SendFrame` vs `SquelchSkip`），在收到键鼠输入、按键或 IDR 关键帧请求时即刻 `force_wake` 唤醒；与 ADR-088 硬件解耦光标无缝协同，静噪期间 125Hz 独立光标通道畅通无阻；(2) **双端 CLI 全同构与生态**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `runtime.rs`, `uihttp.rs`）：持续保证 `tetherly` 与 `tetherly-cli` 100% 同构，新增 `screen squelch [mode]` 子命令与 `--screen-squelch` 启动参数；新增 REST API `GET/POST /api/screen/squelch`，扩展 `ScreenStatusReport` 透出静噪模式、静噪状态与累计静噪跳帧数；(3) **测试与版本**：单元测试与 Phase 5 端到端集成测试 `m5_13_screen_dirty_rect_squelch` 全绿，工作区升级至 `0.1.25`。 |
+| 状态 | **v2.04 屏幕流前向纠错（FEC）与自适应冗余保护流水线（Screen Forward Error Correction & Adaptive Redundancy Protection Pipeline, ADR-090）与双端 CLI 全同构**——(1) **协议与数学引擎**（`crates/tetherly-core/src/screen.rs`）：基于有限域 $GF(2^8)$（$P(x) = x^8 + x^4 + x^3 + x^2 + 1$）与柯西生成矩阵（Cauchy Generator Matrix）构建满足 MDS 严格可分特性的线速前向纠错编解码引擎（`ScreenFecBlock`、`ScreenFecEncoder`、`ScreenFecDecoder`），支持高斯消元求逆 0-RTT 自愈重构；设计 24 字节定长线缆分片头（`TYPE_SCREEN_FEC = 0x0504`，魔数 `TFEC`）；实现自适应冗余控制器 `ScreenFecController`，支持 Auto（动态阶梯 0% ~ 30%）、Conservative（10%）、Aggressive（25%）与 Disabled（0% 透传）四种模式；与 ADR-086 4 维自主自适应矩阵协同器（`network_health()`）深度绑定；在接收端引入零往返抗丢恢复器 `ScreenFecAssembler`；(2) **双端 CLI 全同构与生态**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `runtime.rs`, `uihttp.rs`）：持续保证 `tetherly` 与 `tetherly-cli` 100% 同构，新增 `screen fec [mode]` 子命令与 `--screen-fec` 启动参数；新增 REST API `GET/POST /api/screen/fec`，扩展 `ScreenStatusReport` 透出 FEC 模式、冗余比例与重构遥测；(3) **测试与版本**：单元测试与 Phase 5 端到端集成测试 `m5_14_screen_adaptive_fec_protection` 全绿，工作区升级至 `0.1.26`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.04 相对 2.03(屏幕流前向纠错与自适应冗余保护流水线 ADR-090 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **跨洋弱网与突发丢包下的重传停顿风暴**: 屏幕流在 Wi-Fi 抖动、跨洋中继或弱网环境下，单一视频分片丢失往往导致接收端解码流水线停顿，被迫依赖 1 RTT 以上的 ARQ 重传或发送端全帧 IDR 刷新，造成交互卡顿与延迟累积。
+  2. **传统范德蒙 Reed-Solomon 矩阵隐患与求逆性能开销**: 经典 Vandermonde 矩阵在分片增多时存在子矩阵行列式为 0（非 MDS 奇异矩阵）的风险；柯西矩阵（Cauchy Matrix）天然保证任意子方阵非奇异可逆，且在 $GF(2^8)$ 下乘法与求逆可通过费马小定理与移位异或快速执行。
+  3. **动静态网络下的弹性冗余调节**: 良好网络下持续发送校验分片会浪费宝贵带宽，恶劣弱网下固定冗余又无法抵御突发连续丢包。必须将 FEC 控制器与 4 维自主协同网络健康评估结合，实现自适应动态升降档。
+- **架构解法与落地**:
+  1. **Core 有限域算术与柯西前向纠错引擎（`crates/tetherly-core/src/screen.rs`）**:
+     - 基于 AES 不可约多项式 $0x11D$ 实现 $GF(2^8)$ 乘除逆元算术，构造柯西矩阵 $C_{r, c} = \text{gf\_inv}(c \oplus (K + r))$，编写高斯消元求逆重构器。
+     - 定义数据类型 `TYPE_SCREEN_FEC = 0x0504`，24 字节线缆头：`TFEC(4) | proto(1) | flags(1) | reserved(2) | frame_seq(8) | block_id(2) | k(1) | m(1) | shard_index(1) | is_parity(1) | shard_len(2)`。
+     - 实现自适应冗余控制器 `ScreenFecController`，支持 Auto（动态 0% ~ 30%）、Conservative（10%）、Aggressive（25%）与 Disabled（0% 透传）四种模式。
+     - 接收端实现 `ScreenFecAssembler`，在集齐 $K$ 个任意数据/校验分片后 0-RTT 瞬间恢复完整视频帧，无缝对接上层解码器。
+  2. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - `tetherly` 与 `tetherly-cli` 全同构支持 `screen fec [mode]`（get / set），支持 `--json` 与 `--ui-port`。
+     - `tetherly run` 新增 `--screen-fec <auto|conservative|aggressive|disabled>` 启动参数。
+     - `screen status` 丰富输出 FEC 模式、当前冗余比例与重构/损坏块遥测。
+  3. **Node 运行时与回环 REST API（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）**:
+     - 新增 REST 路由 `GET /api/screen/fec` 与 `POST /api/screen/fec`，支持 JSON 与 query 参数。
+     - `ScreenStatusReport` 扩充 `fec_mode`、`fec_redundancy_pct`、`fec_recovered_shards`、`fec_unrecoverable_blocks` 字段；新增强类型 DTO `ScreenFecReport`。
+     - `Node` 暴露 `screen_fec_mode()`、`screen_set_fec_mode()` 与 `screen_fec_report()` 控制方法。
+  4. **测试与验证**:
+     - Core 单元测试覆盖 $GF(2^8)$ 算术、柯西矩阵生成、任意分片丢失恢复。
+     - Phase 5 端到端集成测试 `m5_14_screen_adaptive_fec_protection` 验证真实 Noise 传输栈分片传输、恢复与 REST 控制。
+     - 空间工作区统一升级至 `0.1.26`。
 
 **2.03 相对 2.02(屏幕流脏区差分检测与静止画面自适应静噪控制器 ADR-089 与双端 CLI 全同构)**
 
