@@ -3,12 +3,35 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.07** |
+| 文档版本 | **2.08** |
 | 日期 | 2026-10-25 |
-| 状态 | **v2.07 屏幕流选择性重传（NACK）与混合纠错（HARQ）流水线（Screen Streaming Selective NACK Retransmission & Hybrid ARQ Pipeline, ADR-093）与双端 CLI 全同构**——(1) **协议与混合纠错引擎**（`crates/tetherly-core/src/screen.rs`）：统一前向纠错（FEC，ADR-090）与选择性重传（NACK），设计专用线协议帧（`TYPE_SCREEN_NACK = 0x0505`、`TNACK` 协议魔数、36 字节紧凑报头、64 位掩码与动态缺失索引）；支持 Auto（自适应重试 2 次）、Aggressive（极速重试 3 次）、Conservative（保守重试 1 次）与 Disabled 四种模式；接收端引入播放截止期限（Playout Deadline）约束与超期自适应 IDR 关键帧回退（Fallback），并实现 RTT 周期防抖洪泛抑制；发送端维护 256 容量、300ms 最大存活期的轻量滑动重传环形队列（`ScreenRetransmitBuffer`）；(2) **发送端与接收端运行时联动**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：`attach_screen_host` 捕获 `TYPE_SCREEN_NACK` 提取重传帧并触发自适应 IDR 降级刷新，`attach_screen_client` 定时触发 NACK 生成与补传分片译码；新增 REST API `GET/POST /api/screen/harq`，扩展 `ScreenStatusReport` 透出 `harq_mode`、`harq_shards_retransmitted`、`harq_recovered_frames`；(3) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：`tetherly` 与 `tetherly-cli` 全同构支持 `screen harq [mode]`、`tetherly run --screen-harq` 与状态打印；(4) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_17_screen_selective_nack_and_hybrid_arq` 全绿，版本升级至 `0.1.29`。 |
+| 状态 | **v2.08 屏幕流接收端驱动传输层全网拥塞控制与报文到达反馈流水线（Screen Streaming Receiver-Driven Transport-Wide Congestion Control & Packet Arrival Feedback Pipeline, ADR-094）与双端 CLI 全同构**——(1) **协议与 TWCC 反馈解算引擎**（`crates/tetherly-core/src/screen.rs`）：借鉴 RFC 8888 体系，为全局 FEC 切片单调分配 16 位传输序列号（`transport_seq`）；设计专用线协议帧（`TYPE_SCREEN_TWCC = 0x0506`、`TTWCC` 协议魔数、20 字节报头与每包 4 字节紧凑增量、哨兵 `-32768`）；支持 Auto（10ms/40包）、Aggressive（5ms/20包）、Conservative（25ms/80包）与 Disabled 四种模式；接收端跟踪器记录微秒到达时间差并自适应聚合，发送端滑动窗口跟踪在途报文并在双向配对后以 EWMA 平滑解算投递速率（Delivery Rate）、精确丢包率（Loss Ratio）、平滑 RTT 与包间排队时延梯度；与 AIMD 深度联动，严重丢包（>5%）或投递速率被压制时触发乘性减（`force_step_down`）；(2) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：Visitor 循环自适应派发 `TYPE_SCREEN_TWCC`，Host 循环解析反馈并实时联动编码器码率；新增 REST API `GET/POST /api/screen/twcc`，扩展 `ScreenStatusReport` 包含 6 个 TWCC 遥测字段；(3) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen twcc [mode]`、`tetherly run --screen-twcc` 与 `screen status` 状态监控；(4) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_18_screen_receiver_driven_twcc_and_congestion_feedback` 全绿，版本升级至 `0.1.30`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.08 相对 2.07(屏幕流接收端驱动传输层全网拥塞控制与报文到达反馈流水线 ADR-094 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **突破帧级别（Frame-Level）流控的滞后性瓶颈**: 传统流控依赖完整帧接收后的 ACK 或统计反馈，而在高分辨率切片场景下，帧内单个分片遭遇队列挤压时，发送端需等待整帧数十毫秒才能感知，无法在微突发拥塞（Micro-burst Congestion）最初几毫秒内采取行动。
+  2. **引入 RFC 8888 风格的报文级（Per-Packet Level）反馈机制**: 发送端为每个发出的 FEC 分片分配全局单调递增的 16 位传输序列号（`transport_seq`）。接收端以微秒精度记录每个切片的实际到达时刻，并以高频定时周期与包计数自适应聚合生成紧凑反馈帧（`TYPE_SCREEN_TWCC = 0x0506`），实时反映网络排队积压与单向延迟梯度。
+  3. **精确解算真实信道投递速率（Delivery Rate）**: 消除发送端发送虚高码率引发的恶性膨胀，将发送码率硬性锚定在当前平滑投递速率 $R_{\text{delivery}} \times 1.05$ 之内；当严重拥塞丢包（>5%）发生时触发 AIMD 乘性减（`force_step_down`）。
+- **架构解法与落地**:
+  1. **Core TWCC 协议与解算器（`crates/tetherly-core/src/screen.rs`）**:
+     - 定义 `ScreenTwccMode`、`ScreenTwccFeedback`、`ScreenTwccReceiverTracker`、`ScreenTwccSenderTracker`、`ScreenTwccStats` 与 `ScreenTwccReport`。
+     - 定义线协议常量：`TYPE_SCREEN_TWCC = 0x0506`、`SCREEN_TWCC_MAGIC = *b"TTWCC"`、`SCREEN_TWCC_PROTO = 0x01`、`SCREEN_TWCC_MISSING_DELTA = -32768`。
+     - 接收端实现基于超时与包阈值的自适应反馈聚合生成器；发送端实现 2048 容量的滑动在途报文追踪表，支持双向配对、丢包检测与 EWMA 投递速率/时延梯度解算。
+  2. **Node 守护进程与端到端传输（`crates/tetherly-node/src/runtime.rs`）**:
+     - `NodeConfig` 与 `SharedNodeState` 引入 `screen_twcc_mode: ScreenTwccMode`。
+     - Visitor 接收循环定时调用 `receiver.generate_twcc_feedback` 并发送 `TYPE_SCREEN_TWCC`；Host 发送循环捕获反馈帧调用 `engine.handle_twcc_feedback` 更新网络统计并动态驱动编码器码率。
+     - 暴露 `screen_twcc_mode()`、`screen_set_twcc_mode()`、`screen_twcc_report()` 运行时接口。
+  3. **回环 REST API（`crates/tetherly-node/src/uihttp.rs`）**:
+     - 新增 `GET /api/screen/twcc` 与 `POST /api/screen/twcc`，支持 JSON 和 query 参数控制。
+     - `ScreenStatusReport` 扩充 6 个 TWCC 关键遥测字段。
+  4. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - 支持 `screen twcc [mode]` 子命令、`tetherly run --screen-twcc` 启动参数与 `screen status` 状态监控。
+  5. **测试与验证**:
+     - 核心单元测试、REST API 单元测试及 Phase 5 端到端集成测试 `m5_18_screen_receiver_driven_twcc_and_congestion_feedback` 全绿。
 
 **2.07 相对 2.06(屏幕流选择性重传 NACK 与混合纠错 HARQ 流水线 ADR-093 与双端 CLI 全同构)**
 

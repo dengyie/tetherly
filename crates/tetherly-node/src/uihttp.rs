@@ -4433,6 +4433,45 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 json_ok(&rep)
             }
         }
+        // Screen transport-wide congestion control (TWCC) pipeline (v2.08 / ADR-094).
+        ("GET", "/api/screen/twcc") => {
+            let rep = node.screen_twcc_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/twcc") => {
+            #[derive(serde::Deserialize)]
+            struct TwccBody {
+                mode: Option<String>,
+                twcc_mode: Option<String>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TwccBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.clone().or_else(|| b.twcc_mode.clone()))
+                .or_else(|| qmap.get("mode").cloned())
+                .or_else(|| qmap.get("twcc_mode").cloned());
+
+            if let Some(m_str) = mode_str {
+                match m_str.parse::<tetherly_core::ScreenTwccMode>() {
+                    Ok(mode) => {
+                        let rep = node.screen_set_twcc_mode(mode);
+                        json_ok(&rep)
+                    }
+                    Err(_) => err(
+                        400,
+                        "invalid twcc mode: expected auto, aggressive, conservative, or disabled",
+                    ),
+                }
+            } else {
+                let rep = node.screen_twcc_report();
+                json_ok(&rep)
+            }
+        }
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -8330,6 +8369,7 @@ mod tests {
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
+            screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -9771,6 +9811,80 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/screen/harq HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_twcc_endpoints() {
+        let (node, dir) = temp_test_node("screen_twcc");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/twcc default
+        let (code, body) = loopback_get(port, "/api/screen/twcc").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["mode"], "auto");
+        assert_eq!(rep["feedbacks_sent"], 0);
+        assert_eq!(rep["feedbacks_received"], 0);
+        assert_eq!(rep["packets_lost"], 0);
+
+        // 2. POST /api/screen/twcc with JSON {"mode": "aggressive"}
+        let update_agg = serde_json::json!({ "mode": "aggressive" });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/twcc",
+            &serde_json::to_vec(&update_agg).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["mode"], "aggressive");
+
+        // 3. POST /api/screen/twcc with query param ?mode=conservative
+        let (code, body) = loopback_post(port, "/api/screen/twcc?mode=conservative", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["mode"], "conservative");
+
+        // 4. POST /api/screen/twcc with query param ?mode=disabled
+        let (code, body) = loopback_post(port, "/api/screen/twcc?mode=disabled", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["mode"], "disabled");
+
+        // 5. POST /api/screen/twcc with query param ?mode=auto
+        let (code, body) = loopback_post(port, "/api/screen/twcc?mode=auto", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["mode"], "auto");
+
+        // 6. Invalid mode returns 400
+        let (code, _) = loopback_post(port, "/api/screen/twcc?mode=invalid_twcc", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+
+        // 7. Host header 403 test on /api/screen/twcc
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/twcc HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();

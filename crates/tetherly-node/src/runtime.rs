@@ -64,12 +64,13 @@ use tetherly_core::{
     ScreenFrame, ScreenHarqMode, ScreenHarqReport, ScreenNack, ScreenPacerMode, ScreenPacerReport,
     ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats, ScreenReceiver, ScreenSender,
     ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState, ScreenStats, ScreenTrendlineMode,
-    ScreenTrendlineReport, SensitiveContentGuard, TcpLimiter, TopologyStateFrame,
-    TopologySyncReqFrame, TopologyValidator, TrustStore, VirtualDisplayAnnounceFrame,
-    VirtualDisplayAttachFrame, VirtualDisplayCodec, VirtualDisplayDetachFrame,
-    VirtualDisplayFrameAck, VirtualDisplayMode, VirtualDisplayPixelFormat, VirtualDisplayRole,
-    VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS,
-    OVERLAY_PROBE_MS, TYPE_SCREEN_FEC, TYPE_SCREEN_NACK,
+    ScreenTrendlineReport, ScreenTwccFeedback, ScreenTwccMode, ScreenTwccReport, ScreenTwccStats,
+    SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
+    TrustStore, VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
+    VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
+    VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator,
+    CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS, TYPE_SCREEN_FEC,
+    TYPE_SCREEN_NACK, TYPE_SCREEN_TWCC,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -175,6 +176,8 @@ pub struct NodeConfig {
     pub screen_trendline_mode: tetherly_core::ScreenTrendlineMode,
     /// Operation mode for screen streaming selective NACK and Hybrid ARQ (HARQ) pipeline (ADR-093).
     pub screen_harq_mode: tetherly_core::ScreenHarqMode,
+    /// Operation mode for receiver-driven transport-wide congestion control (TWCC) (ADR-094).
+    pub screen_twcc_mode: tetherly_core::ScreenTwccMode,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -235,6 +238,7 @@ impl Default for NodeConfig {
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
+            screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_sink: None,
             input_sink: None,
         }
@@ -2975,6 +2979,18 @@ pub struct ScreenStatusReport {
     pub harq_retransmit_timeouts: u64,
     #[serde(default)]
     pub harq_buffer_occupancy: usize,
+    #[serde(default)]
+    pub twcc_mode: String,
+    #[serde(default)]
+    pub twcc_feedbacks_sent: u64,
+    #[serde(default)]
+    pub twcc_feedbacks_received: u64,
+    #[serde(default)]
+    pub twcc_delivery_rate_bps: u64,
+    #[serde(default)]
+    pub twcc_delay_gradient_us: i64,
+    #[serde(default)]
+    pub twcc_loss_ratio: f32,
 }
 
 /// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
@@ -3341,6 +3357,9 @@ struct Shared {
     screen_trendline_mode: Mutex<ScreenTrendlineMode>,
     /// Hybrid ARQ (HARQ) selective retransmission mode for screen streams (ADR-093).
     screen_harq_mode: Mutex<ScreenHarqMode>,
+    /// Transport-wide congestion control (TWCC) mode for screen streams (ADR-094).
+    screen_twcc_mode: Mutex<ScreenTwccMode>,
+    screen_twcc_stats: Mutex<ScreenTwccStats>,
     /// Damage tracker for screen frames (ADR-089).
     screen_damage_tracker: Mutex<ScreenDamageTracker>,
     /// Previous frame bytes for difference detection (ADR-089).
@@ -3542,6 +3561,7 @@ impl Node {
         let screen_pacer_mode = cfg.screen_pacer_mode;
         let screen_trendline_mode = cfg.screen_trendline_mode;
         let screen_harq_mode = cfg.screen_harq_mode;
+        let screen_twcc_mode = cfg.screen_twcc_mode;
         if let Some(sel) = &screen_encode_codec {
             sel.set_fps(screen_fps);
             sel.set_scale_pct(screen_scale_pct);
@@ -3686,6 +3706,7 @@ impl Node {
                 s.set_pacer_mode(screen_pacer_mode);
                 s.set_trendline_mode(screen_trendline_mode);
                 s.set_harq_mode(screen_harq_mode);
+                s.set_twcc_mode(screen_twcc_mode);
                 s
             }),
             screen_source,
@@ -3729,6 +3750,11 @@ impl Node {
             screen_pacer_mode: Mutex::new(screen_pacer_mode),
             screen_trendline_mode: Mutex::new(screen_trendline_mode),
             screen_harq_mode: Mutex::new(screen_harq_mode),
+            screen_twcc_mode: Mutex::new(screen_twcc_mode),
+            screen_twcc_stats: Mutex::new(ScreenTwccStats {
+                mode: screen_twcc_mode,
+                ..Default::default()
+            }),
             screen_damage_tracker: Mutex::new(ScreenDamageTracker::new()),
             screen_prev_frame: Mutex::new(None),
             shutdown,
@@ -20321,6 +20347,41 @@ impl Node {
                                     }
                                     continue;
                                 }
+                                if frame.ty == TYPE_SCREEN_TWCC {
+                                    if let Ok(feedback) = ScreenTwccFeedback::decode(&frame.payload) {
+                                        let now_us = node.shared.clock.unix_us();
+                                        let report = {
+                                            let mut engine = node
+                                                .shared
+                                                .screen_engine
+                                                .lock()
+                                                .expect("screen");
+                                            engine.handle_twcc_feedback(&feedback, now_us)
+                                        };
+                                        *node.shared.screen_twcc_stats.lock().expect("twcc stats") = ScreenTwccStats {
+                                            mode: report.mode,
+                                            feedbacks_sent: report.feedbacks_sent,
+                                            feedbacks_received: report.feedbacks_received,
+                                            packets_tracked: report.packets_tracked,
+                                            packets_acknowledged: report.packets_acknowledged,
+                                            packets_lost: report.packets_lost,
+                                            loss_ratio: report.loss_ratio,
+                                            delivery_rate_bps: report.delivery_rate_bps,
+                                            delay_gradient_us: report.delay_gradient_us,
+                                            smoothed_rtt_us: report.smoothed_rtt_us,
+                                        };
+                                        if let Some(sel) = &node.shared.screen_encode_codec {
+                                            let dynamic_bitrate = {
+                                                let engine = node.shared.screen_engine.lock().expect("screen");
+                                                engine.bitrate_bps()
+                                            };
+                                            if sel.bitrate_bps() != dynamic_bitrate {
+                                                sel.set_bitrate_bps(dynamic_bitrate);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
                                 if let Ok(msg) = ControlMsg::from_frame(&frame) {
                                     let now_us = node.shared.clock.unix_us();
                                     if matches!(msg, ControlMsg::KeyframeRequest) {
@@ -20422,9 +20483,11 @@ impl Node {
             .expect("playout mode");
         let initial_cursor_mode = *self.shared.screen_cursor_mode.lock().expect("cursor mode");
         let initial_harq_mode = *self.shared.screen_harq_mode.lock().expect("harq mode");
+        let initial_twcc_mode = *self.shared.screen_twcc_mode.lock().expect("twcc mode");
         let mut receiver = ScreenReceiver::with_playout_mode(initial_playout_mode);
         receiver.set_cursor_mode(initial_cursor_mode);
         receiver.set_harq_mode(initial_harq_mode);
+        receiver.set_twcc_mode(initial_twcc_mode);
         let mut assembler = ScreenAssembler::new();
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
@@ -20450,7 +20513,21 @@ impl Node {
                         if receiver.harq_mode() != target_harq_mode {
                             receiver.set_harq_mode(target_harq_mode);
                         }
+                        let target_twcc_mode = *node.shared.screen_twcc_mode.lock().expect("twcc mode");
+                        if receiver.twcc_mode() != target_twcc_mode {
+                            receiver.set_twcc_mode(target_twcc_mode);
+                        }
                         let now_us = node.shared.clock.unix_us();
+                        if let Some(twcc_fb) = receiver.generate_twcc_feedback(now_us) {
+                            *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
+                            *node.shared.screen_twcc_stats.lock().expect("twcc stats") = receiver.twcc_stats();
+                            if let Ok(twcc_frame) = twcc_fb.to_inner() {
+                                let t_len = (twcc_frame.payload.len() + 12) as u64;
+                                if sess.send_bounded(twcc_frame).await.is_ok() {
+                                    node.shared.telemetry.record_screen_tx(t_len);
+                                }
+                            }
+                        }
                         let mut played = false;
                         while let ScreenPlayoutAction::Play(ready_frame) = receiver.pop_playout(now_us) {
                             let _ = node.shared.screen_sink.present(&ready_frame);
@@ -20491,8 +20568,9 @@ impl Node {
                                     continue;
                                 }
                                 let assembled_opt = if frame.ty == TYPE_SCREEN_FEC {
+                                    let now_us = node.shared.clock.unix_us();
                                     match ScreenFecShard::from_inner_frame(&frame) {
-                                        Ok(shard) => match receiver.on_fec_shard(shard) {
+                                        Ok(shard) => match receiver.on_fec_shard_with_time(shard, now_us) {
                                             Ok(opt) => {
                                                 *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
                                                 opt
@@ -20516,8 +20594,18 @@ impl Node {
                                         }
                                     }
                                 };
+                                let now_us = node.shared.clock.unix_us();
+                                if let Some(twcc_fb) = receiver.generate_twcc_feedback(now_us) {
+                                    *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
+                                    *node.shared.screen_twcc_stats.lock().expect("twcc stats") = receiver.twcc_stats();
+                                    if let Ok(twcc_frame) = twcc_fb.to_inner() {
+                                        let t_len = (twcc_frame.payload.len() + 12) as u64;
+                                        if sess.send_bounded(twcc_frame).await.is_ok() {
+                                            node.shared.telemetry.record_screen_tx(t_len);
+                                        }
+                                    }
+                                }
                                 if assembled_opt.is_none() {
-                                    let now_us = node.shared.clock.unix_us();
                                     let rtt_estimate_us = node
                                         .shared
                                         .screen_engine
@@ -21250,6 +21338,8 @@ impl Node {
         let fec_mode = *self.shared.screen_fec_mode.lock().expect("fec mode");
         let harq_mode = *self.shared.screen_harq_mode.lock().expect("harq mode");
         let harq_report = self.screen_harq_report();
+        let twcc_mode = *self.shared.screen_twcc_mode.lock().expect("twcc mode");
+        let twcc_report = self.screen_twcc_report();
         ScreenStatusReport {
             ok: true,
             state: state.as_str().to_string(),
@@ -21313,6 +21403,12 @@ impl Node {
             harq_recovered_frames: rx_stats.harq_recovered_frames,
             harq_retransmit_timeouts: harq_report.retransmit_timeouts,
             harq_buffer_occupancy: harq_report.buffer_occupancy,
+            twcc_mode: twcc_mode.as_str().to_string(),
+            twcc_feedbacks_sent: rx_stats.twcc_feedbacks_sent,
+            twcc_feedbacks_received: stats.twcc_feedbacks_received,
+            twcc_delivery_rate_bps: twcc_report.delivery_rate_bps,
+            twcc_delay_gradient_us: twcc_report.delay_gradient_us,
+            twcc_loss_ratio: twcc_report.loss_ratio,
         }
     }
 
@@ -21977,6 +22073,47 @@ impl Node {
             .expect("screen")
             .set_harq_mode(mode);
         self.screen_harq_report()
+    }
+
+    /// Report current receiver-driven transport-wide congestion control (TWCC) state and metrics (v2.08 / ADR-094).
+    pub fn screen_twcc_report(&self) -> ScreenTwccReport {
+        let mode = *self.shared.screen_twcc_mode.lock().expect("twcc mode");
+        let sender_rep = self
+            .shared
+            .screen_engine
+            .lock()
+            .map(|e| e.twcc_report())
+            .unwrap_or_default();
+        let rx_stats = *self.shared.screen_rx_stats.lock().expect("screen rx");
+        let local_twcc_stats = *self.shared.screen_twcc_stats.lock().expect("twcc stats");
+        ScreenTwccReport {
+            ok: true,
+            mode,
+            feedbacks_sent: rx_stats.twcc_feedbacks_sent.max(local_twcc_stats.feedbacks_sent),
+            feedbacks_received: sender_rep.feedbacks_received,
+            packets_tracked: sender_rep.packets_tracked.max(local_twcc_stats.packets_tracked),
+            packets_acknowledged: sender_rep.packets_acknowledged,
+            packets_lost: sender_rep.packets_lost,
+            loss_ratio: sender_rep.loss_ratio,
+            delivery_rate_bps: sender_rep.delivery_rate_bps,
+            delay_gradient_us: sender_rep.delay_gradient_us,
+            smoothed_rtt_us: sender_rep.smoothed_rtt_us,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Current screen TWCC feedback mode (v2.08 / ADR-094).
+    pub fn screen_twcc_mode(&self) -> tetherly_core::ScreenTwccMode {
+        *self.shared.screen_twcc_mode.lock().expect("twcc mode")
+    }
+
+    /// Set and report screen TWCC feedback mode (v2.08 / ADR-094).
+    pub fn screen_set_twcc_mode(&self, mode: tetherly_core::ScreenTwccMode) -> ScreenTwccReport {
+        *self.shared.screen_twcc_mode.lock().expect("twcc mode") = mode;
+        if let Ok(mut engine) = self.shared.screen_engine.lock() {
+            engine.set_twcc_mode(mode);
+        }
+        self.screen_twcc_report()
     }
 
     /// Comprehensive status report for input sharing.
@@ -22721,6 +22858,7 @@ mod clipboard_policy_tests {
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
+            screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22874,6 +23012,7 @@ mod handoff_engine_tests {
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
+            screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23058,6 +23197,7 @@ mod media_policy_tests {
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
+            screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23163,6 +23303,41 @@ mod media_policy_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_screen_twcc_mode_and_reporting() {
+        let (node, dir) = temp_media_node("screen_twcc");
+
+        // 1. Initial TWCC mode defaults to Auto
+        assert_eq!(node.screen_twcc_mode(), tetherly_core::ScreenTwccMode::Auto);
+        let rep = node.screen_twcc_report();
+        assert!(rep.ok);
+        assert_eq!(rep.mode, tetherly_core::ScreenTwccMode::Auto);
+        assert_eq!(rep.feedbacks_sent, 0);
+        assert_eq!(rep.feedbacks_received, 0);
+
+        // 2. Mutate to Aggressive
+        let rep_agg = node.screen_set_twcc_mode(tetherly_core::ScreenTwccMode::Aggressive);
+        assert_eq!(rep_agg.mode, tetherly_core::ScreenTwccMode::Aggressive);
+        assert_eq!(node.screen_twcc_mode(), tetherly_core::ScreenTwccMode::Aggressive);
+
+        // 3. Mutate to Conservative
+        let rep_cons = node.screen_set_twcc_mode(tetherly_core::ScreenTwccMode::Conservative);
+        assert_eq!(rep_cons.mode, tetherly_core::ScreenTwccMode::Conservative);
+        assert_eq!(node.screen_twcc_mode(), tetherly_core::ScreenTwccMode::Conservative);
+
+        // 4. Mutate to Disabled
+        let rep_dis = node.screen_set_twcc_mode(tetherly_core::ScreenTwccMode::Disabled);
+        assert_eq!(rep_dis.mode, tetherly_core::ScreenTwccMode::Disabled);
+        assert_eq!(node.screen_twcc_mode(), tetherly_core::ScreenTwccMode::Disabled);
+
+        // 5. Restore to Auto
+        let rep_auto = node.screen_set_twcc_mode(tetherly_core::ScreenTwccMode::Auto);
+        assert_eq!(rep_auto.mode, tetherly_core::ScreenTwccMode::Auto);
+        assert_eq!(node.screen_twcc_mode(), tetherly_core::ScreenTwccMode::Auto);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -23218,6 +23393,7 @@ mod locator_policy_tests {
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
+            screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23358,6 +23534,7 @@ mod locator_policy_tests {
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
             screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
+            screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_sink: None,
             input_sink: None,
         };

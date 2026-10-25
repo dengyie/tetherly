@@ -23,6 +23,8 @@ pub const TYPE_SCREEN_CURSOR: u16 = 0x0503;
 pub const TYPE_SCREEN_FEC: u16 = 0x0504;
 /// Screen selective negative acknowledgment (NACK) channel inner type (v2.07 / ADR-093).
 pub const TYPE_SCREEN_NACK: u16 = 0x0505;
+/// Screen transport-wide congestion control (TWCC) feedback channel inner type (v2.08 / ADR-094).
+pub const TYPE_SCREEN_TWCC: u16 = 0x0506;
 
 pub const SCREEN_MAGIC: [u8; 4] = *b"TMV1";
 pub const SCREEN_PROTO: u8 = 1;
@@ -44,6 +46,20 @@ pub const SCREEN_HARQ_MAX_RETRIES_AGGRESSIVE: u8 = 3;
 pub const SCREEN_HARQ_MAX_RETRIES_CONSERVATIVE: u8 = 1;
 pub const SCREEN_HARQ_DEFAULT_BUFFER_CAPACITY: usize = 256;
 pub const SCREEN_HARQ_MAX_AGE_US: u64 = 300_000;
+
+pub const SCREEN_TWCC_MAGIC: [u8; 5] = *b"TTWCC";
+pub const SCREEN_TWCC_PROTO: u8 = 1;
+pub const SCREEN_TWCC_HEADER_LEN: usize = 20;
+pub const SCREEN_TWCC_RECORD_LEN: usize = 4;
+pub const SCREEN_TWCC_MISSING_DELTA: i16 = -32768;
+
+pub const SCREEN_TWCC_AUTO_INTERVAL_US: u64 = 10_000;
+pub const SCREEN_TWCC_AGGRESSIVE_INTERVAL_US: u64 = 5_000;
+pub const SCREEN_TWCC_CONSERVATIVE_INTERVAL_US: u64 = 25_000;
+
+pub const SCREEN_TWCC_AUTO_PACKET_THRESHOLD: usize = 40;
+pub const SCREEN_TWCC_AGGRESSIVE_PACKET_THRESHOLD: usize = 20;
+pub const SCREEN_TWCC_CONSERVATIVE_PACKET_THRESHOLD: usize = 80;
 
 /// Maximum payload bytes for a custom cursor bitmap (64x64 RGBA8 = 16,384 bytes).
 pub const CURSOR_BITMAP_MAX_BYTES: usize = 64 * 64 * 4;
@@ -244,6 +260,7 @@ pub fn is_screen_type(ty: u16) -> bool {
             | TYPE_SCREEN_CURSOR
             | TYPE_SCREEN_FEC
             | TYPE_SCREEN_NACK
+            | TYPE_SCREEN_TWCC
     )
 }
 
@@ -952,9 +969,24 @@ pub struct ScreenStats {
     pub harq_shards_retransmitted: u64,
     /// Total frames successfully recovered via selective retransmission (v2.07 / ADR-093).
     pub harq_recovered_frames: u64,
+    /// Transport-Wide Congestion Control (TWCC) mode tag (0=auto, 1=conservative, 2=aggressive, 3=disabled) (v2.08 / ADR-094).
+    pub twcc_mode: u8,
+    /// Cumulative count of TWCC feedback packets sent by receiver (v2.08 / ADR-094).
+    pub twcc_feedbacks_sent: u64,
+    /// Cumulative count of TWCC feedback packets received by sender (v2.08 / ADR-094).
+    pub twcc_feedbacks_received: u64,
+    /// Estimated network delivery rate in bits per second derived from TWCC arrival deltas (v2.08 / ADR-094).
+    pub twcc_delivery_rate_bps: u64,
+    /// Inter-packet queuing delay gradient in microseconds (v2.08 / ADR-094).
+    pub twcc_delay_gradient_us: i64,
 }
 
 impl ScreenStats {
+    /// Transport-Wide Congestion Control (TWCC) mode.
+    pub fn twcc_mode(&self) -> ScreenTwccMode {
+        ScreenTwccMode::from_tag(self.twcc_mode)
+    }
+
     /// Hybrid ARQ (HARQ) selective retransmission mode.
     pub fn harq_mode(&self) -> ScreenHarqMode {
         ScreenHarqMode::from_tag(self.harq_mode)
@@ -1120,6 +1152,15 @@ impl ScreenRateController {
         self.last_decrease_us = now_us;
         let old = self.current_bps;
         // Multiplicative decrease (MD): scale down to 80%
+        let decreased = ((self.current_bps as u64 * 80) / 100) as u32;
+        self.current_bps = decreased.max(self.min_bps);
+        self.current_bps != old
+    }
+
+    /// Force an immediate multiplicative step down regardless of cooldown (used by TWCC on acute congestion).
+    pub fn force_step_down(&mut self) -> bool {
+        self.consecutive_good_frames = 0;
+        let old = self.current_bps;
         let decreased = ((self.current_bps as u64 * 80) / 100) as u32;
         self.current_bps = decreased.max(self.min_bps);
         self.current_bps != old
@@ -2876,6 +2917,7 @@ pub struct ScreenFecShard {
     pub m_parity_shards: u8,
     pub shard_index: u8,
     pub is_parity: bool,
+    pub transport_seq: u16,
     pub data: Vec<u8>,
 }
 
@@ -2885,7 +2927,7 @@ impl ScreenFecShard {
         hdr[0..4].copy_from_slice(&FEC_MAGIC);
         hdr[4] = FEC_PROTO;
         hdr[5] = 0; // flags
-        hdr[6..8].copy_from_slice(&[0, 0]); // reserved
+        hdr[6..8].copy_from_slice(&self.transport_seq.to_be_bytes());
         hdr[8..16].copy_from_slice(&self.frame_seq.to_be_bytes());
         hdr[16..18].copy_from_slice(&self.block_id.to_be_bytes());
         hdr[18] = self.k_data_shards;
@@ -2922,6 +2964,7 @@ impl ScreenFecShard {
         if frame.payload[4] != FEC_PROTO {
             return Err(CoreError::UnsupportedProto);
         }
+        let transport_seq = u16::from_be_bytes(frame.payload[6..8].try_into().unwrap());
         let frame_seq = u64::from_be_bytes(frame.payload[8..16].try_into().unwrap());
         let block_id = u16::from_be_bytes(frame.payload[16..18].try_into().unwrap());
         let k_data_shards = frame.payload[18];
@@ -2940,6 +2983,7 @@ impl ScreenFecShard {
             m_parity_shards,
             shard_index,
             is_parity,
+            transport_seq,
             data,
         })
     }
@@ -2997,6 +3041,7 @@ impl ScreenFecEncoder {
                 m_parity_shards: m_parity as u8,
                 shard_index: idx as u8,
                 is_parity: false,
+                transport_seq: 0,
                 data: shard_data.clone(),
             });
         }
@@ -3018,6 +3063,7 @@ impl ScreenFecEncoder {
                 m_parity_shards: m_parity as u8,
                 shard_index: r as u8,
                 is_parity: true,
+                transport_seq: 0,
                 data: parity_buf,
             });
         }
@@ -4404,6 +4450,587 @@ impl ScreenRetransmitBuffer {
     }
 }
 
+/// Receiver-driven transport-wide congestion control (TWCC) feedback mode (v2.08 / ADR-094).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenTwccMode {
+    #[default]
+    Auto = 0,
+    Conservative = 1,
+    Aggressive = 2,
+    Disabled = 3,
+}
+
+impl ScreenTwccMode {
+    pub const fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => ScreenTwccMode::Conservative,
+            2 => ScreenTwccMode::Aggressive,
+            3 => ScreenTwccMode::Disabled,
+            _ => ScreenTwccMode::Auto,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ScreenTwccMode::Auto => "auto",
+            ScreenTwccMode::Conservative => "conservative",
+            ScreenTwccMode::Aggressive => "aggressive",
+            ScreenTwccMode::Disabled => "disabled",
+        }
+    }
+
+    pub const fn interval_us(self) -> u64 {
+        match self {
+            ScreenTwccMode::Auto => SCREEN_TWCC_AUTO_INTERVAL_US,
+            ScreenTwccMode::Conservative => SCREEN_TWCC_CONSERVATIVE_INTERVAL_US,
+            ScreenTwccMode::Aggressive => SCREEN_TWCC_AGGRESSIVE_INTERVAL_US,
+            ScreenTwccMode::Disabled => u64::MAX,
+        }
+    }
+
+    pub const fn packet_threshold(self) -> usize {
+        match self {
+            ScreenTwccMode::Auto => SCREEN_TWCC_AUTO_PACKET_THRESHOLD,
+            ScreenTwccMode::Conservative => SCREEN_TWCC_CONSERVATIVE_PACKET_THRESHOLD,
+            ScreenTwccMode::Aggressive => SCREEN_TWCC_AGGRESSIVE_PACKET_THRESHOLD,
+            ScreenTwccMode::Disabled => usize::MAX,
+        }
+    }
+}
+
+impl fmt::Display for ScreenTwccMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ScreenTwccMode {
+    type Err = CoreError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(ScreenTwccMode::Auto),
+            "conservative" | "cons" => Ok(ScreenTwccMode::Conservative),
+            "aggressive" | "agg" => Ok(ScreenTwccMode::Aggressive),
+            "disabled" | "off" | "none" => Ok(ScreenTwccMode::Disabled),
+            _ => Err(CoreError::ScreenFrame),
+        }
+    }
+}
+
+/// Individual packet arrival record in TWCC feedback (v2.08 / ADR-094).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenTwccPacketRecord {
+    pub transport_seq: u16,
+    pub recv_delta_us: i16,
+}
+
+/// Receiver-to-sender TWCC feedback message (v2.08 / ADR-094).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenTwccFeedback {
+    pub feedback_seq: u8,
+    pub base_seq: u16,
+    pub packet_count: u16,
+    pub reference_time_us: u64,
+    pub records: Vec<ScreenTwccPacketRecord>,
+}
+
+impl ScreenTwccFeedback {
+    pub fn encode(&self) -> Vec<u8> {
+        let count = self.records.len().min(u16::MAX as usize) as u16;
+        let mut buf =
+            Vec::with_capacity(SCREEN_TWCC_HEADER_LEN + (count as usize) * SCREEN_TWCC_RECORD_LEN);
+        buf.extend_from_slice(&SCREEN_TWCC_MAGIC);
+        buf.push(SCREEN_TWCC_PROTO);
+        buf.push(0); // flags
+        buf.push(self.feedback_seq);
+        buf.extend_from_slice(&self.base_seq.to_be_bytes());
+        buf.extend_from_slice(&count.to_be_bytes());
+        buf.extend_from_slice(&self.reference_time_us.to_be_bytes());
+        for rec in &self.records[..count as usize] {
+            buf.extend_from_slice(&rec.transport_seq.to_be_bytes());
+            buf.extend_from_slice(&rec.recv_delta_us.to_be_bytes());
+        }
+        buf
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, CoreError> {
+        if payload.len() < SCREEN_TWCC_HEADER_LEN {
+            return Err(CoreError::ScreenFrame);
+        }
+        if payload[..5] != SCREEN_TWCC_MAGIC {
+            return Err(CoreError::ScreenFrame);
+        }
+        if payload[5] != SCREEN_TWCC_PROTO {
+            return Err(CoreError::UnsupportedProto);
+        }
+        let feedback_seq = payload[7];
+        let base_seq = u16::from_be_bytes(
+            payload[8..10]
+                .try_into()
+                .map_err(|_| CoreError::ScreenFrame)?,
+        );
+        let packet_count = u16::from_be_bytes(
+            payload[10..12]
+                .try_into()
+                .map_err(|_| CoreError::ScreenFrame)?,
+        );
+        let reference_time_us = u64::from_be_bytes(
+            payload[12..20]
+                .try_into()
+                .map_err(|_| CoreError::ScreenFrame)?,
+        );
+
+        let required_len =
+            SCREEN_TWCC_HEADER_LEN + (packet_count as usize) * SCREEN_TWCC_RECORD_LEN;
+        if payload.len() < required_len {
+            return Err(CoreError::TruncatedFrame);
+        }
+
+        let mut records = Vec::with_capacity(packet_count as usize);
+        let mut offset = SCREEN_TWCC_HEADER_LEN;
+        for _ in 0..packet_count {
+            let transport_seq = u16::from_be_bytes(
+                payload[offset..offset + 2]
+                    .try_into()
+                    .map_err(|_| CoreError::ScreenFrame)?,
+            );
+            let recv_delta_us = i16::from_be_bytes(
+                payload[offset + 2..offset + 4]
+                    .try_into()
+                    .map_err(|_| CoreError::ScreenFrame)?,
+            );
+            records.push(ScreenTwccPacketRecord {
+                transport_seq,
+                recv_delta_us,
+            });
+            offset += SCREEN_TWCC_RECORD_LEN;
+        }
+
+        Ok(Self {
+            feedback_seq,
+            base_seq,
+            packet_count,
+            reference_time_us,
+            records,
+        })
+    }
+
+    pub fn to_inner_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_SCREEN_TWCC, self.encode())
+    }
+
+    pub fn to_inner(&self) -> Result<InnerFrame, CoreError> {
+        self.to_inner_frame()
+    }
+
+    pub fn from_inner_frame(frame: &InnerFrame) -> Result<Self, CoreError> {
+        if frame.ty != TYPE_SCREEN_TWCC {
+            return Err(CoreError::ScreenFrame);
+        }
+        Self::decode(&frame.payload)
+    }
+
+    pub fn from_inner(frame: &InnerFrame) -> Result<Self, CoreError> {
+        Self::from_inner_frame(frame)
+    }
+}
+
+/// Telemetry statistics for Transport-Wide Congestion Control (v2.08 / ADR-094).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ScreenTwccStats {
+    pub mode: ScreenTwccMode,
+    pub feedbacks_sent: u64,
+    pub feedbacks_received: u64,
+    pub packets_tracked: u64,
+    pub packets_acknowledged: u64,
+    pub packets_lost: u64,
+    pub loss_ratio: f32,
+    pub delivery_rate_bps: u64,
+    pub delay_gradient_us: i64,
+    pub smoothed_rtt_us: u64,
+}
+
+impl Default for ScreenTwccStats {
+    fn default() -> Self {
+        Self {
+            mode: ScreenTwccMode::Auto,
+            feedbacks_sent: 0,
+            feedbacks_received: 0,
+            packets_tracked: 0,
+            packets_acknowledged: 0,
+            packets_lost: 0,
+            loss_ratio: 0.0,
+            delivery_rate_bps: 0,
+            delay_gradient_us: 0,
+            smoothed_rtt_us: 0,
+        }
+    }
+}
+
+/// DTO report for REST API and CLI status (v2.08 / ADR-094).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ScreenTwccReport {
+    pub ok: bool,
+    pub mode: ScreenTwccMode,
+    pub feedbacks_sent: u64,
+    pub feedbacks_received: u64,
+    pub packets_tracked: u64,
+    pub packets_acknowledged: u64,
+    pub packets_lost: u64,
+    pub loss_ratio: f32,
+    pub delivery_rate_bps: u64,
+    pub delay_gradient_us: i64,
+    pub smoothed_rtt_us: u64,
+    pub timestamp_ms: u64,
+}
+
+/// Receiver-side arrival tracker that records packet arrival times and emits TWCC feedback (v2.08 / ADR-094).
+#[derive(Debug, Clone)]
+pub struct ScreenTwccReceiverTracker {
+    mode: ScreenTwccMode,
+    feedback_seq: u8,
+    last_feedback_us: u64,
+    arrivals: VecDeque<(u16, u64)>,
+    stats: ScreenTwccStats,
+}
+
+impl Default for ScreenTwccReceiverTracker {
+    fn default() -> Self {
+        Self::new(ScreenTwccMode::Auto)
+    }
+}
+
+impl ScreenTwccReceiverTracker {
+    pub fn new(mode: ScreenTwccMode) -> Self {
+        Self {
+            mode,
+            feedback_seq: 0,
+            last_feedback_us: 0,
+            arrivals: VecDeque::with_capacity(512),
+            stats: ScreenTwccStats {
+                mode,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn mode(&self) -> ScreenTwccMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenTwccMode) {
+        self.mode = mode;
+        self.stats.mode = mode;
+        if mode == ScreenTwccMode::Disabled {
+            self.arrivals.clear();
+        }
+    }
+
+    pub fn stats(&self) -> ScreenTwccStats {
+        self.stats
+    }
+
+    pub fn report(&self) -> ScreenTwccReport {
+        ScreenTwccReport {
+            ok: true,
+            mode: self.mode,
+            feedbacks_sent: self.stats.feedbacks_sent,
+            feedbacks_received: self.stats.feedbacks_received,
+            packets_tracked: self.stats.packets_tracked,
+            packets_acknowledged: self.stats.packets_acknowledged,
+            packets_lost: self.stats.packets_lost,
+            loss_ratio: self.stats.loss_ratio,
+            delivery_rate_bps: self.stats.delivery_rate_bps,
+            delay_gradient_us: self.stats.delay_gradient_us,
+            smoothed_rtt_us: self.stats.smoothed_rtt_us,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        }
+    }
+
+    pub fn on_packet_received(&mut self, transport_seq: u16, recv_us: u64) {
+        if self.mode == ScreenTwccMode::Disabled || transport_seq == 0 {
+            return;
+        }
+        if self.arrivals.iter().any(|&(s, _)| s == transport_seq) {
+            return;
+        }
+        if self.last_feedback_us == 0 {
+            self.last_feedback_us = recv_us;
+        }
+        while self.arrivals.len() >= 512 {
+            self.arrivals.pop_front();
+        }
+        self.arrivals.push_back((transport_seq, recv_us));
+        self.stats.packets_tracked = self.stats.packets_tracked.saturating_add(1);
+    }
+
+    pub fn should_send_feedback(&self, now_us: u64) -> bool {
+        if self.mode == ScreenTwccMode::Disabled || self.arrivals.is_empty() {
+            return false;
+        }
+        if self.arrivals.len() >= self.mode.packet_threshold() {
+            return true;
+        }
+        now_us.saturating_sub(self.last_feedback_us) >= self.mode.interval_us()
+    }
+
+    pub fn build_feedback(&mut self, now_us: u64) -> Option<ScreenTwccFeedback> {
+        if self.mode == ScreenTwccMode::Disabled || self.arrivals.is_empty() {
+            return None;
+        }
+        let base_seq = self.arrivals.front().unwrap().0;
+        let max_seq = self.arrivals.back().unwrap().0;
+        let span = (max_seq.wrapping_sub(base_seq) as usize) + 1;
+        let count = span.clamp(1, 256);
+
+        let reference_time_us = self.arrivals.front().unwrap().1;
+        let mut records = Vec::with_capacity(count);
+
+        for i in 0..count {
+            let seq = base_seq.wrapping_add(i as u16);
+            if let Some(&(_, arrival_us)) = self.arrivals.iter().find(|&&(s, _)| s == seq) {
+                let delta = (arrival_us as i64) - (reference_time_us as i64);
+                let clamped_delta =
+                    delta.clamp(SCREEN_TWCC_MISSING_DELTA as i64 + 1, i16::MAX as i64) as i16;
+                records.push(ScreenTwccPacketRecord {
+                    transport_seq: seq,
+                    recv_delta_us: clamped_delta,
+                });
+            } else {
+                records.push(ScreenTwccPacketRecord {
+                    transport_seq: seq,
+                    recv_delta_us: SCREEN_TWCC_MISSING_DELTA,
+                });
+            }
+        }
+
+        self.arrivals.retain(|&(seq, _)| {
+            let diff = seq.wrapping_sub(base_seq);
+            diff >= count as u16
+        });
+
+        let fb_seq = self.feedback_seq;
+        self.feedback_seq = self.feedback_seq.wrapping_add(1);
+        self.last_feedback_us = now_us;
+        self.stats.feedbacks_sent = self.stats.feedbacks_sent.saturating_add(1);
+
+        Some(ScreenTwccFeedback {
+            feedback_seq: fb_seq,
+            base_seq,
+            packet_count: records.len() as u16,
+            reference_time_us,
+            records,
+        })
+    }
+
+    pub fn clear(&mut self) {
+        self.arrivals.clear();
+        self.stats = ScreenTwccStats {
+            mode: self.mode,
+            ..Default::default()
+        };
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TwccSentPacket {
+    pub seq: u16,
+    pub send_us: u64,
+    pub bytes: usize,
+}
+
+/// Sender-side sequence allocator and feedback processor that derives delivery rate and delay gradient (v2.08 / ADR-094).
+#[derive(Debug, Clone)]
+pub struct ScreenTwccSenderTracker {
+    mode: ScreenTwccMode,
+    next_seq: u16,
+    in_flight: VecDeque<TwccSentPacket>,
+    stats: ScreenTwccStats,
+}
+
+impl Default for ScreenTwccSenderTracker {
+    fn default() -> Self {
+        Self::new(ScreenTwccMode::Auto)
+    }
+}
+
+impl ScreenTwccSenderTracker {
+    pub fn new(mode: ScreenTwccMode) -> Self {
+        Self {
+            mode,
+            next_seq: 1,
+            in_flight: VecDeque::with_capacity(1024),
+            stats: ScreenTwccStats {
+                mode,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn mode(&self) -> ScreenTwccMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenTwccMode) {
+        self.mode = mode;
+        self.stats.mode = mode;
+        if mode == ScreenTwccMode::Disabled {
+            self.in_flight.clear();
+        }
+    }
+
+    pub fn stats(&self) -> ScreenTwccStats {
+        self.stats
+    }
+
+    pub fn report(&self) -> ScreenTwccReport {
+        ScreenTwccReport {
+            ok: true,
+            mode: self.mode,
+            feedbacks_sent: self.stats.feedbacks_sent,
+            feedbacks_received: self.stats.feedbacks_received,
+            packets_tracked: self.stats.packets_tracked,
+            packets_acknowledged: self.stats.packets_acknowledged,
+            packets_lost: self.stats.packets_lost,
+            loss_ratio: self.stats.loss_ratio,
+            delivery_rate_bps: self.stats.delivery_rate_bps,
+            delay_gradient_us: self.stats.delay_gradient_us,
+            smoothed_rtt_us: self.stats.smoothed_rtt_us,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        }
+    }
+
+    pub fn allocate_seq(&mut self, send_us: u64, bytes: usize) -> u16 {
+        if self.mode == ScreenTwccMode::Disabled {
+            return 0;
+        }
+        let seq = self.next_seq;
+        self.next_seq = if self.next_seq == u16::MAX {
+            1
+        } else {
+            self.next_seq + 1
+        };
+        while self.in_flight.len() >= 1024 {
+            self.in_flight.pop_front();
+        }
+        self.in_flight
+            .push_back(TwccSentPacket { seq, send_us, bytes });
+        self.stats.packets_tracked = self.stats.packets_tracked.saturating_add(1);
+        seq
+    }
+
+    pub fn on_feedback(&mut self, feedback: &ScreenTwccFeedback, now_us: u64) -> ScreenTwccReport {
+        if self.mode == ScreenTwccMode::Disabled {
+            return self.report();
+        }
+        self.stats.feedbacks_received = self.stats.feedbacks_received.saturating_add(1);
+
+        let mut acked_in_block = 0u64;
+        let mut lost_in_block = 0u64;
+        let mut delivered_bytes = 0usize;
+        let mut min_arrival_us = u64::MAX;
+        let mut max_arrival_us = 0u64;
+
+        let mut prev_send_us: Option<u64> = None;
+        let mut prev_recv_us: Option<u64> = None;
+        let mut delay_gradients = Vec::new();
+
+        for rec in &feedback.records {
+            if rec.recv_delta_us == SCREEN_TWCC_MISSING_DELTA {
+                lost_in_block += 1;
+                self.stats.packets_lost = self.stats.packets_lost.saturating_add(1);
+            } else {
+                acked_in_block += 1;
+                self.stats.packets_acknowledged =
+                    self.stats.packets_acknowledged.saturating_add(1);
+                let recv_us =
+                    (feedback.reference_time_us as i64 + rec.recv_delta_us as i64).max(0) as u64;
+                min_arrival_us = min_arrival_us.min(recv_us);
+                max_arrival_us = max_arrival_us.max(recv_us);
+
+                if let Some(sent) = self.in_flight.iter().find(|p| p.seq == rec.transport_seq) {
+                    delivered_bytes += sent.bytes;
+                    let sample_rtt = now_us.saturating_sub(sent.send_us);
+                    if self.stats.smoothed_rtt_us == 0 {
+                        self.stats.smoothed_rtt_us = sample_rtt;
+                    } else {
+                        self.stats.smoothed_rtt_us =
+                            (self.stats.smoothed_rtt_us * 7 + sample_rtt) / 8;
+                    }
+
+                    if let (Some(p_send), Some(p_recv)) = (prev_send_us, prev_recv_us) {
+                        let send_delta = sent.send_us as i64 - p_send as i64;
+                        let recv_delta = recv_us as i64 - p_recv as i64;
+                        delay_gradients.push(recv_delta - send_delta);
+                    }
+                    prev_send_us = Some(sent.send_us);
+                    prev_recv_us = Some(recv_us);
+                }
+            }
+        }
+
+        let total_block = acked_in_block + lost_in_block;
+        if total_block > 0 {
+            let block_loss = lost_in_block as f32 / total_block as f32;
+            if self.stats.feedbacks_received <= 1 {
+                self.stats.loss_ratio = block_loss;
+            } else {
+                self.stats.loss_ratio = self.stats.loss_ratio * 0.7 + block_loss * 0.3;
+            }
+        }
+
+        if delivered_bytes > 0 && max_arrival_us > min_arrival_us {
+            let dt_us = max_arrival_us - min_arrival_us;
+            if dt_us >= 100 {
+                let inst_rate_bps = ((delivered_bytes as u64) * 8 * 1_000_000) / dt_us;
+                if self.stats.delivery_rate_bps == 0 || self.stats.feedbacks_received <= 1 {
+                    self.stats.delivery_rate_bps = inst_rate_bps;
+                } else {
+                    self.stats.delivery_rate_bps =
+                        (self.stats.delivery_rate_bps * 7 + inst_rate_bps) / 8;
+                }
+            }
+        }
+
+        if !delay_gradients.is_empty() {
+            let avg_grad =
+                delay_gradients.iter().sum::<i64>() / (delay_gradients.len() as i64);
+            if self.stats.feedbacks_received <= 1 {
+                self.stats.delay_gradient_us = avg_grad;
+            } else {
+                self.stats.delay_gradient_us = (self.stats.delay_gradient_us * 3 + avg_grad) / 4;
+            }
+        }
+
+        self.in_flight.retain(|p| {
+            let diff = p.seq.wrapping_sub(feedback.base_seq);
+            diff >= feedback.packet_count
+        });
+
+        self.report()
+    }
+
+    pub fn clear(&mut self) {
+        self.in_flight.clear();
+        self.next_seq = 1;
+        self.stats = ScreenTwccStats {
+            mode: self.mode,
+            ..Default::default()
+        };
+    }
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -4425,6 +5052,7 @@ pub struct ScreenSender {
     packet_pacer: ScreenPacketPacer,
     trendline_filter: ScreenTrendlineFilter,
     retransmit_buffer: ScreenRetransmitBuffer,
+    twcc_sender: ScreenTwccSenderTracker,
 }
 
 impl Default for ScreenSender {
@@ -4446,6 +5074,7 @@ impl ScreenSender {
         let packet_pacer = ScreenPacketPacer::default();
         let trendline_filter = ScreenTrendlineFilter::default();
         let retransmit_buffer = ScreenRetransmitBuffer::new(ScreenHarqMode::Auto);
+        let twcc_sender = ScreenTwccSenderTracker::new(ScreenTwccMode::Auto);
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -4478,6 +5107,11 @@ impl ScreenSender {
             harq_nacks_received: 0,
             harq_shards_retransmitted: 0,
             harq_recovered_frames: 0,
+            twcc_mode: twcc_sender.mode().tag(),
+            twcc_feedbacks_sent: 0,
+            twcc_feedbacks_received: 0,
+            twcc_delivery_rate_bps: 0,
+            twcc_delay_gradient_us: 0,
             ..Default::default()
         };
         Self {
@@ -4498,7 +5132,14 @@ impl ScreenSender {
             packet_pacer,
             trendline_filter,
             retransmit_buffer,
+            twcc_sender,
         }
+    }
+
+    pub fn with_twcc(twcc: ScreenTwccMode) -> Self {
+        let mut sender = Self::new();
+        sender.set_twcc_mode(twcc);
+        sender
     }
 
     pub fn with_harq(harq: ScreenHarqMode) -> Self {
@@ -4561,7 +5202,57 @@ impl ScreenSender {
         s.harq_nacks_received = h_stats.nacks_received;
         s.harq_shards_retransmitted = h_stats.shards_retransmitted;
         s.harq_recovered_frames = h_stats.recovered_frames;
+        s.twcc_mode = self.twcc_sender.mode().tag();
+        let twcc_st = self.twcc_sender.stats();
+        s.twcc_feedbacks_sent = twcc_st.feedbacks_sent;
+        s.twcc_feedbacks_received = twcc_st.feedbacks_received;
+        s.twcc_delivery_rate_bps = twcc_st.delivery_rate_bps;
+        s.twcc_delay_gradient_us = twcc_st.delay_gradient_us;
         s
+    }
+
+    pub fn twcc_mode(&self) -> ScreenTwccMode {
+        self.twcc_sender.mode()
+    }
+
+    pub fn set_twcc_mode(&mut self, mode: ScreenTwccMode) {
+        self.twcc_sender.set_mode(mode);
+        self.stats.twcc_mode = mode.tag();
+    }
+
+    pub fn twcc_stats(&self) -> ScreenTwccStats {
+        self.twcc_sender.stats()
+    }
+
+    pub fn twcc_report(&self) -> ScreenTwccReport {
+        self.twcc_sender.report()
+    }
+
+    pub fn twcc_sender(&self) -> &ScreenTwccSenderTracker {
+        &self.twcc_sender
+    }
+
+    pub fn twcc_sender_mut(&mut self) -> &mut ScreenTwccSenderTracker {
+        &mut self.twcc_sender
+    }
+
+    pub fn handle_twcc_feedback(
+        &mut self,
+        feedback: &ScreenTwccFeedback,
+        now_us: u64,
+    ) -> ScreenTwccReport {
+        let rep = self.twcc_sender.on_feedback(feedback, now_us);
+        self.stats.twcc_feedbacks_received = rep.feedbacks_received;
+        self.stats.twcc_delivery_rate_bps = rep.delivery_rate_bps;
+        self.stats.twcc_delay_gradient_us = rep.delay_gradient_us;
+        if rep.delivery_rate_bps > 0 {
+            let cap_bps = rep.delivery_rate_bps.min(u32::MAX as u64) as u32;
+            if cap_bps < self.rate_controller.current_bps() && rep.loss_ratio > 0.05 {
+                self.rate_controller.force_step_down();
+                self.stats.bitrate_bps = self.rate_controller.current_bps();
+            }
+        }
+        rep
     }
 
     pub fn harq_mode(&self) -> ScreenHarqMode {
@@ -5211,6 +5902,7 @@ impl ScreenSender {
         if m_parity == 0 {
             let frames = frame.to_frames()?;
             for f in &frames {
+                self.twcc_sender.allocate_seq(now_us, f.payload.len());
                 self.retransmit_buffer.record_outbound_frame(f, now_us);
             }
             return Ok(frames);
@@ -5223,6 +5915,7 @@ impl ScreenSender {
             // If too large for single FEC block, fallback to standard fragmentation
             let frames = frame.to_frames()?;
             for f in &frames {
+                self.twcc_sender.allocate_seq(now_us, f.payload.len());
                 self.retransmit_buffer.record_outbound_frame(f, now_us);
             }
             return Ok(frames);
@@ -5239,14 +5932,21 @@ impl ScreenSender {
         if m == 0 {
             let frames = frame.to_frames()?;
             for f in &frames {
+                self.twcc_sender.allocate_seq(now_us, f.payload.len());
                 self.retransmit_buffer.record_outbound_frame(f, now_us);
             }
             return Ok(frames);
         }
 
-        let shards = ScreenFecEncoder::encode_block(frame.seq, 0, &data_buffers, m)?;
+        let mut shards = ScreenFecEncoder::encode_block(frame.seq, 0, &data_buffers, m)?;
         self.fec_controller.record_block_encoded(k, m);
         self.stats.fec_redundancy_pct = self.fec_controller.stats().redundancy_pct;
+
+        for shard in &mut shards {
+            shard.transport_seq = self
+                .twcc_sender
+                .allocate_seq(now_us, shard.data.len() + FEC_HEADER_LEN);
+        }
 
         let frames: Vec<InnerFrame> = shards.iter().map(|s| s.to_inner_frame()).collect();
         for f in &frames {
@@ -5285,12 +5985,17 @@ impl ScreenSender {
         self.fec_controller = ScreenFecController::new(self.fec_controller.mode());
         self.packet_pacer = ScreenPacketPacer::new(self.packet_pacer.mode());
         self.retransmit_buffer.clear();
+        self.twcc_sender.clear();
         self.stats.is_squelched = false;
         self.stats.squelched_frames = 0;
         self.stats.harq_nacks_sent = 0;
         self.stats.harq_nacks_received = 0;
         self.stats.harq_shards_retransmitted = 0;
         self.stats.harq_recovered_frames = 0;
+        self.stats.twcc_feedbacks_sent = 0;
+        self.stats.twcc_feedbacks_received = 0;
+        self.stats.twcc_delivery_rate_bps = 0;
+        self.stats.twcc_delay_gradient_us = 0;
     }
 }
 
@@ -5307,6 +6012,7 @@ pub struct ScreenReceiver {
     harq_mode: ScreenHarqMode,
     harq_stats: ScreenHarqStats,
     nack_history: VecDeque<(u64, u16, u64)>,
+    twcc_receiver: ScreenTwccReceiverTracker,
 }
 
 impl Default for ScreenReceiver {
@@ -5323,11 +6029,18 @@ impl ScreenReceiver {
             mode: harq_mode,
             ..Default::default()
         };
+        let twcc_mode = ScreenTwccMode::Auto;
+        let twcc_receiver = ScreenTwccReceiverTracker::new(twcc_mode);
         let stats = ScreenStats {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
             cursor_shape: CursorShape::Arrow.tag(),
             harq_mode: harq_mode.tag(),
+            twcc_mode: twcc_mode.tag(),
+            twcc_feedbacks_sent: 0,
+            twcc_feedbacks_received: 0,
+            twcc_delivery_rate_bps: 0,
+            twcc_delay_gradient_us: 0,
             ..Default::default()
         };
         Self {
@@ -5341,6 +6054,7 @@ impl ScreenReceiver {
             harq_mode,
             harq_stats,
             nack_history: VecDeque::with_capacity(64),
+            twcc_receiver,
         }
     }
 
@@ -5351,11 +6065,18 @@ impl ScreenReceiver {
             mode: harq_mode,
             ..Default::default()
         };
+        let twcc_mode = ScreenTwccMode::Auto;
+        let twcc_receiver = ScreenTwccReceiverTracker::new(twcc_mode);
         let stats = ScreenStats {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
             cursor_shape: CursorShape::Arrow.tag(),
             harq_mode: harq_mode.tag(),
+            twcc_mode: twcc_mode.tag(),
+            twcc_feedbacks_sent: 0,
+            twcc_feedbacks_received: 0,
+            twcc_delivery_rate_bps: 0,
+            twcc_delay_gradient_us: 0,
             ..Default::default()
         };
         Self {
@@ -5369,12 +6090,19 @@ impl ScreenReceiver {
             harq_mode,
             harq_stats,
             nack_history: VecDeque::with_capacity(64),
+            twcc_receiver,
         }
     }
 
     pub fn with_harq_mode(mode: ScreenHarqMode) -> Self {
         let mut r = Self::new();
         r.set_harq_mode(mode);
+        r
+    }
+
+    pub fn with_twcc_mode(mode: ScreenTwccMode) -> Self {
+        let mut r = Self::new();
+        r.set_twcc_mode(mode);
         r
     }
 
@@ -5405,6 +6133,12 @@ impl ScreenReceiver {
         st.harq_nacks_received = self.harq_stats.nacks_received;
         st.harq_shards_retransmitted = self.harq_stats.shards_retransmitted;
         st.harq_recovered_frames = self.harq_stats.recovered_frames;
+        st.twcc_mode = self.twcc_receiver.mode().tag();
+        let twcc_st = self.twcc_receiver.stats();
+        st.twcc_feedbacks_sent = twcc_st.feedbacks_sent;
+        st.twcc_feedbacks_received = twcc_st.feedbacks_received;
+        st.twcc_delivery_rate_bps = twcc_st.delivery_rate_bps;
+        st.twcc_delay_gradient_us = twcc_st.delay_gradient_us;
         st
     }
 
@@ -5469,6 +6203,50 @@ impl ScreenReceiver {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
+        }
+    }
+
+    /// Screen TWCC mode (v2.08 / ADR-094).
+    pub fn twcc_mode(&self) -> ScreenTwccMode {
+        self.twcc_receiver.mode()
+    }
+
+    /// Explicitly configure screen TWCC mode.
+    pub fn set_twcc_mode(&mut self, mode: ScreenTwccMode) {
+        self.twcc_receiver.set_mode(mode);
+        self.stats.twcc_mode = mode.tag();
+    }
+
+    /// Snapshot of receiver-side TWCC statistics.
+    pub fn twcc_stats(&self) -> ScreenTwccStats {
+        self.twcc_receiver.stats()
+    }
+
+    /// Structured receiver-side TWCC status report.
+    pub fn twcc_report(&self) -> ScreenTwccReport {
+        self.twcc_receiver.report()
+    }
+
+    /// Access reference to internal TWCC receiver tracker.
+    pub fn twcc_receiver(&self) -> &ScreenTwccReceiverTracker {
+        &self.twcc_receiver
+    }
+
+    /// Access mutable reference to internal TWCC receiver tracker.
+    pub fn twcc_receiver_mut(&mut self) -> &mut ScreenTwccReceiverTracker {
+        &mut self.twcc_receiver
+    }
+
+    /// Generate periodic or packet-threshold TWCC arrival feedback frame.
+    pub fn generate_twcc_feedback(&mut self, now_us: u64) -> Option<ScreenTwccFeedback> {
+        if self.twcc_receiver.should_send_feedback(now_us) {
+            let fb = self.twcc_receiver.build_feedback(now_us);
+            if fb.is_some() {
+                self.stats.twcc_feedbacks_sent = self.twcc_receiver.stats().feedbacks_sent;
+            }
+            fb
+        } else {
+            None
         }
     }
 
@@ -5595,16 +6373,34 @@ impl ScreenReceiver {
         &mut self.fec_assembler
     }
 
+    /// Handle incoming forward error correction (FEC) shard packet with timestamp (v2.08 / ADR-094).
+    /// Records arrival microsecond timestamp into TWCC receiver tracker and forwards to FEC assembler.
+    pub fn on_fec_shard_with_time(
+        &mut self,
+        shard: ScreenFecShard,
+        now_us: u64,
+    ) -> Result<Option<ScreenFrame>, CoreError> {
+        if shard.transport_seq > 0 {
+            self.twcc_receiver
+                .on_packet_received(shard.transport_seq, now_us);
+        }
+        let res = self.fec_assembler.push_shard(shard);
+        self.stats.fec_recovered_shards = self.fec_assembler.recovered_shards();
+        self.stats.fec_unrecoverable_blocks = self.fec_assembler.unrecoverable_blocks();
+        res
+    }
+
     /// Handle incoming forward error correction (FEC) shard packet (v2.04 / ADR-090).
     /// If shard satisfies K data shards or reconstruction threshold, assembles and returns ScreenFrame.
     pub fn on_fec_shard(
         &mut self,
         shard: ScreenFecShard,
     ) -> Result<Option<ScreenFrame>, CoreError> {
-        let res = self.fec_assembler.push_shard(shard);
-        self.stats.fec_recovered_shards = self.fec_assembler.recovered_shards();
-        self.stats.fec_unrecoverable_blocks = self.fec_assembler.unrecoverable_blocks();
-        res
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        self.on_fec_shard_with_time(shard, now_us)
     }
 
     /// Most recently accepted sequence numbers, oldest first.
@@ -5655,10 +6451,15 @@ impl ScreenReceiver {
             mode: self.harq_mode,
             ..Default::default()
         };
+        self.twcc_receiver.clear();
         self.stats.harq_nacks_sent = 0;
         self.stats.harq_nacks_received = 0;
         self.stats.harq_shards_retransmitted = 0;
         self.stats.harq_recovered_frames = 0;
+        self.stats.twcc_feedbacks_sent = 0;
+        self.stats.twcc_feedbacks_received = 0;
+        self.stats.twcc_delivery_rate_bps = 0;
+        self.stats.twcc_delay_gradient_us = 0;
     }
 }
 
@@ -7495,6 +8296,7 @@ mod tests {
             m_parity_shards: 2,
             shard_index: 1,
             is_parity: true,
+            transport_seq: 101,
             data: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02],
         };
 
@@ -7919,6 +8721,7 @@ fn screen_harq_selective_nack_retransmission_pipeline() {
         m_parity_shards: 2,
         shard_index: 0,
         is_parity: false,
+        transport_seq: 1,
         data: vec![10; 100],
     };
     let shard1 = ScreenFecShard {
@@ -7995,6 +8798,7 @@ fn screen_harq_selective_nack_retransmission_pipeline() {
         m_parity_shards: 1,
         shard_index: 0,
         is_parity: false,
+        transport_seq: 10,
         data: vec![55; 100],
     };
     let _ = receiver.on_fec_shard(r_shard0);
@@ -8050,4 +8854,231 @@ fn screen_harq_selective_nack_retransmission_pipeline() {
     let _ = sender.handle_nack(&fallback_nack, 3_010_000);
     assert_eq!(sender.stats().harq_nacks_received, 1);
     assert!(!sender.stats().is_squelched);
+}
+
+#[test]
+fn screen_twcc_transport_wide_congestion_control_pipeline() {
+    // 1. Parsing and enum tags for ScreenTwccMode
+    assert_eq!(
+        "auto".parse::<ScreenTwccMode>().unwrap(),
+        ScreenTwccMode::Auto
+    );
+    assert_eq!(
+        "aggressive".parse::<ScreenTwccMode>().unwrap(),
+        ScreenTwccMode::Aggressive
+    );
+    assert_eq!(
+        "agg".parse::<ScreenTwccMode>().unwrap(),
+        ScreenTwccMode::Aggressive
+    );
+    assert_eq!(
+        "conservative".parse::<ScreenTwccMode>().unwrap(),
+        ScreenTwccMode::Conservative
+    );
+    assert_eq!(
+        "cons".parse::<ScreenTwccMode>().unwrap(),
+        ScreenTwccMode::Conservative
+    );
+    assert_eq!(
+        "disabled".parse::<ScreenTwccMode>().unwrap(),
+        ScreenTwccMode::Disabled
+    );
+    assert_eq!(
+        "off".parse::<ScreenTwccMode>().unwrap(),
+        ScreenTwccMode::Disabled
+    );
+    assert!("unknown".parse::<ScreenTwccMode>().is_err());
+
+    assert_eq!(ScreenTwccMode::from_tag(0), ScreenTwccMode::Auto);
+    assert_eq!(ScreenTwccMode::from_tag(1), ScreenTwccMode::Conservative);
+    assert_eq!(ScreenTwccMode::from_tag(2), ScreenTwccMode::Aggressive);
+    assert_eq!(ScreenTwccMode::from_tag(3), ScreenTwccMode::Disabled);
+
+    assert_eq!(ScreenTwccMode::Auto.interval_us(), 10_000);
+    assert_eq!(ScreenTwccMode::Aggressive.interval_us(), 5_000);
+    assert_eq!(ScreenTwccMode::Conservative.interval_us(), 25_000);
+    assert_eq!(ScreenTwccMode::Disabled.interval_us(), u64::MAX);
+
+    assert_eq!(ScreenTwccMode::Auto.packet_threshold(), 40);
+    assert_eq!(ScreenTwccMode::Aggressive.packet_threshold(), 20);
+    assert_eq!(ScreenTwccMode::Conservative.packet_threshold(), 80);
+    assert_eq!(ScreenTwccMode::Disabled.packet_threshold(), usize::MAX);
+
+    // 2. ScreenTwccFeedback wire protocol codec
+    let fb = ScreenTwccFeedback {
+        feedback_seq: 12,
+        base_seq: 100,
+        packet_count: 3,
+        reference_time_us: 1_000_000,
+        records: vec![
+            ScreenTwccPacketRecord {
+                transport_seq: 100,
+                recv_delta_us: 0,
+            },
+            ScreenTwccPacketRecord {
+                transport_seq: 101,
+                recv_delta_us: 250,
+            },
+            ScreenTwccPacketRecord {
+                transport_seq: 102,
+                recv_delta_us: SCREEN_TWCC_MISSING_DELTA, // lost packet
+            },
+        ],
+    };
+    let encoded = fb.encode();
+    assert_eq!(&encoded[0..5], &SCREEN_TWCC_MAGIC);
+    assert_eq!(encoded[5], SCREEN_TWCC_PROTO);
+    assert_eq!(
+        encoded.len(),
+        SCREEN_TWCC_HEADER_LEN + 3 * SCREEN_TWCC_RECORD_LEN
+    );
+
+    let decoded = ScreenTwccFeedback::decode(&encoded).expect("decode twcc");
+    assert_eq!(decoded, fb);
+
+    // Corrupt magic & length checks
+    let mut corrupt = encoded.clone();
+    corrupt[0] = b'X';
+    assert!(ScreenTwccFeedback::decode(&corrupt).is_err());
+    assert!(ScreenTwccFeedback::decode(&encoded[..19]).is_err());
+    assert!(ScreenTwccFeedback::decode(&encoded[..23]).is_err());
+
+    // InnerFrame round-trip
+    let inner = fb.to_inner().expect("to inner");
+    assert_eq!(inner.ty, TYPE_SCREEN_TWCC);
+    assert_eq!(
+        ScreenTwccFeedback::from_inner_frame(&inner).expect("from inner"),
+        fb
+    );
+
+    // 3. ScreenTwccReceiverTracker
+    let mut rx = ScreenTwccReceiverTracker::new(ScreenTwccMode::Auto);
+    assert!(!rx.should_send_feedback(1_000_000));
+    assert!(rx.build_feedback(1_000_000).is_none());
+
+    // Record packets
+    rx.on_packet_received(10, 1_000_000);
+    rx.on_packet_received(11, 1_000_200);
+    rx.on_packet_received(12, 1_000_500);
+
+    // Before interval or threshold -> false / none
+    assert!(!rx.should_send_feedback(1_005_000));
+
+    // After interval (10ms) -> generates feedback
+    assert!(rx.should_send_feedback(1_011_000));
+    let fb_out = rx.build_feedback(1_011_000).expect("should emit feedback");
+    assert_eq!(fb_out.base_seq, 10);
+    assert_eq!(fb_out.packet_count, 3);
+    assert_eq!(fb_out.records.len(), 3);
+    assert_eq!(fb_out.records[0].recv_delta_us, 0);
+    assert_eq!(fb_out.records[1].recv_delta_us, 200);
+    assert_eq!(fb_out.records[2].recv_delta_us, 500);
+
+    // Generating again immediately returns None (buffer cleared)
+    assert!(rx.build_feedback(1_012_000).is_none());
+
+    // Packet threshold trigger (e.g. Aggressive mode: 20 packets)
+    rx.set_mode(ScreenTwccMode::Aggressive);
+    for seq in 20..40 {
+        rx.on_packet_received(seq, 1_020_000 + (seq as u64) * 10);
+    }
+    assert!(rx.should_send_feedback(1_020_100));
+    let fb_agg = rx.build_feedback(1_020_100).expect("threshold triggered");
+    assert_eq!(fb_agg.packet_count, 20);
+
+    // 4. ScreenTwccSenderTracker
+    let mut tx = ScreenTwccSenderTracker::new(ScreenTwccMode::Auto);
+    let s1 = tx.allocate_seq(1_000_000, 1000);
+    let s2 = tx.allocate_seq(1_001_000, 1000);
+    let s3 = tx.allocate_seq(1_002_000, 1000);
+    assert_eq!(s1, 1);
+    assert_eq!(s2, 2);
+    assert_eq!(s3, 3);
+
+    // Create feedback matching s1, s2, s3 (s2 received with 1ms delay, s3 lost)
+    let fb_test = ScreenTwccFeedback {
+        feedback_seq: 1,
+        base_seq: 1,
+        packet_count: 3,
+        reference_time_us: 1_010_000,
+        records: vec![
+            ScreenTwccPacketRecord {
+                transport_seq: 1,
+                recv_delta_us: 0,
+            },
+            ScreenTwccPacketRecord {
+                transport_seq: 2,
+                recv_delta_us: 1_000,
+            },
+            ScreenTwccPacketRecord {
+                transport_seq: 3,
+                recv_delta_us: SCREEN_TWCC_MISSING_DELTA,
+            },
+        ],
+    };
+
+    let rep = tx.on_feedback(&fb_test, 1_020_000);
+    assert_eq!(rep.feedbacks_received, 1);
+    assert_eq!(rep.packets_lost, 1);
+    assert_eq!(rep.packets_acknowledged, 2);
+    assert!(rep.loss_ratio > 0.3);
+    assert!(rep.delivery_rate_bps > 0);
+
+    // 5. End-to-end integration with ScreenSender & ScreenReceiver
+    let mut sender = ScreenSender::new();
+    sender.set_twcc_mode(ScreenTwccMode::Auto);
+    sender.set_fec_mode(ScreenFecMode::Aggressive);
+    assert_eq!(sender.twcc_mode(), ScreenTwccMode::Auto);
+    assert_eq!(sender.stats().twcc_mode, ScreenTwccMode::Auto.tag());
+
+    sender.on_peer_connected();
+    sender.allow();
+    sender.on_control(ControlMsg::Start).unwrap();
+
+    let frame = ScreenFrame {
+        seq: 50,
+        bytes: vec![0xAB; 2000],
+        rect: ScreenRect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 20,
+        },
+        format: PixelFormat::Bgra8,
+        codec_tag: SCREEN_COMPRESS_NONE,
+        stride: 80,
+    };
+
+    let inner_frames = sender
+        .encode_frame_to_inner_frames_with_time(&frame, 0.05, 2_000_000)
+        .expect("encode");
+    assert!(!inner_frames.is_empty());
+
+    let mut receiver = ScreenReceiver::new();
+    receiver.set_twcc_mode(ScreenTwccMode::Auto);
+
+    let mut shards_received = 0;
+    for in_frame in &inner_frames {
+        if in_frame.ty == TYPE_SCREEN_FEC {
+            let shard = ScreenFecShard::from_inner_frame(in_frame).expect("shard");
+            assert!(shard.transport_seq > 0);
+            let _ = receiver.on_fec_shard_with_time(shard, 2_005_000);
+            shards_received += 1;
+        }
+    }
+    assert!(shards_received > 0);
+
+    let fb_rx = receiver
+        .generate_twcc_feedback(2_016_000)
+        .expect("rx feedback");
+    let sender_rep = sender.handle_twcc_feedback(&fb_rx, 2_020_000);
+    assert_eq!(sender_rep.feedbacks_received, 1);
+    assert_eq!(sender.stats().twcc_feedbacks_received, 1);
+    assert_eq!(receiver.stats().twcc_feedbacks_sent, 1);
+
+    // Test peer disconnect resets
+    sender.on_peer_gone();
+    receiver.on_peer_gone();
+    assert_eq!(sender.stats().twcc_feedbacks_received, 0);
+    assert_eq!(receiver.stats().twcc_feedbacks_sent, 0);
 }

@@ -121,6 +121,10 @@ enum Cmd {
         /// `auto` (default) up to 2 retries; `aggressive` (up to 3 retries); `conservative` (1 retry); `disabled`.
         #[arg(long, default_value = "auto")]
         screen_harq: String,
+        /// Screen Streaming Transport-Wide Congestion Control (TWCC) feedback mode (ADR-094):
+        /// `auto` (default, 10ms feedback / dynamic AIMD); `aggressive` (5ms feedback); `conservative` (25ms feedback); `disabled`.
+        #[arg(long, default_value = "auto")]
+        screen_twcc: String,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -2179,6 +2183,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming receiver-driven transport-wide congestion control (TWCC) feedback pipeline (v2.08 / ADR-094).
+    Twcc {
+        /// Target TWCC mode: `auto`, `aggressive`, `conservative`, or `disabled`. If omitted, displays current TWCC status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3981,6 +3996,7 @@ async fn main() -> Result<()> {
             screen_pacer,
             screen_trendline,
             screen_harq,
+            screen_twcc,
             file_port,
             input_port,
             screen_port,
@@ -4112,6 +4128,15 @@ async fn main() -> Result<()> {
                 Err(_) => {
                     anyhow::bail!(
                         "--screen-harq must be `auto`, `aggressive`, `conservative`, or `disabled`"
+                    )
+                }
+            };
+            cfg.screen_twcc_mode = match screen_twcc.trim().parse::<tetherly_core::ScreenTwccMode>()
+            {
+                Ok(mode) => mode,
+                Err(_) => {
+                    anyhow::bail!(
+                        "--screen-twcc must be `auto`, `aggressive`, `conservative`, or `disabled`"
                     )
                 }
             };
@@ -6308,6 +6333,17 @@ async fn main() -> Result<()> {
                             tetherly_core::SCREEN_HARQ_DEFAULT_BUFFER_CAPACITY
                         );
                     }
+                    if !rep.twcc_mode.is_empty() {
+                        println!(
+                            "  TWCC:         {} (sent_fb: {}, rcvd_fb: {}, rate: {:.2} Mbps, grad: {} us, loss: {:.2}%)",
+                            rep.twcc_mode,
+                            rep.twcc_feedbacks_sent,
+                            rep.twcc_feedbacks_received,
+                            rep.twcc_delivery_rate_bps as f64 / 1_000_000.0,
+                            rep.twcc_delay_gradient_us,
+                            rep.twcc_loss_ratio * 100.0
+                        );
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -6978,6 +7014,67 @@ async fn main() -> Result<()> {
                         println!(
                             "  Buffer Occupancy:     {}/{}",
                             rep.buffer_occupancy, rep.buffer_capacity
+                        );
+                    }
+                }
+            }
+            ScreenCmd::Twcc {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    tetherly_node::loopback_post(ui_port, "/api/screen/twcc", &body).await
+                } else {
+                    tetherly_node::loopback_get(ui_port, "/api/screen/twcc").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen twcc query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_core::ScreenTwccReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    if has_update {
+                        println!(
+                            "Screen TWCC feedback mode updated: {}",
+                            rep.mode
+                        );
+                    } else {
+                        println!("Screen Transport-Wide Congestion Control (TWCC) Pipeline (ADR-094):");
+                        println!("  TWCC Mode:            {}", rep.mode);
+                        println!("  Feedbacks Sent:       {}", rep.feedbacks_sent);
+                        println!("  Feedbacks Received:   {}", rep.feedbacks_received);
+                        println!("  Packets Tracked:      {}", rep.packets_tracked);
+                        println!("  Packets Acknowledged: {}", rep.packets_acknowledged);
+                        println!("  Packets Lost:         {}", rep.packets_lost);
+                        println!("  Loss Ratio:           {:.2}%", rep.loss_ratio * 100.0);
+                        println!(
+                            "  Delivery Rate:        {:.2} Mbps ({} bps)",
+                            rep.delivery_rate_bps as f64 / 1_000_000.0,
+                            rep.delivery_rate_bps
+                        );
+                        println!("  Delay Gradient:       {} us", rep.delay_gradient_us);
+                        println!(
+                            "  Smoothed RTT:         {} us ({:.2} ms)",
+                            rep.smoothed_rtt_us,
+                            rep.smoothed_rtt_us as f64 / 1_000.0
                         );
                     }
                 }

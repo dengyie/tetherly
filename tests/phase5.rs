@@ -84,6 +84,7 @@ fn cfg(
         screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
         screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
         screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
+        screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
         screen_sink: None,
         input_sink: None,
     }
@@ -3125,6 +3126,161 @@ async fn m5_17_screen_selective_nack_and_hybrid_arq() {
     assert_eq!(
         host.screen_harq_mode(),
         tetherly_core::ScreenHarqMode::Conservative
+    );
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_18_screen_receiver_driven_twcc_and_congestion_feedback() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial TWCC query on host: defaults to Auto mode (ADR-094)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/twcc")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenTwccReport = serde_json::from_slice(&b).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.mode, tetherly_core::ScreenTwccMode::Auto);
+    assert_eq!(init_rep.feedbacks_sent, 0);
+    assert_eq!(init_rep.feedbacks_received, 0);
+    assert_eq!(init_rep.packets_lost, 0);
+
+    // 2. Dynamic TWCC mode configuration via POST /api/screen/twcc
+    let agg_payload = serde_json::json!({ "mode": "aggressive" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/twcc",
+        &serde_json::to_vec(&agg_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let agg_rep: tetherly_core::ScreenTwccReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(agg_rep.mode, tetherly_core::ScreenTwccMode::Aggressive);
+
+    let cons_payload = serde_json::json!({ "mode": "conservative" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/twcc",
+        &serde_json::to_vec(&cons_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let cons_rep: tetherly_core::ScreenTwccReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(cons_rep.mode, tetherly_core::ScreenTwccMode::Conservative);
+
+    let dis_payload = serde_json::json!({ "mode": "disabled" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/twcc",
+        &serde_json::to_vec(&dis_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let dis_rep: tetherly_core::ScreenTwccReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(dis_rep.mode, tetherly_core::ScreenTwccMode::Disabled);
+
+    // Set back to Auto mode
+    let auto_payload = serde_json::json!({ "mode": "auto" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/twcc",
+        &serde_json::to_vec(&auto_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let auto_rep: tetherly_core::ScreenTwccReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(auto_rep.mode, tetherly_core::ScreenTwccMode::Auto);
+
+    // 3. Visitor opens screen channel, host allows, and visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Send video frame from host
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Verify TWCC report on host
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/twcc")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_twcc: tetherly_core::ScreenTwccReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_twcc.mode, tetherly_core::ScreenTwccMode::Auto);
+    assert!(host_twcc.ok);
+
+    // 6. Verify status report contains TWCC fields
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_status.twcc_mode, "auto");
+
+    // 7. Verify node direct accessor methods
+    assert_eq!(host.screen_twcc_mode(), tetherly_core::ScreenTwccMode::Auto);
+    let set_res = host.screen_set_twcc_mode(tetherly_core::ScreenTwccMode::Conservative);
+    assert_eq!(set_res.mode, tetherly_core::ScreenTwccMode::Conservative);
+    assert_eq!(
+        host.screen_twcc_mode(),
+        tetherly_core::ScreenTwccMode::Conservative
     );
 
     host.shutdown();

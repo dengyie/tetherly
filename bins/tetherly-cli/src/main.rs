@@ -2079,6 +2079,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming receiver-driven transport-wide congestion control (TWCC) feedback pipeline (v2.08 / ADR-094).
+    Twcc {
+        /// Target TWCC mode: `auto`, `aggressive`, `conservative`, or `disabled`. If omitted, displays current TWCC status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -8083,6 +8094,27 @@ async fn main() -> Result<()> {
                         .get("harq_buffer_occupancy")
                         .and_then(|n| n.as_u64())
                         .unwrap_or(0);
+                    let twcc_mode = v.get("twcc_mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let twcc_feedbacks_sent = v
+                        .get("twcc_feedbacks_sent")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let twcc_feedbacks_received = v
+                        .get("twcc_feedbacks_received")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let twcc_delivery_rate_bps = v
+                        .get("twcc_delivery_rate_bps")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let twcc_delay_gradient_us = v
+                        .get("twcc_delay_gradient_us")
+                        .and_then(|n| n.as_i64())
+                        .unwrap_or(0);
+                    let twcc_loss_ratio = v
+                        .get("twcc_loss_ratio")
+                        .and_then(|n| n.as_f64())
+                        .unwrap_or(0.0);
 
                     println!("Screen Channel Status:");
                     println!("  State:        {state}");
@@ -8194,6 +8226,17 @@ async fn main() -> Result<()> {
                             harq_recovered_frames,
                             harq_buffer_occupancy,
                             tetherly_core::SCREEN_HARQ_DEFAULT_BUFFER_CAPACITY
+                        );
+                    }
+                    if !twcc_mode.is_empty() {
+                        println!(
+                            "  TWCC:         {} (sent_fb: {}, rcvd_fb: {}, rate: {:.2} Mbps, grad: {} us, loss: {:.2}%)",
+                            twcc_mode,
+                            twcc_feedbacks_sent,
+                            twcc_feedbacks_received,
+                            twcc_delivery_rate_bps as f64 / 1_000_000.0,
+                            twcc_delay_gradient_us,
+                            twcc_loss_ratio * 100.0
                         );
                     }
                 }
@@ -9088,6 +9131,75 @@ async fn main() -> Result<()> {
                         println!("  Recovered Frames:     {recovered_frames}");
                         println!("  Retransmit Timeouts:  {retransmit_timeouts}");
                         println!("  Buffer Occupancy:     {buffer_occupancy}/{buffer_capacity}");
+                    }
+                }
+            }
+            ScreenCmd::Twcc {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    loopback_post(ui_port, "/api/screen/twcc", &body).await
+                } else {
+                    loopback_get(ui_port, "/api/screen/twcc").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen twcc query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    let m = v.get("mode").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let feedbacks_sent = v.get("feedbacks_sent").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let feedbacks_received = v.get("feedbacks_received").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let packets_tracked = v.get("packets_tracked").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let packets_acknowledged = v.get("packets_acknowledged").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let packets_lost = v.get("packets_lost").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let loss_ratio = v.get("loss_ratio").and_then(|n| n.as_f64()).unwrap_or(0.0);
+                    let delivery_rate_bps = v.get("delivery_rate_bps").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let delay_gradient_us = v.get("delay_gradient_us").and_then(|n| n.as_i64()).unwrap_or(0);
+                    let smoothed_rtt_us = v.get("smoothed_rtt_us").and_then(|n| n.as_u64()).unwrap_or(0);
+
+                    if has_update {
+                        println!("Screen TWCC feedback mode updated: {m}");
+                    } else {
+                        println!("Screen Transport-Wide Congestion Control (TWCC) Pipeline (ADR-094):");
+                        println!("  TWCC Mode:            {m}");
+                        println!("  Feedbacks Sent:       {feedbacks_sent}");
+                        println!("  Feedbacks Received:   {feedbacks_received}");
+                        println!("  Packets Tracked:      {packets_tracked}");
+                        println!("  Packets Acknowledged: {packets_acknowledged}");
+                        println!("  Packets Lost:         {packets_lost}");
+                        println!("  Loss Ratio:           {:.2}%", loss_ratio * 100.0);
+                        println!(
+                            "  Delivery Rate:        {:.2} Mbps ({} bps)",
+                            delivery_rate_bps as f64 / 1_000_000.0,
+                            delivery_rate_bps
+                        );
+                        println!("  Delay Gradient:       {delay_gradient_us} us");
+                        println!(
+                            "  Smoothed RTT:         {} us ({:.2} ms)",
+                            smoothed_rtt_us,
+                            smoothed_rtt_us as f64 / 1_000.0
+                        );
                     }
                 }
             }
