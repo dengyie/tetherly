@@ -4238,6 +4238,45 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 json_ok(&rep)
             }
         }
+        // Dirty-rect detection and static frame adaptive squelch (v2.03 / ADR-089).
+        ("GET", "/api/screen/squelch") => {
+            let rep = node.screen_squelch_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/squelch") => {
+            #[derive(serde::Deserialize)]
+            struct SquelchBody {
+                mode: Option<String>,
+                squelch_mode: Option<String>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<SquelchBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.clone().or_else(|| b.squelch_mode.clone()))
+                .or_else(|| qmap.get("mode").cloned())
+                .or_else(|| qmap.get("squelch_mode").cloned());
+
+            if let Some(m_str) = mode_str {
+                match tetherly_core::ScreenSquelchMode::from_str_loose(&m_str) {
+                    Some(mode) => {
+                        let rep = node.screen_set_squelch_mode(mode);
+                        json_ok(&rep)
+                    }
+                    None => err(
+                        400,
+                        "invalid squelch mode: expected auto, aggressive, or disabled",
+                    ),
+                }
+            } else {
+                let rep = node.screen_squelch_report();
+                json_ok(&rep)
+            }
+        }
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -8130,6 +8169,7 @@ mod tests {
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
+            screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_sink: None,
             input_sink: None,
         };

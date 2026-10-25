@@ -2024,6 +2024,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming damage detection and static frame adaptive squelch (v2.03 / ADR-089).
+    Squelch {
+        /// Target squelch mode: `auto`, `aggressive`, or `disabled`. If omitted, displays current squelch status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -7956,6 +7967,9 @@ async fn main() -> Result<()> {
                         .get("cursor_updates_received")
                         .and_then(|n| n.as_u64())
                         .unwrap_or(0);
+                    let squelch_mode = v.get("squelch_mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let is_squelched = v.get("is_squelched").and_then(|b| b.as_bool()).unwrap_or(false);
+                    let squelched_frames = v.get("squelched_frames").and_then(|n| n.as_u64()).unwrap_or(0);
 
                     println!("Screen Channel Status:");
                     println!("  State:        {state}");
@@ -8031,6 +8045,12 @@ async fn main() -> Result<()> {
                             cursor_shape,
                             cursor_updates_sent,
                             cursor_updates_received
+                        );
+                    }
+                    if !squelch_mode.is_empty() {
+                        println!(
+                            "  Squelch Mode: {} (squelched={}, suppressed_frames={})",
+                            squelch_mode, is_squelched, squelched_frames
                         );
                     }
                 }
@@ -8569,6 +8589,86 @@ async fn main() -> Result<()> {
                         println!("  Updates Received:    {received}");
                         println!("  Dropped (Dedup):     {dedup}");
                         println!("  Dropped (Rate):      {rate}");
+                    }
+                }
+            }
+            ScreenCmd::Squelch {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    loopback_post(ui_port, "/api/screen/squelch", &body).await
+                } else {
+                    loopback_get(ui_port, "/api/screen/squelch").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    bail!(
+                        "screen squelch query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let v: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response JSON: {e}"))?;
+                    let m = v.get("mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let is_squelched = v
+                        .get("is_squelched")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
+                    let frames_evaluated = v
+                        .get("frames_evaluated")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let frames_passed = v
+                        .get("frames_passed")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let frames_squelched = v
+                        .get("frames_squelched")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let keepalive_frames = v
+                        .get("keepalive_frames")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let last_dirty_ratio = v
+                        .get("last_dirty_ratio")
+                        .and_then(|n| n.as_f64())
+                        .unwrap_or(0.0);
+                    let consecutive_static_frames = v
+                        .get("consecutive_static_frames")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+
+                    if has_update {
+                        println!("Screen static frame adaptive squelch mode updated: {m}");
+                    } else {
+                        println!(
+                            "Screen Streaming Dirty-Rect Detection & Adaptive Squelch Controller (ADR-089):"
+                        );
+                        println!("  Squelch Mode:        {m}");
+                        println!("  Currently Squelched: {is_squelched}");
+                        println!("  Frames Evaluated:    {frames_evaluated}");
+                        println!("  Frames Passed:       {frames_passed}");
+                        println!("  Frames Squelched:    {frames_squelched}");
+                        println!("  Keepalive Frames:    {keepalive_frames}");
+                        println!("  Last Dirty Ratio:    {:.2}%", last_dirty_ratio * 100.0);
+                        println!("  Static Frames Run:   {consecutive_static_frames}");
                     }
                 }
             }

@@ -99,6 +99,11 @@ enum Cmd {
         /// `embedded` renders cursor directly into video frames; `hidden` suppresses remote cursor.
         #[arg(long, default_value = "decoupled")]
         screen_cursor: String,
+        /// Screen Static Frame Adaptive Squelch mode (ADR-089): `auto` (default)
+        /// squelches video push after 500ms of static screen with 2.0s heartbeats;
+        /// `aggressive` squelches after 150ms with 5.0s heartbeats; `disabled` pushes continuous frames.
+        #[arg(long, default_value = "auto")]
+        screen_squelch: String,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -2102,6 +2107,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming damage detection and static frame adaptive squelch (v2.03 / ADR-089).
+    Squelch {
+        /// Target squelch mode: `auto`, `aggressive`, or `disabled`. If omitted, displays current squelch status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3899,6 +3915,7 @@ async fn main() -> Result<()> {
             screen_matrix,
             screen_playout,
             screen_cursor,
+            screen_squelch,
             file_port,
             input_port,
             screen_port,
@@ -3986,6 +4003,14 @@ async fn main() -> Result<()> {
                 "hidden" | "hide" | "none" => tetherly_core::ScreenCursorMode::Hidden,
                 _ => {
                     anyhow::bail!("--screen-cursor must be `decoupled`, `embedded`, or `hidden`")
+                }
+            };
+            cfg.screen_squelch_mode = match screen_squelch.trim().to_lowercase().as_str() {
+                "auto" => tetherly_core::ScreenSquelchMode::Auto,
+                "aggressive" => tetherly_core::ScreenSquelchMode::Aggressive,
+                "disabled" | "off" | "none" => tetherly_core::ScreenSquelchMode::Disabled,
+                _ => {
+                    anyhow::bail!("--screen-squelch must be `auto`, `aggressive`, or `disabled`")
                 }
             };
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
@@ -6136,6 +6161,14 @@ async fn main() -> Result<()> {
                             rep.cursor_updates_received
                         );
                     }
+                    if !rep.squelch_mode.is_empty() {
+                        println!(
+                            "  Squelch Mode: {} (squelched={}, suppressed_frames={})",
+                            rep.squelch_mode,
+                            rep.is_squelched,
+                            rep.squelched_frames
+                        );
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -6546,6 +6579,59 @@ async fn main() -> Result<()> {
                         println!("  Updates Received:    {}", rep.updates_received);
                         println!("  Dropped (Dedup):     {}", rep.updates_dropped_dedup);
                         println!("  Dropped (Rate):      {}", rep.updates_dropped_rate);
+                    }
+                }
+            }
+            ScreenCmd::Squelch {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    tetherly_node::loopback_post(ui_port, "/api/screen/squelch", &body).await
+                } else {
+                    tetherly_node::loopback_get(ui_port, "/api/screen/squelch").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen squelch query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_node::ScreenSquelchReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    if has_update {
+                        println!(
+                            "Screen static frame adaptive squelch mode updated: {}",
+                            rep.mode
+                        );
+                    } else {
+                        println!(
+                            "Screen Streaming Dirty-Rect Detection & Adaptive Squelch Controller (ADR-089):"
+                        );
+                        println!("  Squelch Mode:        {}", rep.mode);
+                        println!("  Currently Squelched: {}", rep.is_squelched);
+                        println!("  Frames Evaluated:    {}", rep.frames_evaluated);
+                        println!("  Frames Passed:       {}", rep.frames_passed);
+                        println!("  Frames Squelched:    {}", rep.frames_squelched);
+                        println!("  Keepalive Frames:    {}", rep.keepalive_frames);
+                        println!("  Last Dirty Ratio:    {:.2}%", rep.last_dirty_ratio * 100.0);
+                        println!("  Static Frames Run:   {}", rep.consecutive_static_frames);
                     }
                 }
             }

@@ -60,9 +60,9 @@ use tetherly_core::{
     MicDetachFrame, MicMode, MicRole, MicValidator, NotificationPayload, NotificationUrgency,
     Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource, ReplyView,
     ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenCursorMode, ScreenCursorStats,
-    ScreenCursorUpdate, ScreenFrame, ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats,
-    ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenState, ScreenStats,
-    SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
+    ScreenCursorUpdate, ScreenDamageTracker, ScreenFrame, ScreenPlayoutAction, ScreenPlayoutMode,
+    ScreenPlayoutStats, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode,
+    ScreenState, ScreenStats, SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
     TrustStore, VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
     VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
     VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
@@ -162,6 +162,8 @@ pub struct NodeConfig {
     pub screen_playout_mode: tetherly_core::ScreenPlayoutMode,
     /// Operation mode for screen hardware cursor decoupling (ADR-088).
     pub screen_cursor_mode: tetherly_core::ScreenCursorMode,
+    /// Operation mode for screen damage detection and static frame adaptive squelch (ADR-089).
+    pub screen_squelch_mode: tetherly_core::ScreenSquelchMode,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -217,6 +219,7 @@ impl Default for NodeConfig {
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
+            screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_sink: None,
             input_sink: None,
         }
@@ -2913,6 +2916,27 @@ pub struct ScreenStatusReport {
     pub cursor_updates_sent: u64,
     #[serde(default)]
     pub cursor_updates_received: u64,
+    #[serde(default)]
+    pub squelch_mode: String,
+    #[serde(default)]
+    pub is_squelched: bool,
+    #[serde(default)]
+    pub squelched_frames: u64,
+}
+
+/// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ScreenSquelchReport {
+    pub ok: bool,
+    pub mode: String,
+    pub is_squelched: bool,
+    pub frames_evaluated: u64,
+    pub frames_passed: u64,
+    pub frames_squelched: u64,
+    pub keepalive_frames: u64,
+    pub last_dirty_ratio: f32,
+    pub consecutive_static_frames: u64,
+    pub timestamp_ms: u64,
 }
 
 /// Status report for hardware cursor decoupling (ADR-088).
@@ -3254,6 +3278,12 @@ struct Shared {
     screen_cursor_mode: Mutex<ScreenCursorMode>,
     /// Hardware cursor metrics for screen streams (ADR-088).
     screen_cursor_stats: Mutex<ScreenCursorStats>,
+    /// Adaptive squelch mode for screen streams (ADR-089).
+    screen_squelch_mode: Mutex<ScreenSquelchMode>,
+    /// Damage tracker for screen frames (ADR-089).
+    screen_damage_tracker: Mutex<ScreenDamageTracker>,
+    /// Previous frame bytes for difference detection (ADR-089).
+    screen_prev_frame: Mutex<Option<Vec<u8>>>,
     shutdown: watch::Sender<bool>,
     overlay: Mutex<OverlayStatus>,
     /// ANCS ingress. Present only when a transport was attached.
@@ -3446,6 +3476,7 @@ impl Node {
         let screen_matrix_mode = cfg.screen_matrix_mode;
         let screen_playout_mode = cfg.screen_playout_mode;
         let screen_cursor_mode = cfg.screen_cursor_mode;
+        let screen_squelch_mode = cfg.screen_squelch_mode;
         if let Some(sel) = &screen_encode_codec {
             sel.set_fps(screen_fps);
             sel.set_scale_pct(screen_scale_pct);
@@ -3585,6 +3616,7 @@ impl Node {
                 s.set_matrix_mode(screen_matrix_mode);
                 s.matrix_coordinator_mut().set_auto_fps(screen_fps_auto);
                 s.matrix_coordinator_mut().set_auto_scale(screen_scale_auto);
+                s.set_squelch_mode(screen_squelch_mode);
                 s
             }),
             screen_source,
@@ -3623,6 +3655,9 @@ impl Node {
             }),
             screen_cursor_mode: Mutex::new(screen_cursor_mode),
             screen_cursor_stats: Mutex::new(ScreenCursorStats::default()),
+            screen_squelch_mode: Mutex::new(screen_squelch_mode),
+            screen_damage_tracker: Mutex::new(ScreenDamageTracker::new()),
+            screen_prev_frame: Mutex::new(None),
             shutdown,
             overlay: Mutex::new(initial_overlay),
             ancs: Mutex::new(ancs),
@@ -20093,6 +20128,7 @@ impl Node {
                                             }
                                         }
                                         forwarded = total;
+                                        node.screen_force_wake_squelch();
                                     }
                                     let new_seat = if client.focused() {
                                         CursorSeat::Remote
@@ -20659,7 +20695,38 @@ impl Node {
                 );
                 return Ok(false);
             }
-            if engine.push_with_time(frame, now_us).is_none() {
+
+            // ADR-089 Screen Damage Detection & Adaptive Squelch:
+            let (is_dirty, dirty_ratio) = {
+                let mut prev_guard = self.shared.screen_prev_frame.lock().expect("prev frame");
+                let mut tracker = self.shared.screen_damage_tracker.lock().expect("damage tracker");
+                let (width, height) = (frame.rect.w as u32, frame.rect.h as u32);
+                let report = match &*prev_guard {
+                    None => {
+                        *prev_guard = Some(frame.bytes.clone());
+                        tracker.evaluate_hint(true, width, height)
+                    }
+                    Some(prev_bytes) => {
+                        let is_diff = prev_bytes != &frame.bytes;
+                        if !is_diff {
+                            tracker.evaluate_hint(false, width, height)
+                        } else if !frame.compressed() {
+                            let r = tracker.evaluate_rgba(prev_bytes, &frame.bytes, width, height);
+                            *prev_guard = Some(frame.bytes.clone());
+                            r
+                        } else {
+                            *prev_guard = Some(frame.bytes.clone());
+                            tracker.evaluate_hint(true, width, height)
+                        }
+                    }
+                };
+                (!report.is_static, report.dirty_ratio)
+            };
+
+            let pushed = engine.push_with_damage_time(frame, is_dirty, dirty_ratio, now_us);
+            if pushed.is_none() {
+                // Suppressed by adaptive squelch due to static screen
+                engine.consume_pacing(now_us);
                 return Ok(false);
             }
             engine.consume_pacing(now_us);
@@ -21043,6 +21110,9 @@ impl Node {
             cursor_shape: cursor_stats.current_shape.as_str().to_string(),
             cursor_updates_sent: cursor_stats.updates_sent,
             cursor_updates_received: cursor_stats.updates_received,
+            squelch_mode: stats.squelch_mode().as_str().to_string(),
+            is_squelched: stats.is_squelched,
+            squelched_frames: stats.squelched_frames,
         }
     }
 
@@ -21480,6 +21550,58 @@ impl Node {
             .lock()
             .expect("screen")
             .is_pacing_ready(now_us)
+    }
+
+    /// Report current screen static frame adaptive squelch status and metrics (ADR-089).
+    pub fn screen_squelch_report(&self) -> ScreenSquelchReport {
+        let mode = *self.shared.screen_squelch_mode.lock().expect("squelch mode");
+        let stats = self
+            .shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .squelch_stats();
+        ScreenSquelchReport {
+            ok: true,
+            mode: mode.as_str().to_string(),
+            is_squelched: stats.is_squelched,
+            frames_evaluated: stats.frames_evaluated,
+            frames_passed: stats.frames_passed,
+            frames_squelched: stats.frames_squelched,
+            keepalive_frames: stats.keepalive_frames,
+            last_dirty_ratio: stats.last_dirty_ratio,
+            consecutive_static_frames: stats.consecutive_static_frames,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Current screen static frame adaptive squelch mode (ADR-089).
+    pub fn screen_squelch_mode(&self) -> tetherly_core::ScreenSquelchMode {
+        *self.shared.screen_squelch_mode.lock().expect("squelch mode")
+    }
+
+    /// Set and report screen static frame adaptive squelch mode (ADR-089).
+    pub fn screen_set_squelch_mode(
+        &self,
+        mode: tetherly_core::ScreenSquelchMode,
+    ) -> ScreenSquelchReport {
+        *self.shared.screen_squelch_mode.lock().expect("squelch mode") = mode;
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .set_squelch_mode(mode);
+        self.screen_squelch_report()
+    }
+
+    /// Wake up squelch controller immediately (e.g. upon user input or client interaction) (ADR-089).
+    pub fn screen_force_wake_squelch(&self) {
+        let now_us = self.shared.clock.unix_us();
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .force_wake_squelch(now_us);
     }
 
     /// Comprehensive status report for input sharing.
@@ -22219,6 +22341,7 @@ mod clipboard_policy_tests {
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
+            screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22367,6 +22490,7 @@ mod handoff_engine_tests {
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
+            screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22546,6 +22670,7 @@ mod media_policy_tests {
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
+            screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22701,6 +22826,7 @@ mod locator_policy_tests {
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
+            screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22836,6 +22962,7 @@ mod locator_policy_tests {
             screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
             screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
             screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
+            screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_sink: None,
             input_sink: None,
         };

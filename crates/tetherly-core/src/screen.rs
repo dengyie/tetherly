@@ -10,7 +10,9 @@
 
 use crate::error::CoreError;
 use crate::frame::{InnerFrame, FLAG_MUST_UNDERSTAND, INNER_PAYLOAD_MAX};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::fmt;
 
 /// Screen channel inner types. Not listed in the JSON control-plane table.
 pub const TYPE_SCREEN_FRAME: u16 = 0x0501;
@@ -29,6 +31,21 @@ pub const CURSOR_BITMAP_MAX_BYTES: usize = 64 * 64 * 4;
 
 /// Minimum interval between outbound cursor position packets in microseconds (~125 Hz).
 pub const SCREEN_CURSOR_MIN_INTERVAL_US: u64 = 8_000;
+
+/// Static delay threshold in microseconds before triggering zero-motion frame squelch in Auto mode (500 ms) (v2.03 / ADR-089).
+pub const SCREEN_SQUELCH_AUTO_DELAY_US: u64 = 500_000;
+
+/// Static delay threshold in microseconds before triggering zero-motion frame squelch in Aggressive mode (150 ms) (v2.03 / ADR-089).
+pub const SCREEN_SQUELCH_AGGRESSIVE_DELAY_US: u64 = 150_000;
+
+/// Periodic refresh heartbeat / keepalive frame interval in microseconds under squelched Auto mode (2.0 s) (v2.03 / ADR-089).
+pub const SCREEN_SQUELCH_AUTO_KEEPALIVE_US: u64 = 2_000_000;
+
+/// Periodic refresh heartbeat / keepalive frame interval in microseconds under squelched Aggressive mode (5.0 s) (v2.03 / ADR-089).
+pub const SCREEN_SQUELCH_AGGRESSIVE_KEEPALIVE_US: u64 = 5_000_000;
+
+/// Grid block dimension in pixels for tile-based screen damage / dirty rect evaluation (32x32 pixels) (v2.03 / ADR-089).
+pub const SCREEN_DAMAGE_BLOCK_SIZE: usize = 32;
 
 /// Drop-and-ignore anything older, and refuse a forward jump this large.
 /// Same shape as the input window: the wire is a live stream, not a log.
@@ -872,9 +889,20 @@ pub struct ScreenStats {
     pub cursor_updates_sent: u64,
     /// Total cursor updates received by client (v2.02 / ADR-088).
     pub cursor_updates_received: u64,
+    /// Squelch controller mode (0=auto, 1=aggressive, 2=disabled) (v2.03 / ADR-089).
+    pub squelch_mode: u8,
+    /// Indicates whether zero-motion squelch is actively suppressing video frames (v2.03 / ADR-089).
+    pub is_squelched: bool,
+    /// Cumulative count of video frames squelched/suppressed (v2.03 / ADR-089).
+    pub squelched_frames: u64,
 }
 
 impl ScreenStats {
+    /// Squelch controller mode.
+    pub fn squelch_mode(&self) -> ScreenSquelchMode {
+        ScreenSquelchMode::from_tag(self.squelch_mode)
+    }
+
     /// Active screen content profile resolved from profile tag.
     pub fn content_profile(&self) -> ScreenContentProfile {
         ScreenContentProfile::from_tag(self.profile_tag)
@@ -2217,6 +2245,403 @@ impl ScreenCursorController {
     }
 }
 
+/// Screen streaming adaptive squelch mode (v2.03 / ADR-089).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum ScreenSquelchMode {
+    /// Adaptive intelligent squelch: halts full-frame video push after 500ms of static screen,
+    /// waking instantly on damage and sending a refresh keepalive every 2.0s.
+    #[default]
+    Auto = 0,
+    /// Aggressive power/bandwidth saving squelch: squelches after 150ms with 5.0s keepalive.
+    Aggressive = 1,
+    /// Disabled / passthrough: continuously pushes video frames regardless of damage state.
+    Disabled = 2,
+}
+
+impl ScreenSquelchMode {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Aggressive => "aggressive",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub const fn tag(&self) -> u8 {
+        *self as u8
+    }
+
+    pub const fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => Self::Aggressive,
+            2 => Self::Disabled,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "aggressive" | "agg" | "aggro" => Some(Self::Aggressive),
+            "disabled" | "off" | "none" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ScreenSquelchMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for ScreenSquelchMode {
+    type Err = CoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_str_loose(s).ok_or(CoreError::ScreenFrame)
+    }
+}
+
+/// Bounding rectangle for detected dirty regions on screen (v2.03 / ADR-089).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScreenDamageRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl ScreenDamageRect {
+    pub const fn new(x: u16, y: u16, width: u16, height: u16) -> Self {
+        Self { x, y, width, height }
+    }
+}
+
+/// Summary report of dirty region evaluation across consecutive screen frames (v2.03 / ADR-089).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ScreenDamageReport {
+    pub dirty_pixels: u64,
+    pub total_pixels: u64,
+    pub dirty_ratio: f32,
+    pub num_dirty_blocks: usize,
+    pub total_blocks: usize,
+    pub is_static: bool,
+    pub bounding_rect: Option<ScreenDamageRect>,
+}
+
+impl ScreenDamageReport {
+    pub fn is_dirty(&self) -> bool {
+        !self.is_static
+    }
+
+    pub fn rect(&self) -> Option<ScreenDamageRect> {
+        self.bounding_rect
+    }
+}
+
+/// Grid-based dirty block damage detector for screen frames (v2.03 / ADR-089).
+#[derive(Debug, Clone, Default)]
+pub struct ScreenDamageTracker {
+    has_prior: bool,
+}
+
+impl ScreenDamageTracker {
+    pub fn new() -> Self {
+        Self { has_prior: false }
+    }
+
+    /// Evaluates damage between two RGBA8 frames of given width and height.
+    /// Operates on 32x32 pixel macroblocks for fast 64-bit comparison.
+    pub fn evaluate_rgba(
+        &mut self,
+        prev_rgba: &[u8],
+        curr_rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> ScreenDamageReport {
+        let total_pixels = (width as u64) * (height as u64);
+        if total_pixels == 0
+            || prev_rgba.len() != curr_rgba.len()
+            || prev_rgba.len() < (total_pixels as usize) * 4
+        {
+            return ScreenDamageReport {
+                total_pixels,
+                dirty_pixels: total_pixels,
+                dirty_ratio: 1.0,
+                num_dirty_blocks: 1,
+                total_blocks: 1,
+                is_static: false,
+                bounding_rect: Some(ScreenDamageRect {
+                    x: 0,
+                    y: 0,
+                    width: width as u16,
+                    height: height as u16,
+                }),
+            };
+        }
+
+        let block_w = SCREEN_DAMAGE_BLOCK_SIZE as u32;
+        let block_h = SCREEN_DAMAGE_BLOCK_SIZE as u32;
+        let grid_cols = width.div_ceil(block_w);
+        let grid_rows = height.div_ceil(block_h);
+        let total_blocks = (grid_cols * grid_rows) as usize;
+
+        let mut num_dirty_blocks = 0usize;
+        let mut dirty_pixels = 0u64;
+        let mut min_bx = u32::MAX;
+        let mut max_bx = 0u32;
+        let mut min_by = u32::MAX;
+        let mut max_by = 0u32;
+
+        let stride = (width * 4) as usize;
+
+        for by in 0..grid_rows {
+            let y_start = by * block_h;
+            let y_end = (y_start + block_h).min(height);
+            let bh = y_end - y_start;
+
+            for bx in 0..grid_cols {
+                let x_start = bx * block_w;
+                let x_end = (x_start + block_w).min(width);
+                let bw = x_end - x_start;
+                let row_bytes = (bw * 4) as usize;
+
+                let mut block_dirty = false;
+                for y in y_start..y_end {
+                    let offset = (y as usize) * stride + (x_start as usize) * 4;
+                    if prev_rgba[offset..offset + row_bytes] != curr_rgba[offset..offset + row_bytes]
+                    {
+                        block_dirty = true;
+                        break;
+                    }
+                }
+
+                if block_dirty {
+                    num_dirty_blocks += 1;
+                    dirty_pixels += (bw as u64) * (bh as u64);
+                    min_bx = min_bx.min(x_start);
+                    max_bx = max_bx.max(x_end);
+                    min_by = min_by.min(y_start);
+                    max_by = max_by.max(y_end);
+                }
+            }
+        }
+
+        let is_static = num_dirty_blocks == 0;
+        let dirty_ratio = if total_pixels > 0 {
+            (dirty_pixels as f32) / (total_pixels as f32)
+        } else {
+            0.0
+        };
+
+        let bounding_rect = if !is_static && min_bx < max_bx && min_by < max_by {
+            Some(ScreenDamageRect {
+                x: min_bx as u16,
+                y: min_by as u16,
+                width: (max_bx - min_bx) as u16,
+                height: (max_by - min_by) as u16,
+            })
+        } else {
+            None
+        };
+
+        self.has_prior = true;
+
+        ScreenDamageReport {
+            dirty_pixels,
+            total_pixels,
+            dirty_ratio,
+            num_dirty_blocks,
+            total_blocks,
+            is_static,
+            bounding_rect,
+        }
+    }
+
+    /// Evaluates damage based on an explicit boolean change hint (e.g. from capture driver or mock).
+    pub fn evaluate_hint(&mut self, is_dirty: bool, width: u32, height: u32) -> ScreenDamageReport {
+        let total_pixels = (width as u64) * (height as u64);
+        let block_w = SCREEN_DAMAGE_BLOCK_SIZE as u32;
+        let block_h = SCREEN_DAMAGE_BLOCK_SIZE as u32;
+        let grid_cols = width.div_ceil(block_w);
+        let grid_rows = height.div_ceil(block_h);
+        let total_blocks = (grid_cols * grid_rows) as usize;
+
+        if is_dirty {
+            ScreenDamageReport {
+                dirty_pixels: total_pixels,
+                total_pixels,
+                dirty_ratio: 1.0,
+                num_dirty_blocks: total_blocks,
+                total_blocks,
+                is_static: false,
+                bounding_rect: Some(ScreenDamageRect {
+                    x: 0,
+                    y: 0,
+                    width: width as u16,
+                    height: height as u16,
+                }),
+            }
+        } else {
+            ScreenDamageReport {
+                dirty_pixels: 0,
+                total_pixels,
+                dirty_ratio: 0.0,
+                num_dirty_blocks: 0,
+                total_blocks,
+                is_static: true,
+                bounding_rect: None,
+            }
+        }
+    }
+}
+
+/// Squelch dispatch decision returned on each frame candidate evaluation (v2.03 / ADR-089).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenSquelchDecision {
+    /// Proceed with encoding and transmitting the video frame.
+    SendFrame,
+    /// Suppress frame encoding and transmission because screen is static.
+    SquelchSkip,
+}
+
+/// Real-time telemetry and running counters for the squelch controller (v2.03 / ADR-089).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ScreenSquelchStats {
+    pub mode: ScreenSquelchMode,
+    pub is_squelched: bool,
+    pub frames_evaluated: u64,
+    pub frames_passed: u64,
+    pub frames_squelched: u64,
+    pub keepalive_frames: u64,
+    pub last_dirty_ratio: f32,
+    pub consecutive_static_frames: u64,
+}
+
+/// Zero-motion adaptive squelch controller (v2.03 / ADR-089).
+#[derive(Debug, Clone)]
+pub struct ScreenSquelchController {
+    mode: ScreenSquelchMode,
+    stats: ScreenSquelchStats,
+    last_change_us: u64,
+    last_sent_us: u64,
+}
+
+impl Default for ScreenSquelchController {
+    fn default() -> Self {
+        Self::new(ScreenSquelchMode::default())
+    }
+}
+
+impl ScreenSquelchController {
+    pub fn new(mode: ScreenSquelchMode) -> Self {
+        Self {
+            mode,
+            stats: ScreenSquelchStats {
+                mode,
+                ..Default::default()
+            },
+            last_change_us: 0,
+            last_sent_us: 0,
+        }
+    }
+
+    pub fn mode(&self) -> ScreenSquelchMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenSquelchMode) -> ScreenSquelchMode {
+        self.mode = mode;
+        self.stats.mode = mode;
+        mode
+    }
+
+    pub fn is_squelched(&self) -> bool {
+        self.stats.is_squelched
+    }
+
+    pub fn stats(&self) -> ScreenSquelchStats {
+        self.stats.clone()
+    }
+
+    /// Wake up immediately upon explicit user input or keyframe request.
+    pub fn force_wake(&mut self, now_us: u64) {
+        self.last_change_us = now_us;
+        self.stats.is_squelched = false;
+        self.stats.consecutive_static_frames = 0;
+    }
+
+    /// Evaluate candidate frame against damage state and rate limits.
+    pub fn evaluate_decision(
+        &mut self,
+        is_dirty: bool,
+        dirty_ratio: f32,
+        now_us: u64,
+    ) -> ScreenSquelchDecision {
+        if self.mode == ScreenSquelchMode::Disabled {
+            self.stats.frames_evaluated = self.stats.frames_evaluated.saturating_add(1);
+            self.stats.frames_passed = self.stats.frames_passed.saturating_add(1);
+            self.stats.is_squelched = false;
+            self.stats.last_dirty_ratio = dirty_ratio;
+            self.last_sent_us = now_us;
+            return ScreenSquelchDecision::SendFrame;
+        }
+
+        self.stats.frames_evaluated = self.stats.frames_evaluated.saturating_add(1);
+        self.stats.last_dirty_ratio = dirty_ratio;
+
+        if is_dirty {
+            self.last_change_us = now_us;
+            self.last_sent_us = now_us;
+            self.stats.is_squelched = false;
+            self.stats.consecutive_static_frames = 0;
+            self.stats.frames_passed = self.stats.frames_passed.saturating_add(1);
+            ScreenSquelchDecision::SendFrame
+        } else {
+            self.stats.consecutive_static_frames =
+                self.stats.consecutive_static_frames.saturating_add(1);
+            let (delay_us, keepalive_us) = match self.mode {
+                ScreenSquelchMode::Auto => (
+                    SCREEN_SQUELCH_AUTO_DELAY_US,
+                    SCREEN_SQUELCH_AUTO_KEEPALIVE_US,
+                ),
+                ScreenSquelchMode::Aggressive => (
+                    SCREEN_SQUELCH_AGGRESSIVE_DELAY_US,
+                    SCREEN_SQUELCH_AGGRESSIVE_KEEPALIVE_US,
+                ),
+                ScreenSquelchMode::Disabled => (0, 0),
+            };
+
+            // Check if we entered squelch state
+            if self.last_change_us > 0 && now_us.saturating_sub(self.last_change_us) >= delay_us {
+                self.stats.is_squelched = true;
+                // Periodic keepalive check
+                if self.last_sent_us == 0
+                    || now_us.saturating_sub(self.last_sent_us) >= keepalive_us
+                {
+                    self.last_sent_us = now_us;
+                    self.stats.frames_passed = self.stats.frames_passed.saturating_add(1);
+                    self.stats.keepalive_frames = self.stats.keepalive_frames.saturating_add(1);
+                    ScreenSquelchDecision::SendFrame
+                } else {
+                    self.stats.frames_squelched =
+                        self.stats.frames_squelched.saturating_add(1);
+                    ScreenSquelchDecision::SquelchSkip
+                }
+            } else {
+                // Grace transition window
+                self.stats.is_squelched = false;
+                self.last_sent_us = now_us;
+                self.stats.frames_passed = self.stats.frames_passed.saturating_add(1);
+                ScreenSquelchDecision::SendFrame
+            }
+        }
+    }
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -2233,6 +2658,7 @@ pub struct ScreenSender {
     quality_controller: ScreenQualityController,
     matrix_coordinator: ScreenMatrixCoordinator,
     cursor_controller: ScreenCursorController,
+    squelch_controller: ScreenSquelchController,
 }
 
 impl Default for ScreenSender {
@@ -2249,6 +2675,7 @@ impl ScreenSender {
         let quality_controller = ScreenQualityController::default();
         let matrix_coordinator = ScreenMatrixCoordinator::default();
         let cursor_controller = ScreenCursorController::default();
+        let squelch_controller = ScreenSquelchController::default();
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -2261,6 +2688,9 @@ impl ScreenSender {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
             cursor_shape: CursorShape::Arrow.tag(),
+            squelch_mode: squelch_controller.mode().tag(),
+            is_squelched: squelch_controller.is_squelched(),
+            squelched_frames: 0,
             ..Default::default()
         };
         Self {
@@ -2276,6 +2706,7 @@ impl ScreenSender {
             quality_controller,
             matrix_coordinator,
             cursor_controller,
+            squelch_controller,
         }
     }
 
@@ -2435,6 +2866,8 @@ impl ScreenSender {
             }
             ControlMsg::KeyframeRequest => {
                 self.stats.keyframes_requested = self.stats.keyframes_requested.saturating_add(1);
+                self.squelch_controller.force_wake(now_us);
+                self.stats.is_squelched = false;
                 Ok(None)
             }
         }
@@ -2463,6 +2896,32 @@ impl ScreenSender {
 
         self.pending.push_back(ScreenFrame { seq, ..frame });
         Some(seq)
+    }
+
+    /// Queue a frame while streaming evaluated against dirty region damage and adaptive squelch (v2.03 / ADR-089).
+    /// If screen is static and in squelch window, frame encoding/transmission is suppressed (returns None).
+    pub fn push_with_damage_time(
+        &mut self,
+        frame: ScreenFrame,
+        is_dirty: bool,
+        dirty_ratio: f32,
+        now_us: u64,
+    ) -> Option<u64> {
+        if self.state != ScreenState::Streaming {
+            return None;
+        }
+        let decision = self
+            .squelch_controller
+            .evaluate_decision(is_dirty, dirty_ratio, now_us);
+        let squelch_stats = self.squelch_controller.stats();
+        self.stats.squelch_mode = squelch_stats.mode.tag();
+        self.stats.is_squelched = squelch_stats.is_squelched;
+        self.stats.squelched_frames = squelch_stats.frames_squelched;
+
+        match decision {
+            ScreenSquelchDecision::SendFrame => self.push_with_time(frame, now_us),
+            ScreenSquelchDecision::SquelchSkip => None,
+        }
     }
 
     /// Record a frame dropped on sender side (e.g. due to congestion or backpressure).
@@ -2698,6 +3157,45 @@ impl ScreenSender {
         )
     }
 
+    /// Screen streaming adaptive squelch mode (v2.03 / ADR-089).
+    pub fn squelch_mode(&self) -> ScreenSquelchMode {
+        self.squelch_controller.mode()
+    }
+
+    /// Explicitly configure screen streaming adaptive squelch mode.
+    pub fn set_squelch_mode(&mut self, mode: ScreenSquelchMode) -> ScreenSquelchMode {
+        let actual = self.squelch_controller.set_mode(mode);
+        self.stats.squelch_mode = actual.tag();
+        self.stats.is_squelched = self.squelch_controller.is_squelched();
+        actual
+    }
+
+    /// Whether frame transmission is currently squelched due to static screen.
+    pub fn is_squelched(&self) -> bool {
+        self.squelch_controller.is_squelched()
+    }
+
+    /// Real-time squelch controller telemetry and statistics.
+    pub fn squelch_stats(&self) -> ScreenSquelchStats {
+        self.squelch_controller.stats()
+    }
+
+    /// Access reference to internal squelch controller.
+    pub fn squelch_controller(&self) -> &ScreenSquelchController {
+        &self.squelch_controller
+    }
+
+    /// Access mutable reference to internal squelch controller.
+    pub fn squelch_controller_mut(&mut self) -> &mut ScreenSquelchController {
+        &mut self.squelch_controller
+    }
+
+    /// Wake up squelch controller immediately (e.g. upon user input or client interaction).
+    pub fn force_wake_squelch(&mut self, now_us: u64) {
+        self.squelch_controller.force_wake(now_us);
+        self.stats.is_squelched = false;
+    }
+
     pub fn drain(&mut self) -> Vec<ScreenFrame> {
         self.pending.drain(..).collect()
     }
@@ -2713,6 +3211,9 @@ impl ScreenSender {
         self.stats.in_flight = 0;
         self.fps_pacer.reset();
         self.cursor_controller.reset();
+        self.squelch_controller = ScreenSquelchController::new(self.squelch_controller.mode());
+        self.stats.is_squelched = false;
+        self.stats.squelched_frames = 0;
     }
 }
 
@@ -4406,4 +4907,205 @@ mod tests {
         receiver.on_peer_gone();
         assert_eq!(receiver.current_cursor(), None);
     }
+
+    #[test]
+    fn screen_damage_tracker_clean_and_dirty_eval() {
+        let mut tracker = ScreenDamageTracker::new();
+        let w = 128u32;
+        let h = 128u32;
+        let block_w = (w + SCREEN_DAMAGE_BLOCK_SIZE as u32 - 1) / SCREEN_DAMAGE_BLOCK_SIZE as u32;
+        let block_h = (h + SCREEN_DAMAGE_BLOCK_SIZE as u32 - 1) / SCREEN_DAMAGE_BLOCK_SIZE as u32;
+        let total_blocks = (block_w * block_h) as usize;
+        assert_eq!(total_blocks, 16);
+
+        // 1. Initial frame comparison with empty previous buffer -> full dirty
+        let mut curr = vec![0x11u8; (w * h * 4) as usize];
+        let rep1 = tracker.evaluate_rgba(&[], &curr, w, h);
+        assert!(rep1.is_dirty());
+        assert_eq!(rep1.num_dirty_blocks, 1); // fallback returns 1 whole dirty block covering full rect
+        assert_eq!(rep1.dirty_pixels, 128 * 128);
+        assert!((rep1.dirty_ratio - 1.0).abs() < 1e-4);
+        assert_eq!(rep1.rect(), Some(ScreenDamageRect::new(0, 0, 128, 128)));
+
+        // 2. Second frame comparison with identical buffer -> clean (zero dirty)
+        let rep2 = tracker.evaluate_rgba(&curr, &curr, w, h);
+        assert!(!rep2.is_dirty());
+        assert_eq!(rep2.num_dirty_blocks, 0);
+        assert_eq!(rep2.total_blocks, 16);
+        assert_eq!(rep2.dirty_pixels, 0);
+        assert_eq!(rep2.dirty_ratio, 0.0);
+        assert_eq!(rep2.rect(), None);
+
+        // 3. Modify single pixel in macroblock (1, 1) -> (x: 32..64, y: 32..64)
+        let prev = curr.clone();
+        let target_idx = ((35 * w + 40) * 4) as usize;
+        curr[target_idx] = 0x99;
+        let rep3 = tracker.evaluate_rgba(&prev, &curr, w, h);
+        assert!(rep3.is_dirty());
+        assert_eq!(rep3.num_dirty_blocks, 1);
+        assert_eq!(rep3.total_blocks, 16);
+        assert_eq!(rep3.dirty_pixels, 32 * 32);
+        assert_eq!(rep3.dirty_ratio, 1.0 / 16.0);
+        assert_eq!(rep3.rect(), Some(ScreenDamageRect::new(32, 32, 32, 32)));
+
+        // 4. Modify top-left (0, 0) and bottom-right (127, 127) -> bounding box covers whole screen
+        let prev = curr.clone();
+        curr[0] = 0xAA;
+        let last_idx = ((127 * w + 127) * 4) as usize;
+        curr[last_idx] = 0xBB;
+        let rep4 = tracker.evaluate_rgba(&prev, &curr, w, h);
+        assert!(rep4.is_dirty());
+        assert_eq!(rep4.num_dirty_blocks, 2);
+        assert_eq!(rep4.rect(), Some(ScreenDamageRect::new(0, 0, 128, 128)));
+    }
+
+    #[test]
+    fn screen_squelch_modes_and_decisions() {
+        // 1. Parsing and serialization
+        assert_eq!("auto".parse::<ScreenSquelchMode>().unwrap(), ScreenSquelchMode::Auto);
+        assert_eq!("aggressive".parse::<ScreenSquelchMode>().unwrap(), ScreenSquelchMode::Aggressive);
+        assert_eq!("agg".parse::<ScreenSquelchMode>().unwrap(), ScreenSquelchMode::Aggressive);
+        assert_eq!("disabled".parse::<ScreenSquelchMode>().unwrap(), ScreenSquelchMode::Disabled);
+        assert_eq!("off".parse::<ScreenSquelchMode>().unwrap(), ScreenSquelchMode::Disabled);
+        assert!("invalid".parse::<ScreenSquelchMode>().is_err());
+        assert_eq!(ScreenSquelchMode::from_tag(0), ScreenSquelchMode::Auto);
+        assert_eq!(ScreenSquelchMode::from_tag(1), ScreenSquelchMode::Aggressive);
+        assert_eq!(ScreenSquelchMode::from_tag(2), ScreenSquelchMode::Disabled);
+
+        // 2. Auto mode lifecycle
+        let mut ctrl = ScreenSquelchController::new(ScreenSquelchMode::Auto);
+        let t0 = 1_000_000u64;
+
+        // Dirty frame -> SendFrame
+        assert_eq!(
+            ctrl.evaluate_decision(true, 0.5, t0),
+            ScreenSquelchDecision::SendFrame
+        );
+        assert!(!ctrl.stats().is_squelched);
+        assert_eq!(ctrl.stats().frames_passed, 1);
+        assert_eq!(ctrl.stats().consecutive_static_frames, 0);
+
+        // Static frame within 500ms grace window (t0 + 200ms) -> SendFrame
+        let t1 = t0 + 200_000;
+        assert_eq!(
+            ctrl.evaluate_decision(false, 0.0, t1),
+            ScreenSquelchDecision::SendFrame
+        );
+        assert!(!ctrl.stats().is_squelched);
+        assert_eq!(ctrl.stats().frames_passed, 2);
+        assert_eq!(ctrl.stats().consecutive_static_frames, 1);
+
+        // Static frame at t0 + 500ms -> Squelch activated, frame skipped
+        let t2 = t0 + 500_000;
+        assert_eq!(
+            ctrl.evaluate_decision(false, 0.0, t2),
+            ScreenSquelchDecision::SquelchSkip
+        );
+        assert!(ctrl.stats().is_squelched);
+        assert_eq!(ctrl.stats().frames_squelched, 1);
+        assert_eq!(ctrl.stats().consecutive_static_frames, 2);
+
+        // Repeated static frames remain squelched
+        for i in 1..10 {
+            let t = t2 + i * 33_333;
+            assert_eq!(
+                ctrl.evaluate_decision(false, 0.0, t),
+                ScreenSquelchDecision::SquelchSkip
+            );
+        }
+        assert_eq!(ctrl.stats().frames_squelched, 10);
+
+        // Keepalive heartbeat fires after 2.0s since last sent frame
+        let t_keepalive = t0 + 200_000 + SCREEN_SQUELCH_AUTO_KEEPALIVE_US;
+        assert_eq!(
+            ctrl.evaluate_decision(false, 0.0, t_keepalive),
+            ScreenSquelchDecision::SendFrame
+        );
+        assert_eq!(ctrl.stats().keepalive_frames, 1);
+        assert_eq!(ctrl.stats().frames_passed, 3);
+        assert!(ctrl.stats().is_squelched);
+
+        // User input or force_wake awakens immediately
+        ctrl.force_wake(t_keepalive + 10_000);
+        assert!(!ctrl.stats().is_squelched);
+        assert_eq!(
+            ctrl.evaluate_decision(false, 0.0, t_keepalive + 10_000),
+            ScreenSquelchDecision::SendFrame
+        );
+
+        // 3. Aggressive mode squelches after 150ms
+        let mut agg = ScreenSquelchController::new(ScreenSquelchMode::Aggressive);
+        assert_eq!(
+            agg.evaluate_decision(true, 1.0, 100_000),
+            ScreenSquelchDecision::SendFrame
+        );
+        assert_eq!(
+            agg.evaluate_decision(false, 0.0, 100_000 + 100_000),
+            ScreenSquelchDecision::SendFrame
+        );
+        // Squelched at 150ms
+        assert_eq!(
+            agg.evaluate_decision(false, 0.0, 100_000 + 150_000),
+            ScreenSquelchDecision::SquelchSkip
+        );
+        assert!(agg.stats().is_squelched);
+
+        // 4. Disabled mode never squelches
+        let mut dis = ScreenSquelchController::new(ScreenSquelchMode::Disabled);
+        assert_eq!(
+            dis.evaluate_decision(true, 1.0, 100_000),
+            ScreenSquelchDecision::SendFrame
+        );
+        assert_eq!(
+            dis.evaluate_decision(false, 0.0, 100_000 + 600_000),
+            ScreenSquelchDecision::SendFrame
+        );
+        assert!(!dis.stats().is_squelched);
+    }
+
+    #[test]
+    fn screen_sender_squelch_integration() {
+        let mut s = ScreenSender::new();
+        assert_eq!(s.squelch_mode(), ScreenSquelchMode::Auto);
+        assert_eq!(s.stats().squelch_mode, ScreenSquelchMode::Auto.tag());
+
+        // Mode mutation
+        s.set_squelch_mode(ScreenSquelchMode::Aggressive);
+        assert_eq!(s.squelch_mode(), ScreenSquelchMode::Aggressive);
+        assert_eq!(s.stats().squelch_mode, ScreenSquelchMode::Aggressive.tag());
+
+        s.set_squelch_mode(ScreenSquelchMode::Auto);
+        s.on_peer_connected();
+        s.allow();
+        s.on_control(ControlMsg::Start).unwrap();
+        assert!(s.state().is_streaming());
+
+        let rect = ScreenRect::new(0, 0, 64, 64).unwrap();
+        let frame = ScreenFrame::raw(1, rect, PixelFormat::Bgra8, vec![0u8; 64 * 64 * 4]).unwrap();
+
+        // 1. Initial dirty push
+        let seq = s.push_with_damage_time(frame.clone(), true, 1.0, 1_000_000);
+        assert_eq!(seq, Some(1));
+        assert_eq!(s.stats().sent, 1);
+        assert!(!s.stats().is_squelched);
+
+        // 2. Static push within 500ms
+        let seq = s.push_with_damage_time(frame.clone(), false, 0.0, 1_200_000);
+        assert_eq!(seq, Some(2));
+        assert_eq!(s.stats().sent, 2);
+
+        // 3. Static push past 500ms -> Squelch skips
+        let seq = s.push_with_damage_time(frame.clone(), false, 0.0, 1_600_000);
+        assert_eq!(seq, None);
+        assert_eq!(s.stats().sent, 2);
+        assert!(s.stats().is_squelched);
+        assert_eq!(s.stats().squelched_frames, 1);
+
+        // 4. On-demand IDR keyframe wakes squelch
+        s.on_control_with_time(ControlMsg::KeyframeRequest, 1_605_000).unwrap();
+        assert!(!s.stats().is_squelched);
+        let seq = s.push_with_damage_time(frame.clone(), false, 0.0, 1_610_000);
+        assert_eq!(seq, Some(3));
+    }
 }
+

@@ -79,6 +79,7 @@ fn cfg(
         screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
         screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
         screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
+        screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
         screen_sink: None,
         input_sink: None,
     }
@@ -2346,6 +2347,168 @@ async fn m5_12_screen_hardware_cursor_decoupling() {
     assert!(visitor_status.cursor_visible);
     assert_eq!(visitor_status.cursor_shape, "ibeam");
     assert_eq!(visitor_status.cursor_updates_received, 2);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_13_screen_dirty_rect_squelch() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial squelch status on host: defaults to Auto mode (ADR-089)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/squelch")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_node::ScreenSquelchReport = serde_json::from_slice(&b).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.mode, "auto");
+    assert!(!init_rep.is_squelched);
+    assert_eq!(init_rep.frames_evaluated, 0);
+    assert_eq!(init_rep.frames_passed, 0);
+    assert_eq!(init_rep.frames_squelched, 0);
+
+    // 2. Dynamic mode configuration via POST /api/screen/squelch
+    let agg_payload = serde_json::json!({ "mode": "aggressive" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/squelch",
+        &serde_json::to_vec(&agg_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let agg_rep: tetherly_node::ScreenSquelchReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(agg_rep.mode, "aggressive");
+
+    let dis_payload = serde_json::json!({ "mode": "disabled" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/squelch",
+        &serde_json::to_vec(&dis_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let dis_rep: tetherly_node::ScreenSquelchReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(dis_rep.mode, "disabled");
+
+    // Restore to auto via query string (?mode=auto)
+    let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/squelch?mode=auto", b"")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let auto_rep: tetherly_node::ScreenSquelchReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(auto_rep.mode, "auto");
+
+    // 3. Visitor opens screen channel, host allows, and visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Send video frame from host
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received first frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Test Keyframe Request waking squelch
+    let (c, _) = tetherly_node::loopback_post(visitor_ui, "/api/screen/keyframe", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    // 6. Test decoupled hardware cursor continues to stream at high frequency even if screen is static
+    let cur_update = tetherly_core::ScreenCursorUpdate {
+        seq: 0,
+        x: 450,
+        y: 600,
+        visible: true,
+        shape: tetherly_core::CursorShape::Crosshair,
+        hotspot_x: 0,
+        hotspot_y: 0,
+        width: 0,
+        height: 0,
+        custom_rgba: None,
+    };
+    let sent_cur = host.screen_send_cursor(cur_update).await.unwrap();
+    assert!(sent_cur, "decoupled cursor update sent during static screen");
+
+    // Wait for cursor update on visitor
+    let wait_cursor = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/cursor")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let cur_rep: tetherly_node::ScreenCursorReport = serde_json::from_slice(&b).unwrap();
+        if cur_rep.updates_received >= 1 && cur_rep.shape == "crosshair" {
+            assert_eq!(cur_rep.x, 450);
+            assert_eq!(cur_rep.y, 600);
+            break;
+        }
+        if wait_cursor.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received decoupled cursor update during squelch test");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 7. Verify status report contains squelch telemetry fields
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_status.squelch_mode, "auto");
 
     host.shutdown();
     visitor.shutdown();

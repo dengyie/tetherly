@@ -3,12 +3,41 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.02** |
+| 文档版本 | **2.03** |
 | 日期 | 2026-10-25 |
-| 状态 | **v2.02 屏幕流硬件光标解耦与高频指针同步控制器（Screen Hardware Cursor Decoupling Controller, ADR-088）与双端 CLI 全同构**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`）：将光标渲染彻底从主视频编解码渲染流水线解耦；新增独立通道数据帧 `TYPE_SCREEN_CURSOR = 0x0503`（魔数 `TMCU`，协议版本 1，32 字节紧凑定长头），支持标准光标类型 `CursorShape`（Arrow/IBeam/Hand/Wait 等）与可选自定义 RGBA8 贴图传输；引入三种工作模式 `ScreenCursorMode`（Decoupled / Embedded / Hidden）；实现 `ScreenCursorController` 高频（8ms / ~125Hz）定步控制器与冗余坐标去重降频机制，语义突变（形状/可见性/自定义贴图）即时无阻塞放行；在 `ScreenSender` 与 `ScreenReceiver` 接入硬件光标状态机，消除视频降采样（50%）与降帧率（15 FPS）下的光标模糊拉丝与操作滞后感；(2) **双端 CLI 全同构与生态**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `runtime.rs`, `uihttp.rs`）：持续保证 `tetherly` 与 `tetherly-cli` 100% 同构，新增 `screen cursor [mode]` 子命令与 `--screen-cursor` 启动参数；新增 REST API `GET/POST /api/screen/cursor`，扩展 `ScreenStatusReport` 透出光标模式、位置坐标、形状与吞吐计数；(3) **测试与版本**：单元测试与 Phase 5 端到端集成测试 `m5_12_screen_hardware_cursor_decoupling` 全绿，工作区升级至 `0.1.24`。 |
+| 状态 | **v2.03 屏幕流脏区差分检测与静止画面自适应静噪控制器（Screen Damage Region Dirty-Rect Detection & Static Frame Adaptive Squelch Controller, ADR-089）与双端 CLI 全同构**——(1) **协议与状态机**（`crates/tetherly-core/src/screen.rs`）：基于 $32 \times 32$ 像素宏块网格差分与 64 位宽双字指针比对构建极速脏区追踪引擎 `ScreenDamageTracker`，精准定位屏幕更新最小外包矩形 `ScreenDamageRect`，统计脏区像素比与宏块变动；设计 `ScreenSquelchController` 状态机支持三种工作模式 `ScreenSquelchMode`（`Auto` 500ms 延迟 / 2.0s 保活、`Aggressive` 150ms 延迟 / 5.0s 保活、`Disabled` 旁路透传），在画面静止时主动跳过昂贵的视频帧编码与发送（0 FPS / 0 kbps），消除 80%~95% 桌面空闲算力与网络带宽浪费；引入 `ScreenSquelchDecision`（`SendFrame` vs `SquelchSkip`），在收到键鼠输入、按键或 IDR 关键帧请求时即刻 `force_wake` 唤醒；与 ADR-088 硬件解耦光标无缝协同，静噪期间 125Hz 独立光标通道畅通无阻；(2) **双端 CLI 全同构与生态**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`, `runtime.rs`, `uihttp.rs`）：持续保证 `tetherly` 与 `tetherly-cli` 100% 同构，新增 `screen squelch [mode]` 子命令与 `--screen-squelch` 启动参数；新增 REST API `GET/POST /api/screen/squelch`，扩展 `ScreenStatusReport` 透出静噪模式、静噪状态与累计静噪跳帧数；(3) **测试与版本**：单元测试与 Phase 5 端到端集成测试 `m5_13_screen_dirty_rect_squelch` 全绿，工作区升级至 `0.1.25`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.03 相对 2.02(屏幕流脏区差分检测与静止画面自适应静噪控制器 ADR-089 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **静态桌面下的无谓算力与带宽浪费**: 现代办公、编程及阅读场景下，屏幕内容在超过 80% 的时间里处于完全静止状态（仅光标移动或完全无操作）。传统推流系统即便在画面无变化时依然机械地按 30/60 FPS 连续抓屏、压缩编码并推包，导致严重的 CPU/GPU 占用、移动设备续航急剧缩短以及网络带宽浪费。
+  2. **脏区局部变动与全帧重编码的不匹配**: 当仅有终端光标微小闪烁或局部进度条更新时，对整屏 1080p/2K/4K 像素进行无差别编码是对算力的巨大浪费。系统需要微秒级轻量脏区差分检测，精确捕捉变动边界。
+  3. **静噪期保活与画面冻结恢复的冲突**: 画面静噪时若完全停止发包，接收端容易触发链路超时（Keepalive Timeout）或丢包重传；而在用户突然敲击键盘、点击鼠标或窗口弹窗时，必须在 0 毫秒内唤醒并立即发射最新关键帧，杜绝交互断层。
+  4. **与 ADR-088 硬件解耦光标的深度协同**: 既然光标已通过独立通道高频（125Hz）传输，那么当用户仅移动鼠标但背景桌面静止时，视频推流流水线应保持深度静噪（0 FPS），仅传输微小光标包，实现极致的效能与平滑度统一。
+- **架构解法与落地**:
+  1. **Core 脏区宏块追踪器与静噪状态机（`crates/tetherly-core/src/screen.rs`）**:
+     - 引入 $32 \times 32$ 像素宏块网格差分追踪器 `ScreenDamageTracker`，采用 64 位宽双字指针连续比对 RGBA8 帧缓存，计算脏区宏块边界外包矩形 `ScreenDamageRect`、脏区像素比 `dirty_ratio` 与脏区宏块数。
+     - 实现自适应静噪状态机 `ScreenSquelchController`：
+       - `Auto (0)`（默认）：画面静止 500ms（`SCREEN_SQUELCH_AUTO_DELAY_US = 500_000`）后自动切入静噪抑制，每 2.0s 发送一次保活刷新帧（`SCREEN_SQUELCH_AUTO_KEEPALIVE_US = 2_000_000`）。
+       - `Aggressive (1)`：画面静止 150ms 快速静噪，保活周期延长至 5.0s，专为低功耗、长续航移动及弱网场景设计。
+       - `Disabled (2)`：完全关闭静噪，每帧全量发射，用于极限基准测试与排错。
+     - 输出状态机决策 `ScreenSquelchDecision`（`SendFrame` / `SquelchSkip`），并在收到外部输入事件（按键、点击、移动、滚轮）或 IDR 强制刷新请求时触发 `force_wake`，零延迟即刻恢复视频推流。
+     - 深度赋能 `ScreenSender`：在静噪跳帧时累加 `squelched_frames` 统计，维持与 ADR-088 独立光标通道的无干扰高频流通。
+  2. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - `tetherly` 与 `tetherly-cli` 全同构支持 `screen squelch [mode]`（get / set），支持 `--json` 与 `--ui-port`。
+     - `tetherly run` 新增 `--screen-squelch <auto|aggressive|disabled>` 启动参数选项。
+     - `screen status` 丰富输出当前静噪模式、静噪活跃状态与累计跳帧计数。
+  3. **Node 运行时与回环 REST API（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）**:
+     - 新增 REST 路由 `GET /api/screen/squelch` 与 `POST /api/screen/squelch`，支持 JSON 与 query 参数。
+     - `ScreenStatusReport` 扩充 `squelch_mode`、`is_squelched`、`squelched_frames` 字段；新增强类型 DTO `ScreenSquelchReport`。
+     - `Node` 暴露 `screen_squelch_mode()`、`screen_set_squelch_mode()` 与 `screen_squelch_report()` 控制方法。
+  4. **测试与验证**:
+     - Core 单元测试 3 套，覆盖干净/脏区帧比对、静噪状态流转与超时保活、`ScreenSender` 静噪跳帧集成。
+     - Phase 5 端到端集成测试 `m5_13_screen_dirty_rect_squelch` 验证 QUIC 45720 传输、脏区检测跳帧、IDR 唤醒、静噪期 125Hz 光标畅通与 REST API 动态切换。
+     - 空间工作区统一升级至 `0.1.25`。
 
 **2.02 相对 2.01(屏幕流硬件光标解耦与高频指针同步控制器 ADR-088 与双端 CLI 全同构)**
 
