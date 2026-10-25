@@ -58,7 +58,8 @@ pub use screen::{
 };
 pub use telemetry::{ChannelTrafficDto, ProtocolMessagesDto, TrafficReport, TrafficTelemetry};
 pub use tetherly_core::{
-    ScreenFecMode, ScreenFecReport, ScreenPacerMode, ScreenPacerReport, ScreenPacerStats,
+    ScreenBandwidthUsageState, ScreenFecMode, ScreenFecReport, ScreenPacerMode, ScreenPacerReport,
+    ScreenPacerStats, ScreenTrendlineMode, ScreenTrendlineReport, ScreenTrendlineStats,
 };
 
 #[cfg(windows)]

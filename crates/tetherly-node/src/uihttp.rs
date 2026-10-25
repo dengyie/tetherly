@@ -4355,6 +4355,45 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 json_ok(&rep)
             }
         }
+        // Delay-based congestion controller & trendline filter (v2.06 / ADR-092).
+        ("GET", "/api/screen/trendline") => {
+            let rep = node.screen_trendline_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/trendline") => {
+            #[derive(serde::Deserialize)]
+            struct TrendlineBody {
+                mode: Option<String>,
+                trendline_mode: Option<String>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TrendlineBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.clone().or_else(|| b.trendline_mode.clone()))
+                .or_else(|| qmap.get("mode").cloned())
+                .or_else(|| qmap.get("trendline_mode").cloned());
+
+            if let Some(m_str) = mode_str {
+                match m_str.parse::<tetherly_core::ScreenTrendlineMode>() {
+                    Ok(mode) => {
+                        let rep = node.screen_set_trendline_mode(mode);
+                        json_ok(&rep)
+                    }
+                    Err(_) => err(
+                        400,
+                        "invalid trendline mode: expected auto, aggressive, conservative, or disabled",
+                    ),
+                }
+            } else {
+                let rep = node.screen_trendline_report();
+                json_ok(&rep)
+            }
+        }
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -8250,6 +8289,7 @@ mod tests {
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
+            screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -9545,6 +9585,79 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/screen/pacer HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_trendline_endpoints() {
+        let (node, dir) = temp_test_node("screen_trendline");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/trendline default
+        let (code, body) = loopback_get(port, "/api/screen/trendline").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["mode"], "auto");
+        assert_eq!(rep["state"], "normal");
+        assert_eq!(rep["overuse_count"], 0);
+
+        // 2. POST /api/screen/trendline with JSON {"mode": "aggressive"}
+        let update_agg = serde_json::json!({ "mode": "aggressive" });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/trendline",
+            &serde_json::to_vec(&update_agg).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["mode"], "aggressive");
+
+        // 3. POST /api/screen/trendline with query param ?mode=conservative
+        let (code, body) = loopback_post(port, "/api/screen/trendline?mode=conservative", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["mode"], "conservative");
+
+        // 4. POST /api/screen/trendline with query param ?mode=disabled
+        let (code, body) = loopback_post(port, "/api/screen/trendline?mode=disabled", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["mode"], "disabled");
+
+        // 5. POST /api/screen/trendline with query param ?mode=auto
+        let (code, body) = loopback_post(port, "/api/screen/trendline?mode=auto", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["mode"], "auto");
+
+        // 6. Invalid mode returns 400
+        let (code, _) = loopback_post(port, "/api/screen/trendline?mode=invalid_trendline", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+
+        // 7. Host header 403 test on /api/screen/trendline
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/trendline HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();

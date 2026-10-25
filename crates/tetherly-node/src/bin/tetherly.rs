@@ -113,6 +113,10 @@ enum Cmd {
         /// `aggressive` burst 2 pkts, smooth over 100% frame interval; `disabled` passthrough.
         #[arg(long, default_value = "auto")]
         screen_pacer: String,
+        /// Screen Streaming Delay-Based Congestion Controller and Bufferbloat Trendline Filter mode (ADR-092):
+        /// `auto` (default) dynamic RTT-scaled gamma; `aggressive` (6.0 us/frame); `conservative` (25.0 us/frame); `disabled`.
+        #[arg(long, default_value = "auto")]
+        screen_trendline: String,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -2149,6 +2153,17 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming delay-based congestion controller & trendline filter (v2.06 / ADR-092).
+    Trendline {
+        /// Target trendline mode: `auto`, `aggressive`, `conservative`, or `disabled`. If omitted, displays current trendline status.
+        mode: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3949,6 +3964,7 @@ async fn main() -> Result<()> {
             screen_squelch,
             screen_fec,
             screen_pacer,
+            screen_trendline,
             file_port,
             input_port,
             screen_port,
@@ -4061,6 +4077,17 @@ async fn main() -> Result<()> {
                 Ok(mode) => mode,
                 Err(_) => {
                     anyhow::bail!("--screen-pacer must be `auto`, `aggressive`, or `disabled`")
+                }
+            };
+            cfg.screen_trendline_mode = match screen_trendline
+                .trim()
+                .parse::<tetherly_core::ScreenTrendlineMode>()
+            {
+                Ok(mode) => mode,
+                Err(_) => {
+                    anyhow::bail!(
+                        "--screen-trendline must be `auto`, `aggressive`, `conservative`, or `disabled`"
+                    )
                 }
             };
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
@@ -6235,6 +6262,15 @@ async fn main() -> Result<()> {
                             rep.pacer_avg_delay_us
                         );
                     }
+                    if !rep.trendline_mode.is_empty() {
+                        println!(
+                            "  Trendline:    {} [state: {}] (slope: {:.2} us/frame, overuse_cnt: {})",
+                            rep.trendline_mode,
+                            rep.trendline_state,
+                            rep.trendline_slope_us,
+                            rep.trendline_overuse_count
+                        );
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -6799,6 +6835,60 @@ async fn main() -> Result<()> {
                         println!("  Bursts Smoothed:      {}", rep.bursts_smoothed);
                         println!("  Average Delay:        {} us", rep.avg_delay_us);
                         println!("  Last Packet Delay:    {} us", rep.last_delay_us);
+                    }
+                }
+            }
+            ScreenCmd::Trendline {
+                mode,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some();
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    tetherly_node::loopback_post(ui_port, "/api/screen/trendline", &body).await
+                } else {
+                    tetherly_node::loopback_get(ui_port, "/api/screen/trendline").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen trendline query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_core::ScreenTrendlineReport =
+                        serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    if has_update {
+                        println!("Screen delay trendline filter mode updated: {}", rep.mode);
+                    } else {
+                        println!("Screen Delay-Based Congestion Controller & Trendline Filter (ADR-092):");
+                        println!("  Trendline Mode:       {}", rep.mode);
+                        println!("  Usage State:          {}", rep.state);
+                        println!(
+                            "  Current Slope:        {:.2} us/frame",
+                            rep.current_slope_us_per_frame
+                        );
+                        println!(
+                            "  Threshold:            {:.2} us/frame",
+                            rep.threshold_us_per_frame
+                        );
+                        println!("  Accumulated Delay:    {} us", rep.accumulated_delay_us);
+                        println!("  Overuse Events:       {}", rep.overuse_count);
+                        println!("  Underuse Events:      {}", rep.underuse_count);
                     }
                 }
             }

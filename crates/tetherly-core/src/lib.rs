@@ -149,8 +149,8 @@ pub use replay::ReplayGuard;
 pub use screen::{
     cauchy_coeff, downscale_bgra8, downscale_frame, gf_div, gf_inv, gf_mul, is_screen_type,
     ControlMsg, CursorShape, MemoryScreenSink, MemoryScreenSource, NetworkHealth, PixelFormat,
-    ScreenAssembler, ScreenContentProfile, ScreenCursorController, ScreenCursorMode,
-    ScreenCursorStats, ScreenCursorUpdate, ScreenDamageRect, ScreenDamageReport,
+    ScreenAssembler, ScreenBandwidthUsageState, ScreenContentProfile, ScreenCursorController,
+    ScreenCursorMode, ScreenCursorStats, ScreenCursorUpdate, ScreenDamageRect, ScreenDamageReport,
     ScreenDamageTracker, ScreenFecAssembler, ScreenFecController, ScreenFecDecoder,
     ScreenFecEncoder, ScreenFecMode, ScreenFecReport, ScreenFecShard, ScreenFecStats,
     ScreenFpsPacer, ScreenFrame, ScreenMatrixCoordinator, ScreenMatrixMode, ScreenMatrixOutcome,
@@ -158,7 +158,8 @@ pub use screen::{
     ScreenPlayoutBuffer, ScreenPlayoutMode, ScreenPlayoutStats, ScreenQualityController,
     ScreenRateController, ScreenReceiver, ScreenRect, ScreenScaleController, ScreenSender,
     ScreenSquelchController, ScreenSquelchDecision, ScreenSquelchMode, ScreenSquelchStats,
-    ScreenState, ScreenStats, CURSOR_BITMAP_MAX_BYTES, CURSOR_MAGIC, CURSOR_PROTO, FEC_HEADER_LEN,
+    ScreenState, ScreenStats, ScreenTrendlineFilter, ScreenTrendlineMode, ScreenTrendlineReport,
+    ScreenTrendlineStats, CURSOR_BITMAP_MAX_BYTES, CURSOR_MAGIC, CURSOR_PROTO, FEC_HEADER_LEN,
     FEC_MAGIC, FEC_MAX_DATA_SHARDS, FEC_MAX_PARITY_SHARDS, FEC_PROTO, SCREEN_BITRATE_COOLDOWN_US,
     SCREEN_BITRATE_DEFAULT_BPS, SCREEN_BITRATE_MAX_BPS, SCREEN_BITRATE_MIN_BPS,
     SCREEN_BITRATE_STEP_INCREASE_BPS, SCREEN_COMPRESS_H264, SCREEN_COMPRESS_NONE,
@@ -173,7 +174,11 @@ pub use screen::{
     SCREEN_QP_ABSOLUTE_MIN, SCREEN_QP_MAX_DEFAULT, SCREEN_QP_MIN_DEFAULT, SCREEN_QP_MOTION_DEFAULT,
     SCREEN_QP_TEXT_DEFAULT, SCREEN_SCALE_DEFAULT_PCT, SCREEN_SCALE_MAX_PCT, SCREEN_SCALE_MIN_PCT,
     SCREEN_SEQ_WINDOW, SCREEN_SQUELCH_AGGRESSIVE_DELAY_US, SCREEN_SQUELCH_AGGRESSIVE_KEEPALIVE_US,
-    SCREEN_SQUELCH_AUTO_DELAY_US, SCREEN_SQUELCH_AUTO_KEEPALIVE_US, TYPE_SCREEN_CONTROL,
+    SCREEN_SQUELCH_AUTO_DELAY_US, SCREEN_SQUELCH_AUTO_KEEPALIVE_US,
+    SCREEN_TRENDLINE_AGGRESSIVE_THRESHOLD_US_PER_FRAME,
+    SCREEN_TRENDLINE_CONSERVATIVE_THRESHOLD_US_PER_FRAME,
+    SCREEN_TRENDLINE_DEFAULT_THRESHOLD_US_PER_FRAME, SCREEN_TRENDLINE_MIN_SAMPLES,
+    SCREEN_TRENDLINE_WINDOW_DEFAULT, SCREEN_TRENDLINE_WINDOW_MAX, TYPE_SCREEN_CONTROL,
     TYPE_SCREEN_CURSOR, TYPE_SCREEN_FEC, TYPE_SCREEN_FRAME,
 };
 pub use session::{

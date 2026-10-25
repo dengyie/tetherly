@@ -92,6 +92,7 @@ fn cfg(dir: PathBuf, name: &str, overlay: OverlayConfig) -> NodeConfig {
         screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
         screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
         screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
+        screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
         screen_sink: None,
         input_sink: None,
     }

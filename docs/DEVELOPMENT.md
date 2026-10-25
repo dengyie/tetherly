@@ -3,12 +3,33 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.05** |
+| 文档版本 | **2.06** |
 | 日期 | 2026-10-25 |
-| 状态 | **v2.05 屏幕流微秒级报文定步与令牌桶突发整形器（Screen Streaming Microsecond Packet Pacing & Token-Bucket Burst Shaper, ADR-091）与双端 CLI 全同构**——(1) **协议与定步引擎**（`crates/tetherly-core/src/screen.rs`）：设计微秒级定步与令牌桶突发平滑整形器（`ScreenPacketPacer`、`ScreenPacerStats`、`ScreenPacerReport`、`ScreenPacerMode`），消除关键帧（IDR）与复杂大帧切片后线速微突发（Micro-Burst）引发的路由队列尾丢弃（Queue Tail-Drop）；支持 Auto（允许 4 包初始突发，剩余分片在帧周期 80% 内均匀发散）、Aggressive（允许 2 包初始突发，在帧周期 100% 内发散）与 Disabled（零延时透传）三种模式；引入 50ms 延时硬上限熔断（`SCREEN_PACER_MAX_DELAY_US = 50_000`）；(2) **异步发射管线与运行时**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：深度集成至 `ScreenSender` 与 `Node::send_screen_frames`，利用 Tokio 协程微秒级非阻塞发散报文；新增 REST API `GET/POST /api/screen/pacer`，扩展 `ScreenStatusReport` 透出 `pacer_mode`、`pacer_packets_paced`、`pacer_bursts_smoothed`、`pacer_avg_delay_us` 遥测；(3) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：`tetherly` 与 `tetherly-cli` 全同构支持 `screen pacer [mode]`、`tetherly run --screen-pacer` 与状态打印；(4) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_15_screen_packet_pacing_and_burst_shaping` 全绿，版本升级至 `0.1.27`。 |
+| 状态 | **v2.06 屏幕流基于时延梯度的拥塞控制器与缓冲膨胀趋势线滤波器（Screen Streaming Delay-Based Congestion Controller & Early Bufferbloat Trendline Filter, ADR-092）与双端 CLI 全同构**——(1) **协议与趋势线滤波引擎**（`crates/tetherly-core/src/screen.rs`）：设计基于最小二乘法（OLS）线性回归的延迟梯度趋势线滤波器（`ScreenTrendlineFilter`、`ScreenTrendlineStats`、`ScreenTrendlineReport`、`ScreenTrendlineMode`、`ScreenBandwidthUsageState`），消除传统基于丢包拥塞控制对网络中间节点大队列积压（Bufferbloat）的反应迟钝缺陷；支持 Auto（自适应 RTT 缩放阈值 $\gamma$）、Aggressive（低延时敏感阈值 $6.0 \mu s/\text{frame}$）、Conservative（抗无线噪波阈值 $25.0 \mu s/\text{frame}$）与 Disabled 四种模式；在连续 3 帧判定队列积压（Overusing）或消解（Underusing）时触发状态机跃迁；(2) **发射端自适应联动与运行时**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：深度集成至 `ScreenSender::on_control_with_time` 帧确认驱动流水线，实时更新 `ScreenStats` 遥测；新增 REST API `GET/POST /api/screen/trendline`，扩展 `ScreenStatusReport` 透出 `trendline_mode`、`trendline_state`、`trendline_slope_us`、`trendline_overuse_count`；(3) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：`tetherly` 与 `tetherly-cli` 全同构支持 `screen trendline [mode]`、`tetherly run --screen-trendline` 与状态打印；(4) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_16_screen_delay_based_trendline_filter` 全绿，版本升级至 `0.1.28`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.06 相对 2.05(屏幕流基于时延梯度的拥塞控制器与缓冲膨胀趋势线滤波器 ADR-092 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **突破传统基于丢包拥塞控制的滞后性缺陷**: 屏幕流传统流控依赖丢包或 RTT 剧烈跳变来降速，但在存在大缓冲区（Bufferbloat）的 Wi-Fi 路由器与基站上，瓶颈队列积压可导致单向延迟单调爬升数百毫秒却尚未发生尾丢弃，丢包发生时管道内已积压数帧过期切片，造成严重卡顿。
+  2. **引入 RFC 8888 与 GCC 延迟梯度滤波思想**: 比较连续帧的发射间隔差（$\Delta s_i$）与到达间隔差（$\Delta a_i$），计算单帧延迟抖动变动量 $v_i = \Delta a_i - \Delta s_i$ 与累积队列时延 $y_i$。通过滑动窗口 OLS 线性回归求解队列排队斜率 $m$（$\mu s/\text{frame}$），在零丢包前即可提前检测到队列膨胀并触发主动降速。
+  3. **自适应动态阈值 $\gamma$ 与抗噪防抖**: 在长 RTT 跨国链路上自适应放宽容忍度，在局域网超低延迟链路上收紧容忍度；支持 Auto、Aggressive、Conservative 与 Disabled 四种模式，并引入 3 帧防抖滤波防止信道偶发毛刺误判。
+- **架构解法与落地**:
+  1. **Core 延迟梯度趋势线滤波器（`crates/tetherly-core/src/screen.rs`）**:
+     - 实现 `ScreenTrendlineFilter`、`ScreenTrendlineMode`、`ScreenBandwidthUsageState`、`ScreenTrendlineStats` 与 `ScreenTrendlineReport`。
+     - 实现滑动窗口（默认 20 帧，上限 60 帧）OLS 线性回归斜率求解与基于平滑 RTT 的动态自适应阈值计算公式 $\gamma = 12.5 \cdot \text{clamp}(\frac{\text{RTT}_{\text{p95}}}{100\text{ms}}, 0.5, 3.0)$。
+  2. **Node 确认驱动流控与运行时（`crates/tetherly-node/src/runtime.rs`）**:
+     - 在 `ScreenSender::on_control_with_time` 帧确认链路中触发 `trendline_filter.on_ack()`，实时更新 `ScreenStats`。
+     - `Node` 增加 `screen_trendline_mode()`、`screen_set_trendline_mode()`、`screen_trendline_report()` 运行时接口。
+  3. **回环 REST API（`crates/tetherly-node/src/uihttp.rs`）**:
+     - 新增 `GET /api/screen/trendline` 与 `POST /api/screen/trendline`，支持 JSON 和 query 参数控制。
+     - `ScreenStatusReport` 扩充趋势线遥测字段。
+  4. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - 支持 `screen trendline [mode]` 子命令、`tetherly run --screen-trendline` 启动参数与 `screen status` 状态监控。
+  5. **测试与验证**:
+     - 核心单元测试、REST API 单元测试及 Phase 5 端到端集成测试 `m5_16_screen_delay_based_trendline_filter` 全绿。
 
 **2.05 相对 2.04(屏幕流微秒级报文定步与令牌桶突发整形器 ADR-091 与双端 CLI 全同构)**
 

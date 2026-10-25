@@ -839,7 +839,7 @@ impl ScreenState {
 }
 
 /// Running counters for the local UI. Cheap to read; never carries pixels.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ScreenStats {
     pub sent: u64,
     pub received: u64,
@@ -919,9 +919,27 @@ pub struct ScreenStats {
     pub pacer_bursts_smoothed: u64,
     /// Average packet pacing delay in microseconds (v2.05 / ADR-091).
     pub pacer_avg_delay_us: u64,
+    /// Delay-based trendline filter mode tag (0=auto, 1=aggressive, 2=conservative, 3=disabled) (v2.06 / ADR-092).
+    pub trendline_mode: u8,
+    /// Delay-based bandwidth usage state tag (0=normal, 1=overusing, 2=underusing) (v2.06 / ADR-092).
+    pub trendline_state: u8,
+    /// Estimated queue delay gradient slope in microseconds per frame (v2.06 / ADR-092).
+    pub trendline_slope_us: f64,
+    /// Total bufferbloat overuse events detected (v2.06 / ADR-092).
+    pub trendline_overuse_count: u64,
 }
 
 impl ScreenStats {
+    /// Delay-based trendline filter mode.
+    pub fn trendline_mode(&self) -> ScreenTrendlineMode {
+        ScreenTrendlineMode::from_tag(self.trendline_mode)
+    }
+
+    /// Delay-based bandwidth usage state.
+    pub fn trendline_state(&self) -> ScreenBandwidthUsageState {
+        ScreenBandwidthUsageState::from_tag(self.trendline_state)
+    }
+
     /// Microsecond packet pacer mode.
     pub fn pacer_mode(&self) -> ScreenPacerMode {
         ScreenPacerMode::from_tag(self.pacer_mode)
@@ -3500,6 +3518,356 @@ impl ScreenPacketPacer {
     }
 }
 
+/// Maximum sliding window capacity for delay trendline filter (v2.06 / ADR-092).
+pub const SCREEN_TRENDLINE_WINDOW_MAX: usize = 60;
+/// Default sliding window capacity for delay trendline filter (v2.06 / ADR-092).
+pub const SCREEN_TRENDLINE_WINDOW_DEFAULT: usize = 20;
+/// Default trendline slope threshold in microseconds per frame for Auto mode (v2.06 / ADR-092).
+pub const SCREEN_TRENDLINE_DEFAULT_THRESHOLD_US_PER_FRAME: f64 = 12.5;
+/// Aggressive trendline slope threshold in microseconds per frame (v2.06 / ADR-092).
+pub const SCREEN_TRENDLINE_AGGRESSIVE_THRESHOLD_US_PER_FRAME: f64 = 6.0;
+/// Conservative trendline slope threshold in microseconds per frame (v2.06 / ADR-092).
+pub const SCREEN_TRENDLINE_CONSERVATIVE_THRESHOLD_US_PER_FRAME: f64 = 25.0;
+/// Minimum samples required before computing linear regression slope (v2.06 / ADR-092).
+pub const SCREEN_TRENDLINE_MIN_SAMPLES: usize = 5;
+
+/// Operating modes for the delay-based trendline bufferbloat filter (v2.06 / ADR-092).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenTrendlineMode {
+    #[default]
+    Auto = 0,
+    Aggressive = 1,
+    Conservative = 2,
+    Disabled = 3,
+}
+
+impl ScreenTrendlineMode {
+    pub fn tag(&self) -> u8 {
+        *self as u8
+    }
+
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => ScreenTrendlineMode::Aggressive,
+            2 => ScreenTrendlineMode::Conservative,
+            3 => ScreenTrendlineMode::Disabled,
+            _ => ScreenTrendlineMode::Auto,
+        }
+    }
+}
+
+impl std::str::FromStr for ScreenTrendlineMode {
+    type Err = CoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(ScreenTrendlineMode::Auto),
+            "aggressive" | "agg" => Ok(ScreenTrendlineMode::Aggressive),
+            "conservative" | "cons" => Ok(ScreenTrendlineMode::Conservative),
+            "disabled" | "off" | "none" => Ok(ScreenTrendlineMode::Disabled),
+            _ => Err(CoreError::Json(format!(
+                "unknown screen trendline mode: {s}"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for ScreenTrendlineMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScreenTrendlineMode::Auto => write!(f, "auto"),
+            ScreenTrendlineMode::Aggressive => write!(f, "aggressive"),
+            ScreenTrendlineMode::Conservative => write!(f, "conservative"),
+            ScreenTrendlineMode::Disabled => write!(f, "disabled"),
+        }
+    }
+}
+
+/// Network bandwidth usage state estimated by the delay trendline filter (v2.06 / ADR-092).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenBandwidthUsageState {
+    #[default]
+    Normal = 0,
+    Overusing = 1,
+    Underusing = 2,
+}
+
+impl ScreenBandwidthUsageState {
+    pub fn tag(&self) -> u8 {
+        *self as u8
+    }
+
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => ScreenBandwidthUsageState::Overusing,
+            2 => ScreenBandwidthUsageState::Underusing,
+            _ => ScreenBandwidthUsageState::Normal,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScreenBandwidthUsageState::Normal => "normal",
+            ScreenBandwidthUsageState::Overusing => "overusing",
+            ScreenBandwidthUsageState::Underusing => "underusing",
+        }
+    }
+}
+
+impl std::fmt::Display for ScreenBandwidthUsageState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScreenBandwidthUsageState::Normal => write!(f, "normal"),
+            ScreenBandwidthUsageState::Overusing => write!(f, "overusing"),
+            ScreenBandwidthUsageState::Underusing => write!(f, "underusing"),
+        }
+    }
+}
+
+/// Telemetry stats for the delay-based trendline filter (v2.06 / ADR-092).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScreenTrendlineStats {
+    pub mode: ScreenTrendlineMode,
+    pub state: ScreenBandwidthUsageState,
+    pub window_size: usize,
+    pub samples_count: usize,
+    pub current_slope_us_per_frame: f64,
+    pub threshold_us_per_frame: f64,
+    pub overuse_count: u64,
+    pub underuse_count: u64,
+    pub accumulated_delay_us: i64,
+    pub last_update_ts_ms: u64,
+}
+
+impl Default for ScreenTrendlineStats {
+    fn default() -> Self {
+        Self {
+            mode: ScreenTrendlineMode::Auto,
+            state: ScreenBandwidthUsageState::Normal,
+            window_size: SCREEN_TRENDLINE_WINDOW_DEFAULT,
+            samples_count: 0,
+            current_slope_us_per_frame: 0.0,
+            threshold_us_per_frame: SCREEN_TRENDLINE_DEFAULT_THRESHOLD_US_PER_FRAME,
+            overuse_count: 0,
+            underuse_count: 0,
+            accumulated_delay_us: 0,
+            last_update_ts_ms: 0,
+        }
+    }
+}
+
+/// DTO report for REST API and CLI status formatting (v2.06 / ADR-092).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScreenTrendlineReport {
+    pub ok: bool,
+    pub mode: ScreenTrendlineMode,
+    pub state: ScreenBandwidthUsageState,
+    pub samples_count: usize,
+    pub current_slope_us_per_frame: f64,
+    pub threshold_us_per_frame: f64,
+    pub overuse_count: u64,
+    pub underuse_count: u64,
+    pub accumulated_delay_us: i64,
+    pub timestamp_ms: u64,
+}
+
+/// Delay-based trendline bufferbloat estimator utilizing linear regression across
+/// a sliding window of inter-departure vs inter-arrival delays (v2.06 / ADR-092).
+#[derive(Debug, Clone)]
+pub struct ScreenTrendlineFilter {
+    mode: ScreenTrendlineMode,
+    state: ScreenBandwidthUsageState,
+    window_capacity: usize,
+    samples: VecDeque<(u64, i64)>,
+    last_send_ts_us: u64,
+    last_recv_ts_us: u64,
+    accumulated_delay_us: i64,
+    consecutive_overuse: usize,
+    consecutive_underuse: usize,
+    stats: ScreenTrendlineStats,
+}
+
+impl Default for ScreenTrendlineFilter {
+    fn default() -> Self {
+        Self::new(ScreenTrendlineMode::Auto)
+    }
+}
+
+impl ScreenTrendlineFilter {
+    pub fn new(mode: ScreenTrendlineMode) -> Self {
+        Self {
+            mode,
+            state: ScreenBandwidthUsageState::Normal,
+            window_capacity: SCREEN_TRENDLINE_WINDOW_DEFAULT,
+            samples: VecDeque::with_capacity(SCREEN_TRENDLINE_WINDOW_DEFAULT),
+            last_send_ts_us: 0,
+            last_recv_ts_us: 0,
+            accumulated_delay_us: 0,
+            consecutive_overuse: 0,
+            consecutive_underuse: 0,
+            stats: ScreenTrendlineStats {
+                mode,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn mode(&self) -> ScreenTrendlineMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenTrendlineMode) {
+        self.mode = mode;
+        self.stats.mode = mode;
+        if mode == ScreenTrendlineMode::Disabled {
+            self.state = ScreenBandwidthUsageState::Normal;
+            self.stats.state = ScreenBandwidthUsageState::Normal;
+        }
+    }
+
+    pub fn state(&self) -> ScreenBandwidthUsageState {
+        self.state
+    }
+
+    pub fn stats(&self) -> ScreenTrendlineStats {
+        let mut s = self.stats.clone();
+        s.mode = self.mode;
+        s.state = self.state;
+        s.window_size = self.window_capacity;
+        s.samples_count = self.samples.len();
+        s.accumulated_delay_us = self.accumulated_delay_us;
+        s
+    }
+
+    pub fn reset(&mut self) {
+        self.samples.clear();
+        self.last_send_ts_us = 0;
+        self.last_recv_ts_us = 0;
+        self.accumulated_delay_us = 0;
+        self.consecutive_overuse = 0;
+        self.consecutive_underuse = 0;
+        self.state = ScreenBandwidthUsageState::Normal;
+        self.stats.current_slope_us_per_frame = 0.0;
+        self.stats.state = ScreenBandwidthUsageState::Normal;
+    }
+
+    /// Process a new frame acknowledgment and update the linear regression trendline.
+    pub fn on_ack(
+        &mut self,
+        sent_ts_us: u64,
+        recv_ts_us: u64,
+        rtt_p95_us: Option<u64>,
+    ) -> ScreenBandwidthUsageState {
+        if self.mode == ScreenTrendlineMode::Disabled {
+            self.state = ScreenBandwidthUsageState::Normal;
+            return self.state;
+        }
+
+        if self.last_send_ts_us > 0 && self.last_recv_ts_us > 0 && sent_ts_us > self.last_send_ts_us
+        {
+            let delta_send = sent_ts_us.saturating_sub(self.last_send_ts_us);
+            let delta_recv = recv_ts_us.saturating_sub(self.last_recv_ts_us);
+            let delay_variation = delta_recv as i64 - delta_send as i64;
+            self.accumulated_delay_us = self.accumulated_delay_us.saturating_add(delay_variation);
+
+            if self.samples.len() >= self.window_capacity {
+                self.samples.pop_front();
+            }
+            self.samples
+                .push_back((sent_ts_us, self.accumulated_delay_us));
+        } else if self.samples.is_empty() {
+            self.samples.push_back((sent_ts_us, 0));
+        }
+
+        self.last_send_ts_us = sent_ts_us;
+        self.last_recv_ts_us = recv_ts_us;
+
+        // Threshold evaluation
+        let threshold = match self.mode {
+            ScreenTrendlineMode::Disabled => 0.0,
+            ScreenTrendlineMode::Aggressive => SCREEN_TRENDLINE_AGGRESSIVE_THRESHOLD_US_PER_FRAME,
+            ScreenTrendlineMode::Conservative => {
+                SCREEN_TRENDLINE_CONSERVATIVE_THRESHOLD_US_PER_FRAME
+            }
+            ScreenTrendlineMode::Auto => {
+                if let Some(rtt) = rtt_p95_us {
+                    let rtt_factor = (rtt as f64 / 100_000.0).clamp(0.5, 3.0);
+                    SCREEN_TRENDLINE_DEFAULT_THRESHOLD_US_PER_FRAME * rtt_factor
+                } else {
+                    SCREEN_TRENDLINE_DEFAULT_THRESHOLD_US_PER_FRAME
+                }
+            }
+        };
+        self.stats.threshold_us_per_frame = threshold;
+
+        if self.samples.len() < SCREEN_TRENDLINE_MIN_SAMPLES {
+            self.state = ScreenBandwidthUsageState::Normal;
+            self.stats.state = self.state;
+            return self.state;
+        }
+
+        // Ordinary Least Squares (OLS) linear regression
+        let n = self.samples.len() as f64;
+        let t0 = self.samples[0].0;
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        for (s, d) in &self.samples {
+            let x = s.saturating_sub(t0) as f64;
+            let y = *d as f64;
+            sum_x += x;
+            sum_y += y;
+        }
+        let mean_x = sum_x / n;
+        let mean_y = sum_y / n;
+
+        let mut cov_xy = 0.0;
+        let mut var_x = 0.0;
+        for (s, d) in &self.samples {
+            let x = s.saturating_sub(t0) as f64;
+            let y = *d as f64;
+            cov_xy += (x - mean_x) * (y - mean_y);
+            var_x += (x - mean_x) * (x - mean_x);
+        }
+
+        let slope_us_per_frame = if var_x > 1.0 {
+            let raw_slope = cov_xy / var_x;
+            let last_ts = self.samples.back().unwrap().0;
+            let total_span_us = last_ts.saturating_sub(t0) as f64;
+            let avg_frame_interval_us = total_span_us / (n - 1.0);
+            raw_slope * avg_frame_interval_us
+        } else {
+            0.0
+        };
+
+        self.stats.current_slope_us_per_frame = slope_us_per_frame;
+
+        if slope_us_per_frame > threshold {
+            self.consecutive_overuse = self.consecutive_overuse.saturating_add(1);
+            self.consecutive_underuse = 0;
+            if self.consecutive_overuse >= 3 {
+                self.state = ScreenBandwidthUsageState::Overusing;
+                self.stats.overuse_count = self.stats.overuse_count.saturating_add(1);
+            }
+        } else if slope_us_per_frame < -threshold {
+            self.consecutive_underuse = self.consecutive_underuse.saturating_add(1);
+            self.consecutive_overuse = 0;
+            if self.consecutive_underuse >= 3 {
+                self.state = ScreenBandwidthUsageState::Underusing;
+                self.stats.underuse_count = self.stats.underuse_count.saturating_add(1);
+            }
+        } else {
+            self.consecutive_overuse = 0;
+            self.consecutive_underuse = 0;
+            self.state = ScreenBandwidthUsageState::Normal;
+        }
+
+        self.stats.state = self.state;
+        self.state
+    }
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -3519,6 +3887,7 @@ pub struct ScreenSender {
     squelch_controller: ScreenSquelchController,
     fec_controller: ScreenFecController,
     packet_pacer: ScreenPacketPacer,
+    trendline_filter: ScreenTrendlineFilter,
 }
 
 impl Default for ScreenSender {
@@ -3538,6 +3907,7 @@ impl ScreenSender {
         let squelch_controller = ScreenSquelchController::default();
         let fec_controller = ScreenFecController::default();
         let packet_pacer = ScreenPacketPacer::default();
+        let trendline_filter = ScreenTrendlineFilter::default();
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -3561,6 +3931,10 @@ impl ScreenSender {
             pacer_packets_paced: 0,
             pacer_bursts_smoothed: 0,
             pacer_avg_delay_us: 0,
+            trendline_mode: trendline_filter.mode().tag(),
+            trendline_state: trendline_filter.state().tag(),
+            trendline_slope_us: 0.0,
+            trendline_overuse_count: 0,
             ..Default::default()
         };
         Self {
@@ -3579,7 +3953,14 @@ impl ScreenSender {
             squelch_controller,
             fec_controller,
             packet_pacer,
+            trendline_filter,
         }
+    }
+
+    pub fn with_trendline(trendline: ScreenTrendlineMode) -> Self {
+        let mut sender = Self::new();
+        sender.set_trendline_mode(trendline);
+        sender
     }
 
     pub fn with_pacer(pacer: ScreenPacerMode) -> Self {
@@ -3620,7 +4001,48 @@ impl ScreenSender {
         let mut s = self.stats;
         s.fec_mode = self.fec_controller.mode().tag();
         s.fec_redundancy_pct = self.fec_controller.stats().redundancy_pct;
+        s.trendline_mode = self.trendline_filter.mode().tag();
+        s.trendline_state = self.trendline_filter.state().tag();
+        s.trendline_slope_us = self.trendline_filter.stats().current_slope_us_per_frame;
+        s.trendline_overuse_count = self.trendline_filter.stats().overuse_count;
         s
+    }
+
+    pub fn trendline_mode(&self) -> ScreenTrendlineMode {
+        self.trendline_filter.mode()
+    }
+
+    pub fn set_trendline_mode(&mut self, mode: ScreenTrendlineMode) {
+        self.trendline_filter.set_mode(mode);
+        self.stats.trendline_mode = mode.tag();
+        self.stats.trendline_state = self.trendline_filter.state().tag();
+    }
+
+    pub fn trendline_state(&self) -> ScreenBandwidthUsageState {
+        self.trendline_filter.state()
+    }
+
+    pub fn trendline_stats(&self) -> ScreenTrendlineStats {
+        self.trendline_filter.stats()
+    }
+
+    pub fn trendline_report(&self) -> ScreenTrendlineReport {
+        let stats = self.trendline_filter.stats();
+        ScreenTrendlineReport {
+            ok: true,
+            mode: stats.mode,
+            state: stats.state,
+            samples_count: stats.samples_count,
+            current_slope_us_per_frame: stats.current_slope_us_per_frame,
+            threshold_us_per_frame: stats.threshold_us_per_frame,
+            overuse_count: stats.overuse_count,
+            underuse_count: stats.underuse_count,
+            accumulated_delay_us: stats.accumulated_delay_us,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        }
     }
 
     pub fn next_seq(&self) -> u64 {
@@ -3726,27 +4148,54 @@ impl ScreenSender {
                     self.rtt_tracker.record(rtt);
                     self.stats.rtt_latest_us = Some(rtt);
                     self.stats.rtt_p95_us = self.rtt_tracker.p95_us();
-                    self.rate_controller
-                        .on_ack(rtt, self.in_flight_records.len() as u64, now_us);
-                    self.stats.bitrate_bps = self.rate_controller.current_bps();
 
-                    let outcome = self.matrix_coordinator.on_ack(
-                        now_us,
-                        rtt,
-                        self.in_flight_records.len() as u64,
-                        self.stats.fps_target,
-                        self.stats.scale_pct,
-                        SCREEN_FPS_MAX,
-                    );
-                    if let Some(new_fps) = outcome.new_fps {
-                        let actual_fps = self.fps_pacer.set_fps(new_fps);
-                        self.stats.fps_target = actual_fps;
+                    // ADR-092 Delay-Based Trendline Bufferbloat Filter
+                    let sent_us = now_us.saturating_sub(rtt);
+                    let usage =
+                        self.trendline_filter
+                            .on_ack(sent_us, now_us, self.stats.rtt_p95_us);
+                    self.stats.trendline_mode = self.trendline_filter.mode().tag();
+                    self.stats.trendline_state = usage.tag();
+                    self.stats.trendline_slope_us =
+                        self.trendline_filter.stats().current_slope_us_per_frame;
+                    self.stats.trendline_overuse_count =
+                        self.trendline_filter.stats().overuse_count;
+
+                    if usage == ScreenBandwidthUsageState::Overusing {
+                        self.rate_controller.on_congestion(now_us);
+                        self.stats.bitrate_bps = self.rate_controller.current_bps();
+                        self.matrix_coordinator.on_drop(
+                            now_us,
+                            self.stats.fps_target,
+                            self.stats.scale_pct,
+                        );
+                        self.stats.network_health = self.matrix_coordinator.health().tag();
+                    } else {
+                        self.rate_controller.on_ack(
+                            rtt,
+                            self.in_flight_records.len() as u64,
+                            now_us,
+                        );
+                        self.stats.bitrate_bps = self.rate_controller.current_bps();
+
+                        let outcome = self.matrix_coordinator.on_ack(
+                            now_us,
+                            rtt,
+                            self.in_flight_records.len() as u64,
+                            self.stats.fps_target,
+                            self.stats.scale_pct,
+                            SCREEN_FPS_MAX,
+                        );
+                        if let Some(new_fps) = outcome.new_fps {
+                            let actual_fps = self.fps_pacer.set_fps(new_fps);
+                            self.stats.fps_target = actual_fps;
+                        }
+                        if let Some(new_scale) = outcome.new_scale_pct {
+                            let actual_scale = self.scale_controller.set_scale_pct(new_scale);
+                            self.stats.scale_pct = actual_scale;
+                        }
+                        self.stats.network_health = outcome.health.tag();
                     }
-                    if let Some(new_scale) = outcome.new_scale_pct {
-                        let actual_scale = self.scale_controller.set_scale_pct(new_scale);
-                        self.stats.scale_pct = actual_scale;
-                    }
-                    self.stats.network_health = outcome.health.tag();
                 }
                 self.stats.in_flight = self.in_flight_records.len() as u64;
                 Ok(None)
@@ -6412,5 +6861,155 @@ mod tests {
         assert_eq!(sender.stats().pacer_mode, ScreenPacerMode::Auto.tag());
         assert_eq!(sender.stats().pacer_bursts_smoothed, 1);
         assert_eq!(sender.stats().pacer_packets_paced, 6);
+    }
+
+    #[test]
+    fn screen_trendline_filter_bufferbloat_detection_and_modes() {
+        // 1. Parsing and enum tags
+        assert_eq!(
+            "auto".parse::<ScreenTrendlineMode>().unwrap(),
+            ScreenTrendlineMode::Auto
+        );
+        assert_eq!(
+            "aggressive".parse::<ScreenTrendlineMode>().unwrap(),
+            ScreenTrendlineMode::Aggressive
+        );
+        assert_eq!(
+            "agg".parse::<ScreenTrendlineMode>().unwrap(),
+            ScreenTrendlineMode::Aggressive
+        );
+        assert_eq!(
+            "conservative".parse::<ScreenTrendlineMode>().unwrap(),
+            ScreenTrendlineMode::Conservative
+        );
+        assert_eq!(
+            "cons".parse::<ScreenTrendlineMode>().unwrap(),
+            ScreenTrendlineMode::Conservative
+        );
+        assert_eq!(
+            "disabled".parse::<ScreenTrendlineMode>().unwrap(),
+            ScreenTrendlineMode::Disabled
+        );
+        assert_eq!(
+            "off".parse::<ScreenTrendlineMode>().unwrap(),
+            ScreenTrendlineMode::Disabled
+        );
+        assert!("unknown".parse::<ScreenTrendlineMode>().is_err());
+
+        assert_eq!(ScreenTrendlineMode::from_tag(0), ScreenTrendlineMode::Auto);
+        assert_eq!(
+            ScreenTrendlineMode::from_tag(1),
+            ScreenTrendlineMode::Aggressive
+        );
+        assert_eq!(
+            ScreenTrendlineMode::from_tag(2),
+            ScreenTrendlineMode::Conservative
+        );
+        assert_eq!(
+            ScreenTrendlineMode::from_tag(3),
+            ScreenTrendlineMode::Disabled
+        );
+
+        assert_eq!(
+            ScreenBandwidthUsageState::from_tag(0),
+            ScreenBandwidthUsageState::Normal
+        );
+        assert_eq!(
+            ScreenBandwidthUsageState::from_tag(1),
+            ScreenBandwidthUsageState::Overusing
+        );
+        assert_eq!(
+            ScreenBandwidthUsageState::from_tag(2),
+            ScreenBandwidthUsageState::Underusing
+        );
+        assert_eq!(ScreenBandwidthUsageState::Normal.as_str(), "normal");
+        assert_eq!(ScreenBandwidthUsageState::Overusing.as_str(), "overusing");
+        assert_eq!(ScreenBandwidthUsageState::Underusing.as_str(), "underusing");
+
+        // 2. Linear regression & constant delay -> normal state, slope ~ 0
+        let mut filter = ScreenTrendlineFilter::new(ScreenTrendlineMode::Auto);
+        assert_eq!(filter.mode(), ScreenTrendlineMode::Auto);
+        assert_eq!(filter.state(), ScreenBandwidthUsageState::Normal);
+
+        let frame_interval_us = 33_333; // ~30 fps
+        let mut send_ts = 1_000_000;
+        let rtt = 30_000; // 30ms
+
+        for _ in 0..15 {
+            let recv_ts = send_ts + rtt;
+            let state = filter.on_ack(send_ts, recv_ts, Some(rtt));
+            assert_eq!(state, ScreenBandwidthUsageState::Normal);
+            send_ts += frame_interval_us;
+        }
+        assert_eq!(filter.stats().overuse_count, 0);
+        assert_eq!(filter.stats().underuse_count, 0);
+        assert!(filter.stats().current_slope_us_per_frame.abs() < 1.0);
+
+        // 3. Bufferbloat queue buildup: increasing delay (+200 us per frame) -> triggers Overusing
+        let mut queue_delay = rtt;
+        let mut reached_overuse = false;
+        for _ in 0..20 {
+            queue_delay += 200;
+            let recv_ts = send_ts + queue_delay;
+            let state = filter.on_ack(send_ts, recv_ts, Some(queue_delay));
+            if state == ScreenBandwidthUsageState::Overusing {
+                reached_overuse = true;
+            }
+            send_ts += frame_interval_us;
+        }
+        assert!(reached_overuse);
+        assert_eq!(filter.state(), ScreenBandwidthUsageState::Overusing);
+        assert!(filter.stats().overuse_count >= 1);
+        assert!(filter.stats().current_slope_us_per_frame > 10.0);
+
+        // 4. Queue draining: decreasing delay (-200 us per frame) -> triggers Underusing
+        let mut reached_underuse = false;
+        for _ in 0..25 {
+            queue_delay = queue_delay.saturating_sub(200);
+            let recv_ts = send_ts + queue_delay;
+            let state = filter.on_ack(send_ts, recv_ts, Some(queue_delay));
+            if state == ScreenBandwidthUsageState::Underusing {
+                reached_underuse = true;
+            }
+            send_ts += frame_interval_us;
+        }
+        assert!(reached_underuse);
+        assert!(filter.stats().underuse_count >= 1);
+        assert!(filter.stats().current_slope_us_per_frame < -10.0);
+
+        // 5. Threshold adaptation across modes
+        let mut filter_auto = ScreenTrendlineFilter::new(ScreenTrendlineMode::Auto);
+        // Low RTT (50ms): factor clamp 0.5 -> threshold = 12.5 * 0.5 = 6.25
+        filter_auto.on_ack(1_000_000, 1_050_000, Some(50_000));
+        assert!((filter_auto.stats().threshold_us_per_frame - 6.25).abs() < 0.01);
+        // High RTT (200ms): factor 2.0 -> threshold = 12.5 * 2.0 = 25.0
+        filter_auto.on_ack(2_000_000, 2_200_000, Some(200_000));
+        assert!((filter_auto.stats().threshold_us_per_frame - 25.0).abs() < 0.01);
+
+        let mut filter_agg = ScreenTrendlineFilter::new(ScreenTrendlineMode::Aggressive);
+        filter_agg.on_ack(1_000_000, 1_050_000, Some(50_000));
+        assert!((filter_agg.stats().threshold_us_per_frame - 6.0).abs() < 0.01);
+
+        let mut filter_cons = ScreenTrendlineFilter::new(ScreenTrendlineMode::Conservative);
+        filter_cons.on_ack(1_000_000, 1_050_000, Some(50_000));
+        assert!((filter_cons.stats().threshold_us_per_frame - 25.0).abs() < 0.01);
+
+        let mut filter_dis = ScreenTrendlineFilter::new(ScreenTrendlineMode::Disabled);
+        let dis_state = filter_dis.on_ack(1_000_000, 1_500_000, Some(500_000));
+        assert_eq!(dis_state, ScreenBandwidthUsageState::Normal);
+
+        // 6. Sender integration test
+        let mut sender = ScreenSender::new();
+        assert_eq!(sender.trendline_mode(), ScreenTrendlineMode::Auto);
+        sender.set_trendline_mode(ScreenTrendlineMode::Aggressive);
+        assert_eq!(sender.trendline_mode(), ScreenTrendlineMode::Aggressive);
+        assert_eq!(
+            sender.stats().trendline_mode,
+            ScreenTrendlineMode::Aggressive.tag()
+        );
+        assert_eq!(
+            sender.stats().trendline_state,
+            ScreenBandwidthUsageState::Normal.tag()
+        );
     }
 }

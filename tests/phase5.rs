@@ -82,6 +82,7 @@ fn cfg(
         screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
         screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
         screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
+        screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
         screen_sink: None,
         input_sink: None,
     }
@@ -2807,6 +2808,165 @@ async fn m5_15_screen_packet_pacing_and_burst_shaping() {
     let host_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
     assert_eq!(host_status.pacer_mode, "auto");
     assert!(host_status.pacer_packets_paced >= 1);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_16_screen_delay_based_trendline_filter() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial Trendline query on host: defaults to Auto mode (ADR-092)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/trendline")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenTrendlineReport = serde_json::from_slice(&b).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.mode, tetherly_core::ScreenTrendlineMode::Auto);
+    assert_eq!(
+        init_rep.state,
+        tetherly_core::ScreenBandwidthUsageState::Normal
+    );
+    assert_eq!(init_rep.overuse_count, 0);
+    assert_eq!(init_rep.underuse_count, 0);
+
+    // 2. Dynamic Trendline mode configuration via POST /api/screen/trendline
+    let agg_payload = serde_json::json!({ "mode": "aggressive" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/trendline",
+        &serde_json::to_vec(&agg_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let agg_rep: tetherly_core::ScreenTrendlineReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(agg_rep.mode, tetherly_core::ScreenTrendlineMode::Aggressive);
+
+    let cons_payload = serde_json::json!({ "mode": "conservative" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/trendline",
+        &serde_json::to_vec(&cons_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let cons_rep: tetherly_core::ScreenTrendlineReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        cons_rep.mode,
+        tetherly_core::ScreenTrendlineMode::Conservative
+    );
+
+    let dis_payload = serde_json::json!({ "mode": "disabled" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/trendline",
+        &serde_json::to_vec(&dis_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let dis_rep: tetherly_core::ScreenTrendlineReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(dis_rep.mode, tetherly_core::ScreenTrendlineMode::Disabled);
+
+    // Set back to Auto mode
+    let auto_payload = serde_json::json!({ "mode": "auto" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/trendline",
+        &serde_json::to_vec(&auto_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let auto_rep: tetherly_core::ScreenTrendlineReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(auto_rep.mode, tetherly_core::ScreenTrendlineMode::Auto);
+
+    // 3. Visitor opens screen channel, host allows, and visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Send video frame from host
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Verify Trendline report on host
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/trendline")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_trendline: tetherly_core::ScreenTrendlineReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        host_trendline.mode,
+        tetherly_core::ScreenTrendlineMode::Auto
+    );
+    assert_eq!(
+        host_trendline.state,
+        tetherly_core::ScreenBandwidthUsageState::Normal
+    );
+
+    // 6. Verify status report contains Trendline fields
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_status.trendline_mode, "auto");
+    assert_eq!(host_status.trendline_state, "normal");
 
     host.shutdown();
     visitor.shutdown();

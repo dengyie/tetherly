@@ -63,12 +63,12 @@ use tetherly_core::{
     ScreenCursorUpdate, ScreenDamageTracker, ScreenFecMode, ScreenFecReport, ScreenFecShard,
     ScreenFrame, ScreenPacerMode, ScreenPacerReport, ScreenPlayoutAction, ScreenPlayoutMode,
     ScreenPlayoutStats, ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode,
-    ScreenState, ScreenStats, SensitiveContentGuard, TcpLimiter, TopologyStateFrame,
-    TopologySyncReqFrame, TopologyValidator, TrustStore, VirtualDisplayAnnounceFrame,
-    VirtualDisplayAttachFrame, VirtualDisplayCodec, VirtualDisplayDetachFrame,
-    VirtualDisplayFrameAck, VirtualDisplayMode, VirtualDisplayPixelFormat, VirtualDisplayRole,
-    VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS,
-    OVERLAY_PROBE_MS, TYPE_SCREEN_FEC,
+    ScreenState, ScreenStats, ScreenTrendlineMode, ScreenTrendlineReport, SensitiveContentGuard,
+    TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator, TrustStore,
+    VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
+    VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
+    VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
+    DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS, TYPE_SCREEN_FEC,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -170,6 +170,8 @@ pub struct NodeConfig {
     pub screen_fec_mode: tetherly_core::ScreenFecMode,
     /// Operation mode for screen streaming microsecond packet pacing and token-bucket burst shaper (ADR-091).
     pub screen_pacer_mode: tetherly_core::ScreenPacerMode,
+    /// Operation mode for screen streaming delay-based trendline bufferbloat filter (ADR-092).
+    pub screen_trendline_mode: tetherly_core::ScreenTrendlineMode,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -228,6 +230,7 @@ impl Default for NodeConfig {
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
+            screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_sink: None,
             input_sink: None,
         }
@@ -2946,6 +2949,14 @@ pub struct ScreenStatusReport {
     pub pacer_bursts_smoothed: u64,
     #[serde(default)]
     pub pacer_avg_delay_us: u64,
+    #[serde(default)]
+    pub trendline_mode: String,
+    #[serde(default)]
+    pub trendline_state: String,
+    #[serde(default)]
+    pub trendline_slope_us: f64,
+    #[serde(default)]
+    pub trendline_overuse_count: u64,
 }
 
 /// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
@@ -3308,6 +3319,8 @@ struct Shared {
     screen_fec_mode: Mutex<ScreenFecMode>,
     /// Microsecond packet pacing and burst shaper mode for screen streams (ADR-091).
     screen_pacer_mode: Mutex<ScreenPacerMode>,
+    /// Delay-based trendline bufferbloat filter mode for screen streams (ADR-092).
+    screen_trendline_mode: Mutex<ScreenTrendlineMode>,
     /// Damage tracker for screen frames (ADR-089).
     screen_damage_tracker: Mutex<ScreenDamageTracker>,
     /// Previous frame bytes for difference detection (ADR-089).
@@ -3507,6 +3520,7 @@ impl Node {
         let screen_squelch_mode = cfg.screen_squelch_mode;
         let screen_fec_mode = cfg.screen_fec_mode;
         let screen_pacer_mode = cfg.screen_pacer_mode;
+        let screen_trendline_mode = cfg.screen_trendline_mode;
         if let Some(sel) = &screen_encode_codec {
             sel.set_fps(screen_fps);
             sel.set_scale_pct(screen_scale_pct);
@@ -3649,6 +3663,7 @@ impl Node {
                 s.set_squelch_mode(screen_squelch_mode);
                 s.set_fec_mode(screen_fec_mode);
                 s.set_pacer_mode(screen_pacer_mode);
+                s.set_trendline_mode(screen_trendline_mode);
                 s
             }),
             screen_source,
@@ -3690,6 +3705,7 @@ impl Node {
             screen_squelch_mode: Mutex::new(screen_squelch_mode),
             screen_fec_mode: Mutex::new(screen_fec_mode),
             screen_pacer_mode: Mutex::new(screen_pacer_mode),
+            screen_trendline_mode: Mutex::new(screen_trendline_mode),
             screen_damage_tracker: Mutex::new(ScreenDamageTracker::new()),
             screen_prev_frame: Mutex::new(None),
             shutdown,
@@ -21198,6 +21214,10 @@ impl Node {
             pacer_packets_paced: stats.pacer_packets_paced,
             pacer_bursts_smoothed: stats.pacer_bursts_smoothed,
             pacer_avg_delay_us: stats.pacer_avg_delay_us,
+            trendline_mode: stats.trendline_mode().to_string(),
+            trendline_state: stats.trendline_state().to_string(),
+            trendline_slope_us: stats.trendline_slope_us,
+            trendline_overuse_count: stats.trendline_overuse_count,
         }
     }
 
@@ -21775,6 +21795,60 @@ impl Node {
             .expect("screen")
             .set_pacer_mode(mode);
         self.screen_pacer_report()
+    }
+
+    /// Report current delay-based trendline bufferbloat metrics and state (v2.06 / ADR-092).
+    pub fn screen_trendline_report(&self) -> ScreenTrendlineReport {
+        let mode = *self
+            .shared
+            .screen_trendline_mode
+            .lock()
+            .expect("trendline mode");
+        let stats = self
+            .shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .trendline_stats();
+        ScreenTrendlineReport {
+            ok: true,
+            mode,
+            state: stats.state,
+            samples_count: stats.samples_count,
+            current_slope_us_per_frame: stats.current_slope_us_per_frame,
+            threshold_us_per_frame: stats.threshold_us_per_frame,
+            overuse_count: stats.overuse_count,
+            underuse_count: stats.underuse_count,
+            accumulated_delay_us: stats.accumulated_delay_us,
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Current screen delay trendline filter mode (v2.06 / ADR-092).
+    pub fn screen_trendline_mode(&self) -> tetherly_core::ScreenTrendlineMode {
+        *self
+            .shared
+            .screen_trendline_mode
+            .lock()
+            .expect("trendline mode")
+    }
+
+    /// Set and report screen delay trendline filter mode (v2.06 / ADR-092).
+    pub fn screen_set_trendline_mode(
+        &self,
+        mode: tetherly_core::ScreenTrendlineMode,
+    ) -> ScreenTrendlineReport {
+        *self
+            .shared
+            .screen_trendline_mode
+            .lock()
+            .expect("trendline mode") = mode;
+        self.shared
+            .screen_engine
+            .lock()
+            .expect("screen")
+            .set_trendline_mode(mode);
+        self.screen_trendline_report()
     }
 
     /// Comprehensive status report for input sharing.
@@ -22517,6 +22591,7 @@ mod clipboard_policy_tests {
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
+            screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22668,6 +22743,7 @@ mod handoff_engine_tests {
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
+            screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -22850,6 +22926,7 @@ mod media_policy_tests {
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
+            screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23008,6 +23085,7 @@ mod locator_policy_tests {
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
+            screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23146,6 +23224,7 @@ mod locator_policy_tests {
             screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
             screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
             screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
+            screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23782,6 +23861,93 @@ mod locator_policy_tests {
         assert_eq!(status.cursor_y, 0);
         assert!(!status.cursor_visible);
         assert_eq!(status.cursor_shape, "arrow");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_screen_trendline_mode_and_reporting() {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-trendline-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.clone(),
+            control_port: 0,
+            file_port: 0,
+            input_port: 0,
+            screen_port: 0,
+            ui_port: 0,
+            name: "trendline-test-node".into(),
+            platform: "test".into(),
+            memory_clip: true,
+            memory_notifier: true,
+            loopback_only: true,
+            advertise: false,
+            reconnect: false,
+            overlay: OverlayConfig::default(),
+            screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
+            ..Default::default()
+        };
+        let clock = Arc::new(ManualClock::new(50_000));
+        let node = Node::start_with_clock(cfg, clock.clone()).unwrap();
+
+        // 1. Initial report: defaults to Auto mode (ADR-092)
+        let initial_rep = node.screen_trendline_report();
+        assert!(initial_rep.ok);
+        assert_eq!(initial_rep.mode, tetherly_core::ScreenTrendlineMode::Auto);
+        assert_eq!(
+            initial_rep.state,
+            tetherly_core::ScreenBandwidthUsageState::Normal
+        );
+        assert_eq!(initial_rep.overuse_count, 0);
+        assert_eq!(initial_rep.underuse_count, 0);
+        assert_eq!(
+            node.screen_trendline_mode(),
+            tetherly_core::ScreenTrendlineMode::Auto
+        );
+
+        // 2. Set mode to Aggressive
+        let rep_agg =
+            node.screen_set_trendline_mode(tetherly_core::ScreenTrendlineMode::Aggressive);
+        assert!(rep_agg.ok);
+        assert_eq!(rep_agg.mode, tetherly_core::ScreenTrendlineMode::Aggressive);
+        assert_eq!(
+            node.screen_trendline_mode(),
+            tetherly_core::ScreenTrendlineMode::Aggressive
+        );
+
+        // 3. Set mode to Conservative
+        let rep_cons =
+            node.screen_set_trendline_mode(tetherly_core::ScreenTrendlineMode::Conservative);
+        assert!(rep_cons.ok);
+        assert_eq!(
+            rep_cons.mode,
+            tetherly_core::ScreenTrendlineMode::Conservative
+        );
+        assert_eq!(
+            node.screen_trendline_mode(),
+            tetherly_core::ScreenTrendlineMode::Conservative
+        );
+
+        // 4. Set mode to Disabled
+        let rep_dis = node.screen_set_trendline_mode(tetherly_core::ScreenTrendlineMode::Disabled);
+        assert!(rep_dis.ok);
+        assert_eq!(rep_dis.mode, tetherly_core::ScreenTrendlineMode::Disabled);
+        assert_eq!(
+            node.screen_trendline_mode(),
+            tetherly_core::ScreenTrendlineMode::Disabled
+        );
+
+        // 5. Status report reflects active trendline mode
+        let status = node.screen_status_report().await;
+        assert_eq!(status.trendline_mode, "disabled");
+        assert_eq!(status.trendline_state, "normal");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
