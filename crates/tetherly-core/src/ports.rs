@@ -258,6 +258,9 @@ pub trait ScreenSource: Send + Sync {
         vec![crate::screen::ScreenDisplayInfo::primary_default()]
     }
 
+    /// Update available displays list (v2.11 / ADR-097).
+    fn set_displays(&self, _displays: Vec<crate::screen::ScreenDisplayInfo>) {}
+
     /// Currently active display ID being captured (v2.11 / ADR-097). Defaults to 0.
     fn active_display_id(&self) -> u8 {
         0

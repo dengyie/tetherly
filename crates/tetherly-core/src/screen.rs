@@ -7037,6 +7037,11 @@ impl ScreenSender {
                 self.in_flight_records.clear();
                 self.stats.in_flight = 0;
                 self.fps_pacer.reset();
+                self.privacy_enabled = false;
+                self.privacy_lock_input = false;
+                self.stats.privacy_enabled = false;
+                self.stats.privacy_input_locked = false;
+                self.privacy_last_change_us = now_us;
                 Ok(None)
             }
             ControlMsg::Ack { seq } => {
@@ -7151,7 +7156,7 @@ impl ScreenSender {
     pub fn switch_display(&mut self, display_id: u8, now_us: u64) -> Result<(), CoreError> {
         if !self.displays.is_empty() && !self.displays.iter().any(|d| d.display_id == display_id) {
             return Err(CoreError::ScreenRefused(format!(
-                "display id {display_id} not found"
+                "Display {display_id} not found"
             )));
         }
         self.active_display_id = display_id;
@@ -8722,6 +8727,12 @@ impl crate::ports::ScreenSource for MemoryScreenSource {
             .unwrap_or_else(|_| vec![ScreenDisplayInfo::primary_default()])
     }
 
+    fn set_displays(&self, displays: Vec<ScreenDisplayInfo>) {
+        if let Ok(mut lock) = self.displays.lock() {
+            *lock = displays;
+        }
+    }
+
     fn active_display_id(&self) -> u8 {
         self.active_display
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -8731,7 +8742,7 @@ impl crate::ports::ScreenSource for MemoryScreenSource {
         let displays = self.displays();
         if !displays.is_empty() && !displays.iter().any(|d| d.display_id == display_id) {
             return Err(CoreError::ScreenRefused(format!(
-                "display id {display_id} not found"
+                "Display {display_id} not found"
             )));
         }
         self.active_display

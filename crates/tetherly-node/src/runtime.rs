@@ -3670,7 +3670,9 @@ impl Node {
         }
         let initial_display_id = cfg.screen_display_id;
         let initial_displays = screen_source.displays();
-        let _ = screen_source.switch_display(initial_display_id);
+        if initial_display_id != 0 {
+            let _ = screen_source.switch_display(initial_display_id);
+        }
         let screen_codec: Arc<dyn ScreenCodec> = cfg
             .screen_codec
             .clone()
@@ -3788,7 +3790,9 @@ impl Node {
                 s.set_probe_mode(screen_probe_mode);
                 s.set_sync_mode(screen_sync_mode);
                 s.set_displays(initial_displays.clone());
-                let _ = s.switch_display(initial_display_id, 0);
+                if initial_display_id != 0 {
+                    let _ = s.switch_display(initial_display_id, 0);
+                }
                 s
             }),
             screen_source,
@@ -20387,11 +20391,12 @@ impl Node {
             .screen_bitrate_applied
             .store(false, std::sync::atomic::Ordering::Relaxed);
         {
-            self.shared
-                .screen_engine
-                .lock()
-                .expect("screen")
-                .on_peer_connected();
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            let displays = self.screen_displays();
+            if !displays.is_empty() {
+                engine.set_displays(displays);
+            }
+            engine.on_peer_connected();
         }
         let state = self.screen_state();
         let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
@@ -20519,6 +20524,11 @@ impl Node {
                                     if let ControlMsg::SetPrivacyMode { enabled, lock_input } = msg {
                                         node.shared.screen_privacy_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
                                         node.shared.screen_privacy_lock_input.store(lock_input, std::sync::atomic::Ordering::Relaxed);
+                                        node.shared.screen_privacy_last_change_us.store(now_us, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    if matches!(msg, ControlMsg::Stop) {
+                                        node.shared.screen_privacy_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+                                        node.shared.screen_privacy_lock_input.store(false, std::sync::atomic::Ordering::Relaxed);
                                         node.shared.screen_privacy_last_change_us.store(now_us, std::sync::atomic::Ordering::Relaxed);
                                     }
                                     let (reply, dynamic_bitrate, dynamic_fps, dynamic_scale) = {
@@ -21458,6 +21468,12 @@ impl Node {
     /// Visitor: ask the host to stop sending.
     pub async fn screen_stop(&self) -> Result<(), CoreError> {
         self.send_screen_control(ControlMsg::Stop).await?;
+        self.shared
+            .screen_privacy_enabled
+            .store(false, Ordering::Relaxed);
+        self.shared
+            .screen_privacy_lock_input
+            .store(false, Ordering::Relaxed);
         let peer = self
             .shared
             .screen_peer
@@ -22613,6 +22629,7 @@ impl Node {
 
     /// Update available displays list (e.g. when physical displays plug/unplug or virtual displays are created) (ADR-097).
     pub fn screen_set_displays(&self, displays: Vec<tetherly_core::ScreenDisplayInfo>) {
+        self.shared.screen_source.set_displays(displays.clone());
         if let Ok(mut engine) = self.shared.screen_engine.lock() {
             engine.set_displays(displays.clone());
         }
@@ -22655,7 +22672,7 @@ impl Node {
         let displays = self.screen_displays();
         if !displays.is_empty() && !displays.iter().any(|d| d.display_id == display_id) {
             return Err(CoreError::ScreenRefused(format!(
-                "display id {display_id} not found"
+                "Display {display_id} not found"
             )));
         }
 

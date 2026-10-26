@@ -910,6 +910,10 @@ impl<S: ScreenSource> ScreenSource for EncodedSource<S> {
         self.inner.displays()
     }
 
+    fn set_displays(&self, displays: Vec<tetherly_core::screen::ScreenDisplayInfo>) {
+        self.inner.set_displays(displays);
+    }
+
     fn active_display_id(&self) -> u8 {
         self.inner.active_display_id()
     }
