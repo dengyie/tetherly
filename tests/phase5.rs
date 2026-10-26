@@ -87,6 +87,7 @@ fn cfg(
         screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
         screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
         screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+        screen_display_id: 0,
         screen_sink: None,
         input_sink: None,
     }
@@ -3621,6 +3622,149 @@ async fn m5_20_screen_audio_sync_and_clock_drift_compensation() {
     let trig_res = host.trigger_screen_sync().await.unwrap();
     assert!(trig_res.ok);
     assert!(trig_res.beacons_sent >= 2);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_21_screen_multi_display_and_dynamic_switch_pipeline() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Configure multi-display topology on host
+    let d0 = tetherly_core::ScreenDisplayInfo::primary_default();
+    let d1 = tetherly_core::ScreenDisplayInfo::new(
+        1,
+        "Display 1 (Secondary)",
+        2560,
+        1440,
+        125,
+        false,
+        false,
+    );
+    let d2 = tetherly_core::ScreenDisplayInfo::new(
+        2,
+        "Virtual Display (ADR-073)",
+        1920,
+        1200,
+        100,
+        false,
+        true,
+    );
+    host.screen_set_displays(vec![d0.clone(), d1.clone(), d2.clone()]);
+
+    // 2. Query displays via GET /api/screen/displays on host
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/displays")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenDisplayReport = serde_json::from_slice(&b).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.active_display_id, 0);
+    assert_eq!(init_rep.displays.len(), 3);
+    assert_eq!(init_rep.switches_count, 0);
+
+    // 3. Visitor opens screen channel, host allows, and visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Dynamic Switch to display 1 via POST /api/screen/switch
+    let switch_payload = serde_json::json!({ "display_id": 1 });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/switch",
+        &serde_json::to_vec(&switch_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let switch_rep: tetherly_core::ScreenDisplayReport = serde_json::from_slice(&b).unwrap();
+    assert!(switch_rep.ok);
+    assert_eq!(switch_rep.active_display_id, 1);
+    assert_eq!(switch_rep.switches_count, 1);
+
+    // 5. Send video frame after switch and verify receipt
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 6. Switch to Virtual Display (ID 2) via node direct method
+    let switch2_rep = host.screen_switch_display(2).await.unwrap();
+    assert!(switch2_rep.ok);
+    assert_eq!(switch2_rep.active_display_id, 2);
+    assert_eq!(switch2_rep.switches_count, 2);
+    assert_eq!(host.screen_active_display_id(), 2);
+    assert_eq!(host.screen_display_switches_count(), 2);
+
+    // 7. Verify status report contains active display and switch counters
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_status.active_display_id, 2);
+    assert_eq!(host_status.display_count, 3);
+    assert_eq!(host_status.display_switches_count, 2);
+
+    // 8. Verify error rejection on invalid display ID
+    let invalid_payload = serde_json::json!({ "display_id": 99 });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/switch",
+        &serde_json::to_vec(&invalid_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 404);
+    assert!(String::from_utf8_lossy(&b).contains("Display 99 not found"));
 
     host.shutdown();
     visitor.shutdown();

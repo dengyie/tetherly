@@ -3,12 +3,36 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.10** |
+| 文档版本 | **2.11** |
 | 日期 | 2026-10-26 |
-| 状态 | **v2.10 屏幕与音频播放音画同步与硬件时钟漂移补偿流水线（Screen & Audio Playout Lip-Sync & Clock Synchronization Pipeline, ADR-096）与双端 CLI 全同构**——(1) **协议与同步信标状态机**（`crates/tetherly-core/src/screen.rs`）：借鉴 RFC 3550 RTCP Sender Report 锚点映射体系，设计专用线协议帧（`TYPE_SCREEN_SYNC = 0x0508`、`TSYNC` 协议魔数、36 字节定长报头）；携带信标序列号、发送端发送微秒墙上时间戳、最新视频帧微秒显示时间戳 Video PTS 与最新音频块微秒显示时间戳 Audio PTS；支持 Auto（±15ms 容限，500ms 间隔）、Strict（±5ms 容限，250ms 间隔）、Loose（±40ms 容限，1000ms 间隔）与 Disabled 四种模式；(2) **偏斜评估与时钟漂移 PPM 补偿**（`crates/tetherly-core/src/screen.rs`）：接收端解算音画呈现偏斜 $\Delta t_{\text{skew}} = \text{PTS}_{\text{video}} - \text{PTS}_{\text{audio}}$，并在连续信标到达间隔中解算异构设备间物理晶振漂移 PPM；当偏斜超出模式容限时，自适应平滑微调接收端视频去抖动播放缓冲区（`ScreenPlayoutBuffer`）的目标播放延迟（步进限制在 $\pm 20\,\text{ms}$ 平滑滤波窗口内），实现画面无撕裂、音频无爆音的微秒级无缝唇音对齐；(3) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：音频块接收时实时更新最新音频 PTS；屏幕发送循环按周期派发同步信标；屏幕客户端接收循环截获同步信标并驱动播放延迟补偿；新增 REST API `GET/POST /api/screen/sync` 与 `POST /api/screen/sync/trigger`，扩展 `ScreenStatusReport` 包含 7 个 Sync 关键遥测字段；(4) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen sync [mode] [--trigger]`、`tetherly run --screen-sync` 与 `screen status` 状态监控；(5) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_20_screen_audio_sync_and_clock_drift_compensation` 全绿，版本升级至 `0.1.32`。 |
+| 状态 | **v2.11 屏幕串流多显示器枚举与虚拟显示器流复用及动态切换流水线（Screen Streaming Multi-Display & Virtual Display Stream Multiplexing & Dynamic Switch Pipeline, ADR-097）与双端 CLI 全同构**——(1) **协议与切换控制状态机**（`crates/tetherly-core/src/screen.rs`）：扩展 14 字节定长屏幕控制信令（`TYPE_SCREEN_CONTROL = 0x0502`），引入 Envelope Tag = 4 专用信令 `ControlMsg::SwitchDisplay { display_id: u8 }`；定义 `ScreenDisplayInfo`（包含 ID、标题、尺寸、缩放比例、主屏幕与虚拟扩展屏标记）与 `ScreenDisplayReport`；(2) **零中断无缝动态切换与关键帧主动注入**（`crates/tetherly-core/src/screen.rs`）：发送端 `ScreenSender` 维护活跃显示器指针与拓扑列表，在接收到切换信令或 API 指令后无缝切换捕获目标，联动 ADR-089 静止抑制器执行 `squelch_controller.force_wake(now_us)` 并强制注入 IDR 关键帧刷新解码器，杜绝花屏与黑屏卡顿；接收端 `ScreenReceiver` 维护显示器拓扑镜像并在切屏时平滑呈现；(3) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：`NodeConfig` 新增 `screen_display_id`（默认 0）；`Node` 维护活跃显示器与拓扑原子状态，并在 `attach_screen_server` 控制循环中监听对端 `ControlMsg::SwitchDisplay` 信令实时切屏；新增 REST API `GET /api/screen/displays` 与 `POST /api/screen/switch`，扩展 `ScreenStatusReport` 包含 `active_display_id`、`display_count`、`display_switches_count` 字段；(4) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen displays`、`screen switch <display_id>`、`tetherly run --screen-display <display_id>` 与 `screen status` 状态监控；(5) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_21_screen_multi_display_and_dynamic_switch_pipeline` 全绿，版本升级至 `0.1.33`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.11 相对 2.10(屏幕串流多显示器枚举与虚拟显示器流复用及动态切换流水线 ADR-097 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **现代工作站多物理显示器与虚拟扩展屏（Virtual Displays）环境下的远程串流痛点**: 开发与办公工作站普遍配备双屏或多屏，且借助 ADR-073 虚拟屏幕驱动可在宿主机创建任意规格虚拟扩展屏。过去屏幕串流固定捕获主显示器（Display 0），若通过重连切换屏幕会导致 Noise 密钥重新协商、UDP 重连、音画基准丢失及画面闪烁卡顿。
+  2. **零中断动态切屏与关键帧主动注入（Zero-Downtime Dynamic Switch Pipeline）**: 动态切换必须在现有会话内部完成。由于不同屏幕分辨率或像素比例可能突变，切换时必须联动编码器与静止抑制器（Squelch Filter）立即注入 IDR 关键帧，强制重置解码器参考基准，消除画面撕裂与错位伪影。
+  3. **双向拓扑同步与显示器元数据标准化（Display Topology Discovery）**: 建立统一元数据模型（`ScreenDisplayInfo`），使访客端可随时发现主机的显示器拓扑（物理屏与虚拟屏），并通过控制信令即时无缝切换。
+- **架构解法与落地**:
+  1. **Core 控制信令与元数据模型（`crates/tetherly-core/src/screen.rs`）**:
+     - 扩展 `ControlMsg`，新增 `ControlMsg::SwitchDisplay { display_id: u8 }`，映射至 Tag 4 定长 14 字节控制信封。
+     - 定义 `ScreenDisplayInfo` 与 `ScreenDisplayReport`。
+     - 扩展 `ScreenSource` trait：增加 `displays()`、`active_display_id()` 与 `switch_display()` 接口；并在 `MemoryScreenSource` 中提供完整测试实现。
+     - 发送端 `ScreenSender` 维护多屏拓扑与切换计数，切屏时强制唤醒静止抑制器并请求关键帧；接收端 `ScreenReceiver` 维护远端拓扑镜像并在切屏时平滑呈现。
+  2. **Node 守护进程与端到端传输（`crates/tetherly-node/src/runtime.rs`）**:
+     - `NodeConfig` 新增 `screen_display_id: u8`。
+     - `Node` 维护活跃显示器原子状态并在 `attach_screen_server` 控制流中处理 `ControlMsg::SwitchDisplay` 信令。
+     - 暴露 `screen_active_display_id()`、`screen_displays()`、`screen_set_displays()`、`screen_display_switches_count()`、`screen_display_report()` 与异步 `screen_switch_display(display_id).await`。
+  3. **回环 REST API（`crates/tetherly-node/src/uihttp.rs`）**:
+     - 新增 `GET /api/screen/displays` 与 `POST /api/screen/switch`。
+     - `ScreenStatusReport` 扩充 `active_display_id`、`display_count`、`display_switches_count` 字段。
+  4. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - 支持 `screen displays` 与 `screen switch <display_id>` 子命令、`tetherly run --screen-display <id>` 启动参数与 `screen status` 状态监控。
+  5. **测试与验证**:
+     - 核心单元测试、REST API 单元测试及 Phase 5 端到端集成测试 `m5_21_screen_multi_display_and_dynamic_switch_pipeline` 全绿。
 
 **2.10 相对 2.09(屏幕与音频播放音画同步与硬件时钟漂移补偿流水线 ADR-096 与双端 CLI 全同构)**
 

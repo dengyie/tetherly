@@ -27,7 +27,7 @@ use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tetherly_core::frame::{
@@ -185,6 +185,8 @@ pub struct NodeConfig {
     pub screen_probe_mode: tetherly_core::ScreenProbeMode,
     /// Operation mode for screen and audio playout lip-sync & clock synchronization pipeline (ADR-096).
     pub screen_sync_mode: tetherly_core::ScreenAudioSyncMode,
+    /// Initial active display ID for screen capture (ADR-097). Defaults to 0 (Primary).
+    pub screen_display_id: u8,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -248,6 +250,7 @@ impl Default for NodeConfig {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
         }
@@ -3028,6 +3031,12 @@ pub struct ScreenStatusReport {
     pub sync_adjustments_applied: u64,
     #[serde(default)]
     pub in_sync: bool,
+    #[serde(default)]
+    pub active_display_id: u8,
+    #[serde(default)]
+    pub display_count: usize,
+    #[serde(default)]
+    pub display_switches_count: u64,
 }
 
 /// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
@@ -3403,6 +3412,14 @@ struct Shared {
     /// Audio-video playout lip-sync and clock drift synchronization mode (ADR-096).
     screen_sync_mode: Mutex<ScreenAudioSyncMode>,
     screen_sync_stats: Mutex<ScreenAudioSyncStats>,
+    /// Active display ID for screen capture (ADR-097). Defaults to 0 (Primary).
+    screen_active_display_id: AtomicU8,
+    /// Known displays available on this host (ADR-097).
+    screen_displays: Mutex<Vec<tetherly_core::ScreenDisplayInfo>>,
+    /// Count of display switch operations executed during runtime (ADR-097).
+    screen_display_switches_count: AtomicU64,
+    /// Timestamp (us) of last display switch (ADR-097).
+    screen_last_display_switch_us: AtomicU64,
     /// Damage tracker for screen frames (ADR-089).
     screen_damage_tracker: Mutex<ScreenDamageTracker>,
     /// Previous frame bytes for difference detection (ADR-089).
@@ -3638,6 +3655,9 @@ impl Node {
         {
             screen_source.set_qp_range(screen_qp_min, screen_qp_max);
         }
+        let initial_display_id = cfg.screen_display_id;
+        let initial_displays = screen_source.displays();
+        let _ = screen_source.switch_display(initial_display_id);
         let screen_codec: Arc<dyn ScreenCodec> = cfg
             .screen_codec
             .clone()
@@ -3754,6 +3774,8 @@ impl Node {
                 s.set_twcc_mode(screen_twcc_mode);
                 s.set_probe_mode(screen_probe_mode);
                 s.set_sync_mode(screen_sync_mode);
+                s.set_displays(initial_displays.clone());
+                let _ = s.switch_display(initial_display_id, 0);
                 s
             }),
             screen_source,
@@ -3812,6 +3834,10 @@ impl Node {
                 mode: screen_sync_mode,
                 ..Default::default()
             }),
+            screen_active_display_id: AtomicU8::new(initial_display_id),
+            screen_displays: Mutex::new(initial_displays),
+            screen_display_switches_count: AtomicU64::new(0),
+            screen_last_display_switch_us: AtomicU64::new(0),
             screen_damage_tracker: Mutex::new(ScreenDamageTracker::new()),
             screen_prev_frame: Mutex::new(None),
             shutdown,
@@ -20460,6 +20486,16 @@ impl Node {
                                             sel.force_idr();
                                         }
                                     }
+                                    if let ControlMsg::SwitchDisplay { display_id } = msg {
+                                        let _ = node.shared.screen_source.switch_display(display_id);
+                                        node.shared.screen_source.force_idr();
+                                        if let Some(sel) = &node.shared.screen_encode_codec {
+                                            sel.force_idr();
+                                        }
+                                        node.shared.screen_active_display_id.store(display_id, std::sync::atomic::Ordering::Relaxed);
+                                        node.shared.screen_display_switches_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        node.shared.screen_last_display_switch_us.store(now_us, std::sync::atomic::Ordering::Relaxed);
+                                    }
                                     let (reply, dynamic_bitrate, dynamic_fps, dynamic_scale) = {
                                         let mut engine = node
                                             .shared
@@ -21583,6 +21619,9 @@ impl Node {
             sync_clock_drift_ppm: sync_report.clock_drift_ppm,
             sync_adjustments_applied: sync_report.adjustments_applied,
             in_sync: sync_report.in_sync,
+            active_display_id: self.shared.screen_active_display_id.load(Ordering::Relaxed),
+            display_count: self.screen_displays().len(),
+            display_switches_count: self.shared.screen_display_switches_count.load(Ordering::Relaxed),
         }
     }
 
@@ -22503,6 +22542,108 @@ impl Node {
         Ok(self.screen_sync_report())
     }
 
+    /// Return the active display ID being captured or viewed (ADR-097).
+    pub fn screen_active_display_id(&self) -> u8 {
+        self.shared
+            .screen_active_display_id
+            .load(Ordering::Relaxed)
+    }
+
+    /// List enumerated displays available on this host (ADR-097).
+    pub fn screen_displays(&self) -> Vec<tetherly_core::ScreenDisplayInfo> {
+        let displays = self.shared.screen_displays.lock().expect("displays").clone();
+        if !displays.is_empty() {
+            displays
+        } else {
+            self.shared.screen_source.displays()
+        }
+    }
+
+    /// Update available displays list (e.g. when physical displays plug/unplug or virtual displays are created) (ADR-097).
+    pub fn screen_set_displays(&self, displays: Vec<tetherly_core::ScreenDisplayInfo>) {
+        if let Ok(mut engine) = self.shared.screen_engine.lock() {
+            engine.set_displays(displays.clone());
+        }
+        *self.shared.screen_displays.lock().expect("displays") = displays;
+    }
+
+    /// Return count of display switch operations executed during runtime (ADR-097).
+    pub fn screen_display_switches_count(&self) -> u64 {
+        self.shared
+            .screen_display_switches_count
+            .load(Ordering::Relaxed)
+    }
+
+    /// Comprehensive status report for screen displays and active streaming target (v2.11 / ADR-097).
+    pub fn screen_display_report(&self) -> tetherly_core::ScreenDisplayReport {
+        let active_id = self.screen_active_display_id();
+        let displays = self.screen_displays();
+        let switches = self.screen_display_switches_count();
+        let last_switch = self
+            .shared
+            .screen_last_display_switch_us
+            .load(Ordering::Relaxed);
+        tetherly_core::ScreenDisplayReport {
+            ok: true,
+            active_display_id: active_id,
+            displays,
+            switches_count: switches,
+            last_switch_us: last_switch,
+        }
+    }
+
+    /// Dynamically switch active display during screen streaming session (ADR-097).
+    /// Dispatches ControlMsg::SwitchDisplay over wire if visitor, or switches capture source & forces keyframe if host.
+    pub async fn screen_switch_display(
+        &self,
+        display_id: u8,
+    ) -> Result<tetherly_core::ScreenDisplayReport, CoreError> {
+        let now_us = self.shared.clock.unix_us();
+
+        // 1. If connected as visitor/controller, send SwitchDisplay control message across ctl channel
+        let ctl_opt = self.shared.screen_ctl.lock().await.clone();
+        if let Some(ctl) = ctl_opt {
+            let msg = ControlMsg::SwitchDisplay { display_id };
+            if ctl.send(msg).await.is_err() {
+                return Err(CoreError::NoConnectedPeer);
+            }
+            self.shared
+                .screen_active_display_id
+                .store(display_id, Ordering::Relaxed);
+            self.shared
+                .screen_display_switches_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.shared
+                .screen_last_display_switch_us
+                .store(now_us, Ordering::Relaxed);
+            return Ok(self.screen_display_report());
+        }
+
+        // 2. Otherwise (host or standalone), switch source directly
+        self.shared.screen_source.switch_display(display_id)?;
+        self.shared.screen_source.force_idr();
+        if let Some(sel) = &self.shared.screen_encode_codec {
+            sel.force_idr();
+        }
+
+        {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            let _ = engine.switch_display(display_id, now_us);
+        }
+
+        self.shared
+            .screen_active_display_id
+            .store(display_id, Ordering::Relaxed);
+        self.shared
+            .screen_display_switches_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.shared
+            .screen_last_display_switch_us
+            .store(now_us, Ordering::Relaxed);
+
+        Ok(self.screen_display_report())
+    }
+
     /// Comprehensive status report for input sharing.
     pub async fn input_status_report(&self) -> InputStatusReport {
         let channel_open = self.input_channel_open().await;
@@ -23248,6 +23389,7 @@ mod clipboard_policy_tests {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
         };
@@ -23404,6 +23546,7 @@ mod handoff_engine_tests {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
         };
@@ -23591,6 +23734,7 @@ mod media_policy_tests {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
         };
@@ -23789,6 +23933,7 @@ mod locator_policy_tests {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
         };
@@ -23932,6 +24077,7 @@ mod locator_policy_tests {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
         };

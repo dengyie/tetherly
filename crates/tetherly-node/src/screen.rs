@@ -905,6 +905,18 @@ impl<S: ScreenSource> ScreenSource for EncodedSource<S> {
     fn qp_range(&self) -> (u8, u8) {
         self.codec.qp_range()
     }
+
+    fn displays(&self) -> Vec<tetherly_core::screen::ScreenDisplayInfo> {
+        self.inner.displays()
+    }
+
+    fn active_display_id(&self) -> u8 {
+        self.inner.active_display_id()
+    }
+
+    fn switch_display(&self, display_id: u8) -> Result<(), CoreError> {
+        self.inner.switch_display(display_id)
+    }
 }
 
 // ---------------------------------------------------------------------------

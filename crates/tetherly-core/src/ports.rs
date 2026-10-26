@@ -252,6 +252,21 @@ pub trait ScreenSource: Send + Sync {
     fn qp_range(&self) -> (u8, u8) {
         crate::screen::SCREEN_QP_TEXT_DEFAULT
     }
+
+    /// Enumerate available displays on this host (v2.11 / ADR-097). Default returns single primary display 0.
+    fn displays(&self) -> Vec<crate::screen::ScreenDisplayInfo> {
+        vec![crate::screen::ScreenDisplayInfo::primary_default()]
+    }
+
+    /// Currently active display ID being captured (v2.11 / ADR-097). Defaults to 0.
+    fn active_display_id(&self) -> u8 {
+        0
+    }
+
+    /// Request switching capture source to target display_id (v2.11 / ADR-097).
+    fn switch_display(&self, _display_id: u8) -> Result<(), CoreError> {
+        Ok(())
+    }
 }
 
 /// Transform a raw pixel body to or form the wire format carried in

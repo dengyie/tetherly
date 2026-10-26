@@ -80,6 +80,8 @@ fn cfg(dir: PathBuf, name: &str) -> NodeConfig {
         screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
         screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
         screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
+        screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+        screen_display_id: 0,
         screen_sink: None,
         input_sink: None,
     }

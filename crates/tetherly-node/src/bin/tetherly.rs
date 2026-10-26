@@ -133,6 +133,9 @@ enum Cmd {
         /// `auto` (default, ±15ms skew tolerance); `strict` (±5ms tolerance); `loose` (±40ms tolerance); `disabled`.
         #[arg(long, default_value = "auto")]
         screen_sync: String,
+        /// Initial display ID for screen capture (ADR-097). Defaults to 0 (Primary).
+        #[arg(long, default_value = "0")]
+        screen_display: u8,
     },
     /// Print device_id of the persisted identity.
     Identity,
@@ -2233,6 +2236,26 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// List enumerated displays available for screen streaming (v2.11 / ADR-097).
+    Displays {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Dynamically switch active display during screen streaming session (v2.11 / ADR-097).
+    Switch {
+        /// Target display ID to switch to (e.g. 0 for primary, 1 for secondary).
+        display_id: u8,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -4038,6 +4061,7 @@ async fn main() -> Result<()> {
             screen_twcc,
             screen_probe,
             screen_sync,
+            screen_display,
             file_port,
             input_port,
             screen_port,
@@ -4199,6 +4223,7 @@ async fn main() -> Result<()> {
                         )
                     }
                 };
+            cfg.screen_display_id = screen_display;
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
             cfg.screen_codec_h264 = h264;
             let encode_codec: Arc<dyn tetherly_core::ScreenCodec> = if h264 {
@@ -6427,6 +6452,12 @@ async fn main() -> Result<()> {
                             rep.in_sync
                         );
                     }
+                    if rep.display_count > 0 {
+                        println!(
+                            "  Display:      ID {} (total: {}, switches: {})",
+                            rep.active_display_id, rep.display_count, rep.display_switches_count
+                        );
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -7303,6 +7334,88 @@ async fn main() -> Result<()> {
                         println!("  Playout Adjustments:  {}", rep.adjustments_applied);
                         println!("  In Lip-Sync:          {}", rep.in_sync);
                     }
+                }
+            }
+            ScreenCmd::Displays { json, ui_port } => {
+                let (code, resp) =
+                    tetherly_node::loopback_get(ui_port, "/api/screen/displays")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen displays query failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_core::ScreenDisplayReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    println!("Screen Multi-Display & Virtual Display Pipeline (ADR-097):");
+                    println!("  Active Display ID:    {}", rep.active_display_id);
+                    println!("  Total Displays:       {}", rep.displays.len());
+                    println!("  Dynamic Switches:     {}", rep.switches_count);
+                    if rep.last_switch_us > 0 {
+                        println!("  Last Switch (us):     {}", rep.last_switch_us);
+                    }
+                    println!("  Displays:");
+                    for d in &rep.displays {
+                        let tag = if d.display_id == rep.active_display_id {
+                            " [active]"
+                        } else {
+                            ""
+                        };
+                        let kind = if d.is_virtual {
+                            " (virtual)"
+                        } else if d.is_primary {
+                            " (primary)"
+                        } else {
+                            ""
+                        };
+                        println!(
+                            "    - ID {}: \"{}\" {}x{} @ {}% scale{}{}",
+                            d.display_id, d.title, d.width, d.height, d.scale_factor_pct, kind, tag
+                        );
+                    }
+                }
+            }
+            ScreenCmd::Switch {
+                display_id,
+                json,
+                ui_port,
+            } => {
+                let req = serde_json::json!({ "display_id": display_id });
+                let body = serde_json::to_vec(&req)?;
+                let (code, resp) =
+                    tetherly_node::loopback_post(ui_port, "/api/screen/switch", &body)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "display switch failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_core::ScreenDisplayReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    println!(
+                        "Screen display switched successfully: active display is now ID {} (total switches: {})",
+                        rep.active_display_id, rep.switches_count
+                    );
                 }
             }
         },

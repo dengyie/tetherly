@@ -566,6 +566,73 @@ impl ScreenFrame {
     }
 }
 
+/// Detailed display properties and geometry for multi-display and virtual display multiplexing (v2.11 / ADR-097).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScreenDisplayInfo {
+    /// Zero-based identifier of the display on the host system.
+    pub display_id: u8,
+    /// Human-readable title or monitor model name.
+    pub title: String,
+    /// Physical width in pixels.
+    pub width: u32,
+    /// Physical height in pixels.
+    pub height: u32,
+    /// Operating system display scaling percentage (e.g. 100%, 125%, 150%, 200%).
+    pub scale_factor_pct: u32,
+    /// Indicates whether this display is designated as the primary monitor.
+    pub is_primary: bool,
+    /// Indicates whether this display is an emulated virtual secondary display (ADR-073).
+    pub is_virtual: bool,
+}
+
+impl ScreenDisplayInfo {
+    pub fn new(
+        display_id: u8,
+        title: impl Into<String>,
+        width: u32,
+        height: u32,
+        scale_factor_pct: u32,
+        is_primary: bool,
+        is_virtual: bool,
+    ) -> Self {
+        Self {
+            display_id,
+            title: title.into(),
+            width,
+            height,
+            scale_factor_pct,
+            is_primary,
+            is_virtual,
+        }
+    }
+
+    pub fn primary_default() -> Self {
+        Self {
+            display_id: 0,
+            title: "Display 0 (Primary)".to_string(),
+            width: 1920,
+            height: 1080,
+            scale_factor_pct: 100,
+            is_primary: true,
+            is_virtual: false,
+        }
+    }
+}
+
+/// Status report of active multi-display configuration and dynamic multiplexing statistics (v2.11 / ADR-097).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScreenDisplayReport {
+    pub ok: bool,
+    /// Currently active display ID being captured and streamed.
+    pub active_display_id: u8,
+    /// List of all discovered displays on the streaming host.
+    pub displays: Vec<ScreenDisplayInfo>,
+    /// Cumulative count of dynamic display switches performed.
+    pub switches_count: u64,
+    /// Timestamp in microseconds of the last display switch event.
+    pub last_switch_us: u64,
+}
+
 /// The only legal instructions a controller may send. There is deliberately no
 /// "run" or "open" here: the screen channel carries pixels and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -579,6 +646,10 @@ pub enum ControlMsg {
     },
     /// Viewer asks sender to emit an independent keyframe (IDR for H.264, v1.95 / ADR-081).
     KeyframeRequest,
+    /// Viewer asks sender to dynamically switch captured monitor/display (v2.11 / ADR-097).
+    SwitchDisplay {
+        display_id: u8,
+    },
 }
 
 /// Control payload layout: magic(4) | proto(1) | tag(1) | seq(8).
@@ -593,6 +664,7 @@ impl ControlMsg {
             ControlMsg::Stop => 1,
             ControlMsg::Ack { .. } => 2,
             ControlMsg::KeyframeRequest => 3,
+            ControlMsg::SwitchDisplay { .. } => 4,
         }
     }
 
@@ -603,6 +675,9 @@ impl ControlMsg {
         out.push(self.tag());
         match self {
             ControlMsg::Ack { seq } => out.extend_from_slice(&seq.to_be_bytes()),
+            ControlMsg::SwitchDisplay { display_id } => {
+                out.extend_from_slice(&(*display_id as u64).to_be_bytes())
+            }
             _ => out.extend_from_slice(&0u64.to_be_bytes()),
         }
         out
@@ -640,6 +715,9 @@ impl ControlMsg {
             1 => Ok(ControlMsg::Stop),
             2 => Ok(ControlMsg::Ack { seq }),
             3 => Ok(ControlMsg::KeyframeRequest),
+            4 => Ok(ControlMsg::SwitchDisplay {
+                display_id: seq as u8,
+            }),
             _ => Err(CoreError::ScreenFrame),
         }
     }
@@ -1033,6 +1111,12 @@ pub struct ScreenStats {
     pub sync_adjustments_applied: u64,
     /// Indicates whether audio and video presentation timestamps are currently within tolerance (v2.10 / ADR-096).
     pub in_sync: bool,
+    /// Active display ID currently selected for streaming capture (v2.11 / ADR-097).
+    pub active_display_id: u8,
+    /// Total count of available displays discovered on the host (v2.11 / ADR-097).
+    pub display_count: u8,
+    /// Total number of dynamic display switches executed (v2.11 / ADR-097).
+    pub display_switches_count: u64,
 }
 
 impl Default for ScreenStats {
@@ -1107,6 +1191,9 @@ impl Default for ScreenStats {
             sync_clock_drift_ppm: 0.0,
             sync_adjustments_applied: 0,
             in_sync: true,
+            active_display_id: 0,
+            display_count: 1,
+            display_switches_count: 0,
         }
     }
 }
@@ -6300,6 +6387,10 @@ pub struct ScreenSender {
     twcc_sender: ScreenTwccSenderTracker,
     probe_controller: ScreenProbeController,
     sync_coordinator: ScreenAudioSyncCoordinator,
+    active_display_id: u8,
+    displays: Vec<ScreenDisplayInfo>,
+    display_switches_count: u64,
+    last_display_switch_us: u64,
 }
 
 impl Default for ScreenSender {
@@ -6324,6 +6415,10 @@ impl ScreenSender {
         let twcc_sender = ScreenTwccSenderTracker::new(ScreenTwccMode::Auto);
         let probe_controller = ScreenProbeController::default();
         let sync_coordinator = ScreenAudioSyncCoordinator::default();
+        let displays = vec![ScreenDisplayInfo::primary_default()];
+        let active_display_id = 0;
+        let display_switches_count = 0;
+        let last_display_switch_us = 0;
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -6375,6 +6470,9 @@ impl ScreenSender {
             sync_clock_drift_ppm: 0.0,
             sync_adjustments_applied: 0,
             in_sync: true,
+            active_display_id: 0,
+            display_count: 1,
+            display_switches_count: 0,
             ..Default::default()
         };
         Self {
@@ -6398,7 +6496,17 @@ impl ScreenSender {
             twcc_sender,
             probe_controller,
             sync_coordinator,
+            active_display_id,
+            displays,
+            display_switches_count,
+            last_display_switch_us,
         }
+    }
+
+    pub fn with_display(display_id: u8) -> Self {
+        let mut sender = Self::new();
+        let _ = sender.switch_display(display_id, 0);
+        sender
     }
 
     pub fn with_sync(sync: ScreenAudioSyncMode) -> Self {
@@ -6946,6 +7054,47 @@ impl ScreenSender {
                 self.stats.is_squelched = false;
                 Ok(None)
             }
+            ControlMsg::SwitchDisplay { display_id } => {
+                self.switch_display(display_id, now_us)?;
+                Ok(None)
+            }
+        }
+    }
+
+    pub fn active_display_id(&self) -> u8 {
+        self.active_display_id
+    }
+
+    pub fn displays(&self) -> &[ScreenDisplayInfo] {
+        &self.displays
+    }
+
+    pub fn set_displays(&mut self, displays: Vec<ScreenDisplayInfo>) {
+        if !displays.is_empty() {
+            self.stats.display_count = displays.len().min(255) as u8;
+            self.displays = displays;
+        }
+    }
+
+    pub fn switch_display(&mut self, display_id: u8, now_us: u64) -> Result<(), CoreError> {
+        self.active_display_id = display_id;
+        self.display_switches_count = self.display_switches_count.saturating_add(1);
+        self.last_display_switch_us = now_us;
+        self.stats.active_display_id = display_id;
+        self.stats.display_switches_count = self.display_switches_count;
+        self.stats.keyframes_requested = self.stats.keyframes_requested.saturating_add(1);
+        self.squelch_controller.force_wake(now_us);
+        self.stats.is_squelched = false;
+        Ok(())
+    }
+
+    pub fn display_report(&self) -> ScreenDisplayReport {
+        ScreenDisplayReport {
+            ok: true,
+            active_display_id: self.active_display_id,
+            displays: self.displays.clone(),
+            switches_count: self.display_switches_count,
+            last_switch_us: self.last_display_switch_us,
         }
     }
 
@@ -7458,6 +7607,11 @@ impl ScreenSender {
         self.probe_controller = ScreenProbeController::new(self.probe_controller.mode());
         self.sync_coordinator.reset();
         self.sync_sync_stats();
+        self.stats.active_display_id = 0;
+        self.active_display_id = 0;
+        self.display_switches_count = 0;
+        self.last_display_switch_us = 0;
+        self.stats.display_switches_count = 0;
     }
 }
 
@@ -7478,6 +7632,10 @@ pub struct ScreenReceiver {
     probe_mode: ScreenProbeMode,
     probe_stats: ScreenProbeStats,
     sync_coordinator: ScreenAudioSyncCoordinator,
+    active_display_id: u8,
+    displays: Vec<ScreenDisplayInfo>,
+    display_switches_count: u64,
+    last_switch_us: u64,
 }
 
 impl Default for ScreenReceiver {
@@ -7502,6 +7660,7 @@ impl ScreenReceiver {
             ..Default::default()
         };
         let sync_coordinator = ScreenAudioSyncCoordinator::default();
+        let displays = vec![ScreenDisplayInfo::primary_default()];
         let stats = ScreenStats {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
@@ -7526,6 +7685,9 @@ impl ScreenReceiver {
             sync_clock_drift_ppm: 0.0,
             sync_adjustments_applied: 0,
             in_sync: true,
+            active_display_id: 0,
+            display_count: 1,
+            display_switches_count: 0,
             ..Default::default()
         };
         Self {
@@ -7543,6 +7705,10 @@ impl ScreenReceiver {
             probe_mode,
             probe_stats,
             sync_coordinator,
+            active_display_id: 0,
+            displays,
+            display_switches_count: 0,
+            last_switch_us: 0,
         }
     }
 
@@ -7561,6 +7727,7 @@ impl ScreenReceiver {
             ..Default::default()
         };
         let sync_coordinator = ScreenAudioSyncCoordinator::default();
+        let displays = vec![ScreenDisplayInfo::primary_default()];
         let stats = ScreenStats {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
@@ -7585,6 +7752,9 @@ impl ScreenReceiver {
             sync_clock_drift_ppm: 0.0,
             sync_adjustments_applied: 0,
             in_sync: true,
+            active_display_id: 0,
+            display_count: 1,
+            display_switches_count: 0,
             ..Default::default()
         };
         Self {
@@ -7602,6 +7772,10 @@ impl ScreenReceiver {
             probe_mode,
             probe_stats,
             sync_coordinator,
+            active_display_id: 0,
+            displays,
+            display_switches_count: 0,
+            last_switch_us: 0,
         }
     }
 
@@ -8136,6 +8310,49 @@ impl ScreenReceiver {
         self.stats.probe_measured_bps = 0;
         self.sync_coordinator.reset();
         self.sync_sync_stats();
+        self.active_display_id = 0;
+        self.display_switches_count = 0;
+        self.last_switch_us = 0;
+        self.stats.active_display_id = 0;
+        self.stats.display_switches_count = 0;
+    }
+
+    pub fn active_display_id(&self) -> u8 {
+        self.active_display_id
+    }
+
+    pub fn set_active_display_id(&mut self, display_id: u8) {
+        self.active_display_id = display_id;
+        self.stats.active_display_id = display_id;
+    }
+
+    pub fn switch_display(&mut self, display_id: u8, now_us: u64) {
+        self.active_display_id = display_id;
+        self.display_switches_count = self.display_switches_count.saturating_add(1);
+        self.last_switch_us = now_us;
+        self.stats.active_display_id = display_id;
+        self.stats.display_switches_count = self.display_switches_count;
+    }
+
+    pub fn displays(&self) -> &[ScreenDisplayInfo] {
+        &self.displays
+    }
+
+    pub fn set_displays(&mut self, displays: Vec<ScreenDisplayInfo>) {
+        if !displays.is_empty() {
+            self.stats.display_count = displays.len().min(255) as u8;
+            self.displays = displays;
+        }
+    }
+
+    pub fn display_report(&self) -> ScreenDisplayReport {
+        ScreenDisplayReport {
+            ok: true,
+            active_display_id: self.active_display_id,
+            displays: self.displays.clone(),
+            switches_count: self.display_switches_count,
+            last_switch_us: self.last_switch_us,
+        }
     }
 }
 
@@ -8299,6 +8516,8 @@ pub struct MemoryScreenSource {
     seq: std::sync::atomic::AtomicU64,
     /// Optional per-grab failure injection (index of the grab call, 1-based).
     fail_at: std::sync::atomic::AtomicU64,
+    active_display: std::sync::atomic::AtomicU8,
+    displays: std::sync::Mutex<Vec<ScreenDisplayInfo>>,
 }
 
 impl MemoryScreenSource {
@@ -8308,6 +8527,8 @@ impl MemoryScreenSource {
             format: PixelFormat::Bgra8,
             seq: std::sync::atomic::AtomicU64::new(1),
             fail_at: std::sync::atomic::AtomicU64::new(0),
+            active_display: std::sync::atomic::AtomicU8::new(0),
+            displays: std::sync::Mutex::new(vec![ScreenDisplayInfo::primary_default()]),
         })
     }
 
@@ -8318,6 +8539,12 @@ impl MemoryScreenSource {
 
     pub fn rect(&self) -> ScreenRect {
         self.rect
+    }
+
+    pub fn set_displays(&self, displays: Vec<ScreenDisplayInfo>) {
+        if let Ok(mut lock) = self.displays.lock() {
+            *lock = displays;
+        }
     }
 }
 
@@ -8334,6 +8561,23 @@ impl crate::ports::ScreenSource for MemoryScreenSource {
             *b = (i.wrapping_add(seq as usize) & 0xFF) as u8;
         }
         Ok(Some(ScreenFrame::raw(seq, self.rect, self.format, bytes)?))
+    }
+
+    fn displays(&self) -> Vec<ScreenDisplayInfo> {
+        self.displays
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_else(|_| vec![ScreenDisplayInfo::primary_default()])
+    }
+
+    fn active_display_id(&self) -> u8 {
+        self.active_display.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn switch_display(&self, display_id: u8) -> Result<(), CoreError> {
+        self.active_display
+            .store(display_id, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -8473,6 +8717,7 @@ mod tests {
             ControlMsg::Stop,
             ControlMsg::Ack { seq: 9 },
             ControlMsg::KeyframeRequest,
+            ControlMsg::SwitchDisplay { display_id: 2 },
         ] {
             let wire = msg.to_frame().unwrap();
             assert_eq!(ControlMsg::from_frame(&wire).unwrap(), msg);
@@ -11151,4 +11396,92 @@ fn screen_audio_sync_pipeline_and_drift_compensation() {
     receiver.on_peer_gone();
     assert_eq!(sender.stats().sync_beacons_sent, 0);
     assert_eq!(receiver.stats().sync_beacons_received, 0);
+}
+
+#[test]
+fn screen_multi_display_and_dynamic_switch_pipeline() {
+    // 1. ScreenDisplayInfo constructor and defaults
+    let d0 = ScreenDisplayInfo::primary_default();
+    assert_eq!(d0.display_id, 0);
+    assert!(d0.is_primary);
+    assert!(!d0.is_virtual);
+    assert_eq!(d0.width, 1920);
+    assert_eq!(d0.height, 1080);
+    assert_eq!(d0.scale_factor_pct, 100);
+
+    let d1 = ScreenDisplayInfo::new(1, "Display 1 (Secondary)", 2560, 1440, 125, false, false);
+    let d2 = ScreenDisplayInfo::new(2, "Virtual Display (ADR-073)", 1920, 1200, 100, false, true);
+
+    // 2. ControlMsg wire round-trip
+    let ctrl_switch = ControlMsg::SwitchDisplay { display_id: 1 };
+    assert_eq!(ctrl_switch.tag(), 4);
+    let frame = ctrl_switch.to_frame().expect("to_frame");
+    assert_eq!(frame.ty, TYPE_SCREEN_CONTROL);
+    let decoded = ControlMsg::from_frame(&frame).expect("from_frame");
+    assert_eq!(decoded, ControlMsg::SwitchDisplay { display_id: 1 });
+
+    // 3. ScreenSender display management and switching
+    let mut sender = ScreenSender::new();
+    sender.allow();
+    sender.on_control(ControlMsg::Start).unwrap();
+    assert_eq!(sender.active_display_id(), 0);
+    assert_eq!(sender.displays().len(), 1);
+
+    sender.set_displays(vec![d0.clone(), d1.clone(), d2.clone()]);
+    assert_eq!(sender.displays().len(), 3);
+    assert_eq!(sender.stats().display_count, 3);
+
+    // Switch to display 1
+    sender.switch_display(1, 1_000_000).expect("switch display 1");
+    assert_eq!(sender.active_display_id(), 1);
+    assert_eq!(sender.stats().active_display_id, 1);
+    assert_eq!(sender.stats().display_switches_count, 1);
+    assert_eq!(sender.stats().keyframes_requested, 1); // Triggers keyframe refresh
+
+    let report = sender.display_report();
+    assert_eq!(report.active_display_id, 1);
+    assert_eq!(report.displays.len(), 3);
+    assert_eq!(report.switches_count, 1);
+    assert_eq!(report.last_switch_us, 1_000_000);
+
+    // Receiving ControlMsg::SwitchDisplay on sender
+    sender
+        .on_control_with_time(ControlMsg::SwitchDisplay { display_id: 2 }, 1_500_000)
+        .expect("on_control switch");
+    assert_eq!(sender.active_display_id(), 2);
+    assert_eq!(sender.stats().active_display_id, 2);
+    assert_eq!(sender.stats().display_switches_count, 2);
+    assert_eq!(sender.stats().keyframes_requested, 2);
+
+    // 4. ScreenReceiver display management
+    let mut receiver = ScreenReceiver::new();
+    assert_eq!(receiver.active_display_id(), 0);
+    receiver.set_displays(vec![d0, d1, d2]);
+    assert_eq!(receiver.displays().len(), 3);
+    assert_eq!(receiver.stats().display_count, 3);
+
+    receiver.switch_display(2, 1_500_000);
+    assert_eq!(receiver.active_display_id(), 2);
+    assert_eq!(receiver.stats().active_display_id, 2);
+    assert_eq!(receiver.stats().display_switches_count, 1);
+
+    let rx_report = receiver.display_report();
+    assert_eq!(rx_report.active_display_id, 2);
+    assert_eq!(rx_report.switches_count, 1);
+
+    // 5. MemoryScreenSource multi-display support
+    use crate::ports::ScreenSource;
+    let mem_src = MemoryScreenSource::new(1920, 1080).expect("mem_src");
+    assert_eq!(mem_src.active_display_id(), 0);
+    assert_eq!(mem_src.displays().len(), 1);
+    mem_src.switch_display(1).expect("mem_src switch");
+    assert_eq!(mem_src.active_display_id(), 1);
+
+    // 6. Peer disconnect resets sender & receiver display state
+    sender.on_peer_gone();
+    receiver.on_peer_gone();
+    assert_eq!(sender.stats().active_display_id, 0);
+    assert_eq!(sender.stats().display_switches_count, 0);
+    assert_eq!(receiver.stats().active_display_id, 0);
+    assert_eq!(receiver.stats().display_switches_count, 0);
 }
