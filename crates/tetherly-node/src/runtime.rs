@@ -59,10 +59,11 @@ use tetherly_core::{
     MemoryTrustStore, MicAnnounceFrame, MicAttachFrame, MicAudioChunkFrame, MicCodec,
     MicDetachFrame, MicMode, MicRole, MicValidator, NotificationPayload, NotificationUrgency,
     Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource, ReplyView,
-    ResourceHandoffValidator, ScreenAssembler, ScreenCodec, ScreenCursorMode, ScreenCursorStats,
-    ScreenCursorUpdate, ScreenDamageTracker, ScreenFecMode, ScreenFecReport, ScreenFecShard,
-    ScreenFrame, ScreenHarqMode, ScreenHarqReport, ScreenNack, ScreenPacerMode, ScreenPacerReport,
-    ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats, ScreenProbeMode,
+    ResourceHandoffValidator, ScreenAssembler, ScreenAudioSyncFrame, ScreenAudioSyncMode,
+    ScreenAudioSyncReport, ScreenAudioSyncStats, ScreenCodec, ScreenCursorMode,
+    ScreenCursorStats, ScreenCursorUpdate, ScreenDamageTracker, ScreenFecMode, ScreenFecReport,
+    ScreenFecShard, ScreenFrame, ScreenHarqMode, ScreenHarqReport, ScreenNack, ScreenPacerMode,
+    ScreenPacerReport, ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats, ScreenProbeMode,
     ScreenProbePacket, ScreenProbeReport, ScreenProbeState, ScreenProbeStats, ScreenReceiver,
     ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState, ScreenStats,
     ScreenTrendlineMode, ScreenTrendlineReport, ScreenTwccFeedback, ScreenTwccMode,
@@ -71,7 +72,8 @@ use tetherly_core::{
     VirtualDisplayAttachFrame, VirtualDisplayCodec, VirtualDisplayDetachFrame,
     VirtualDisplayFrameAck, VirtualDisplayMode, VirtualDisplayPixelFormat, VirtualDisplayRole,
     VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS,
-    OVERLAY_PROBE_MS, TYPE_SCREEN_FEC, TYPE_SCREEN_NACK, TYPE_SCREEN_PROBE, TYPE_SCREEN_TWCC,
+    OVERLAY_PROBE_MS, TYPE_SCREEN_FEC, TYPE_SCREEN_NACK, TYPE_SCREEN_PROBE, TYPE_SCREEN_SYNC,
+    TYPE_SCREEN_TWCC,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -181,6 +183,8 @@ pub struct NodeConfig {
     pub screen_twcc_mode: tetherly_core::ScreenTwccMode,
     /// Operation mode for active bandwidth probing and fast ramp-up pipeline (ADR-095).
     pub screen_probe_mode: tetherly_core::ScreenProbeMode,
+    /// Operation mode for screen and audio playout lip-sync & clock synchronization pipeline (ADR-096).
+    pub screen_sync_mode: tetherly_core::ScreenAudioSyncMode,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
     /// production passes `SystemSink` for real output.
     pub screen_sink: Option<Arc<dyn ScreenSink>>,
@@ -243,6 +247,7 @@ impl Default for NodeConfig {
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
+            screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_sink: None,
             input_sink: None,
         }
@@ -3009,6 +3014,20 @@ pub struct ScreenStatusReport {
     pub probe_target_bps: u32,
     #[serde(default)]
     pub probe_measured_bps: u64,
+    #[serde(default)]
+    pub sync_mode: String,
+    #[serde(default)]
+    pub sync_beacons_sent: u64,
+    #[serde(default)]
+    pub sync_beacons_received: u64,
+    #[serde(default)]
+    pub sync_skew_us: i64,
+    #[serde(default)]
+    pub sync_clock_drift_ppm: f64,
+    #[serde(default)]
+    pub sync_adjustments_applied: u64,
+    #[serde(default)]
+    pub in_sync: bool,
 }
 
 /// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
@@ -3381,6 +3400,9 @@ struct Shared {
     /// Active bandwidth probing and fast ramp-up mode for screen streams (ADR-095).
     screen_probe_mode: Mutex<ScreenProbeMode>,
     screen_probe_stats: Mutex<ScreenProbeStats>,
+    /// Audio-video playout lip-sync and clock drift synchronization mode (ADR-096).
+    screen_sync_mode: Mutex<ScreenAudioSyncMode>,
+    screen_sync_stats: Mutex<ScreenAudioSyncStats>,
     /// Damage tracker for screen frames (ADR-089).
     screen_damage_tracker: Mutex<ScreenDamageTracker>,
     /// Previous frame bytes for difference detection (ADR-089).
@@ -3584,6 +3606,7 @@ impl Node {
         let screen_harq_mode = cfg.screen_harq_mode;
         let screen_twcc_mode = cfg.screen_twcc_mode;
         let screen_probe_mode = cfg.screen_probe_mode;
+        let screen_sync_mode = cfg.screen_sync_mode;
         if let Some(sel) = &screen_encode_codec {
             sel.set_fps(screen_fps);
             sel.set_scale_pct(screen_scale_pct);
@@ -3730,6 +3753,7 @@ impl Node {
                 s.set_harq_mode(screen_harq_mode);
                 s.set_twcc_mode(screen_twcc_mode);
                 s.set_probe_mode(screen_probe_mode);
+                s.set_sync_mode(screen_sync_mode);
                 s
             }),
             screen_source,
@@ -3781,6 +3805,11 @@ impl Node {
             screen_probe_mode: Mutex::new(screen_probe_mode),
             screen_probe_stats: Mutex::new(ScreenProbeStats {
                 mode: screen_probe_mode,
+                ..Default::default()
+            }),
+            screen_sync_mode: Mutex::new(screen_sync_mode),
+            screen_sync_stats: Mutex::new(ScreenAudioSyncStats {
+                mode: screen_sync_mode,
                 ..Default::default()
             }),
             screen_damage_tracker: Mutex::new(ScreenDamageTracker::new()),
@@ -15677,6 +15706,15 @@ impl Node {
             return;
         }
 
+        let audio_pts_us = if frame.timestamp_ms > 0 {
+            frame.timestamp_ms.saturating_mul(1000)
+        } else {
+            now_ms.saturating_mul(1000)
+        };
+        if let Ok(mut engine) = self.shared.screen_engine.lock() {
+            engine.record_audio_pts(audio_pts_us);
+        }
+
         let mut guard = self
             .shared
             .active_audio_routing
@@ -20517,11 +20555,13 @@ impl Node {
         let initial_harq_mode = *self.shared.screen_harq_mode.lock().expect("harq mode");
         let initial_twcc_mode = *self.shared.screen_twcc_mode.lock().expect("twcc mode");
         let initial_probe_mode = *self.shared.screen_probe_mode.lock().expect("probe mode");
+        let initial_sync_mode = *self.shared.screen_sync_mode.lock().expect("sync mode");
         let mut receiver = ScreenReceiver::with_playout_mode(initial_playout_mode);
         receiver.set_cursor_mode(initial_cursor_mode);
         receiver.set_harq_mode(initial_harq_mode);
         receiver.set_twcc_mode(initial_twcc_mode);
         receiver.set_probe_mode(initial_probe_mode);
+        receiver.set_sync_mode(initial_sync_mode);
         let mut assembler = ScreenAssembler::new();
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
@@ -20554,6 +20594,10 @@ impl Node {
                         let target_probe_mode = *node.shared.screen_probe_mode.lock().expect("probe mode");
                         if receiver.probe_mode() != target_probe_mode {
                             receiver.set_probe_mode(target_probe_mode);
+                        }
+                        let target_sync_mode = *node.shared.screen_sync_mode.lock().expect("sync mode");
+                        if receiver.sync_mode() != target_sync_mode {
+                            receiver.set_sync_mode(target_sync_mode);
                         }
                         let now_us = node.shared.clock.unix_us();
                         if let Some(twcc_fb) = receiver.generate_twcc_feedback(now_us) {
@@ -20620,6 +20664,16 @@ impl Node {
                                                 }
                                             }
                                         }
+                                    }
+                                    continue;
+                                }
+                                if frame.ty == TYPE_SCREEN_SYNC {
+                                    if let Ok(sync_beacon) = ScreenAudioSyncFrame::decode(&frame.payload) {
+                                        let now_us = node.shared.clock.unix_us();
+                                        receiver.on_sync_beacon_with_time(&sync_beacon, now_us);
+                                        *node.shared.screen_sync_stats.lock().expect("sync stats") = receiver.sync_stats();
+                                        *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
+                                        *node.shared.screen_playout_stats.lock().expect("playout stats") = receiver.playout_stats();
                                     }
                                     continue;
                                 }
@@ -20804,6 +20858,16 @@ impl Node {
                 .screen_cursor_stats
                 .lock()
                 .expect("cursor stats") = receiver.cursor_stats();
+            *node
+                .shared
+                .screen_rx_stats
+                .lock()
+                .expect("screen rx") = receiver.stats();
+            *node
+                .shared
+                .screen_sync_stats
+                .lock()
+                .expect("sync stats") = receiver.sync_stats();
             *node.shared.screen_peer.lock().expect("screen_peer") = None;
             *node.shared.screen_ctl.lock().await = None;
             node.shared
@@ -21130,6 +21194,26 @@ impl Node {
             }
             self.shared.telemetry.record_screen_tx(p_len);
         }
+        let sync_frames: Vec<InnerFrame> = {
+            let now_us = self.shared.clock.unix_us();
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            engine.record_video_pts(now_us);
+            engine.maybe_generate_sync_beacon(now_us);
+            let mut sf = Vec::new();
+            while let Some(sync_beacon) = engine.pop_sync_beacon() {
+                if let Ok(f) = sync_beacon.to_inner() {
+                    sf.push(f);
+                }
+            }
+            sf
+        };
+        for sf in sync_frames {
+            let s_len = (sf.payload.len() + 12) as u64;
+            if tx.try_send(sf).is_err() {
+                return Err(CoreError::Json("screen peer gone".into()));
+            }
+            self.shared.telemetry.record_screen_tx(s_len);
+        }
         Ok(())
     }
 
@@ -21415,6 +21499,7 @@ impl Node {
         let twcc_report = self.screen_twcc_report();
         let probe_mode = *self.shared.screen_probe_mode.lock().expect("probe mode");
         let probe_report = self.screen_probe_report();
+        let sync_report = self.screen_sync_report();
         ScreenStatusReport {
             ok: true,
             state: state.as_str().to_string(),
@@ -21491,6 +21576,13 @@ impl Node {
             probes_failed: probe_report.probes_failed,
             probe_target_bps: probe_report.last_target_bps,
             probe_measured_bps: probe_report.last_measured_bps,
+            sync_mode: sync_report.mode.as_str().to_string(),
+            sync_beacons_sent: sync_report.beacons_sent,
+            sync_beacons_received: sync_report.beacons_received,
+            sync_skew_us: sync_report.current_skew_us,
+            sync_clock_drift_ppm: sync_report.clock_drift_ppm,
+            sync_adjustments_applied: sync_report.adjustments_applied,
+            in_sync: sync_report.in_sync,
         }
     }
 
@@ -22319,6 +22411,98 @@ impl Node {
         Ok(self.screen_probe_report())
     }
 
+    /// Report current audio-video playout lip-sync and clock drift state and metrics (v2.10 / ADR-096).
+    pub fn screen_sync_report(&self) -> ScreenAudioSyncReport {
+        let mode = *self.shared.screen_sync_mode.lock().expect("sync mode");
+        let sender_rep = self
+            .shared
+            .screen_engine
+            .lock()
+            .map(|e| e.sync_report())
+            .unwrap_or_else(|_| ScreenAudioSyncReport {
+                ok: true,
+                mode,
+                ..Default::default()
+            });
+        let rx_stats = *self.shared.screen_rx_stats.lock().expect("screen rx");
+        let local_sync_stats = *self.shared.screen_sync_stats.lock().expect("sync stats");
+
+        ScreenAudioSyncReport {
+            ok: true,
+            mode,
+            beacons_sent: sender_rep
+                .beacons_sent
+                .max(rx_stats.sync_beacons_sent)
+                .max(local_sync_stats.beacons_sent),
+            beacons_received: sender_rep
+                .beacons_received
+                .max(rx_stats.sync_beacons_received)
+                .max(local_sync_stats.beacons_received),
+            current_skew_us: if sender_rep.current_skew_us != 0 {
+                sender_rep.current_skew_us
+            } else if rx_stats.sync_skew_us != 0 {
+                rx_stats.sync_skew_us
+            } else {
+                local_sync_stats.current_skew_us
+            },
+            clock_drift_ppm: if sender_rep.clock_drift_ppm.abs() > 0.001 {
+                sender_rep.clock_drift_ppm
+            } else if rx_stats.sync_clock_drift_ppm.abs() > 0.001 {
+                rx_stats.sync_clock_drift_ppm
+            } else {
+                local_sync_stats.clock_drift_ppm
+            },
+            adjustments_applied: sender_rep
+                .adjustments_applied
+                .max(rx_stats.sync_adjustments_applied)
+                .max(local_sync_stats.adjustments_applied),
+            in_sync: if rx_stats.sync_beacons_received > 0 {
+                rx_stats.in_sync
+            } else if sender_rep.beacons_sent > 0 {
+                sender_rep.in_sync
+            } else {
+                local_sync_stats.in_sync
+            },
+            timestamp_ms: self.shared.clock.unix_ms(),
+        }
+    }
+
+    /// Current screen audio-video sync mode (v2.10 / ADR-096).
+    pub fn screen_sync_mode(&self) -> tetherly_core::ScreenAudioSyncMode {
+        *self.shared.screen_sync_mode.lock().expect("sync mode")
+    }
+
+    /// Set and report screen audio-video sync mode (v2.10 / ADR-096).
+    pub fn screen_set_sync_mode(
+        &self,
+        mode: tetherly_core::ScreenAudioSyncMode,
+    ) -> ScreenAudioSyncReport {
+        *self.shared.screen_sync_mode.lock().expect("sync mode") = mode;
+        if let Ok(mut engine) = self.shared.screen_engine.lock() {
+            engine.set_sync_mode(mode);
+        }
+        self.screen_sync_report()
+    }
+
+    /// Manually trigger a screen sync beacon.
+    pub async fn trigger_screen_sync(&self) -> Result<ScreenAudioSyncReport, CoreError> {
+        let now_us = self.shared.clock.unix_us();
+        let beacon = {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            engine.trigger_sync_beacon(now_us)
+        };
+        let tx_opt = self.shared.screen_out.lock().await.clone();
+        if let Some(tx) = tx_opt {
+            if let Ok(f) = beacon.to_inner() {
+                let s_len = (f.payload.len() + 12) as u64;
+                if tx.try_send(f).is_ok() {
+                    self.shared.telemetry.record_screen_tx(s_len);
+                }
+            }
+        }
+        Ok(self.screen_sync_report())
+    }
+
     /// Comprehensive status report for input sharing.
     pub async fn input_status_report(&self) -> InputStatusReport {
         let channel_open = self.input_channel_open().await;
@@ -23063,6 +23247,7 @@ mod clipboard_policy_tests {
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
+            screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23218,6 +23403,7 @@ mod handoff_engine_tests {
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
+            screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23404,6 +23590,7 @@ mod media_policy_tests {
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
+            screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23601,6 +23788,7 @@ mod locator_policy_tests {
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
+            screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_sink: None,
             input_sink: None,
         };
@@ -23743,6 +23931,7 @@ mod locator_policy_tests {
             screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
+            screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_sink: None,
             input_sink: None,
         };

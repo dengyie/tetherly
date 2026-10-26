@@ -2107,6 +2107,20 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect, configure, or manually trigger screen & audio playout lip-sync & clock synchronization pipeline (v2.10 / ADR-096).
+    Sync {
+        /// Target sync mode: `auto`, `strict`, `loose`, or `disabled`. If omitted, displays current sync status.
+        mode: Option<String>,
+        /// Manually trigger immediate sync beacon transmission.
+        #[arg(long)]
+        trigger: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -8154,6 +8168,31 @@ async fn main() -> Result<()> {
                         .get("probe_measured_bps")
                         .and_then(|n| n.as_u64())
                         .unwrap_or(0);
+                    let sync_mode = v.get("sync_mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let sync_beacons_sent = v
+                        .get("sync_beacons_sent")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let sync_beacons_received = v
+                        .get("sync_beacons_received")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let sync_skew_us = v
+                        .get("sync_skew_us")
+                        .and_then(|n| n.as_i64())
+                        .unwrap_or(0);
+                    let sync_clock_drift_ppm = v
+                        .get("sync_clock_drift_ppm")
+                        .and_then(|n| n.as_f64())
+                        .unwrap_or(0.0);
+                    let sync_adjustments_applied = v
+                        .get("sync_adjustments_applied")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let in_sync = v
+                        .get("in_sync")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(true);
 
                     println!("Screen Channel Status:");
                     println!("  State:        {state}");
@@ -8288,6 +8327,18 @@ async fn main() -> Result<()> {
                             probes_failed,
                             probe_target_bps as f64 / 1_000_000.0,
                             probe_measured_bps as f64 / 1_000_000.0
+                        );
+                    }
+                    if !sync_mode.is_empty() {
+                        println!(
+                            "  Sync:         {} (sent: {}, recv: {}, skew: {:.2} ms, drift: {:+.1} ppm, adj: {}, in-sync: {})",
+                            sync_mode,
+                            sync_beacons_sent,
+                            sync_beacons_received,
+                            sync_skew_us as f64 / 1_000.0,
+                            sync_clock_drift_ppm,
+                            sync_adjustments_applied,
+                            in_sync
                         );
                     }
                 }
@@ -9329,6 +9380,71 @@ async fn main() -> Result<()> {
                         if let Some(cid) = rep.active_cluster_id {
                             println!("  Active Cluster ID:    {}", cid);
                         }
+                    }
+                }
+            }
+            ScreenCmd::Sync {
+                mode,
+                trigger,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some() || trigger;
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    if trigger {
+                        req.insert("trigger".into(), serde_json::json!(true));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    loopback_post(ui_port, "/api/screen/sync", &body).await
+                } else {
+                    loopback_get(ui_port, "/api/screen/sync").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen sync query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_core::ScreenAudioSyncReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    if trigger {
+                        println!(
+                            "Screen & audio sync beacon triggered (skew: {:.2} ms, drift: {:+.1} ppm, in-sync: {})",
+                            rep.current_skew_us as f64 / 1_000.0,
+                            rep.clock_drift_ppm,
+                            rep.in_sync
+                        );
+                    } else if has_update {
+                        println!(
+                            "Screen & audio sync mode updated: {}",
+                            rep.mode
+                        );
+                    } else {
+                        println!("Screen & Audio Playout Lip-Sync & Clock Synchronization Pipeline (ADR-096):");
+                        println!("  Sync Mode:            {}", rep.mode);
+                        println!("  Beacons Sent:         {}", rep.beacons_sent);
+                        println!("  Beacons Received:     {}", rep.beacons_received);
+                        println!(
+                            "  Current Skew:         {:.2} ms ({} us)",
+                            rep.current_skew_us as f64 / 1_000.0,
+                            rep.current_skew_us
+                        );
+                        println!("  Clock Drift (PPM):    {:+.1} ppm", rep.clock_drift_ppm);
+                        println!("  Playout Adjustments:  {}", rep.adjustments_applied);
+                        println!("  In Lip-Sync:          {}", rep.in_sync);
                     }
                 }
             }

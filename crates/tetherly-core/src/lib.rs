@@ -149,7 +149,9 @@ pub use replay::ReplayGuard;
 pub use screen::{
     cauchy_coeff, downscale_bgra8, downscale_frame, gf_div, gf_inv, gf_mul, is_screen_type,
     ControlMsg, CursorShape, MemoryScreenSink, MemoryScreenSource, NetworkHealth, PixelFormat,
-    ScreenAssembler, ScreenBandwidthUsageState, ScreenContentProfile, ScreenCursorController,
+    ScreenAssembler, ScreenAudioSyncCoordinator, ScreenAudioSyncFrame, ScreenAudioSyncMode,
+    ScreenAudioSyncReport, ScreenAudioSyncStats, ScreenBandwidthUsageState, ScreenContentProfile,
+    ScreenCursorController,
     ScreenCursorMode, ScreenCursorStats, ScreenCursorUpdate, ScreenDamageRect, ScreenDamageReport,
     ScreenDamageTracker, ScreenFecAssembler, ScreenFecController, ScreenFecDecoder,
     ScreenFecEncoder, ScreenFecMode, ScreenFecReport, ScreenFecShard, ScreenFecStats,
@@ -186,7 +188,10 @@ pub use screen::{
     SCREEN_QP_MAX_DEFAULT, SCREEN_QP_MIN_DEFAULT, SCREEN_QP_MOTION_DEFAULT,
     SCREEN_QP_TEXT_DEFAULT, SCREEN_SCALE_DEFAULT_PCT, SCREEN_SCALE_MAX_PCT, SCREEN_SCALE_MIN_PCT,
     SCREEN_SEQ_WINDOW, SCREEN_SQUELCH_AGGRESSIVE_DELAY_US, SCREEN_SQUELCH_AGGRESSIVE_KEEPALIVE_US,
-    SCREEN_SQUELCH_AUTO_DELAY_US, SCREEN_SQUELCH_AUTO_KEEPALIVE_US,
+    SCREEN_SQUELCH_AUTO_DELAY_US, SCREEN_SQUELCH_AUTO_KEEPALIVE_US, SCREEN_SYNC_HEADER_LEN,
+    SCREEN_SYNC_INTERVAL_US_AUTO, SCREEN_SYNC_INTERVAL_US_LOOSE, SCREEN_SYNC_INTERVAL_US_STRICT,
+    SCREEN_SYNC_MAGIC, SCREEN_SYNC_PROTO, SCREEN_SYNC_SKEW_TOLERANCE_US_AUTO,
+    SCREEN_SYNC_SKEW_TOLERANCE_US_LOOSE, SCREEN_SYNC_SKEW_TOLERANCE_US_STRICT,
     SCREEN_TRENDLINE_AGGRESSIVE_THRESHOLD_US_PER_FRAME,
     SCREEN_TRENDLINE_CONSERVATIVE_THRESHOLD_US_PER_FRAME,
     SCREEN_TRENDLINE_DEFAULT_THRESHOLD_US_PER_FRAME, SCREEN_TRENDLINE_MIN_SAMPLES,
@@ -196,7 +201,7 @@ pub use screen::{
     SCREEN_TWCC_CONSERVATIVE_PACKET_THRESHOLD, SCREEN_TWCC_HEADER_LEN, SCREEN_TWCC_MAGIC,
     SCREEN_TWCC_MISSING_DELTA, SCREEN_TWCC_PROTO, SCREEN_TWCC_RECORD_LEN, TYPE_SCREEN_CONTROL,
     TYPE_SCREEN_CURSOR, TYPE_SCREEN_FEC, TYPE_SCREEN_FRAME, TYPE_SCREEN_NACK, TYPE_SCREEN_PROBE,
-    TYPE_SCREEN_TWCC,
+    TYPE_SCREEN_SYNC, TYPE_SCREEN_TWCC,
 };
 pub use session::{
     backoff_delay, commit_trust, dispose_hello, ConnState, HelloDisposition, LockoutTable, PIN_TTL,

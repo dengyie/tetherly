@@ -3,12 +3,35 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.09** |
-| 日期 | 2026-10-25 |
-| 状态 | **v2.09 屏幕流带宽主动探测与链路容量快速爬升流水线（Screen Streaming Active Bandwidth Probing & Fast Ramp-Up Pipeline, ADR-095）与双端 CLI 全同构**——(1) **协议与主动探测状态机**（`crates/tetherly-core/src/screen.rs`）：借鉴现代 WebRTC 与 BBR 主动探测体系，设计专用线协议帧（`TYPE_SCREEN_PROBE = 0x0507`、`TPROB` 协议魔数、26 字节固定报头与可变填充载荷）；支持 Auto（8包/簇，500ms间隔）、Aggressive（16包/簇，250ms间隔）、Conservative（6包/簇，1000ms间隔）与 Disabled 四种模式；支持 Idle、Probing、AwaitingFeedback、Completed 与 Failed 五态状态机；(2) **TWCC 传输序号关联与快速爬升门禁**（`crates/tetherly-core/src/screen.rs`）：探测报文无缝纳入 TWCC 全局传输序号分配；接收端在 TWCC 反馈中携带各探测切片的实际到达增量；发送端解算探测簇的实际投递突发速率 $R_{\text{probe}}$、丢包率与排队梯度膨胀量，唯有同时满足丢包率 $\le 15\%$、实测速率 $\ge 70\%$ 目标速率、额外排队梯度 $\le 20\,\text{ms}$ 三重严格门禁时，才判定探测成功，直接调用 `ScreenRateController.fast_ramp_up(target_bps)` 绕过 AIMD 慢速加性增，瞬间爬升至信道真实承载上限；(3) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：串流建立初期或严重拥塞恢复后优先排队派发探测突发簇；新增 REST API `GET/POST /api/screen/probe` 与 `POST /api/screen/probe/trigger`，扩展 `ScreenStatusReport` 包含 7 个 Probe 关键遥测字段；(4) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen probe [mode] [--target-kbps] [--trigger]`、`tetherly run --screen-probe` 与 `screen status` 状态监控；(5) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_19_screen_active_bandwidth_probing_and_fast_rampup` 全绿，版本升级至 `0.1.31`。 |
+| 文档版本 | **2.10** |
+| 日期 | 2026-10-26 |
+| 状态 | **v2.10 屏幕与音频播放音画同步与硬件时钟漂移补偿流水线（Screen & Audio Playout Lip-Sync & Clock Synchronization Pipeline, ADR-096）与双端 CLI 全同构**——(1) **协议与同步信标状态机**（`crates/tetherly-core/src/screen.rs`）：借鉴 RFC 3550 RTCP Sender Report 锚点映射体系，设计专用线协议帧（`TYPE_SCREEN_SYNC = 0x0508`、`TSYNC` 协议魔数、36 字节定长报头）；携带信标序列号、发送端发送微秒墙上时间戳、最新视频帧微秒显示时间戳 Video PTS 与最新音频块微秒显示时间戳 Audio PTS；支持 Auto（±15ms 容限，500ms 间隔）、Strict（±5ms 容限，250ms 间隔）、Loose（±40ms 容限，1000ms 间隔）与 Disabled 四种模式；(2) **偏斜评估与时钟漂移 PPM 补偿**（`crates/tetherly-core/src/screen.rs`）：接收端解算音画呈现偏斜 $\Delta t_{\text{skew}} = \text{PTS}_{\text{video}} - \text{PTS}_{\text{audio}}$，并在连续信标到达间隔中解算异构设备间物理晶振漂移 PPM；当偏斜超出模式容限时，自适应平滑微调接收端视频去抖动播放缓冲区（`ScreenPlayoutBuffer`）的目标播放延迟（步进限制在 $\pm 20\,\text{ms}$ 平滑滤波窗口内），实现画面无撕裂、音频无爆音的微秒级无缝唇音对齐；(3) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：音频块接收时实时更新最新音频 PTS；屏幕发送循环按周期派发同步信标；屏幕客户端接收循环截获同步信标并驱动播放延迟补偿；新增 REST API `GET/POST /api/screen/sync` 与 `POST /api/screen/sync/trigger`，扩展 `ScreenStatusReport` 包含 7 个 Sync 关键遥测字段；(4) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen sync [mode] [--trigger]`、`tetherly run --screen-sync` 与 `screen status` 状态监控；(5) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_20_screen_audio_sync_and_clock_drift_compensation` 全绿，版本升级至 `0.1.32`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.10 相对 2.09(屏幕与音频播放音画同步与硬件时钟漂移补偿流水线 ADR-096 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **解决音视频独立捕获编码链路导致的「音画不同步（Lip-Sync Playout Divergence）」问题**: 屏幕视频采集编码与音频分块传输运行在不同线程与硬件管道，视频去抖动缓冲与音频独立交付缺乏全局统一时间锚点，容易导致数十至数百毫秒的画面人声脱节。
+  2. **补偿异构设备间物理晶体振荡器的微小频率偏差（Hardware Clock Drift PPM）**: 不同设备硬件晶振制造公差引发 10~100 ppm 固有偏差，长时连线将引发播放缓冲区周期性膨胀或欠载饥饿。
+  3. **借鉴 RTP/RTCP RFC 3550 呈现时间锚点映射模型**: 定期发送轻量级微秒精度时钟同步信标（`ScreenAudioSyncFrame`），动态对齐音画时间轴并平滑调整播放延迟。
+- **架构解法与落地**:
+  1. **Core 同步协议与协调器（`crates/tetherly-core/src/screen.rs`）**:
+     - 定义 `ScreenAudioSyncMode`、`ScreenAudioSyncFrame`、`ScreenAudioSyncCoordinator`、`ScreenAudioSyncStats` 与 `ScreenAudioSyncReport`。
+     - 定义线协议常量：`TYPE_SCREEN_SYNC = 0x0508`、`SCREEN_SYNC_MAGIC = *b"TSYNC"`、`SCREEN_SYNC_PROTO = 0x01`、`SCREEN_SYNC_HEADER_LEN = 36`。
+     - 发送端 `ScreenAudioSyncCoordinator` 记录音视频 PTS 并周期性生成同步信标；接收端比对 PTS 差值解算偏斜 $\Delta t_{\text{skew}}$，结合信标到达间隔解算发送端与接收端物理时钟漂移 PPM，平滑调整 `ScreenPlayoutBuffer::adjust_target_delay`。
+  2. **Node 守护进程与端到端传输（`crates/tetherly-node/src/runtime.rs`）**:
+     - `NodeConfig` 与 `SharedNodeState` 引入 `screen_sync_mode: ScreenAudioSyncMode`。
+     - `receive_audio_routing_chunk` 注入实时音频 PTS；`send_screen_frames` 打包发送同步信标帧；`attach_screen_client` 捕获信标帧交由接收端驱动时钟对齐与播放缓冲区调整。
+     - 暴露 `screen_sync_mode()`、`screen_set_sync_mode()`、`screen_sync_report()`、`trigger_screen_sync()` 运行时接口。
+  3. **回环 REST API（`crates/tetherly-node/src/uihttp.rs`）**:
+     - 新增 `GET /api/screen/sync`、`POST /api/screen/sync` 与 `POST /api/screen/sync/trigger`。
+     - `ScreenStatusReport` 扩充 `sync_mode`、`sync_beacons_sent`、`sync_beacons_received`、`sync_skew_us`、`sync_clock_drift_ppm`、`sync_adjustments_applied`、`in_sync` 7 个字段。
+  4. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - 支持 `screen sync [mode] [--trigger]` 子命令、`tetherly run --screen-sync` 启动参数与 `screen status` 状态监控。
+  5. **测试与验证**:
+     - 核心单元测试、REST API 单元测试及 Phase 5 端到端集成测试 `m5_20_screen_audio_sync_and_clock_drift_compensation` 全绿。
 
 **2.09 相对 2.08(屏幕流带宽主动探测与链路容量快速爬升流水线 ADR-095 与双端 CLI 全同构)**
 

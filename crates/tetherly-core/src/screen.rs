@@ -27,6 +27,8 @@ pub const TYPE_SCREEN_NACK: u16 = 0x0505;
 pub const TYPE_SCREEN_TWCC: u16 = 0x0506;
 /// Screen active bandwidth probing channel inner type (v2.09 / ADR-095).
 pub const TYPE_SCREEN_PROBE: u16 = 0x0507;
+/// Screen and audio presentation timestamp (PTS) lip-sync alignment and clock synchronization inner type (v2.10 / ADR-096).
+pub const TYPE_SCREEN_SYNC: u16 = 0x0508;
 
 pub const SCREEN_MAGIC: [u8; 4] = *b"TMV1";
 pub const SCREEN_PROTO: u8 = 1;
@@ -73,6 +75,16 @@ pub const SCREEN_PROBE_CLUSTER_SIZE_CONSERVATIVE: u8 = 6;
 pub const SCREEN_PROBE_MIN_INTERVAL_US_AUTO: u64 = 2_000_000;
 pub const SCREEN_PROBE_MIN_INTERVAL_US_AGGRESSIVE: u64 = 1_000_000;
 pub const SCREEN_PROBE_MIN_INTERVAL_US_CONSERVATIVE: u64 = 4_000_000;
+
+pub const SCREEN_SYNC_MAGIC: [u8; 5] = *b"TSYNC";
+pub const SCREEN_SYNC_PROTO: u8 = 1;
+pub const SCREEN_SYNC_HEADER_LEN: usize = 36;
+pub const SCREEN_SYNC_INTERVAL_US_AUTO: u64 = 500_000;
+pub const SCREEN_SYNC_INTERVAL_US_STRICT: u64 = 200_000;
+pub const SCREEN_SYNC_INTERVAL_US_LOOSE: u64 = 1_000_000;
+pub const SCREEN_SYNC_SKEW_TOLERANCE_US_AUTO: i64 = 15_000;
+pub const SCREEN_SYNC_SKEW_TOLERANCE_US_STRICT: i64 = 5_000;
+pub const SCREEN_SYNC_SKEW_TOLERANCE_US_LOOSE: i64 = 40_000;
 
 /// Maximum payload bytes for a custom cursor bitmap (64x64 RGBA8 = 16,384 bytes).
 pub const CURSOR_BITMAP_MAX_BYTES: usize = 64 * 64 * 4;
@@ -885,7 +897,7 @@ impl ScreenState {
 }
 
 /// Running counters for the local UI. Cheap to read; never carries pixels.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenStats {
     pub sent: u64,
     pub received: u64,
@@ -1007,9 +1019,104 @@ pub struct ScreenStats {
     pub probe_target_bps: u32,
     /// Last measured delivery rate during probe in bits per second (v2.09 / ADR-095).
     pub probe_measured_bps: u64,
+    /// Audio-video lip-sync and clock synchronization mode tag (0=auto, 1=strict, 2=loose, 3=disabled) (v2.10 / ADR-096).
+    pub sync_mode: u8,
+    /// Cumulative count of sync beacons sent (v2.10 / ADR-096).
+    pub sync_beacons_sent: u64,
+    /// Cumulative count of sync beacons received (v2.10 / ADR-096).
+    pub sync_beacons_received: u64,
+    /// Latest measured presentation timestamp (PTS) skew in microseconds (video PTS - audio PTS) (v2.10 / ADR-096).
+    pub sync_skew_us: i64,
+    /// Estimated sender vs receiver hardware clock drift in parts per million (PPM) (v2.10 / ADR-096).
+    pub sync_clock_drift_ppm: f64,
+    /// Total playout target delay adjustments applied for lip-sync alignment (v2.10 / ADR-096).
+    pub sync_adjustments_applied: u64,
+    /// Indicates whether audio and video presentation timestamps are currently within tolerance (v2.10 / ADR-096).
+    pub in_sync: bool,
+}
+
+impl Default for ScreenStats {
+    fn default() -> Self {
+        Self {
+            sent: 0,
+            received: 0,
+            dropped: 0,
+            bytes: 0,
+            refused: 0,
+            acked: 0,
+            last_acked_seq: 0,
+            in_flight: 0,
+            rtt_latest_us: None,
+            rtt_p95_us: None,
+            keyframes_requested: 0,
+            gaps: 0,
+            bitrate_bps: 0,
+            fps_target: 0,
+            scale_pct: 0,
+            profile_tag: 0,
+            qp_min: 0,
+            qp_max: 0,
+            matrix_mode: 0,
+            network_health: 0,
+            playout_mode: 0,
+            playout_delay_us: 0,
+            playout_jitter_us: 0,
+            cursor_mode: 0,
+            cursor_x: 0,
+            cursor_y: 0,
+            cursor_visible: false,
+            cursor_shape: 0,
+            cursor_updates_sent: 0,
+            cursor_updates_received: 0,
+            squelch_mode: 0,
+            is_squelched: false,
+            squelched_frames: 0,
+            fec_mode: 0,
+            fec_redundancy_pct: 0,
+            fec_recovered_shards: 0,
+            fec_unrecoverable_blocks: 0,
+            pacer_mode: 0,
+            pacer_packets_paced: 0,
+            pacer_bursts_smoothed: 0,
+            pacer_avg_delay_us: 0,
+            trendline_mode: 0,
+            trendline_state: 0,
+            trendline_slope_us: 0.0,
+            trendline_overuse_count: 0,
+            harq_mode: 0,
+            harq_nacks_sent: 0,
+            harq_nacks_received: 0,
+            harq_shards_retransmitted: 0,
+            harq_recovered_frames: 0,
+            twcc_mode: 0,
+            twcc_feedbacks_sent: 0,
+            twcc_feedbacks_received: 0,
+            twcc_delivery_rate_bps: 0,
+            twcc_delay_gradient_us: 0,
+            probe_mode: 0,
+            probe_state: 0,
+            probes_triggered: 0,
+            probes_completed: 0,
+            probes_failed: 0,
+            probe_target_bps: 0,
+            probe_measured_bps: 0,
+            sync_mode: 0,
+            sync_beacons_sent: 0,
+            sync_beacons_received: 0,
+            sync_skew_us: 0,
+            sync_clock_drift_ppm: 0.0,
+            sync_adjustments_applied: 0,
+            in_sync: true,
+        }
+    }
 }
 
 impl ScreenStats {
+    /// Audio-video lip-sync and clock synchronization mode.
+    pub fn sync_mode(&self) -> ScreenAudioSyncMode {
+        ScreenAudioSyncMode::from_tag(self.sync_mode)
+    }
+
     /// Active bandwidth probing mode.
     pub fn probe_mode(&self) -> ScreenProbeMode {
         ScreenProbeMode::from_tag(self.probe_mode)
@@ -2122,6 +2229,14 @@ impl ScreenPlayoutBuffer {
     pub fn set_custom_target_delay_us(&mut self, delay_us: Option<u64>) {
         self.custom_target_delay_us =
             delay_us.map(|d| d.clamp(SCREEN_PLAYOUT_MIN_DELAY_US, SCREEN_PLAYOUT_MAX_DELAY_US));
+        self.recompute_target_delay();
+    }
+
+    pub fn adjust_target_delay(&mut self, delta_us: i64) {
+        let current = self.target_delay_us as i64;
+        let new_target = (current + delta_us)
+            .clamp(SCREEN_PLAYOUT_MIN_DELAY_US as i64, SCREEN_PLAYOUT_MAX_DELAY_US as i64) as u64;
+        self.custom_target_delay_us = Some(new_target);
         self.recompute_target_delay();
     }
 
@@ -5783,6 +5898,384 @@ impl ScreenProbeController {
     }
 }
 
+/// Screen and audio presentation timestamp (PTS) lip-sync alignment and clock synchronization mode (v2.10 / ADR-096).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenAudioSyncMode {
+    #[default]
+    Auto = 0,
+    Strict = 1,
+    Loose = 2,
+    Disabled = 3,
+}
+
+impl ScreenAudioSyncMode {
+    pub const fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => ScreenAudioSyncMode::Strict,
+            2 => ScreenAudioSyncMode::Loose,
+            3 => ScreenAudioSyncMode::Disabled,
+            _ => ScreenAudioSyncMode::Auto,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ScreenAudioSyncMode::Auto => "auto",
+            ScreenAudioSyncMode::Strict => "strict",
+            ScreenAudioSyncMode::Loose => "loose",
+            ScreenAudioSyncMode::Disabled => "disabled",
+        }
+    }
+
+    pub const fn beacon_interval_us(self) -> u64 {
+        match self {
+            ScreenAudioSyncMode::Auto => SCREEN_SYNC_INTERVAL_US_AUTO,
+            ScreenAudioSyncMode::Strict => SCREEN_SYNC_INTERVAL_US_STRICT,
+            ScreenAudioSyncMode::Loose => SCREEN_SYNC_INTERVAL_US_LOOSE,
+            ScreenAudioSyncMode::Disabled => u64::MAX,
+        }
+    }
+
+    pub const fn skew_tolerance_us(self) -> i64 {
+        match self {
+            ScreenAudioSyncMode::Auto => SCREEN_SYNC_SKEW_TOLERANCE_US_AUTO,
+            ScreenAudioSyncMode::Strict => SCREEN_SYNC_SKEW_TOLERANCE_US_STRICT,
+            ScreenAudioSyncMode::Loose => SCREEN_SYNC_SKEW_TOLERANCE_US_LOOSE,
+            ScreenAudioSyncMode::Disabled => i64::MAX,
+        }
+    }
+}
+
+impl fmt::Display for ScreenAudioSyncMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ScreenAudioSyncMode {
+    type Err = CoreError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(ScreenAudioSyncMode::Auto),
+            "strict" | "tight" | "low" => Ok(ScreenAudioSyncMode::Strict),
+            "loose" | "relaxed" | "high" => Ok(ScreenAudioSyncMode::Loose),
+            "disabled" | "off" | "none" => Ok(ScreenAudioSyncMode::Disabled),
+            _ => Err(CoreError::ScreenFrame),
+        }
+    }
+}
+
+/// Compact wire protocol frame for presentation timestamp (PTS) lip-sync beacon (v2.10 / ADR-096).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenAudioSyncFrame {
+    pub flags: u16,
+    pub sync_seq: u32,
+    pub sender_wallclock_us: u64,
+    pub video_pts_us: u64,
+    pub audio_pts_us: u64,
+}
+
+impl ScreenAudioSyncFrame {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(SCREEN_SYNC_HEADER_LEN);
+        buf.extend_from_slice(&SCREEN_SYNC_MAGIC);
+        buf.push(SCREEN_SYNC_PROTO);
+        buf.extend_from_slice(&self.flags.to_be_bytes());
+        buf.extend_from_slice(&self.sync_seq.to_be_bytes());
+        buf.extend_from_slice(&self.sender_wallclock_us.to_be_bytes());
+        buf.extend_from_slice(&self.video_pts_us.to_be_bytes());
+        buf.extend_from_slice(&self.audio_pts_us.to_be_bytes());
+        buf
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, CoreError> {
+        if bytes.len() < SCREEN_SYNC_HEADER_LEN {
+            return Err(CoreError::TruncatedFrame);
+        }
+        if &bytes[0..5] != &SCREEN_SYNC_MAGIC {
+            return Err(CoreError::ScreenFrame);
+        }
+        if bytes[5] != SCREEN_SYNC_PROTO {
+            return Err(CoreError::UnsupportedProto);
+        }
+        let flags = u16::from_be_bytes(bytes[6..8].try_into().unwrap());
+        let sync_seq = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
+        let sender_wallclock_us = u64::from_be_bytes(bytes[12..20].try_into().unwrap());
+        let video_pts_us = u64::from_be_bytes(bytes[20..28].try_into().unwrap());
+        let audio_pts_us = u64::from_be_bytes(bytes[28..36].try_into().unwrap());
+
+        Ok(Self {
+            flags,
+            sync_seq,
+            sender_wallclock_us,
+            video_pts_us,
+            audio_pts_us,
+        })
+    }
+
+    pub fn to_inner(&self) -> Result<InnerFrame, CoreError> {
+        Ok(InnerFrame {
+            ty: TYPE_SCREEN_SYNC,
+            flags: 0,
+            msg_id: 0,
+            payload: self.encode(),
+        })
+    }
+
+    pub fn from_inner_frame(frame: &InnerFrame) -> Result<Self, CoreError> {
+        if frame.ty != TYPE_SCREEN_SYNC {
+            return Err(CoreError::ScreenFrame);
+        }
+        Self::decode(&frame.payload)
+    }
+}
+
+/// Statistics and telemetry for audio-video presentation sync (v2.10 / ADR-096).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ScreenAudioSyncStats {
+    pub mode: ScreenAudioSyncMode,
+    pub beacons_sent: u64,
+    pub beacons_received: u64,
+    pub current_skew_us: i64,
+    pub clock_drift_ppm: f64,
+    pub adjustments_applied: u64,
+    pub last_sync_timestamp_ms: u64,
+    pub in_sync: bool,
+}
+
+impl Default for ScreenAudioSyncStats {
+    fn default() -> Self {
+        Self {
+            mode: ScreenAudioSyncMode::Auto,
+            beacons_sent: 0,
+            beacons_received: 0,
+            current_skew_us: 0,
+            clock_drift_ppm: 0.0,
+            adjustments_applied: 0,
+            last_sync_timestamp_ms: 0,
+            in_sync: true,
+        }
+    }
+}
+
+/// DTO report for REST API and CLI status formatting (v2.10 / ADR-096).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenAudioSyncReport {
+    pub ok: bool,
+    pub mode: ScreenAudioSyncMode,
+    pub beacons_sent: u64,
+    pub beacons_received: u64,
+    pub current_skew_us: i64,
+    pub clock_drift_ppm: f64,
+    pub adjustments_applied: u64,
+    pub in_sync: bool,
+    pub timestamp_ms: u64,
+}
+
+impl Default for ScreenAudioSyncReport {
+    fn default() -> Self {
+        Self {
+            ok: true,
+            mode: ScreenAudioSyncMode::Auto,
+            beacons_sent: 0,
+            beacons_received: 0,
+            current_skew_us: 0,
+            clock_drift_ppm: 0.0,
+            adjustments_applied: 0,
+            in_sync: true,
+            timestamp_ms: 0,
+        }
+    }
+}
+
+/// Audio-video lip-sync alignment and clock drift synchronization coordinator (v2.10 / ADR-096).
+#[derive(Debug, Clone)]
+pub struct ScreenAudioSyncCoordinator {
+    mode: ScreenAudioSyncMode,
+    next_sync_seq: u32,
+    last_beacon_sent_us: u64,
+    latest_video_pts_us: u64,
+    latest_audio_pts_us: u64,
+    recent_samples: VecDeque<(u64, u64)>,
+    beacon_queue: VecDeque<ScreenAudioSyncFrame>,
+    stats: ScreenAudioSyncStats,
+}
+
+impl Default for ScreenAudioSyncCoordinator {
+    fn default() -> Self {
+        Self::new(ScreenAudioSyncMode::Auto)
+    }
+}
+
+impl ScreenAudioSyncCoordinator {
+    pub fn new(mode: ScreenAudioSyncMode) -> Self {
+        Self {
+            mode,
+            next_sync_seq: 0,
+            last_beacon_sent_us: 0,
+            latest_video_pts_us: 0,
+            latest_audio_pts_us: 0,
+            recent_samples: VecDeque::with_capacity(16),
+            beacon_queue: VecDeque::with_capacity(8),
+            stats: ScreenAudioSyncStats {
+                mode,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn mode(&self) -> ScreenAudioSyncMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenAudioSyncMode) {
+        self.mode = mode;
+        self.stats.mode = mode;
+        if mode == ScreenAudioSyncMode::Disabled {
+            self.beacon_queue.clear();
+        }
+    }
+
+    pub fn stats(&self) -> ScreenAudioSyncStats {
+        self.stats
+    }
+
+    pub fn report(&self) -> ScreenAudioSyncReport {
+        ScreenAudioSyncReport {
+            ok: true,
+            mode: self.mode,
+            beacons_sent: self.stats.beacons_sent,
+            beacons_received: self.stats.beacons_received,
+            current_skew_us: self.stats.current_skew_us,
+            clock_drift_ppm: self.stats.clock_drift_ppm,
+            adjustments_applied: self.stats.adjustments_applied,
+            in_sync: self.stats.in_sync,
+            timestamp_ms: self.stats.last_sync_timestamp_ms,
+        }
+    }
+
+    pub fn record_video_pts(&mut self, pts_us: u64) {
+        self.latest_video_pts_us = pts_us;
+    }
+
+    pub fn record_audio_pts(&mut self, pts_us: u64) {
+        self.latest_audio_pts_us = pts_us;
+    }
+
+    pub fn latest_video_pts_us(&self) -> u64 {
+        self.latest_video_pts_us
+    }
+
+    pub fn latest_audio_pts_us(&self) -> u64 {
+        self.latest_audio_pts_us
+    }
+
+    /// Evaluates beacon generation interval and produces an outbound sync beacon if due.
+    pub fn maybe_generate_sync_beacon(&mut self, now_us: u64) -> Option<ScreenAudioSyncFrame> {
+        if self.mode == ScreenAudioSyncMode::Disabled {
+            return None;
+        }
+        let interval = self.mode.beacon_interval_us();
+        if self.last_beacon_sent_us > 0
+            && now_us.saturating_sub(self.last_beacon_sent_us) < interval
+        {
+            return None;
+        }
+        Some(self.trigger_sync_beacon(now_us))
+    }
+
+    /// Unconditionally trigger a sync beacon (for tests or manual inspection).
+    pub fn trigger_sync_beacon(&mut self, now_us: u64) -> ScreenAudioSyncFrame {
+        self.last_beacon_sent_us = now_us;
+        self.next_sync_seq = self.next_sync_seq.wrapping_add(1);
+        let frame = ScreenAudioSyncFrame {
+            flags: 0,
+            sync_seq: self.next_sync_seq,
+            sender_wallclock_us: now_us,
+            video_pts_us: self.latest_video_pts_us,
+            audio_pts_us: self.latest_audio_pts_us,
+        };
+        self.stats.beacons_sent = self.stats.beacons_sent.saturating_add(1);
+        self.stats.last_sync_timestamp_ms = now_us / 1000;
+        self.beacon_queue.push_back(frame);
+        frame
+    }
+
+    pub fn pop_sync_beacon(&mut self) -> Option<ScreenAudioSyncFrame> {
+        self.beacon_queue.pop_front()
+    }
+
+    /// Ingest an inbound sync beacon, calculating presentation skew, clock drift, and applying playout compensation.
+    pub fn on_sync_beacon(
+        &mut self,
+        frame: &ScreenAudioSyncFrame,
+        arrival_us: u64,
+        playout_buffer: Option<&mut ScreenPlayoutBuffer>,
+    ) -> i64 {
+        let skew_us = (frame.video_pts_us as i64) - (frame.audio_pts_us as i64);
+        self.stats.current_skew_us = skew_us;
+        self.stats.beacons_received = self.stats.beacons_received.saturating_add(1);
+        self.stats.last_sync_timestamp_ms = arrival_us / 1000;
+
+        if self.recent_samples.len() >= 16 {
+            self.recent_samples.pop_front();
+        }
+        self.recent_samples
+            .push_back((arrival_us, frame.sender_wallclock_us));
+
+        if self.recent_samples.len() >= 2 {
+            let (first_arrival, first_sender) = self.recent_samples.front().copied().unwrap();
+            let elapsed_recv = arrival_us.saturating_sub(first_arrival);
+            let elapsed_sender = frame.sender_wallclock_us.saturating_sub(first_sender);
+            if elapsed_sender >= 100_000 && elapsed_recv > 0 {
+                let drift_ppm = ((elapsed_recv as f64 - elapsed_sender as f64)
+                    / (elapsed_sender as f64))
+                    * 1_000_000.0;
+                if self.stats.clock_drift_ppm == 0.0 {
+                    self.stats.clock_drift_ppm = drift_ppm;
+                } else {
+                    self.stats.clock_drift_ppm =
+                        (self.stats.clock_drift_ppm * 0.7) + (drift_ppm * 0.3);
+                }
+            }
+        }
+
+        let tol = self.mode.skew_tolerance_us();
+        let in_sync = skew_us.abs() <= tol;
+        self.stats.in_sync = in_sync;
+
+        if !in_sync && self.mode != ScreenAudioSyncMode::Disabled {
+            if let Some(buf) = playout_buffer {
+                let delta_us = (skew_us / 2).clamp(-20_000, 20_000);
+                if delta_us != 0 {
+                    buf.adjust_target_delay(delta_us);
+                    self.stats.adjustments_applied =
+                        self.stats.adjustments_applied.saturating_add(1);
+                }
+            }
+        }
+        skew_us
+    }
+
+    pub fn reset(&mut self) {
+        self.next_sync_seq = 0;
+        self.last_beacon_sent_us = 0;
+        self.latest_video_pts_us = 0;
+        self.latest_audio_pts_us = 0;
+        self.recent_samples.clear();
+        self.beacon_queue.clear();
+        self.stats = ScreenAudioSyncStats {
+            mode: self.mode,
+            ..Default::default()
+        };
+    }
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -5806,6 +6299,7 @@ pub struct ScreenSender {
     retransmit_buffer: ScreenRetransmitBuffer,
     twcc_sender: ScreenTwccSenderTracker,
     probe_controller: ScreenProbeController,
+    sync_coordinator: ScreenAudioSyncCoordinator,
 }
 
 impl Default for ScreenSender {
@@ -5829,6 +6323,7 @@ impl ScreenSender {
         let retransmit_buffer = ScreenRetransmitBuffer::new(ScreenHarqMode::Auto);
         let twcc_sender = ScreenTwccSenderTracker::new(ScreenTwccMode::Auto);
         let probe_controller = ScreenProbeController::default();
+        let sync_coordinator = ScreenAudioSyncCoordinator::default();
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -5873,6 +6368,13 @@ impl ScreenSender {
             probes_failed: 0,
             probe_target_bps: 0,
             probe_measured_bps: 0,
+            sync_mode: sync_coordinator.mode().tag(),
+            sync_beacons_sent: 0,
+            sync_beacons_received: 0,
+            sync_skew_us: 0,
+            sync_clock_drift_ppm: 0.0,
+            sync_adjustments_applied: 0,
+            in_sync: true,
             ..Default::default()
         };
         Self {
@@ -5895,7 +6397,14 @@ impl ScreenSender {
             retransmit_buffer,
             twcc_sender,
             probe_controller,
+            sync_coordinator,
         }
+    }
+
+    pub fn with_sync(sync: ScreenAudioSyncMode) -> Self {
+        let mut sender = Self::new();
+        sender.set_sync_mode(sync);
+        sender
     }
 
     pub fn with_probe(probe: ScreenProbeMode) -> Self {
@@ -5984,6 +6493,14 @@ impl ScreenSender {
         s.probes_failed = p_stats.probes_failed;
         s.probe_target_bps = p_stats.last_target_bps;
         s.probe_measured_bps = p_stats.last_measured_bps;
+        let sync_st = self.sync_coordinator.stats();
+        s.sync_mode = sync_st.mode.tag();
+        s.sync_beacons_sent = sync_st.beacons_sent;
+        s.sync_beacons_received = sync_st.beacons_received;
+        s.sync_skew_us = sync_st.current_skew_us;
+        s.sync_clock_drift_ppm = sync_st.clock_drift_ppm;
+        s.sync_adjustments_applied = sync_st.adjustments_applied;
+        s.in_sync = sync_st.in_sync;
         s
     }
 
@@ -6070,6 +6587,70 @@ impl ScreenSender {
         self.stats.probes_failed = st.probes_failed;
         self.stats.probe_target_bps = st.last_target_bps;
         self.stats.probe_measured_bps = st.last_measured_bps;
+    }
+
+    /// Screen and audio presentation timestamp (PTS) sync mode (v2.10 / ADR-096).
+    pub fn sync_mode(&self) -> ScreenAudioSyncMode {
+        self.sync_coordinator.mode()
+    }
+
+    /// Set screen and audio presentation timestamp sync mode.
+    pub fn set_sync_mode(&mut self, mode: ScreenAudioSyncMode) {
+        self.sync_coordinator.set_mode(mode);
+        self.sync_sync_stats();
+    }
+
+    /// Telemetry statistics for audio-video presentation sync.
+    pub fn sync_stats(&self) -> ScreenAudioSyncStats {
+        self.sync_coordinator.stats()
+    }
+
+    /// Structured sync status report for REST API and CLI.
+    pub fn sync_report(&self) -> ScreenAudioSyncReport {
+        self.sync_coordinator.report()
+    }
+
+    /// Record latest video presentation timestamp in microseconds.
+    pub fn record_video_pts(&mut self, pts_us: u64) {
+        self.sync_coordinator.record_video_pts(pts_us);
+    }
+
+    /// Record latest audio presentation timestamp in microseconds.
+    pub fn record_audio_pts(&mut self, pts_us: u64) {
+        self.sync_coordinator.record_audio_pts(pts_us);
+    }
+
+    /// Evaluates beacon generation interval and produces an outbound sync beacon if due.
+    pub fn maybe_generate_sync_beacon(&mut self, now_us: u64) -> Option<ScreenAudioSyncFrame> {
+        let frame = self.sync_coordinator.maybe_generate_sync_beacon(now_us);
+        if frame.is_some() {
+            self.sync_sync_stats();
+        }
+        frame
+    }
+
+    /// Unconditionally trigger a sync beacon (for tests or manual inspection).
+    pub fn trigger_sync_beacon(&mut self, now_us: u64) -> ScreenAudioSyncFrame {
+        let frame = self.sync_coordinator.trigger_sync_beacon(now_us);
+        self.sync_sync_stats();
+        frame
+    }
+
+    /// Pop a pending sync beacon to be transmitted over the wire.
+    pub fn pop_sync_beacon(&mut self) -> Option<ScreenAudioSyncFrame> {
+        self.sync_coordinator.pop_sync_beacon()
+    }
+
+    /// Synchronize internal sync coordinator stats to ScreenStats.
+    pub fn sync_sync_stats(&mut self) {
+        let st = self.sync_coordinator.stats();
+        self.stats.sync_mode = st.mode.tag();
+        self.stats.sync_beacons_sent = st.beacons_sent;
+        self.stats.sync_beacons_received = st.beacons_received;
+        self.stats.sync_skew_us = st.current_skew_us;
+        self.stats.sync_clock_drift_ppm = st.clock_drift_ppm;
+        self.stats.sync_adjustments_applied = st.adjustments_applied;
+        self.stats.in_sync = st.in_sync;
     }
 
     pub fn twcc_mode(&self) -> ScreenTwccMode {
@@ -6390,6 +6971,7 @@ impl ScreenSender {
         self.stats.in_flight = self.in_flight_records.len() as u64;
 
         self.pending.push_back(ScreenFrame { seq, ..frame });
+        self.record_video_pts(now_us);
         Some(seq)
     }
 
@@ -6874,6 +7456,8 @@ impl ScreenSender {
         self.stats.probe_target_bps = 0;
         self.stats.probe_measured_bps = 0;
         self.probe_controller = ScreenProbeController::new(self.probe_controller.mode());
+        self.sync_coordinator.reset();
+        self.sync_sync_stats();
     }
 }
 
@@ -6893,6 +7477,7 @@ pub struct ScreenReceiver {
     twcc_receiver: ScreenTwccReceiverTracker,
     probe_mode: ScreenProbeMode,
     probe_stats: ScreenProbeStats,
+    sync_coordinator: ScreenAudioSyncCoordinator,
 }
 
 impl Default for ScreenReceiver {
@@ -6916,6 +7501,7 @@ impl ScreenReceiver {
             mode: probe_mode,
             ..Default::default()
         };
+        let sync_coordinator = ScreenAudioSyncCoordinator::default();
         let stats = ScreenStats {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
@@ -6933,6 +7519,13 @@ impl ScreenReceiver {
             probes_failed: 0,
             probe_target_bps: 0,
             probe_measured_bps: 0,
+            sync_mode: sync_coordinator.mode().tag(),
+            sync_beacons_sent: 0,
+            sync_beacons_received: 0,
+            sync_skew_us: 0,
+            sync_clock_drift_ppm: 0.0,
+            sync_adjustments_applied: 0,
+            in_sync: true,
             ..Default::default()
         };
         Self {
@@ -6949,6 +7542,7 @@ impl ScreenReceiver {
             twcc_receiver,
             probe_mode,
             probe_stats,
+            sync_coordinator,
         }
     }
 
@@ -6966,6 +7560,7 @@ impl ScreenReceiver {
             mode: probe_mode,
             ..Default::default()
         };
+        let sync_coordinator = ScreenAudioSyncCoordinator::default();
         let stats = ScreenStats {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
@@ -6983,6 +7578,13 @@ impl ScreenReceiver {
             probes_failed: 0,
             probe_target_bps: 0,
             probe_measured_bps: 0,
+            sync_mode: sync_coordinator.mode().tag(),
+            sync_beacons_sent: 0,
+            sync_beacons_received: 0,
+            sync_skew_us: 0,
+            sync_clock_drift_ppm: 0.0,
+            sync_adjustments_applied: 0,
+            in_sync: true,
             ..Default::default()
         };
         Self {
@@ -6999,6 +7601,7 @@ impl ScreenReceiver {
             twcc_receiver,
             probe_mode,
             probe_stats,
+            sync_coordinator,
         }
     }
 
@@ -7017,6 +7620,12 @@ impl ScreenReceiver {
     pub fn with_probe_mode(mode: ScreenProbeMode) -> Self {
         let mut r = Self::new();
         r.set_probe_mode(mode);
+        r
+    }
+
+    pub fn with_sync_mode(mode: ScreenAudioSyncMode) -> Self {
+        let mut r = Self::new();
+        r.set_sync_mode(mode);
         r
     }
 
@@ -7060,6 +7669,14 @@ impl ScreenReceiver {
         st.probes_failed = self.probe_stats.probes_failed;
         st.probe_target_bps = self.probe_stats.last_target_bps;
         st.probe_measured_bps = self.probe_stats.last_measured_bps;
+        let sync_st = self.sync_coordinator.stats();
+        st.sync_mode = sync_st.mode.tag();
+        st.sync_beacons_sent = sync_st.beacons_sent;
+        st.sync_beacons_received = sync_st.beacons_received;
+        st.sync_skew_us = sync_st.current_skew_us;
+        st.sync_clock_drift_ppm = sync_st.clock_drift_ppm;
+        st.sync_adjustments_applied = sync_st.adjustments_applied;
+        st.in_sync = sync_st.in_sync;
         st
     }
 
@@ -7131,6 +7748,62 @@ impl ScreenReceiver {
         self.stats.probes_failed = self.probe_stats.probes_failed;
         self.stats.probe_target_bps = self.probe_stats.last_target_bps;
         self.stats.probe_measured_bps = self.probe_stats.last_measured_bps;
+    }
+
+    /// Audio-video lip-sync alignment mode (v2.10 / ADR-096).
+    pub fn sync_mode(&self) -> ScreenAudioSyncMode {
+        self.sync_coordinator.mode()
+    }
+
+    /// Explicitly configure audio-video lip-sync alignment mode.
+    pub fn set_sync_mode(&mut self, mode: ScreenAudioSyncMode) {
+        self.sync_coordinator.set_mode(mode);
+        self.sync_sync_stats();
+    }
+
+    /// Snapshot of receiver-side sync statistics.
+    pub fn sync_stats(&self) -> ScreenAudioSyncStats {
+        self.sync_coordinator.stats()
+    }
+
+    /// Structured receiver-side sync status report.
+    pub fn sync_report(&self) -> ScreenAudioSyncReport {
+        self.sync_coordinator.report()
+    }
+
+    /// Ingest an inbound sync beacon with explicit arrival timestamp in microseconds.
+    pub fn on_sync_beacon_with_time(
+        &mut self,
+        beacon: &ScreenAudioSyncFrame,
+        now_us: u64,
+    ) -> i64 {
+        let skew = self.sync_coordinator.on_sync_beacon(
+            beacon,
+            now_us,
+            Some(&mut self.playout_buffer),
+        );
+        self.sync_sync_stats();
+        skew
+    }
+
+    /// Ingest an inbound sync beacon using current system clock.
+    pub fn on_sync_beacon(&mut self, beacon: &ScreenAudioSyncFrame) -> i64 {
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        self.on_sync_beacon_with_time(beacon, now_us)
+    }
+
+    fn sync_sync_stats(&mut self) {
+        let st = self.sync_coordinator.stats();
+        self.stats.sync_mode = st.mode.tag();
+        self.stats.sync_beacons_sent = st.beacons_sent;
+        self.stats.sync_beacons_received = st.beacons_received;
+        self.stats.sync_skew_us = st.current_skew_us;
+        self.stats.sync_clock_drift_ppm = st.clock_drift_ppm;
+        self.stats.sync_adjustments_applied = st.adjustments_applied;
+        self.stats.in_sync = st.in_sync;
     }
 
     /// Access playout buffer reference.
@@ -7461,6 +8134,8 @@ impl ScreenReceiver {
         self.stats.probes_failed = 0;
         self.stats.probe_target_bps = 0;
         self.stats.probe_measured_bps = 0;
+        self.sync_coordinator.reset();
+        self.sync_sync_stats();
     }
 }
 
@@ -10314,4 +10989,166 @@ fn screen_active_bandwidth_probing_and_fast_rampup_pipeline() {
     receiver.on_peer_gone();
     assert_eq!(sender.stats().probes_triggered, 0);
     assert_eq!(receiver.stats().probes_triggered, 0);
+}
+
+#[test]
+fn screen_audio_sync_pipeline_and_drift_compensation() {
+    // 1. Enum parsing and tags
+    assert_eq!(
+        "auto".parse::<ScreenAudioSyncMode>().unwrap(),
+        ScreenAudioSyncMode::Auto
+    );
+    assert_eq!(
+        "strict".parse::<ScreenAudioSyncMode>().unwrap(),
+        ScreenAudioSyncMode::Strict
+    );
+    assert_eq!(
+        "tight".parse::<ScreenAudioSyncMode>().unwrap(),
+        ScreenAudioSyncMode::Strict
+    );
+    assert_eq!(
+        "loose".parse::<ScreenAudioSyncMode>().unwrap(),
+        ScreenAudioSyncMode::Loose
+    );
+    assert_eq!(
+        "relaxed".parse::<ScreenAudioSyncMode>().unwrap(),
+        ScreenAudioSyncMode::Loose
+    );
+    assert_eq!(
+        "disabled".parse::<ScreenAudioSyncMode>().unwrap(),
+        ScreenAudioSyncMode::Disabled
+    );
+    assert_eq!(
+        "off".parse::<ScreenAudioSyncMode>().unwrap(),
+        ScreenAudioSyncMode::Disabled
+    );
+    assert!("invalid".parse::<ScreenAudioSyncMode>().is_err());
+    assert_eq!(ScreenAudioSyncMode::from_tag(0), ScreenAudioSyncMode::Auto);
+    assert_eq!(ScreenAudioSyncMode::from_tag(1), ScreenAudioSyncMode::Strict);
+    assert_eq!(ScreenAudioSyncMode::from_tag(2), ScreenAudioSyncMode::Loose);
+    assert_eq!(ScreenAudioSyncMode::from_tag(3), ScreenAudioSyncMode::Disabled);
+
+    // 2. Wire Protocol and framing: ScreenAudioSyncFrame encode/decode round-trip
+    let original = ScreenAudioSyncFrame {
+        flags: 0x01,
+        sync_seq: 42,
+        sender_wallclock_us: 1_000_000,
+        video_pts_us: 1_020_000,
+        audio_pts_us: 1_005_000,
+    };
+    let encoded = original.encode();
+    assert_eq!(encoded.len(), SCREEN_SYNC_HEADER_LEN);
+    assert_eq!(&encoded[0..5], &SCREEN_SYNC_MAGIC);
+    assert_eq!(encoded[5], SCREEN_SYNC_PROTO);
+
+    let decoded = ScreenAudioSyncFrame::decode(&encoded).expect("decode sync frame");
+    assert_eq!(decoded.flags, original.flags);
+    assert_eq!(decoded.sync_seq, original.sync_seq);
+    assert_eq!(decoded.sender_wallclock_us, original.sender_wallclock_us);
+    assert_eq!(decoded.video_pts_us, original.video_pts_us);
+    assert_eq!(decoded.audio_pts_us, original.audio_pts_us);
+
+    // Corrupted magic and truncated errors
+    let mut bad_magic = encoded.clone();
+    bad_magic[0] = b'X';
+    assert!(ScreenAudioSyncFrame::decode(&bad_magic).is_err());
+
+    let mut bad_proto = encoded.clone();
+    bad_proto[5] = 0x99;
+    assert!(ScreenAudioSyncFrame::decode(&bad_proto).is_err());
+
+    assert!(ScreenAudioSyncFrame::decode(&encoded[..SCREEN_SYNC_HEADER_LEN - 1]).is_err());
+
+    // InnerFrame round-trip
+    let inner = original.to_inner().expect("to inner");
+    assert_eq!(inner.ty, TYPE_SCREEN_SYNC);
+    assert_eq!(
+        ScreenAudioSyncFrame::from_inner_frame(&inner).expect("from inner"),
+        original
+    );
+
+    // 3. ScreenAudioSyncCoordinator generation and interval gating
+    let mut coord = ScreenAudioSyncCoordinator::new(ScreenAudioSyncMode::Auto);
+    coord.record_video_pts(500_000);
+    coord.record_audio_pts(490_000);
+
+    let beacon1 = coord.maybe_generate_sync_beacon(1_000_000);
+    assert!(beacon1.is_some());
+    let b1 = beacon1.unwrap();
+    assert_eq!(b1.sync_seq, 1);
+    assert_eq!(b1.video_pts_us, 500_000);
+    assert_eq!(b1.audio_pts_us, 490_000);
+    assert_eq!(coord.stats().beacons_sent, 1);
+
+    // Call before interval has passed (< 500ms) returns None
+    let beacon_early = coord.maybe_generate_sync_beacon(1_200_000);
+    assert!(beacon_early.is_none());
+
+    // Call after interval (>= 500ms) generates next beacon
+    let beacon2 = coord.maybe_generate_sync_beacon(1_600_000);
+    assert!(beacon2.is_some());
+    assert_eq!(beacon2.unwrap().sync_seq, 2);
+    assert_eq!(coord.stats().beacons_sent, 2);
+
+    // 4. Receiver-side skew calculation, drift tracking, and playout buffer compensation
+    let mut receiver_coord = ScreenAudioSyncCoordinator::new(ScreenAudioSyncMode::Auto);
+    let mut playout_buf = ScreenPlayoutBuffer::new(ScreenPlayoutMode::Adaptive);
+    let initial_delay = playout_buf.target_delay_us();
+
+    // Beacon with video lead > 15ms tolerance (video 600ms, audio 570ms -> skew = +30ms)
+    let lead_beacon = ScreenAudioSyncFrame {
+        flags: 0,
+        sync_seq: 10,
+        sender_wallclock_us: 2_000_000,
+        video_pts_us: 600_000,
+        audio_pts_us: 570_000,
+    };
+    let skew = receiver_coord.on_sync_beacon(&lead_beacon, 2_005_000, Some(&mut playout_buf));
+    assert_eq!(skew, 30_000);
+    assert_eq!(receiver_coord.stats().current_skew_us, 30_000);
+    assert!(!receiver_coord.stats().in_sync); // |30ms| > 15ms tolerance
+    assert_eq!(receiver_coord.stats().adjustments_applied, 1);
+    assert!(playout_buf.target_delay_us() > initial_delay); // delay increased to slow down video
+
+    // Second beacon within tolerance (video 700ms, audio 695ms -> skew = +5ms <= 15ms)
+    let sync_beacon = ScreenAudioSyncFrame {
+        flags: 0,
+        sync_seq: 11,
+        sender_wallclock_us: 2_500_000,
+        video_pts_us: 700_000,
+        audio_pts_us: 695_000,
+    };
+    let skew2 = receiver_coord.on_sync_beacon(&sync_beacon, 2_505_050, Some(&mut playout_buf));
+    assert_eq!(skew2, 5_000);
+    assert!(receiver_coord.stats().in_sync);
+
+    // Check drift estimation over time
+    assert!(receiver_coord.stats().clock_drift_ppm.abs() >= 0.0);
+
+    // 5. End-to-end ScreenSender & ScreenReceiver Pipeline
+    let mut sender = ScreenSender::with_sync(ScreenAudioSyncMode::Auto);
+    let mut receiver = ScreenReceiver::with_sync_mode(ScreenAudioSyncMode::Auto);
+    assert_eq!(sender.sync_mode(), ScreenAudioSyncMode::Auto);
+    assert_eq!(receiver.sync_mode(), ScreenAudioSyncMode::Auto);
+
+    sender.record_audio_pts(1_000_000);
+    sender.record_video_pts(1_025_000);
+
+    let beacon = sender.trigger_sync_beacon(2_000_000);
+    assert_eq!(beacon.sync_seq, 1);
+    assert_eq!(sender.stats().sync_beacons_sent, 1);
+
+    let popped = sender.pop_sync_beacon().expect("popped beacon");
+    assert_eq!(popped, beacon);
+
+    let skew_rcv = receiver.on_sync_beacon_with_time(&popped, 2_002_000);
+    assert_eq!(skew_rcv, 25_000);
+    assert_eq!(receiver.stats().sync_beacons_received, 1);
+    assert_eq!(receiver.stats().sync_skew_us, 25_000);
+
+    // Disconnect resets sync state
+    sender.on_peer_gone();
+    receiver.on_peer_gone();
+    assert_eq!(sender.stats().sync_beacons_sent, 0);
+    assert_eq!(receiver.stats().sync_beacons_received, 0);
 }
