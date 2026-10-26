@@ -716,6 +716,10 @@ pub enum ControlMsg {
     },
     /// Peer asks to reset bottleneck-driven autonomous tuning statistics and recovery stack (v2.14 / ADR-100).
     ResetTuningProfile,
+    /// Receiver discloses that it started/stopped recording the session (v2.15 / ADR-101).
+    SetRecordingState {
+        active: bool,
+    },
 }
 
 /// Control payload layout: magic(4) | proto(1) | tag(1) | seq(8).
@@ -735,6 +739,7 @@ impl ControlMsg {
             ControlMsg::ResetLatencyProfile => 6,
             ControlMsg::SetTuningMode { .. } => 7,
             ControlMsg::ResetTuningProfile => 8,
+            ControlMsg::SetRecordingState { .. } => 9,
         }
     }
 
@@ -757,6 +762,9 @@ impl ControlMsg {
             }
             ControlMsg::SetTuningMode { mode } => {
                 out.extend_from_slice(&(*mode as u64).to_be_bytes())
+            }
+            ControlMsg::SetRecordingState { active } => {
+                out.extend_from_slice(&(*active as u64).to_be_bytes())
             }
             _ => out.extend_from_slice(&0u64.to_be_bytes()),
         }
@@ -811,6 +819,9 @@ impl ControlMsg {
                 mode: (seq & 0xFF) as u8,
             }),
             8 => Ok(ControlMsg::ResetTuningProfile),
+            9 => Ok(ControlMsg::SetRecordingState {
+                active: (seq & 0xFF) != 0,
+            }),
             _ => Err(CoreError::ScreenFrame),
         }
     }
@@ -7648,6 +7659,199 @@ fn drop_bitrate(current_bps: u32, min_bps: u32) -> u32 {
     dropped.max(min_bps)
 }
 
+/// Screen session recording container magic & layout (v2.15 / ADR-101).
+pub const SCREEN_RECORDING_MAGIC: [u8; 4] = *b"TREC";
+pub const SCREEN_RECORDING_PROTO: u8 = 1;
+/// Container header: magic(4) proto(1) width(4) height(4) format(1) codec(1) stride(4) started_us(8).
+pub const SCREEN_RECORDING_HEADER_LEN: usize = 27;
+/// Per-frame record prefix: seq(8) pts_us(8) len(4).
+pub const SCREEN_RECORDING_RECORD_PREFIX_LEN: usize = 20;
+/// Upper bound of frame summaries returned by one replay inspection.
+pub const SCREEN_RECORDING_REPLAY_LIMIT_MAX: usize = 512;
+
+/// Container header metadata derived from the first recorded frame (v2.15 / ADR-101).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenRecordingMeta {
+    pub width: u32,
+    pub height: u32,
+    pub format_tag: u8,
+    pub codec_tag: u8,
+    pub stride: u32,
+    pub started_at_us: u64,
+}
+
+impl ScreenRecordingMeta {
+    pub fn from_frame(frame: &ScreenFrame, started_at_us: u64) -> Self {
+        Self {
+            width: frame.rect.w as u32,
+            height: frame.rect.h as u32,
+            format_tag: frame.format.tag(),
+            codec_tag: frame.codec_tag,
+            stride: frame.stride,
+            started_at_us,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(SCREEN_RECORDING_HEADER_LEN);
+        out.extend_from_slice(&SCREEN_RECORDING_MAGIC);
+        out.push(SCREEN_RECORDING_PROTO);
+        out.extend_from_slice(&self.width.to_be_bytes());
+        out.extend_from_slice(&self.height.to_be_bytes());
+        out.push(self.format_tag);
+        out.push(self.codec_tag);
+        out.extend_from_slice(&self.stride.to_be_bytes());
+        out.extend_from_slice(&self.started_at_us.to_be_bytes());
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, CoreError> {
+        if bytes.len() < SCREEN_RECORDING_HEADER_LEN {
+            return Err(CoreError::TruncatedFrame);
+        }
+        if bytes[0..4] != SCREEN_RECORDING_MAGIC {
+            return Err(CoreError::ScreenFrame);
+        }
+        if bytes[4] != SCREEN_RECORDING_PROTO {
+            return Err(CoreError::UnsupportedProto);
+        }
+        Ok(Self {
+            width: u32::from_be_bytes(bytes[5..9].try_into().unwrap()),
+            height: u32::from_be_bytes(bytes[9..13].try_into().unwrap()),
+            format_tag: bytes[13],
+            codec_tag: bytes[14],
+            stride: u32::from_be_bytes(bytes[15..19].try_into().unwrap()),
+            started_at_us: u64::from_be_bytes(bytes[19..27].try_into().unwrap()),
+        })
+    }
+}
+
+/// One recorded frame record (v2.15 / ADR-101).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenRecordingFrameRecord {
+    pub seq: u64,
+    pub pts_us: u64,
+    pub payload: Vec<u8>,
+}
+
+/// Streaming TREC container writer; the header is written on construction from
+/// the first frame's metadata and each append stores the raw wire payload of the
+/// frame — zero re-encoding (v2.15 / ADR-101).
+pub struct ScreenRecordingWriter<W: std::io::Write> {
+    meta: ScreenRecordingMeta,
+    inner: W,
+    frames_written: u64,
+    bytes_written: u64,
+}
+
+impl<W: std::io::Write> ScreenRecordingWriter<W> {
+    pub fn new(meta: ScreenRecordingMeta, mut inner: W) -> Result<Self, CoreError> {
+        inner.write_all(&meta.encode())?;
+        Ok(Self {
+            meta,
+            inner,
+            frames_written: 0,
+            bytes_written: 0,
+        })
+    }
+
+    pub fn meta(&self) -> &ScreenRecordingMeta {
+        &self.meta
+    }
+
+    pub fn frames_written(&self) -> u64 {
+        self.frames_written
+    }
+
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+
+    pub fn append(&mut self, frame: &ScreenFrame, pts_us: u64) -> Result<(), CoreError> {
+        let payload = frame.encode_payload()?;
+        self.inner.write_all(&frame.seq.to_be_bytes())?;
+        self.inner.write_all(&pts_us.to_be_bytes())?;
+        self.inner
+            .write_all(&(payload.len() as u32).to_be_bytes())?;
+        self.inner.write_all(&payload)?;
+        self.frames_written = self.frames_written.saturating_add(1);
+        self.bytes_written = self
+            .bytes_written
+            .saturating_add((SCREEN_RECORDING_RECORD_PREFIX_LEN + payload.len()) as u64);
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<(u64, u64), CoreError> {
+        self.inner.flush()?;
+        Ok((self.frames_written, self.bytes_written))
+    }
+}
+
+/// Streaming TREC container reader; validates magic/proto on open and yields
+/// raw frame records that `decode_frame` turns back into standard `ScreenFrame`s
+/// (v2.15 / ADR-101).
+pub struct ScreenRecordingReader<R: std::io::Read> {
+    meta: ScreenRecordingMeta,
+    inner: R,
+    records_read: u64,
+}
+
+impl<R: std::io::Read> ScreenRecordingReader<R> {
+    pub fn new(mut inner: R) -> Result<Self, CoreError> {
+        let mut head = [0u8; SCREEN_RECORDING_HEADER_LEN];
+        inner.read_exact(&mut head)?;
+        if head[0..4] != SCREEN_RECORDING_MAGIC {
+            return Err(CoreError::ScreenFrame);
+        }
+        if head[4] != SCREEN_RECORDING_PROTO {
+            return Err(CoreError::UnsupportedProto);
+        }
+        let meta = ScreenRecordingMeta::decode(&head)?;
+        Ok(Self {
+            meta,
+            inner,
+            records_read: 0,
+        })
+    }
+
+    pub fn meta(&self) -> &ScreenRecordingMeta {
+        &self.meta
+    }
+
+    pub fn records_read(&self) -> u64 {
+        self.records_read
+    }
+
+    pub fn next_record(&mut self) -> Result<Option<ScreenRecordingFrameRecord>, CoreError> {
+        let mut prefix = [0u8; SCREEN_RECORDING_RECORD_PREFIX_LEN];
+        // Distinguish a clean container end from a truncated record: read the
+        // first prefix byte manually; EOF there means the container ended cleanly,
+        // while a short read inside a record is a hard truncation error.
+        if self.inner.read(&mut prefix[..1])? == 0 {
+            return Ok(None);
+        }
+        self.inner.read_exact(&mut prefix[1..])?;
+        let seq = u64::from_be_bytes(prefix[0..8].try_into().unwrap());
+        let pts_us = u64::from_be_bytes(prefix[8..16].try_into().unwrap());
+        let len = u32::from_be_bytes(prefix[16..20].try_into().unwrap()) as usize;
+        let mut payload = vec![0u8; len];
+        self.inner.read_exact(&mut payload)?;
+        self.records_read = self.records_read.saturating_add(1);
+        Ok(Some(ScreenRecordingFrameRecord {
+            seq,
+            pts_us,
+            payload,
+        }))
+    }
+
+    pub fn decode_frame(
+        &self,
+        record: &ScreenRecordingFrameRecord,
+    ) -> Result<ScreenFrame, CoreError> {
+        ScreenFrame::decode_payload(&record.payload)
+    }
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -8574,6 +8778,8 @@ impl ScreenSender {
                 self.reset_tuning();
                 Ok(None)
             }
+            // Recording disclosure is receiver-side state; the sender only mirrors it.
+            ControlMsg::SetRecordingState { .. } => Ok(None),
         }
     }
 
@@ -13873,4 +14079,96 @@ fn screen_bottleneck_autotuning_closed_loop() {
     );
     assert!(ScreenTuningAction::RecoverBitrate.is_recovery());
     assert!(!ScreenTuningAction::ReduceFps.is_recovery());
+}
+
+// ADR-101 Screen Streaming Session Recording Container & Replay Pipeline
+#[test]
+fn screen_recording_container_roundtrip_and_recording_disclosure() {
+    // 1. ControlMsg::SetRecordingState wire roundtrip (Tag = 9, 14-byte envelope)
+    let on_frame = ControlMsg::SetRecordingState { active: true }
+        .to_frame()
+        .unwrap();
+    assert_eq!(on_frame.ty, TYPE_SCREEN_CONTROL);
+    assert_eq!(on_frame.payload.len(), 14);
+    assert!(matches!(
+        ControlMsg::decode_payload(&on_frame.payload).unwrap(),
+        ControlMsg::SetRecordingState { active: true }
+    ));
+    let off_frame = ControlMsg::SetRecordingState { active: false }
+        .to_frame()
+        .unwrap();
+    assert!(matches!(
+        ControlMsg::decode_payload(&off_frame.payload).unwrap(),
+        ControlMsg::SetRecordingState { active: false }
+    ));
+
+    // 2. Writer -> Reader container roundtrip with three raw frames
+    let rect0 = ScreenRect::new(0, 0, 8, 4).unwrap();
+    let frame_bytes = rect0.pixel_bytes(PixelFormat::Bgra8);
+    let frames: Vec<ScreenFrame> = (1..=3)
+        .map(|seq| {
+            ScreenFrame::raw(seq, rect0, PixelFormat::Bgra8, vec![7u8; frame_bytes]).unwrap()
+        })
+        .collect();
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let meta = ScreenRecordingMeta::from_frame(&frames[0], 1_000);
+        assert_eq!(meta.width, rect0.w as u32);
+        assert_eq!(meta.height, rect0.h as u32);
+        let mut writer = ScreenRecordingWriter::new(meta, &mut buf).unwrap();
+        let pts = [1_000u64, 16_000, 33_000];
+        for (i, f) in frames.iter().enumerate() {
+            writer.append(f, pts[i]).unwrap();
+        }
+        assert_eq!(writer.frames_written(), 3);
+        let (fw, bw) = writer.finish().unwrap();
+        assert_eq!(fw, 3);
+        assert!(bw > 0);
+    }
+    buf.set_position(0);
+    let mut reader = ScreenRecordingReader::new(&mut buf).unwrap();
+    let meta = reader.meta().clone();
+    assert_eq!(meta.started_at_us, 1_000);
+    assert_eq!(meta.format_tag, PixelFormat::Bgra8.tag());
+    assert_eq!(meta.codec_tag, SCREEN_COMPRESS_NONE);
+    let mut read_back = Vec::new();
+    while let Some(rec) = reader.next_record().unwrap() {
+        read_back.push(rec);
+    }
+    assert_eq!(read_back.len(), 3);
+    assert_eq!(reader.records_read(), 3);
+    for (i, rec) in read_back.iter().enumerate() {
+        assert_eq!(rec.seq, frames[i].seq);
+        assert_eq!(rec.pts_us, [1_000u64, 16_000, 33_000][i]);
+        // decode_frame must restore the exact original ScreenFrame
+        let restored = reader.decode_frame(rec).unwrap();
+        assert_eq!(restored.seq, frames[i].seq);
+        assert_eq!(restored.rect, frames[i].rect);
+        assert_eq!(restored.format, frames[i].format);
+        assert_eq!(restored.bytes, frames[i].bytes);
+        assert_eq!(restored.codec_tag, frames[i].codec_tag);
+    }
+
+    // 3. Truncated record -> error, not a hang
+    let mut buf2 = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer =
+            ScreenRecordingWriter::new(ScreenRecordingMeta::from_frame(&frames[0], 5), &mut buf2)
+                .unwrap();
+        writer.append(&frames[0], 5).unwrap();
+        writer.finish().unwrap();
+    }
+    let mut raw = buf2.into_inner();
+    raw.truncate(SCREEN_RECORDING_HEADER_LEN + 8);
+    let mut reader2 = ScreenRecordingReader::new(&raw[..]).unwrap();
+    assert!(reader2.next_record().is_err());
+
+    // 4. Bad magic / proto rejected
+    let mut bad = ScreenRecordingMeta::from_frame(&frames[0], 5).encode();
+    bad[0] = b'X';
+    assert!(ScreenRecordingMeta::decode(&bad).is_err());
+    let mut bad_proto = ScreenRecordingMeta::from_frame(&frames[0], 5).encode();
+    bad_proto[4] = 0x7F;
+    let mut cursor = std::io::Cursor::new(bad_proto);
+    assert!(ScreenRecordingReader::new(&mut cursor).is_err());
 }

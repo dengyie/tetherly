@@ -2315,6 +2315,68 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Start/stop/inspect the screen session recorder (v2.15 / ADR-101).
+    Recording {
+        #[command(subcommand)]
+        action: Option<ScreenRecordingSubCmd>,
+        /// Output path for the TREC container (default: <data_dir>/recordings/rec-<ts>.trec).
+        #[arg(long)]
+        out: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenRecordingSubCmd {
+    /// Start recording the locally presented screen stream into a TREC container.
+    Start {
+        /// Output path for the TREC container (default: <data_dir>/recordings/rec-<ts>.trec).
+        #[arg(long)]
+        out: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Stop the active recording, flush the container and show final statistics.
+    Stop {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Show the recorder status (local recording + peer recording disclosure).
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Inspect a recorded TREC container: header metadata + frame record summaries.
+    Inspect {
+        /// Path to the .trec container file.
+        path: String,
+        /// Max frame summaries to return (1-512).
+        #[arg(long, default_value_t = 32)]
+        limit: usize,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -6649,6 +6711,12 @@ async fn main() -> Result<()> {
                             rep.tuning_recoveries
                         );
                     }
+                    if rep.recording_active || rep.peer_recording {
+                        println!(
+                            "  Recording:    local: {} (frames: {}) · peer_recording: {}",
+                            rep.recording_active, rep.recording_frames, rep.peer_recording
+                        );
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -7941,6 +8009,147 @@ async fn main() -> Result<()> {
                         let rep: tetherly_core::ScreenTuningReport = serde_json::from_slice(&resp)
                             .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
                         print_screen_tuning_report(&rep);
+                    }
+                }
+            }
+            ScreenCmd::Recording {
+                action,
+                out,
+                json,
+                ui_port,
+            } => {
+                let (action, out, is_json, port) = match action {
+                    Some(ScreenRecordingSubCmd::Start {
+                        out: o,
+                        json: j,
+                        ui_port: p,
+                    }) => (Some("start"), o, j || json, p),
+                    Some(ScreenRecordingSubCmd::Stop {
+                        json: j,
+                        ui_port: p,
+                    }) => (Some("stop"), None, j || json, p),
+                    Some(ScreenRecordingSubCmd::Status {
+                        json: j,
+                        ui_port: p,
+                    }) => (None, None, j || json, p),
+                    Some(ScreenRecordingSubCmd::Inspect {
+                        path,
+                        limit,
+                        json: j,
+                        ui_port: p,
+                    }) => {
+                        let q = format!("path={}&limit={}", urlencode_path(&path), limit);
+                        let (code, resp) = tetherly_node::loopback_get(
+                            p,
+                            &format!("/api/screen/recording/replay?{q}"),
+                        )
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{p} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "recording inspect failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if j || json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            print_screen_recording_replay(&rep);
+                        }
+                        return Ok(());
+                    }
+                    None => (None, out, json, ui_port),
+                };
+
+                match action {
+                    Some("start") => {
+                        let mut body_map = serde_json::Map::new();
+                        if let Some(o) = out {
+                            body_map.insert("path".into(), serde_json::json!(o));
+                        }
+                        let body = serde_json::to_vec(&body_map)?;
+                        let (code, resp) = tetherly_node::loopback_post(
+                            port,
+                            "/api/screen/recording/start",
+                            &body,
+                        )
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen recording start failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Screen session recording started.");
+                            print_screen_recording_report(&rep);
+                        }
+                    }
+                    Some("stop") => {
+                        let (code, resp) =
+                            tetherly_node::loopback_post(port, "/api/screen/recording/stop", &[])
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen recording stop failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Screen session recording stopped and flushed to disk.");
+                            print_screen_recording_report(&rep);
+                        }
+                    }
+                    _ => {
+                        let (code, resp) =
+                            tetherly_node::loopback_get(port, "/api/screen/recording")
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen recording query failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            print_screen_recording_report(&rep);
+                        }
                     }
                 }
             }
@@ -19537,4 +19746,100 @@ fn print_screen_tuning_report(rep: &tetherly_core::ScreenTuningReport) {
             println!("    New Playout Delay:  {} us", delay);
         }
     }
+}
+
+fn print_screen_recording_report(rep: &serde_json::Value) {
+    println!("Screen Session Recording (TREC Container, ADR-101):");
+    let active = rep.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+    let peer = rep
+        .get("peer_recording")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let path = rep.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    println!("  Active:               {active}");
+    println!("  Peer Recording:       {peer}");
+    if !path.is_empty() {
+        println!("  Container Path:       {path}");
+    }
+    if !active {
+        if !peer {
+            println!("  (No active recording; use `screen recording start` to record the locally presented stream)");
+        }
+        return;
+    }
+    let frames = rep
+        .get("frames_recorded")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let bytes = rep
+        .get("bytes_recorded")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let dur_us = rep.get("duration_us").and_then(|v| v.as_u64()).unwrap_or(0);
+    let last_seq = rep
+        .get("last_frame_seq")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let width = rep.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+    let height = rep.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+    println!("  Frames Recorded:      {frames}");
+    println!("  Container Bytes:      {bytes}");
+    println!(
+        "  Duration:             {:.2} s",
+        dur_us as f64 / 1_000_000.0
+    );
+    println!("  Last Frame Seq:       #{last_seq}");
+    if width > 0 {
+        println!("  Resolution:           {width}x{height}");
+    }
+}
+
+fn print_screen_recording_replay(rep: &serde_json::Value) {
+    println!("TREC Container Replay Inspection (ADR-101):");
+    let path = rep.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let width = rep.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+    let height = rep.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+    let fmt = rep.get("format_tag").and_then(|v| v.as_u64()).unwrap_or(0);
+    let codec = rep.get("codec_tag").and_then(|v| v.as_u64()).unwrap_or(0);
+    let started = rep
+        .get("started_at_us")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let returned = rep
+        .get("records_returned")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let truncated = rep
+        .get("truncated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    println!("  Container Path:       {path}");
+    println!("  Resolution:           {width}x{height}");
+    println!("  Format/Codec Tag:     {fmt}/{codec}",);
+    println!("  Started At:           {started} us");
+    println!(
+        "  Records Returned:     {returned}{}",
+        if truncated { " (truncated)" } else { "" }
+    );
+    if let Some(records) = rep.get("records").and_then(|v| v.as_array()) {
+        for r in records {
+            let seq = r.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
+            let pts = r.get("pts_us").and_then(|v| v.as_u64()).unwrap_or(0);
+            let len = r.get("len").and_then(|v| v.as_u64()).unwrap_or(0);
+            println!("    frame #{seq} pts={pts}us len={len}");
+        }
+    }
+}
+
+fn urlencode_path(p: &str) -> String {
+    let mut out = String::with_capacity(p.len());
+    for b in p.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b'~' => {
+                out.push(b as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }

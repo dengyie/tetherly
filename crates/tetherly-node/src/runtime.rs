@@ -66,15 +66,17 @@ use tetherly_core::{
     ScreenLatencyBreakdown, ScreenLatencyReport, ScreenNack, ScreenPacerMode, ScreenPacerReport,
     ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats, ScreenProbeMode, ScreenProbePacket,
     ScreenProbeReport, ScreenProbeState, ScreenProbeStats, ScreenProfileFrame, ScreenProfilerMode,
-    ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState,
-    ScreenStats, ScreenTrendlineMode, ScreenTrendlineReport, ScreenTunerMode, ScreenTuningReport,
+    ScreenReceiver, ScreenRecordingMeta, ScreenRecordingReader, ScreenRecordingWriter,
+    ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState, ScreenStats,
+    ScreenTrendlineMode, ScreenTrendlineReport, ScreenTunerMode, ScreenTuningReport,
     ScreenTwccFeedback, ScreenTwccMode, ScreenTwccReport, ScreenTwccStats, SensitiveContentGuard,
     TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator, TrustStore,
     VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
     VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
     VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
-    DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS, TYPE_SCREEN_FEC, TYPE_SCREEN_NACK,
-    TYPE_SCREEN_PROBE, TYPE_SCREEN_PROFILE, TYPE_SCREEN_SYNC, TYPE_SCREEN_TWCC,
+    DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS, SCREEN_RECORDING_REPLAY_LIMIT_MAX,
+    TYPE_SCREEN_FEC, TYPE_SCREEN_NACK, TYPE_SCREEN_PROBE, TYPE_SCREEN_PROFILE, TYPE_SCREEN_SYNC,
+    TYPE_SCREEN_TWCC,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -3070,6 +3072,62 @@ pub struct ScreenStatusReport {
     pub tuning_last_stage: String,
     #[serde(default)]
     pub tuning_last_action: String,
+    #[serde(default)]
+    pub recording_active: bool,
+    #[serde(default)]
+    pub peer_recording: bool,
+    #[serde(default)]
+    pub recording_frames: u64,
+}
+
+/// Status report for the screen session recorder (v2.15 / ADR-101).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScreenRecordingReport {
+    pub ok: bool,
+    pub active: bool,
+    pub path: String,
+    pub frames_recorded: u64,
+    pub bytes_recorded: u64,
+    pub started_at_us: u64,
+    pub duration_us: u64,
+    pub last_frame_seq: u64,
+    pub peer_recording: bool,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// One replayed frame summary from a TREC container (v2.15 / ADR-101).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScreenRecordingReplayRecord {
+    pub seq: u64,
+    pub pts_us: u64,
+    pub len: usize,
+}
+
+/// Replay inspection report for a recorded TREC container (v2.15 / ADR-101).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScreenRecordingReplayReport {
+    pub ok: bool,
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+    pub format_tag: u8,
+    pub codec_tag: u8,
+    pub started_at_us: u64,
+    pub records: Vec<ScreenRecordingReplayRecord>,
+    pub records_returned: usize,
+    pub truncated: bool,
+}
+
+/// Armed screen session recording: the TREC header is written lazily on the
+/// first presented frame, when the actual rect/codec are known (v2.15 / ADR-101).
+pub struct ScreenRecordingSession {
+    pub path: std::path::PathBuf,
+    pub started_at_us: u64,
+    pub writer: Option<ScreenRecordingWriter<std::io::BufWriter<std::fs::File>>>,
+    pub frames: u64,
+    pub bytes: u64,
+    pub last_seq: u64,
 }
 
 /// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
@@ -3451,6 +3509,10 @@ struct Shared {
     /// Bottleneck-driven autonomous tuner mode (ADR-100).
     screen_tuning_mode: Mutex<ScreenTunerMode>,
     screen_tuning_stats: Mutex<ScreenTuningReport>,
+    /// Active screen session recording (ADR-101).
+    screen_recording: Mutex<Option<ScreenRecordingSession>>,
+    /// Peer disclosed recording state via ControlMsg::SetRecordingState (ADR-101).
+    screen_peer_recording: std::sync::atomic::AtomicBool,
     /// Active display ID for screen capture (ADR-097). Defaults to 0 (Primary).
     screen_active_display_id: AtomicU8,
     /// Known displays available on this host (ADR-097).
@@ -3899,6 +3961,8 @@ impl Node {
                 mode: screen_tuning_mode.as_str().to_string(),
                 ..Default::default()
             }),
+            screen_recording: Mutex::new(None),
+            screen_peer_recording: std::sync::atomic::AtomicBool::new(false),
             screen_active_display_id: AtomicU8::new(initial_display_id),
             screen_displays: Mutex::new(initial_displays),
             screen_display_switches_count: AtomicU64::new(0),
@@ -20616,6 +20680,12 @@ impl Node {
                                                 engine.tuning_report();
                                         }
                                     }
+                                    if let ControlMsg::SetRecordingState { active } = msg {
+                                        node.shared
+                                            .screen_peer_recording
+                                            .store(active, std::sync::atomic::Ordering::Relaxed);
+                                        tracing::info!(active, "peer screen recording state updated");
+                                    }
                                     let (reply, dynamic_bitrate, dynamic_fps, dynamic_scale) = {
                                         let mut engine = node
                                             .shared
@@ -20792,6 +20862,39 @@ impl Node {
                         let mut played = false;
                         while let ScreenPlayoutAction::Play(ready_frame) = receiver.pop_playout(now_us) {
                             let _ = node.shared.screen_sink.present(&ready_frame);
+                            if let Ok(mut slot) = node.shared.screen_recording.try_lock() {
+                                if let Some(sess) = slot.as_mut() {
+                                    if sess.writer.is_none() {
+                                        let meta =
+                                            ScreenRecordingMeta::from_frame(&ready_frame, sess.started_at_us);
+                                        match std::fs::File::create(&sess.path) {
+                                            Ok(file) => {
+                                                match ScreenRecordingWriter::new(
+                                                    meta,
+                                                    std::io::BufWriter::new(file),
+                                                ) {
+                                                    Ok(w) => sess.writer = Some(w),
+                                                    Err(e) => tracing::warn!(%e, "screen recording header write failed"),
+                                                }
+                                            }
+                                            Err(e) => tracing::warn!(
+                                                %e,
+                                                path = %sess.path.display(),
+                                                "screen recording file create failed"
+                                            ),
+                                        }
+                                    }
+                                    if let Some(w) = sess.writer.as_mut() {
+                                        if w.append(&ready_frame, now_us).is_ok() {
+                                            sess.frames = sess.frames.saturating_add(1);
+                                            sess.bytes = sess
+                                                .bytes
+                                                .saturating_add(ready_frame.bytes.len() as u64 + 32);
+                                            sess.last_seq = ready_frame.seq;
+                                        }
+                                    }
+                                }
+                            }
                             played = true;
                         }
                         if played || receiver.playout_stats().buffered_frames > 0 {
@@ -20815,6 +20918,11 @@ impl Node {
                                 if matches!(msg, ControlMsg::ResetTuningProfile) {
                                     receiver.reset_tuning();
                                     *node.shared.screen_tuning_stats.lock().expect("tuning stats") = receiver.tuning_report();
+                                }
+                                if let ControlMsg::SetRecordingState { active } = msg {
+                                    node.shared
+                                        .screen_peer_recording
+                                        .store(active, std::sync::atomic::Ordering::Relaxed);
                                 }
                                 match msg.to_frame() {
                                     Ok(f) => {
@@ -21825,6 +21933,12 @@ impl Node {
             tuning_recoveries: tuning_report.recoveries_applied,
             tuning_last_stage: tuning_report.last_stage,
             tuning_last_action: tuning_report.last_action,
+            recording_active: self.screen_recording_report().active,
+            peer_recording: self
+                .shared
+                .screen_peer_recording
+                .load(std::sync::atomic::Ordering::Relaxed),
+            recording_frames: self.screen_recording_report().frames_recorded,
         }
     }
 
@@ -23129,6 +23243,189 @@ impl Node {
             .lock()
             .expect("tuning stats") = report;
         Ok(self.screen_tuning_report())
+    }
+
+    /// Report the screen session recorder state and statistics (v2.15 / ADR-101).
+    pub fn screen_recording_report(&self) -> ScreenRecordingReport {
+        let peer = self
+            .shared
+            .screen_peer_recording
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let guard = self.shared.screen_recording.lock().expect("recording");
+        match guard.as_ref() {
+            Some(s) => {
+                let now_us = self.shared.clock.unix_us();
+                let (width, height) = s
+                    .writer
+                    .as_ref()
+                    .map(|w| (w.meta().width, w.meta().height))
+                    .unwrap_or((0, 0));
+                ScreenRecordingReport {
+                    ok: true,
+                    active: true,
+                    path: s.path.display().to_string(),
+                    frames_recorded: s.frames,
+                    bytes_recorded: s.bytes,
+                    started_at_us: s.started_at_us,
+                    duration_us: now_us.saturating_sub(s.started_at_us),
+                    last_frame_seq: s.last_seq,
+                    peer_recording: peer,
+                    width,
+                    height,
+                }
+            }
+            None => ScreenRecordingReport {
+                ok: true,
+                active: false,
+                path: String::new(),
+                frames_recorded: 0,
+                bytes_recorded: 0,
+                started_at_us: 0,
+                duration_us: 0,
+                last_frame_seq: 0,
+                peer_recording: peer,
+                width: 0,
+                height: 0,
+            },
+        }
+    }
+
+    /// Start recording the locally presented screen stream into a TREC container
+    /// (v2.15 / ADR-101). If a screen session is live, discloses the recording to
+    /// the peer via ControlMsg::SetRecordingState.
+    pub async fn screen_start_recording(
+        &self,
+        path: Option<String>,
+    ) -> Result<ScreenRecordingReport, CoreError> {
+        {
+            let guard = self.shared.screen_recording.lock().expect("recording");
+            if guard.is_some() {
+                return Err(CoreError::InvalidConfig(
+                    "screen recording already active; stop it first".into(),
+                ));
+            }
+        }
+        let resolved: std::path::PathBuf = match path.as_deref().map(str::trim) {
+            Some(p) if !p.is_empty() => {
+                let raw = std::path::PathBuf::from(p);
+                if raw.file_name().is_none()
+                    || raw
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(CoreError::UnsafeFileName);
+                }
+                if raw.is_absolute() {
+                    raw
+                } else {
+                    self.shared.cfg.data_dir.join(raw)
+                }
+            }
+            _ => {
+                let ts = self.shared.clock.unix_us() / 1000;
+                self.shared
+                    .cfg
+                    .data_dir
+                    .join("recordings")
+                    .join(format!("rec-{ts}.trec"))
+            }
+        };
+        if let Some(parent) = resolved.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| CoreError::OpenRefused(format!("create recordings dir: {e}")))?;
+        }
+        let session = ScreenRecordingSession {
+            path: resolved,
+            started_at_us: self.shared.clock.unix_us(),
+            writer: None,
+            frames: 0,
+            bytes: 0,
+            last_seq: 0,
+        };
+        *self.shared.screen_recording.lock().expect("recording") = Some(session);
+
+        let ctl_opt = self.shared.screen_ctl.lock().await.clone();
+        if let Some(ctl) = ctl_opt {
+            let _ = ctl
+                .send(ControlMsg::SetRecordingState { active: true })
+                .await;
+        }
+        Ok(self.screen_recording_report())
+    }
+
+    /// Stop the active screen session recording, flush the TREC container to disk
+    /// and disclose the stop to a live peer (v2.15 / ADR-101).
+    pub async fn screen_stop_recording(&self) -> Result<ScreenRecordingReport, CoreError> {
+        let session = {
+            let mut guard = self.shared.screen_recording.lock().expect("recording");
+            guard.take()
+        };
+        if let Some(sess) = session {
+            if let Some(w) = sess.writer {
+                if let Err(e) = w.finish() {
+                    tracing::warn!(%e, "screen recording flush failed");
+                }
+            }
+            tracing::info!(
+                path = %sess.path.display(),
+                frames = sess.frames,
+                "screen recording stopped"
+            );
+        }
+
+        let ctl_opt = self.shared.screen_ctl.lock().await.clone();
+        if let Some(ctl) = ctl_opt {
+            let _ = ctl
+                .send(ControlMsg::SetRecordingState { active: false })
+                .await;
+        }
+        Ok(self.screen_recording_report())
+    }
+
+    /// Inspect a recorded TREC container: validate the header and return up to
+    /// `limit` frame record summaries (v2.15 / ADR-101).
+    pub fn screen_recording_replay(
+        &self,
+        path: String,
+        limit: usize,
+    ) -> Result<ScreenRecordingReplayReport, CoreError> {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::InvalidConfig(
+                "recording path is required".into(),
+            ));
+        }
+        let p = std::path::PathBuf::from(trimmed);
+        let file = std::fs::File::open(&p)
+            .map_err(|e| CoreError::OpenRefused(format!("open recording: {e}")))?;
+        let mut reader = ScreenRecordingReader::new(std::io::BufReader::new(file))?;
+        let eff_limit = limit.clamp(1, SCREEN_RECORDING_REPLAY_LIMIT_MAX);
+        let mut records = Vec::new();
+        let mut truncated = false;
+        while let Some(r) = reader.next_record()? {
+            if records.len() < eff_limit {
+                records.push(ScreenRecordingReplayRecord {
+                    seq: r.seq,
+                    pts_us: r.pts_us,
+                    len: r.payload.len(),
+                });
+            } else {
+                truncated = true;
+            }
+        }
+        let meta = reader.meta().clone();
+        Ok(ScreenRecordingReplayReport {
+            ok: true,
+            path: p.display().to_string(),
+            width: meta.width,
+            height: meta.height,
+            format_tag: meta.format_tag,
+            codec_tag: meta.codec_tag,
+            started_at_us: meta.started_at_us,
+            records_returned: records.len(),
+            records,
+            truncated,
+        })
     }
 
     /// Comprehensive status report for input sharing.

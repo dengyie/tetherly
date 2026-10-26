@@ -4236,3 +4236,217 @@ async fn m5_24_screen_bottleneck_driven_autonomous_tuning_closed_loop() {
     drop(ga);
     drop(gb);
 }
+
+// ADR-101 Screen Streaming Session Recording Container & Replay Pipeline
+#[tokio::test]
+async fn m5_25_screen_session_recording_container_and_replay_pipeline() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial recording status on both ends: idle, no peer disclosure
+    for ui in [host_ui, visitor_ui] {
+        let (c, b) = tetherly_node::loopback_get(ui, "/api/screen/recording")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_node::ScreenRecordingReport = serde_json::from_slice(&b).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.active);
+        assert!(!rep.peer_recording);
+    }
+
+    // 2. Visitor opens screen channel, host allows, visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 3. Visitor starts recording with an explicit container path; the
+    //    ControlMsg::SetRecordingState disclosure must reach the host sender.
+    let out_dir = std::env::temp_dir().join(format!(
+        "tetherly_m5_25_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    ));
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let container = out_dir.join("session.trec");
+    let rec_req = serde_json::json!({ "path": container.display().to_string() });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/recording/start",
+        &serde_json::to_vec(&rec_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rec_rep: tetherly_node::ScreenRecordingReport = serde_json::from_slice(&b).unwrap();
+    assert!(rec_rep.active);
+
+    // Host must learn about the recording via the disclosure signaling
+    let deadline = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/recording")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_node::ScreenRecordingReport = serde_json::from_slice(&b).unwrap();
+        if rep.peer_recording {
+            break;
+        }
+        if deadline.elapsed() > Duration::from_secs(3) {
+            panic!("SetRecordingState disclosure never reached the host");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Stream video frames; the visitor records every presented frame
+    for _ in 0..6 {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let sent = host.screen_send_frame().await.unwrap();
+        assert!(sent, "frame should queue while streaming");
+    }
+
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 4 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received frames");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 5. Visitor's recorder must show recorded frames
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/recording")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rec_rep: tetherly_node::ScreenRecordingReport = serde_json::from_slice(&b).unwrap();
+    assert!(rec_rep.active);
+    assert!(
+        rec_rep.frames_recorded >= 3,
+        "recorder must have captured the presented frames, got {}",
+        rec_rep.frames_recorded
+    );
+    assert!(rec_rep.last_frame_seq >= 1);
+
+    // 6. ScreenStatusReport carries recording telemetry
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let vs: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(vs.recording_active);
+    assert!(vs.recording_frames >= 3);
+
+    // 7. Stop recording and inspect the container via the replay endpoint
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/recording/stop", &[])
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let stopped: tetherly_node::ScreenRecordingReport = serde_json::from_slice(&b).unwrap();
+    assert!(!stopped.active);
+    assert!(container.exists(), "TREC container must exist on disk");
+
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/recording")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_rep: tetherly_node::ScreenRecordingReport = serde_json::from_slice(&b).unwrap();
+    assert!(
+        !host_rep.peer_recording,
+        "stop disclosure must clear host flag"
+    );
+
+    let replay_q = format!(
+        "path={}&limit=32",
+        urlencode_query(&container.display().to_string())
+    );
+    let (c, b) = tetherly_node::loopback_get(
+        visitor_ui,
+        &format!("/api/screen/recording/replay?{replay_q}"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let replay: tetherly_node::ScreenRecordingReplayReport = serde_json::from_slice(&b).unwrap();
+    assert!(replay.ok);
+    assert!(replay.width > 0);
+    assert!(replay.height > 0);
+    assert!(
+        replay.records_returned as u64 >= 3,
+        "replay must read back the recorded frames, got {}",
+        replay.records_returned
+    );
+    assert!(!replay.truncated);
+    assert_eq!(replay.records[0].seq, 1);
+
+    // 8. Stop streaming session cleanly
+    let stop_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/stop",
+        &serde_json::to_vec(&stop_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+    let _ = std::fs::remove_dir_all(&out_dir);
+}
+
+fn urlencode_query(p: &str) -> String {
+    let mut out = String::with_capacity(p.len());
+    for b in p.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b'~' => {
+                out.push(b as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}

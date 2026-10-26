@@ -3,12 +3,31 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.14** |
+| 文档版本 | **2.15** |
 | 日期 | 2026-10-27 |
-| 状态 | **v2.14 屏幕串流瓶颈驱动的自主调优闭环流水线（Screen Streaming Bottleneck-Driven Autonomous Tuning Closed Loop, ADR-100）与双端 CLI 全同构**——(1) **调优模式与迟滞触发**（`crates/tetherly-core/src/screen.rs`）：引入调优模式 `ScreenTunerMode`（`Disabled`、`Standard`（默认）、`Aggressive`），迟滞触发准则为 Standard 连续 3 帧 / Aggressive 连续 2 帧同型瓶颈，冷却窗 Standard 2s / Aggressive 1s，反振荡恢复门槛 Standard 连续 10 帧 / Aggressive 连续 6 帧均衡；(2) **瓶颈→靶向动作映射**：`Capture`→`ReduceFps`、`Encode`→`RaiseQp`（+4，顶格后转 `ReduceScale`）、`Pacer`/`Network`→`ReduceBitrate`（×85%，下限 200kbps）、`Jitter`→`RaisePlayoutDelay`（+5ms，收端播放缓冲执行器）、`Decode`→`ReduceScale`（下限后转 `ReduceFps`）、`Render`→`ReduceFps`（下限后转 `ReduceScale`）；恢复栈按降级逆序逐级回升（`RecoverBitrate` ×112%、`RecoverFps`/`RecoverScale` 阶梯上爬、`RecoverQp` −2、`LowerPlayoutDelay` −5ms）；调优仅由真实剖析信封（`TYPE_SCREEN_PROFILE`）驱动，本地合成剖析路径保持观测-only，不与 AIMD/TWCC 抢参数；(3) **跨端信令协同**：扩展 14 字节定长屏幕控制信令（`TYPE_SCREEN_CONTROL = 0x0502`），引入 Tag = 7 `ControlMsg::SetTuningMode` 与 Tag = 8 `ControlMsg::ResetTuningProfile`，双端调优模式与统计重置跨端同步；`ScreenStats` 扩充 `tuning_mode`、`tuning_actions_total`、`tuning_recoveries`、`tuning_last_stage`、`tuning_last_action`；(4) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：`NodeShared` 维护 `screen_tuning_mode` / `screen_tuning_stats` 并在 `attach_screen_server` / `attach_screen_client` 双循环收发解析新信令、周期同步收端模式；新增 REST API `GET /api/screen/tuning`、`POST /api/screen/tuning` 与 `POST /api/screen/tuning/reset`，`ScreenStatusReport` 扩充 `tuning_mode`、`tuning_actions_total`、`tuning_recoveries`、`tuning_last_stage`、`tuning_last_action`；(5) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen tuning`、`screen tuning status`、`screen tuning set <mode>`、`screen tuning reset`、`--mode`、`--reset`、`--json`，`screen status` 输出 Tuning 行；(6) **测试与版本**：核心单元测试 `screen_bottleneck_autotuning_closed_loop`、REST 端点单测与 Phase 5 端到端 `m5_24_screen_bottleneck_driven_autonomous_tuning_closed_loop` 全绿（31 套件），版本升级至 `0.1.36`。 |
+| 状态 | **v2.15 屏幕串流会话录制容器与回放流水线（Screen Streaming Session Recording Container & Replay Pipeline, ADR-101）与双端 CLI 全同构**——(1) **TREC 自主容器格式**（`crates/tetherly-core/src/screen.rs`）：定义 `SCREEN_RECORDING_MAGIC = *b"TREC"`（`proto = 0x01`）27 字节定长容器头（`width/height/format/codec/stride/started_us`，由首帧自动推导 `ScreenRecordingMeta::from_frame`）与逐帧记录（`seq(8) + pts_us(8) + len(4) + payload`）；`payload` 为 `ScreenFrame::encode_payload()` 线协议字节，容器层零转码零重编码；`ScreenRecordingWriter`（BufWriter 落盘 + finish flush）与 `ScreenRecordingReader`（magic/proto 校验 + 干净 EOF 与记录中途截断区分 + `decode_frame` 还原标准 `ScreenFrame`）；(2) **录制告知信令（Recording Disclosure）**：14 字节定长控制信封引入 Tag = 9 `ControlMsg::SetRecordingState { active }`，收端开始/停止录制时向宿主机广播，宿主机原子 `screen_peer_recording` 透视（录制知情权）；(3) **节点录制会话管理**（`crates/tetherly-node/src/runtime.rs`）：`NodeShared` 维护 `screen_recording: Mutex<Option<ScreenRecordingSession>>`（惰性写头：首帧呈现时以实际 rect/codec 建立容器）与 `screen_peer_recording`；收端 playout 弹帧路径 tap 录制；暴露 `screen_recording_report()`、`screen_start_recording()`（默认 `<data_dir>/recordings/rec-<unix_ms>.trec`，拒绝 `..` 穿越）、`screen_stop_recording()`（flush + 停止告知）与 `screen_recording_replay()`（容器读回校验，limit 钳位 1..512）；(4) **回环 REST API**（`uihttp.rs`）：`POST /api/screen/recording/start`（body/query `path`）、`POST /api/screen/recording/stop`、`GET /api/screen/recording` 与 `GET /api/screen/recording/replay?path=&limit=`；`ScreenStatusReport` 扩充 `recording_active`、`peer_recording`、`recording_frames`；(5) **双端 CLI 100% 全同构**：`screen recording start [--out]`、`stop`、`status`、`inspect <path> [--limit]` 与 `--json`，`screen status` 新增 Recording 行；(6) **测试与版本**：核心单测 `screen_recording_container_roundtrip_and_recording_disclosure`（信令往返、容器读写还原逐字节一致、截断报错、magic/proto 拒绝）、REST 单测 `test_uihttp_screen_recording_endpoints` 与端到端 `m5_25_screen_session_recording_container_and_replay_pipeline`（录制告知跨端传播、收端逐帧录制、容器落盘、replay 读回校验、停止清除对端标志）全绿，版本升级至 `0.1.37`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.15 相对 2.14(屏幕串流会话录制容器与回放流水线 ADR-101 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **远程协助会话缺少取证与回放能力**: 远程运维、跨设备协作与技术支持场景中，访客端缺少「把整场会话录制下来事后回看/取证/复盘」的能力。
+  2. **录制知情权（Recording Disclosure）**: 对被控端而言，「我的屏幕正在被对端录制」是与隐私模式（ADR-098）同等重要的知情信息；录制必须在协议层可感知，杜绝静默录制。
+  3. **格式自主可控**: 引入 MP4/MKV 会引入重依赖与专利编码器约束（违背 ADR-006 许可证边界）；屏幕帧本就是自描述的 `ScreenFrame` 线协议载荷，录制容器只需最小化封装「帧线协议载荷 + 呈现时间戳」即可无损保存并逐帧还原。
+  4. **双端 CLI 100% 同构与控制面闭环**: 录制启停、状态透视与容器读回必须在回环 REST API 与双端 CLI 中 100% 同构。
+- **架构解法与落地**:
+  1. **TREC 容器格式（`crates/tetherly-core/src/screen.rs`）**:
+     - 27 字节定长容器头（`SCREEN_RECORDING_MAGIC = *b"TREC"`, `proto = 0x01`）+ 逐帧记录（`seq/pts_us/len/payload`）；`payload` 为 `ScreenFrame::encode_payload()` 原始线协议字节。
+     - `ScreenRecordingMeta::from_frame` 由首帧推导元数据；`ScreenRecordingWriter` 惰性建容器（节点侧首帧呈现时落盘）；`ScreenRecordingReader` 区分「记录边界干净 EOF」与「记录中途截断」并经 `decode_frame` 还原标准 `ScreenFrame`。
+  2. **录制告知信令**: `ControlMsg::SetRecordingState { active }`（Tag = 9，14 字节定长控制信封）；双 attach 循环解析并原子更新 `screen_peer_recording`。
+  3. **节点录制会话管理（`crates/tetherly-node/src/runtime.rs`）**:
+     - `ScreenRecordingSession`（path/started_at_us/writer/frames/bytes/last_seq）挂于 `NodeShared.screen_recording`；收端 playout 弹帧路径 try_lock tap 录制。
+     - `screen_start_recording()`：默认 `<data_dir>/recordings/rec-<unix_ms>.trec`，拒绝 `..` 父目录穿越与空路径（`UnsafeFileName`）；`screen_stop_recording()` flush 落盘并告知对端；`screen_recording_replay(path, limit)` 读回校验（limit 钳位 1..=512）。
+  4. **回环 REST API（`crates/tetherly-node/src/uihttp.rs`）**: `POST /api/screen/recording/start`、`POST /api/screen/recording/stop`、`GET /api/screen/recording`、`GET /api/screen/recording/replay`；`ScreenStatusReport` 扩充 `recording_active`、`peer_recording`、`recording_frames`。
+  5. **双端 CLI 100% 全同构**: `screen recording start [--out]` / `stop` / `status` / `inspect <path> [--limit]` 与 `--json`；`screen status` 新增 Recording 行。
+  6. **测试与验证**: 核心单测、REST 单测与端到端 `m5_25` 全绿。
 
 **2.14 相对 2.13(屏幕串流瓶颈驱动的自主调优闭环流水线 ADR-100 与双端 CLI 全同构)**
 
@@ -5857,3 +5876,35 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
    - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_bottleneck_autotuning_closed_loop`，覆盖模式解析、Tag 7/8 信令往返、迟滞触发、七类靶向降级动作、冷却窗抑制、混合瓶颈重置、反振荡逆序恢复、收端播放缓冲联动、Disabled 惰性与 `ScreenStats` 默认遥测；
    - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tuning_endpoints`（GET/POST/query/400/403）；
    - `tests/phase5.rs`：新增端到端集成测试 `m5_24_screen_bottleneck_driven_autonomous_tuning_closed_loop`，覆盖跨端 `SetTuningMode` 信令传播（无会话时不传播、有会话时 3s 内收敛）、流式传输中双端状态报告遥测与重置保模式全链路验证；全工作区 31 套件全绿，版本升级至 `0.1.36`。
+## 50. 屏幕串流会话录制容器与回放流水线与双端 CLI 全同构 (v2.15 / ADR-101)
+
+1. **动机与设计准则（ADR-101）**：
+   - **会话可取证**：远程协助全程可无损录制与逐帧回放，容器零转码、格式自主可控，不引入任何新依赖与专利编码器；
+   - **录制知情权入协议**：`SetRecordingState` 信令让被控端对「正在被录制」有协议级感知，补齐远程桌面信任模型；
+   - **双端 CLI 100% 全同构与控制面闭环**：录制启停、状态透视与容器读回在回环 REST API 与双端 CLI 中 100% 同构。
+
+2. **核心机制与实现**：
+   - **TREC 容器格式 (`crates/tetherly-core/src/screen.rs`)**：
+     - `SCREEN_RECORDING_MAGIC = *b"TREC"`、`SCREEN_RECORDING_PROTO = 0x01`、`SCREEN_RECORDING_HEADER_LEN = 27`、`SCREEN_RECORDING_RECORD_PREFIX_LEN = 20`、`SCREEN_RECORDING_REPLAY_LIMIT_MAX = 512`；
+     - `ScreenRecordingMeta`（width/height/format_tag/codec_tag/stride/started_at_us，`from_frame` 首帧推导）；
+     - `ScreenRecordingWriter<W: Write>`（构造即写头、`append(frame, pts_us)` 存原始线协议载荷、`finish()` flush）；
+     - `ScreenRecordingReader<R: Read>`（magic/proto 校验、干净 EOF vs 记录截断区分、`decode_frame` 还原 `ScreenFrame`）；
+   - **录制告知信令 (`TYPE_SCREEN_CONTROL = 0x0502`, 14 字节定长)**：Tag = 9 `ControlMsg::SetRecordingState { active: bool }`；
+   - **节点录制会话管理 (`crates/tetherly-node/src/runtime.rs`)**：
+     - `ScreenRecordingSession` 惰性建容器（首帧呈现时 `ScreenRecordingMeta::from_frame` + `File::create` + BufWriter）；
+     - 收端 playout 弹帧路径 tap：`screen_recording.try_lock()` 非阻塞录制；
+     - `screen_recording_report()` / `screen_start_recording()` / `screen_stop_recording()` / `screen_recording_replay()`；
+     - 路径卫生：拒绝 `..` 父目录穿越与空路径；默认路径 `<data_dir>/recordings/rec-<unix_ms>.trec` 自动建父目录；
+   - **轻量级回环控制面端点 (`crates/tetherly-node/src/uihttp.rs`)**：
+     - `POST /api/screen/recording/start`（body/query 可选 `path`；重复开始 400）；
+     - `POST /api/screen/recording/stop`（flush + 返回终态）；
+     - `GET /api/screen/recording`（状态报告）；
+     - `GET /api/screen/recording/replay?path=&limit=`（容器读回校验；缺 path 400）；
+     - `ScreenStatusReport` 扩充 `recording_active`、`peer_recording`、`recording_frames`；
+   - **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**：
+     - 新增 `screen recording start [--out]`、`stop`、`status`、`inspect <path> [--limit]`；支持 `--json` 与 `--ui-port`；`screen status` 新增 Recording 行。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_recording_container_roundtrip_and_recording_disclosure`——Tag = 9 信令往返、三帧容器写读逐字节还原、容器头元数据一致性、截断记录报错、magic/proto 拒绝；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_recording_endpoints`（默认路径开始、重复开始 400、状态、停止、缺 path 400、穿越路径 400、Host 403）；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_25_screen_session_recording_container_and_replay_pipeline`——录制告知跨端传播（开始置位/停止清除）、收端逐帧录制（frames_recorded ≥ 3）、容器落盘、replay 读回校验（records ≥ 3、seq 一致、未截断）与状态报告遥测全链路验证；全工作区 31 套件全绿，版本升级至 `0.1.37`。

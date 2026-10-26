@@ -4862,6 +4862,48 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             Ok(rep) => json_ok(&rep),
             Err(e) => err(500, &format!("failed to reset autonomous tuning: {e}")),
         },
+        ("POST", "/api/screen/recording/start") => {
+            #[derive(serde::Deserialize)]
+            struct RecordingStartBody {
+                path: Option<String>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<RecordingStartBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let path_opt = parsed_body
+                .as_ref()
+                .and_then(|b| b.path.clone())
+                .or_else(|| qmap.get("path").cloned());
+            match node.screen_start_recording(path_opt).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &format!("failed to start screen recording: {e}")),
+            }
+        }
+        ("POST", "/api/screen/recording/stop") => match node.screen_stop_recording().await {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(500, &format!("failed to stop screen recording: {e}")),
+        },
+        ("GET", "/api/screen/recording") => {
+            let rep = node.screen_recording_report();
+            json_ok(&rep)
+        }
+        ("GET", "/api/screen/recording/replay") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let Some(path) = qmap.get("path").cloned() else {
+                return err(400, "recording replay requires a ?path= parameter");
+            };
+            let limit = qmap
+                .get("limit")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(32);
+            match node.screen_recording_replay(path, limit) {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &format!("recording replay failed: {e}")),
+            }
+        }
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -10762,6 +10804,93 @@ mod tests {
         let (resp_code, _) = parse_http_response(&raw);
         assert_eq!(resp_code, 403);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_recording_endpoints() {
+        let (node, dir) = temp_test_node("screen_recording");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/recording default (idle, no peer disclosure)
+        let (code, body) = loopback_get(port, "/api/screen/recording").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["active"], false);
+        assert_eq!(rep["peer_recording"], false);
+        assert_eq!(rep["frames_recorded"], 0);
+
+        // 2. POST /api/screen/recording/start without a path (default under data_dir)
+        let (code, body) = loopback_post(port, "/api/screen/recording/start", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["active"], true);
+        let container_path = rep["path"].as_str().unwrap().to_string();
+        assert!(container_path.ends_with(".trec"));
+        assert!(container_path.contains("recordings"));
+
+        // 3. Starting twice must be rejected
+        let (code, _) = loopback_post(port, "/api/screen/recording/start", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+
+        // 4. Status while active
+        let (code, body) = loopback_get(port, "/api/screen/recording").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["active"], true);
+
+        // 5. POST /api/screen/recording/stop flushes and reports idle
+        let (code, body) = loopback_post(port, "/api/screen/recording/stop", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["active"], false);
+
+        // 6. Replay of a non-existent container must fail with 400
+        let (code, _) = loopback_get(
+            port,
+            "/api/screen/recording/replay?path=/definitely/not/here.trec",
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 400);
+
+        // 7. Replay without ?path= must be rejected
+        let (code, _) = loopback_get(port, "/api/screen/recording/replay")
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+
+        // 8. Start with a path containing parent-directory traversal is refused
+        let bad_req = serde_json::json!({ "path": "../escape.trec" });
+        let (code, _) = loopback_post(
+            port,
+            "/api/screen/recording/start",
+            &serde_json::to_vec(&bad_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 400);
+
+        // 9. Host header 403 on /api/screen/recording
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/recording HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = container_path;
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
