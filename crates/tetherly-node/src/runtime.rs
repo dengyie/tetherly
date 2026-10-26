@@ -60,20 +60,19 @@ use tetherly_core::{
     MicDetachFrame, MicMode, MicRole, MicValidator, NotificationPayload, NotificationUrgency,
     Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource, ReplyView,
     ResourceHandoffValidator, ScreenAssembler, ScreenAudioSyncFrame, ScreenAudioSyncMode,
-    ScreenAudioSyncReport, ScreenAudioSyncStats, ScreenCodec, ScreenCursorMode,
-    ScreenCursorStats, ScreenCursorUpdate, ScreenDamageTracker, ScreenFecMode, ScreenFecReport,
-    ScreenFecShard, ScreenFrame, ScreenHarqMode, ScreenHarqReport, ScreenNack, ScreenPacerMode,
-    ScreenPacerReport, ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats, ScreenProbeMode,
-    ScreenProbePacket, ScreenProbeReport, ScreenProbeState, ScreenProbeStats, ScreenReceiver,
-    ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState, ScreenStats,
-    ScreenTrendlineMode, ScreenTrendlineReport, ScreenTwccFeedback, ScreenTwccMode,
-    ScreenTwccReport, ScreenTwccStats, SensitiveContentGuard, TcpLimiter, TopologyStateFrame,
-    TopologySyncReqFrame, TopologyValidator, TrustStore, VirtualDisplayAnnounceFrame,
-    VirtualDisplayAttachFrame, VirtualDisplayCodec, VirtualDisplayDetachFrame,
-    VirtualDisplayFrameAck, VirtualDisplayMode, VirtualDisplayPixelFormat, VirtualDisplayRole,
-    VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS,
-    OVERLAY_PROBE_MS, TYPE_SCREEN_FEC, TYPE_SCREEN_NACK, TYPE_SCREEN_PROBE, TYPE_SCREEN_SYNC,
-    TYPE_SCREEN_TWCC,
+    ScreenAudioSyncReport, ScreenAudioSyncStats, ScreenCodec, ScreenCursorMode, ScreenCursorStats,
+    ScreenCursorUpdate, ScreenDamageTracker, ScreenFecMode, ScreenFecReport, ScreenFecShard,
+    ScreenFrame, ScreenHarqMode, ScreenHarqReport, ScreenNack, ScreenPacerMode, ScreenPacerReport,
+    ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats, ScreenProbeMode, ScreenProbePacket,
+    ScreenProbeReport, ScreenProbeState, ScreenProbeStats, ScreenReceiver, ScreenSender,
+    ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState, ScreenStats, ScreenTrendlineMode,
+    ScreenTrendlineReport, ScreenTwccFeedback, ScreenTwccMode, ScreenTwccReport, ScreenTwccStats,
+    SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
+    TrustStore, VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
+    VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
+    VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
+    DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS, TYPE_SCREEN_FEC, TYPE_SCREEN_NACK,
+    TYPE_SCREEN_PROBE, TYPE_SCREEN_SYNC, TYPE_SCREEN_TWCC,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -20926,16 +20925,8 @@ impl Node {
                 .screen_cursor_stats
                 .lock()
                 .expect("cursor stats") = receiver.cursor_stats();
-            *node
-                .shared
-                .screen_rx_stats
-                .lock()
-                .expect("screen rx") = receiver.stats();
-            *node
-                .shared
-                .screen_sync_stats
-                .lock()
-                .expect("sync stats") = receiver.sync_stats();
+            *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
+            *node.shared.screen_sync_stats.lock().expect("sync stats") = receiver.sync_stats();
             *node.shared.screen_peer.lock().expect("screen_peer") = None;
             *node.shared.screen_ctl.lock().await = None;
             node.shared
@@ -21659,10 +21650,21 @@ impl Node {
             in_sync: sync_report.in_sync,
             active_display_id: self.shared.screen_active_display_id.load(Ordering::Relaxed),
             display_count: self.screen_displays().len(),
-            display_switches_count: self.shared.screen_display_switches_count.load(Ordering::Relaxed),
+            display_switches_count: self
+                .shared
+                .screen_display_switches_count
+                .load(Ordering::Relaxed),
             privacy_enabled: self.shared.screen_privacy_enabled.load(Ordering::Relaxed),
-            privacy_input_locked: self.shared.screen_privacy_lock_input.load(Ordering::Relaxed),
-            privacy_blanking_method: self.shared.screen_privacy_blanking_method.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            privacy_input_locked: self
+                .shared
+                .screen_privacy_lock_input
+                .load(Ordering::Relaxed),
+            privacy_blanking_method: self
+                .shared
+                .screen_privacy_blanking_method
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         }
     }
 
@@ -22343,9 +22345,13 @@ impl Node {
         ScreenTwccReport {
             ok: true,
             mode,
-            feedbacks_sent: rx_stats.twcc_feedbacks_sent.max(local_twcc_stats.feedbacks_sent),
+            feedbacks_sent: rx_stats
+                .twcc_feedbacks_sent
+                .max(local_twcc_stats.feedbacks_sent),
             feedbacks_received: sender_rep.feedbacks_received,
-            packets_tracked: sender_rep.packets_tracked.max(local_twcc_stats.packets_tracked),
+            packets_tracked: sender_rep
+                .packets_tracked
+                .max(local_twcc_stats.packets_tracked),
             packets_acknowledged: sender_rep.packets_acknowledged,
             packets_lost: sender_rep.packets_lost,
             loss_ratio: sender_rep.loss_ratio,
@@ -22400,7 +22406,9 @@ impl Node {
             probes_completed: sender_rep
                 .probes_completed
                 .max(local_probe_stats.probes_completed),
-            probes_failed: sender_rep.probes_failed.max(local_probe_stats.probes_failed),
+            probes_failed: sender_rep
+                .probes_failed
+                .max(local_probe_stats.probes_failed),
             last_target_bps: if sender_rep.last_target_bps > 0 {
                 sender_rep.last_target_bps
             } else {
@@ -22585,14 +22593,17 @@ impl Node {
 
     /// Return the active display ID being captured or viewed (ADR-097).
     pub fn screen_active_display_id(&self) -> u8 {
-        self.shared
-            .screen_active_display_id
-            .load(Ordering::Relaxed)
+        self.shared.screen_active_display_id.load(Ordering::Relaxed)
     }
 
     /// List enumerated displays available on this host (ADR-097).
     pub fn screen_displays(&self) -> Vec<tetherly_core::ScreenDisplayInfo> {
-        let displays = self.shared.screen_displays.lock().expect("displays").clone();
+        let displays = self
+            .shared
+            .screen_displays
+            .lock()
+            .expect("displays")
+            .clone();
         if !displays.is_empty() {
             displays
         } else {
@@ -22695,7 +22706,10 @@ impl Node {
     /// Return current privacy mode and host input lockout status (v2.12 / ADR-098).
     pub fn screen_privacy_report(&self) -> tetherly_core::ScreenPrivacyReport {
         let enabled = self.shared.screen_privacy_enabled.load(Ordering::Relaxed);
-        let lock_input = self.shared.screen_privacy_lock_input.load(Ordering::Relaxed);
+        let lock_input = self
+            .shared
+            .screen_privacy_lock_input
+            .load(Ordering::Relaxed);
         let blanking_method = self
             .shared
             .screen_privacy_blanking_method
@@ -22728,7 +22742,10 @@ impl Node {
         // 1. If connected as visitor/controller, send SetPrivacyMode control message across ctl channel
         let ctl_opt = self.shared.screen_ctl.lock().await.clone();
         if let Some(ctl) = ctl_opt {
-            let msg = ControlMsg::SetPrivacyMode { enabled, lock_input };
+            let msg = ControlMsg::SetPrivacyMode {
+                enabled,
+                lock_input,
+            };
             if ctl.send(msg).await.is_err() {
                 return Err(CoreError::NoConnectedPeer);
             }
@@ -23975,17 +23992,26 @@ mod media_policy_tests {
         // 2. Mutate to Aggressive
         let rep_agg = node.screen_set_twcc_mode(tetherly_core::ScreenTwccMode::Aggressive);
         assert_eq!(rep_agg.mode, tetherly_core::ScreenTwccMode::Aggressive);
-        assert_eq!(node.screen_twcc_mode(), tetherly_core::ScreenTwccMode::Aggressive);
+        assert_eq!(
+            node.screen_twcc_mode(),
+            tetherly_core::ScreenTwccMode::Aggressive
+        );
 
         // 3. Mutate to Conservative
         let rep_cons = node.screen_set_twcc_mode(tetherly_core::ScreenTwccMode::Conservative);
         assert_eq!(rep_cons.mode, tetherly_core::ScreenTwccMode::Conservative);
-        assert_eq!(node.screen_twcc_mode(), tetherly_core::ScreenTwccMode::Conservative);
+        assert_eq!(
+            node.screen_twcc_mode(),
+            tetherly_core::ScreenTwccMode::Conservative
+        );
 
         // 4. Mutate to Disabled
         let rep_dis = node.screen_set_twcc_mode(tetherly_core::ScreenTwccMode::Disabled);
         assert_eq!(rep_dis.mode, tetherly_core::ScreenTwccMode::Disabled);
-        assert_eq!(node.screen_twcc_mode(), tetherly_core::ScreenTwccMode::Disabled);
+        assert_eq!(
+            node.screen_twcc_mode(),
+            tetherly_core::ScreenTwccMode::Disabled
+        );
 
         // 5. Restore to Auto
         let rep_auto = node.screen_set_twcc_mode(tetherly_core::ScreenTwccMode::Auto);

@@ -4606,12 +4606,10 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 json_ok(&rep)
             }
         }
-        ("POST", "/api/screen/sync/trigger") => {
-            match node.trigger_screen_sync().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to trigger screen sync beacon: {e}")),
-            }
-        }
+        ("POST", "/api/screen/sync/trigger") => match node.trigger_screen_sync().await {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(500, &format!("failed to trigger screen sync beacon: {e}")),
+        },
         // Screen multi-display & virtual display stream multiplexing pipeline (v2.11 / ADR-097).
         ("GET", "/api/screen/displays") => {
             let rep = node.screen_display_report();
@@ -4641,7 +4639,10 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 });
 
             let Some(display_id) = display_id_opt else {
-                return err(400, "missing required field: display_id (expected integer 0-255)");
+                return err(
+                    400,
+                    "missing required field: display_id (expected integer 0-255)",
+                );
             };
 
             match node.screen_switch_display(display_id).await {
@@ -4673,19 +4674,20 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             } else {
                 None
             };
-            let enabled_opt = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| {
-                    qmap.get("enabled").and_then(|v| match v.to_ascii_lowercase().as_str() {
+            let enabled_opt = parsed_body.as_ref().and_then(|b| b.enabled).or_else(|| {
+                qmap.get("enabled")
+                    .and_then(|v| match v.to_ascii_lowercase().as_str() {
                         "true" | "1" | "yes" | "on" => Some(true),
                         "false" | "0" | "no" | "off" => Some(false),
                         _ => None,
                     })
-                });
+            });
 
             let Some(enabled) = enabled_opt else {
-                return err(400, "missing required field: enabled (expected boolean true/false)");
+                return err(
+                    400,
+                    "missing required field: enabled (expected boolean true/false)",
+                );
             };
 
             let lock_input = parsed_body
@@ -4704,7 +4706,10 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
 
             match node.screen_set_privacy_mode(enabled, lock_input).await {
                 Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to configure screen privacy mode: {e}")),
+                Err(e) => err(
+                    500,
+                    &format!("failed to configure screen privacy mode: {e}"),
+                ),
             }
         }
         ("POST", "/api/screen/privacy/enable") => {
@@ -10351,9 +10356,26 @@ mod tests {
         assert!(rep["displays"].as_array().unwrap().len() >= 1);
 
         // 2. Set multi-display configuration
-        let d0 = tetherly_core::ScreenDisplayInfo::new(0, "Main Display", 1920, 1080, 100, true, false);
-        let d1 = tetherly_core::ScreenDisplayInfo::new(1, "Secondary Monitor", 2560, 1440, 125, false, false);
-        let d2 = tetherly_core::ScreenDisplayInfo::new(2, "Virtual Display (ADR-073)", 1920, 1200, 100, false, true);
+        let d0 =
+            tetherly_core::ScreenDisplayInfo::new(0, "Main Display", 1920, 1080, 100, true, false);
+        let d1 = tetherly_core::ScreenDisplayInfo::new(
+            1,
+            "Secondary Monitor",
+            2560,
+            1440,
+            125,
+            false,
+            false,
+        );
+        let d2 = tetherly_core::ScreenDisplayInfo::new(
+            2,
+            "Virtual Display (ADR-073)",
+            1920,
+            1200,
+            100,
+            false,
+            true,
+        );
         node.screen_set_displays(vec![d0, d1, d2]);
 
         let (code, body) = loopback_get(port, "/api/screen/displays").await.unwrap();

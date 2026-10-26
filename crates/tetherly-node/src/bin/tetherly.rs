@@ -4259,24 +4259,26 @@ async fn main() -> Result<()> {
                     )
                 }
             };
-            cfg.screen_probe_mode =
-                match screen_probe.trim().parse::<tetherly_core::ScreenProbeMode>() {
-                    Ok(mode) => mode,
-                    Err(_) => {
-                        anyhow::bail!(
+            cfg.screen_probe_mode = match screen_probe
+                .trim()
+                .parse::<tetherly_core::ScreenProbeMode>()
+            {
+                Ok(mode) => mode,
+                Err(_) => {
+                    anyhow::bail!(
                             "--screen-probe must be `auto`, `aggressive`, `conservative`, or `disabled`"
                         )
-                    }
-                };
-            cfg.screen_sync_mode =
-                match screen_sync.trim().parse::<tetherly_core::ScreenAudioSyncMode>() {
-                    Ok(mode) => mode,
-                    Err(_) => {
-                        anyhow::bail!(
-                            "--screen-sync must be `auto`, `strict`, `loose`, or `disabled`"
-                        )
-                    }
-                };
+                }
+            };
+            cfg.screen_sync_mode = match screen_sync
+                .trim()
+                .parse::<tetherly_core::ScreenAudioSyncMode>()
+            {
+                Ok(mode) => mode,
+                Err(_) => {
+                    anyhow::bail!("--screen-sync must be `auto`, `strict`, `loose`, or `disabled`")
+                }
+            };
             cfg.screen_display_id = screen_display;
             let h264 = screen_codec.eq_ignore_ascii_case("h264");
             cfg.screen_codec_h264 = h264;
@@ -7220,12 +7222,11 @@ async fn main() -> Result<()> {
                     let rep: tetherly_core::ScreenTwccReport = serde_json::from_slice(&resp)
                         .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
                     if has_update {
-                        println!(
-                            "Screen TWCC feedback mode updated: {}",
-                            rep.mode
-                        );
+                        println!("Screen TWCC feedback mode updated: {}", rep.mode);
                     } else {
-                        println!("Screen Transport-Wide Congestion Control (TWCC) Pipeline (ADR-094):");
+                        println!(
+                            "Screen Transport-Wide Congestion Control (TWCC) Pipeline (ADR-094):"
+                        );
                         println!("  TWCC Mode:            {}", rep.mode);
                         println!("  Feedbacks Sent:       {}", rep.feedbacks_sent);
                         println!("  Feedbacks Received:   {}", rep.feedbacks_received);
@@ -7295,12 +7296,11 @@ async fn main() -> Result<()> {
                             rep.last_target_bps as f64 / 1_000_000.0
                         );
                     } else if has_update {
-                        println!(
-                            "Screen active bandwidth probe mode updated: {}",
-                            rep.mode
-                        );
+                        println!("Screen active bandwidth probe mode updated: {}", rep.mode);
                     } else {
-                        println!("Screen Active Bandwidth Probing & Fast Ramp-Up Pipeline (ADR-095):");
+                        println!(
+                            "Screen Active Bandwidth Probing & Fast Ramp-Up Pipeline (ADR-095):"
+                        );
                         println!("  Probe Mode:           {}", rep.mode);
                         println!("  Probe State:          {}", rep.state);
                         println!("  Probes Triggered:     {}", rep.probes_triggered);
@@ -7316,8 +7316,15 @@ async fn main() -> Result<()> {
                             rep.last_measured_bps as f64 / 1_000_000.0,
                             rep.last_measured_bps
                         );
-                        println!("  Last RTT:             {} us ({:.2} ms)", rep.last_rtt_us, rep.last_rtt_us as f64 / 1_000.0);
-                        println!("  Last Loss Ratio:      {:.2}%", rep.last_loss_ratio * 100.0);
+                        println!(
+                            "  Last RTT:             {} us ({:.2} ms)",
+                            rep.last_rtt_us,
+                            rep.last_rtt_us as f64 / 1_000.0
+                        );
+                        println!(
+                            "  Last Loss Ratio:      {:.2}%",
+                            rep.last_loss_ratio * 100.0
+                        );
                         println!("  Last Delay Gradient:  {} us", rep.last_delay_gradient_us);
                         if let Some(cid) = rep.active_cluster_id {
                             println!("  Active Cluster ID:    {}", cid);
@@ -7360,8 +7367,9 @@ async fn main() -> Result<()> {
                 if json {
                     println!("{}", String::from_utf8_lossy(&resp).trim());
                 } else {
-                    let rep: tetherly_core::ScreenAudioSyncReport = serde_json::from_slice(&resp)
-                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    let rep: tetherly_core::ScreenAudioSyncReport =
+                        serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
                     if trigger {
                         println!(
                             "Screen & audio sync beacon triggered (skew: {:.2} ms, drift: {:+.1} ppm, in-sync: {})",
@@ -7370,10 +7378,7 @@ async fn main() -> Result<()> {
                             rep.in_sync
                         );
                     } else if has_update {
-                        println!(
-                            "Screen & audio sync mode updated: {}",
-                            rep.mode
-                        );
+                        println!("Screen & audio sync mode updated: {}", rep.mode);
                     } else {
                         println!("Screen & Audio Playout Lip-Sync & Clock Synchronization Pipeline (ADR-096):");
                         println!("  Sync Mode:            {}", rep.mode);
@@ -7391,15 +7396,14 @@ async fn main() -> Result<()> {
                 }
             }
             ScreenCmd::Displays { json, ui_port } => {
-                let (code, resp) =
-                    tetherly_node::loopback_get(ui_port, "/api/screen/displays")
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/displays")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
                                  start one with `tetherly --data-dir <dir> run` first"
-                            )
-                        })?;
+                        )
+                    })?;
                 if code != 200 {
                     anyhow::bail!(
                         "screen displays query failed (HTTP {code}): {}",
@@ -7554,15 +7558,14 @@ async fn main() -> Result<()> {
                         }
                     }
                 } else {
-                    let (code, resp) =
-                        tetherly_node::loopback_get(port, "/api/screen/privacy")
-                            .await
-                            .map_err(|e| {
-                                anyhow::anyhow!(
-                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/privacy")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
                                      start one with `tetherly --data-dir <dir> run` first"
-                                )
-                            })?;
+                            )
+                        })?;
                     if code != 200 {
                         anyhow::bail!(
                             "screen privacy query failed (HTTP {code}): {}",

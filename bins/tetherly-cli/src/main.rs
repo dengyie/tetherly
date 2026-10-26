@@ -8230,10 +8230,8 @@ async fn main() -> Result<()> {
                         .get("probes_completed")
                         .and_then(|n| n.as_u64())
                         .unwrap_or(0);
-                    let probes_failed = v
-                        .get("probes_failed")
-                        .and_then(|n| n.as_u64())
-                        .unwrap_or(0);
+                    let probes_failed =
+                        v.get("probes_failed").and_then(|n| n.as_u64()).unwrap_or(0);
                     let probe_target_bps = v
                         .get("probe_target_bps")
                         .and_then(|n| n.as_u64())
@@ -8251,10 +8249,7 @@ async fn main() -> Result<()> {
                         .get("sync_beacons_received")
                         .and_then(|n| n.as_u64())
                         .unwrap_or(0);
-                    let sync_skew_us = v
-                        .get("sync_skew_us")
-                        .and_then(|n| n.as_i64())
-                        .unwrap_or(0);
+                    let sync_skew_us = v.get("sync_skew_us").and_then(|n| n.as_i64()).unwrap_or(0);
                     let sync_clock_drift_ppm = v
                         .get("sync_clock_drift_ppm")
                         .and_then(|n| n.as_f64())
@@ -8263,18 +8258,13 @@ async fn main() -> Result<()> {
                         .get("sync_adjustments_applied")
                         .and_then(|n| n.as_u64())
                         .unwrap_or(0);
-                    let in_sync = v
-                        .get("in_sync")
-                        .and_then(|b| b.as_bool())
-                        .unwrap_or(true);
+                    let in_sync = v.get("in_sync").and_then(|b| b.as_bool()).unwrap_or(true);
                     let active_display_id = v
                         .get("active_display_id")
                         .and_then(|n| n.as_u64())
                         .unwrap_or(0) as u8;
-                    let display_count = v
-                        .get("display_count")
-                        .and_then(|n| n.as_u64())
-                        .unwrap_or(0) as usize;
+                    let display_count =
+                        v.get("display_count").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
                     let display_switches_count = v
                         .get("display_switches_count")
                         .and_then(|n| n.as_u64())
@@ -9362,20 +9352,43 @@ async fn main() -> Result<()> {
                     let v: serde_json::Value = serde_json::from_slice(&resp)
                         .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
                     let m = v.get("mode").and_then(|s| s.as_str()).unwrap_or("unknown");
-                    let feedbacks_sent = v.get("feedbacks_sent").and_then(|n| n.as_u64()).unwrap_or(0);
-                    let feedbacks_received = v.get("feedbacks_received").and_then(|n| n.as_u64()).unwrap_or(0);
-                    let packets_tracked = v.get("packets_tracked").and_then(|n| n.as_u64()).unwrap_or(0);
-                    let packets_acknowledged = v.get("packets_acknowledged").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let feedbacks_sent = v
+                        .get("feedbacks_sent")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let feedbacks_received = v
+                        .get("feedbacks_received")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let packets_tracked = v
+                        .get("packets_tracked")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let packets_acknowledged = v
+                        .get("packets_acknowledged")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
                     let packets_lost = v.get("packets_lost").and_then(|n| n.as_u64()).unwrap_or(0);
                     let loss_ratio = v.get("loss_ratio").and_then(|n| n.as_f64()).unwrap_or(0.0);
-                    let delivery_rate_bps = v.get("delivery_rate_bps").and_then(|n| n.as_u64()).unwrap_or(0);
-                    let delay_gradient_us = v.get("delay_gradient_us").and_then(|n| n.as_i64()).unwrap_or(0);
-                    let smoothed_rtt_us = v.get("smoothed_rtt_us").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let delivery_rate_bps = v
+                        .get("delivery_rate_bps")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let delay_gradient_us = v
+                        .get("delay_gradient_us")
+                        .and_then(|n| n.as_i64())
+                        .unwrap_or(0);
+                    let smoothed_rtt_us = v
+                        .get("smoothed_rtt_us")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
 
                     if has_update {
                         println!("Screen TWCC feedback mode updated: {m}");
                     } else {
-                        println!("Screen Transport-Wide Congestion Control (TWCC) Pipeline (ADR-094):");
+                        println!(
+                            "Screen Transport-Wide Congestion Control (TWCC) Pipeline (ADR-094):"
+                        );
                         println!("  TWCC Mode:            {m}");
                         println!("  Feedbacks Sent:       {feedbacks_sent}");
                         println!("  Feedbacks Received:   {feedbacks_received}");
@@ -9445,12 +9458,11 @@ async fn main() -> Result<()> {
                             rep.last_target_bps as f64 / 1_000_000.0
                         );
                     } else if has_update {
-                        println!(
-                            "Screen active bandwidth probe mode updated: {}",
-                            rep.mode
-                        );
+                        println!("Screen active bandwidth probe mode updated: {}", rep.mode);
                     } else {
-                        println!("Screen Active Bandwidth Probing & Fast Ramp-Up Pipeline (ADR-095):");
+                        println!(
+                            "Screen Active Bandwidth Probing & Fast Ramp-Up Pipeline (ADR-095):"
+                        );
                         println!("  Probe Mode:           {}", rep.mode);
                         println!("  Probe State:          {}", rep.state);
                         println!("  Probes Triggered:     {}", rep.probes_triggered);
@@ -9466,8 +9478,15 @@ async fn main() -> Result<()> {
                             rep.last_measured_bps as f64 / 1_000_000.0,
                             rep.last_measured_bps
                         );
-                        println!("  Last RTT:             {} us ({:.2} ms)", rep.last_rtt_us, rep.last_rtt_us as f64 / 1_000.0);
-                        println!("  Last Loss Ratio:      {:.2}%", rep.last_loss_ratio * 100.0);
+                        println!(
+                            "  Last RTT:             {} us ({:.2} ms)",
+                            rep.last_rtt_us,
+                            rep.last_rtt_us as f64 / 1_000.0
+                        );
+                        println!(
+                            "  Last Loss Ratio:      {:.2}%",
+                            rep.last_loss_ratio * 100.0
+                        );
                         println!("  Last Delay Gradient:  {} us", rep.last_delay_gradient_us);
                         if let Some(cid) = rep.active_cluster_id {
                             println!("  Active Cluster ID:    {}", cid);
@@ -9510,8 +9529,9 @@ async fn main() -> Result<()> {
                 if json {
                     println!("{}", String::from_utf8_lossy(&resp).trim());
                 } else {
-                    let rep: tetherly_core::ScreenAudioSyncReport = serde_json::from_slice(&resp)
-                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    let rep: tetherly_core::ScreenAudioSyncReport =
+                        serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
                     if trigger {
                         println!(
                             "Screen & audio sync beacon triggered (skew: {:.2} ms, drift: {:+.1} ppm, in-sync: {})",
@@ -9520,10 +9540,7 @@ async fn main() -> Result<()> {
                             rep.in_sync
                         );
                     } else if has_update {
-                        println!(
-                            "Screen & audio sync mode updated: {}",
-                            rep.mode
-                        );
+                        println!("Screen & audio sync mode updated: {}", rep.mode);
                     } else {
                         println!("Screen & Audio Playout Lip-Sync & Clock Synchronization Pipeline (ADR-096):");
                         println!("  Sync Mode:            {}", rep.mode);
@@ -9701,14 +9718,15 @@ async fn main() -> Result<()> {
                         }
                     }
                 } else {
-                    let (code, resp) = loopback_get(port, "/api/screen/privacy")
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                    let (code, resp) =
+                        loopback_get(port, "/api/screen/privacy")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
                                  start one with `tetherly --data-dir <dir> run` first"
-                            )
-                        })?;
+                                )
+                            })?;
                     if code != 200 {
                         anyhow::bail!(
                             "screen privacy query failed (HTTP {code}): {}",

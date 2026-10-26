@@ -710,7 +710,10 @@ impl ControlMsg {
             ControlMsg::SwitchDisplay { display_id } => {
                 out.extend_from_slice(&(*display_id as u64).to_be_bytes())
             }
-            ControlMsg::SetPrivacyMode { enabled, lock_input } => {
+            ControlMsg::SetPrivacyMode {
+                enabled,
+                lock_input,
+            } => {
                 let val: u64 = (*enabled as u64) | ((*lock_input as u64) << 8);
                 out.extend_from_slice(&val.to_be_bytes())
             }
@@ -2371,8 +2374,10 @@ impl ScreenPlayoutBuffer {
 
     pub fn adjust_target_delay(&mut self, delta_us: i64) {
         let current = self.target_delay_us as i64;
-        let new_target = (current + delta_us)
-            .clamp(SCREEN_PLAYOUT_MIN_DELAY_US as i64, SCREEN_PLAYOUT_MAX_DELAY_US as i64) as u64;
+        let new_target = (current + delta_us).clamp(
+            SCREEN_PLAYOUT_MIN_DELAY_US as i64,
+            SCREEN_PLAYOUT_MAX_DELAY_US as i64,
+        ) as u64;
         self.custom_target_delay_us = Some(new_target);
         self.recompute_target_delay();
     }
@@ -5235,8 +5240,11 @@ impl ScreenTwccSenderTracker {
         while self.in_flight.len() >= 1024 {
             self.in_flight.pop_front();
         }
-        self.in_flight
-            .push_back(TwccSentPacket { seq, send_us, bytes });
+        self.in_flight.push_back(TwccSentPacket {
+            seq,
+            send_us,
+            bytes,
+        });
         self.stats.packets_tracked = self.stats.packets_tracked.saturating_add(1);
         seq
     }
@@ -5263,8 +5271,7 @@ impl ScreenTwccSenderTracker {
                 self.stats.packets_lost = self.stats.packets_lost.saturating_add(1);
             } else {
                 acked_in_block += 1;
-                self.stats.packets_acknowledged =
-                    self.stats.packets_acknowledged.saturating_add(1);
+                self.stats.packets_acknowledged = self.stats.packets_acknowledged.saturating_add(1);
                 let recv_us =
                     (feedback.reference_time_us as i64 + rec.recv_delta_us as i64).max(0) as u64;
                 min_arrival_us = min_arrival_us.min(recv_us);
@@ -5315,8 +5322,7 @@ impl ScreenTwccSenderTracker {
         }
 
         if !delay_gradients.is_empty() {
-            let avg_grad =
-                delay_gradients.iter().sum::<i64>() / (delay_gradients.len() as i64);
+            let avg_grad = delay_gradients.iter().sum::<i64>() / (delay_gradients.len() as i64);
             if self.stats.feedbacks_received <= 1 {
                 self.stats.delay_gradient_us = avg_grad;
             } else {
@@ -5836,12 +5842,7 @@ impl ScreenProbeController {
     }
 
     /// Trigger an active bandwidth probe burst using pre-allocated transport sequence numbers.
-    pub fn trigger_probe_with_seqs(
-        &mut self,
-        target_bps: u32,
-        now_us: u64,
-        seqs: &[u16],
-    ) -> bool {
+    pub fn trigger_probe_with_seqs(&mut self, target_bps: u32, now_us: u64, seqs: &[u16]) -> bool {
         if self.mode == ScreenProbeMode::Disabled || seqs.is_empty() {
             return false;
         }
@@ -5997,8 +5998,8 @@ impl ScreenProbeController {
 
         // Estimate delay gradient over probe cluster: recv span vs send span
         let delay_gradient_us = if arrived_deltas.len() >= 2 {
-            let recv_span = (*arrived_deltas.iter().max().unwrap())
-                - (*arrived_deltas.iter().min().unwrap());
+            let recv_span =
+                (*arrived_deltas.iter().max().unwrap()) - (*arrived_deltas.iter().min().unwrap());
             recv_span
         } else {
             0
@@ -6134,7 +6135,7 @@ impl ScreenAudioSyncFrame {
         if bytes.len() < SCREEN_SYNC_HEADER_LEN {
             return Err(CoreError::TruncatedFrame);
         }
-        if &bytes[0..5] != &SCREEN_SYNC_MAGIC {
+        if bytes[0..5] != SCREEN_SYNC_MAGIC {
             return Err(CoreError::ScreenFrame);
         }
         if bytes[5] != SCREEN_SYNC_PROTO {
@@ -7122,7 +7123,10 @@ impl ScreenSender {
                 self.switch_display(display_id, now_us)?;
                 Ok(None)
             }
-            ControlMsg::SetPrivacyMode { enabled, lock_input } => {
+            ControlMsg::SetPrivacyMode {
+                enabled,
+                lock_input,
+            } => {
                 self.set_privacy_mode(enabled, lock_input, now_us);
                 Ok(None)
             }
@@ -8065,16 +8069,10 @@ impl ScreenReceiver {
     }
 
     /// Ingest an inbound sync beacon with explicit arrival timestamp in microseconds.
-    pub fn on_sync_beacon_with_time(
-        &mut self,
-        beacon: &ScreenAudioSyncFrame,
-        now_us: u64,
-    ) -> i64 {
-        let skew = self.sync_coordinator.on_sync_beacon(
-            beacon,
-            now_us,
-            Some(&mut self.playout_buffer),
-        );
+    pub fn on_sync_beacon_with_time(&mut self, beacon: &ScreenAudioSyncFrame, now_us: u64) -> i64 {
+        let skew =
+            self.sync_coordinator
+                .on_sync_beacon(beacon, now_us, Some(&mut self.playout_buffer));
         self.sync_sync_stats();
         skew
     }
@@ -8725,7 +8723,8 @@ impl crate::ports::ScreenSource for MemoryScreenSource {
     }
 
     fn active_display_id(&self) -> u8 {
-        self.active_display.load(std::sync::atomic::Ordering::SeqCst)
+        self.active_display
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn switch_display(&self, display_id: u8) -> Result<(), CoreError> {
@@ -11381,7 +11380,10 @@ fn screen_active_bandwidth_probing_and_fast_rampup_pipeline() {
     for (idx, p) in probe_packets.into_iter().enumerate() {
         receiver.on_probe_packet_with_time(p, 2_005_000 + (idx as u64) * 200);
     }
-    assert_eq!(receiver.probe_stats().probes_triggered, SCREEN_PROBE_CLUSTER_SIZE_AUTO as u64);
+    assert_eq!(
+        receiver.probe_stats().probes_triggered,
+        SCREEN_PROBE_CLUSTER_SIZE_AUTO as u64
+    );
 
     let fb = receiver
         .generate_twcc_feedback(2_016_000)
@@ -11429,9 +11431,15 @@ fn screen_audio_sync_pipeline_and_drift_compensation() {
     );
     assert!("invalid".parse::<ScreenAudioSyncMode>().is_err());
     assert_eq!(ScreenAudioSyncMode::from_tag(0), ScreenAudioSyncMode::Auto);
-    assert_eq!(ScreenAudioSyncMode::from_tag(1), ScreenAudioSyncMode::Strict);
+    assert_eq!(
+        ScreenAudioSyncMode::from_tag(1),
+        ScreenAudioSyncMode::Strict
+    );
     assert_eq!(ScreenAudioSyncMode::from_tag(2), ScreenAudioSyncMode::Loose);
-    assert_eq!(ScreenAudioSyncMode::from_tag(3), ScreenAudioSyncMode::Disabled);
+    assert_eq!(
+        ScreenAudioSyncMode::from_tag(3),
+        ScreenAudioSyncMode::Disabled
+    );
 
     // 2. Wire Protocol and framing: ScreenAudioSyncFrame encode/decode round-trip
     let original = ScreenAudioSyncFrame {
@@ -11592,7 +11600,9 @@ fn screen_multi_display_and_dynamic_switch_pipeline() {
     assert_eq!(sender.stats().display_count, 3);
 
     // Switch to display 1
-    sender.switch_display(1, 1_000_000).expect("switch display 1");
+    sender
+        .switch_display(1, 1_000_000)
+        .expect("switch display 1");
     assert_eq!(sender.active_display_id(), 1);
     assert_eq!(sender.stats().active_display_id, 1);
     assert_eq!(sender.stats().display_switches_count, 1);

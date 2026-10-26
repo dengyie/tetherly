@@ -3444,7 +3444,10 @@ async fn m5_19_screen_active_bandwidth_probing_and_fast_rampup() {
     assert!(host_status.probes_triggered >= 1);
 
     // 8. Verify node direct accessor methods
-    assert_eq!(host.screen_probe_mode(), tetherly_core::ScreenProbeMode::Auto);
+    assert_eq!(
+        host.screen_probe_mode(),
+        tetherly_core::ScreenProbeMode::Auto
+    );
     let set_res = host.screen_set_probe_mode(tetherly_core::ScreenProbeMode::Aggressive);
     assert_eq!(set_res.mode, tetherly_core::ScreenProbeMode::Aggressive);
     assert_eq!(
@@ -3611,7 +3614,10 @@ async fn m5_20_screen_audio_sync_and_clock_drift_compensation() {
     assert!(host_status.sync_beacons_sent >= 1);
 
     // 8. Verify node direct accessor methods
-    assert_eq!(host.screen_sync_mode(), tetherly_core::ScreenAudioSyncMode::Auto);
+    assert_eq!(
+        host.screen_sync_mode(),
+        tetherly_core::ScreenAudioSyncMode::Auto
+    );
     let set_res = host.screen_set_sync_mode(tetherly_core::ScreenAudioSyncMode::Strict);
     assert_eq!(set_res.mode, tetherly_core::ScreenAudioSyncMode::Strict);
     assert_eq!(
@@ -3880,13 +3886,10 @@ async fn m5_22_screen_privacy_mode_and_input_lockout_pipeline() {
     assert!(!disabled_rep.lock_input);
 
     // 7. Re-enable via convenience route /api/screen/privacy/enable?lock_input=true
-    let (c, b) = tetherly_node::loopback_post(
-        host_ui,
-        "/api/screen/privacy/enable?lock_input=true",
-        &[],
-    )
-    .await
-    .unwrap();
+    let (c, b) =
+        tetherly_node::loopback_post(host_ui, "/api/screen/privacy/enable?lock_input=true", &[])
+            .await
+            .unwrap();
     assert_eq!(c, 200);
     let re_enabled: tetherly_core::ScreenPrivacyReport = serde_json::from_slice(&b).unwrap();
     assert!(re_enabled.enabled);
@@ -3907,8 +3910,14 @@ async fn m5_22_screen_privacy_mode_and_input_lockout_pipeline() {
 
     // Direct check on host privacy report after session teardown
     let host_priv = host.screen_privacy_report();
-    assert!(!host_priv.enabled, "Fail-safe: privacy mode must be disengaged after session teardown");
-    assert!(!host_priv.lock_input, "Fail-safe: input lockout must be released after session teardown");
+    assert!(
+        !host_priv.enabled,
+        "Fail-safe: privacy mode must be disengaged after session teardown"
+    );
+    assert!(
+        !host_priv.lock_input,
+        "Fail-safe: input lockout must be released after session teardown"
+    );
 
     host.shutdown();
     visitor.shutdown();
