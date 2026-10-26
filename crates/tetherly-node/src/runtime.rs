@@ -20569,6 +20569,12 @@ impl Node {
                                         node.shared.screen_privacy_lock_input.store(false, std::sync::atomic::Ordering::Relaxed);
                                         node.shared.screen_privacy_last_change_us.store(now_us, std::sync::atomic::Ordering::Relaxed);
                                     }
+                                    if matches!(msg, ControlMsg::ResetLatencyProfile) {
+                                        *node.shared.screen_latency_stats.lock().expect("latency stats") = {
+                                            let engine = node.shared.screen_engine.lock().expect("screen");
+                                            engine.latency_report()
+                                        };
+                                    }
                                     let (reply, dynamic_bitrate, dynamic_fps, dynamic_scale) = {
                                         let mut engine = node
                                             .shared
@@ -20747,6 +20753,11 @@ impl Node {
                     ctl = ctl_rx.recv() => {
                         match ctl {
                             Some(msg) => {
+                                if matches!(msg, ControlMsg::ResetLatencyProfile) {
+                                    receiver.reset_latency();
+                                    *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
+                                    *node.shared.screen_latency_stats.lock().expect("latency stats") = receiver.latency_report();
+                                }
                                 match msg.to_frame() {
                                     Ok(f) => {
                                         let f_len = (f.payload.len() + 12) as u64;
@@ -22962,9 +22973,7 @@ impl Node {
         let ctl_opt = self.shared.screen_ctl.lock().await.clone();
         if let Some(ctl) = ctl_opt {
             let msg = ControlMsg::ResetLatencyProfile;
-            if ctl.send(msg).await.is_err() {
-                return Err(CoreError::NoConnectedPeer);
-            }
+            let _ = ctl.send(msg).await;
         }
         let report = {
             let mut engine = self.shared.screen_engine.lock().expect("screen");
@@ -22975,6 +22984,13 @@ impl Node {
             .screen_latency_stats
             .lock()
             .expect("latency stats") = report;
+        {
+            let mut rx_stats = self.shared.screen_rx_stats.lock().expect("screen rx");
+            rx_stats.latency_frames_profiled = 0;
+            rx_stats.latency_total_e2e_us = 0;
+            rx_stats.latency_p95_e2e_us = 0;
+            rx_stats.latency_bottleneck = ScreenBottleneckStage::Balanced.tag();
+        }
         Ok(self.screen_latency_report())
     }
 
