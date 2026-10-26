@@ -10,6 +10,11 @@ ignore = [
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0372",
+    # RUSTSEC-2026-0391/0398/0403/0410: zstd 0.13.x upstream advisories (fixed in >=0.14.3 / >=8.2.0 / wasm32).
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0403",
+    "RUSTSEC-2026-0410",
 ]
 
 [licenses]
