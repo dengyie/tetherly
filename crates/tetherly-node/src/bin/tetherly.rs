@@ -24,6 +24,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Persist identity, listen on LAN + loopback, advertise mDNS.
     Run {

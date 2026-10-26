@@ -10353,7 +10353,7 @@ mod tests {
         assert_eq!(rep["ok"], true);
         assert_eq!(rep["active_display_id"], 0);
         assert_eq!(rep["switches_count"], 0);
-        assert!(rep["displays"].as_array().unwrap().len() >= 1);
+        assert!(!rep["displays"].as_array().unwrap().is_empty());
 
         // 2. Set multi-display configuration
         let d0 =

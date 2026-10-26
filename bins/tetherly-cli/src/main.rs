@@ -25,6 +25,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Print a new identity device_id (ephemeral; not persisted in Phase 0 CLI).
     Identity,

@@ -11703,8 +11703,8 @@ fn screen_privacy_mode_and_input_lockout_pipeline() {
     assert!(!rep0.enabled);
     assert!(!rep0.lock_input);
     assert_eq!(rep0.blanking_method, "virtual_overlay");
-    assert_eq!(sender.stats().privacy_enabled, false);
-    assert_eq!(sender.stats().privacy_input_locked, false);
+    assert!(!sender.stats().privacy_enabled);
+    assert!(!sender.stats().privacy_input_locked);
 
     // Set privacy mode directly
     sender.set_privacy_mode(true, true, 1_000_000);
@@ -11712,8 +11712,8 @@ fn screen_privacy_mode_and_input_lockout_pipeline() {
     assert!(rep1.enabled);
     assert!(rep1.lock_input);
     assert_eq!(rep1.last_change_us, 1_000_000);
-    assert_eq!(sender.stats().privacy_enabled, true);
-    assert_eq!(sender.stats().privacy_input_locked, true);
+    assert!(sender.stats().privacy_enabled);
+    assert!(sender.stats().privacy_input_locked);
 
     // Update via ControlMsg::SetPrivacyMode
     sender
@@ -11729,16 +11729,16 @@ fn screen_privacy_mode_and_input_lockout_pipeline() {
     assert!(rep2.enabled);
     assert!(!rep2.lock_input);
     assert_eq!(rep2.last_change_us, 2_000_000);
-    assert_eq!(sender.stats().privacy_enabled, true);
-    assert_eq!(sender.stats().privacy_input_locked, false);
+    assert!(sender.stats().privacy_enabled);
+    assert!(!sender.stats().privacy_input_locked);
 
     // 3. Fail-safe disconnect recovery: on_peer_gone disengages privacy & input lockout
     sender.on_peer_gone();
     let rep3 = sender.privacy_report();
     assert!(!rep3.enabled);
     assert!(!rep3.lock_input);
-    assert_eq!(sender.stats().privacy_enabled, false);
-    assert_eq!(sender.stats().privacy_input_locked, false);
+    assert!(!sender.stats().privacy_enabled);
+    assert!(!sender.stats().privacy_input_locked);
 
     // 4. ScreenReceiver privacy mode management
     let mut receiver = ScreenReceiver::new();
@@ -11751,14 +11751,14 @@ fn screen_privacy_mode_and_input_lockout_pipeline() {
     assert!(rx_rep1.enabled);
     assert!(rx_rep1.lock_input);
     assert_eq!(rx_rep1.last_change_us, 3_000_000);
-    assert_eq!(receiver.stats().privacy_enabled, true);
-    assert_eq!(receiver.stats().privacy_input_locked, true);
+    assert!(receiver.stats().privacy_enabled);
+    assert!(receiver.stats().privacy_input_locked);
 
     // Receiver on_peer_gone reset
     receiver.on_peer_gone();
     let rx_rep2 = receiver.privacy_report();
     assert!(!rx_rep2.enabled);
     assert!(!rx_rep2.lock_input);
-    assert_eq!(receiver.stats().privacy_enabled, false);
-    assert_eq!(receiver.stats().privacy_input_locked, false);
+    assert!(!receiver.stats().privacy_enabled);
+    assert!(!receiver.stats().privacy_input_locked);
 }
