@@ -20487,14 +20487,17 @@ impl Node {
                                         }
                                     }
                                     if let ControlMsg::SwitchDisplay { display_id } = msg {
-                                        let _ = node.shared.screen_source.switch_display(display_id);
-                                        node.shared.screen_source.force_idr();
-                                        if let Some(sel) = &node.shared.screen_encode_codec {
-                                            sel.force_idr();
+                                        let displays = node.screen_displays();
+                                        if displays.is_empty() || displays.iter().any(|d| d.display_id == display_id) {
+                                            let _ = node.shared.screen_source.switch_display(display_id);
+                                            node.shared.screen_source.force_idr();
+                                            if let Some(sel) = &node.shared.screen_encode_codec {
+                                                sel.force_idr();
+                                            }
+                                            node.shared.screen_active_display_id.store(display_id, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_display_switches_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_last_display_switch_us.store(now_us, std::sync::atomic::Ordering::Relaxed);
                                         }
-                                        node.shared.screen_active_display_id.store(display_id, std::sync::atomic::Ordering::Relaxed);
-                                        node.shared.screen_display_switches_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        node.shared.screen_last_display_switch_us.store(now_us, std::sync::atomic::Ordering::Relaxed);
                                     }
                                     let (reply, dynamic_bitrate, dynamic_fps, dynamic_scale) = {
                                         let mut engine = node
@@ -22599,6 +22602,13 @@ impl Node {
         display_id: u8,
     ) -> Result<tetherly_core::ScreenDisplayReport, CoreError> {
         let now_us = self.shared.clock.unix_us();
+
+        let displays = self.screen_displays();
+        if !displays.is_empty() && !displays.iter().any(|d| d.display_id == display_id) {
+            return Err(CoreError::ScreenRefused(format!(
+                "display id {display_id} not found"
+            )));
+        }
 
         // 1. If connected as visitor/controller, send SwitchDisplay control message across ctl channel
         let ctl_opt = self.shared.screen_ctl.lock().await.clone();

@@ -4646,7 +4646,13 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
 
             match node.screen_switch_display(display_id).await {
                 Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &format!("failed to switch display: {e}")),
+                Err(e) => {
+                    let status = match &e {
+                        tetherly_core::CoreError::ScreenRefused(_) => 404,
+                        _ => 400,
+                    };
+                    err(status, &format!("failed to switch display: {e}"))
+                }
             }
         }
         // Local input sharing (controller → controlled). Dialling the 45719
@@ -10296,6 +10302,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(code, 400);
+
+        // 5b. POST /api/screen/switch with unknown display_id returns 404
+        let (code, _) = loopback_post(port, "/api/screen/switch?display_id=99", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 404);
 
         // 6. Host header 403 test on /api/screen/displays
         let addr = SocketAddr::from(([127, 0, 0, 1], port));

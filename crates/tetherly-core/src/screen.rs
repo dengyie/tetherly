@@ -7077,6 +7077,11 @@ impl ScreenSender {
     }
 
     pub fn switch_display(&mut self, display_id: u8, now_us: u64) -> Result<(), CoreError> {
+        if !self.displays.is_empty() && !self.displays.iter().any(|d| d.display_id == display_id) {
+            return Err(CoreError::ScreenRefused(format!(
+                "display id {display_id} not found"
+            )));
+        }
         self.active_display_id = display_id;
         self.display_switches_count = self.display_switches_count.saturating_add(1);
         self.last_display_switch_us = now_us;
@@ -8575,6 +8580,12 @@ impl crate::ports::ScreenSource for MemoryScreenSource {
     }
 
     fn switch_display(&self, display_id: u8) -> Result<(), CoreError> {
+        let displays = self.displays();
+        if !displays.is_empty() && !displays.iter().any(|d| d.display_id == display_id) {
+            return Err(CoreError::ScreenRefused(format!(
+                "display id {display_id} not found"
+            )));
+        }
         self.active_display
             .store(display_id, std::sync::atomic::Ordering::SeqCst);
         Ok(())
@@ -11474,6 +11485,13 @@ fn screen_multi_display_and_dynamic_switch_pipeline() {
     let mem_src = MemoryScreenSource::new(1920, 1080).expect("mem_src");
     assert_eq!(mem_src.active_display_id(), 0);
     assert_eq!(mem_src.displays().len(), 1);
+    assert!(mem_src.switch_display(99).is_err()); // Reject unknown display ID
+
+    mem_src.set_displays(vec![
+        ScreenDisplayInfo::primary_default(),
+        ScreenDisplayInfo::new(1, "Display 1", 2560, 1440, 100, false, false),
+    ]);
+    assert_eq!(mem_src.displays().len(), 2);
     mem_src.switch_display(1).expect("mem_src switch");
     assert_eq!(mem_src.active_display_id(), 1);
 
