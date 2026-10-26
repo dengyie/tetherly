@@ -20928,6 +20928,12 @@ impl Node {
                                                 .lock()
                                                 .expect("screen rx") =
                                                 receiver.stats();
+                                            *node
+                                                .shared
+                                                .screen_latency_stats
+                                                .lock()
+                                                .expect("latency stats") =
+                                                receiver.latency_report();
                                             if is_gap
                                                 && codec_tag
                                                     == tetherly_core::SCREEN_COMPRESS_H264

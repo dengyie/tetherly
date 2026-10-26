@@ -3997,8 +3997,9 @@ async fn m5_23_screen_microsecond_latency_breakdown_and_multi_stage_profiler_pip
 
     // 4. Send video frames from host and verify reception on visitor
     for _ in 0..5 {
-        assert!(host.screen_send_frame().await.unwrap());
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let sent = host.screen_send_frame().await.unwrap();
+        assert!(sent, "frame should queue while streaming");
     }
 
     let wait_frame = std::time::Instant::now();
