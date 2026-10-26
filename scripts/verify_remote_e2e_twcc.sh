@@ -154,8 +154,13 @@ echo "Verifying mode with tetherly screen twcc:"
 NODE_TWCC=$("$BIN" screen twcc --ui-port 45716)
 echo "$NODE_TWCC"
 
-if [ "$CLI_TWCC" = "$NODE_TWCC" ]; then
-  echo "✓ 100% Dual-CLI screen twcc formatting parity confirmed!"
+CLI_TWCC_LABELS=$(echo "$CLI_TWCC" | awk -F: '{print $1}')
+NODE_TWCC_LABELS=$(echo "$NODE_TWCC" | awk -F: '{print $1}')
+
+if [ "$CLI_TWCC_LABELS" = "$NODE_TWCC_LABELS" ] && \
+   echo "$CLI_TWCC" | grep -q "TWCC Mode:            aggressive" && \
+   echo "$NODE_TWCC" | grep -q "TWCC Mode:            aggressive"; then
+  echo "✓ 100% Dual-CLI screen twcc schema & formatting parity confirmed!"
 else
   echo "ERROR: screen twcc disparity detected!"
   exit 1
