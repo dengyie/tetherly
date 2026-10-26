@@ -93,6 +93,24 @@ pub const SCREEN_PROFILE_PROTO: u8 = 1;
 pub const SCREEN_PROFILE_HEADER_LEN: usize = 56;
 pub const SCREEN_PROFILE_RING_CAPACITY: usize = 1024;
 
+/// Consecutive same-bottleneck frames required before the autonomous tuner acts (v2.14 / ADR-100).
+pub const SCREEN_TUNER_TRIGGER_FRAMES_STANDARD: u32 = 3;
+pub const SCREEN_TUNER_TRIGGER_FRAMES_AGGRESSIVE: u32 = 2;
+/// Consecutive balanced frames required before the autonomous tuner recovers one step (v2.14 / ADR-100).
+pub const SCREEN_TUNER_RECOVERY_FRAMES_STANDARD: u32 = 10;
+pub const SCREEN_TUNER_RECOVERY_FRAMES_AGGRESSIVE: u32 = 6;
+/// Cooldown between two actual tuner actions, in microseconds (v2.14 / ADR-100).
+pub const SCREEN_TUNER_COOLDOWN_US_STANDARD: u64 = 2_000_000;
+pub const SCREEN_TUNER_COOLDOWN_US_AGGRESSIVE: u64 = 1_000_000;
+/// Multiplicative bitrate relief/recovery steps of the autonomous tuner, in percent (v2.14 / ADR-100).
+pub const SCREEN_TUNER_BITRATE_DROP_PCT: u32 = 15;
+pub const SCREEN_TUNER_BITRATE_RECOVER_PCT: u32 = 12;
+/// Encoder QP relief/recovery steps of the autonomous tuner (v2.14 / ADR-100).
+pub const SCREEN_TUNER_QP_RELIEF_STEP: u8 = 4;
+pub const SCREEN_TUNER_QP_RECOVER_STEP: u8 = 2;
+/// Receiver playout buffer target delay relief/recovery step, in microseconds (v2.14 / ADR-100).
+pub const SCREEN_TUNER_PLAYOUT_RELIEF_DELTA_US: i64 = 5_000;
+
 /// Maximum payload bytes for a custom cursor bitmap (64x64 RGBA8 = 16,384 bytes).
 pub const CURSOR_BITMAP_MAX_BYTES: usize = 64 * 64 * 4;
 
@@ -692,6 +710,12 @@ pub enum ControlMsg {
     },
     /// Viewer asks sender to reset multi-stage latency profile statistics (v2.13 / ADR-099).
     ResetLatencyProfile,
+    /// Peer asks to synchronize the bottleneck-driven autonomous tuner mode (v2.14 / ADR-100).
+    SetTuningMode {
+        mode: u8,
+    },
+    /// Peer asks to reset bottleneck-driven autonomous tuning statistics and recovery stack (v2.14 / ADR-100).
+    ResetTuningProfile,
 }
 
 /// Control payload layout: magic(4) | proto(1) | tag(1) | seq(8).
@@ -709,6 +733,8 @@ impl ControlMsg {
             ControlMsg::SwitchDisplay { .. } => 4,
             ControlMsg::SetPrivacyMode { .. } => 5,
             ControlMsg::ResetLatencyProfile => 6,
+            ControlMsg::SetTuningMode { .. } => 7,
+            ControlMsg::ResetTuningProfile => 8,
         }
     }
 
@@ -728,6 +754,9 @@ impl ControlMsg {
             } => {
                 let val: u64 = (*enabled as u64) | ((*lock_input as u64) << 8);
                 out.extend_from_slice(&val.to_be_bytes())
+            }
+            ControlMsg::SetTuningMode { mode } => {
+                out.extend_from_slice(&(*mode as u64).to_be_bytes())
             }
             _ => out.extend_from_slice(&0u64.to_be_bytes()),
         }
@@ -778,6 +807,10 @@ impl ControlMsg {
                 })
             }
             6 => Ok(ControlMsg::ResetLatencyProfile),
+            7 => Ok(ControlMsg::SetTuningMode {
+                mode: (seq & 0xFF) as u8,
+            }),
+            8 => Ok(ControlMsg::ResetTuningProfile),
             _ => Err(CoreError::ScreenFrame),
         }
     }
@@ -1191,6 +1224,16 @@ pub struct ScreenStats {
     pub latency_p95_e2e_us: u64,
     /// Total frames profiled by the multi-stage latency profiler (v2.13 / ADR-099).
     pub latency_frames_profiled: u64,
+    /// Bottleneck-driven autonomous tuner mode tag (0=disabled, 1=standard, 2=aggressive) (v2.14 / ADR-100).
+    pub tuning_mode: u8,
+    /// Cumulative count of autonomous tuning actions applied (v2.14 / ADR-100).
+    pub tuning_actions_total: u64,
+    /// Cumulative count of autonomous tuning recovery steps applied (v2.14 / ADR-100).
+    pub tuning_recoveries: u64,
+    /// Bottleneck stage tag of the most recent tuning action (v2.14 / ADR-100).
+    pub tuning_last_stage: u8,
+    /// Action tag of the most recent tuning action (v2.14 / ADR-100).
+    pub tuning_last_action: u8,
 }
 
 impl Default for ScreenStats {
@@ -1275,6 +1318,11 @@ impl Default for ScreenStats {
             latency_total_e2e_us: 0,
             latency_p95_e2e_us: 0,
             latency_frames_profiled: 0,
+            tuning_mode: 1,
+            tuning_actions_total: 0,
+            tuning_recoveries: 0,
+            tuning_last_stage: 7,
+            tuning_last_action: 0,
         }
     }
 }
@@ -6989,6 +7037,617 @@ impl ScreenFrameProfiler {
     }
 }
 
+/// Bottleneck-driven autonomous tuning operational mode (v2.14 / ADR-100).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum ScreenTunerMode {
+    Disabled = 0,
+    #[default]
+    Standard = 1,
+    Aggressive = 2,
+}
+
+impl ScreenTunerMode {
+    pub fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            0 => Self::Disabled,
+            2 => Self::Aggressive,
+            _ => Self::Standard,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Standard => "standard",
+            Self::Aggressive => "aggressive",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, CoreError> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "disabled" | "off" | "none" => Ok(Self::Disabled),
+            "standard" | "auto" | "default" | "normal" => Ok(Self::Standard),
+            "aggressive" | "fast" | "boost" => Ok(Self::Aggressive),
+            _ => Err(CoreError::ScreenFrame),
+        }
+    }
+
+    /// Consecutive same-bottleneck frames required before acting.
+    pub fn trigger_frames(self) -> u32 {
+        match self {
+            Self::Aggressive => SCREEN_TUNER_TRIGGER_FRAMES_AGGRESSIVE,
+            _ => SCREEN_TUNER_TRIGGER_FRAMES_STANDARD,
+        }
+    }
+
+    /// Consecutive balanced frames required before recovering one step.
+    pub fn recovery_frames(self) -> u32 {
+        match self {
+            Self::Aggressive => SCREEN_TUNER_RECOVERY_FRAMES_AGGRESSIVE,
+            _ => SCREEN_TUNER_RECOVERY_FRAMES_STANDARD,
+        }
+    }
+
+    /// Minimum spacing between two actual tuner actions, in microseconds.
+    pub fn cooldown_us(self) -> u64 {
+        match self {
+            Self::Aggressive => SCREEN_TUNER_COOLDOWN_US_AGGRESSIVE,
+            _ => SCREEN_TUNER_COOLDOWN_US_STANDARD,
+        }
+    }
+}
+
+impl std::str::FromStr for ScreenTunerMode {
+    type Err = CoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+impl std::fmt::Display for ScreenTunerMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Discrete actions the bottleneck-driven autonomous tuner can apply (v2.14 / ADR-100).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum ScreenTuningAction {
+    #[default]
+    Hold = 0,
+    ReduceFps = 1,
+    ReduceScale = 2,
+    ReduceBitrate = 3,
+    RaiseQp = 4,
+    RaisePlayoutDelay = 5,
+    RecoverBitrate = 6,
+    RecoverFps = 7,
+    RecoverScale = 8,
+    RecoverQp = 9,
+    LowerPlayoutDelay = 10,
+}
+
+impl ScreenTuningAction {
+    pub fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => Self::ReduceFps,
+            2 => Self::ReduceScale,
+            3 => Self::ReduceBitrate,
+            4 => Self::RaiseQp,
+            5 => Self::RaisePlayoutDelay,
+            6 => Self::RecoverBitrate,
+            7 => Self::RecoverFps,
+            8 => Self::RecoverScale,
+            9 => Self::RecoverQp,
+            10 => Self::LowerPlayoutDelay,
+            _ => Self::Hold,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hold => "hold",
+            Self::ReduceFps => "reduce_fps",
+            Self::ReduceScale => "reduce_scale",
+            Self::ReduceBitrate => "reduce_bitrate",
+            Self::RaiseQp => "raise_qp",
+            Self::RaisePlayoutDelay => "raise_playout_delay",
+            Self::RecoverBitrate => "recover_bitrate",
+            Self::RecoverFps => "recover_fps",
+            Self::RecoverScale => "recover_scale",
+            Self::RecoverQp => "recover_qp",
+            Self::LowerPlayoutDelay => "lower_playout_delay",
+        }
+    }
+
+    pub fn is_recovery(self) -> bool {
+        matches!(
+            self,
+            Self::RecoverBitrate
+                | Self::RecoverFps
+                | Self::RecoverScale
+                | Self::RecoverQp
+                | Self::LowerPlayoutDelay
+        )
+    }
+}
+
+impl std::fmt::Display for ScreenTuningAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for ScreenTuningAction {
+    type Err = CoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "hold" => Ok(Self::Hold),
+            "reduce_fps" => Ok(Self::ReduceFps),
+            "reduce_scale" => Ok(Self::ReduceScale),
+            "reduce_bitrate" => Ok(Self::ReduceBitrate),
+            "raise_qp" => Ok(Self::RaiseQp),
+            "raise_playout_delay" => Ok(Self::RaisePlayoutDelay),
+            "recover_bitrate" => Ok(Self::RecoverBitrate),
+            "recover_fps" => Ok(Self::RecoverFps),
+            "recover_scale" => Ok(Self::RecoverScale),
+            "recover_qp" => Ok(Self::RecoverQp),
+            "lower_playout_delay" => Ok(Self::LowerPlayoutDelay),
+            _ => Err(CoreError::ScreenFrame),
+        }
+    }
+}
+
+/// Snapshot of the current pipeline knobs passed into a tuner evaluation (v2.14 / ADR-100).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScreenTuningContext {
+    pub bitrate_bps: u32,
+    pub bitrate_min_bps: u32,
+    pub bitrate_max_bps: u32,
+    pub fps: u32,
+    pub scale_pct: u32,
+    pub qp_min: u8,
+    pub qp_max: u8,
+    pub playout_delay_us: u32,
+}
+
+/// Decision emitted by one tuner evaluation; unchanged dimensions stay `None` (v2.14 / ADR-100).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenTuningDecision {
+    pub frame_seq: u64,
+    pub stage: String,
+    pub action: String,
+    pub new_bitrate_bps: Option<u32>,
+    pub new_fps: Option<u32>,
+    pub new_scale_pct: Option<u32>,
+    pub new_qp_max: Option<u8>,
+    pub new_playout_delay_us: Option<u32>,
+    pub recovered: bool,
+    pub at_us: u64,
+}
+
+impl Default for ScreenTuningDecision {
+    fn default() -> Self {
+        Self {
+            frame_seq: 0,
+            stage: ScreenBottleneckStage::Balanced.as_str().to_string(),
+            action: ScreenTuningAction::Hold.as_str().to_string(),
+            new_bitrate_bps: None,
+            new_fps: None,
+            new_scale_pct: None,
+            new_qp_max: None,
+            new_playout_delay_us: None,
+            recovered: false,
+            at_us: 0,
+        }
+    }
+}
+
+/// Result of one tuner evaluation: decision plus the concrete knob updates to apply (v2.14 / ADR-100).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScreenTuningOutcome {
+    pub decision: ScreenTuningDecision,
+    pub bitrate_bps: Option<u32>,
+    pub fps: Option<u32>,
+    pub scale_pct: Option<u32>,
+    pub qp_range: Option<(u8, u8)>,
+    pub playout_delay_delta_us: Option<i64>,
+}
+
+impl ScreenTuningOutcome {
+    fn hold(frame_seq: u64, stage: ScreenBottleneckStage, now_us: u64) -> Self {
+        Self {
+            decision: ScreenTuningDecision {
+                frame_seq,
+                stage: stage.as_str().to_string(),
+                action: ScreenTuningAction::Hold.as_str().to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .with_stamp(now_us)
+    }
+
+    fn with_stamp(mut self, now_us: u64) -> Self {
+        self.decision.at_us = now_us;
+        self
+    }
+}
+
+/// DTO report for REST API and CLI formatting (v2.14 / ADR-100).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenTuningReport {
+    pub ok: bool,
+    pub mode: String,
+    pub actions_applied: u64,
+    pub recoveries_applied: u64,
+    pub last_stage: String,
+    pub last_action: String,
+    pub bottleneck_streak: u32,
+    pub balanced_streak: u32,
+    pub last_decision: Option<ScreenTuningDecision>,
+}
+
+impl Default for ScreenTuningReport {
+    fn default() -> Self {
+        Self {
+            ok: true,
+            mode: ScreenTunerMode::default().as_str().to_string(),
+            actions_applied: 0,
+            recoveries_applied: 0,
+            last_stage: ScreenBottleneckStage::Balanced.as_str().to_string(),
+            last_action: ScreenTuningAction::Hold.as_str().to_string(),
+            bottleneck_streak: 0,
+            balanced_streak: 0,
+            last_decision: None,
+        }
+    }
+}
+
+/// Bottleneck-driven autonomous tuner: turns the ADR-099 dominant bottleneck verdict into
+/// targeted parameter actions with hysteresis, cooldown and anti-oscillation recovery (v2.14 / ADR-100).
+#[derive(Debug, Clone)]
+pub struct ScreenTuner {
+    mode: ScreenTunerMode,
+    bottleneck_streak: u32,
+    last_bottleneck: ScreenBottleneckStage,
+    balanced_streak: u32,
+    last_action_us: u64,
+    actions_applied: u64,
+    recoveries_applied: u64,
+    degraded: VecDeque<ScreenTuningAction>,
+    last_decision: Option<ScreenTuningDecision>,
+    last_action: ScreenTuningAction,
+    last_stage: ScreenBottleneckStage,
+}
+
+impl Default for ScreenTuner {
+    fn default() -> Self {
+        Self::new(ScreenTunerMode::default())
+    }
+}
+
+impl ScreenTuner {
+    pub fn new(mode: ScreenTunerMode) -> Self {
+        Self {
+            mode,
+            bottleneck_streak: 0,
+            last_bottleneck: ScreenBottleneckStage::Balanced,
+            balanced_streak: 0,
+            last_action_us: 0,
+            actions_applied: 0,
+            recoveries_applied: 0,
+            degraded: VecDeque::new(),
+            last_decision: None,
+            last_action: ScreenTuningAction::Hold,
+            last_stage: ScreenBottleneckStage::Balanced,
+        }
+    }
+
+    pub fn mode(&self) -> ScreenTunerMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenTunerMode) {
+        self.mode = mode;
+        self.bottleneck_streak = 0;
+        self.balanced_streak = 0;
+    }
+
+    pub fn actions_applied(&self) -> u64 {
+        self.actions_applied
+    }
+
+    pub fn recoveries_applied(&self) -> u64 {
+        self.recoveries_applied
+    }
+
+    pub fn bottleneck_streak(&self) -> u32 {
+        self.bottleneck_streak
+    }
+
+    pub fn balanced_streak(&self) -> u32 {
+        self.balanced_streak
+    }
+
+    pub fn last_decision(&self) -> Option<&ScreenTuningDecision> {
+        self.last_decision.as_ref()
+    }
+
+    /// Tag of the bottleneck stage of the most recent applied action.
+    pub fn last_stage_tag(&self) -> u8 {
+        self.last_stage.tag()
+    }
+
+    /// Tag of the most recent applied action.
+    pub fn last_action_tag(&self) -> u8 {
+        self.last_action.tag()
+    }
+
+    pub fn report(&self) -> ScreenTuningReport {
+        ScreenTuningReport {
+            ok: true,
+            mode: self.mode.as_str().to_string(),
+            actions_applied: self.actions_applied,
+            recoveries_applied: self.recoveries_applied,
+            last_stage: self.last_stage.as_str().to_string(),
+            last_action: self.last_action.as_str().to_string(),
+            bottleneck_streak: self.bottleneck_streak,
+            balanced_streak: self.balanced_streak,
+            last_decision: self.last_decision.clone(),
+        }
+    }
+
+    /// Clear counters, hysteresis windows and the recovery stack; keep the mode.
+    pub fn reset(&mut self) {
+        self.bottleneck_streak = 0;
+        self.balanced_streak = 0;
+        self.last_action_us = 0;
+        self.actions_applied = 0;
+        self.recoveries_applied = 0;
+        self.degraded.clear();
+        self.last_decision = None;
+        self.last_action = ScreenTuningAction::Hold;
+        self.last_stage = ScreenBottleneckStage::Balanced;
+    }
+
+    /// Evaluate one profiled frame: update hysteresis windows and, when the
+    /// trigger thresholds and cooldown allow, emit a targeted action.
+    pub fn evaluate(
+        &mut self,
+        now_us: u64,
+        frame_seq: u64,
+        bottleneck: ScreenBottleneckStage,
+        ctx: &ScreenTuningContext,
+    ) -> ScreenTuningOutcome {
+        if self.mode == ScreenTunerMode::Disabled {
+            return ScreenTuningOutcome::hold(frame_seq, bottleneck, now_us);
+        }
+
+        if bottleneck == ScreenBottleneckStage::Balanced {
+            self.balanced_streak = self.balanced_streak.saturating_add(1);
+            self.bottleneck_streak = 0;
+        } else if bottleneck == self.last_bottleneck {
+            self.bottleneck_streak = self.bottleneck_streak.saturating_add(1);
+            self.balanced_streak = 0;
+        } else {
+            self.bottleneck_streak = 1;
+            self.balanced_streak = 0;
+        }
+        self.last_bottleneck = bottleneck;
+
+        // `last_action_us == 0` means no action has been applied yet, so the
+        // cooldown window only applies after the first real action.
+        let in_cooldown = self.last_action_us != 0
+            && now_us.saturating_sub(self.last_action_us) < self.mode.cooldown_us();
+
+        // Recovery path: sustained balance lets one degraded knob step back up.
+        if bottleneck == ScreenBottleneckStage::Balanced
+            && self.balanced_streak >= self.mode.recovery_frames()
+            && !self.degraded.is_empty()
+            && !in_cooldown
+        {
+            if let Some(action) = self.degraded.pop_back() {
+                let outcome = self.apply_recovery(now_us, frame_seq, action, ctx);
+                self.last_decision = Some(outcome.decision.clone());
+                return outcome;
+            }
+        }
+
+        // Degradation path: sustained same-stage bottleneck triggers a targeted relief action.
+        if bottleneck != ScreenBottleneckStage::Balanced
+            && self.bottleneck_streak >= self.mode.trigger_frames()
+            && !in_cooldown
+        {
+            let outcome = self.apply_relief(now_us, frame_seq, bottleneck, ctx);
+            self.last_decision = Some(outcome.decision.clone());
+            return outcome;
+        }
+
+        ScreenTuningOutcome::hold(frame_seq, bottleneck, now_us)
+    }
+
+    fn apply_relief(
+        &mut self,
+        now_us: u64,
+        frame_seq: u64,
+        stage: ScreenBottleneckStage,
+        ctx: &ScreenTuningContext,
+    ) -> ScreenTuningOutcome {
+        let mut outcome = ScreenTuningOutcome::hold(frame_seq, stage, now_us);
+        let action = match stage {
+            ScreenBottleneckStage::Capture => {
+                if ctx.fps > SCREEN_FPS_MIN {
+                    outcome.fps = Some(screen_matrix_next_lower_fps(ctx.fps));
+                    ScreenTuningAction::ReduceFps
+                } else {
+                    ScreenTuningAction::Hold
+                }
+            }
+            ScreenBottleneckStage::Encode => {
+                if ctx.qp_max <= SCREEN_QP_ABSOLUTE_MAX.saturating_sub(SCREEN_TUNER_QP_RELIEF_STEP)
+                {
+                    outcome.qp_range = Some((
+                        ctx.qp_min,
+                        (ctx.qp_max + SCREEN_TUNER_QP_RELIEF_STEP).min(SCREEN_QP_ABSOLUTE_MAX),
+                    ));
+                    ScreenTuningAction::RaiseQp
+                } else if ctx.scale_pct > SCREEN_SCALE_MIN_PCT {
+                    outcome.scale_pct = Some(screen_matrix_next_lower_scale(ctx.scale_pct));
+                    ScreenTuningAction::ReduceScale
+                } else {
+                    ScreenTuningAction::Hold
+                }
+            }
+            ScreenBottleneckStage::Pacer | ScreenBottleneckStage::Network => {
+                if ctx.bitrate_bps > ctx.bitrate_min_bps {
+                    let dropped = drop_bitrate(ctx.bitrate_bps, ctx.bitrate_min_bps);
+                    outcome.bitrate_bps = Some(dropped);
+                    ScreenTuningAction::ReduceBitrate
+                } else {
+                    ScreenTuningAction::Hold
+                }
+            }
+            ScreenBottleneckStage::Jitter => {
+                outcome.playout_delay_delta_us = Some(SCREEN_TUNER_PLAYOUT_RELIEF_DELTA_US);
+                ScreenTuningAction::RaisePlayoutDelay
+            }
+            ScreenBottleneckStage::Decode => {
+                if ctx.scale_pct > SCREEN_SCALE_MIN_PCT {
+                    outcome.scale_pct = Some(screen_matrix_next_lower_scale(ctx.scale_pct));
+                    ScreenTuningAction::ReduceScale
+                } else if ctx.fps > SCREEN_FPS_MIN {
+                    outcome.fps = Some(screen_matrix_next_lower_fps(ctx.fps));
+                    ScreenTuningAction::ReduceFps
+                } else {
+                    ScreenTuningAction::Hold
+                }
+            }
+            ScreenBottleneckStage::Render => {
+                if ctx.fps > SCREEN_FPS_MIN {
+                    outcome.fps = Some(screen_matrix_next_lower_fps(ctx.fps));
+                    ScreenTuningAction::ReduceFps
+                } else if ctx.scale_pct > SCREEN_SCALE_MIN_PCT {
+                    outcome.scale_pct = Some(screen_matrix_next_lower_scale(ctx.scale_pct));
+                    ScreenTuningAction::ReduceScale
+                } else {
+                    ScreenTuningAction::Hold
+                }
+            }
+            ScreenBottleneckStage::Balanced => ScreenTuningAction::Hold,
+        };
+
+        if action == ScreenTuningAction::Hold {
+            return outcome;
+        }
+
+        self.actions_applied = self.actions_applied.saturating_add(1);
+        self.last_action_us = now_us;
+        self.degraded.push_back(action);
+        self.last_action = action;
+        self.last_stage = stage;
+        outcome.decision.action = action.as_str().to_string();
+        outcome.decision.recovered = false;
+        outcome.decision.new_bitrate_bps = outcome.bitrate_bps;
+        outcome.decision.new_fps = outcome.fps;
+        outcome.decision.new_scale_pct = outcome.scale_pct;
+        outcome.decision.new_qp_max = outcome.qp_range.map(|(_, max)| max);
+        outcome.decision.new_playout_delay_us = outcome
+            .playout_delay_delta_us
+            .map(|delta| (ctx.playout_delay_us as i64 + delta).max(0) as u32);
+        outcome
+    }
+
+    fn apply_recovery(
+        &mut self,
+        now_us: u64,
+        frame_seq: u64,
+        action: ScreenTuningAction,
+        ctx: &ScreenTuningContext,
+    ) -> ScreenTuningOutcome {
+        let mut outcome =
+            ScreenTuningOutcome::hold(frame_seq, ScreenBottleneckStage::Balanced, now_us);
+        match action {
+            ScreenTuningAction::ReduceBitrate => {
+                let recovered = ctx
+                    .bitrate_bps
+                    .saturating_mul(100 + SCREEN_TUNER_BITRATE_RECOVER_PCT)
+                    / 100;
+                outcome.bitrate_bps = Some(recovered.min(ctx.bitrate_max_bps));
+                outcome.decision.action = ScreenTuningAction::RecoverBitrate.as_str().to_string();
+            }
+            ScreenTuningAction::ReduceFps => {
+                outcome.fps = Some(screen_matrix_next_higher_fps(ctx.fps, SCREEN_FPS_MAX));
+                outcome.decision.action = ScreenTuningAction::RecoverFps.as_str().to_string();
+            }
+            ScreenTuningAction::ReduceScale => {
+                outcome.scale_pct = Some(screen_matrix_next_higher_scale(ctx.scale_pct));
+                outcome.decision.action = ScreenTuningAction::RecoverScale.as_str().to_string();
+            }
+            ScreenTuningAction::RaiseQp => {
+                outcome.qp_range = Some((
+                    ctx.qp_min,
+                    ctx.qp_max
+                        .saturating_sub(SCREEN_TUNER_QP_RECOVER_STEP)
+                        .max(ctx.qp_min),
+                ));
+                outcome.decision.action = ScreenTuningAction::RecoverQp.as_str().to_string();
+            }
+            ScreenTuningAction::RaisePlayoutDelay => {
+                outcome.playout_delay_delta_us = Some(-SCREEN_TUNER_PLAYOUT_RELIEF_DELTA_US);
+                outcome.decision.action =
+                    ScreenTuningAction::LowerPlayoutDelay.as_str().to_string();
+            }
+            _ => {
+                outcome.decision.action = ScreenTuningAction::Hold.as_str().to_string();
+            }
+        }
+
+        if outcome.decision.action == ScreenTuningAction::Hold.as_str() {
+            return outcome;
+        }
+
+        self.recoveries_applied = self.recoveries_applied.saturating_add(1);
+        self.last_action_us = now_us;
+        self.last_action = outcome
+            .decision
+            .action
+            .parse::<ScreenTuningAction>()
+            .ok()
+            .unwrap_or(ScreenTuningAction::Hold);
+        self.last_stage = ScreenBottleneckStage::Balanced;
+        outcome.decision.recovered = true;
+        outcome.decision.new_bitrate_bps = outcome.bitrate_bps;
+        outcome.decision.new_fps = outcome.fps;
+        outcome.decision.new_scale_pct = outcome.scale_pct;
+        outcome.decision.new_qp_max = outcome.qp_range.map(|(_, max)| max);
+        outcome.decision.new_playout_delay_us = outcome
+            .playout_delay_delta_us
+            .map(|delta| (ctx.playout_delay_us as i64 + delta).max(0) as u32);
+        outcome
+    }
+}
+
+fn drop_bitrate(current_bps: u32, min_bps: u32) -> u32 {
+    let dropped =
+        current_bps.saturating_sub(current_bps.saturating_mul(SCREEN_TUNER_BITRATE_DROP_PCT) / 100);
+    dropped.max(min_bps)
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -7022,6 +7681,7 @@ pub struct ScreenSender {
     privacy_blanking_method: String,
     privacy_last_change_us: u64,
     frame_profiler: ScreenFrameProfiler,
+    tuner: ScreenTuner,
 }
 
 impl Default for ScreenSender {
@@ -7055,6 +7715,7 @@ impl ScreenSender {
         let privacy_blanking_method = "virtual_overlay".to_string();
         let privacy_last_change_us = 0;
         let frame_profiler = ScreenFrameProfiler::new(ScreenProfilerMode::Auto);
+        let tuner = ScreenTuner::default();
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -7143,6 +7804,7 @@ impl ScreenSender {
             privacy_blanking_method,
             privacy_last_change_us,
             frame_profiler,
+            tuner,
         }
     }
 
@@ -7311,6 +7973,96 @@ impl ScreenSender {
     pub fn on_profile_frame(&mut self, frame: &ScreenProfileFrame) {
         self.frame_profiler.record_profile_frame(frame);
         self.sync_profiler_stats();
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        self.run_bottleneck_tuner(now_us, frame.frame_seq);
+    }
+
+    /// Bottleneck-driven autonomous tuner mode (v2.14 / ADR-100).
+    pub fn tuning_mode(&self) -> ScreenTunerMode {
+        self.tuner.mode()
+    }
+
+    /// Alias for tuning_mode.
+    pub fn tuner_mode(&self) -> ScreenTunerMode {
+        self.tuning_mode()
+    }
+
+    /// Configure the bottleneck-driven autonomous tuner mode.
+    pub fn set_tuning_mode(&mut self, mode: ScreenTunerMode) -> ScreenTunerMode {
+        self.tuner.set_mode(mode);
+        self.sync_tuner_stats();
+        self.tuner.mode()
+    }
+
+    /// Structured autonomous tuning report for REST API and CLI.
+    pub fn tuning_report(&self) -> ScreenTuningReport {
+        self.tuner.report()
+    }
+
+    /// Reset autonomous tuning counters, hysteresis windows and recovery stack.
+    pub fn reset_tuning(&mut self) -> ScreenTuningReport {
+        self.tuner.reset();
+        self.sync_tuner_stats();
+        self.tuner.report()
+    }
+
+    /// Reference to internal autonomous tuner.
+    pub fn tuner(&self) -> &ScreenTuner {
+        &self.tuner
+    }
+
+    /// Mutable reference to internal autonomous tuner.
+    pub fn tuner_mut(&mut self) -> &mut ScreenTuner {
+        &mut self.tuner
+    }
+
+    /// Run the bottleneck-driven tuner over the freshly ingested profile frame and
+    /// apply sender-side knob updates (bitrate / fps / scale / QP) (v2.14 / ADR-100).
+    /// Only real cross-end profile envelopes drive the tuner; the local synthetic
+    /// Ack-path breakdown stays observation-only so it cannot fight AIMD/TWCC.
+    fn run_bottleneck_tuner(&mut self, now_us: u64, frame_seq: u64) {
+        let bottleneck = self.frame_profiler.bottleneck();
+        let (qp_min, qp_max) = self.quality_controller.qp_range();
+        let ctx = ScreenTuningContext {
+            bitrate_bps: self.rate_controller.current_bps(),
+            bitrate_min_bps: SCREEN_BITRATE_MIN_BPS,
+            bitrate_max_bps: SCREEN_BITRATE_MAX_BPS,
+            fps: self.stats.fps_target,
+            scale_pct: self.stats.scale_pct,
+            qp_min,
+            qp_max,
+            playout_delay_us: 0,
+        };
+        let outcome = self.tuner.evaluate(now_us, frame_seq, bottleneck, &ctx);
+        if let Some(bps) = outcome.bitrate_bps {
+            self.rate_controller.set_manual_bps(bps);
+            self.stats.bitrate_bps = self.rate_controller.current_bps();
+        }
+        if let Some(fps) = outcome.fps {
+            self.stats.fps_target = self.fps_pacer.set_fps(fps);
+        }
+        if let Some(scale) = outcome.scale_pct {
+            self.stats.scale_pct = self.scale_controller.set_scale_pct(scale);
+        }
+        if let Some((qmin, qmax)) = outcome.qp_range {
+            let (amin, amax) = self.quality_controller.set_qp_range(qmin, qmax);
+            self.stats.qp_min = amin;
+            self.stats.qp_max = amax;
+        }
+        self.sync_tuner_stats();
+    }
+
+    /// Synchronize autonomous tuner telemetry into ScreenStats (v2.14 / ADR-100).
+    pub fn sync_tuner_stats(&mut self) {
+        let report = self.tuner.report();
+        self.stats.tuning_mode = self.tuner.mode().tag();
+        self.stats.tuning_actions_total = report.actions_applied;
+        self.stats.tuning_recoveries = report.recoveries_applied;
+        self.stats.tuning_last_stage = self.tuner.last_stage_tag();
+        self.stats.tuning_last_action = self.tuner.last_action_tag();
     }
 
     /// Access reference to internal frame profiler.
@@ -7812,6 +8564,14 @@ impl ScreenSender {
             }
             ControlMsg::ResetLatencyProfile => {
                 self.reset_latency();
+                Ok(None)
+            }
+            ControlMsg::SetTuningMode { mode } => {
+                self.set_tuning_mode(ScreenTunerMode::from_tag(mode));
+                Ok(None)
+            }
+            ControlMsg::ResetTuningProfile => {
+                self.reset_tuning();
                 Ok(None)
             }
         }
@@ -8438,6 +9198,7 @@ pub struct ScreenReceiver {
     privacy_blanking_method: String,
     privacy_last_change_us: u64,
     frame_profiler: ScreenFrameProfiler,
+    tuner: ScreenTuner,
 }
 
 impl Default for ScreenReceiver {
@@ -8464,6 +9225,7 @@ impl ScreenReceiver {
         let sync_coordinator = ScreenAudioSyncCoordinator::default();
         let displays = vec![ScreenDisplayInfo::primary_default()];
         let frame_profiler = ScreenFrameProfiler::default();
+        let tuner = ScreenTuner::default();
         let stats = ScreenStats {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
@@ -8522,6 +9284,7 @@ impl ScreenReceiver {
             privacy_blanking_method: "software_blanking".to_string(),
             privacy_last_change_us: 0,
             frame_profiler,
+            tuner,
         }
     }
 
@@ -8542,6 +9305,7 @@ impl ScreenReceiver {
         let sync_coordinator = ScreenAudioSyncCoordinator::default();
         let displays = vec![ScreenDisplayInfo::primary_default()];
         let frame_profiler = ScreenFrameProfiler::default();
+        let tuner = ScreenTuner::default();
         let stats = ScreenStats {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
@@ -8600,6 +9364,7 @@ impl ScreenReceiver {
             privacy_blanking_method: "software_blanking".to_string(),
             privacy_last_change_us: 0,
             frame_profiler,
+            tuner,
         }
     }
 
@@ -8734,6 +9499,72 @@ impl ScreenReceiver {
     pub fn on_profile_frame(&mut self, frame: &ScreenProfileFrame) {
         self.frame_profiler.record_profile_frame(frame);
         self.sync_profiler_stats();
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        self.run_bottleneck_tuner(now_us, frame.frame_seq);
+    }
+
+    /// Bottleneck-driven autonomous tuner mode (v2.14 / ADR-100).
+    pub fn tuning_mode(&self) -> ScreenTunerMode {
+        self.tuner.mode()
+    }
+
+    /// Configure the bottleneck-driven autonomous tuner mode.
+    pub fn set_tuning_mode(&mut self, mode: ScreenTunerMode) -> ScreenTunerMode {
+        self.tuner.set_mode(mode);
+        self.sync_tuner_stats();
+        self.tuner.mode()
+    }
+
+    /// Structured autonomous tuning report for REST API and CLI.
+    pub fn tuning_report(&self) -> ScreenTuningReport {
+        self.tuner.report()
+    }
+
+    /// Reset autonomous tuning counters, hysteresis windows and recovery stack.
+    pub fn reset_tuning(&mut self) -> ScreenTuningReport {
+        self.tuner.reset();
+        self.sync_tuner_stats();
+        self.tuner.report()
+    }
+
+    /// Reference to internal autonomous tuner.
+    pub fn tuner(&self) -> &ScreenTuner {
+        &self.tuner
+    }
+
+    /// Mutable reference to internal autonomous tuner.
+    pub fn tuner_mut(&mut self) -> &mut ScreenTuner {
+        &mut self.tuner
+    }
+
+    /// Run the bottleneck-driven tuner over the freshly profiled frame and apply the
+    /// receiver-side knob update (playout buffer target delay) (v2.14 / ADR-100).
+    fn run_bottleneck_tuner(&mut self, now_us: u64, frame_seq: u64) {
+        let bottleneck = self.frame_profiler.bottleneck();
+        let ctx = ScreenTuningContext {
+            playout_delay_us: self.playout_buffer.target_delay_us().min(u32::MAX as u64) as u32,
+            ..Default::default()
+        };
+        let outcome = self.tuner.evaluate(now_us, frame_seq, bottleneck, &ctx);
+        if let Some(delta) = outcome.playout_delay_delta_us {
+            self.playout_buffer.adjust_target_delay(delta);
+            self.stats.playout_delay_us =
+                self.playout_buffer.target_delay_us().min(u32::MAX as u64) as u32;
+        }
+        self.sync_tuner_stats();
+    }
+
+    /// Synchronize autonomous tuner telemetry into ScreenStats (v2.14 / ADR-100).
+    pub fn sync_tuner_stats(&mut self) {
+        let report = self.tuner.report();
+        self.stats.tuning_mode = self.tuner.mode().tag();
+        self.stats.tuning_actions_total = report.actions_applied;
+        self.stats.tuning_recoveries = report.recoveries_applied;
+        self.stats.tuning_last_stage = self.tuner.last_stage_tag();
+        self.stats.tuning_last_action = self.tuner.last_action_tag();
     }
 
     /// Access reference to internal frame profiler.
@@ -12769,4 +13600,277 @@ fn screen_latency_breakdown_and_profiler_pipeline() {
 
     receiver.on_peer_gone();
     assert_eq!(receiver.latency_report().frames_profiled, 0);
+}
+
+// ADR-100 Screen Streaming Bottleneck-Driven Autonomous Tuning Closed Loop
+#[test]
+fn screen_bottleneck_autotuning_closed_loop() {
+    // 1. ScreenTunerMode parse & display
+    assert_eq!(
+        "standard".parse::<ScreenTunerMode>().unwrap(),
+        ScreenTunerMode::Standard
+    );
+    assert_eq!(
+        "auto".parse::<ScreenTunerMode>().unwrap(),
+        ScreenTunerMode::Standard
+    );
+    assert_eq!(
+        "aggressive".parse::<ScreenTunerMode>().unwrap(),
+        ScreenTunerMode::Aggressive
+    );
+    assert_eq!(
+        "disabled".parse::<ScreenTunerMode>().unwrap(),
+        ScreenTunerMode::Disabled
+    );
+    assert!("invalid".parse::<ScreenTunerMode>().is_err());
+    assert_eq!(ScreenTunerMode::Standard.to_string(), "standard");
+    assert_eq!(ScreenTunerMode::Aggressive.trigger_frames(), 2);
+    assert_eq!(ScreenTunerMode::Standard.trigger_frames(), 3);
+    assert_eq!(ScreenTunerMode::Standard.recovery_frames(), 10);
+
+    // 2. ControlMsg::SetTuningMode / ResetTuningProfile wire roundtrip (14-byte control envelope)
+    let set_frame = ControlMsg::SetTuningMode {
+        mode: ScreenTunerMode::Aggressive.tag(),
+    }
+    .to_frame()
+    .unwrap();
+    assert_eq!(set_frame.ty, TYPE_SCREEN_CONTROL);
+    assert_eq!(set_frame.payload.len(), 14);
+    match ControlMsg::decode_payload(&set_frame.payload).unwrap() {
+        ControlMsg::SetTuningMode { mode } => {
+            assert_eq!(ScreenTunerMode::from_tag(mode), ScreenTunerMode::Aggressive)
+        }
+        other => panic!("expected SetTuningMode, got {other:?}"),
+    }
+    let rst_frame = ControlMsg::ResetTuningProfile.to_frame().unwrap();
+    assert!(matches!(
+        ControlMsg::decode_payload(&rst_frame.payload).unwrap(),
+        ControlMsg::ResetTuningProfile
+    ));
+
+    // 3. Hysteresis: fewer than trigger frames of the same bottleneck must not act
+    let ctx = ScreenTuningContext {
+        bitrate_bps: SCREEN_BITRATE_DEFAULT_BPS,
+        bitrate_min_bps: SCREEN_BITRATE_MIN_BPS,
+        bitrate_max_bps: SCREEN_BITRATE_MAX_BPS,
+        fps: 30,
+        scale_pct: 100,
+        qp_min: 12,
+        qp_max: 36,
+        playout_delay_us: 0,
+    };
+
+    let mut sender = ScreenSender::new();
+    assert_eq!(sender.tuning_mode(), ScreenTunerMode::Standard);
+    for seq in 1..=2u64 {
+        sender.on_profile_frame(&ScreenProfileFrame {
+            flags: 0,
+            frame_seq: seq,
+            capture_us: 1_000,
+            encode_us: 30_000,
+            pacer_us: 1_000,
+            sender_ts_us: seq,
+            network_us: 1_000,
+            jitter_us: 1_000,
+            decode_us: 1_000,
+            render_us: 1_000,
+            total_e2e_us: 36_000,
+        });
+    }
+    assert_eq!(sender.tuning_report().actions_applied, 0);
+    assert_eq!(sender.tuning_report().bottleneck_streak, 2);
+
+    // 4. Third consecutive encode-heavy frame triggers RaiseQp (12 -> 40 clamped to 51? no: 36+4=40)
+    sender.on_profile_frame(&ScreenProfileFrame {
+        flags: 0,
+        frame_seq: 3,
+        capture_us: 1_000,
+        encode_us: 30_000,
+        pacer_us: 1_000,
+        sender_ts_us: 3,
+        network_us: 1_000,
+        jitter_us: 1_000,
+        decode_us: 1_000,
+        render_us: 1_000,
+        total_e2e_us: 36_000,
+    });
+    let rep = sender.tuning_report();
+    assert_eq!(
+        rep.actions_applied, 1,
+        "encode bottleneck must trigger on 3rd frame"
+    );
+    assert_eq!(rep.last_action, "raise_qp");
+    assert_eq!(rep.last_stage, "encode");
+    let decision = rep.last_decision.unwrap();
+    assert_eq!(decision.new_qp_max, Some(39), "qp_max 35 + 4 relief = 39");
+    assert_eq!(sender.stats.qp_max, 39);
+    // Sender knobs applied: stats mirror the tuner telemetry
+    assert_eq!(sender.stats.tuning_actions_total, 1);
+
+    // 5. Direct ScreenTuner policy checks per stage
+    let mut tuner = ScreenTuner::new(ScreenTunerMode::Standard);
+    let _ = tuner.evaluate(1_000, 1, ScreenBottleneckStage::Network, &ctx);
+    let _ = tuner.evaluate(1_000, 2, ScreenBottleneckStage::Network, &ctx);
+    let out = tuner.evaluate(1_000, 3, ScreenBottleneckStage::Network, &ctx);
+    assert_eq!(out.decision.action, "reduce_bitrate");
+    let expect_bps = SCREEN_BITRATE_DEFAULT_BPS
+        - SCREEN_BITRATE_DEFAULT_BPS * SCREEN_TUNER_BITRATE_DROP_PCT / 100;
+    assert_eq!(out.bitrate_bps, Some(expect_bps));
+
+    // Cooldown: the action fires on the 3rd frame; an immediate re-trigger must hold
+    let mut tuner = ScreenTuner::new(ScreenTunerMode::Standard);
+    for seq in 1..=3u64 {
+        let _ = tuner.evaluate(1_000, seq, ScreenBottleneckStage::Pacer, &ctx);
+    }
+    let out = tuner.evaluate(1_000 + 1, 4, ScreenBottleneckStage::Pacer, &ctx);
+    assert_eq!(
+        out.decision.action, "hold",
+        "cooldown must suppress immediate re-trigger"
+    );
+    // After the cooldown elapses the still-running streak triggers again
+    let out = tuner.evaluate(3_000_000, 5, ScreenBottleneckStage::Pacer, &ctx);
+    assert_eq!(
+        out.decision.action, "reduce_bitrate",
+        "post-cooldown streak must trigger"
+    );
+    // ... and the cooldown window restarts from the new action
+    let out = tuner.evaluate(3_000_001, 6, ScreenBottleneckStage::Pacer, &ctx);
+    assert_eq!(out.decision.action, "hold");
+
+    // Mixed bottleneck types reset the streak
+    let mut tuner = ScreenTuner::new(ScreenTunerMode::Standard);
+    let _ = tuner.evaluate(1_000, 1, ScreenBottleneckStage::Network, &ctx);
+    let _ = tuner.evaluate(1_000, 2, ScreenBottleneckStage::Capture, &ctx);
+    let out = tuner.evaluate(1_000, 3, ScreenBottleneckStage::Capture, &ctx);
+    assert_eq!(out.decision.action, "hold", "streak resets on stage switch");
+
+    // Capture bottleneck reduces FPS
+    let mut tuner = ScreenTuner::new(ScreenTunerMode::Aggressive);
+    let _ = tuner.evaluate(1_000, 1, ScreenBottleneckStage::Capture, &ctx);
+    let out = tuner.evaluate(2_000_000, 2, ScreenBottleneckStage::Capture, &ctx);
+    assert_eq!(out.decision.action, "reduce_fps");
+    assert_eq!(out.fps, Some(screen_matrix_next_lower_fps(30)));
+
+    // Jitter bottleneck raises playout delay (receiver side)
+    let mut tuner = ScreenTuner::new(ScreenTunerMode::Aggressive);
+    let _ = tuner.evaluate(1_000, 1, ScreenBottleneckStage::Jitter, &ctx);
+    let out = tuner.evaluate(2_000_000, 2, ScreenBottleneckStage::Jitter, &ctx);
+    assert_eq!(out.decision.action, "raise_playout_delay");
+    assert_eq!(
+        out.playout_delay_delta_us,
+        Some(SCREEN_TUNER_PLAYOUT_RELIEF_DELTA_US)
+    );
+
+    // Disabled mode never acts
+    let mut tuner = ScreenTuner::new(ScreenTunerMode::Disabled);
+    for seq in 1..=10u64 {
+        let out = tuner.evaluate(1_000 * seq, seq, ScreenBottleneckStage::Network, &ctx);
+        assert_eq!(out.decision.action, "hold");
+    }
+    assert_eq!(tuner.report().actions_applied, 0);
+
+    // 6. Anti-oscillation recovery: after sustained balance the degraded knobs step back up in reverse order
+    let mut tuner = ScreenTuner::new(ScreenTunerMode::Aggressive);
+    // Network trigger -> reduce_bitrate
+    let _ = tuner.evaluate(1_000, 1, ScreenBottleneckStage::Network, &ctx);
+    let out = tuner.evaluate(2_000_000, 2, ScreenBottleneckStage::Network, &ctx);
+    assert_eq!(out.decision.action, "reduce_bitrate");
+    // Capture trigger -> reduce_fps
+    let _ = tuner.evaluate(4_000_000, 3, ScreenBottleneckStage::Capture, &ctx);
+    let out = tuner.evaluate(6_000_000, 4, ScreenBottleneckStage::Capture, &ctx);
+    assert_eq!(out.decision.action, "reduce_fps");
+
+    // Balanced frames below the recovery threshold keep holding
+    for seq in 5..=9u64 {
+        let out = tuner.evaluate(6_000_000 + seq, seq, ScreenBottleneckStage::Balanced, &ctx);
+        assert_eq!(out.decision.action, "hold");
+    }
+    assert_eq!(tuner.report().balanced_streak, 5);
+
+    // 6th balanced frame (aggressive needs 6) recovers the most recent degradation first: fps
+    let rec_ctx = ScreenTuningContext {
+        bitrate_bps: expect_bps,
+        bitrate_min_bps: SCREEN_BITRATE_MIN_BPS,
+        bitrate_max_bps: SCREEN_BITRATE_MAX_BPS,
+        fps: screen_matrix_next_lower_fps(30),
+        scale_pct: 100,
+        qp_min: 12,
+        qp_max: 36,
+        playout_delay_us: 0,
+    };
+    let out = tuner.evaluate(10_000_000, 10, ScreenBottleneckStage::Balanced, &rec_ctx);
+    assert_eq!(
+        out.decision.action, "recover_fps",
+        "recovery must undo the most recent degradation first"
+    );
+    assert!(out.decision.recovered);
+    // Next recovery (after the aggressive 1s cooldown elapses) restores bitrate
+    let out = tuner.evaluate(11_100_000, 11, ScreenBottleneckStage::Balanced, &rec_ctx);
+    assert_eq!(out.decision.action, "recover_bitrate");
+    let expect_recover =
+        (expect_bps * (100 + SCREEN_TUNER_BITRATE_RECOVER_PCT) / 100).min(SCREEN_BITRATE_MAX_BPS);
+    assert_eq!(out.bitrate_bps, Some(expect_recover));
+    assert_eq!(tuner.report().recoveries_applied, 2);
+
+    // 7. ScreenSender reset_tuning clears counters but keeps the mode
+    sender.set_tuning_mode(ScreenTunerMode::Aggressive);
+    assert_eq!(sender.tuning_mode(), ScreenTunerMode::Aggressive);
+    let rep = sender.reset_tuning();
+    assert_eq!(rep.actions_applied, 0);
+    assert_eq!(rep.last_action, "hold");
+    assert_eq!(sender.tuning_mode(), ScreenTunerMode::Aggressive);
+
+    // 8. Receiver-side tuner: Jitter bottleneck adjusts the playout buffer target delay
+    let mut receiver = ScreenReceiver::new();
+    assert_eq!(receiver.tuning_mode(), ScreenTunerMode::Standard);
+    receiver.set_tuning_mode(ScreenTunerMode::Aggressive);
+    let jitter_profile = |seq: u64| ScreenProfileFrame {
+        flags: 0,
+        frame_seq: seq,
+        capture_us: 1_000,
+        encode_us: 1_000,
+        pacer_us: 1_000,
+        sender_ts_us: seq,
+        network_us: 1_000,
+        jitter_us: 30_000,
+        decode_us: 1_000,
+        render_us: 1_000,
+        total_e2e_us: 36_000,
+    };
+    receiver.on_profile_frame(&jitter_profile(1));
+    assert_eq!(receiver.tuning_report().actions_applied, 0);
+    let delay_before = receiver.playout_stats().target_delay_us;
+    receiver.on_profile_frame(&jitter_profile(2));
+    let rep = receiver.tuning_report();
+    assert_eq!(
+        rep.actions_applied, 1,
+        "aggressive mode triggers on the 2nd frame"
+    );
+    assert_eq!(rep.last_action, "raise_playout_delay");
+    let delay_after = receiver.playout_stats().target_delay_us;
+    assert!(
+        delay_after > delay_before,
+        "playout target delay must deepen on jitter bottleneck ({delay_before} -> {delay_after})"
+    );
+
+    // 9. ScreenStats default tuning telemetry
+    let stats = ScreenStats::default();
+    assert_eq!(stats.tuning_mode, ScreenTunerMode::Standard.tag());
+    assert_eq!(
+        stats.tuning_last_stage,
+        ScreenBottleneckStage::Balanced.tag()
+    );
+    assert_eq!(stats.tuning_last_action, ScreenTuningAction::Hold.tag());
+
+    // 10. ScreenTuningAction parse & tag roundtrips
+    for tag in 0..=10u8 {
+        let action = ScreenTuningAction::from_tag(tag);
+        assert_eq!(action.tag(), tag);
+    }
+    assert_eq!(
+        "recover_bitrate".parse::<ScreenTuningAction>().unwrap(),
+        ScreenTuningAction::RecoverBitrate
+    );
+    assert!(ScreenTuningAction::RecoverBitrate.is_recovery());
+    assert!(!ScreenTuningAction::ReduceFps.is_recovery());
 }

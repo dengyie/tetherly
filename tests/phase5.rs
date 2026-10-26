@@ -88,6 +88,7 @@ fn cfg(
         screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
         screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
         screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
+        screen_tuning_mode: tetherly_core::ScreenTunerMode::Standard,
         screen_display_id: 0,
         screen_sink: None,
         input_sink: None,
@@ -602,7 +603,7 @@ async fn screen_and_input_lifecycle_and_peer_targeting_via_loopback_api() {
 
     // 6. Visitor starts screen streaming targeting the host peer
     let start_payload = serde_json::json!({ "peer": host_id.as_str() });
-    let (c, b) = tetherly_node::loopback_post(
+    let (c, _) = tetherly_node::loopback_post(
         visitor_ui,
         "/api/screen/start",
         &serde_json::to_vec(&start_payload).unwrap(),
@@ -4047,6 +4048,177 @@ async fn m5_23_screen_microsecond_latency_breakdown_and_multi_stage_profiler_pip
     let reset_rep: tetherly_core::ScreenLatencyReport = serde_json::from_slice(&b).unwrap();
     assert_eq!(reset_rep.frames_profiled, 0);
     assert_eq!(reset_rep.bottleneck, "balanced");
+
+    // 8. Stop streaming session cleanly
+    let stop_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/stop",
+        &serde_json::to_vec(&stop_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+// ADR-100 Screen Streaming Bottleneck-Driven Autonomous Tuning Closed Loop
+#[tokio::test]
+async fn m5_24_screen_bottleneck_driven_autonomous_tuning_closed_loop() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial tuning report on host: standard mode, no actions applied yet
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tuning")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenTuningReport = serde_json::from_slice(&b).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.mode, "standard");
+    assert_eq!(init_rep.actions_applied, 0);
+    assert_eq!(init_rep.recoveries_applied, 0);
+    assert_eq!(init_rep.last_action, "hold");
+
+    // 2. Visitor configures the tuner to aggressive before any session exists
+    let mode_req = serde_json::json!({ "mode": "aggressive" });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tuning",
+        &serde_json::to_vec(&mode_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let set_rep: tetherly_core::ScreenTuningReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(set_rep.mode, "aggressive");
+
+    // Host is still on the default: without a session there is no control channel
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tuning")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_rep: tetherly_core::ScreenTuningReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_rep.mode, "standard");
+
+    // 3. Visitor opens screen channel, host allows, visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. With the live control channel up, re-set the mode on the visitor; the
+    //    ControlMsg::SetTuningMode signal must propagate and flip the host sender's tuner.
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tuning",
+        &serde_json::to_vec(&serde_json::json!({ "mode": "aggressive" })).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let deadline = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tuning")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTuningReport = serde_json::from_slice(&b).unwrap();
+        if rep.mode == "aggressive" {
+            break;
+        }
+        if deadline.elapsed() > Duration::from_secs(3) {
+            panic!("SetTuningMode control signal never reached the host sender");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Stream video frames from host while the visitor receives them
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let sent = host.screen_send_frame().await.unwrap();
+        assert!(sent, "frame should queue while streaming");
+    }
+
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 3 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received frames");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 6. ScreenStatusReport carries autonomous tuning telemetry on both ends
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_status.tuning_mode, "aggressive");
+    assert!(!host_status.tuning_last_stage.is_empty());
+    assert!(!host_status.tuning_last_action.is_empty());
+
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let visitor_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(visitor_status.tuning_mode, "aggressive");
+
+    // 7. POST /api/screen/tuning/reset clears counters but preserves the mode
+    let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/tuning/reset", &[])
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenTuningReport = serde_json::from_slice(&b).unwrap();
+    assert!(reset_rep.ok);
+    assert_eq!(reset_rep.mode, "aggressive");
+    assert_eq!(reset_rep.actions_applied, 0);
+    assert_eq!(reset_rep.last_action, "hold");
+    assert!(reset_rep.last_decision.is_none());
 
     // 8. Stop streaming session cleanly
     let stop_payload = serde_json::json!({ "peer": host_id.as_str() });

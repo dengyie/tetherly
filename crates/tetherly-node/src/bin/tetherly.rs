@@ -2298,6 +2298,56 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure the bottleneck-driven autonomous tuning closed loop (v2.14 / ADR-100).
+    Tuning {
+        #[command(subcommand)]
+        action: Option<ScreenTuningSubCmd>,
+        /// Configure tuner mode: 'standard', 'aggressive', or 'disabled'.
+        #[arg(long)]
+        mode: Option<String>,
+        /// Reset tuning counters, hysteresis windows and the recovery stack.
+        #[arg(long)]
+        reset: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenTuningSubCmd {
+    /// Show current bottleneck-driven autonomous tuning mode, actions and last decision.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Set tuner mode ('standard', 'aggressive', 'disabled').
+    Set {
+        /// Tuner mode: standard, aggressive, disabled.
+        mode: String,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset autonomous tuning counters, hysteresis windows and the recovery stack.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -6589,6 +6639,16 @@ async fn main() -> Result<()> {
                             rep.latency_frames_profiled
                         );
                     }
+                    if !rep.tuning_mode.is_empty() {
+                        println!(
+                            "  Tuning:       {} [last: {} / {}] (actions: {}, recoveries: {})",
+                            rep.tuning_mode,
+                            rep.tuning_last_stage,
+                            rep.tuning_last_action,
+                            rep.tuning_actions_total,
+                            rep.tuning_recoveries
+                        );
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -7777,6 +7837,110 @@ async fn main() -> Result<()> {
                         let rep: tetherly_core::ScreenLatencyReport = serde_json::from_slice(&resp)
                             .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
                         print_screen_latency_report(&rep);
+                    }
+                }
+            }
+            ScreenCmd::Tuning {
+                action,
+                mode,
+                reset,
+                json,
+                ui_port,
+            } => {
+                let (target_mode, target_reset, is_json, port) = match action {
+                    Some(ScreenTuningSubCmd::Set {
+                        mode: m,
+                        json: j,
+                        ui_port: p,
+                    }) => (Some(m), false, j || json, p),
+                    Some(ScreenTuningSubCmd::Reset {
+                        json: j,
+                        ui_port: p,
+                    }) => (None, true, j || json, p),
+                    Some(ScreenTuningSubCmd::Status {
+                        json: j,
+                        ui_port: p,
+                    }) => (None, false, j || json, p),
+                    None => (mode, reset, json, ui_port),
+                };
+
+                if target_reset && target_mode.is_none() {
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/tuning/reset", &[])
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen tuning reset failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: tetherly_core::ScreenTuningReport = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen autonomous tuning statistics and recovery stack reset successfully.");
+                        print_screen_tuning_report(&rep);
+                    }
+                } else if target_mode.is_some() || target_reset {
+                    let mut body_map = serde_json::Map::new();
+                    if let Some(m) = target_mode {
+                        body_map.insert("mode".into(), serde_json::json!(m));
+                    }
+                    if target_reset {
+                        body_map.insert("reset".into(), serde_json::json!(true));
+                    }
+                    let body = serde_json::to_vec(&body_map)?;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/tuning", &body)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen tuning configuration failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: tetherly_core::ScreenTuningReport = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen autonomous tuner mode updated: {}", rep.mode);
+                        print_screen_tuning_report(&rep);
+                    }
+                } else {
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tuning")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen tuning query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: tetherly_core::ScreenTuningReport = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_tuning_report(&rep);
                     }
                 }
             }
@@ -19334,4 +19498,43 @@ fn print_screen_latency_report(rep: &tetherly_core::ScreenLatencyReport) {
         rep.p99_e2e_us as f64 / 1000.0,
         rep.p99_e2e_us
     );
+}
+
+fn print_screen_tuning_report(rep: &tetherly_core::ScreenTuningReport) {
+    println!("Screen Bottleneck-Driven Autonomous Tuning Closed Loop (ADR-100):");
+    println!("  Tuner Mode:           {}", rep.mode);
+    println!("  Actions Applied:      {}", rep.actions_applied);
+    println!("  Recoveries Applied:   {}", rep.recoveries_applied);
+    println!("  Bottleneck Streak:    {} frames", rep.bottleneck_streak);
+    println!("  Balanced Streak:      {} frames", rep.balanced_streak);
+    println!("  Last Stage:           {}", rep.last_stage);
+    println!("  Last Action:          {}", rep.last_action);
+    if rep.actions_applied == 0 && rep.recoveries_applied == 0 && rep.last_decision.is_none() {
+        println!("  (No autonomous tuning actions yet; the tuner retunes the pipeline when ADR-099 profiling reports a sustained dominant bottleneck)");
+        return;
+    }
+    if let Some(d) = rep.last_decision.as_ref() {
+        println!("  Last Decision (Frame #{}):", d.frame_seq);
+        println!("    Stage:              {}", d.stage);
+        println!(
+            "    Action:             {}{}",
+            d.action,
+            if d.recovered { " (recovery)" } else { "" }
+        );
+        if let Some(bps) = d.new_bitrate_bps {
+            println!("    New Bitrate:        {} bps", bps);
+        }
+        if let Some(fps) = d.new_fps {
+            println!("    New FPS:            {}", fps);
+        }
+        if let Some(scale) = d.new_scale_pct {
+            println!("    New Scale:          {}%", scale);
+        }
+        if let Some(qp) = d.new_qp_max {
+            println!("    New QP Max:         {}", qp);
+        }
+        if let Some(delay) = d.new_playout_delay_us {
+            println!("    New Playout Delay:  {} us", delay);
+        }
+    }
 }

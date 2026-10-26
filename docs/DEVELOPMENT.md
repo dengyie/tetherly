@@ -3,12 +3,39 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.13** |
+| 文档版本 | **2.14** |
 | 日期 | 2026-10-27 |
-| 状态 | **v2.13 屏幕串流微秒级端到端延迟拆解、多阶段逐帧分析器与性能遥测流水线（Screen Streaming Microsecond End-to-End Latency Breakdown, Multi-Stage Frame Profiler & Performance Telemetry Pipeline, ADR-099）与双端 CLI 全同构**——(1) **协议与剖析信封设计**（`crates/tetherly-core/src/screen.rs`）：引入 56 字节专用定长线协议信封 `TYPE_SCREEN_PROFILE = 0x0509`（`magic: [u8; 5] = *b"TPROF"`, `proto: u8 = 0x01`），承载 7 阶段微秒耗时（`capture_us`, `encode_us`, `pacer_us`, `network_us`, `jitter_us`, `decode_us`, `render_us`, `total_e2e_us`）；扩展 14 字节定长屏幕控制信令（`TYPE_SCREEN_CONTROL = 0x0502`），引入 Tag = 6 专用重置信令 `ControlMsg::ResetLatencyProfile`；定义 `ScreenLatencyBreakdown`、`ScreenFrameProfiler`、`ScreenLatencyReport`、`ScreenProfilerMode` 与 `ScreenBottleneckStage`；(2) **状态机协同与瓶颈自动识别**（`crates/tetherly-core/src/screen.rs`）：`ScreenReceiver` 与 `ScreenSender` 维护延迟剖析状态，支持 `Auto`、`Detailed`、`Disabled` 模式；实现主导瓶颈阶段判定准则（单阶段耗时占比 $\ge 35\%$ 时自动判定，低于阈值时判定为 `Balanced`）；建立 EWMA 指数移动加权平均（$\alpha = 0.15$）与 1024 样本环形缓冲区分位数统计（P50、P90、P95、P99、Min、Max）；(3) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：`NodeShared` 维护原子模式变量并在 `attach_screen_server` / `attach_screen_client` 中无缝收发解析 `TYPE_SCREEN_PROFILE` 与 `ControlMsg::ResetLatencyProfile`；新增 REST API `GET /api/screen/latency`、`POST /api/screen/latency` 与 `POST /api/screen/latency/reset`，扩展 `ScreenStatusReport` 包含 `latency_mode`、`latency_bottleneck`、`latency_total_e2e_us`、`latency_p95_e2e_us`、`latency_frames_profiled`；(4) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen latency`、`screen latency status`、`screen latency set <mode>`、`screen latency reset`、`--mode`、`--reset`、`--json` 序列化与 `screen status` 状态监控；(5) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_23_screen_microsecond_latency_breakdown_and_multi_stage_profiler_pipeline` 全绿，版本升级至 `0.1.35`。 |
+| 状态 | **v2.14 屏幕串流瓶颈驱动的自主调优闭环流水线（Screen Streaming Bottleneck-Driven Autonomous Tuning Closed Loop, ADR-100）与双端 CLI 全同构**——(1) **调优模式与迟滞触发**（`crates/tetherly-core/src/screen.rs`）：引入调优模式 `ScreenTunerMode`（`Disabled`、`Standard`（默认）、`Aggressive`），迟滞触发准则为 Standard 连续 3 帧 / Aggressive 连续 2 帧同型瓶颈，冷却窗 Standard 2s / Aggressive 1s，反振荡恢复门槛 Standard 连续 10 帧 / Aggressive 连续 6 帧均衡；(2) **瓶颈→靶向动作映射**：`Capture`→`ReduceFps`、`Encode`→`RaiseQp`（+4，顶格后转 `ReduceScale`）、`Pacer`/`Network`→`ReduceBitrate`（×85%，下限 200kbps）、`Jitter`→`RaisePlayoutDelay`（+5ms，收端播放缓冲执行器）、`Decode`→`ReduceScale`（下限后转 `ReduceFps`）、`Render`→`ReduceFps`（下限后转 `ReduceScale`）；恢复栈按降级逆序逐级回升（`RecoverBitrate` ×112%、`RecoverFps`/`RecoverScale` 阶梯上爬、`RecoverQp` −2、`LowerPlayoutDelay` −5ms）；调优仅由真实剖析信封（`TYPE_SCREEN_PROFILE`）驱动，本地合成剖析路径保持观测-only，不与 AIMD/TWCC 抢参数；(3) **跨端信令协同**：扩展 14 字节定长屏幕控制信令（`TYPE_SCREEN_CONTROL = 0x0502`），引入 Tag = 7 `ControlMsg::SetTuningMode` 与 Tag = 8 `ControlMsg::ResetTuningProfile`，双端调优模式与统计重置跨端同步；`ScreenStats` 扩充 `tuning_mode`、`tuning_actions_total`、`tuning_recoveries`、`tuning_last_stage`、`tuning_last_action`；(4) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：`NodeShared` 维护 `screen_tuning_mode` / `screen_tuning_stats` 并在 `attach_screen_server` / `attach_screen_client` 双循环收发解析新信令、周期同步收端模式；新增 REST API `GET /api/screen/tuning`、`POST /api/screen/tuning` 与 `POST /api/screen/tuning/reset`，`ScreenStatusReport` 扩充 `tuning_mode`、`tuning_actions_total`、`tuning_recoveries`、`tuning_last_stage`、`tuning_last_action`；(5) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen tuning`、`screen tuning status`、`screen tuning set <mode>`、`screen tuning reset`、`--mode`、`--reset`、`--json`，`screen status` 输出 Tuning 行；(6) **测试与版本**：核心单元测试 `screen_bottleneck_autotuning_closed_loop`、REST 端点单测与 Phase 5 端到端 `m5_24_screen_bottleneck_driven_autonomous_tuning_closed_loop` 全绿（31 套件），版本升级至 `0.1.36`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.14 相对 2.13(屏幕串流瓶颈驱动的自主调优闭环流水线 ADR-100 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **剖析归因与自主执行的断层**: ADR-099 建立了微秒级 7 阶段延迟拆解与主导瓶颈自动识别，但识别结果只用于观测——读到「Network 53.4% [BOTTLENECK]」后仍需人工调参，缺少「归因 → 靶向执行 → 验证 → 回升」的全自主闭环。
+  2. **黑盒调控的误伤问题**: 4D 矩阵（ADR-086）与 TWCC（ADR-094）依据 RTT/丢包/带宽估计做黑盒调控，无法区分「编码器太慢」与「链路太堵」。只有按瓶颈阶段靶向执行才能真正缓解：编码瓶颈抬 QP/降尺度、网络与起搏瓶颈降码率、抖动瓶颈加深播放缓冲、采集/解码/呈现瓶颈降 FPS/降尺度。
+  3. **迟滞与反振荡**: 自主调优最大的工程风险是「降级-恢复」振荡。必须以连续 N 帧同型瓶颈为触发门槛（迟滞）、冷却窗限频，且恢复比降级更保守（更长均衡观测窗 + 逐级逆序回升），保证单调收敛到稳定工作点。
+  4. **双向信令协同与双端 CLI 100% 同构**: 调优模式必须在双端（发端四维执行器 + 收端播放缓冲执行器）保持一致，并可通过控制通道跨端设置与重置。
+- **架构解法与落地**:
+  1. **Core 调优器与元数据模型（`crates/tetherly-core/src/screen.rs`）**:
+     - 实现 `ScreenTuner`（模式、迟滞窗口、冷却窗、恢复栈、决策快照）与 `ScreenTunerMode`（`Disabled`/`Standard`/`Aggressive`）、`ScreenTuningAction`（11 类动作）、`ScreenTuningContext`、`ScreenTuningOutcome`、`ScreenTuningDecision`、`ScreenTuningReport`。
+     - 瓶颈→靶向动作映射：`Capture`→`ReduceFps`；`Encode`→`RaiseQp`（+4，顶格转 `ReduceScale`）；`Pacer`/`Network`→`ReduceBitrate`（×85%，下限 `SCREEN_BITRATE_MIN_BPS`）；`Jitter`→`RaisePlayoutDelay`（+5ms）；`Decode`→`ReduceScale`（下限转 `ReduceFps`）；`Render`→`ReduceFps`（下限转 `ReduceScale`）。
+     - 恢复路径：连续均衡达到门槛后按恢复栈逆序每次弹出一项执行逆操作（`RecoverBitrate` ×112% 上限钳位、`RecoverFps`/`RecoverScale` 阶梯上爬、`RecoverQp` −2、`LowerPlayoutDelay` −5ms）；仅实际执行的动作刷新冷却窗。
+     - 扩展 `ControlMsg`，新增 `ControlMsg::SetTuningMode { mode }`（Tag = 7）与 `ControlMsg::ResetTuningProfile`（Tag = 8，均为 14 字节定长控制信封）。
+     - `ScreenSender`/`ScreenReceiver` 各自挂接 `ScreenTuner`：发端执行码率/FPS/尺度/QP 四维动作，收端执行播放缓冲目标延迟动作；`ScreenStats` 新增 `tuning_mode`、`tuning_actions_total`、`tuning_recoveries`、`tuning_last_stage`、`tuning_last_action`。
+     - **数据流契约**：调优仅由真实剖析信封（`TYPE_SCREEN_PROFILE = 0x0509`）驱动；发端 Ack 路径与收端 apply 路径的本地合成剖析保持观测-only，避免与 AIMD/TWCC 拥塞响应互相抢参数。
+  2. **Node 守护进程与端到端传输（`crates/tetherly-node/src/runtime.rs`）**:
+     - `NodeConfig` 新增 `screen_tuning_mode`（默认 `Standard`）；`NodeShared` 维护 `screen_tuning_mode` / `screen_tuning_stats`。
+     - `attach_screen_server` 与 `attach_screen_client` 双循环解析 `ControlMsg::SetTuningMode` / `ResetTuningProfile` 信令并同步本地执行器；收端循环周期同步共享模式并回写调优统计；剖析信封入站时同步 `screen_tuning_stats`。
+     - 暴露 `screen_tuning_report()`、`screen_tuning_mode()`、`screen_set_tuning_mode()`（有会话时向对端发送 `SetTuningMode`）与 `screen_reset_tuning()`（有会话时发送 `ResetTuningProfile`）。
+  3. **回环 REST API（`crates/tetherly-node/src/uihttp.rs`）**:
+     - 新增 `GET /api/screen/tuning`、`POST /api/screen/tuning`（body/query `mode` + 可选 `reset`）与 `POST /api/screen/tuning/reset`。
+     - `ScreenStatusReport` 扩充 `tuning_mode`、`tuning_actions_total`、`tuning_recoveries`、`tuning_last_stage`、`tuning_last_action`。
+  4. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - 全同构支持 `screen tuning`、`screen tuning status`、`screen tuning set <mode>`、`screen tuning reset`、`--mode`、`--reset`、`--json` 序列化；`screen status` 新增 Tuning 行。
+  5. **测试与验证**:
+     - 核心单元测试 `screen_bottleneck_autotuning_closed_loop`（模式解析、信令往返、迟滞触发、七类靶向动作、冷却窗、反振荡逆序恢复、收端播放缓冲联动、Disabled 惰性）、REST 端点单测 `test_uihttp_screen_tuning_endpoints` 与 Phase 5 端到端集成测试 `m5_24_screen_bottleneck_driven_autonomous_tuning_closed_loop`（跨端 `SetTuningMode` 信令传播、流式传输中状态报告遥测、重置保模式）全绿，31 套件全绿。
 
 **2.13 相对 2.12(屏幕串流微秒级端到端延迟拆解、多阶段逐帧分析器与性能遥测流水线 ADR-099 与双端 CLI 全同构)**
 
@@ -5793,3 +5820,40 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 
 
 
+## 49. 屏幕串流瓶颈驱动的自主调优闭环流水线与双端 CLI 全同构 (v2.14 / ADR-100)
+
+1. **动机与设计准则（ADR-100）**：
+   - **归因即执行**：ADR-099 已能识别主导瓶颈阶段（`Capture`/`Encode`/`Pacer`/`Network`/`Jitter`/`Decode`/`Render`/`Balanced`），本版本将识别结果直接驱动参数执行，形成「感知 → 决策 → 执行 → 验证」全自主闭环，消除「观测-决策-执行」断层；
+   - **靶向执行而非黑盒调控**：编码瓶颈 → 抬 QP/降尺度（减少编码工作量）；网络与起搏瓶颈 → 降码率；抖动瓶颈 → 加深播放缓冲；采集/解码/呈现瓶颈 → 降 FPS/降尺度；
+   - **迟滞收敛保证**：触发门槛（Standard 连续 3 帧 / Aggressive 连续 2 帧同型瓶颈）+ 冷却窗（Standard 2s / Aggressive 1s）+ 更保守的恢复门槛（Standard 连续 10 帧 / Aggressive 连续 6 帧均衡）三重反振荡设计，保证调优过程单调收敛、不乒乓；
+   - **双端 CLI 100% 全同构与控制面闭环**：在 `tetherly` 与 `tetherly-cli` 中保持终端输出格式与 `--json` 输出完全同构。
+
+2. **核心机制与实现**：
+   - **调优器与元数据模型 (`crates/tetherly-core/src/screen.rs`)**：
+     - `ScreenTunerMode`：`Disabled`、`Standard`（默认）、`Aggressive`；
+     - `ScreenTuningAction`：11 类离散动作（5 类降级 + 5 类恢复 + `Hold`）；
+     - `ScreenTuner`：迟滞窗口（同型瓶颈连续帧计数、均衡连续帧计数）、冷却窗、恢复栈（按降级逆序逐级弹出）、决策快照（`ScreenTuningDecision`）；
+     - `ScreenTuningContext` / `ScreenTuningOutcome`：当前管线旋钮快照与具体参数更新；
+   - **发端四维执行器与收端播放缓冲执行器 (`crates/tetherly-core/src/screen.rs`)**：
+     - `ScreenSender`：`ReduceBitrate` → `rate_controller.set_manual_bps`、`ReduceFps` → `fps_pacer.set_fps`、`ReduceScale` → `scale_controller.set_scale_pct`、`RaiseQp`/`RecoverQp` → `quality_controller.set_qp_range`；
+     - `ScreenReceiver`：`RaisePlayoutDelay`/`LowerPlayoutDelay` → `playout_buffer.adjust_target_delay`；
+     - 数据流契约：调优仅由真实剖析信封 `TYPE_SCREEN_PROFILE` 驱动；本地合成剖析路径（发端 Ack 半 RTT 估算、收端 apply 固定基线）保持观测-only，不与 AIMD/TWCC 抢参数；
+   - **跨端信令协同 (`TYPE_SCREEN_CONTROL = 0x0502`, 14 字节定长)**：
+     - Tag = 7 `ControlMsg::SetTuningMode { mode: u8 }`：任一端经 REST/CLI 设置调优模式后向对端广播；
+     - Tag = 8 `ControlMsg::ResetTuningProfile`：双端原子清空调优计数、迟滞窗口与恢复栈（模式保留）；
+   - **节点运行时与状态集成 (`crates/tetherly-node/src/runtime.rs`)**：
+     - `NodeConfig.screen_tuning_mode`（默认 `Standard`）；`NodeShared` 维护 `screen_tuning_mode` / `screen_tuning_stats`；
+     - 双 attach 循环解析新信令、收端周期同步模式并回写统计；提供 `screen_tuning_report()`、`screen_tuning_mode()`、`screen_set_tuning_mode()`、`screen_reset_tuning()`；
+   - **轻量级回环控制面端点 (`crates/tetherly-node/src/uihttp.rs`)**：
+     - `GET /api/screen/tuning`：查询调优报告；
+     - `POST /api/screen/tuning`：设置模式（`disabled`、`standard`、`aggressive`）与可选重置；
+     - `POST /api/screen/tuning/reset`：清空本地统计与恢复栈；
+     - `ScreenStatusReport` 扩充 `tuning_mode`、`tuning_actions_total`、`tuning_recoveries`、`tuning_last_stage`、`tuning_last_action`；
+   - **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**：
+     - 新增 `screen tuning`、`screen tuning status`、`screen tuning set <mode>`、`screen tuning reset`；
+     - 支持 `--mode`、`--reset`、`--json` 与 `--ui-port`；`screen status` 新增 Tuning 行。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_bottleneck_autotuning_closed_loop`，覆盖模式解析、Tag 7/8 信令往返、迟滞触发、七类靶向降级动作、冷却窗抑制、混合瓶颈重置、反振荡逆序恢复、收端播放缓冲联动、Disabled 惰性与 `ScreenStats` 默认遥测；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tuning_endpoints`（GET/POST/query/400/403）；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_24_screen_bottleneck_driven_autonomous_tuning_closed_loop`，覆盖跨端 `SetTuningMode` 信令传播（无会话时不传播、有会话时 3s 内收敛）、流式传输中双端状态报告遥测与重置保模式全链路验证；全工作区 31 套件全绿，版本升级至 `0.1.36`。

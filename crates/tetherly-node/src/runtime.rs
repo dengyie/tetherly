@@ -67,14 +67,14 @@ use tetherly_core::{
     ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats, ScreenProbeMode, ScreenProbePacket,
     ScreenProbeReport, ScreenProbeState, ScreenProbeStats, ScreenProfileFrame, ScreenProfilerMode,
     ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState,
-    ScreenStats, ScreenTrendlineMode, ScreenTrendlineReport, ScreenTwccFeedback, ScreenTwccMode,
-    ScreenTwccReport, ScreenTwccStats, SensitiveContentGuard, TcpLimiter, TopologyStateFrame,
-    TopologySyncReqFrame, TopologyValidator, TrustStore, VirtualDisplayAnnounceFrame,
-    VirtualDisplayAttachFrame, VirtualDisplayCodec, VirtualDisplayDetachFrame,
-    VirtualDisplayFrameAck, VirtualDisplayMode, VirtualDisplayPixelFormat, VirtualDisplayRole,
-    VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS,
-    OVERLAY_PROBE_MS, TYPE_SCREEN_FEC, TYPE_SCREEN_NACK, TYPE_SCREEN_PROBE, TYPE_SCREEN_PROFILE,
-    TYPE_SCREEN_SYNC, TYPE_SCREEN_TWCC,
+    ScreenStats, ScreenTrendlineMode, ScreenTrendlineReport, ScreenTunerMode, ScreenTuningReport,
+    ScreenTwccFeedback, ScreenTwccMode, ScreenTwccReport, ScreenTwccStats, SensitiveContentGuard,
+    TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator, TrustStore,
+    VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
+    VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
+    VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
+    DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS, TYPE_SCREEN_FEC, TYPE_SCREEN_NACK,
+    TYPE_SCREEN_PROBE, TYPE_SCREEN_PROFILE, TYPE_SCREEN_SYNC, TYPE_SCREEN_TWCC,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -188,6 +188,8 @@ pub struct NodeConfig {
     pub screen_sync_mode: tetherly_core::ScreenAudioSyncMode,
     /// Operation mode for microsecond-precision multi-stage latency profiler & telemetry (ADR-099).
     pub screen_latency_mode: tetherly_core::ScreenProfilerMode,
+    /// Operation mode for the bottleneck-driven autonomous tuner (ADR-100).
+    pub screen_tuning_mode: tetherly_core::ScreenTunerMode,
     /// Initial active display ID for screen capture (ADR-097). Defaults to 0 (Primary).
     pub screen_display_id: u8,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
@@ -254,6 +256,7 @@ impl Default for NodeConfig {
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
+            screen_tuning_mode: tetherly_core::ScreenTunerMode::Standard,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
@@ -3057,6 +3060,16 @@ pub struct ScreenStatusReport {
     pub latency_p95_e2e_us: u64,
     #[serde(default)]
     pub latency_frames_profiled: u64,
+    #[serde(default)]
+    pub tuning_mode: String,
+    #[serde(default)]
+    pub tuning_actions_total: u64,
+    #[serde(default)]
+    pub tuning_recoveries: u64,
+    #[serde(default)]
+    pub tuning_last_stage: String,
+    #[serde(default)]
+    pub tuning_last_action: String,
 }
 
 /// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
@@ -3435,6 +3448,9 @@ struct Shared {
     /// Microsecond-precision multi-stage latency profiler mode (ADR-099).
     screen_latency_mode: Mutex<ScreenProfilerMode>,
     screen_latency_stats: Mutex<ScreenLatencyReport>,
+    /// Bottleneck-driven autonomous tuner mode (ADR-100).
+    screen_tuning_mode: Mutex<ScreenTunerMode>,
+    screen_tuning_stats: Mutex<ScreenTuningReport>,
     /// Active display ID for screen capture (ADR-097). Defaults to 0 (Primary).
     screen_active_display_id: AtomicU8,
     /// Known displays available on this host (ADR-097).
@@ -3656,6 +3672,7 @@ impl Node {
         let screen_probe_mode = cfg.screen_probe_mode;
         let screen_sync_mode = cfg.screen_sync_mode;
         let screen_latency_mode = cfg.screen_latency_mode;
+        let screen_tuning_mode = cfg.screen_tuning_mode;
         if let Some(sel) = &screen_encode_codec {
             sel.set_fps(screen_fps);
             sel.set_scale_pct(screen_scale_pct);
@@ -3809,6 +3826,7 @@ impl Node {
                 s.set_probe_mode(screen_probe_mode);
                 s.set_sync_mode(screen_sync_mode);
                 s.set_latency_mode(screen_latency_mode);
+                s.set_tuning_mode(screen_tuning_mode);
                 s.set_displays(initial_displays.clone());
                 if initial_display_id != 0 {
                     let _ = s.switch_display(initial_display_id, 0);
@@ -3874,6 +3892,11 @@ impl Node {
             screen_latency_mode: Mutex::new(screen_latency_mode),
             screen_latency_stats: Mutex::new(ScreenLatencyReport {
                 mode: screen_latency_mode.as_str().to_string(),
+                ..Default::default()
+            }),
+            screen_tuning_mode: Mutex::new(screen_tuning_mode),
+            screen_tuning_stats: Mutex::new(ScreenTuningReport {
+                mode: screen_tuning_mode.as_str().to_string(),
                 ..Default::default()
             }),
             screen_active_display_id: AtomicU8::new(initial_display_id),
@@ -20496,6 +20519,8 @@ impl Node {
                                         engine.on_profile_frame(&profile);
                                         *node.shared.screen_latency_stats.lock().expect("latency stats") =
                                             engine.latency_report();
+                                        *node.shared.screen_tuning_stats.lock().expect("tuning stats") =
+                                            engine.tuning_report();
                                     }
                                     continue;
                                 }
@@ -20574,6 +20599,22 @@ impl Node {
                                             let engine = node.shared.screen_engine.lock().expect("screen");
                                             engine.latency_report()
                                         };
+                                    }
+                                    if let ControlMsg::SetTuningMode { mode } = msg {
+                                        let m = ScreenTunerMode::from_tag(mode);
+                                        *node.shared.screen_tuning_mode.lock().expect("tuning mode") = m;
+                                        if let Ok(mut engine) = node.shared.screen_engine.lock() {
+                                            engine.set_tuning_mode(m);
+                                            *node.shared.screen_tuning_stats.lock().expect("tuning stats") =
+                                                engine.tuning_report();
+                                        }
+                                    }
+                                    if matches!(msg, ControlMsg::ResetTuningProfile) {
+                                        if let Ok(mut engine) = node.shared.screen_engine.lock() {
+                                            engine.reset_tuning();
+                                            *node.shared.screen_tuning_stats.lock().expect("tuning stats") =
+                                                engine.tuning_report();
+                                        }
                                     }
                                     let (reply, dynamic_bitrate, dynamic_fps, dynamic_scale) = {
                                         let mut engine = node
@@ -20689,6 +20730,8 @@ impl Node {
         receiver.set_probe_mode(initial_probe_mode);
         receiver.set_sync_mode(initial_sync_mode);
         receiver.set_latency_mode(initial_latency_mode);
+        let initial_tuning_mode = *self.shared.screen_tuning_mode.lock().expect("tuning mode");
+        receiver.set_tuning_mode(initial_tuning_mode);
         let mut assembler = ScreenAssembler::new();
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
@@ -20730,6 +20773,11 @@ impl Node {
                         if receiver.latency_mode() != target_latency_mode {
                             receiver.set_latency_mode(target_latency_mode);
                         }
+                        let target_tuning_mode = *node.shared.screen_tuning_mode.lock().expect("tuning mode");
+                        if receiver.tuning_mode() != target_tuning_mode {
+                            receiver.set_tuning_mode(target_tuning_mode);
+                        }
+                        *node.shared.screen_tuning_stats.lock().expect("tuning stats") = receiver.tuning_report();
                         let now_us = node.shared.clock.unix_us();
                         if let Some(twcc_fb) = receiver.generate_twcc_feedback(now_us) {
                             *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
@@ -20757,6 +20805,16 @@ impl Node {
                                     receiver.reset_latency();
                                     *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
                                     *node.shared.screen_latency_stats.lock().expect("latency stats") = receiver.latency_report();
+                                }
+                                if let ControlMsg::SetTuningMode { mode } = msg {
+                                    let m = ScreenTunerMode::from_tag(mode);
+                                    *node.shared.screen_tuning_mode.lock().expect("tuning mode") = m;
+                                    receiver.set_tuning_mode(m);
+                                    *node.shared.screen_tuning_stats.lock().expect("tuning stats") = receiver.tuning_report();
+                                }
+                                if matches!(msg, ControlMsg::ResetTuningProfile) {
+                                    receiver.reset_tuning();
+                                    *node.shared.screen_tuning_stats.lock().expect("tuning stats") = receiver.tuning_report();
                                 }
                                 match msg.to_frame() {
                                     Ok(f) => {
@@ -20817,6 +20875,7 @@ impl Node {
                                     if let Ok(profile) = ScreenProfileFrame::decode(&frame.payload) {
                                         receiver.on_profile_frame(&profile);
                                         *node.shared.screen_latency_stats.lock().expect("latency stats") = receiver.latency_report();
+                                        *node.shared.screen_tuning_stats.lock().expect("tuning stats") = receiver.tuning_report();
                                         *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
                                     }
                                     continue;
@@ -21655,6 +21714,7 @@ impl Node {
         let probe_report = self.screen_probe_report();
         let sync_report = self.screen_sync_report();
         let latency_report = self.screen_latency_report();
+        let tuning_report = self.screen_tuning_report();
         ScreenStatusReport {
             ok: true,
             state: state.as_str().to_string(),
@@ -21760,6 +21820,11 @@ impl Node {
             latency_total_e2e_us: latency_report.current.total_e2e_us,
             latency_p95_e2e_us: latency_report.p95_e2e_us,
             latency_frames_profiled: latency_report.frames_profiled,
+            tuning_mode: tuning_report.mode,
+            tuning_actions_total: tuning_report.actions_applied,
+            tuning_recoveries: tuning_report.recoveries_applied,
+            tuning_last_stage: tuning_report.last_stage,
+            tuning_last_action: tuning_report.last_action,
         }
     }
 
@@ -22994,6 +23059,78 @@ impl Node {
         Ok(self.screen_latency_report())
     }
 
+    /// Report bottleneck-driven autonomous tuning state and statistics (v2.14 / ADR-100).
+    pub fn screen_tuning_report(&self) -> ScreenTuningReport {
+        let mode = *self.shared.screen_tuning_mode.lock().expect("tuning mode");
+        let engine_rep = self
+            .shared
+            .screen_engine
+            .lock()
+            .map(|e| e.tuning_report())
+            .unwrap_or_else(|_| ScreenTuningReport {
+                mode: mode.as_str().to_string(),
+                ..Default::default()
+            });
+        let local_stats = self
+            .shared
+            .screen_tuning_stats
+            .lock()
+            .expect("tuning stats")
+            .clone();
+        if engine_rep.actions_applied > 0 || engine_rep.last_decision.is_some() {
+            engine_rep
+        } else if local_stats.actions_applied > 0 || local_stats.last_decision.is_some() {
+            local_stats
+        } else {
+            ScreenTuningReport {
+                ok: true,
+                mode: mode.as_str().to_string(),
+                ..Default::default()
+            }
+        }
+    }
+
+    /// Return current bottleneck-driven autonomous tuner mode (v2.14 / ADR-100).
+    pub fn screen_tuning_mode(&self) -> ScreenTunerMode {
+        *self.shared.screen_tuning_mode.lock().expect("tuning mode")
+    }
+
+    /// Dynamically configure the bottleneck-driven autonomous tuner mode (v2.14 / ADR-100).
+    /// If connected as visitor/controller with an active screen session, sends
+    /// ControlMsg::SetTuningMode to the peer as well.
+    pub async fn screen_set_tuning_mode(&self, mode: ScreenTunerMode) -> ScreenTuningReport {
+        *self.shared.screen_tuning_mode.lock().expect("tuning mode") = mode;
+        if let Ok(mut engine) = self.shared.screen_engine.lock() {
+            engine.set_tuning_mode(mode);
+        }
+        let ctl_opt = self.shared.screen_ctl.lock().await.clone();
+        if let Some(ctl) = ctl_opt {
+            let _ = ctl
+                .send(ControlMsg::SetTuningMode { mode: mode.tag() })
+                .await;
+        }
+        self.screen_tuning_report()
+    }
+
+    /// Reset screen streaming autonomous tuning stats and recovery stack (v2.14 / ADR-100).
+    /// If connected as visitor/controller, sends ControlMsg::ResetTuningProfile over wire.
+    pub async fn screen_reset_tuning(&self) -> Result<ScreenTuningReport, CoreError> {
+        let ctl_opt = self.shared.screen_ctl.lock().await.clone();
+        if let Some(ctl) = ctl_opt {
+            let _ = ctl.send(ControlMsg::ResetTuningProfile).await;
+        }
+        let report = {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            engine.reset_tuning()
+        };
+        *self
+            .shared
+            .screen_tuning_stats
+            .lock()
+            .expect("tuning stats") = report;
+        Ok(self.screen_tuning_report())
+    }
+
     /// Comprehensive status report for input sharing.
     pub async fn input_status_report(&self) -> InputStatusReport {
         let channel_open = self.input_channel_open().await;
@@ -23740,6 +23877,7 @@ mod clipboard_policy_tests {
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
+            screen_tuning_mode: tetherly_core::ScreenTunerMode::Standard,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
@@ -23898,6 +24036,7 @@ mod handoff_engine_tests {
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
+            screen_tuning_mode: tetherly_core::ScreenTunerMode::Standard,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
@@ -24087,6 +24226,7 @@ mod media_policy_tests {
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
+            screen_tuning_mode: tetherly_core::ScreenTunerMode::Standard,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
@@ -24296,6 +24436,7 @@ mod locator_policy_tests {
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
+            screen_tuning_mode: tetherly_core::ScreenTunerMode::Standard,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
@@ -24441,6 +24582,7 @@ mod locator_policy_tests {
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
+            screen_tuning_mode: tetherly_core::ScreenTunerMode::Standard,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,

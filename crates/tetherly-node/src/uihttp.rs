@@ -4806,6 +4806,62 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             Ok(rep) => json_ok(&rep),
             Err(e) => err(500, &format!("failed to reset latency profiler: {e}")),
         },
+        ("GET", "/api/screen/tuning") => {
+            let rep = node.screen_tuning_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/tuning") => {
+            #[derive(serde::Deserialize)]
+            struct TuningBody {
+                mode: Option<String>,
+                tuner_mode: Option<String>,
+                reset: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TuningBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.clone().or_else(|| b.tuner_mode.clone()))
+                .or_else(|| qmap.get("mode").cloned())
+                .or_else(|| qmap.get("tuner_mode").cloned());
+
+            let reset_flag = parsed_body
+                .as_ref()
+                .and_then(|b| b.reset)
+                .or_else(|| qmap.get("reset").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(false);
+
+            if let Some(m_str) = mode_str {
+                match m_str.parse::<tetherly_core::ScreenTunerMode>() {
+                    Ok(mode) => {
+                        let _ = node.screen_set_tuning_mode(mode).await;
+                    }
+                    Err(_) => {
+                        return err(
+                            400,
+                            "invalid tuning mode: expected disabled, standard, or aggressive",
+                        );
+                    }
+                }
+            }
+
+            if reset_flag {
+                match node.screen_reset_tuning().await {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(500, &format!("failed to reset autonomous tuning: {e}")),
+                }
+            } else {
+                json_ok(&node.screen_tuning_report())
+            }
+        }
+        ("POST", "/api/screen/tuning/reset") => match node.screen_reset_tuning().await {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(500, &format!("failed to reset autonomous tuning: {e}")),
+        },
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -8707,6 +8763,7 @@ mod tests {
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
             screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
+            screen_tuning_mode: tetherly_core::ScreenTunerMode::Standard,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
@@ -10629,6 +10686,75 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/screen/latency HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_tuning_endpoints() {
+        let (node, dir) = temp_test_node("screen_tuning");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/tuning default (standard mode, no actions)
+        let (code, body) = loopback_get(port, "/api/screen/tuning").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["mode"], "standard");
+        assert_eq!(rep["actions_applied"], 0);
+        assert_eq!(rep["recoveries_applied"], 0);
+        assert_eq!(rep["last_action"], "hold");
+
+        // 2. POST /api/screen/tuning with JSON body {"mode": "aggressive"}
+        let tune_req = serde_json::json!({
+            "mode": "aggressive"
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tuning",
+            &serde_json::to_vec(&tune_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["mode"], "aggressive");
+
+        // 3. POST /api/screen/tuning with query string ?mode=disabled
+        let (code, body) = loopback_post(port, "/api/screen/tuning?mode=disabled", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["mode"], "disabled");
+
+        // 4. POST /api/screen/tuning/reset
+        let (code, body) = loopback_post(port, "/api/screen/tuning/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["actions_applied"], 0);
+
+        // 5. POST /api/screen/tuning with invalid mode returns 400
+        let (code, _) = loopback_post(port, "/api/screen/tuning?mode=invalid_xyz", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+
+        // 6. Host header 403 test on /api/screen/tuning
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/tuning HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();

@@ -98,6 +98,7 @@ fn cfg(dir: PathBuf, name: &str, overlay: OverlayConfig) -> NodeConfig {
         screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
         screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
         screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
+        screen_tuning_mode: tetherly_core::ScreenTunerMode::Standard,
         screen_display_id: 0,
         screen_sink: None,
         input_sink: None,
