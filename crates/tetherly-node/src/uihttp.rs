@@ -4749,6 +4749,63 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 Err(e) => err(500, &format!("failed to disable screen privacy mode: {e}")),
             }
         }
+        // Microsecond end-to-end latency profiler & performance telemetry (ADR-099).
+        ("GET", "/api/screen/latency") => {
+            let rep = node.screen_latency_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/latency") => {
+            #[derive(serde::Deserialize)]
+            struct LatencyBody {
+                mode: Option<String>,
+                profiler_mode: Option<String>,
+                reset: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<LatencyBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.clone().or_else(|| b.profiler_mode.clone()))
+                .or_else(|| qmap.get("mode").cloned())
+                .or_else(|| qmap.get("profiler_mode").cloned());
+
+            let reset_flag = parsed_body
+                .as_ref()
+                .and_then(|b| b.reset)
+                .or_else(|| qmap.get("reset").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(false);
+
+            if let Some(m_str) = mode_str {
+                match m_str.parse::<tetherly_core::ScreenProfilerMode>() {
+                    Ok(mode) => {
+                        let _ = node.screen_set_latency_mode(mode);
+                    }
+                    Err(_) => {
+                        return err(
+                            400,
+                            "invalid latency profiler mode: expected auto, detailed, or disabled",
+                        );
+                    }
+                }
+            }
+
+            if reset_flag {
+                match node.screen_reset_latency().await {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(500, &format!("failed to reset latency profiler: {e}")),
+                }
+            } else {
+                json_ok(&node.screen_latency_report())
+            }
+        }
+        ("POST", "/api/screen/latency/reset") => match node.screen_reset_latency().await {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(500, &format!("failed to reset latency profiler: {e}")),
+        },
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -8649,6 +8706,7 @@ mod tests {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
@@ -10505,6 +10563,72 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/screen/privacy HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_latency_endpoints() {
+        let (node, dir) = temp_test_node("screen_latency");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/latency default
+        let (code, body) = loopback_get(port, "/api/screen/latency").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["mode"], "auto");
+        assert_eq!(rep["frames_profiled"], 0);
+
+        // 2. POST /api/screen/latency with JSON body {"mode": "detailed"}
+        let lat_req = serde_json::json!({
+            "mode": "detailed"
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/latency",
+            &serde_json::to_vec(&lat_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["mode"], "detailed");
+
+        // 3. POST /api/screen/latency with query string ?mode=disabled
+        let (code, body) = loopback_post(port, "/api/screen/latency?mode=disabled", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["mode"], "disabled");
+
+        // 4. POST /api/screen/latency/reset
+        let (code, body) = loopback_post(port, "/api/screen/latency/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+
+        // 5. POST /api/screen/latency with invalid mode returns 400
+        let (code, _) = loopback_post(port, "/api/screen/latency?mode=invalid_xyz", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+
+        // 6. Host header 403 test on /api/screen/latency
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/latency HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();

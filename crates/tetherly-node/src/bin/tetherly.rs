@@ -134,6 +134,10 @@ enum Cmd {
         /// `auto` (default, ±15ms skew tolerance); `strict` (±5ms tolerance); `loose` (±40ms tolerance); `disabled`.
         #[arg(long, default_value = "auto")]
         screen_sync: String,
+        /// Screen Streaming Microsecond Multi-Stage Latency Profiler mode (ADR-099):
+        /// `auto` (default, periodic EWMA and percentiles); `detailed` (per-frame stage timings); `disabled`.
+        #[arg(long, default_value = "auto")]
+        screen_latency: String,
         /// Initial display ID for screen capture (ADR-097). Defaults to 0 (Primary).
         #[arg(long, default_value = "0")]
         screen_display: u8,
@@ -2277,6 +2281,56 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming microsecond latency breakdown, profiler mode & stage telemetry (v2.13 / ADR-099).
+    Latency {
+        #[command(subcommand)]
+        action: Option<ScreenLatencySubCmd>,
+        /// Configure profiler mode: 'auto', 'always', or 'disabled'.
+        #[arg(long)]
+        mode: Option<String>,
+        /// Reset profiler telemetry history and ring buffer counters.
+        #[arg(long)]
+        reset: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenLatencySubCmd {
+    /// Show current screen latency breakdown, EWMA microsecond stages, percentiles and dominant bottleneck.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Set profiler mode ('auto', 'always', 'disabled').
+    Set {
+        /// Profiler mode: auto, always, disabled.
+        mode: String,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset latency profiler metrics, EWMA state, and ring buffer percentiles.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -4116,6 +4170,7 @@ async fn main() -> Result<()> {
             screen_twcc,
             screen_probe,
             screen_sync,
+            screen_latency,
             screen_display,
             file_port,
             input_port,
@@ -4278,6 +4333,15 @@ async fn main() -> Result<()> {
                 Ok(mode) => mode,
                 Err(_) => {
                     anyhow::bail!("--screen-sync must be `auto`, `strict`, `loose`, or `disabled`")
+                }
+            };
+            cfg.screen_latency_mode = match screen_latency
+                .trim()
+                .parse::<tetherly_core::ScreenProfilerMode>()
+            {
+                Ok(mode) => mode,
+                Err(_) => {
+                    anyhow::bail!("--screen-latency must be `auto`, `detailed`, or `disabled`")
                 }
             };
             cfg.screen_display_id = screen_display;
@@ -6515,6 +6579,16 @@ async fn main() -> Result<()> {
                             rep.active_display_id, rep.display_count, rep.display_switches_count
                         );
                     }
+                    if !rep.latency_mode.is_empty() {
+                        println!(
+                            "  Latency:      {} [bottleneck: {}] (total: {:.2} ms, P95: {:.2} ms, frames: {})",
+                            rep.latency_mode,
+                            rep.latency_bottleneck,
+                            rep.latency_total_e2e_us as f64 / 1_000.0,
+                            rep.latency_p95_e2e_us as f64 / 1_000.0,
+                            rep.latency_frames_profiled
+                        );
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -7599,6 +7673,110 @@ async fn main() -> Result<()> {
                         if rep.last_change_us > 0 {
                             println!("  Last Change (us):     {}", rep.last_change_us);
                         }
+                    }
+                }
+            }
+            ScreenCmd::Latency {
+                action,
+                mode,
+                reset,
+                json,
+                ui_port,
+            } => {
+                let (target_mode, target_reset, is_json, port) = match action {
+                    Some(ScreenLatencySubCmd::Set {
+                        mode: m,
+                        json: j,
+                        ui_port: p,
+                    }) => (Some(m), false, j || json, p),
+                    Some(ScreenLatencySubCmd::Reset {
+                        json: j,
+                        ui_port: p,
+                    }) => (None, true, j || json, p),
+                    Some(ScreenLatencySubCmd::Status {
+                        json: j,
+                        ui_port: p,
+                    }) => (None, false, j || json, p),
+                    None => (mode, reset, json, ui_port),
+                };
+
+                if target_reset && target_mode.is_none() {
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/latency/reset", &[])
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen latency reset failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: tetherly_core::ScreenLatencyReport = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen latency profiler statistics and ring buffer reset successfully.");
+                        print_screen_latency_report(&rep);
+                    }
+                } else if target_mode.is_some() || target_reset {
+                    let mut body_map = serde_json::Map::new();
+                    if let Some(m) = target_mode {
+                        body_map.insert("mode".into(), serde_json::json!(m));
+                    }
+                    if target_reset {
+                        body_map.insert("reset".into(), serde_json::json!(true));
+                    }
+                    let body = serde_json::to_vec(&body_map)?;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/latency", &body)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen latency configuration failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: tetherly_core::ScreenLatencyReport = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen latency profiler mode updated: {}", rep.mode);
+                        print_screen_latency_report(&rep);
+                    }
+                } else {
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/latency")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen latency query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: tetherly_core::ScreenLatencyReport = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_latency_report(&rep);
                     }
                 }
             }
@@ -19026,4 +19204,134 @@ fn print_recommendation_value(rep: &serde_json::Value, rec: &serde_json::Value) 
             m["codec"].as_str().unwrap_or("-")
         );
     }
+}
+
+fn print_screen_latency_report(rep: &tetherly_core::ScreenLatencyReport) {
+    println!("Screen End-to-End Microsecond Latency Breakdown & Multi-Stage Profiler (ADR-099):");
+    println!("  Profiler Mode:        {}", rep.mode);
+    println!("  Dominant Bottleneck:  {}", rep.bottleneck);
+    println!("  Frames Profiled:      {}", rep.frames_profiled);
+    if rep.frames_profiled == 0 {
+        println!("  (No telemetry frames profiled yet; start an active screen streaming session to collect latency breakdown)");
+        return;
+    }
+    println!("  Latest Frame Seq:     #{}", rep.current.frame_seq);
+    let b = &rep.current;
+    println!("  Stage Breakdown (Latest Frame):");
+    println!(
+        "    Capture (OS):       {:>6.2} ms ({:>7} us)",
+        b.capture_us as f64 / 1000.0,
+        b.capture_us
+    );
+    println!(
+        "    Encode (Codec):     {:>6.2} ms ({:>7} us)",
+        b.encode_us as f64 / 1000.0,
+        b.encode_us
+    );
+    println!(
+        "    Pacer (Outbound):   {:>6.2} ms ({:>7} us)",
+        b.pacer_us as f64 / 1000.0,
+        b.pacer_us
+    );
+    println!(
+        "    Network (Transit):  {:>6.2} ms ({:>7} us)",
+        b.network_us as f64 / 1000.0,
+        b.network_us
+    );
+    println!(
+        "    Jitter (Playout):   {:>6.2} ms ({:>7} us)",
+        b.jitter_us as f64 / 1000.0,
+        b.jitter_us
+    );
+    println!(
+        "    Decode (Receiver):  {:>6.2} ms ({:>7} us)",
+        b.decode_us as f64 / 1000.0,
+        b.decode_us
+    );
+    println!(
+        "    Render (Display):   {:>6.2} ms ({:>7} us)",
+        b.render_us as f64 / 1000.0,
+        b.render_us
+    );
+    println!(
+        "    Total End-to-End:   {:>6.2} ms ({:>7} us)",
+        b.total_e2e_us as f64 / 1000.0,
+        b.total_e2e_us
+    );
+
+    let tot = if b.total_e2e_us > 0 {
+        b.total_e2e_us as f64
+    } else {
+        1.0
+    };
+    let tag = |stage: &str| {
+        if rep.bottleneck.eq_ignore_ascii_case(stage) {
+            " [BOTTLENECK]"
+        } else {
+            ""
+        }
+    };
+    println!("  Stage Distribution (%):");
+    println!(
+        "    Capture:            {:>5.1}%{}",
+        (b.capture_us as f64 / tot) * 100.0,
+        tag("capture")
+    );
+    println!(
+        "    Encode:             {:>5.1}%{}",
+        (b.encode_us as f64 / tot) * 100.0,
+        tag("encode")
+    );
+    println!(
+        "    Pacer:              {:>5.1}%{}",
+        (b.pacer_us as f64 / tot) * 100.0,
+        tag("pacer")
+    );
+    println!(
+        "    Network:            {:>5.1}%{}",
+        (b.network_us as f64 / tot) * 100.0,
+        tag("network")
+    );
+    println!(
+        "    Jitter:             {:>5.1}%{}",
+        (b.jitter_us as f64 / tot) * 100.0,
+        tag("jitter")
+    );
+    println!(
+        "    Decode:             {:>5.1}%{}",
+        (b.decode_us as f64 / tot) * 100.0,
+        tag("decode")
+    );
+    println!(
+        "    Render:             {:>5.1}%{}",
+        (b.render_us as f64 / tot) * 100.0,
+        tag("render")
+    );
+
+    println!("  Latency Distribution (Total E2E):");
+    println!(
+        "    EWMA (Smoothed):    {:>6.2} ms ({:>7} us)",
+        rep.avg_e2e_us as f64 / 1000.0,
+        rep.avg_e2e_us
+    );
+    println!(
+        "    P50 (Median):       {:>6.2} ms ({:>7} us)",
+        rep.p50_e2e_us as f64 / 1000.0,
+        rep.p50_e2e_us
+    );
+    println!(
+        "    P90:                {:>6.2} ms ({:>7} us)",
+        rep.p90_e2e_us as f64 / 1000.0,
+        rep.p90_e2e_us
+    );
+    println!(
+        "    P95:                {:>6.2} ms ({:>7} us)",
+        rep.p95_e2e_us as f64 / 1000.0,
+        rep.p95_e2e_us
+    );
+    println!(
+        "    P99:                {:>6.2} ms ({:>7} us)",
+        rep.p99_e2e_us as f64 / 1000.0,
+        rep.p99_e2e_us
+    );
 }

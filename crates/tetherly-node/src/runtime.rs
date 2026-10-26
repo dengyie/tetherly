@@ -60,19 +60,21 @@ use tetherly_core::{
     MicDetachFrame, MicMode, MicRole, MicValidator, NotificationPayload, NotificationUrgency,
     Notifier, NotifyHub, OpenAllowlist, PathKind, PlaybackState, PowerSource, ReplyView,
     ResourceHandoffValidator, ScreenAssembler, ScreenAudioSyncFrame, ScreenAudioSyncMode,
-    ScreenAudioSyncReport, ScreenAudioSyncStats, ScreenCodec, ScreenCursorMode, ScreenCursorStats,
-    ScreenCursorUpdate, ScreenDamageTracker, ScreenFecMode, ScreenFecReport, ScreenFecShard,
-    ScreenFrame, ScreenHarqMode, ScreenHarqReport, ScreenNack, ScreenPacerMode, ScreenPacerReport,
+    ScreenAudioSyncReport, ScreenAudioSyncStats, ScreenBottleneckStage, ScreenCodec,
+    ScreenCursorMode, ScreenCursorStats, ScreenCursorUpdate, ScreenDamageTracker, ScreenFecMode,
+    ScreenFecReport, ScreenFecShard, ScreenFrame, ScreenHarqMode, ScreenHarqReport,
+    ScreenLatencyBreakdown, ScreenLatencyReport, ScreenNack, ScreenPacerMode, ScreenPacerReport,
     ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats, ScreenProbeMode, ScreenProbePacket,
-    ScreenProbeReport, ScreenProbeState, ScreenProbeStats, ScreenReceiver, ScreenSender,
-    ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState, ScreenStats, ScreenTrendlineMode,
-    ScreenTrendlineReport, ScreenTwccFeedback, ScreenTwccMode, ScreenTwccReport, ScreenTwccStats,
-    SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
-    TrustStore, VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
-    VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
-    VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
-    DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS, TYPE_SCREEN_FEC, TYPE_SCREEN_NACK,
-    TYPE_SCREEN_PROBE, TYPE_SCREEN_SYNC, TYPE_SCREEN_TWCC,
+    ScreenProbeReport, ScreenProbeState, ScreenProbeStats, ScreenProfileFrame, ScreenProfilerMode,
+    ScreenReceiver, ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState,
+    ScreenStats, ScreenTrendlineMode, ScreenTrendlineReport, ScreenTwccFeedback, ScreenTwccMode,
+    ScreenTwccReport, ScreenTwccStats, SensitiveContentGuard, TcpLimiter, TopologyStateFrame,
+    TopologySyncReqFrame, TopologyValidator, TrustStore, VirtualDisplayAnnounceFrame,
+    VirtualDisplayAttachFrame, VirtualDisplayCodec, VirtualDisplayDetachFrame,
+    VirtualDisplayFrameAck, VirtualDisplayMode, VirtualDisplayPixelFormat, VirtualDisplayRole,
+    VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS, DEFAULT_LOCATE_DURATION_SECS,
+    OVERLAY_PROBE_MS, TYPE_SCREEN_FEC, TYPE_SCREEN_NACK, TYPE_SCREEN_PROBE, TYPE_SCREEN_PROFILE,
+    TYPE_SCREEN_SYNC, TYPE_SCREEN_TWCC,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -184,6 +186,8 @@ pub struct NodeConfig {
     pub screen_probe_mode: tetherly_core::ScreenProbeMode,
     /// Operation mode for screen and audio playout lip-sync & clock synchronization pipeline (ADR-096).
     pub screen_sync_mode: tetherly_core::ScreenAudioSyncMode,
+    /// Operation mode for microsecond-precision multi-stage latency profiler & telemetry (ADR-099).
+    pub screen_latency_mode: tetherly_core::ScreenProfilerMode,
     /// Initial active display ID for screen capture (ADR-097). Defaults to 0 (Primary).
     pub screen_display_id: u8,
     /// Screen presentation sink. `None` defaults to the in-memory observer;
@@ -249,6 +253,7 @@ impl Default for NodeConfig {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
@@ -3042,6 +3047,16 @@ pub struct ScreenStatusReport {
     pub privacy_input_locked: bool,
     #[serde(default)]
     pub privacy_blanking_method: String,
+    #[serde(default)]
+    pub latency_mode: String,
+    #[serde(default)]
+    pub latency_bottleneck: String,
+    #[serde(default)]
+    pub latency_total_e2e_us: u64,
+    #[serde(default)]
+    pub latency_p95_e2e_us: u64,
+    #[serde(default)]
+    pub latency_frames_profiled: u64,
 }
 
 /// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
@@ -3417,6 +3432,9 @@ struct Shared {
     /// Audio-video playout lip-sync and clock drift synchronization mode (ADR-096).
     screen_sync_mode: Mutex<ScreenAudioSyncMode>,
     screen_sync_stats: Mutex<ScreenAudioSyncStats>,
+    /// Microsecond-precision multi-stage latency profiler mode (ADR-099).
+    screen_latency_mode: Mutex<ScreenProfilerMode>,
+    screen_latency_stats: Mutex<ScreenLatencyReport>,
     /// Active display ID for screen capture (ADR-097). Defaults to 0 (Primary).
     screen_active_display_id: AtomicU8,
     /// Known displays available on this host (ADR-097).
@@ -3637,6 +3655,7 @@ impl Node {
         let screen_twcc_mode = cfg.screen_twcc_mode;
         let screen_probe_mode = cfg.screen_probe_mode;
         let screen_sync_mode = cfg.screen_sync_mode;
+        let screen_latency_mode = cfg.screen_latency_mode;
         if let Some(sel) = &screen_encode_codec {
             sel.set_fps(screen_fps);
             sel.set_scale_pct(screen_scale_pct);
@@ -3789,6 +3808,7 @@ impl Node {
                 s.set_twcc_mode(screen_twcc_mode);
                 s.set_probe_mode(screen_probe_mode);
                 s.set_sync_mode(screen_sync_mode);
+                s.set_latency_mode(screen_latency_mode);
                 s.set_displays(initial_displays.clone());
                 if initial_display_id != 0 {
                     let _ = s.switch_display(initial_display_id, 0);
@@ -3849,6 +3869,11 @@ impl Node {
             screen_sync_mode: Mutex::new(screen_sync_mode),
             screen_sync_stats: Mutex::new(ScreenAudioSyncStats {
                 mode: screen_sync_mode,
+                ..Default::default()
+            }),
+            screen_latency_mode: Mutex::new(screen_latency_mode),
+            screen_latency_stats: Mutex::new(ScreenLatencyReport {
+                mode: screen_latency_mode.as_str().to_string(),
                 ..Default::default()
             }),
             screen_active_display_id: AtomicU8::new(initial_display_id),
@@ -20461,6 +20486,19 @@ impl Node {
                                     }
                                     continue;
                                 }
+                                if frame.ty == TYPE_SCREEN_PROFILE {
+                                    if let Ok(profile) = ScreenProfileFrame::decode(&frame.payload) {
+                                        let mut engine = node
+                                            .shared
+                                            .screen_engine
+                                            .lock()
+                                            .expect("screen");
+                                        engine.on_profile_frame(&profile);
+                                        *node.shared.screen_latency_stats.lock().expect("latency stats") =
+                                            engine.latency_report();
+                                    }
+                                    continue;
+                                }
                                 if frame.ty == TYPE_SCREEN_TWCC {
                                     if let Ok(feedback) = ScreenTwccFeedback::decode(&frame.payload) {
                                         let now_us = node.shared.clock.unix_us();
@@ -20633,12 +20671,18 @@ impl Node {
         let initial_twcc_mode = *self.shared.screen_twcc_mode.lock().expect("twcc mode");
         let initial_probe_mode = *self.shared.screen_probe_mode.lock().expect("probe mode");
         let initial_sync_mode = *self.shared.screen_sync_mode.lock().expect("sync mode");
+        let initial_latency_mode = *self
+            .shared
+            .screen_latency_mode
+            .lock()
+            .expect("latency mode");
         let mut receiver = ScreenReceiver::with_playout_mode(initial_playout_mode);
         receiver.set_cursor_mode(initial_cursor_mode);
         receiver.set_harq_mode(initial_harq_mode);
         receiver.set_twcc_mode(initial_twcc_mode);
         receiver.set_probe_mode(initial_probe_mode);
         receiver.set_sync_mode(initial_sync_mode);
+        receiver.set_latency_mode(initial_latency_mode);
         let mut assembler = ScreenAssembler::new();
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
@@ -20675,6 +20719,10 @@ impl Node {
                         let target_sync_mode = *node.shared.screen_sync_mode.lock().expect("sync mode");
                         if receiver.sync_mode() != target_sync_mode {
                             receiver.set_sync_mode(target_sync_mode);
+                        }
+                        let target_latency_mode = *node.shared.screen_latency_mode.lock().expect("latency mode");
+                        if receiver.latency_mode() != target_latency_mode {
+                            receiver.set_latency_mode(target_latency_mode);
                         }
                         let now_us = node.shared.clock.unix_us();
                         if let Some(twcc_fb) = receiver.generate_twcc_feedback(now_us) {
@@ -20751,6 +20799,14 @@ impl Node {
                                         *node.shared.screen_sync_stats.lock().expect("sync stats") = receiver.sync_stats();
                                         *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
                                         *node.shared.screen_playout_stats.lock().expect("playout stats") = receiver.playout_stats();
+                                    }
+                                    continue;
+                                }
+                                if frame.ty == TYPE_SCREEN_PROFILE {
+                                    if let Ok(profile) = ScreenProfileFrame::decode(&frame.payload) {
+                                        receiver.on_profile_frame(&profile);
+                                        *node.shared.screen_latency_stats.lock().expect("latency stats") = receiver.latency_report();
+                                        *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
                                     }
                                     continue;
                                 }
@@ -21581,6 +21637,7 @@ impl Node {
         let probe_mode = *self.shared.screen_probe_mode.lock().expect("probe mode");
         let probe_report = self.screen_probe_report();
         let sync_report = self.screen_sync_report();
+        let latency_report = self.screen_latency_report();
         ScreenStatusReport {
             ok: true,
             state: state.as_str().to_string(),
@@ -21681,6 +21738,11 @@ impl Node {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
+            latency_mode: latency_report.mode,
+            latency_bottleneck: latency_report.bottleneck,
+            latency_total_e2e_us: latency_report.current.total_e2e_us,
+            latency_p95_e2e_us: latency_report.p95_e2e_us,
+            latency_frames_profiled: latency_report.frames_profiled,
         }
     }
 
@@ -22797,6 +22859,119 @@ impl Node {
         Ok(self.screen_privacy_report())
     }
 
+    /// Report microsecond end-to-end screen streaming latency breakdown & multi-stage statistics (v2.13 / ADR-099).
+    pub fn screen_latency_report(&self) -> ScreenLatencyReport {
+        let mode = *self
+            .shared
+            .screen_latency_mode
+            .lock()
+            .expect("latency mode");
+        let sender_rep = self
+            .shared
+            .screen_engine
+            .lock()
+            .map(|e| e.latency_report())
+            .unwrap_or_else(|_| ScreenLatencyReport {
+                mode: mode.as_str().to_string(),
+                ..Default::default()
+            });
+        let rx_stats = *self.shared.screen_rx_stats.lock().expect("screen rx");
+        let local_latency_stats = self
+            .shared
+            .screen_latency_stats
+            .lock()
+            .expect("latency stats")
+            .clone();
+
+        if sender_rep.frames_profiled > 0 {
+            sender_rep
+        } else if local_latency_stats.frames_profiled > 0 {
+            local_latency_stats
+        } else if rx_stats.latency_frames_profiled > 0 {
+            ScreenLatencyReport {
+                ok: true,
+                mode: mode.as_str().to_string(),
+                frames_profiled: rx_stats.latency_frames_profiled,
+                bottleneck: ScreenBottleneckStage::from_tag(rx_stats.latency_bottleneck)
+                    .as_str()
+                    .to_string(),
+                current: ScreenLatencyBreakdown {
+                    frame_seq: rx_stats.latency_frames_profiled,
+                    total_e2e_us: rx_stats.latency_total_e2e_us,
+                    ..Default::default()
+                },
+                avg_e2e_us: rx_stats.latency_total_e2e_us,
+                p50_e2e_us: rx_stats.latency_total_e2e_us,
+                p90_e2e_us: rx_stats.latency_p95_e2e_us,
+                p95_e2e_us: rx_stats.latency_p95_e2e_us,
+                p99_e2e_us: rx_stats.latency_p95_e2e_us,
+                min_e2e_us: rx_stats.latency_total_e2e_us,
+                max_e2e_us: rx_stats.latency_p95_e2e_us,
+                avg_capture_us: 0,
+                avg_encode_us: 0,
+                avg_pacer_us: 0,
+                avg_network_us: 0,
+                avg_jitter_us: 0,
+                avg_decode_us: 0,
+                avg_render_us: 0,
+            }
+        } else {
+            ScreenLatencyReport {
+                ok: true,
+                mode: mode.as_str().to_string(),
+                ..Default::default()
+            }
+        }
+    }
+
+    /// Return current screen latency profiler mode (v2.13 / ADR-099).
+    pub fn screen_latency_mode(&self) -> tetherly_core::ScreenProfilerMode {
+        *self
+            .shared
+            .screen_latency_mode
+            .lock()
+            .expect("latency mode")
+    }
+
+    /// Dynamically configure screen latency profiler mode (v2.13 / ADR-099).
+    pub fn screen_set_latency_mode(
+        &self,
+        mode: tetherly_core::ScreenProfilerMode,
+    ) -> ScreenLatencyReport {
+        *self
+            .shared
+            .screen_latency_mode
+            .lock()
+            .expect("latency mode") = mode;
+        if let Ok(mut engine) = self.shared.screen_engine.lock() {
+            engine.set_latency_mode(mode);
+        }
+        self.screen_latency_report()
+    }
+
+    /// Reset screen streaming latency profiler stats and ring buffer (v2.13 / ADR-099).
+    /// If connected as visitor/controller, sends ControlMsg::ResetLatencyProfile over wire.
+    /// If host or standalone, resets local engine profiler.
+    pub async fn screen_reset_latency(&self) -> Result<ScreenLatencyReport, CoreError> {
+        let ctl_opt = self.shared.screen_ctl.lock().await.clone();
+        if let Some(ctl) = ctl_opt {
+            let msg = ControlMsg::ResetLatencyProfile;
+            if ctl.send(msg).await.is_err() {
+                return Err(CoreError::NoConnectedPeer);
+            }
+        }
+        let report = {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            engine.reset_latency()
+        };
+        *self
+            .shared
+            .screen_latency_stats
+            .lock()
+            .expect("latency stats") = report;
+        Ok(self.screen_latency_report())
+    }
+
     /// Comprehensive status report for input sharing.
     pub async fn input_status_report(&self) -> InputStatusReport {
         let channel_open = self.input_channel_open().await;
@@ -23542,6 +23717,7 @@ mod clipboard_policy_tests {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
@@ -23699,6 +23875,7 @@ mod handoff_engine_tests {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
@@ -23887,6 +24064,7 @@ mod media_policy_tests {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
@@ -24095,6 +24273,7 @@ mod locator_policy_tests {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,
@@ -24239,6 +24418,7 @@ mod locator_policy_tests {
             screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
             screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
             screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
             screen_display_id: 0,
             screen_sink: None,
             input_sink: None,

@@ -3,12 +3,36 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.12** |
+| 文档版本 | **2.13** |
 | 日期 | 2026-10-27 |
-| 状态 | **v2.12 屏幕串流隐私模式、物理显示黑屏遮罩与宿主机物理键鼠锁定安全防护流水线（Screen Streaming Privacy Mode, Display Blanking & Host Input Lockout Security Pipeline, ADR-098）与双端 CLI 全同构**——(1) **协议与控制信令设计**（`crates/tetherly-core/src/screen.rs`）：扩展 14 字节定长屏幕控制信令（`TYPE_SCREEN_CONTROL = 0x0502`），引入 Envelope Tag = 5 专用安全信令 `ControlMsg::SetPrivacyMode { enabled: bool, lock_input: bool }`；定义 `ScreenPrivacyReport`（包含 `ok`、`enabled`、`lock_input`、`blanking_method`、`last_change_us`）；(2) **状态机协同与故障安全断连恢复**（`crates/tetherly-core/src/screen.rs`）：`ScreenReceiver` 与 `ScreenSender` 维护隐私状态与遮罩模式，在 `on_peer_gone()`、连接中断及会话退出时原子执行故障安全恢复（Fail-Safe Disconnect Recovery），强制清零黑屏与键鼠锁定状态，绝不造成物理宿主机死锁；(3) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：`NodeShared` 维护原子布尔与方法状态，在 `attach_screen_server` 控制循环中监听对端 `ControlMsg::SetPrivacyMode` 信令并实时生效；新增 REST API `GET /api/screen/privacy`、`POST /api/screen/privacy`、`POST /api/screen/privacy/enable` 与 `POST /api/screen/privacy/disable`，扩展 `ScreenStatusReport` 包含 `privacy_enabled`、`privacy_input_locked`、`privacy_blanking_method` 字段；(4) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen privacy`、`screen privacy enable [--lock-input]`、`screen privacy disable`、`screen privacy status`、`--json` 序列化与 `screen status` 状态监控；(5) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_22_screen_privacy_mode_and_input_lockout_pipeline` 全绿，版本升级至 `0.1.34`。 |
+| 状态 | **v2.13 屏幕串流微秒级端到端延迟拆解、多阶段逐帧分析器与性能遥测流水线（Screen Streaming Microsecond End-to-End Latency Breakdown, Multi-Stage Frame Profiler & Performance Telemetry Pipeline, ADR-099）与双端 CLI 全同构**——(1) **协议与剖析信封设计**（`crates/tetherly-core/src/screen.rs`）：引入 56 字节专用定长线协议信封 `TYPE_SCREEN_PROFILE = 0x0509`（`magic: [u8; 5] = *b"TPROF"`, `proto: u8 = 0x01`），承载 7 阶段微秒耗时（`capture_us`, `encode_us`, `pacer_us`, `network_us`, `jitter_us`, `decode_us`, `render_us`, `total_e2e_us`）；扩展 14 字节定长屏幕控制信令（`TYPE_SCREEN_CONTROL = 0x0502`），引入 Tag = 6 专用重置信令 `ControlMsg::ResetLatencyProfile`；定义 `ScreenLatencyBreakdown`、`ScreenFrameProfiler`、`ScreenLatencyReport`、`ScreenProfilerMode` 与 `ScreenBottleneckStage`；(2) **状态机协同与瓶颈自动识别**（`crates/tetherly-core/src/screen.rs`）：`ScreenReceiver` 与 `ScreenSender` 维护延迟剖析状态，支持 `Auto`、`Detailed`、`Disabled` 模式；实现主导瓶颈阶段判定准则（单阶段耗时占比 $\ge 35\%$ 时自动判定，低于阈值时判定为 `Balanced`）；建立 EWMA 指数移动加权平均（$\alpha = 0.15$）与 1024 样本环形缓冲区分位数统计（P50、P90、P95、P99、Min、Max）；(3) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：`NodeShared` 维护原子模式变量并在 `attach_screen_server` / `attach_screen_client` 中无缝收发解析 `TYPE_SCREEN_PROFILE` 与 `ControlMsg::ResetLatencyProfile`；新增 REST API `GET /api/screen/latency`、`POST /api/screen/latency` 与 `POST /api/screen/latency/reset`，扩展 `ScreenStatusReport` 包含 `latency_mode`、`latency_bottleneck`、`latency_total_e2e_us`、`latency_p95_e2e_us`、`latency_frames_profiled`；(4) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen latency`、`screen latency status`、`screen latency set <mode>`、`screen latency reset`、`--mode`、`--reset`、`--json` 序列化与 `screen status` 状态监控；(5) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_23_screen_microsecond_latency_breakdown_and_multi_stage_profiler_pipeline` 全绿，版本升级至 `0.1.35`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.13 相对 2.12(屏幕串流微秒级端到端延迟拆解、多阶段逐帧分析器与性能遥测流水线 ADR-099 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **全链路延迟黑盒消除与微秒级归因**: 实时远程控制对交互延迟高度敏感。过去系统仅能粗略观测双向往返时延（RTT）或发端帧间隔，当用户感知卡顿或延迟增大时，无法区分瓶颈发生在抓屏捕获（Capture）、编码压缩（Encode）、出站起搏（Pacer）、网络传输（Network）、抖动排队（Jitter）、解码还原（Decode）还是显卡呈现（Render）。
+  2. **精准靶向自适应调优与瓶颈自适应检测**: 4D 全自主调度矩阵（ADR-086）、自适应起搏整形（ADR-091）与 TWCC 拥塞控制（ADR-094）需要精确到微秒级的阶段耗时数据反馈，当某一阶段耗时占比显著超标（$\ge 35\%$）时，必须自动识别出当前系统的主导瓶颈阶段（`Capture`、`Encode`、`Pacer`、`Network`、`Jitter`、`Decode`、`Render` 或 `Balanced`）。
+  3. **双向信令协同、线协议剖析信封与双端 CLI 100% 同构**: 设计仅 56 字节定长的专用 `TYPE_SCREEN_PROFILE = 0x0509` 线协议信封与 14 字节控制重置信令 `ControlMsg::ResetLatencyProfile`，并通过回环 REST API、SSE 遥测事件总线与双端 CLI（`tetherly` / `tetherly-cli`）保持 100% 字节级同构。
+- **架构解法与落地**:
+  1. **Core 剖析信封、控制信令与元数据模型（`crates/tetherly-core/src/screen.rs`）**:
+     - 新增 56 字节定长二进制协议头 `ScreenProfileFrame`（`TYPE_SCREEN_PROFILE = 0x0509`），携带 7 阶段微秒耗时及总耗时。
+     - 扩展 `ControlMsg`，新增 `ControlMsg::ResetLatencyProfile`（Tag = 6，定长 14 字节控制信封）。
+     - 实现 `ScreenLatencyBreakdown`、`ScreenFrameProfiler`、`ScreenLatencyReport`、`ScreenProfilerMode` 与 `ScreenBottleneckStage`。
+     - 建立 EWMA（$\alpha = 0.15$）与 1024 样本环形缓冲区（P50、P90、P95、P99、Min、Max 计算）。
+  2. **Node 守护进程与端到端传输（`crates/tetherly-node/src/runtime.rs`）**:
+     - `NodeShared` 新增原子变量 `screen_latency_mode`。
+     - `attach_screen_server` 与 `attach_screen_client` 控制循环解析与转发 `TYPE_SCREEN_PROFILE` 与 `ControlMsg::ResetLatencyProfile` 信令，并在发端 ACK 处理时自动计算微秒级 RTT 与起搏排队耗时。
+     - 暴露 `screen_latency_report()`、`screen_latency_mode()`、`screen_set_latency_mode()` 与 `screen_reset_latency()`。
+  3. **回环 REST API（`crates/tetherly-node/src/uihttp.rs`）**:
+     - 新增 `GET /api/screen/latency`、`POST /api/screen/latency` 与 `POST /api/screen/latency/reset`。
+     - `ScreenStatusReport` 扩充 `latency_mode`、`latency_bottleneck`、`latency_total_e2e_us`、`latency_p95_e2e_us`、`latency_frames_profiled`。
+  4. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - 全同构支持 `screen latency`、`screen latency status`、`screen latency set <mode>`、`screen latency reset`、`--mode`、`--reset`、`--json` 序列化与 `screen status` 状态监控。
+  5. **测试与验证**:
+     - 核心单元测试、REST API 单元测试及 Phase 5 端到端集成测试 `m5_23_screen_microsecond_latency_breakdown_and_multi_stage_profiler_pipeline` 全绿。
 
 **2.12 相对 2.11(屏幕串流隐私模式、物理显示黑屏遮罩与宿主机物理键鼠锁定安全防护流水线 ADR-098 与双端 CLI 全同构)**
 
@@ -5726,6 +5750,41 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      - 验证非回环 Host 请求（`Host: evil.attacker.com`）拦截并返回 403 Forbidden；
      - 验证 SSE `/api/events` 实时流式推送；
      - 验证初态查询、主动连线、添加规则、删除规则、清空规则、主动断开与状态/规则事件广播全链路。
+
+## 48. 屏幕串流微秒级端到端延迟拆解、多阶段逐帧分析器与性能遥测流水线与双端 CLI 全同构 (v2.13 / ADR-099)
+
+1. **动机与设计准则（ADR-099）**：
+   - **消除端到端延迟黑盒**：实时屏幕流交互要求极致低延迟，过去仅能观测粗粒度 RTT 或发端单帧间隔，无法定位延迟突增发生在操作系统捕获（Capture）、编码器（Encode）、发包起搏（Pacer）、网络线上传输（Network）、接收端去抖动缓冲区（Jitter）、解码器（Decode）还是显卡呈现渲染（Render）；
+   - **主导瓶颈自动识别准则**：在 7 阶段微秒耗时中，当任意阶段耗时占比达到或超过总耗时的 35% 时，自动标记为主导瓶颈阶段（`Capture`、`Encode`、`Pacer`、`Network`、`Jitter`、`Decode`、`Render`），否则判定为均衡（`Balanced`）；
+   - **轻量级线协议与低开销剖析信封**：设计 56 字节定长线协议信封 `TYPE_SCREEN_PROFILE = 0x0509`（`magic: [u8; 5] = *b"TPROF"`, `proto: u8 = 0x01`），结合 14 字节定长屏幕控制信令 `ControlMsg::ResetLatencyProfile`（Tag = 6），实现高频剖析数据的高效无锁传递与跨端重置；
+   - **双端 CLI 100% 全同构与控制面闭环**：在 `tetherly` 与 `tetherly-cli` 中保持终端输出格式与 `--json` 输出完全同构。
+
+2. **核心机制与实现**：
+   - **线协议剖析信封与控制信令 (`crates/tetherly-core/src/screen.rs`)**：
+     - 定义 56 字节定长 `ScreenProfileFrame`，序列化/反序列化 `frame_seq`、`capture_us`、`encode_us`、`pacer_us`、`sender_ts_us`、`network_us`、`jitter_us`、`decode_us`、`render_us`、`total_e2e_us`；
+     - `ControlMsg::ResetLatencyProfile`（Tag = 6）融入 14 字节定长屏幕控制信封 `TYPE_SCREEN_CONTROL = 0x0502`；
+   - **逐帧分析器与统计聚合模型 (`crates/tetherly-core/src/screen.rs`)**：
+     - `ScreenLatencyBreakdown`：承载单帧 7 阶段耗时与百分比拆解；
+     - `ScreenFrameProfiler`：维护模式（`Auto`、`Detailed`、`Disabled`）、EWMA 移动平滑（$\alpha = 0.15$）、1024 样本环形缓冲区（Min、Max、P50、P90、P95、P99 分位数计算）以及瓶颈阶段判定；
+     - `ScreenLatencyReport`：对外输出结构化遥测报告；
+   - **节点运行时系统与状态集成 (`crates/tetherly-node/src/runtime.rs`)**：
+     - `NodeShared` 维护原子 `screen_latency_mode` 与 `ScreenFrameProfiler`；
+     - 发送端 `attach_screen_server` 与接收端 `attach_screen_client` 解析 `TYPE_SCREEN_PROFILE` 与 `ControlMsg::ResetLatencyProfile` 信令；
+     - 提供 `screen_latency_report()`、`screen_latency_mode()`、`screen_set_latency_mode()` 与 `screen_reset_latency()` 控制方法；
+   - **轻量级回环控制面端点 (`crates/tetherly-node/src/uihttp.rs`)**：
+     - 新增 `GET /api/screen/latency`：查询延迟剖析报告；
+     - 新增 `POST /api/screen/latency`：设置剖析模式（`auto`、`detailed`、`disabled`）；
+     - 新增 `POST /api/screen/latency/reset`：原子清零统计历史；
+     - 扩展 `ScreenStatusReport`，暴露 `latency_mode`、`latency_bottleneck`、`latency_total_e2e_us`、`latency_p95_e2e_us`、`latency_frames_profiled`；
+   - **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**：
+     - 新增 `screen latency`、`screen latency status`、`screen latency set <mode>`、`screen latency reset`；
+     - 支持 `--mode`、`--reset`、`--json` 与 `--ui-port`；
+     - 格式化终端输出：多阶段耗时柱状/百分比拆解、分位数分布（P50/P90/P95/P99）、主导瓶颈阶段高亮显示。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_latency_breakdown_and_profiler_pipeline`，验证模式解析、信封编解码、控制信令、瓶颈判定与分位数统计；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_23_screen_microsecond_latency_breakdown_and_multi_stage_profiler_pipeline`，覆盖从初始化查询、模式切换、串流多帧剖析、统计聚合、瓶颈识别到原子重置的全链路验证。
+
 
 
 

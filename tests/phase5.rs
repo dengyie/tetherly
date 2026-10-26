@@ -87,6 +87,7 @@ fn cfg(
         screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
         screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
         screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+        screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
         screen_display_id: 0,
         screen_sink: None,
         input_sink: None,
@@ -3918,6 +3919,144 @@ async fn m5_22_screen_privacy_mode_and_input_lockout_pipeline() {
         !host_priv.lock_input,
         "Fail-safe: input lockout must be released after session teardown"
     );
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_23_screen_microsecond_latency_breakdown_and_multi_stage_profiler_pipeline() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial latency profiler status check on host (defaults: auto mode, 0 frames)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/latency")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenLatencyReport = serde_json::from_slice(&b).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.mode, "auto");
+    assert_eq!(init_rep.frames_profiled, 0);
+
+    // 2. Configure latency profiler mode to 'detailed' via POST /api/screen/latency
+    let mode_req = serde_json::json!({ "mode": "detailed" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/latency",
+        &serde_json::to_vec(&mode_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let set_rep: tetherly_core::ScreenLatencyReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(set_rep.mode, "detailed");
+
+    // 3. Visitor opens screen channel, host allows, visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Send video frames from host and verify reception on visitor
+    for _ in 0..5 {
+        assert!(host.screen_send_frame().await.unwrap());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 3 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received frames");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Query latency report on visitor receiver side
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/latency")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rx_lat: tetherly_core::ScreenLatencyReport = serde_json::from_slice(&b).unwrap();
+    assert!(rx_lat.ok);
+    assert_eq!(rx_lat.mode, "auto");
+    assert!(rx_lat.frames_profiled >= 1, "frames_profiled must be >= 1");
+    assert!(rx_lat.current.frame_seq >= 1);
+    assert!(
+        rx_lat.current.decode_us > 0
+            || rx_lat.current.render_us > 0
+            || rx_lat.current.total_e2e_us > 0
+    );
+
+    // 6. Verify ScreenStatusReport contains latency telemetry
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rx_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rx_status.latency_mode, "auto");
+    assert!(rx_status.latency_frames_profiled >= 1);
+    assert!(!rx_status.latency_bottleneck.is_empty());
+
+    // 7. Test POST /api/screen/latency/reset
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/latency/reset", &[])
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenLatencyReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(reset_rep.frames_profiled, 0);
+    assert_eq!(reset_rep.bottleneck, "balanced");
+
+    // 8. Stop streaming session cleanly
+    let stop_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/stop",
+        &serde_json::to_vec(&stop_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
 
     host.shutdown();
     visitor.shutdown();
