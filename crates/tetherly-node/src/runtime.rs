@@ -3037,6 +3037,12 @@ pub struct ScreenStatusReport {
     pub display_count: usize,
     #[serde(default)]
     pub display_switches_count: u64,
+    #[serde(default)]
+    pub privacy_enabled: bool,
+    #[serde(default)]
+    pub privacy_input_locked: bool,
+    #[serde(default)]
+    pub privacy_blanking_method: String,
 }
 
 /// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
@@ -3420,6 +3426,14 @@ struct Shared {
     screen_display_switches_count: AtomicU64,
     /// Timestamp (us) of last display switch (ADR-097).
     screen_last_display_switch_us: AtomicU64,
+    /// Screen streaming privacy mode (curtain blanking) enabled flag (ADR-098).
+    screen_privacy_enabled: AtomicBool,
+    /// Screen streaming host physical input lockout enabled flag (ADR-098).
+    screen_privacy_lock_input: AtomicBool,
+    /// Screen streaming blanking method identifier (ADR-098).
+    screen_privacy_blanking_method: Mutex<String>,
+    /// Timestamp (us) of last privacy mode change (ADR-098).
+    screen_privacy_last_change_us: AtomicU64,
     /// Damage tracker for screen frames (ADR-089).
     screen_damage_tracker: Mutex<ScreenDamageTracker>,
     /// Previous frame bytes for difference detection (ADR-089).
@@ -3838,6 +3852,10 @@ impl Node {
             screen_displays: Mutex::new(initial_displays),
             screen_display_switches_count: AtomicU64::new(0),
             screen_last_display_switch_us: AtomicU64::new(0),
+            screen_privacy_enabled: AtomicBool::new(false),
+            screen_privacy_lock_input: AtomicBool::new(false),
+            screen_privacy_blanking_method: Mutex::new("virtual_overlay".to_string()),
+            screen_privacy_last_change_us: AtomicU64::new(0),
             screen_damage_tracker: Mutex::new(ScreenDamageTracker::new()),
             screen_prev_frame: Mutex::new(None),
             shutdown,
@@ -20499,6 +20517,11 @@ impl Node {
                                             node.shared.screen_last_display_switch_us.store(now_us, std::sync::atomic::Ordering::Relaxed);
                                         }
                                     }
+                                    if let ControlMsg::SetPrivacyMode { enabled, lock_input } = msg {
+                                        node.shared.screen_privacy_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+                                        node.shared.screen_privacy_lock_input.store(lock_input, std::sync::atomic::Ordering::Relaxed);
+                                        node.shared.screen_privacy_last_change_us.store(now_us, std::sync::atomic::Ordering::Relaxed);
+                                    }
                                     let (reply, dynamic_bitrate, dynamic_fps, dynamic_scale) = {
                                         let mut engine = node
                                             .shared
@@ -20557,6 +20580,12 @@ impl Node {
                 .on_peer_gone();
             *node.shared.screen_peer.lock().expect("screen_peer") = None;
             *node.shared.screen_out.lock().await = None;
+            node.shared
+                .screen_privacy_enabled
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            node.shared
+                .screen_privacy_lock_input
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             let final_state = node.screen_state();
             let final_allowed =
                 matches!(final_state, ScreenState::Allowed | ScreenState::Streaming);
@@ -20909,6 +20938,12 @@ impl Node {
                 .expect("sync stats") = receiver.sync_stats();
             *node.shared.screen_peer.lock().expect("screen_peer") = None;
             *node.shared.screen_ctl.lock().await = None;
+            node.shared
+                .screen_privacy_enabled
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            node.shared
+                .screen_privacy_lock_input
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             node.shared
                 .screen_bitrate_applied
                 .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -21625,6 +21660,9 @@ impl Node {
             active_display_id: self.shared.screen_active_display_id.load(Ordering::Relaxed),
             display_count: self.screen_displays().len(),
             display_switches_count: self.shared.screen_display_switches_count.load(Ordering::Relaxed),
+            privacy_enabled: self.shared.screen_privacy_enabled.load(Ordering::Relaxed),
+            privacy_input_locked: self.shared.screen_privacy_lock_input.load(Ordering::Relaxed),
+            privacy_blanking_method: self.shared.screen_privacy_blanking_method.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         }
     }
 
@@ -22652,6 +22690,77 @@ impl Node {
             .store(now_us, Ordering::Relaxed);
 
         Ok(self.screen_display_report())
+    }
+
+    /// Return current privacy mode and host input lockout status (v2.12 / ADR-098).
+    pub fn screen_privacy_report(&self) -> tetherly_core::ScreenPrivacyReport {
+        let enabled = self.shared.screen_privacy_enabled.load(Ordering::Relaxed);
+        let lock_input = self.shared.screen_privacy_lock_input.load(Ordering::Relaxed);
+        let blanking_method = self
+            .shared
+            .screen_privacy_blanking_method
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let last_change_us = self
+            .shared
+            .screen_privacy_last_change_us
+            .load(Ordering::Relaxed);
+        tetherly_core::ScreenPrivacyReport {
+            ok: true,
+            enabled,
+            lock_input,
+            blanking_method,
+            last_change_us,
+        }
+    }
+
+    /// Dynamically configure screen privacy mode (curtain blanking) and host physical input lockout (v2.12 / ADR-098).
+    /// If connected as visitor/controller, dispatches ControlMsg::SetPrivacyMode over wire.
+    /// If host or standalone, applies configuration directly to screen_engine.
+    pub async fn screen_set_privacy_mode(
+        &self,
+        enabled: bool,
+        lock_input: bool,
+    ) -> Result<tetherly_core::ScreenPrivacyReport, CoreError> {
+        let now_us = self.shared.clock.unix_us();
+
+        // 1. If connected as visitor/controller, send SetPrivacyMode control message across ctl channel
+        let ctl_opt = self.shared.screen_ctl.lock().await.clone();
+        if let Some(ctl) = ctl_opt {
+            let msg = ControlMsg::SetPrivacyMode { enabled, lock_input };
+            if ctl.send(msg).await.is_err() {
+                return Err(CoreError::NoConnectedPeer);
+            }
+            self.shared
+                .screen_privacy_enabled
+                .store(enabled, Ordering::Relaxed);
+            self.shared
+                .screen_privacy_lock_input
+                .store(lock_input, Ordering::Relaxed);
+            self.shared
+                .screen_privacy_last_change_us
+                .store(now_us, Ordering::Relaxed);
+            return Ok(self.screen_privacy_report());
+        }
+
+        // 2. Otherwise (host or standalone), configure engine directly
+        {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            engine.set_privacy_mode(enabled, lock_input, now_us);
+        }
+
+        self.shared
+            .screen_privacy_enabled
+            .store(enabled, Ordering::Relaxed);
+        self.shared
+            .screen_privacy_lock_input
+            .store(lock_input, Ordering::Relaxed);
+        self.shared
+            .screen_privacy_last_change_us
+            .store(now_us, Ordering::Relaxed);
+
+        Ok(self.screen_privacy_report())
     }
 
     /// Comprehensive status report for input sharing.

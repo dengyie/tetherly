@@ -159,7 +159,7 @@ pub use screen::{
     ScreenFpsPacer, ScreenFrame, ScreenHarqMode, ScreenHarqReport, ScreenHarqStats,
     ScreenMatrixCoordinator, ScreenMatrixMode, ScreenMatrixOutcome, ScreenNack, ScreenPacerMode,
     ScreenPacerReport, ScreenPacerStats, ScreenPacketPacer, ScreenPlayoutAction,
-    ScreenPlayoutBuffer, ScreenPlayoutMode, ScreenPlayoutStats, ScreenProbeCluster,
+    ScreenPlayoutBuffer, ScreenPlayoutMode, ScreenPlayoutStats, ScreenPrivacyReport, ScreenProbeCluster,
     ScreenProbeController, ScreenProbeMode, ScreenProbePacket, ScreenProbeReport, ScreenProbeState,
     ScreenProbeStats, ScreenQualityController, ScreenRateController, ScreenReceiver, ScreenRect,
     ScreenRetransmitBuffer, ScreenScaleController, ScreenSender, ScreenSquelchController,

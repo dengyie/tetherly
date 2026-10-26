@@ -633,6 +633,32 @@ pub struct ScreenDisplayReport {
     pub last_switch_us: u64,
 }
 
+/// Status report of screen privacy mode, display blanking and input lockout (v2.12 / ADR-098).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScreenPrivacyReport {
+    pub ok: bool,
+    /// Whether privacy screen blanking is currently active on the host.
+    pub enabled: bool,
+    /// Whether local physical input (keyboard/mouse) lockout is active on the host.
+    pub lock_input: bool,
+    /// Blanking implementation method ("virtual_overlay", "display_power", "driver_curtain", or "none").
+    pub blanking_method: String,
+    /// Timestamp in microseconds when privacy mode was last toggled.
+    pub last_change_us: u64,
+}
+
+impl Default for ScreenPrivacyReport {
+    fn default() -> Self {
+        Self {
+            ok: true,
+            enabled: false,
+            lock_input: false,
+            blanking_method: "virtual_overlay".to_string(),
+            last_change_us: 0,
+        }
+    }
+}
+
 /// The only legal instructions a controller may send. There is deliberately no
 /// "run" or "open" here: the screen channel carries pixels and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -650,6 +676,11 @@ pub enum ControlMsg {
     SwitchDisplay {
         display_id: u8,
     },
+    /// Viewer/controller asks sender to enable/disable privacy mode (curtain blanking) and input lockout (v2.12 / ADR-098).
+    SetPrivacyMode {
+        enabled: bool,
+        lock_input: bool,
+    },
 }
 
 /// Control payload layout: magic(4) | proto(1) | tag(1) | seq(8).
@@ -665,6 +696,7 @@ impl ControlMsg {
             ControlMsg::Ack { .. } => 2,
             ControlMsg::KeyframeRequest => 3,
             ControlMsg::SwitchDisplay { .. } => 4,
+            ControlMsg::SetPrivacyMode { .. } => 5,
         }
     }
 
@@ -677,6 +709,10 @@ impl ControlMsg {
             ControlMsg::Ack { seq } => out.extend_from_slice(&seq.to_be_bytes()),
             ControlMsg::SwitchDisplay { display_id } => {
                 out.extend_from_slice(&(*display_id as u64).to_be_bytes())
+            }
+            ControlMsg::SetPrivacyMode { enabled, lock_input } => {
+                let val: u64 = (*enabled as u64) | ((*lock_input as u64) << 8);
+                out.extend_from_slice(&val.to_be_bytes())
             }
             _ => out.extend_from_slice(&0u64.to_be_bytes()),
         }
@@ -718,6 +754,14 @@ impl ControlMsg {
             4 => Ok(ControlMsg::SwitchDisplay {
                 display_id: seq as u8,
             }),
+            5 => {
+                let enabled = (seq & 0xFF) != 0;
+                let lock_input = ((seq >> 8) & 0xFF) != 0;
+                Ok(ControlMsg::SetPrivacyMode {
+                    enabled,
+                    lock_input,
+                })
+            }
             _ => Err(CoreError::ScreenFrame),
         }
     }
@@ -1117,6 +1161,10 @@ pub struct ScreenStats {
     pub display_count: u8,
     /// Total number of dynamic display switches executed (v2.11 / ADR-097).
     pub display_switches_count: u64,
+    /// Whether screen privacy mode (curtain blanking) is active on the host (v2.12 / ADR-098).
+    pub privacy_enabled: bool,
+    /// Whether local physical input lockout is active on the host (v2.12 / ADR-098).
+    pub privacy_input_locked: bool,
 }
 
 impl Default for ScreenStats {
@@ -1194,6 +1242,8 @@ impl Default for ScreenStats {
             active_display_id: 0,
             display_count: 1,
             display_switches_count: 0,
+            privacy_enabled: false,
+            privacy_input_locked: false,
         }
     }
 }
@@ -6391,6 +6441,10 @@ pub struct ScreenSender {
     displays: Vec<ScreenDisplayInfo>,
     display_switches_count: u64,
     last_display_switch_us: u64,
+    privacy_enabled: bool,
+    privacy_lock_input: bool,
+    privacy_blanking_method: String,
+    privacy_last_change_us: u64,
 }
 
 impl Default for ScreenSender {
@@ -6419,6 +6473,10 @@ impl ScreenSender {
         let active_display_id = 0;
         let display_switches_count = 0;
         let last_display_switch_us = 0;
+        let privacy_enabled = false;
+        let privacy_lock_input = false;
+        let privacy_blanking_method = "virtual_overlay".to_string();
+        let privacy_last_change_us = 0;
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -6443,7 +6501,7 @@ impl ScreenSender {
             pacer_bursts_smoothed: 0,
             pacer_avg_delay_us: 0,
             trendline_mode: trendline_filter.mode().tag(),
-            trendline_state: trendline_filter.state().tag(),
+            trendline_state: ScreenBandwidthUsageState::Normal.tag(),
             trendline_slope_us: 0.0,
             trendline_overuse_count: 0,
             harq_mode: retransmit_buffer.mode().tag(),
@@ -6473,6 +6531,8 @@ impl ScreenSender {
             active_display_id: 0,
             display_count: 1,
             display_switches_count: 0,
+            privacy_enabled,
+            privacy_input_locked: privacy_lock_input,
             ..Default::default()
         };
         Self {
@@ -6500,6 +6560,10 @@ impl ScreenSender {
             displays,
             display_switches_count,
             last_display_switch_us,
+            privacy_enabled,
+            privacy_lock_input,
+            privacy_blanking_method,
+            privacy_last_change_us,
         }
     }
 
@@ -7058,6 +7122,10 @@ impl ScreenSender {
                 self.switch_display(display_id, now_us)?;
                 Ok(None)
             }
+            ControlMsg::SetPrivacyMode { enabled, lock_input } => {
+                self.set_privacy_mode(enabled, lock_input, now_us);
+                Ok(None)
+            }
         }
     }
 
@@ -7101,6 +7169,36 @@ impl ScreenSender {
             switches_count: self.display_switches_count,
             last_switch_us: self.last_display_switch_us,
         }
+    }
+
+    pub fn with_privacy(enabled: bool, lock_input: bool) -> Self {
+        let mut sender = Self::new();
+        sender.set_privacy_mode(enabled, lock_input, 0);
+        sender
+    }
+
+    pub fn privacy_report(&self) -> ScreenPrivacyReport {
+        ScreenPrivacyReport {
+            ok: true,
+            enabled: self.privacy_enabled,
+            lock_input: self.privacy_lock_input,
+            blanking_method: self.privacy_blanking_method.clone(),
+            last_change_us: self.privacy_last_change_us,
+        }
+    }
+
+    pub fn set_privacy_mode(
+        &mut self,
+        enabled: bool,
+        lock_input: bool,
+        now_us: u64,
+    ) -> ScreenPrivacyReport {
+        self.privacy_enabled = enabled;
+        self.privacy_lock_input = lock_input;
+        self.privacy_last_change_us = now_us;
+        self.stats.privacy_enabled = enabled;
+        self.stats.privacy_input_locked = lock_input;
+        self.privacy_report()
     }
 
     /// Queue a frame while streaming. Returns the assigned sequence number.
@@ -7617,6 +7715,10 @@ impl ScreenSender {
         self.display_switches_count = 0;
         self.last_display_switch_us = 0;
         self.stats.display_switches_count = 0;
+        self.privacy_enabled = false;
+        self.privacy_lock_input = false;
+        self.stats.privacy_enabled = false;
+        self.stats.privacy_input_locked = false;
     }
 }
 
@@ -7641,6 +7743,10 @@ pub struct ScreenReceiver {
     displays: Vec<ScreenDisplayInfo>,
     display_switches_count: u64,
     last_switch_us: u64,
+    privacy_enabled: bool,
+    privacy_lock_input: bool,
+    privacy_blanking_method: String,
+    privacy_last_change_us: u64,
 }
 
 impl Default for ScreenReceiver {
@@ -7714,6 +7820,10 @@ impl ScreenReceiver {
             displays,
             display_switches_count: 0,
             last_switch_us: 0,
+            privacy_enabled: false,
+            privacy_lock_input: false,
+            privacy_blanking_method: "software_blanking".to_string(),
+            privacy_last_change_us: 0,
         }
     }
 
@@ -7781,6 +7891,10 @@ impl ScreenReceiver {
             displays,
             display_switches_count: 0,
             last_switch_us: 0,
+            privacy_enabled: false,
+            privacy_lock_input: false,
+            privacy_blanking_method: "software_blanking".to_string(),
+            privacy_last_change_us: 0,
         }
     }
 
@@ -8320,6 +8434,10 @@ impl ScreenReceiver {
         self.last_switch_us = 0;
         self.stats.active_display_id = 0;
         self.stats.display_switches_count = 0;
+        self.privacy_enabled = false;
+        self.privacy_lock_input = false;
+        self.stats.privacy_enabled = false;
+        self.stats.privacy_input_locked = false;
     }
 
     pub fn active_display_id(&self) -> u8 {
@@ -8358,6 +8476,37 @@ impl ScreenReceiver {
             switches_count: self.display_switches_count,
             last_switch_us: self.last_switch_us,
         }
+    }
+
+    pub fn with_privacy(mut self, enabled: bool, lock_input: bool) -> Self {
+        self.set_privacy_mode(enabled, lock_input, 0);
+        self
+    }
+
+    pub fn privacy_report(&self) -> ScreenPrivacyReport {
+        ScreenPrivacyReport {
+            ok: true,
+            enabled: self.privacy_enabled,
+            lock_input: self.privacy_lock_input,
+            blanking_method: self.privacy_blanking_method.clone(),
+            last_change_us: self.privacy_last_change_us,
+        }
+    }
+
+    pub fn set_privacy_mode(&mut self, enabled: bool, lock_input: bool, now_us: u64) {
+        self.privacy_enabled = enabled;
+        self.privacy_lock_input = lock_input;
+        self.privacy_last_change_us = now_us;
+        self.stats.privacy_enabled = enabled;
+        self.stats.privacy_input_locked = lock_input;
+    }
+
+    pub fn privacy_enabled(&self) -> bool {
+        self.privacy_enabled
+    }
+
+    pub fn privacy_lock_input(&self) -> bool {
+        self.privacy_lock_input
     }
 }
 
@@ -11502,4 +11651,104 @@ fn screen_multi_display_and_dynamic_switch_pipeline() {
     assert_eq!(sender.stats().display_switches_count, 0);
     assert_eq!(receiver.stats().active_display_id, 0);
     assert_eq!(receiver.stats().display_switches_count, 0);
+}
+
+#[test]
+fn screen_privacy_mode_and_input_lockout_pipeline() {
+    // 1. ControlMsg::SetPrivacyMode wire encode/decode round-trip (tag 5, 14 bytes)
+    let ctrl_privacy = ControlMsg::SetPrivacyMode {
+        enabled: true,
+        lock_input: true,
+    };
+    assert_eq!(ctrl_privacy.tag(), 5);
+    let payload = ctrl_privacy.encode_payload();
+    assert_eq!(payload.len(), 14);
+    let decoded = ControlMsg::decode_payload(&payload).expect("decode SetPrivacyMode");
+    assert_eq!(
+        decoded,
+        ControlMsg::SetPrivacyMode {
+            enabled: true,
+            lock_input: true,
+        }
+    );
+
+    let ctrl_privacy_off = ControlMsg::SetPrivacyMode {
+        enabled: false,
+        lock_input: false,
+    };
+    let payload_off = ctrl_privacy_off.encode_payload();
+    let decoded_off = ControlMsg::decode_payload(&payload_off).expect("decode SetPrivacyMode off");
+    assert_eq!(
+        decoded_off,
+        ControlMsg::SetPrivacyMode {
+            enabled: false,
+            lock_input: false,
+        }
+    );
+
+    // 2. ScreenSender privacy mode management and telemetry
+    let mut sender = ScreenSender::new();
+    let rep0 = sender.privacy_report();
+    assert!(rep0.ok);
+    assert!(!rep0.enabled);
+    assert!(!rep0.lock_input);
+    assert_eq!(rep0.blanking_method, "virtual_overlay");
+    assert_eq!(sender.stats().privacy_enabled, false);
+    assert_eq!(sender.stats().privacy_input_locked, false);
+
+    // Set privacy mode directly
+    sender.set_privacy_mode(true, true, 1_000_000);
+    let rep1 = sender.privacy_report();
+    assert!(rep1.enabled);
+    assert!(rep1.lock_input);
+    assert_eq!(rep1.last_change_us, 1_000_000);
+    assert_eq!(sender.stats().privacy_enabled, true);
+    assert_eq!(sender.stats().privacy_input_locked, true);
+
+    // Update via ControlMsg::SetPrivacyMode
+    sender
+        .on_control_with_time(
+            ControlMsg::SetPrivacyMode {
+                enabled: true,
+                lock_input: false,
+            },
+            2_000_000,
+        )
+        .expect("on_control privacy mode");
+    let rep2 = sender.privacy_report();
+    assert!(rep2.enabled);
+    assert!(!rep2.lock_input);
+    assert_eq!(rep2.last_change_us, 2_000_000);
+    assert_eq!(sender.stats().privacy_enabled, true);
+    assert_eq!(sender.stats().privacy_input_locked, false);
+
+    // 3. Fail-safe disconnect recovery: on_peer_gone disengages privacy & input lockout
+    sender.on_peer_gone();
+    let rep3 = sender.privacy_report();
+    assert!(!rep3.enabled);
+    assert!(!rep3.lock_input);
+    assert_eq!(sender.stats().privacy_enabled, false);
+    assert_eq!(sender.stats().privacy_input_locked, false);
+
+    // 4. ScreenReceiver privacy mode management
+    let mut receiver = ScreenReceiver::new();
+    let rx_rep0 = receiver.privacy_report();
+    assert!(!rx_rep0.enabled);
+    assert!(!rx_rep0.lock_input);
+
+    receiver.set_privacy_mode(true, true, 3_000_000);
+    let rx_rep1 = receiver.privacy_report();
+    assert!(rx_rep1.enabled);
+    assert!(rx_rep1.lock_input);
+    assert_eq!(rx_rep1.last_change_us, 3_000_000);
+    assert_eq!(receiver.stats().privacy_enabled, true);
+    assert_eq!(receiver.stats().privacy_input_locked, true);
+
+    // Receiver on_peer_gone reset
+    receiver.on_peer_gone();
+    let rx_rep2 = receiver.privacy_report();
+    assert!(!rx_rep2.enabled);
+    assert!(!rx_rep2.lock_input);
+    assert_eq!(receiver.stats().privacy_enabled, false);
+    assert_eq!(receiver.stats().privacy_input_locked, false);
 }

@@ -3771,3 +3771,147 @@ async fn m5_21_screen_multi_display_and_dynamic_switch_pipeline() {
     drop(ga);
     drop(gb);
 }
+
+#[tokio::test]
+async fn m5_22_screen_privacy_mode_and_input_lockout_pipeline() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial privacy status check on host (defaults: disabled, unlocked)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/privacy")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_priv: tetherly_core::ScreenPrivacyReport = serde_json::from_slice(&b).unwrap();
+    assert!(init_priv.ok);
+    assert!(!init_priv.enabled);
+    assert!(!init_priv.lock_input);
+    assert_eq!(init_priv.blanking_method, "virtual_overlay");
+
+    // 2. Visitor opens screen channel, host allows, and visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 3. Enable Privacy Mode with input lockout via POST /api/screen/privacy
+    let enable_req = serde_json::json!({
+        "enabled": true,
+        "lock_input": true
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/privacy",
+        &serde_json::to_vec(&enable_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let enabled_rep: tetherly_core::ScreenPrivacyReport = serde_json::from_slice(&b).unwrap();
+    assert!(enabled_rep.ok);
+    assert!(enabled_rep.enabled);
+    assert!(enabled_rep.lock_input);
+
+    // 4. Verify host ScreenStatusReport includes privacy telemetry
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.privacy_enabled);
+    assert!(status_rep.privacy_input_locked);
+    assert_eq!(status_rep.privacy_blanking_method, "virtual_overlay");
+
+    // 5. Send video frame while privacy mode is active
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received frame under privacy mode");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 6. Disable Privacy Mode via POST /api/screen/privacy/disable
+    let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/privacy/disable", &[])
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let disabled_rep: tetherly_core::ScreenPrivacyReport = serde_json::from_slice(&b).unwrap();
+    assert!(!disabled_rep.enabled);
+    assert!(!disabled_rep.lock_input);
+
+    // 7. Re-enable via convenience route /api/screen/privacy/enable?lock_input=true
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/privacy/enable?lock_input=true",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let re_enabled: tetherly_core::ScreenPrivacyReport = serde_json::from_slice(&b).unwrap();
+    assert!(re_enabled.enabled);
+    assert!(re_enabled.lock_input);
+
+    // 8. Fail-safe Disconnect Recovery: stopping screen session automatically disengages privacy mode
+    let stop_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/stop",
+        &serde_json::to_vec(&stop_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Direct check on host privacy report after session teardown
+    let host_priv = host.screen_privacy_report();
+    assert!(!host_priv.enabled, "Fail-safe: privacy mode must be disengaged after session teardown");
+    assert!(!host_priv.lock_input, "Fail-safe: input lockout must be released after session teardown");
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}

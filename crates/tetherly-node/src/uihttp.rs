@@ -4655,6 +4655,95 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
                 }
             }
         }
+        // Screen privacy mode, display blanking & host input lockout pipeline (v2.12 / ADR-098).
+        ("GET", "/api/screen/privacy") => {
+            let rep = node.screen_privacy_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/privacy") => {
+            #[derive(serde::Deserialize)]
+            struct PrivacyBody {
+                enabled: Option<bool>,
+                lock_input: Option<bool>,
+                lock: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<PrivacyBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled_opt = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| {
+                    qmap.get("enabled").and_then(|v| match v.to_ascii_lowercase().as_str() {
+                        "true" | "1" | "yes" | "on" => Some(true),
+                        "false" | "0" | "no" | "off" => Some(false),
+                        _ => None,
+                    })
+                });
+
+            let Some(enabled) = enabled_opt else {
+                return err(400, "missing required field: enabled (expected boolean true/false)");
+            };
+
+            let lock_input = parsed_body
+                .as_ref()
+                .and_then(|b| b.lock_input.or(b.lock))
+                .or_else(|| {
+                    qmap.get("lock_input")
+                        .or_else(|| qmap.get("lock"))
+                        .and_then(|v| match v.to_ascii_lowercase().as_str() {
+                            "true" | "1" | "yes" | "on" => Some(true),
+                            "false" | "0" | "no" | "off" => Some(false),
+                            _ => None,
+                        })
+                })
+                .unwrap_or(false);
+
+            match node.screen_set_privacy_mode(enabled, lock_input).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to configure screen privacy mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/privacy/enable") => {
+            #[derive(serde::Deserialize)]
+            struct EnableBody {
+                lock_input: Option<bool>,
+                lock: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<EnableBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let lock_input = parsed_body
+                .as_ref()
+                .and_then(|b| b.lock_input.or(b.lock))
+                .or_else(|| {
+                    qmap.get("lock_input")
+                        .or_else(|| qmap.get("lock"))
+                        .and_then(|v| match v.to_ascii_lowercase().as_str() {
+                            "true" | "1" | "yes" | "on" => Some(true),
+                            "false" | "0" | "no" | "off" => Some(false),
+                            _ => None,
+                        })
+                })
+                .unwrap_or(false);
+
+            match node.screen_set_privacy_mode(true, lock_input).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to enable screen privacy mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/privacy/disable") => {
+            match node.screen_set_privacy_mode(false, false).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to disable screen privacy mode: {e}")),
+            }
+        }
         // Local input sharing (controller → controlled). Dialling the 45719
         // channel is what lets `drive_input*` actually deliver; the established
         // capture hooks are inert until then.
@@ -10314,6 +10403,86 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req =
             "GET /api/screen/displays HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_privacy_endpoints() {
+        let (node, dir) = temp_test_node("screen_privacy");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/privacy default
+        let (code, body) = loopback_get(port, "/api/screen/privacy").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["enabled"], false);
+        assert_eq!(rep["lock_input"], false);
+        assert_eq!(rep["blanking_method"], "virtual_overlay");
+
+        // 2. POST /api/screen/privacy with JSON body {"enabled": true, "lock_input": true}
+        let priv_req = serde_json::json!({
+            "enabled": true,
+            "lock_input": true
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/privacy",
+            &serde_json::to_vec(&priv_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["enabled"], true);
+        assert_eq!(rep["lock_input"], true);
+
+        // 3. POST /api/screen/privacy with query string ?enabled=false
+        let (code, body) = loopback_post(port, "/api/screen/privacy?enabled=false", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["enabled"], false);
+        assert_eq!(rep["lock_input"], false);
+
+        // 4. POST /api/screen/privacy/enable?lock_input=true
+        let (code, body) = loopback_post(port, "/api/screen/privacy/enable?lock_input=true", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["enabled"], true);
+        assert_eq!(rep["lock_input"], true);
+
+        // 5. POST /api/screen/privacy/disable
+        let (code, body) = loopback_post(port, "/api/screen/privacy/disable", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["enabled"], false);
+        assert_eq!(rep["lock_input"], false);
+
+        // 6. POST /api/screen/privacy missing required field returns 400
+        let (code, _) = loopback_post(port, "/api/screen/privacy", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+
+        // 7. Host header 403 test on /api/screen/privacy
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/privacy HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();

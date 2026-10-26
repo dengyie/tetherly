@@ -2141,6 +2141,60 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect or configure screen streaming privacy mode, display blanking & host input lockout (v2.12 / ADR-098).
+    Privacy {
+        #[command(subcommand)]
+        action: Option<ScreenPrivacySubCmd>,
+        /// Enable privacy mode (curtain blanking).
+        #[arg(long)]
+        enable: bool,
+        /// Disable privacy mode.
+        #[arg(long)]
+        disable: bool,
+        /// Lock physical keyboard/mouse on host machine while privacy mode is active.
+        #[arg(long)]
+        lock_input: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenPrivacySubCmd {
+    /// Show current screen privacy mode and input lockout status.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Enable screen privacy mode (curtain blanking) and optional host input lockout.
+    Enable {
+        /// Also lock physical keyboard/mouse on host machine while privacy mode is active.
+        #[arg(long)]
+        lock_input: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Disable screen privacy mode and restore host display and physical inputs.
+    Disable {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -9564,6 +9618,130 @@ async fn main() -> Result<()> {
                         "Screen display switched successfully: active display is now ID {} (total switches: {})",
                         rep.active_display_id, rep.switches_count
                     );
+                }
+            }
+            ScreenCmd::Privacy {
+                action,
+                enable,
+                disable,
+                lock_input,
+                json,
+                ui_port,
+            } => {
+                let (target_enabled, target_lock_input, is_json, port) = match action {
+                    Some(ScreenPrivacySubCmd::Enable {
+                        lock_input: sub_lock,
+                        json: j,
+                        ui_port: p,
+                    }) => (Some(true), sub_lock || lock_input, j || json, p),
+                    Some(ScreenPrivacySubCmd::Disable {
+                        json: j,
+                        ui_port: p,
+                    }) => (Some(false), false, j || json, p),
+                    Some(ScreenPrivacySubCmd::Status {
+                        json: j,
+                        ui_port: p,
+                    }) => (None, false, j || json, p),
+                    None => {
+                        if enable {
+                            (Some(true), lock_input, json, ui_port)
+                        } else if disable {
+                            (Some(false), false, json, ui_port)
+                        } else {
+                            (None, false, json, ui_port)
+                        }
+                    }
+                };
+
+                if let Some(en) = target_enabled {
+                    let req = serde_json::json!({
+                        "enabled": en,
+                        "lock_input": target_lock_input,
+                    });
+                    let body = serde_json::to_vec(&req)?;
+                    let (code, resp) = loopback_post(port, "/api/screen/privacy", &body)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen privacy configuration failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: tetherly_core::ScreenPrivacyReport = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen Privacy Mode & Host Input Lockout Pipeline (ADR-098):");
+                        println!(
+                            "  Privacy Mode:         {}",
+                            if rep.enabled {
+                                "ENABLED [Active Blanking]"
+                            } else {
+                                "DISABLED"
+                            }
+                        );
+                        println!(
+                            "  Host Input Lockout:   {}",
+                            if rep.lock_input {
+                                "LOCKED [Keyboard/Mouse Blocked]"
+                            } else {
+                                "UNLOCKED"
+                            }
+                        );
+                        println!("  Blanking Method:      {}", rep.blanking_method);
+                        if rep.last_change_us > 0 {
+                            println!("  Last Change (us):     {}", rep.last_change_us);
+                        }
+                    }
+                } else {
+                    let (code, resp) = loopback_get(port, "/api/screen/privacy")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen privacy query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: tetherly_core::ScreenPrivacyReport = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen Privacy Mode & Host Input Lockout Pipeline (ADR-098):");
+                        println!(
+                            "  Privacy Mode:         {}",
+                            if rep.enabled {
+                                "ENABLED [Active Blanking]"
+                            } else {
+                                "DISABLED"
+                            }
+                        );
+                        println!(
+                            "  Host Input Lockout:   {}",
+                            if rep.lock_input {
+                                "LOCKED [Keyboard/Mouse Blocked]"
+                            } else {
+                                "UNLOCKED"
+                            }
+                        );
+                        println!("  Blanking Method:      {}", rep.blanking_method);
+                        if rep.last_change_us > 0 {
+                            println!("  Last Change (us):     {}", rep.last_change_us);
+                        }
+                    }
                 }
             }
         },

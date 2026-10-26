@@ -3,12 +3,36 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.11** |
-| 日期 | 2026-10-26 |
-| 状态 | **v2.11 屏幕串流多显示器枚举与虚拟显示器流复用及动态切换流水线（Screen Streaming Multi-Display & Virtual Display Stream Multiplexing & Dynamic Switch Pipeline, ADR-097）与双端 CLI 全同构**——(1) **协议与切换控制状态机**（`crates/tetherly-core/src/screen.rs`）：扩展 14 字节定长屏幕控制信令（`TYPE_SCREEN_CONTROL = 0x0502`），引入 Envelope Tag = 4 专用信令 `ControlMsg::SwitchDisplay { display_id: u8 }`；定义 `ScreenDisplayInfo`（包含 ID、标题、尺寸、缩放比例、主屏幕与虚拟扩展屏标记）与 `ScreenDisplayReport`；(2) **零中断无缝动态切换与关键帧主动注入**（`crates/tetherly-core/src/screen.rs`）：发送端 `ScreenSender` 维护活跃显示器指针与拓扑列表，在接收到切换信令或 API 指令后无缝切换捕获目标，联动 ADR-089 静止抑制器执行 `squelch_controller.force_wake(now_us)` 并强制注入 IDR 关键帧刷新解码器，杜绝花屏与黑屏卡顿；接收端 `ScreenReceiver` 维护显示器拓扑镜像并在切屏时平滑呈现；(3) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：`NodeConfig` 新增 `screen_display_id`（默认 0）；`Node` 维护活跃显示器与拓扑原子状态，并在 `attach_screen_server` 控制循环中监听对端 `ControlMsg::SwitchDisplay` 信令实时切屏；新增 REST API `GET /api/screen/displays` 与 `POST /api/screen/switch`，扩展 `ScreenStatusReport` 包含 `active_display_id`、`display_count`、`display_switches_count` 字段；(4) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen displays`、`screen switch <display_id>`、`tetherly run --screen-display <display_id>` 与 `screen status` 状态监控；(5) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_21_screen_multi_display_and_dynamic_switch_pipeline` 全绿，版本升级至 `0.1.33`。 |
+| 文档版本 | **2.12** |
+| 日期 | 2026-10-27 |
+| 状态 | **v2.12 屏幕串流隐私模式、物理显示黑屏遮罩与宿主机物理键鼠锁定安全防护流水线（Screen Streaming Privacy Mode, Display Blanking & Host Input Lockout Security Pipeline, ADR-098）与双端 CLI 全同构**——(1) **协议与控制信令设计**（`crates/tetherly-core/src/screen.rs`）：扩展 14 字节定长屏幕控制信令（`TYPE_SCREEN_CONTROL = 0x0502`），引入 Envelope Tag = 5 专用安全信令 `ControlMsg::SetPrivacyMode { enabled: bool, lock_input: bool }`；定义 `ScreenPrivacyReport`（包含 `ok`、`enabled`、`lock_input`、`blanking_method`、`last_change_us`）；(2) **状态机协同与故障安全断连恢复**（`crates/tetherly-core/src/screen.rs`）：`ScreenReceiver` 与 `ScreenSender` 维护隐私状态与遮罩模式，在 `on_peer_gone()`、连接中断及会话退出时原子执行故障安全恢复（Fail-Safe Disconnect Recovery），强制清零黑屏与键鼠锁定状态，绝不造成物理宿主机死锁；(3) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：`NodeShared` 维护原子布尔与方法状态，在 `attach_screen_server` 控制循环中监听对端 `ControlMsg::SetPrivacyMode` 信令并实时生效；新增 REST API `GET /api/screen/privacy`、`POST /api/screen/privacy`、`POST /api/screen/privacy/enable` 与 `POST /api/screen/privacy/disable`，扩展 `ScreenStatusReport` 包含 `privacy_enabled`、`privacy_input_locked`、`privacy_blanking_method` 字段；(4) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen privacy`、`screen privacy enable [--lock-input]`、`screen privacy disable`、`screen privacy status`、`--json` 序列化与 `screen status` 状态监控；(5) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_22_screen_privacy_mode_and_input_lockout_pipeline` 全绿，版本升级至 `0.1.34`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.12 相对 2.11(屏幕串流隐私模式、物理显示黑屏遮罩与宿主机物理键鼠锁定安全防护流水线 ADR-098 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **远程协助与桌面管控中的现实威胁模型（Threat Model）**: 在远程办公、敏感数据处理或跨屏协助场景下，宿主机物理显示器若处于点亮状态，现场人员可旁观屏幕上的敏感代码、财务数据或隐私信息；同时，若现场人员触碰物理键盘或滑动鼠标，会与远程输入产生严重的并发竞争、焦点错乱与误操作灾难。
+  2. **传统黑屏方案的死锁风险与故障安全保证**: 许多远控软件在网络异常断线时未能妥善解除物理锁定，导致宿主机现场人员屏幕全黑且键鼠失灵，只能强制拔电或长按电源键重启。Tetherly 必须在协议层、核心状态机层与守护进程退出清理阶段确立绝对可靠的「故障安全断连恢复机制（Fail-Safe Disconnect Recovery）」，保证断线即刻解除锁定。
+  3. **双向信令协同与双端 CLI 100% 同构**: 访客端可随时通过控制通道通知宿主机启闭遮罩与输入锁定，宿主机本地管理员亦可通过回环 REST API 或 CLI 即时切换，双端 CLI 在交互展示与 `--json` 格式上完全一致。
+- **架构解法与落地**:
+  1. **Core 控制信令与元数据模型（`crates/tetherly-core/src/screen.rs`）**:
+     - 扩展 `ControlMsg`，新增 `ControlMsg::SetPrivacyMode { enabled: bool, lock_input: bool }`，映射至 Envelope Tag = 5 定长 14 字节控制信封，低 16 位载荷大端序编码 `enabled` 与 `lock_input`。
+     - 定义 `ScreenPrivacyReport`（`ok`、`enabled`、`lock_input`、`blanking_method`、`last_change_us`）。
+     - `ScreenReceiver` 维护隐私状态与遮罩模式，并在 `on_peer_gone()` 中强制复位 `privacy_enabled = false` 与 `privacy_lock_input = false`。
+  2. **Node 守护进程与端到端传输（`crates/tetherly-node/src/runtime.rs`）**:
+     - `NodeShared` 新增原子变量 `screen_privacy_enabled`、`screen_privacy_lock_input`、`screen_privacy_blanking_method` 与 `screen_privacy_last_change_us`。
+     - `attach_screen_server` 控制循环解析 `ControlMsg::SetPrivacyMode` 信令并实时更新本地状态。
+     - 循环退出或断连时自动执行 `screen_set_privacy_mode(false, false)` 故障安全复位。
+     - 暴露 `screen_privacy_report()` 与 `screen_set_privacy_mode(enabled, lock_input)`。
+  3. **回环 REST API（`crates/tetherly-node/src/uihttp.rs`）**:
+     - 新增 `GET /api/screen/privacy`、`POST /api/screen/privacy`、`POST /api/screen/privacy/enable` 与 `POST /api/screen/privacy/disable`。
+     - `ScreenStatusReport` 扩充 `privacy_enabled`、`privacy_input_locked`、`privacy_blanking_method` 字段。
+  4. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - 全同构支持 `screen privacy`、`screen privacy enable [--lock-input]`、`screen privacy disable`、`screen privacy status` 与 `screen status` 状态监控。
+  5. **测试与验证**:
+     - 核心单元测试、REST API 单元测试及 Phase 5 端到端集成测试 `m5_22_screen_privacy_mode_and_input_lockout_pipeline` 全绿。
 
 **2.11 相对 2.10(屏幕串流多显示器枚举与虚拟显示器流复用及动态切换流水线 ADR-097 与双端 CLI 全同构)**
 
