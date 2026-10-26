@@ -2090,6 +2090,23 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Inspect, configure, or manually trigger screen active bandwidth probing and fast ramp-up (v2.09 / ADR-095).
+    Probe {
+        /// Target probe mode: `auto`, `aggressive`, `conservative`, or `disabled`. If omitted, displays current probe status.
+        mode: Option<String>,
+        /// Target bandwidth in kbps to probe (e.g. 15000 for 15 Mbps). Triggers immediate probe cluster.
+        #[arg(long)]
+        target_kbps: Option<u32>,
+        /// Manually trigger probe cluster immediately (using default or next ladder step).
+        #[arg(long)]
+        trigger: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -8115,6 +8132,28 @@ async fn main() -> Result<()> {
                         .get("twcc_loss_ratio")
                         .and_then(|n| n.as_f64())
                         .unwrap_or(0.0);
+                    let probe_mode = v.get("probe_mode").and_then(|s| s.as_str()).unwrap_or("");
+                    let probe_state = v.get("probe_state").and_then(|s| s.as_str()).unwrap_or("");
+                    let probes_triggered = v
+                        .get("probes_triggered")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let probes_completed = v
+                        .get("probes_completed")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let probes_failed = v
+                        .get("probes_failed")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let probe_target_bps = v
+                        .get("probe_target_bps")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let probe_measured_bps = v
+                        .get("probe_measured_bps")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
 
                     println!("Screen Channel Status:");
                     println!("  State:        {state}");
@@ -8237,6 +8276,18 @@ async fn main() -> Result<()> {
                             twcc_delivery_rate_bps as f64 / 1_000_000.0,
                             twcc_delay_gradient_us,
                             twcc_loss_ratio * 100.0
+                        );
+                    }
+                    if !probe_mode.is_empty() {
+                        println!(
+                            "  Probe:        {} (state: {}, trg: {}, ok: {}, fail: {}, target: {:.2} Mbps, emp: {:.2} Mbps)",
+                            probe_mode,
+                            probe_state,
+                            probes_triggered,
+                            probes_completed,
+                            probes_failed,
+                            probe_target_bps as f64 / 1_000_000.0,
+                            probe_measured_bps as f64 / 1_000_000.0
                         );
                     }
                 }
@@ -9200,6 +9251,84 @@ async fn main() -> Result<()> {
                             smoothed_rtt_us,
                             smoothed_rtt_us as f64 / 1_000.0
                         );
+                    }
+                }
+            }
+            ScreenCmd::Probe {
+                mode,
+                target_kbps,
+                trigger,
+                json,
+                ui_port,
+            } => {
+                let has_update = mode.is_some() || target_kbps.is_some() || trigger;
+                let (code, resp) = if has_update {
+                    let mut req = serde_json::Map::new();
+                    if let Some(m) = mode {
+                        req.insert("mode".into(), serde_json::json!(m));
+                    }
+                    if let Some(kbps) = target_kbps {
+                        req.insert("target_bps".into(), serde_json::json!(kbps * 1000));
+                        req.insert("trigger".into(), serde_json::json!(true));
+                    } else if trigger {
+                        req.insert("trigger".into(), serde_json::json!(true));
+                    }
+                    let body = serde_json::to_vec(&req)?;
+                    loopback_post(ui_port, "/api/screen/probe", &body).await
+                } else {
+                    loopback_get(ui_port, "/api/screen/probe").await
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen probe query/update failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: tetherly_core::ScreenProbeReport = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    if trigger || target_kbps.is_some() {
+                        println!(
+                            "Screen active bandwidth probe burst triggered (state: {}, target: {:.2} Mbps)",
+                            rep.state,
+                            rep.last_target_bps as f64 / 1_000_000.0
+                        );
+                    } else if has_update {
+                        println!(
+                            "Screen active bandwidth probe mode updated: {}",
+                            rep.mode
+                        );
+                    } else {
+                        println!("Screen Active Bandwidth Probing & Fast Ramp-Up Pipeline (ADR-095):");
+                        println!("  Probe Mode:           {}", rep.mode);
+                        println!("  Probe State:          {}", rep.state);
+                        println!("  Probes Triggered:     {}", rep.probes_triggered);
+                        println!("  Probes Completed:     {}", rep.probes_completed);
+                        println!("  Probes Failed:        {}", rep.probes_failed);
+                        println!(
+                            "  Last Target Rate:     {:.2} Mbps ({} bps)",
+                            rep.last_target_bps as f64 / 1_000_000.0,
+                            rep.last_target_bps
+                        );
+                        println!(
+                            "  Last Measured Rate:   {:.2} Mbps ({} bps)",
+                            rep.last_measured_bps as f64 / 1_000_000.0,
+                            rep.last_measured_bps
+                        );
+                        println!("  Last RTT:             {} us ({:.2} ms)", rep.last_rtt_us, rep.last_rtt_us as f64 / 1_000.0);
+                        println!("  Last Loss Ratio:      {:.2}%", rep.last_loss_ratio * 100.0);
+                        println!("  Last Delay Gradient:  {} us", rep.last_delay_gradient_us);
+                        if let Some(cid) = rep.active_cluster_id {
+                            println!("  Active Cluster ID:    {}", cid);
+                        }
                     }
                 }
             }

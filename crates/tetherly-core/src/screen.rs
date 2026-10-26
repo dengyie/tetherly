@@ -25,6 +25,8 @@ pub const TYPE_SCREEN_FEC: u16 = 0x0504;
 pub const TYPE_SCREEN_NACK: u16 = 0x0505;
 /// Screen transport-wide congestion control (TWCC) feedback channel inner type (v2.08 / ADR-094).
 pub const TYPE_SCREEN_TWCC: u16 = 0x0506;
+/// Screen active bandwidth probing channel inner type (v2.09 / ADR-095).
+pub const TYPE_SCREEN_PROBE: u16 = 0x0507;
 
 pub const SCREEN_MAGIC: [u8; 4] = *b"TMV1";
 pub const SCREEN_PROTO: u8 = 1;
@@ -60,6 +62,17 @@ pub const SCREEN_TWCC_CONSERVATIVE_INTERVAL_US: u64 = 25_000;
 pub const SCREEN_TWCC_AUTO_PACKET_THRESHOLD: usize = 40;
 pub const SCREEN_TWCC_AGGRESSIVE_PACKET_THRESHOLD: usize = 20;
 pub const SCREEN_TWCC_CONSERVATIVE_PACKET_THRESHOLD: usize = 80;
+
+pub const SCREEN_PROBE_MAGIC: [u8; 5] = *b"TPROB";
+pub const SCREEN_PROBE_PROTO: u8 = 1;
+pub const SCREEN_PROBE_HEADER_LEN: usize = 26;
+pub const SCREEN_PROBE_DEFAULT_PACKET_LEN: usize = 1000;
+pub const SCREEN_PROBE_CLUSTER_SIZE_AUTO: u8 = 10;
+pub const SCREEN_PROBE_CLUSTER_SIZE_AGGRESSIVE: u8 = 16;
+pub const SCREEN_PROBE_CLUSTER_SIZE_CONSERVATIVE: u8 = 6;
+pub const SCREEN_PROBE_MIN_INTERVAL_US_AUTO: u64 = 2_000_000;
+pub const SCREEN_PROBE_MIN_INTERVAL_US_AGGRESSIVE: u64 = 1_000_000;
+pub const SCREEN_PROBE_MIN_INTERVAL_US_CONSERVATIVE: u64 = 4_000_000;
 
 /// Maximum payload bytes for a custom cursor bitmap (64x64 RGBA8 = 16,384 bytes).
 pub const CURSOR_BITMAP_MAX_BYTES: usize = 64 * 64 * 4;
@@ -261,6 +274,7 @@ pub fn is_screen_type(ty: u16) -> bool {
             | TYPE_SCREEN_FEC
             | TYPE_SCREEN_NACK
             | TYPE_SCREEN_TWCC
+            | TYPE_SCREEN_PROBE
     )
 }
 
@@ -979,9 +993,33 @@ pub struct ScreenStats {
     pub twcc_delivery_rate_bps: u64,
     /// Inter-packet queuing delay gradient in microseconds (v2.08 / ADR-094).
     pub twcc_delay_gradient_us: i64,
+    /// Active bandwidth probing mode tag (0=auto, 1=aggressive, 2=conservative, 3=disabled) (v2.09 / ADR-095).
+    pub probe_mode: u8,
+    /// Active bandwidth probing state tag (0=idle, 1=probing, 2=awaiting_feedback, 3=completed, 4=failed) (v2.09 / ADR-095).
+    pub probe_state: u8,
+    /// Cumulative count of bandwidth probe clusters triggered (v2.09 / ADR-095).
+    pub probes_triggered: u64,
+    /// Cumulative count of bandwidth probe clusters successfully completed (v2.09 / ADR-095).
+    pub probes_completed: u64,
+    /// Cumulative count of bandwidth probe clusters failed (v2.09 / ADR-095).
+    pub probes_failed: u64,
+    /// Last target probing bitrate in bits per second (v2.09 / ADR-095).
+    pub probe_target_bps: u32,
+    /// Last measured delivery rate during probe in bits per second (v2.09 / ADR-095).
+    pub probe_measured_bps: u64,
 }
 
 impl ScreenStats {
+    /// Active bandwidth probing mode.
+    pub fn probe_mode(&self) -> ScreenProbeMode {
+        ScreenProbeMode::from_tag(self.probe_mode)
+    }
+
+    /// Active bandwidth probing state.
+    pub fn probe_state(&self) -> ScreenProbeState {
+        ScreenProbeState::from_tag(self.probe_state)
+    }
+
     /// Transport-Wide Congestion Control (TWCC) mode.
     pub fn twcc_mode(&self) -> ScreenTwccMode {
         ScreenTwccMode::from_tag(self.twcc_mode)
@@ -1164,6 +1202,19 @@ impl ScreenRateController {
         let decreased = ((self.current_bps as u64 * 80) / 100) as u32;
         self.current_bps = decreased.max(self.min_bps);
         self.current_bps != old
+    }
+
+    /// Fast ramp-up to a verified probe bitrate (v2.09 / ADR-095).
+    /// Clamps target to [min_bps, max_bps] and steps up immediately without waiting for additive increase steps.
+    pub fn fast_ramp_up(&mut self, target_bps: u32) -> bool {
+        let clamped = target_bps.clamp(self.min_bps, self.max_bps);
+        if clamped > self.current_bps {
+            self.current_bps = clamped;
+            self.consecutive_good_frames = 0;
+            true
+        } else {
+            false
+        }
     }
 
     /// Process a frame acknowledgment with measured RTT and in-flight count.
@@ -4911,6 +4962,14 @@ impl ScreenTwccSenderTracker {
         }
     }
 
+    pub fn next_seq(&self) -> u16 {
+        self.next_seq
+    }
+
+    pub fn set_next_seq(&mut self, next: u16) {
+        self.next_seq = next;
+    }
+
     pub fn allocate_seq(&mut self, send_us: u64, bytes: usize) -> u16 {
         if self.mode == ScreenTwccMode::Disabled {
             return 0;
@@ -5031,6 +5090,699 @@ impl ScreenTwccSenderTracker {
     }
 }
 
+/// Screen active bandwidth probing operational modes (v2.09 / ADR-095).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenProbeMode {
+    #[default]
+    Auto,
+    Aggressive,
+    Conservative,
+    Disabled,
+}
+
+impl ScreenProbeMode {
+    pub const fn tag(self) -> u8 {
+        match self {
+            ScreenProbeMode::Auto => 0,
+            ScreenProbeMode::Aggressive => 1,
+            ScreenProbeMode::Conservative => 2,
+            ScreenProbeMode::Disabled => 3,
+        }
+    }
+
+    pub const fn from_tag(tag: u8) -> Self {
+        match tag {
+            0 => ScreenProbeMode::Auto,
+            1 => ScreenProbeMode::Aggressive,
+            2 => ScreenProbeMode::Conservative,
+            _ => ScreenProbeMode::Disabled,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ScreenProbeMode::Auto => "auto",
+            ScreenProbeMode::Aggressive => "aggressive",
+            ScreenProbeMode::Conservative => "conservative",
+            ScreenProbeMode::Disabled => "disabled",
+        }
+    }
+
+    pub const fn cluster_size(self) -> u8 {
+        match self {
+            ScreenProbeMode::Auto => SCREEN_PROBE_CLUSTER_SIZE_AUTO,
+            ScreenProbeMode::Aggressive => SCREEN_PROBE_CLUSTER_SIZE_AGGRESSIVE,
+            ScreenProbeMode::Conservative => SCREEN_PROBE_CLUSTER_SIZE_CONSERVATIVE,
+            ScreenProbeMode::Disabled => 0,
+        }
+    }
+
+    pub const fn min_interval_us(self) -> u64 {
+        match self {
+            ScreenProbeMode::Auto => SCREEN_PROBE_MIN_INTERVAL_US_AUTO,
+            ScreenProbeMode::Aggressive => SCREEN_PROBE_MIN_INTERVAL_US_AGGRESSIVE,
+            ScreenProbeMode::Conservative => SCREEN_PROBE_MIN_INTERVAL_US_CONSERVATIVE,
+            ScreenProbeMode::Disabled => u64::MAX,
+        }
+    }
+}
+
+impl fmt::Display for ScreenProbeMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ScreenProbeMode {
+    type Err = CoreError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(ScreenProbeMode::Auto),
+            "aggressive" | "agg" => Ok(ScreenProbeMode::Aggressive),
+            "conservative" | "cons" => Ok(ScreenProbeMode::Conservative),
+            "disabled" | "off" | "none" => Ok(ScreenProbeMode::Disabled),
+            _ => Err(CoreError::ScreenFrame),
+        }
+    }
+}
+
+/// Screen active bandwidth probing state machine (v2.09 / ADR-095).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenProbeState {
+    #[default]
+    Idle,
+    Probing,
+    AwaitingFeedback,
+    Completed,
+    Failed,
+}
+
+impl ScreenProbeState {
+    pub const fn tag(self) -> u8 {
+        match self {
+            ScreenProbeState::Idle => 0,
+            ScreenProbeState::Probing => 1,
+            ScreenProbeState::AwaitingFeedback => 2,
+            ScreenProbeState::Completed => 3,
+            ScreenProbeState::Failed => 4,
+        }
+    }
+
+    pub const fn from_tag(tag: u8) -> Self {
+        match tag {
+            0 => ScreenProbeState::Idle,
+            1 => ScreenProbeState::Probing,
+            2 => ScreenProbeState::AwaitingFeedback,
+            3 => ScreenProbeState::Completed,
+            _ => ScreenProbeState::Failed,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ScreenProbeState::Idle => "idle",
+            ScreenProbeState::Probing => "probing",
+            ScreenProbeState::AwaitingFeedback => "awaiting_feedback",
+            ScreenProbeState::Completed => "completed",
+            ScreenProbeState::Failed => "failed",
+        }
+    }
+}
+
+impl fmt::Display for ScreenProbeState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Screen active bandwidth probe packet (v2.09 / ADR-095).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenProbePacket {
+    pub flags: u8,
+    pub cluster_id: u8,
+    pub cluster_index: u8,
+    pub cluster_size: u8,
+    pub transport_seq: u16,
+    pub target_bps: u32,
+    pub send_time_us: u64,
+    pub padding: Vec<u8>,
+}
+
+impl ScreenProbePacket {
+    pub fn encode(&self) -> Vec<u8> {
+        let padding_len = self.padding.len().min(u16::MAX as usize) as u16;
+        let mut buf = Vec::with_capacity(SCREEN_PROBE_HEADER_LEN + padding_len as usize);
+        buf.extend_from_slice(&SCREEN_PROBE_MAGIC);
+        buf.push(SCREEN_PROBE_PROTO);
+        buf.push(self.flags);
+        buf.push(self.cluster_id);
+        buf.push(self.cluster_index);
+        buf.push(self.cluster_size);
+        buf.extend_from_slice(&self.transport_seq.to_be_bytes());
+        buf.extend_from_slice(&self.target_bps.to_be_bytes());
+        buf.extend_from_slice(&self.send_time_us.to_be_bytes());
+        buf.extend_from_slice(&padding_len.to_be_bytes());
+        buf.extend_from_slice(&self.padding[..padding_len as usize]);
+        buf
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, CoreError> {
+        if payload.len() < SCREEN_PROBE_HEADER_LEN {
+            return Err(CoreError::ScreenFrame);
+        }
+        if payload[..5] != SCREEN_PROBE_MAGIC {
+            return Err(CoreError::ScreenFrame);
+        }
+        if payload[5] != SCREEN_PROBE_PROTO {
+            return Err(CoreError::UnsupportedProto);
+        }
+        let flags = payload[6];
+        let cluster_id = payload[7];
+        let cluster_index = payload[8];
+        let cluster_size = payload[9];
+        let transport_seq = u16::from_be_bytes(
+            payload[10..12]
+                .try_into()
+                .map_err(|_| CoreError::ScreenFrame)?,
+        );
+        let target_bps = u32::from_be_bytes(
+            payload[12..16]
+                .try_into()
+                .map_err(|_| CoreError::ScreenFrame)?,
+        );
+        let send_time_us = u64::from_be_bytes(
+            payload[16..24]
+                .try_into()
+                .map_err(|_| CoreError::ScreenFrame)?,
+        );
+        let padding_len = u16::from_be_bytes(
+            payload[24..26]
+                .try_into()
+                .map_err(|_| CoreError::ScreenFrame)?,
+        ) as usize;
+
+        if payload.len() < SCREEN_PROBE_HEADER_LEN + padding_len {
+            return Err(CoreError::TruncatedFrame);
+        }
+
+        let padding =
+            payload[SCREEN_PROBE_HEADER_LEN..SCREEN_PROBE_HEADER_LEN + padding_len].to_vec();
+
+        Ok(Self {
+            flags,
+            cluster_id,
+            cluster_index,
+            cluster_size,
+            transport_seq,
+            target_bps,
+            send_time_us,
+            padding,
+        })
+    }
+
+    pub fn to_inner_frame(&self) -> Result<InnerFrame, CoreError> {
+        InnerFrame::new(TYPE_SCREEN_PROBE, self.encode())
+    }
+
+    pub fn to_inner(&self) -> Result<InnerFrame, CoreError> {
+        self.to_inner_frame()
+    }
+
+    pub fn from_inner_frame(frame: &InnerFrame) -> Result<Self, CoreError> {
+        if frame.ty != TYPE_SCREEN_PROBE {
+            return Err(CoreError::ScreenFrame);
+        }
+        Self::decode(&frame.payload)
+    }
+
+    pub fn from_inner(frame: &InnerFrame) -> Result<Self, CoreError> {
+        Self::from_inner_frame(frame)
+    }
+}
+
+/// Active bandwidth probe cluster tracking metadata (v2.09 / ADR-095).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenProbeCluster {
+    pub cluster_id: u8,
+    pub target_bps: u32,
+    pub cluster_size: u8,
+    pub packets_sent: u8,
+    pub first_send_time_us: u64,
+    pub last_send_time_us: u64,
+    pub total_bytes: u64,
+    pub start_seq: u16,
+    pub end_seq: u16,
+}
+
+/// Telemetry statistics for Screen Active Bandwidth Probing (v2.09 / ADR-095).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ScreenProbeStats {
+    pub mode: ScreenProbeMode,
+    pub state: ScreenProbeState,
+    pub probes_triggered: u64,
+    pub probes_completed: u64,
+    pub probes_failed: u64,
+    pub last_target_bps: u32,
+    pub last_measured_bps: u64,
+    pub last_rtt_us: u64,
+    pub last_loss_ratio: f32,
+    pub last_delay_gradient_us: i64,
+    pub active_cluster_id: Option<u8>,
+}
+
+impl Default for ScreenProbeStats {
+    fn default() -> Self {
+        Self {
+            mode: ScreenProbeMode::Auto,
+            state: ScreenProbeState::Idle,
+            probes_triggered: 0,
+            probes_completed: 0,
+            probes_failed: 0,
+            last_target_bps: 0,
+            last_measured_bps: 0,
+            last_rtt_us: 0,
+            last_loss_ratio: 0.0,
+            last_delay_gradient_us: 0,
+            active_cluster_id: None,
+        }
+    }
+}
+
+/// DTO report for REST API and CLI status (v2.09 / ADR-095).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenProbeReport {
+    pub ok: bool,
+    pub mode: ScreenProbeMode,
+    pub state: ScreenProbeState,
+    pub probes_triggered: u64,
+    pub probes_completed: u64,
+    pub probes_failed: u64,
+    pub last_target_bps: u32,
+    pub last_measured_bps: u64,
+    pub last_rtt_us: u64,
+    pub last_loss_ratio: f32,
+    pub last_delay_gradient_us: i64,
+    pub active_cluster_id: Option<u8>,
+    pub timestamp_ms: u64,
+}
+
+impl Default for ScreenProbeReport {
+    fn default() -> Self {
+        Self {
+            ok: true,
+            mode: ScreenProbeMode::Auto,
+            state: ScreenProbeState::Idle,
+            probes_triggered: 0,
+            probes_completed: 0,
+            probes_failed: 0,
+            last_target_bps: 0,
+            last_measured_bps: 0,
+            last_rtt_us: 0,
+            last_loss_ratio: 0.0,
+            last_delay_gradient_us: 0,
+            active_cluster_id: None,
+            timestamp_ms: 0,
+        }
+    }
+}
+
+/// Controller coordinating active bandwidth probing bursts and fast ramp-up (v2.09 / ADR-095).
+#[derive(Debug, Clone)]
+pub struct ScreenProbeController {
+    mode: ScreenProbeMode,
+    state: ScreenProbeState,
+    next_cluster_id: u8,
+    active_cluster: Option<ScreenProbeCluster>,
+    last_probe_us: u64,
+    packet_queue: VecDeque<ScreenProbePacket>,
+    stats: ScreenProbeStats,
+}
+
+impl Default for ScreenProbeController {
+    fn default() -> Self {
+        Self::new(ScreenProbeMode::Auto)
+    }
+}
+
+impl ScreenProbeController {
+    pub fn new(mode: ScreenProbeMode) -> Self {
+        Self {
+            mode,
+            state: ScreenProbeState::Idle,
+            next_cluster_id: 0,
+            active_cluster: None,
+            last_probe_us: 0,
+            packet_queue: VecDeque::with_capacity(32),
+            stats: ScreenProbeStats {
+                mode,
+                state: ScreenProbeState::Idle,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn mode(&self) -> ScreenProbeMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ScreenProbeMode) {
+        self.mode = mode;
+        self.stats.mode = mode;
+        if mode == ScreenProbeMode::Disabled {
+            self.packet_queue.clear();
+            self.active_cluster = None;
+            self.state = ScreenProbeState::Idle;
+            self.stats.state = ScreenProbeState::Idle;
+            self.stats.active_cluster_id = None;
+        }
+    }
+
+    pub fn state(&self) -> ScreenProbeState {
+        self.state
+    }
+
+    pub fn stats(&self) -> ScreenProbeStats {
+        self.stats
+    }
+
+    pub fn report(&self) -> ScreenProbeReport {
+        ScreenProbeReport {
+            ok: true,
+            mode: self.mode,
+            state: self.state,
+            probes_triggered: self.stats.probes_triggered,
+            probes_completed: self.stats.probes_completed,
+            probes_failed: self.stats.probes_failed,
+            last_target_bps: self.stats.last_target_bps,
+            last_measured_bps: self.stats.last_measured_bps,
+            last_rtt_us: self.stats.last_rtt_us,
+            last_loss_ratio: self.stats.last_loss_ratio,
+            last_delay_gradient_us: self.stats.last_delay_gradient_us,
+            active_cluster_id: self.stats.active_cluster_id,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        }
+    }
+
+    pub fn has_pending_packets(&self) -> bool {
+        !self.packet_queue.is_empty()
+    }
+
+    pub fn pop_probe_packet(&mut self) -> Option<ScreenProbePacket> {
+        let pkt = self.packet_queue.pop_front()?;
+        if let Some(ref mut cl) = self.active_cluster {
+            cl.packets_sent = cl.packets_sent.saturating_add(1);
+        }
+        if self.packet_queue.is_empty() && self.state == ScreenProbeState::Probing {
+            self.state = ScreenProbeState::AwaitingFeedback;
+            self.stats.state = ScreenProbeState::AwaitingFeedback;
+        }
+        Some(pkt)
+    }
+
+    /// Trigger an active bandwidth probe burst to probe for target_bps.
+    pub fn trigger_probe(
+        &mut self,
+        target_bps: u32,
+        now_us: u64,
+        next_transport_seq: &mut u16,
+    ) -> bool {
+        if self.mode == ScreenProbeMode::Disabled {
+            return false;
+        }
+
+        // If an active cluster is still waiting, check timeout (1.5s)
+        if let Some(ref cl) = self.active_cluster {
+            if now_us.saturating_sub(cl.last_send_time_us) > 1_500_000 {
+                self.stats.probes_failed = self.stats.probes_failed.saturating_add(1);
+                self.active_cluster = None;
+            } else {
+                return false;
+            }
+        }
+
+        self.next_cluster_id = (self.next_cluster_id % 254) + 1;
+        let cluster_id = self.next_cluster_id;
+        let cluster_size = self.mode.cluster_size().max(4);
+        let target_bps = target_bps.clamp(SCREEN_BITRATE_MIN_BPS, SCREEN_BITRATE_MAX_BPS);
+
+        self.packet_queue.clear();
+        let mut start_seq = 0u16;
+        let mut end_seq = 0u16;
+
+        let padding_len = SCREEN_PROBE_DEFAULT_PACKET_LEN - SCREEN_PROBE_HEADER_LEN;
+        let dummy_padding = vec![0x5a; padding_len];
+
+        for i in 0..cluster_size {
+            *next_transport_seq = next_transport_seq.wrapping_add(1);
+            if *next_transport_seq == 0 {
+                *next_transport_seq = 1;
+            }
+            let t_seq = *next_transport_seq;
+            if i == 0 {
+                start_seq = t_seq;
+            }
+            if i == cluster_size - 1 {
+                end_seq = t_seq;
+            }
+            let pkt = ScreenProbePacket {
+                flags: 0,
+                cluster_id,
+                cluster_index: i,
+                cluster_size,
+                transport_seq: t_seq,
+                target_bps,
+                send_time_us: now_us,
+                padding: dummy_padding.clone(),
+            };
+            self.packet_queue.push_back(pkt);
+        }
+
+        self.active_cluster = Some(ScreenProbeCluster {
+            cluster_id,
+            target_bps,
+            cluster_size,
+            packets_sent: 0,
+            first_send_time_us: now_us,
+            last_send_time_us: now_us,
+            total_bytes: (cluster_size as u64) * (SCREEN_PROBE_DEFAULT_PACKET_LEN as u64),
+            start_seq,
+            end_seq,
+        });
+
+        self.state = ScreenProbeState::Probing;
+        self.stats.state = ScreenProbeState::Probing;
+        self.stats.probes_triggered = self.stats.probes_triggered.saturating_add(1);
+        self.stats.last_target_bps = target_bps;
+        self.stats.active_cluster_id = Some(cluster_id);
+        self.last_probe_us = now_us;
+        true
+    }
+
+    /// Trigger an active bandwidth probe burst using pre-allocated transport sequence numbers.
+    pub fn trigger_probe_with_seqs(
+        &mut self,
+        target_bps: u32,
+        now_us: u64,
+        seqs: &[u16],
+    ) -> bool {
+        if self.mode == ScreenProbeMode::Disabled || seqs.is_empty() {
+            return false;
+        }
+
+        if let Some(ref cl) = self.active_cluster {
+            if now_us.saturating_sub(cl.last_send_time_us) > 1_500_000 {
+                self.stats.probes_failed = self.stats.probes_failed.saturating_add(1);
+                self.active_cluster = None;
+            } else {
+                return false;
+            }
+        }
+
+        self.next_cluster_id = (self.next_cluster_id % 254) + 1;
+        let cluster_id = self.next_cluster_id;
+        let cluster_size = seqs.len() as u8;
+        let target_bps = target_bps.clamp(SCREEN_BITRATE_MIN_BPS, SCREEN_BITRATE_MAX_BPS);
+
+        self.packet_queue.clear();
+        let start_seq = seqs[0];
+        let end_seq = seqs[seqs.len() - 1];
+
+        let padding_len = SCREEN_PROBE_DEFAULT_PACKET_LEN - SCREEN_PROBE_HEADER_LEN;
+        let dummy_padding = vec![0x5a; padding_len];
+
+        for (i, &t_seq) in seqs.iter().enumerate() {
+            let pkt = ScreenProbePacket {
+                flags: 0,
+                cluster_id,
+                cluster_index: i as u8,
+                cluster_size,
+                transport_seq: t_seq,
+                target_bps,
+                send_time_us: now_us,
+                padding: dummy_padding.clone(),
+            };
+            self.packet_queue.push_back(pkt);
+        }
+
+        self.active_cluster = Some(ScreenProbeCluster {
+            cluster_id,
+            target_bps,
+            cluster_size,
+            packets_sent: 0,
+            first_send_time_us: now_us,
+            last_send_time_us: now_us,
+            total_bytes: (cluster_size as u64) * (SCREEN_PROBE_DEFAULT_PACKET_LEN as u64),
+            start_seq,
+            end_seq,
+        });
+
+        self.state = ScreenProbeState::Probing;
+        self.stats.state = ScreenProbeState::Probing;
+        self.stats.probes_triggered = self.stats.probes_triggered.saturating_add(1);
+        self.stats.last_target_bps = target_bps;
+        self.stats.active_cluster_id = Some(cluster_id);
+        self.last_probe_us = now_us;
+        true
+    }
+
+    /// Automatically schedule a bandwidth probe if network conditions and intervals allow.
+    pub fn maybe_schedule_probe(
+        &mut self,
+        current_bps: u32,
+        now_us: u64,
+        next_transport_seq: &mut u16,
+    ) -> bool {
+        if self.mode == ScreenProbeMode::Disabled || self.active_cluster.is_some() {
+            return false;
+        }
+        if self.last_probe_us != 0
+            && now_us.saturating_sub(self.last_probe_us) < self.mode.min_interval_us()
+        {
+            return false;
+        }
+        if current_bps >= SCREEN_BITRATE_MAX_BPS {
+            return false;
+        }
+
+        let target_bps = match self.mode {
+            ScreenProbeMode::Aggressive => {
+                let step = (current_bps as u64 * 16) / 10;
+                step.min(SCREEN_BITRATE_MAX_BPS as u64) as u32
+            }
+            ScreenProbeMode::Auto => {
+                let step = (current_bps as u64 * 14) / 10;
+                step.min(SCREEN_BITRATE_MAX_BPS as u64) as u32
+            }
+            ScreenProbeMode::Conservative => {
+                let step = (current_bps as u64 * 12) / 10;
+                step.min(SCREEN_BITRATE_MAX_BPS as u64) as u32
+            }
+            ScreenProbeMode::Disabled => return false,
+        };
+
+        if target_bps > current_bps {
+            self.trigger_probe(target_bps, now_us, next_transport_seq)
+        } else {
+            false
+        }
+    }
+
+    /// Process incoming TWCC feedback to evaluate the delivery rate and delay gradient of the active probe cluster.
+    /// If probe passed, executes fast ramp-up on rate_controller and returns Some(new_bps).
+    pub fn on_twcc_feedback(
+        &mut self,
+        feedback: &ScreenTwccFeedback,
+        rate_controller: &mut ScreenRateController,
+        _now_us: u64,
+    ) -> Option<u32> {
+        let cluster = self.active_cluster.as_ref()?.clone();
+
+        // Check if any packet in this cluster is reported in feedback.records
+        let cluster_records: Vec<_> = feedback
+            .records
+            .iter()
+            .filter(|r| {
+                let diff = r.transport_seq.wrapping_sub(cluster.start_seq);
+                diff < cluster.cluster_size as u16
+            })
+            .collect();
+
+        if cluster_records.is_empty() {
+            return None;
+        }
+
+        let mut arrived_deltas = Vec::new();
+        let mut missing_count = 0;
+
+        for rec in &cluster_records {
+            if rec.recv_delta_us == SCREEN_TWCC_MISSING_DELTA {
+                missing_count += 1;
+            } else {
+                arrived_deltas.push(rec.recv_delta_us as i64);
+            }
+        }
+
+        let loss_ratio = (missing_count as f32) / (cluster.cluster_size as f32);
+        self.stats.last_loss_ratio = loss_ratio;
+
+        let delivered_rate_bps = if arrived_deltas.len() >= 2 {
+            let min_d = *arrived_deltas.iter().min().unwrap();
+            let max_d = *arrived_deltas.iter().max().unwrap();
+            let delta_us = (max_d - min_d).max(1) as u64;
+            let delivered_bytes =
+                (arrived_deltas.len() as u64) * (SCREEN_PROBE_DEFAULT_PACKET_LEN as u64);
+            (delivered_bytes * 8 * 1_000_000) / delta_us
+        } else {
+            0
+        };
+
+        self.stats.last_measured_bps = delivered_rate_bps;
+
+        // Estimate delay gradient over probe cluster: recv span vs send span
+        let delay_gradient_us = if arrived_deltas.len() >= 2 {
+            let recv_span = (*arrived_deltas.iter().max().unwrap())
+                - (*arrived_deltas.iter().min().unwrap());
+            recv_span
+        } else {
+            0
+        };
+        self.stats.last_delay_gradient_us = delay_gradient_us;
+
+        // Validation gate:
+        // 1. Loss ratio <= 15%
+        // 2. Measured rate >= 70% of target_bps
+        // 3. Delay gradient <= 20,000 us (20ms queue growth during burst)
+        let passed = loss_ratio <= 0.15
+            && delivered_rate_bps >= ((cluster.target_bps as u64 * 70) / 100)
+            && delay_gradient_us <= 20_000;
+
+        if passed {
+            self.stats.probes_completed = self.stats.probes_completed.saturating_add(1);
+            self.state = ScreenProbeState::Completed;
+            self.stats.state = ScreenProbeState::Completed;
+            self.active_cluster = None;
+            self.stats.active_cluster_id = None;
+            rate_controller.fast_ramp_up(cluster.target_bps);
+            Some(cluster.target_bps)
+        } else if cluster_records.len() >= (cluster.cluster_size as usize * 3 / 4) {
+            // Cluster largely evaluated but failed validation gate
+            self.stats.probes_failed = self.stats.probes_failed.saturating_add(1);
+            self.state = ScreenProbeState::Failed;
+            self.stats.state = ScreenProbeState::Failed;
+            self.active_cluster = None;
+            self.stats.active_cluster_id = None;
+            None
+        } else {
+            None
+        }
+    }
+}
+
 /// Sender side. Owns the monotonic sequence so a reconnect cannot replay old
 /// frames, and so the controller can detect a gap.
 pub struct ScreenSender {
@@ -5053,6 +5805,7 @@ pub struct ScreenSender {
     trendline_filter: ScreenTrendlineFilter,
     retransmit_buffer: ScreenRetransmitBuffer,
     twcc_sender: ScreenTwccSenderTracker,
+    probe_controller: ScreenProbeController,
 }
 
 impl Default for ScreenSender {
@@ -5075,6 +5828,7 @@ impl ScreenSender {
         let trendline_filter = ScreenTrendlineFilter::default();
         let retransmit_buffer = ScreenRetransmitBuffer::new(ScreenHarqMode::Auto);
         let twcc_sender = ScreenTwccSenderTracker::new(ScreenTwccMode::Auto);
+        let probe_controller = ScreenProbeController::default();
         let stats = ScreenStats {
             bitrate_bps: rate_controller.current_bps(),
             fps_target: fps_pacer.fps_target(),
@@ -5112,6 +5866,13 @@ impl ScreenSender {
             twcc_feedbacks_received: 0,
             twcc_delivery_rate_bps: 0,
             twcc_delay_gradient_us: 0,
+            probe_mode: probe_controller.mode().tag(),
+            probe_state: probe_controller.state().tag(),
+            probes_triggered: 0,
+            probes_completed: 0,
+            probes_failed: 0,
+            probe_target_bps: 0,
+            probe_measured_bps: 0,
             ..Default::default()
         };
         Self {
@@ -5133,7 +5894,14 @@ impl ScreenSender {
             trendline_filter,
             retransmit_buffer,
             twcc_sender,
+            probe_controller,
         }
+    }
+
+    pub fn with_probe(probe: ScreenProbeMode) -> Self {
+        let mut sender = Self::new();
+        sender.set_probe_mode(probe);
+        sender
     }
 
     pub fn with_twcc(twcc: ScreenTwccMode) -> Self {
@@ -5208,7 +5976,100 @@ impl ScreenSender {
         s.twcc_feedbacks_received = twcc_st.feedbacks_received;
         s.twcc_delivery_rate_bps = twcc_st.delivery_rate_bps;
         s.twcc_delay_gradient_us = twcc_st.delay_gradient_us;
+        let p_stats = self.probe_controller.stats();
+        s.probe_mode = p_stats.mode.tag();
+        s.probe_state = p_stats.state.tag();
+        s.probes_triggered = p_stats.probes_triggered;
+        s.probes_completed = p_stats.probes_completed;
+        s.probes_failed = p_stats.probes_failed;
+        s.probe_target_bps = p_stats.last_target_bps;
+        s.probe_measured_bps = p_stats.last_measured_bps;
         s
+    }
+
+    /// Active bandwidth probing mode (v2.09 / ADR-095).
+    pub fn probe_mode(&self) -> ScreenProbeMode {
+        self.probe_controller.mode()
+    }
+
+    /// Set active bandwidth probing mode.
+    pub fn set_probe_mode(&mut self, mode: ScreenProbeMode) {
+        self.probe_controller.set_mode(mode);
+        self.sync_probe_stats();
+    }
+
+    /// Telemetry statistics for Screen Active Bandwidth Probing.
+    pub fn probe_stats(&self) -> ScreenProbeStats {
+        self.probe_controller.stats()
+    }
+
+    /// Structured probe status report for REST API and CLI.
+    pub fn probe_report(&self) -> ScreenProbeReport {
+        self.probe_controller.report()
+    }
+
+    /// Reference to internal probe controller.
+    pub fn probe_controller(&self) -> &ScreenProbeController {
+        &self.probe_controller
+    }
+
+    /// Mutable reference to internal probe controller.
+    pub fn probe_controller_mut(&mut self) -> &mut ScreenProbeController {
+        &mut self.probe_controller
+    }
+
+    /// Manually trigger an active bandwidth probe burst to target_bps.
+    pub fn trigger_probe(&mut self, target_bps: u32, now_us: u64) -> bool {
+        if self.probe_controller.mode() == ScreenProbeMode::Disabled {
+            return false;
+        }
+        let cluster_size = self.probe_controller.mode().cluster_size().max(4);
+        let mut seqs = Vec::with_capacity(cluster_size as usize);
+        for _ in 0..cluster_size {
+            let seq = self
+                .twcc_sender
+                .allocate_seq(now_us, SCREEN_PROBE_DEFAULT_PACKET_LEN);
+            seqs.push(seq);
+        }
+        let res = self
+            .probe_controller
+            .trigger_probe_with_seqs(target_bps, now_us, &seqs);
+        self.sync_probe_stats();
+        res
+    }
+
+    /// Automatically schedule a bandwidth probe if network conditions and intervals allow.
+    pub fn maybe_schedule_probe(&mut self, now_us: u64) -> bool {
+        if self.probe_controller.mode() == ScreenProbeMode::Disabled {
+            return false;
+        }
+        let cur_bps = self.rate_controller.current_bps();
+        let mut next_tseq = self.twcc_sender.next_seq();
+        let res = self
+            .probe_controller
+            .maybe_schedule_probe(cur_bps, now_us, &mut next_tseq);
+        self.twcc_sender.set_next_seq(next_tseq);
+        self.sync_probe_stats();
+        res
+    }
+
+    /// Pop a pending probe packet to be transmitted over the wire.
+    pub fn pop_probe_packet(&mut self) -> Option<ScreenProbePacket> {
+        let pkt = self.probe_controller.pop_probe_packet()?;
+        self.sync_probe_stats();
+        Some(pkt)
+    }
+
+    /// Synchronize internal probe stats to ScreenStats.
+    pub fn sync_probe_stats(&mut self) {
+        let st = self.probe_controller.stats();
+        self.stats.probe_mode = st.mode.tag();
+        self.stats.probe_state = st.state.tag();
+        self.stats.probes_triggered = st.probes_triggered;
+        self.stats.probes_completed = st.probes_completed;
+        self.stats.probes_failed = st.probes_failed;
+        self.stats.probe_target_bps = st.last_target_bps;
+        self.stats.probe_measured_bps = st.last_measured_bps;
     }
 
     pub fn twcc_mode(&self) -> ScreenTwccMode {
@@ -5245,6 +6106,16 @@ impl ScreenSender {
         self.stats.twcc_feedbacks_received = rep.feedbacks_received;
         self.stats.twcc_delivery_rate_bps = rep.delivery_rate_bps;
         self.stats.twcc_delay_gradient_us = rep.delay_gradient_us;
+
+        // Evaluate active bandwidth probe cluster with TWCC feedback
+        if let Some(_new_bps) =
+            self.probe_controller
+                .on_twcc_feedback(feedback, &mut self.rate_controller, now_us)
+        {
+            self.stats.bitrate_bps = self.rate_controller.current_bps();
+        }
+        self.sync_probe_stats();
+
         if rep.delivery_rate_bps > 0 {
             let cap_bps = rep.delivery_rate_bps.min(u32::MAX as u64) as u32;
             if cap_bps < self.rate_controller.current_bps() && rep.loss_ratio > 0.05 {
@@ -5996,6 +6867,13 @@ impl ScreenSender {
         self.stats.twcc_feedbacks_received = 0;
         self.stats.twcc_delivery_rate_bps = 0;
         self.stats.twcc_delay_gradient_us = 0;
+        self.stats.probe_state = ScreenProbeState::Idle.tag();
+        self.stats.probes_triggered = 0;
+        self.stats.probes_completed = 0;
+        self.stats.probes_failed = 0;
+        self.stats.probe_target_bps = 0;
+        self.stats.probe_measured_bps = 0;
+        self.probe_controller = ScreenProbeController::new(self.probe_controller.mode());
     }
 }
 
@@ -6013,6 +6891,8 @@ pub struct ScreenReceiver {
     harq_stats: ScreenHarqStats,
     nack_history: VecDeque<(u64, u16, u64)>,
     twcc_receiver: ScreenTwccReceiverTracker,
+    probe_mode: ScreenProbeMode,
+    probe_stats: ScreenProbeStats,
 }
 
 impl Default for ScreenReceiver {
@@ -6031,6 +6911,11 @@ impl ScreenReceiver {
         };
         let twcc_mode = ScreenTwccMode::Auto;
         let twcc_receiver = ScreenTwccReceiverTracker::new(twcc_mode);
+        let probe_mode = ScreenProbeMode::Auto;
+        let probe_stats = ScreenProbeStats {
+            mode: probe_mode,
+            ..Default::default()
+        };
         let stats = ScreenStats {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
@@ -6041,6 +6926,13 @@ impl ScreenReceiver {
             twcc_feedbacks_received: 0,
             twcc_delivery_rate_bps: 0,
             twcc_delay_gradient_us: 0,
+            probe_mode: probe_mode.tag(),
+            probe_state: probe_stats.state.tag(),
+            probes_triggered: 0,
+            probes_completed: 0,
+            probes_failed: 0,
+            probe_target_bps: 0,
+            probe_measured_bps: 0,
             ..Default::default()
         };
         Self {
@@ -6055,6 +6947,8 @@ impl ScreenReceiver {
             harq_stats,
             nack_history: VecDeque::with_capacity(64),
             twcc_receiver,
+            probe_mode,
+            probe_stats,
         }
     }
 
@@ -6067,6 +6961,11 @@ impl ScreenReceiver {
         };
         let twcc_mode = ScreenTwccMode::Auto;
         let twcc_receiver = ScreenTwccReceiverTracker::new(twcc_mode);
+        let probe_mode = ScreenProbeMode::Auto;
+        let probe_stats = ScreenProbeStats {
+            mode: probe_mode,
+            ..Default::default()
+        };
         let stats = ScreenStats {
             cursor_mode: cursor_controller.mode().tag(),
             cursor_visible: true,
@@ -6077,6 +6976,13 @@ impl ScreenReceiver {
             twcc_feedbacks_received: 0,
             twcc_delivery_rate_bps: 0,
             twcc_delay_gradient_us: 0,
+            probe_mode: probe_mode.tag(),
+            probe_state: probe_stats.state.tag(),
+            probes_triggered: 0,
+            probes_completed: 0,
+            probes_failed: 0,
+            probe_target_bps: 0,
+            probe_measured_bps: 0,
             ..Default::default()
         };
         Self {
@@ -6091,6 +6997,8 @@ impl ScreenReceiver {
             harq_stats,
             nack_history: VecDeque::with_capacity(64),
             twcc_receiver,
+            probe_mode,
+            probe_stats,
         }
     }
 
@@ -6103,6 +7011,12 @@ impl ScreenReceiver {
     pub fn with_twcc_mode(mode: ScreenTwccMode) -> Self {
         let mut r = Self::new();
         r.set_twcc_mode(mode);
+        r
+    }
+
+    pub fn with_probe_mode(mode: ScreenProbeMode) -> Self {
+        let mut r = Self::new();
+        r.set_probe_mode(mode);
         r
     }
 
@@ -6139,7 +7053,84 @@ impl ScreenReceiver {
         st.twcc_feedbacks_received = twcc_st.feedbacks_received;
         st.twcc_delivery_rate_bps = twcc_st.delivery_rate_bps;
         st.twcc_delay_gradient_us = twcc_st.delay_gradient_us;
+        st.probe_mode = self.probe_mode.tag();
+        st.probe_state = self.probe_stats.state.tag();
+        st.probes_triggered = self.probe_stats.probes_triggered;
+        st.probes_completed = self.probe_stats.probes_completed;
+        st.probes_failed = self.probe_stats.probes_failed;
+        st.probe_target_bps = self.probe_stats.last_target_bps;
+        st.probe_measured_bps = self.probe_stats.last_measured_bps;
         st
+    }
+
+    /// Active bandwidth probing mode (v2.09 / ADR-095).
+    pub fn probe_mode(&self) -> ScreenProbeMode {
+        self.probe_mode
+    }
+
+    /// Explicitly configure active bandwidth probing mode.
+    pub fn set_probe_mode(&mut self, mode: ScreenProbeMode) {
+        self.probe_mode = mode;
+        self.probe_stats.mode = mode;
+        self.sync_probe_stats();
+    }
+
+    /// Telemetry statistics for Screen Active Bandwidth Probing.
+    pub fn probe_stats(&self) -> ScreenProbeStats {
+        self.probe_stats
+    }
+
+    /// Structured probe status report for REST API and CLI.
+    pub fn probe_report(&self) -> ScreenProbeReport {
+        ScreenProbeReport {
+            ok: true,
+            mode: self.probe_mode,
+            state: self.probe_stats.state,
+            probes_triggered: self.probe_stats.probes_triggered,
+            probes_completed: self.probe_stats.probes_completed,
+            probes_failed: self.probe_stats.probes_failed,
+            last_target_bps: self.probe_stats.last_target_bps,
+            last_measured_bps: self.probe_stats.last_measured_bps,
+            last_rtt_us: self.probe_stats.last_rtt_us,
+            last_loss_ratio: self.probe_stats.last_loss_ratio,
+            last_delay_gradient_us: self.probe_stats.last_delay_gradient_us,
+            active_cluster_id: self.probe_stats.active_cluster_id,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        }
+    }
+
+    /// Process incoming active bandwidth probe packet (v2.09 / ADR-095).
+    /// Records packet arrival timestamp into TWCC receiver tracker for feedback emission.
+    pub fn on_probe_packet_with_time(&mut self, probe: ScreenProbePacket, now_us: u64) {
+        if probe.transport_seq > 0 {
+            self.twcc_receiver
+                .on_packet_received(probe.transport_seq, now_us);
+        }
+        self.probe_stats.probes_triggered = self.probe_stats.probes_triggered.saturating_add(1);
+        self.probe_stats.last_target_bps = probe.target_bps;
+        self.probe_stats.active_cluster_id = Some(probe.cluster_id);
+        self.sync_probe_stats();
+    }
+
+    pub fn on_probe_packet(&mut self, probe: ScreenProbePacket) {
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        self.on_probe_packet_with_time(probe, now_us);
+    }
+
+    fn sync_probe_stats(&mut self) {
+        self.stats.probe_mode = self.probe_mode.tag();
+        self.stats.probe_state = self.probe_stats.state.tag();
+        self.stats.probes_triggered = self.probe_stats.probes_triggered;
+        self.stats.probes_completed = self.probe_stats.probes_completed;
+        self.stats.probes_failed = self.probe_stats.probes_failed;
+        self.stats.probe_target_bps = self.probe_stats.last_target_bps;
+        self.stats.probe_measured_bps = self.probe_stats.last_measured_bps;
     }
 
     /// Access playout buffer reference.
@@ -6460,6 +7451,16 @@ impl ScreenReceiver {
         self.stats.twcc_feedbacks_received = 0;
         self.stats.twcc_delivery_rate_bps = 0;
         self.stats.twcc_delay_gradient_us = 0;
+        self.probe_stats = ScreenProbeStats {
+            mode: self.probe_mode,
+            ..Default::default()
+        };
+        self.stats.probe_state = ScreenProbeState::Idle.tag();
+        self.stats.probes_triggered = 0;
+        self.stats.probes_completed = 0;
+        self.stats.probes_failed = 0;
+        self.stats.probe_target_bps = 0;
+        self.stats.probe_measured_bps = 0;
     }
 }
 
@@ -9081,4 +10082,236 @@ fn screen_twcc_transport_wide_congestion_control_pipeline() {
     receiver.on_peer_gone();
     assert_eq!(sender.stats().twcc_feedbacks_received, 0);
     assert_eq!(receiver.stats().twcc_feedbacks_sent, 0);
+}
+
+#[test]
+fn screen_active_bandwidth_probing_and_fast_rampup_pipeline() {
+    // 1. Parsing and enum tags for ScreenProbeMode
+    assert_eq!(
+        "auto".parse::<ScreenProbeMode>().unwrap(),
+        ScreenProbeMode::Auto
+    );
+    assert_eq!(
+        "aggressive".parse::<ScreenProbeMode>().unwrap(),
+        ScreenProbeMode::Aggressive
+    );
+    assert_eq!(
+        "agg".parse::<ScreenProbeMode>().unwrap(),
+        ScreenProbeMode::Aggressive
+    );
+    assert_eq!(
+        "conservative".parse::<ScreenProbeMode>().unwrap(),
+        ScreenProbeMode::Conservative
+    );
+    assert_eq!(
+        "cons".parse::<ScreenProbeMode>().unwrap(),
+        ScreenProbeMode::Conservative
+    );
+    assert_eq!(
+        "disabled".parse::<ScreenProbeMode>().unwrap(),
+        ScreenProbeMode::Disabled
+    );
+    assert_eq!(
+        "off".parse::<ScreenProbeMode>().unwrap(),
+        ScreenProbeMode::Disabled
+    );
+    assert!("invalid".parse::<ScreenProbeMode>().is_err());
+    assert_eq!(ScreenProbeMode::from_tag(0), ScreenProbeMode::Auto);
+    assert_eq!(ScreenProbeMode::from_tag(1), ScreenProbeMode::Aggressive);
+    assert_eq!(ScreenProbeMode::from_tag(2), ScreenProbeMode::Conservative);
+    assert_eq!(ScreenProbeMode::from_tag(3), ScreenProbeMode::Disabled);
+
+    // 2. Wire Protocol and framing: ScreenProbePacket encode/decode round-trip
+    let original = ScreenProbePacket {
+        flags: 0x01,
+        cluster_id: 42,
+        cluster_index: 3,
+        cluster_size: 8,
+        transport_seq: 105,
+        target_bps: 12_000_000,
+        send_time_us: 1_234_567_890,
+        padding: vec![0xEE; 256],
+    };
+    let encoded = original.encode();
+    assert_eq!(encoded.len(), SCREEN_PROBE_HEADER_LEN + 256);
+    assert_eq!(&encoded[0..5], &SCREEN_PROBE_MAGIC);
+    assert_eq!(encoded[5], SCREEN_PROBE_PROTO);
+
+    let decoded = ScreenProbePacket::decode(&encoded).expect("decode probe packet");
+    assert_eq!(decoded.flags, original.flags);
+    assert_eq!(decoded.cluster_id, original.cluster_id);
+    assert_eq!(decoded.cluster_index, original.cluster_index);
+    assert_eq!(decoded.cluster_size, original.cluster_size);
+    assert_eq!(decoded.transport_seq, original.transport_seq);
+    assert_eq!(decoded.target_bps, original.target_bps);
+    assert_eq!(decoded.send_time_us, original.send_time_us);
+    assert_eq!(decoded.padding, original.padding);
+
+    // Corrupted magic and truncated slice error tests
+    let mut bad_magic = encoded.clone();
+    bad_magic[0] = b'X';
+    assert!(ScreenProbePacket::decode(&bad_magic).is_err());
+
+    let mut bad_proto = encoded.clone();
+    bad_proto[5] = 0x99;
+    assert!(ScreenProbePacket::decode(&bad_proto).is_err());
+
+    assert!(ScreenProbePacket::decode(&encoded[..SCREEN_PROBE_HEADER_LEN - 1]).is_err());
+    assert!(ScreenProbePacket::decode(&encoded[..SCREEN_PROBE_HEADER_LEN + 10]).is_err());
+
+    // InnerFrame round-trip
+    let inner = original.to_inner().expect("to inner");
+    assert_eq!(inner.ty, TYPE_SCREEN_PROBE);
+    assert_eq!(
+        ScreenProbePacket::from_inner_frame(&inner).expect("from inner"),
+        original
+    );
+
+    // 3. ScreenProbeController state machine and cluster generation
+    let mut controller = ScreenProbeController::new(ScreenProbeMode::Auto);
+    assert_eq!(controller.mode(), ScreenProbeMode::Auto);
+    assert_eq!(controller.state(), ScreenProbeState::Idle);
+
+    // Trigger probe burst for 12 Mbps
+    let mut mock_seq = 1000u16;
+    let ok = controller.trigger_probe(12_000_000, 1_000_000, &mut mock_seq);
+    assert!(ok);
+    assert_eq!(controller.stats().probes_triggered, 1);
+    assert_eq!(controller.stats().last_target_bps, 12_000_000);
+    assert_eq!(controller.state(), ScreenProbeState::Probing);
+
+    let mut popped = Vec::new();
+    while let Some(p) = controller.pop_probe_packet() {
+        popped.push(p);
+    }
+    assert_eq!(popped.len(), SCREEN_PROBE_CLUSTER_SIZE_AUTO as usize);
+    assert_eq!(controller.state(), ScreenProbeState::AwaitingFeedback);
+
+    for (idx, p) in popped.iter().enumerate() {
+        assert_eq!(p.cluster_id, 1);
+        assert_eq!(p.cluster_index, idx as u8);
+        assert_eq!(p.cluster_size, SCREEN_PROBE_CLUSTER_SIZE_AUTO);
+        assert_eq!(p.target_bps, 12_000_000);
+        assert_eq!(p.transport_seq, 1001 + idx as u16);
+    }
+
+    // Evaluating feedback: successful burst delivery with high delivery rate and low loss
+    let mut rate_ctrl = ScreenRateController::new(SCREEN_BITRATE_DEFAULT_BPS);
+    let mut records = Vec::new();
+    for p in &popped {
+        records.push(ScreenTwccPacketRecord {
+            transport_seq: p.transport_seq,
+            recv_delta_us: (p.cluster_index as i16) * 500, // 500us intervals -> 3500us span for 8 packets -> high delivery rate
+        });
+    }
+    let fb_success = ScreenTwccFeedback {
+        feedback_seq: 1,
+        base_seq: popped[0].transport_seq,
+        packet_count: popped.len() as u16,
+        reference_time_us: 1_010_000,
+        records,
+    };
+
+    let ramp_target = controller.on_twcc_feedback(&fb_success, &mut rate_ctrl, 1_015_000);
+    assert!(ramp_target.is_some());
+    assert_eq!(ramp_target.unwrap(), 12_000_000);
+    assert_eq!(controller.state(), ScreenProbeState::Completed);
+    assert_eq!(controller.stats().probes_completed, 1);
+    assert_eq!(rate_ctrl.current_bps(), 12_000_000);
+
+    // Failed probe evaluation (high loss > 15%)
+    let ok_manual = controller.trigger_probe(15_000_000, 2_000_000, &mut mock_seq);
+    assert!(ok_manual);
+    assert_eq!(controller.state(), ScreenProbeState::Probing);
+
+    let mut popped_fail = Vec::new();
+    while let Some(p) = controller.pop_probe_packet() {
+        popped_fail.push(p);
+    }
+    assert_eq!(popped_fail.len(), SCREEN_PROBE_CLUSTER_SIZE_AUTO as usize);
+
+    // Create feedback where half the packets are marked missing
+    let mut records_fail = Vec::new();
+    for p in &popped_fail {
+        let delta = if p.cluster_index % 2 == 1 {
+            SCREEN_TWCC_MISSING_DELTA
+        } else {
+            (p.cluster_index as i16) * 1000
+        };
+        records_fail.push(ScreenTwccPacketRecord {
+            transport_seq: p.transport_seq,
+            recv_delta_us: delta,
+        });
+    }
+    let fb_fail = ScreenTwccFeedback {
+        feedback_seq: 2,
+        base_seq: popped_fail[0].transport_seq,
+        packet_count: popped_fail.len() as u16,
+        reference_time_us: 2_010_000,
+        records: records_fail,
+    };
+
+    let fail_target = controller.on_twcc_feedback(&fb_fail, &mut rate_ctrl, 2_015_000);
+    assert!(fail_target.is_none());
+    assert_eq!(controller.state(), ScreenProbeState::Failed);
+    assert_eq!(controller.stats().probes_failed, 1);
+
+    // 4. ScreenRateController fast_ramp_up integration
+    let mut rate_ctrl2 = ScreenRateController::new(SCREEN_BITRATE_DEFAULT_BPS);
+    assert_eq!(rate_ctrl2.current_bps(), SCREEN_BITRATE_DEFAULT_BPS);
+
+    rate_ctrl2.fast_ramp_up(15_000_000);
+    assert_eq!(rate_ctrl2.current_bps(), 15_000_000);
+
+    // Clamping to max allowed bitrate (SCREEN_BITRATE_MAX_BPS)
+    rate_ctrl2.fast_ramp_up(500_000_000);
+    assert_eq!(rate_ctrl2.current_bps(), SCREEN_BITRATE_MAX_BPS);
+
+    // Fast ramp-up only increases, does not decrease
+    let stepped_down = rate_ctrl2.fast_ramp_up(100);
+    assert!(!stepped_down);
+    assert_eq!(rate_ctrl2.current_bps(), SCREEN_BITRATE_MAX_BPS);
+
+    // 5. End-to-end Sender & Receiver Active Probing Pipeline
+    let mut sender = ScreenSender::new();
+    sender.set_probe_mode(ScreenProbeMode::Auto);
+    sender.set_twcc_mode(ScreenTwccMode::Auto);
+    sender.set_fec_mode(ScreenFecMode::Auto);
+    assert_eq!(sender.probe_mode(), ScreenProbeMode::Auto);
+
+    sender.on_peer_connected();
+    sender.allow();
+    sender.on_control(ControlMsg::Start).unwrap();
+
+    // Trigger active bandwidth probe burst
+    let triggered = sender.trigger_probe(8_000_000, 2_000_000);
+    assert!(triggered);
+
+    // Check that sender generated probe packets
+    let mut probe_packets = Vec::new();
+    while let Some(p) = sender.pop_probe_packet() {
+        probe_packets.push(p);
+    }
+    assert_eq!(probe_packets.len(), SCREEN_PROBE_CLUSTER_SIZE_AUTO as usize);
+
+    let mut receiver = ScreenReceiver::new();
+    receiver.set_probe_mode(ScreenProbeMode::Auto);
+    receiver.set_twcc_mode(ScreenTwccMode::Auto);
+
+    for (idx, p) in probe_packets.into_iter().enumerate() {
+        receiver.on_probe_packet_with_time(p, 2_005_000 + (idx as u64) * 200);
+    }
+    assert_eq!(receiver.probe_stats().probes_triggered, SCREEN_PROBE_CLUSTER_SIZE_AUTO as u64);
+
+    let fb = receiver
+        .generate_twcc_feedback(2_016_000)
+        .expect("twcc feedback covering probe packets");
+    let rep = sender.handle_twcc_feedback(&fb, 2_020_000);
+    assert_eq!(rep.feedbacks_received, 1);
+
+    // Peer disconnect resets
+    sender.on_peer_gone();
+    receiver.on_peer_gone();
+    assert_eq!(sender.stats().probes_triggered, 0);
+    assert_eq!(receiver.stats().probes_triggered, 0);
 }

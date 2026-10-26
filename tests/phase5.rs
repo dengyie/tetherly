@@ -85,6 +85,7 @@ fn cfg(
         screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
         screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
         screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
+        screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
         screen_sink: None,
         input_sink: None,
     }
@@ -3281,6 +3282,172 @@ async fn m5_18_screen_receiver_driven_twcc_and_congestion_feedback() {
     assert_eq!(
         host.screen_twcc_mode(),
         tetherly_core::ScreenTwccMode::Conservative
+    );
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_19_screen_active_bandwidth_probing_and_fast_rampup() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Initial Probe query on host: defaults to Auto mode (ADR-095)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/probe")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenProbeReport = serde_json::from_slice(&b).unwrap();
+    assert!(init_rep.ok);
+    assert_eq!(init_rep.mode, tetherly_core::ScreenProbeMode::Auto);
+    assert_eq!(init_rep.state, tetherly_core::ScreenProbeState::Idle);
+    assert_eq!(init_rep.probes_triggered, 0);
+    assert_eq!(init_rep.probes_completed, 0);
+    assert_eq!(init_rep.probes_failed, 0);
+
+    // 2. Dynamic Probe mode configuration via POST /api/screen/probe
+    let agg_payload = serde_json::json!({ "mode": "aggressive" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/probe",
+        &serde_json::to_vec(&agg_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let agg_rep: tetherly_core::ScreenProbeReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(agg_rep.mode, tetherly_core::ScreenProbeMode::Aggressive);
+
+    let cons_payload = serde_json::json!({ "mode": "conservative" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/probe",
+        &serde_json::to_vec(&cons_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let cons_rep: tetherly_core::ScreenProbeReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(cons_rep.mode, tetherly_core::ScreenProbeMode::Conservative);
+
+    let dis_payload = serde_json::json!({ "mode": "disabled" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/probe",
+        &serde_json::to_vec(&dis_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let dis_rep: tetherly_core::ScreenProbeReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(dis_rep.mode, tetherly_core::ScreenProbeMode::Disabled);
+
+    // Set back to Auto mode
+    let auto_payload = serde_json::json!({ "mode": "auto" });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/probe",
+        &serde_json::to_vec(&auto_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let auto_rep: tetherly_core::ScreenProbeReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(auto_rep.mode, tetherly_core::ScreenProbeMode::Auto);
+
+    // 3. Visitor opens screen channel, host allows, and visitor starts streaming
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Trigger active bandwidth probe burst via /api/screen/probe/trigger
+    let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/probe/trigger", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let trig_rep: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(trig_rep["ok"], true);
+
+    // 5. Send video frame from host
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 6. Verify probe report on host
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/probe")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_probe: tetherly_core::ScreenProbeReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_probe.mode, tetherly_core::ScreenProbeMode::Auto);
+    assert!(host_probe.ok);
+    assert!(host_probe.probes_triggered >= 1);
+
+    // 7. Verify status report contains Probe fields
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_status: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(host_status.probe_mode, "auto");
+    assert!(host_status.probes_triggered >= 1);
+
+    // 8. Verify node direct accessor methods
+    assert_eq!(host.screen_probe_mode(), tetherly_core::ScreenProbeMode::Auto);
+    let set_res = host.screen_set_probe_mode(tetherly_core::ScreenProbeMode::Aggressive);
+    assert_eq!(set_res.mode, tetherly_core::ScreenProbeMode::Aggressive);
+    assert_eq!(
+        host.screen_probe_mode(),
+        tetherly_core::ScreenProbeMode::Aggressive
     );
 
     host.shutdown();

@@ -3,12 +3,40 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.08** |
+| 文档版本 | **2.09** |
 | 日期 | 2026-10-25 |
-| 状态 | **v2.08 屏幕流接收端驱动传输层全网拥塞控制与报文到达反馈流水线（Screen Streaming Receiver-Driven Transport-Wide Congestion Control & Packet Arrival Feedback Pipeline, ADR-094）与双端 CLI 全同构**——(1) **协议与 TWCC 反馈解算引擎**（`crates/tetherly-core/src/screen.rs`）：借鉴 RFC 8888 体系，为全局 FEC 切片单调分配 16 位传输序列号（`transport_seq`）；设计专用线协议帧（`TYPE_SCREEN_TWCC = 0x0506`、`TTWCC` 协议魔数、20 字节报头与每包 4 字节紧凑增量、哨兵 `-32768`）；支持 Auto（10ms/40包）、Aggressive（5ms/20包）、Conservative（25ms/80包）与 Disabled 四种模式；接收端跟踪器记录微秒到达时间差并自适应聚合，发送端滑动窗口跟踪在途报文并在双向配对后以 EWMA 平滑解算投递速率（Delivery Rate）、精确丢包率（Loss Ratio）、平滑 RTT 与包间排队时延梯度；与 AIMD 深度联动，严重丢包（>5%）或投递速率被压制时触发乘性减（`force_step_down`）；(2) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：Visitor 循环自适应派发 `TYPE_SCREEN_TWCC`，Host 循环解析反馈并实时联动编码器码率；新增 REST API `GET/POST /api/screen/twcc`，扩展 `ScreenStatusReport` 包含 6 个 TWCC 遥测字段；(3) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen twcc [mode]`、`tetherly run --screen-twcc` 与 `screen status` 状态监控；(4) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_18_screen_receiver_driven_twcc_and_congestion_feedback` 全绿，版本升级至 `0.1.30`。 |
+| 状态 | **v2.09 屏幕流带宽主动探测与链路容量快速爬升流水线（Screen Streaming Active Bandwidth Probing & Fast Ramp-Up Pipeline, ADR-095）与双端 CLI 全同构**——(1) **协议与主动探测状态机**（`crates/tetherly-core/src/screen.rs`）：借鉴现代 WebRTC 与 BBR 主动探测体系，设计专用线协议帧（`TYPE_SCREEN_PROBE = 0x0507`、`TPROB` 协议魔数、26 字节固定报头与可变填充载荷）；支持 Auto（8包/簇，500ms间隔）、Aggressive（16包/簇，250ms间隔）、Conservative（6包/簇，1000ms间隔）与 Disabled 四种模式；支持 Idle、Probing、AwaitingFeedback、Completed 与 Failed 五态状态机；(2) **TWCC 传输序号关联与快速爬升门禁**（`crates/tetherly-core/src/screen.rs`）：探测报文无缝纳入 TWCC 全局传输序号分配；接收端在 TWCC 反馈中携带各探测切片的实际到达增量；发送端解算探测簇的实际投递突发速率 $R_{\text{probe}}$、丢包率与排队梯度膨胀量，唯有同时满足丢包率 $\le 15\%$、实测速率 $\ge 70\%$ 目标速率、额外排队梯度 $\le 20\,\text{ms}$ 三重严格门禁时，才判定探测成功，直接调用 `ScreenRateController.fast_ramp_up(target_bps)` 绕过 AIMD 慢速加性增，瞬间爬升至信道真实承载上限；(3) **运行时系统与本地控制面整合**（`crates/tetherly-node/src/runtime.rs`, `uihttp.rs`）：串流建立初期或严重拥塞恢复后优先排队派发探测突发簇；新增 REST API `GET/POST /api/screen/probe` 与 `POST /api/screen/probe/trigger`，扩展 `ScreenStatusReport` 包含 7 个 Probe 关键遥测字段；(4) **双端 CLI 100% 全同构**（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）：全同构支持 `screen probe [mode] [--target-kbps] [--trigger]`、`tetherly run --screen-probe` 与 `screen status` 状态监控；(5) **测试与版本**：全工作区集成测试与 Phase 5 端到端 `m5_19_screen_active_bandwidth_probing_and_fast_rampup` 全绿，版本升级至 `0.1.31`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.09 相对 2.08(屏幕流带宽主动探测与链路容量快速爬升流水线 ADR-095 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **突破传统 AIMD「慢启动爬升困境（Slow Ramp-Up Bottleneck）」**: 串流建立初期或遭遇突发丢包降速后，被动 AIMD 加性增（每秒数十至数百 kbps）在千兆 LAN 或 5G 高速链路上耗费十数秒至数十秒才能提升至 4K/60FPS 高码率（15~20 Mbps），导致连接初期画质长时间模糊涂抹。
+  2. **引入现代 WebRTC / BBR 风格的主动带宽探测（Active Bandwidth Probing）**: 主动构造短小、紧凑、微秒级排队的「探针数据包簇（Probe Packet Clusters）」，在数毫秒窗口内突发注入目标速率测试流量，迫使信道物理瓶颈暴露出真实的排队与吞吐特征。
+  3. **严格的抗拥塞安全门禁三要素**:
+     - 丢包率 $\le 15\%$；
+     - 实测投递速率 $\ge 70\%$ 目标探测速率；
+     - 额外排队时延梯度 $\le 20\,\text{ms}$（20,000 $\mu\text{s}$）。
+     全部满足才执行一次性快速爬升（`fast_ramp_up`），任一不达标立即退避，杜绝盲目探测压垮弱网。
+- **架构解法与落地**:
+  1. **Core 探测协议与控制器（`crates/tetherly-core/src/screen.rs`）**:
+     - 定义 `ScreenProbeMode`、`ScreenProbeState`、`ScreenProbePacket`、`ScreenProbeCluster`、`ScreenProbeController`、`ScreenProbeStats` 与 `ScreenProbeReport`。
+     - 定义线协议常量：`TYPE_SCREEN_PROBE = 0x0507`、`SCREEN_PROBE_MAGIC = *b"TPROB"`、`SCREEN_PROBE_PROTO = 0x01`、`SCREEN_PROBE_HEADER_LEN = 26`、`SCREEN_PROBE_DEFAULT_PACKET_LEN = 1200`。
+     - 发送端 `ScreenProbeController` 维护探测排队与状态机；接收端将探测包序列号接入 `ScreenTwccReceiverTracker`；在 TWCC 反馈中通过到达时间跨度 $\Delta t_{\text{span}}$ 精确算出实测投递速率 $R_{\text{probe}}$ 与排队梯度 $\nabla D$。
+     - 门禁通过后调用 `ScreenRateController.fast_ramp_up(target_bps)` 瞬间拉高发送码率上限。
+  2. **Node 守护进程与端到端传输（`crates/tetherly-node/src/runtime.rs`）**:
+     - `NodeConfig` 与 `SharedNodeState` 引入 `screen_probe_mode: ScreenProbeMode`。
+     - `send_screen_frames` 优先提取并下发探测帧，与常规视频分片非阻塞并行流转。
+     - 暴露 `screen_probe_mode()`、`screen_set_probe_mode()`、`screen_probe_report()`、`screen_trigger_probe()` 运行时接口。
+  3. **回环 REST API（`crates/tetherly-node/src/uihttp.rs`）**:
+     - 新增 `GET /api/screen/probe`、`POST /api/screen/probe` 与 `POST /api/screen/probe/trigger`。
+     - `ScreenStatusReport` 扩充 `probe_mode`、`probe_state`、`probes_triggered`、`probes_completed`、`probes_failed`、`probe_target_bps`、`probe_measured_bps` 7 个字段。
+  4. **双端 CLI 100% 全同构（`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`）**:
+     - 支持 `screen probe [mode] [--target-kbps] [--trigger]` 子命令、`tetherly run --screen-probe` 启动参数与 `screen status` 状态监控。
+  5. **测试与验证**:
+     - 核心单元测试、REST API 单元测试及 Phase 5 端到端集成测试 `m5_19_screen_active_bandwidth_probing_and_fast_rampup` 全绿。
 
 **2.08 相对 2.07(屏幕流接收端驱动传输层全网拥塞控制与报文到达反馈流水线 ADR-094 与双端 CLI 全同构)**
 
