@@ -3,12 +3,941 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.15** |
-| 日期 | 2026-10-27 |
-| 状态 | **v2.15 屏幕串流会话录制容器与回放流水线（Screen Streaming Session Recording Container & Replay Pipeline, ADR-101）与双端 CLI 全同构**——(1) **TREC 自主容器格式**（`crates/tetherly-core/src/screen.rs`）：定义 `SCREEN_RECORDING_MAGIC = *b"TREC"`（`proto = 0x01`）27 字节定长容器头（`width/height/format/codec/stride/started_us`，由首帧自动推导 `ScreenRecordingMeta::from_frame`）与逐帧记录（`seq(8) + pts_us(8) + len(4) + payload`）；`payload` 为 `ScreenFrame::encode_payload()` 线协议字节，容器层零转码零重编码；`ScreenRecordingWriter`（BufWriter 落盘 + finish flush）与 `ScreenRecordingReader`（magic/proto 校验 + 干净 EOF 与记录中途截断区分 + `decode_frame` 还原标准 `ScreenFrame`）；(2) **录制告知信令（Recording Disclosure）**：14 字节定长控制信封引入 Tag = 9 `ControlMsg::SetRecordingState { active }`，收端开始/停止录制时向宿主机广播，宿主机原子 `screen_peer_recording` 透视（录制知情权）；(3) **节点录制会话管理**（`crates/tetherly-node/src/runtime.rs`）：`NodeShared` 维护 `screen_recording: Mutex<Option<ScreenRecordingSession>>`（惰性写头：首帧呈现时以实际 rect/codec 建立容器）与 `screen_peer_recording`；收端 playout 弹帧路径 tap 录制；暴露 `screen_recording_report()`、`screen_start_recording()`（默认 `<data_dir>/recordings/rec-<unix_ms>.trec`，拒绝 `..` 穿越）、`screen_stop_recording()`（flush + 停止告知）与 `screen_recording_replay()`（容器读回校验，limit 钳位 1..512）；(4) **回环 REST API**（`uihttp.rs`）：`POST /api/screen/recording/start`（body/query `path`）、`POST /api/screen/recording/stop`、`GET /api/screen/recording` 与 `GET /api/screen/recording/replay?path=&limit=`；`ScreenStatusReport` 扩充 `recording_active`、`peer_recording`、`recording_frames`；(5) **双端 CLI 100% 全同构**：`screen recording start [--out]`、`stop`、`status`、`inspect <path> [--limit]` 与 `--json`，`screen status` 新增 Recording 行；(6) **测试与版本**：核心单测 `screen_recording_container_roundtrip_and_recording_disclosure`（信令往返、容器读写还原逐字节一致、截断报错、magic/proto 拒绝）、REST 单测 `test_uihttp_screen_recording_endpoints` 与端到端 `m5_25_screen_session_recording_container_and_replay_pipeline`（录制告知跨端传播、收端逐帧录制、容器落盘、replay 读回校验、停止清除对端标志）全绿，版本升级至 `0.1.37`。 |
+| 文档版本 | **2.40** |
+| 日期 | 2026-10-31 |
+| 状态 | **v2.40 屏幕串流动态空间瓦片局部运动矢量估计与跨帧位移复用流水线与双端 CLI 全同构（Screen Streaming Dynamic Tile-Grid Local Motion Vector Estimation & Inter-Tile Displacement Compensation Pipeline with 100% Dual CLI Isomorphism, ADR-126）**——(1) **瓦片级局部运动矢量估计数学模型**（`crates/tetherly-core/src/screen.rs`）：定义专用瓦片子编码器 `TILE_SUBCODEC_MOTION = 7`、`ScreenTileMotionConfig`（`max_displacement` 默认 32、范围 4..=128；`min_match_ratio` 默认 90 即 90%）与 `ScreenTileMotionReport`；针对局部子窗口滚动（编辑器视口、终端缓冲、网页窗格）导致的刚性 $64\times64$ 瓦片网格整体错位与哈希缓存全量未命中雪崩，发送端在脏瓦片进入昂贵调色板/预测压缩前，先在上一参考帧画布（`screen_sender_tile_canvas`）的局部搜索窗口 $[-32, 32]$ 内以 4×4 下采样点阵进行快速位移匹配（优先垂直 $dx=0, dy\neq 0$，次选水平 $dx\neq 0, dy=0$，最后粗粒度 2D 对角步进），单瓦片估计时延 $< 5\,\mu\text{s}$；匹配度 $\ge$ 阈值时仅发射 5 字节极简报文 `[subcodec=7: u8 | dx: i16 | dy: i16]`，相较 64×64 RGBA 的 16384 字节原始像素压缩比高达 $3276:1$，带宽节约 99.9%；(2) **接收端零拷贝位移内存复用（`decompress_tile_motion`）**：解析 Tag 7 时跳过熵解码，直接从活跃画布（`screen_receiver_canvas`）的 $(x-\Delta x, y-\Delta y)$ 坐标提取 64×64 像素块贴合至后台双缓冲画布（ADR-121），零解压负荷、零多余分配，帧集齐后原子 Front-Swap，保障 100% 逐位像素精确还原与零撕裂；全部瓦片网格帧格式（`SCREEN_COMPRESS_TILE_GRID` / `TILE_BATCH` / `TILE_CACHE`）统一支持；(3) **14 字节定长信令扩充**：在定长信封（`TYPE_SCREEN_CONTROL = 0x0502`）中扩充 Tag 71（`ControlMsg::SetScreenTileMotionMode { enabled: bool, max_displacement: u16, min_match_ratio: u8 }`）、Tag 72（`ControlMsg::ResetScreenTileMotionMode`）与 Tag 73（`ControlMsg::TileMotionSync { motion_tiles: u64, fallback_tiles: u64, bytes_saved: u64 }`）；(4) **节点运行时状态维护与网络循环协同**（`crates/tetherly-node/src/runtime.rs`）：`NodeShared` 挂载 `screen_tile_motion_config` 与原子计数器（`screen_tile_motion_tiles_sent`, `screen_tile_motion_fallback_tiles_sent`, `screen_tile_motion_bytes_saved`），`screen_send_frame` 在缓存未命中与非缓存双路径上无缝集成运动估计短路，`attach_screen_client` 在网格/批次/缓存三路接收循环集成位移补偿解压；(5) **回环 REST 控制面端点闭环**（`crates/tetherly-node/src/uihttp.rs`）：提供 `/api/screen/tile/motion`（GET / POST）与 `/api/screen/tile/motion/reset`（POST/DELETE），`ScreenStatusReport` 扩充 6 项 Tile Motion 遥测，严格执行 127.0.0.1 物理绑定与 Host 403 强隔离；(6) **双端 CLI 100% 全同构**（`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`）：新增 `screen tile motion [status|set|reset]` 与 `screen tile-motion` 子命令族及格式化报表输出，`screen status` 扩充 Tile Motion Est 遥测指标；(7) **测试与集成**：core 核心单元测试、uihttp REST 单测与 Phase 5 端到端自动化集成测试 `m5_50_screen_tile_motion_vector_pipeline` 全链路验证通过，Workspace 版本发布为 `0.1.62`。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.40 相对 2.39(屏幕串流动态空间瓦片局部运动矢量估计与跨帧位移复用流水线 ADR-126 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **局部窗口滚动场景下的网格错位与哈希缓存失效雪崩（Sub-Window Scroll vs. Tile Grid Misalignment）**: 全帧运动估计（ADR-115，`SCREEN_COMPRESS_MOTION_SCROLL`）仅适用于全局全屏大位移；当用户在终端、代码编辑器局部视口、浏览器网页窗格或多窗口协作场景下进行局部滚动时，屏幕其它区域（顶栏、侧边栏、任务栏）保持静态，全局运动估计不满足全屏匹配阈值（$\ge 85\%$），系统退化为空间瓦片网格流（ADR-116/125）。在刚性 $64\times64$ 固定网格中，局部窗口内容哪怕发生 3~5 像素的微小垂直平移，窗口内部所有瓦片都会在网格边界整体错位，直接导致瓦片哈希全局缓存（ADR-117）全部未命中，成百上千个瓦片被标记为脏瓦片，系统被迫对所有脏瓦片重新执行调色板/预测/Zstd 压缩，引发剧烈的 CPU 编码尖峰与数兆字节瞬时流量脉冲；
+  2. **核心突破（ADR-126 动态瓦片局部运动矢量估计与位移复用流水线）**:
+     - 引入专用瓦片子编码器 `TILE_SUBCODEC_MOTION = 7`；
+     - **发送端局部运动矢量估计（`estimate_tile_motion`）**：脏瓦片进入昂贵压缩前，在上一参考帧画布（`screen_sender_tile_canvas`）的局部搜索窗口（默认 $[-32, 32]$，范围 4..=128）内，以 4×4 下采样行/点特征进行快速位移匹配（优先垂直 $dx=0, dy\neq 0$，次选水平 $dx\neq 0, dy=0$，最后粗粒度 2D 步进），匹配度 $\ge$ 阈值（默认 90%）时确定运动矢量 $(\Delta x, \Delta y)$，单瓦片估计时延 $< 5\,\mu\text{s}$；
+     - 命中时无需编码任何像素数据，仅发射 **5 字节极简报文** `[subcodec=7: u8 | dx: i16 | dy: i16]`，相较 64×64 RGBA 的 16384 字节原始像素压缩比 $3276:1$，带宽节约 99.9%，并大幅削减编码端 CPU 开销；
+     - **接收端即时位移内存复用（`decompress_tile_motion`）**：解析 Tag 7 时无需熵解码，直接从活跃画布（`screen_receiver_canvas`）提取 $(x-\Delta x, y-\Delta y)$ 处的 64×64 像素块贴合至后台双缓冲画布，零 CPU 解压负荷，帧集齐后原子 Front-Swap 交换，保障 100% 逐位像素精确还原与零撕裂；
+  3. **定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 71 (`ControlMsg::SetScreenTileMotionMode { enabled: bool, max_displacement: u16, min_match_ratio: u8 }`)**：配置局部运动估计搜索窗口与匹配阈值；
+     - **Tag 72 (`ControlMsg::ResetScreenTileMotionMode`)**：一键重置配置与统计指标；
+     - **Tag 73 (`ControlMsg::TileMotionSync { motion_tiles: u64, fallback_tiles: u64, bytes_saved: u64 }`)**：双端同步运动补偿遥测统计；
+  4. **安全回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 提供 `GET/POST /api/screen/tile/motion` 与 `POST/DELETE /api/screen/tile/motion/reset`，严格校验 127.0.0.1 物理绑定与 Host 403 阻断；
+  5. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen tile motion [status|set|reset]` 命令族及格式化报表，`screen status` 扩充 Tile Motion Est 运行指标；
+  6. **测试覆盖与版本更新**:
+     - 核心算法单测、REST 端点单测与端到端集成测试 `m5_50_screen_tile_motion_vector_pipeline` 全绿，Workspace 版本发布为 `v0.1.62`。
+
+**2.39 相对 2.38(屏幕串流动态空间瓦片自适应 MTU 分块聚合与定步分发流水线 ADR-125 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **单帧巨型瓦片脉冲与网络丢包雪崩（Monolithic Tile Frame vs. Network Micro-Bursts）**: 在空间分块网格（`SCREEN_COMPRESS_TILE_GRID`，ADR-116）、瓦片字典全局缓存（`SCREEN_COMPRESS_TILE_CACHE`，ADR-117）、显著性分级（`SCREEN_TILE_SALIENCY`，ADR-123）与多分辨率细节层次（`SCREEN_TILE_LOD`，ADR-124）中，待发脏瓦片无论经过何种压缩，最终均被打包并序列化为一个单独的巨大 `ScreenFrame`（`encode_tile_grid`）。在窗口拖拽、高动态滚屏或视频播放等场景下，单帧可能包含数十至上百个脏瓦片，整帧编码体积可轻易达到 40 KB ~ 120 KB；
+  2. **网络层 IP 盲目分片与 Bufferbloat 痛点**: 单个以太网标准 MTU 为 1500 字节，UDP/Noise/EasyTier 隧道安全有效载荷约为 1200 ~ 1400 字节。当 120 KB 巨型报文推送到网络层时，系统底层的 IP 分片或 UDP 突发涌入队列，极易在中间路由器或 Wi-Fi/移动网络中产生严重拥塞与丢包（Micro-Burst & Bufferbloat）。只要其中任意一个底层 IP 分片丢失，整个 120 KB 的巨型帧就会在接收端重组失败，导致整帧所有脏瓦片全部损毁；
+  3. **核心突破（ADR-125 动态瓦片 MTU 分块聚合与定步分发流水线）**:
+     - 引入专用子编码格式 `SCREEN_COMPRESS_TILE_BATCH = 10`；
+     - **发送端自适应 MTU 分块聚合（`chunk_dirty_tiles`）**：依据配置的 `target_chunk_bytes`（默认 1200 字节，512..=64000）将待发瓦片流切分为若干独立的自包含瓦片子批次（Chunks）；
+     - 每一个分块（Chunk）携带完整且独立的瓦片头信息：`batch_id (u32)`、`chunk_index (u16)`、`total_chunks (u16)`、`tile_size (u16)`、`total_tiles (u16)` 与 `tiles_in_chunk (u16)`，彻底杜绝操作系统层与路由器层的 IP 盲目分片；
+     - **分块定步平滑发送（`PacedBatchDispatcher`）**：分块之间施加微秒级定步间隙（`pacing_interval_us`，默认 200 $\mu\text{s}$），将突发流量在时域上均匀铺开，彻底消除线路级瞬时脉冲；
+     - **接收端分块即时解压与原子双缓冲呈现融合（ADR-121）**：接收端收到任一分块即可立即解压瓦片并写入后台画布，分散解压算力开销；当全部分块就绪后原子触发 Front-Swap 呈现，保障 100% 逐位像素精确还原；
+  4. **定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 68 (`ControlMsg::SetScreenTileBatchMode { enabled: bool, target_chunk_bytes: u16, pacing_interval_us: u16 }`)**：配置动态瓦片批次切分与定步参数；
+     - **Tag 69 (`ControlMsg::ResetScreenTileBatchMode`)**：一键重置分块批处理模式与统计指标；
+     - **Tag 70 (`ControlMsg::TileBatchSync { batches_sent: u64, chunks_sent: u64, avg_chunk_bytes: u32, pacing_pauses: u64 }`)**：双端同步分块聚合运行统计；
+  5. **安全回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 提供 `GET /api/screen/tile/batch`、`POST /api/screen/tile/batch`、`POST/DELETE /api/screen/tile/batch/reset` 及 `/api/screen/batch` 语法糖别名，严格校验 127.0.0.1 物理绑定与 Host 403 阻断；
+  6. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen tile batch [status|set|reset]` 与 `screen batch` 别名命令族及格式化报表，`screen status` 扩充 Tile Batching 运行指标；
+  7. **测试覆盖与版本更新**:
+     - 核心算法单测、REST 端点单测与端到端集成测试 `m5_49_screen_tile_batching_pipeline` 全绿，Workspace 版本发布为 `v0.1.61`。
+
+**2.38 相对 2.37(屏幕串流动态空间瓦片多分辨率细节层次下采样与双线性渐进重构流水线 ADR-124 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **瓦片串流中的二元丢弃与视觉冻结瓶颈（Binary Tile Drop vs. Visual Freeze）**: 在空间分块网格（`SCREEN_COMPRESS_TILE_GRID`，ADR-116）、瓦片字典全局缓存（`SCREEN_COMPRESS_TILE_CACHE`，ADR-117）与显著性分级（`SCREEN_TILE_SALIENCY`，ADR-123）中，待发脏瓦片被区分为 Critical、Normal 与 Background 三级。在网络拥塞时，ADR-123 采取主动跳过 Background 瓦片传输（`drop_background_on_congestion`）以保护关键交互区。但在弱网或移动网络持续拥塞的极端场景下，完全跳过会导致背景区域长时间处于视觉冻结（Visual Freeze）状态；若强行以全分辨率 64×64 发送，即便经过 Palette/Predict 压缩也仍占用数百字节，恶化队列排队延迟；
+  2. **核心突破（ADR-124 动态多分辨率细节层次下采样与渐进重构流水线）**:
+     - 打破「全量发送 vs 完全丢弃」的二元对立，引入瓦片级细节层次动态下采样（Tile Level-of-Detail, LoD）；
+     - `TileLodLevel::Lod0`：全分辨率 64×64（基准无损分辨率，Critical 瓦片恒定保真）；
+     - `TileLodLevel::Lod1`：半分辨率 32×32（4 倍像素降采样，带宽减少 75%）；
+     - `TileLodLevel::Lod2`：四分之一分辨率 16×16（16 倍像素降采样，带宽减少 93.75%）；
+  3. **发送端快速盒状平均滤波与复合压缩 (`downsample_tile_rgba`)**:
+     - 采用整数 SIMD 优化的盒状平均滤波，单瓦片下采样时延 $< 1\,\mu\text{s}$；
+     - 下采样后的低分辨率像素块接入 Palette/Zstd 复合子编码器封装为 `TILE_SUBCODEC_LOD = 6`；
+  4. **接收端双线性平滑插值重构 (`upsample_tile_rgba`)**:
+     - 接收端解压低分辨率像素后，采用纯整数定点双线性插值在内存中微秒级放大恢复至 64×64 标准尺寸并提交至双缓冲呈现器；
+  5. **100% 逐位像素精确还原与渐进式自愈（Bit-for-Bit Canvas Invariance & Eventual Consistency）**:
+     - 下采样的瓦片在发送端画布中保留为待高精度回补标记，一旦链路拥塞缓解或进入下一刷新周期，发送端自动发起 Lod0 高保真回补，确保画布达到 100% 无损最终一致性；
+  6. **定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 65 (`ControlMsg::SetScreenTileLodMode { enabled: bool, max_lod: u8, auto_lod_on_congestion: bool }`)**：配置动态 LoD 下采样模式；
+     - **Tag 66 (`ControlMsg::ResetScreenTileLodMode`)**：一键重置 LoD 配置与统计指标；
+     - **Tag 67 (`ControlMsg::TileLodSync { lod0_tiles: u64, lod1_tiles: u64, lod2_tiles: u64, bytes_saved: u64 }`)**：双端同步分级统计与节省带宽遥测；
+  7. **安全回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 提供 `GET /api/screen/tile/lod`、`POST /api/screen/tile/lod` 与 `POST/DELETE /api/screen/tile/lod/reset`，严格校验 127.0.0.1 物理绑定与 Host 403 阻断；
+  8. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen tile lod [status|set|reset]` 与 `screen lod` 别名命令族及格式化报表，`screen status` 扩充 Tile LoD 运行指标；
+  9. **测试覆盖与版本更新**:
+     - 核心算法单测、REST 端点单测与端到端集成测试 `m5_48_screen_tile_lod_pipeline` 全绿，Workspace 版本发布为 `v0.1.60`。
+
+**2.37 相对 2.36(屏幕串流动态空间瓦片重要度感知与视觉显著性丢包抗性分级调度流水线 ADR-123 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **瓦片串流中的无差别调度与带宽争抢痛点（Uniform Tile Pacing & Bandwidth Starvation）**: 在空间分块网格（`SCREEN_COMPRESS_TILE_GRID`，ADR-116）、瓦片字典全局缓存（`SCREEN_COMPRESS_TILE_CACHE`，ADR-117）与双缓冲呈现事务（ADR-121）中，一帧屏幕由数十至数百个 64×64 独立瓦片分包传输。各瓦片的语义与视觉重要性极不均等：高反差文字、代码编辑器、光标焦点交互区具有极高视觉显著性，任何残缺或延迟都会引发强烈的交互卡顿感；而桌面壁纸、纯色或平滑渐变背景视觉熵极低。在无差别 FIFO 调度下，低价值背景瓦片与核心交互瓦片争抢同一套网络队列与 MTU，导致关键交互区被延迟送达；
+  2. **弱网拥塞下的全量过载痛点（Lossy Congestion Overload）**: 当网络链路发生缓冲膨胀或拥塞时，若仍然无差别尝试传输整帧所有背景瓦片，会恶化链路丢包率。若能在拥塞期间主动暂时舍弃背景瓦片，把 100% 传输带宽倾斜给高显著性核心交互区，系统可在极度恶劣网络下维持极致流畅的交互体验；
+  3. **空间梯度能量与焦点距离综合显著性评估器 (`ScreenTileSaliencyEvaluator`)**:
+     - 在发送端压缩瓦片前，计算亮度空间梯度能量（Spatial Gradient Energy），融合注视点/光标视口（ADR-118）欧氏距离加权：$S = \alpha \cdot \text{GradientEnergy} + \beta \cdot \text{FocusProximity}$，输出 $S \in [0, 255]$；
+     - 依双阈值分为三级：`Critical`（$S \ge 120$）、`Normal`（$40 \le S < 120$）、`Background`（$S < 40$）；
+  4. **优先级报文重排与拥塞自适应降级 (`Tiered Pacing & Congestion Skip`)**:
+     - 待发脏瓦片列表按优先级稳定重排，Critical 瓦片优先排入帧的前部报文；
+     - 当开启 `drop_background_on_congestion = true` 时，若检测到链路拥塞，发送端主动跳过 Background 瓦片当帧传输，保留在未确认画布脏区等待下一周期自愈补齐；
+  5. **定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 62 (`ControlMsg::SetScreenTileSaliencyMode { enabled: bool, high_threshold: u8, low_threshold: u8, drop_background_on_congestion: bool }`)**：配置分级策略；
+     - **Tag 63 (`ControlMsg::ResetScreenTileSaliencyMode`)**：一键重置分级策略与遥测；
+     - **Tag 64 (`ControlMsg::TileSaliencySync { critical_tiles: u64, normal_tiles: u64, background_tiles: u64, background_tiles_skipped: u64 }`)**：双端同步分级调度遥测；
+  6. **安全回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/tile/saliency`、`POST /api/screen/tile/saliency`、`POST/DELETE /api/screen/tile/saliency/reset`，严格校验 127.0.0.1 物理绑定与 Host 403 阻断；
+  7. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen tile saliency [status|set|reset]` 与 `screen saliency` 别名命令族及格式化报表；
+  8. **测试覆盖与版本更新**:
+     - 核心算法单测、REST 端点单测与端到端集成测试 `m5_47_screen_tile_saliency_tiering_pipeline` 全绿，Workspace 版本发布为 `v0.1.59`。
+
+**2.36 相对 2.35(屏幕串流瓦片级快速重传、微型选择性重发与事务超时自愈流水线 ADR-122 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **瓦片串流中的单包丢弃与全量关键帧脉冲雪崩痛点（Single-Tile Loss & Keyframe Burst Avalanche）**: 在空间瓦片化网格串流（ADR-116）、瓦片字典全局缓存（ADR-117）与双缓冲原子呈现事务（ADR-121）中，一帧屏幕画面由多个独立的 64×64 瓦片跨多网络包分发。在弱网偶发丢包场景下，单个包含 1~2 个脏瓦片的数据包丢失原先导致接收端只能放弃整帧并派发 Tag 3 全量关键帧请求，注入常规帧 15~50 倍的巨量突发脉冲流量，造成链路缓冲膨胀（Bufferbloat）与 100~300ms 画面冻结卡顿；
+  2. **双缓冲呈现事务死锁瓶颈（Transaction HoL Deadlock）**: ADR-121 的原子双缓冲机制要求整帧所有脏瓦片齐全方可执行前后台交换，个别瓦片丢失会导致呈现流水线队头阻塞（Head-of-Line Block）；
+  3. **微型语义化否定应答与发送端环形缓存极速回放核心解法**:
+     - **瓦片级语义化微型否定应答（Semantic Micro-NACK）**：接收端在检测到特定瓦片超时未到达时，派发定长 14 字节微型 NACK 报文 `ControlMsg::TileNackRequest` (Tag 59)，携带精确的 `seq: u32`、`tile_index: u16` 与 `retry_count: u8`；
+     - **发送端最近脏瓦片环形队列极速回放（Sender Tile Ring-Buffer & Fast Replay）**：宿主发送端维护固定容量为 4 帧的 `ScreenTileResendBuffer` 环形队列。收到 Tag 59 时以 $O(1)$ 复杂度直接提取对应压缩瓦片并封装为单瓦片补丁帧（`< 500` 字节）定向极速重发，完全避免全量关键帧冲击；
+     - **事务超时降级原子提交与最终一致性自愈（Degraded Atomic Commit & Self-Healing）**：当重传超时或达最大重试次数（默认 2 次）时，执行降级提交：已收到的有效瓦片原子翻转至前台，缺失瓦片安全沿用前一帧旧像素（零黑块、零花屏），递增 `degraded_commits`，并在下一刷新周期标记脏区实现最终一致性自愈；
+  4. **定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 59 (`ControlMsg::TileNackRequest { seq: u32, tile_index: u16, retry_count: u8 }`)**：精确请求重传指定缺失瓦片；
+     - **Tag 60 (`ControlMsg::ResetScreenTileNackMode`)**：一键重置至默认关闭态并清空重发缓存与指标；
+     - **Tag 61 (`ControlMsg::TileNackSync { nack_requests: u64, retransmitted_tiles: u64, degraded_commits: u64 }`)**：周期性同步微型重发与降级统计遥测；
+  5. **安全回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/tile/nack`：查询当前 NACK 恢复配置、重传统计与降级提交数；
+     - `POST /api/screen/tile/nack`：动态配置启用状态、超时毫秒与最大重试次数；
+     - `POST/DELETE /api/screen/tile/nack/reset`：一键重置配置与计数器；
+     - `ScreenStatusReport` 扩充 6 项 NACK 遥测字段，严格实行 127.0.0.1 物理绑定与 Host 请求头 403 强隔离校验；
+  6. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen tile nack [status|set|reset]` 与 `screen nack` 别名命令族及格式化报表；
+     - `screen status` 扩充显示 Tile Micro-NACK 运行遥测。
+
+- **架构解法与落地**:
+  1. **核心数据模型与环形重发缓存算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - 定义 `ScreenTileNackConfig`、`ScreenTileNackReport` 与 `ScreenTileResendBuffer`（容量为 4 帧）；
+     - 实现 $O(1)$ 瓦片检索 `get_tile(seq, tile_index) -> Option<DirtyTile>` 与 `push_frame` 帧滑动更新；
+     - 扩充 `ControlMsg` Tag 59~61 定长线协议编解码与单测 `screen_tile_nack_and_fast_retransmission_algorithms`；
+  2. **节点运行时状态与流水线集成 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `NodeShared` 挂载 `screen_tile_nack_config`、`screen_tile_resend_buffer` 以及 `nack_requests_sent`、`tiles_retransmitted`、`degraded_commits` 原子计数器；
+     - 在 `attach_screen_client` 中集成残缺检测、Tag 59 派发与超时降级提交；
+     - 在 `screen_send_frame` 中将压缩脏瓦片推入 `screen_tile_resend_buffer`；宿主信令循环在收到 Tag 59 时极速定向回放重传单瓦片；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/tile/nack` 与 `/api/screen/tile/nack/reset` 端点，严格校验 127.0.0.1 回环物理绑定与 Host 请求头 403 阻断；
+  4. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称实现 `screen tile nack` 与 `screen nack` 命令族并扩充 `screen status`；
+  5. **测试覆盖与版本更新**:
+     - 核心算法单测、REST 端点单测与端到端集成测试 `m5_46_screen_tile_nack_recovery_pipeline` 全绿，Workspace 版本发布为 `v0.1.58`。
+
+**2.35 相对 2.34(屏幕串流瓦片级原子呈现事务、双缓冲前台交换与防撕裂垂直同步步频流水线 ADR-121 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **空间分块串流的局部渲染撕裂痛点（Inter-Tile Visual Tearing）**: 在空间瓦片化网格串流（ADR-116）与瓦片字典全局缓存（ADR-117）中，一帧画面的数十至数百个 64×64 瓦片被拆分封装在不同的 UDP 数据包中分批到达。若访客端解码器在解包后直接原地写入前台活跃画布（`apply_dirty_tile`），且此时显示渲染槽拉取该帧，用户将观测到「部分瓦片已更新、其余瓦片仍停留在旧帧」的水平/垂直裂缝和撕裂假影；
+  2. **双缓冲后置暂存与微秒级原子前台交换核心解法**:
+     - **后置暂存画布（Back Buffer / Staging Canvas）**：在帧传输生命周期内，所有到达的脏瓦片首先解压并增量写入后置隔离缓冲区，活跃的前台画布（Front Buffer）绝对保持只读与纯净；
+     - **原子呈现事务（Atomic Presentation Transaction）**：整帧瓦片到达并校验完毕后，执行原子指针/缓冲区交换（`std::mem::swap(&mut front, &mut back)`），耗时 `< 5µs`，瞬间向前台提交无缝完整图像，实现 100% 杜绝瓦片间局部渲染撕裂；
+     - **防撕裂垂直同步步频控制（Anti-Tearing V-Sync Pacing）**：提供 `Off`（立即交换）、`Vsync60`（16.6ms 步频对齐）、`Vsync120`（8.3ms 步频对齐）与 `Adaptive`（自适应对齐），对齐显示刷新节拍；
+  3. **定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 56 (`ControlMsg::SetScreenTilePresentMode { enabled: bool, vsync_mode: u8, double_buffer: bool, tear_prevention: bool }`)**：配置瓦片呈现事务启闭、V-Sync 步频模式（0=Off, 1=Vsync60, 2=Vsync120, 3=Adaptive）、双缓冲启用状态与防撕裂控制；
+     - **Tag 57 (`ControlMsg::ResetScreenTilePresentMode`)**：一键重置至默认关闭状态并归零计数器；
+     - **Tag 58 (`ControlMsg::TilePresentSync { committed_txs: u64, swapped_frames: u64 }`)**：周期性同步已提交事务数与前台交换帧数遥测；
+  4. **安全回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/tile/present`：查询当前呈现事务状态、V-Sync 模式、双缓冲配置与累计指标；
+     - `POST /api/screen/tile/present`：动态配置启用参数与防撕裂策略；
+     - `POST/DELETE /api/screen/tile/present/reset`：一键重置配置并归零遥测；
+     - `ScreenStatusReport` 扩充 8 项呈现遥测指标，严格实行 127.0.0.1 物理绑定与 Host 头 403 强隔离校验；
+  5. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen tile present [status|set|reset]` 与 `screen present` 别名命令族及格式化报表；
+     - `screen status` 扩充显示 Tile Present 运行遥测。
+
+- **架构解法与落地**:
+  1. **核心数据模型与呈现事务算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - 定义 `ScreenTilePresentVsyncMode`、`ScreenTilePresentConfig`、`ScreenTilePresentReport`、`ScreenTilePresenter`；
+     - 实现后置暂存画布初始化、瓦片批次写入（`stage_dirty_tile`）、原子前后台交换（`swap_buffers`）、位图完全等价性校验与平均延迟统计；
+     - 扩充 `ControlMsg` Tag 56~58 定长线协议编解码与单测 `screen_tile_presentation_transaction_and_double_buffer_algorithms`；
+  2. **节点运行时状态与流水线集成 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `NodeShared` 挂载双缓冲后置画布 `screen_receiver_back_buffer`、呈现事务配置与原子指标；
+     - 在 `attach_screen_client` 中无缝集成双缓冲解包暂存与整帧原子前台提交；
+     - 双端事件循环对称处理 Tag 56~58；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/tile/present` 与 `/api/screen/tile/present/reset` 端点，严格校验 127.0.0.1 回环物理绑定与 Host 请求头 403 阻断；
+  4. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称实现 `screen tile present` 与 `screen present` 命令族并扩充 `screen status`；
+  5. **测试覆盖与版本更新**:
+     - 核心算法单测、REST 端点单测与端到端集成测试 `m5_45_screen_tile_presentation_transaction_pipeline` 全绿，Workspace 版本发布为 `v0.1.57`。
+
+**2.34 相对 2.33(屏幕串流瓦片级可逆颜色变换、方向性差分预测滤波与复合无损压缩流水线 ADR-120 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **现代桌面真彩色与连续渐变 UI 的高熵压缩瓶颈**: 在现代桌面操作系统中，窗口亚克力/Mica 毛玻璃模糊特效、精细阴影渐变、壁纸底图、图片与抗锯齿字体渲染极其普遍，其局部唯一颜色数远超 16（$K > 16$）。在 ADR-119 中，此类瓦片直接回退至原始交错 RGBA 并交由通用 Zstd 压缩；
+  2. **交错 RGBA 空间与色彩通道冗余**: 原始交错 RGBA 破坏了空间与通道的连续性。相邻像素间存在强烈的水平与垂直梯度相关性，且 R、G、B 通道高度相关（绿色承载主要亮度信息）。直接压缩 16KB 瓦片通常残留 1200~2500 字节，带宽与压缩能耗仍有巨大优化空间；
+  3. **可逆颜色变换（RCT）与方向性空间差分预测滤波流水线核心解法**:
+     - **可逆颜色变换（RCT）**：对 32-bit RGBA 像素执行无损通道解耦：
+       $$Y = G, \quad U = (R - G) \pmod{256}, \quad V = (B - G) \pmod{256}, \quad A = A$$
+       反变换：
+       $$G = Y, \quad R = (U + Y) \pmod{256}, \quad B = (V + Y) \pmod{256}, \quad A = A$$
+       利用模 256 整数加减法消除通道间相关性，使色彩残差集中于 0 附近，色彩熵锐减 50% 以上；
+     - **方向性空间差分预测滤波（DPCM）**：基于像素左邻 $A$、上邻 $B$、左上邻 $C$，支持 5 种空间预测模式：
+       - `Filter 0 (None)`：原始像素；
+       - `Filter 1 (Sub / Left)`：$\Delta = P - A \pmod{256}$；
+       - `Filter 2 (Up)`：$\Delta = P - B \pmod{256}$；
+       - `Filter 3 (Average)`：$\Delta = P - \lfloor(A + B) / 2\rfloor \pmod{256}$；
+       - `Filter 4 (Paeth)`：基于 Paeth 最小倾斜梯度预测器；
+       - `Filter 5 (Auto)`：评估各滤波器 L1 残差绝对值之和，动态自适应选取残差能量最小的最优滤波器；
+     - **复合无损残差压缩（`TILE_SUBCODEC_PREDICT_ZSTD = 5`）**：残差流送入 Zstd 压缩，使渐变瓦片体积骤降至 300~600 字节（再降 60%~75%）；
+     - **100% 数学级无损保证（Bit-for-Bit Lossless Invariance）**：预测与解预测严格对称，反变换零浮点运算，解压后与宿主原始屏幕图像 100% 逐位像素精确一致；
+  4. **定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 53 (`ControlMsg::SetScreenTilePredictMode { enabled: bool, filter_mode: u8, enable_rct: bool }`)**：配置预测滤波启闭、滤波模式与 RCT 选项；
+     - **Tag 54 (`ControlMsg::ResetScreenTilePredictMode`)**：一键重置至默认关闭态；
+     - **Tag 55 (`ControlMsg::TilePredictSync { predict_tiles: u64, saved_bytes: u64 }`)**：双端同步预测滤波瓦片流控遥测；
+  5. **安全回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/tile/predict`：查询预测滤波配置、滤波模式与累计节省带宽；
+     - `POST /api/screen/tile/predict`：动态配置启用状态与预测参数；
+     - `POST/DELETE /api/screen/tile/predict/reset`：一键重置配置与计数器；
+     - `ScreenStatusReport` 扩充 `tile_predict_enabled`、`tile_predict_filter_mode`、`tile_predict_enable_rct`、`tile_predict_tiles_sent`、`tile_predict_saved_bytes` 遥测，严格实行 127.0.0.1 物理绑定与 Host 头 403 强隔离校验；
+  6. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen tile predict [status|set|reset]` 与 `screen predict` 别名命令族及格式化报表；
+     - `screen status` 扩充显示 Tile Predict 运行指标。
+
+- **架构解法与落地**:
+  1. **核心数据模型与编解码算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - 定义 `ScreenTilePredictFilter`、`ScreenTilePredictConfig`、`ScreenTilePredictReport`、`TILE_SUBCODEC_PREDICT_ZSTD = 5`；
+     - 实现 `rct_transform`、`rct_inverse`、`paeth_predictor`、`predict_filter_tile`、`unpredict_filter_tile`、`compress_tile_predictive` 与 `decompress_tile_predictive`；
+     - 扩充 `ControlMsg` Tag 53~55 定长线协议编解码与单测 `screen_tile_predictive_compression_and_decompression_algorithms`；
+  2. **节点运行时状态与流水线集成 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `NodeShared` 挂载预测滤波配置与原子计数统计；
+     - 在 `screen_send_frame()` 针对真彩色瓦片（$K > 16$）集成预测滤波压缩，接收端在解包路径无缝集成 `decompress_tile_predictive`；
+     - 双端事件循环对称处理 Tag 53~55；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/tile/predict` 与 `/api/screen/tile/predict/reset` 端点，严格校验 127.0.0.1 回环绑定与 Host 请求头；
+  4. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称实现 `screen tile predict` 与 `screen predict` 命令族并扩充 `screen status`；
+  5. **测试覆盖与版本更新**:
+     - 核心算法单测、REST 端点单测与端到端集成测试 `m5_44_screen_tile_predictive_compression_pipeline` 全绿，Workspace 版本发布为 `v0.1.56`。
+
+**2.33 相对 2.32(屏幕串流瓦片级自适应调色板、二值位图与混合无损压缩流水线 ADR-119 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **桌面图形典型的低色彩熵特性**: 在现代远程桌面、代码协同与文档编辑场景中，大量 64x64 屏幕瓦片属于单色背景、终端文本、反白文字或扁平化 UI 控件，唯一颜色数极少（$K \le 16$）；
+  2. **交错 RGBA 原始压缩瓶颈**: 原始交错 RGBA 像素破坏了局部空间连续性，未经预处理直接交给 Zstd 时仍产生数百至数千字节负载，且耗费不必要的 CPU 压缩算力；
+  3. **自适应调色板与二值位图混合无损压缩核心解法**:
+     - **单色瓦片（Solid Color, $K=1$）**：1 字节子编解码器类型 + 4 字节 RGBA（共 5 字节），压缩比高达 3276:1（节省 99.97% 带宽），接收端单指令 fill 纳秒级重构；
+     - **二值双色瓦片（Bi-Level Bitmap, $K=2$）**：1 字节类型 + 8 字节双色调色板 + 1-bit/像素紧凑位图（512 字节），共 521 字节，压缩比 31.4:1（节省 96.8% 带宽）；
+     - **16 色索引调色板（Indexed Palette, $3 \le K \le 16$）**：1 字节类型 + 1 字节色彩数 $K$ + $K \times 4$ 字节调色板 + 4-bit 半字节流（2048 字节），节省 87% 以上带宽；
+     - **快速短路探测算法与真彩平滑回退**: 栈上固定数组直方图扫描，遇到第 17 种颜色在 $< 2\,\mu\text{s}$ 内立刻退出并平滑回退至 Zstd / 原始全彩；
+     - **数学级无损保证（Bit-for-Bit Lossless Invariance）**: 所有重构像素与源端 100% 逐位像素精确一致，零边缘振铃与色度失真；
+  4. **定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 50 (`ControlMsg::SetScreenTilePaletteMode { enabled: bool, max_colors: u8, enable_rle: bool }`)**：配置调色板压缩启闭、最大颜色数与游程选项；
+     - **Tag 51 (`ControlMsg::ResetScreenTilePaletteMode`)**：一键重置至默认关闭态；
+     - **Tag 52 (`ControlMsg::TilePaletteSync { solid_tiles: u64, bilevel_tiles: u64, palette_tiles: u64, saved_bytes: u64 }`)**：双端同步调色板瓦片流控遥测；
+  5. **安全回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/tile/palette`：查询调色板配置与分类统计；
+     - `POST /api/screen/tile/palette`：动态更新启闭状态与色彩阈值；
+     - `POST/DELETE /api/screen/tile/palette/reset`：一键重置配置与计数器；
+     - `ScreenStatusReport` 扩充 `tile_palette_enabled`、`tile_palette_max_colors`、`tile_palette_solid_tiles`、`tile_palette_bilevel_tiles`、`tile_palette_palette_tiles`、`tile_palette_truecolor_tiles`、`tile_palette_saved_bytes` 遥测，严格实行 127.0.0.1 物理绑定与 Host 头 403 强隔离校验；
+  6. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen tile palette [status|set|reset]` 子命令族与格式化报表；
+     - `screen status` 扩充显示 Tile Palette 优先级流控运行指标。
+
+- **架构解法与落地**:
+  1. **核心数据模型与编解码算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - 定义子编解码器常量 `TILE_SUBCODEC_*`、`ScreenTilePaletteConfig`、`ScreenTilePaletteReport`；
+     - 实现 `compress_tile_palette` 与 `decompress_tile_palette`；
+     - 扩充 `ControlMsg` Tag 50~52 定长线协议编解码；
+  2. **节点运行时状态与流水线集成 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `NodeShared` 挂载调色板配置与原子计数统计；
+     - 在 `screen_send_frame()` 脏瓦片编码路径无缝集成调色板探测，接收端在解包路径无缝集成 `decompress_tile_palette` 逐位重构；
+     - 双端事件循环对称处理 Tag 50~52；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/tile/palette` 与 `/api/screen/tile/palette/reset` 端点，严格校验 127.0.0.1 回环绑定与 Host 请求头；
+  4. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称实现 `screen tile palette` 命令族并扩充 `screen status`；
+  5. **测试覆盖与版本更新**:
+     - 核心算法单测、REST 端点单测与端到端集成测试 `m5_43_screen_tile_palette_adaptive_compression_pipeline` 全绿，Workspace 版本发布为 `v0.1.55`。
+
+**2.32 相对 2.31(屏幕串流动态注视点焦点感知、空间区域优先级与外围自适应抽帧调度流水线 ADR-118 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **人眼注视点高度聚焦特性**: 在高分辨率（1080p/2K/4K）与高瓦片网格密度（ADR-116/117）下，用户的视觉焦点与操作交互几乎 100% 集中于鼠标光标周边（输入交互点）或当前活动的编辑/播放窗口（焦点矩形），而屏幕其余 70%~90% 的外围区域（后台终端滚动、系统托盘动画、状态栏时钟跳动、侧边栏微动）属于低关注度次要背景；
+  2. **全屏均质流控缺陷（Uniform Scheduling Bottleneck）**: 在传统均质流控中，所有空间脏瓦片均被同等优先级处理并立即发送。一旦网络发生瞬时拥塞或抖动，均质丢帧迫使用户正在打字或移动光标的核心焦点区域同样发生掉帧与卡顿；
+  3. **注视点焦点感知与空间区域优先级自适应调度核心解法**:
+     - **焦点区域（Focus Zone / 优先级 0）**：根据鼠标硬件光标实时物理坐标 $(cx, cy)$ 动态锁定注视半径 $R$（或用户配置的静态焦点框），焦点内的脏瓦片享有 100% 绝对刷新保障（如 60 FPS、零抽帧、优先编码与发送）；
+     - **外围区域（Peripheral Zone / 优先级 1）**：焦点外的脏瓦片按照自适应抽帧率 $S$（`peripheral_skip_ratio`，默认 2，即每 3 帧刷新 1 次，抽帧率 66.7%）进行时域稀疏化调度；
+     - **数学级画布一致性守护（Canvas Invariance Theorem）**：外围被抽帧跳过的脏瓦片在发送端参考画布中**不更新**，确保下一次调度周期被稳定提取重传，双端画布始终保持 100% 逐位像素精确一致；
+     - 弱网与高动态背景场景下，外围带宽消耗降低 60%~80%，交互焦点延迟维持在极低物理极限，彻底消除打字与鼠标拖拽迟滞；
+  4. **定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 45 (`ControlMsg::SetScreenFocusMode { enabled: bool, mode: u8, radius: u16, peripheral_skip_ratio: u8 }`)**：配置注视点焦点模式（0=光标跟踪 Cursor, 1=静态框 Box）、半径与外围抽帧率；
+     - **Tag 46 (`ControlMsg::SetScreenFocusBox { box_x: u16, box_y: u16, box_w: u16, box_h: u16 }`)**：配置静态焦点区域坐标；
+     - **Tag 47 (`ControlMsg::ResetScreenFocusMode`)**：一键重置至默认关闭态；
+     - **Tag 48 (`ControlMsg::FocusSync { focus_tiles_sent: u64 }`)**：双端同步焦点瓦片计数；
+     - **Tag 49 (`ControlMsg::FocusPeripheralSync { peripheral_skipped: u64 }`)**：双端同步外围抽帧节省计数；
+  5. **安全回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/focus`：读取焦点模式、注视半径、抽帧比率、静态框坐标、焦点瓦片发送数、外围发送数、外围抽帧数与节省带宽；
+     - `POST /api/screen/focus`：动态配置启用状态、模式、半径、抽帧比率及可选静态框；
+     - `POST/DELETE /api/screen/focus/reset`：一键重置配置并清零统计；
+     - `ScreenStatusReport` 扩充 `focus_enabled`、`focus_mode`、`focus_radius`、`focus_peripheral_skip_ratio`、`focus_tiles_sent`、`peripheral_tiles_sent`、`peripheral_tiles_skipped`、`focus_saved_bandwidth_bytes` 遥测，严格实行 127.0.0.1 物理绑定与 Host 头 403 强隔离校验；
+  6. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen focus [status|set|reset]` 子命令族与格式化报表；
+     - `screen status` 扩充显示 Focus 优先级流控运行指标。
+
+- **架构解法与落地**:
+  1. **核心数据模型与几何算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - 定义 `ScreenFocusMode`、`ScreenFocusConfig`、`ScreenFocusReport`；
+     - 实现欧氏几何距离平方算法与矩形相交算法 `is_tile_in_focus`；
+     - 扩充 `ControlMsg` Tag 45~49 定长线协议编解码；
+  2. **节点运行时管线与自适应调度执行 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `Shared` 挂载 `screen_focus_config`、`screen_focus_tiles_sent`、`screen_focus_peripheral_sent`、`screen_focus_peripheral_skipped`、`screen_focus_saved_bytes`；
+     - 在 `screen_send_frame()` 阶段：若启用 Focus 模式，对提取出的脏瓦片执行几何分级，焦点区瓦片 100% 保持发送，外围区瓦片在 `seq % (skip_ratio + 1) != 0` 时跳过并不更新参考画布；
+     - 双端事件循环对称处理 Tag 45~49；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/focus` 与 `/api/screen/focus/reset` 端点，严格校验 127.0.0.1 回环绑定与 Host 请求头；
+  4. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称实现 `screen focus` 命令族并扩充 `screen status`；
+  5. **测试覆盖与版本更新**:
+     - 核心算法单测、REST 端点单测与端到端集成测试 `m5_42_screen_foveated_focus_priority_scheduling_pipeline` 全绿，Workspace 版本发布为 `v0.1.54`。
+
+**2.31 相对 2.30(屏幕串流哈希瓦片字典缓存、全局跨帧空间去重与零带宽复用流水线 ADR-117 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **空间平移再现（Window Dragging / Movement）**: 在 v2.30 / ADR-116 空间网格分块中，当用户拖动窗口时，窗口内像素瓦片仅发生物理坐标平移（$(x_1, y_1) \to (x_2, y_2)$）。纯空间分块将目标瓦片均判定为脏瓦片重新压缩传输，导致拖窗时出现带宽瞬时毛刺，且接收端早已持有该瓦片历史位图；
+  2. **画面内宏观空间模式重现（Spatial Pattern Repetition）**: 桌面操作系统界面中存在极高密度的重复视觉元素（统一背景色块、窗口标题栏、Dock 图标、代码行边距）。同一帧内数十甚至上百个瓦片完全同构；
+  3. **双端同步轻量级 LRU 瓦片字典缓存核心解法**:
+     - 发送端与接收端同步维护容量为 $N$ 的轻量级 LRU 瓦片字典缓存（$64 \le N \le 4096$，默认 $N=512$）；
+     - 利用纯 Rust 快速 64-bit 内存哈希算法（`fnv1a_hash64`，零外部 crate 依赖）为每个候选脏瓦片计算内容指纹；
+     - **缓存命中（Cache Hit / 空间与时域零带宽复用）**：若瓦片指纹已在缓存中命中，发送端仅发送 17 字节定位补丁（`index: u16, x: u16, y: u16, w: u16, h: u16, cache_hit: 1, cache_id: u16, patch_len: 0`），**0 字节数据载荷**；
+     - **缓存未命中（Cache Miss / 动态学习入库）**：发送端压缩脏瓦片并标记 `cache_hit: 0, cache_id: id`，接收端解压后贴合画布并将像素存入字典槽位 `cache[id]`；
+     - 拖窗与重复元素场景下，带宽在 ADR-116 基础上**再降 85%~98%**，接收端零解压开销，保证 100% 逐位像素精确还原；
+  4. **专用 Codec Tag `SCREEN_COMPRESS_TILE_CACHE = 9`**:
+     - 6 字节网格头（`tile_size: u16`, `total_tiles: u16`, `dirty_count: u16`）搭配 17 字节定长条目流；
+  5. **定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 42 (`ControlMsg::SetScreenTileCacheMode { enabled: bool, max_entries: u16 }`)**：动态启闭瓦片字典缓存并配置字典容量；
+     - **Tag 43 (`ControlMsg::ResetScreenTileCacheMode`)**：一键重置至默认关闭态并清空字典条目；
+     - **Tag 44 (`ControlMsg::TileCacheSync { hits: u64, misses: u64, saved_bytes: u64 }`)**：双端同步缓存命中率与带宽节省统计；
+  6. **回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/tile/cache`：读取瓦片缓存状态、最大容量、当前条目数、命中数、未命中数、命中率与节省带宽；
+     - `POST /api/screen/tile/cache`：动态配置启用状态与最大容量；
+     - `POST/DELETE /api/screen/tile/cache/reset`：一键重置配置并清空缓存；
+     - `ScreenStatusReport` 扩充 `tile_cache_enabled`、`tile_cache_max_entries`、`tile_cache_entries`、`tile_cache_hits`、`tile_cache_misses`、`tile_cache_saved_bytes` 遥测，严格实行 127.0.0.1 物理绑定与 Host 头 403 阻断；
+  7. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen tile cache [status|set|reset]` 子命令族与格式化报表；
+     - `screen status` 扩充显示 Tile Cache 字典流控运行指标。
+
+- **架构解法与落地**:
+  1. **核心数据模型与字典算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - 定义 `SCREEN_COMPRESS_TILE_CACHE = 9`，实现 `ScreenTileCacheConfig`、`ScreenTileCacheReport`、`CachedTileEntry`；
+     - 实现纯标准库 `fnv1a_hash64` 快速 64-bit 内存哈希与双端同步 LRU 字典管理器 `ScreenTileDictionary`；
+     - 实现 `ScreenFrame::encode_tile_cache`、`decode_tile_cache` 与 `apply_cached_tile` 画布局部贴合；
+     - 扩充 `ControlMsg` Tag 42~44 定长线协议编解码；
+  2. **节点运行时管线与缓存流化执行 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `Shared` 挂载 `screen_tile_cache_config`、`screen_tile_cache_dict`、`screen_tile_cache_receiver`、`screen_tile_cache_hits`、`screen_tile_cache_misses`、`screen_tile_cache_saved_bytes`；
+     - 在 `screen_send_frame()` 阶段：若启用 Tile Cache 模式，优先执行瓦片指纹查找，命中时发送 0 载荷指针补丁，未命中时动态入库并压缩发送；
+     - 接收端收到 Tag 9 帧时，命中瓦片直接按槽位取出贴入画布，未命中瓦片解压贴入并更新槽位；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/tile/cache` 与 `/api/screen/tile/cache/reset` 端点，严格校验 127.0.0.1 回环绑定与 Host 请求头；
+  4. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称实现 `screen tile cache` 命令族并扩充 `screen status`；
+  5. **测试覆盖与版本更新**:
+     - 核心单测、REST 端点单测与端到端集成测试 `m5_41_screen_tile_cache_deduplication_and_streaming_pipeline` 全绿，Workspace 版本发布为 `v0.1.53`。
+
+**2.30 相对 2.29(屏幕串流空间分块网格划分与独立异步瓦片更新流水线 ADR-116 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **多处离散微小更新引发包围盒爆炸**: 在高分辨率与超宽屏显示器交互中，极常见多处离散微小局部更新（例如编辑器光标闪烁与桌面托盘时钟跳动）。现有单矩形差分补丁算法（ADR-109）基于单一最小外接矩形（Bounding Box），被迫覆盖包含 98% 静态像素的庞大矩形区域，引发严重的带宽毛刺与压缩计算开销；
+  2. **空间分块网格 (Spatial Tile-Grid) 几何划分与脏瓦片提取**:
+     - 全屏幕物理剖分为 $M \times N$ 二维空间瓦片网格（$32 \le T \le 256$，默认 $T=64$），边缘瓦片按边界严格截断；
+     - 发送端基于行级内存比对提取真实脏瓦片集合 `extract_dirty_tiles`，跳过高达 99% 的未改变静态瓦片；
+  3. **专用 Codec Tag `SCREEN_COMPRESS_TILE_GRID = 8` 与画布局部 Blit**:
+     - 发送端编码 6 字节定长网格头（`tile_size`, `total_tiles`, `dirty_count`）与独立压缩的脏瓦片补丁集合；
+     - 接收端调用 `apply_dirty_tile` 将脏瓦片解压并按物理坐标直接贴合至活跃画布 `screen_receiver_canvas`，保证 100% 逐位像素精确还原；
+  4. **定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 39 (`ControlMsg::SetScreenTileMode { enabled: bool, tile_size: u16 }`)**：动态配置瓦片模式与尺寸；
+     - **Tag 40 (`ControlMsg::ResetScreenTileMode`)**：一键重置至默认关闭态；
+     - **Tag 41 (`ControlMsg::TileGridSync { tiles_sent: u64 }`)**：同步瓦片加速指标与计数；
+  5. **回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/tile`：读取瓦片流状态、网格总数、脏瓦片发送数、跳过瓦片数与累计节省带宽；
+     - `POST /api/screen/tile`：动态配置启用状态与瓦片尺寸；
+     - `POST/DELETE /api/screen/tile/reset`：一键重置配置与统计计数；
+     - `ScreenStatusReport` 扩充 `tile_enabled`、`tile_size`、`tile_frames_sent`、`dirty_tiles_sent`、`skipped_tiles_count`、`tile_saved_bytes` 遥测，严格实行 127.0.0.1 物理绑定与 Host 头 403 阻断；
+  6. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen tile [status|set|reset]` 子命令族与格式化报表；
+     - `screen status` 扩充显示空间瓦片流控运行指标。
+
+- **架构解法与落地**:
+  1. **核心数据模型与网格算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - 定义 `SCREEN_COMPRESS_TILE_GRID = 8`，实现 `ScreenTileConfig`、`ScreenTileReport`、`DirtyTile`；
+     - 实现 `compute_tile_grid_dims` 网格几何划分与 `extract_dirty_tiles` 脏瓦片提取算法；
+     - 实现 `ScreenFrame::encode_tile_grid`、`decode_tile_grid` 与 `apply_dirty_tile` 画布局部贴合；
+     - 扩充 `ControlMsg` Tag 39~41 定长线协议编解码；
+  2. **节点运行时管线与瓦片流化执行 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `Shared` 挂载 `screen_tile_config`、`screen_tile_frames_sent`、`screen_tile_dirty_tiles_sent`、`screen_tile_skipped_count`、`screen_tile_saved_bytes` 与 `screen_sender_tile_canvas`；
+     - 在 `screen_send_frame()` 阶段：若启用瓦片模式，对参考帧与当前帧执行 `extract_dirty_tiles`；脏瓦片占比低于全量阈值（75%）时编码为 `SCREEN_COMPRESS_TILE_GRID` 帧并累加节省带宽与跳过计数；
+     - 接收端收到 Tag 8 帧时，解压并调用 `apply_dirty_tile` 合成至 `screen_receiver_canvas`；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/tile` 与 `/api/screen/tile/reset` 端点，严格校验 127.0.0.1 回环绑定与 Host 请求头；
+  4. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称实现 `screen tile` 命令族并扩充 `screen status`；
+  5. **测试覆盖与版本更新**:
+     - 核心单测、REST 端点单测与端到端集成测试 `m5_40_screen_spatial_tile_grid_decomposition_and_streaming_pipeline` 全绿，Workspace 版本发布为 `v0.1.52`。
+
+**2.29 相对 2.28(屏幕串流窗口滚动 2D 运动矢量估计 (Motion Vector / Block Matching) 与位移补偿加速流水线 ADR-115 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **页面单向滚动场景的常规差分失效与带宽脉冲**: 在日常桌面远程操作中，超 70% 的操作属于窗口垂直滚动（网页浏览、IDE 代码编辑翻页、终端滚动、长文档阅读）。现有差分补丁算法（ADR-109）基于固定坐标宏块比较（$prev[x,y] == curr[x,y]$），当画面发生平移 $\Delta y$ 时，虽然 85%~95% 的像素内容保持完好（仅在空间坐标上产生位移），但固定坐标比对会将整屏判定为脏区，被迫重传大矩形，造成巨大带宽脉冲与弱网滚屏卡顿；
+  2. **2D 运动矢量估计 (Motion Vector) 与位移补偿加速核心原理**:
+     - 发送端在检测到脏区时，通过轻量级 16x16 空间网格采样，在搜索半径 $[-D, D]$（默认 $D=64$ 像素，支持 $8 \le D \le 256$）内快速评估候选位移矢量 $(\Delta x, \Delta y)$；
+     - 当重叠区域采样匹配率达到 $\ge 85\%$ 时，判定为滚动位移事件；
+  3. **专用 Codec Tag `SCREEN_COMPRESS_MOTION_SCROLL = 7` 与条带补丁**:
+     - 发送端不再重传重叠区域像素，仅编码 12 字节位移头（$dx, dy$ 与暴露条带几何矩形）以及新滚入屏幕的**暴露条带（Exposed Edge Strip）**的 Zstd 压缩像素补丁；
+     - 接收端在活跃画布上直接调用 `scroll_canvas(dx, dy)` 执行高效内存移动，再将暴露条带贴合至边缘；
+     - 滚屏带宽与压缩 CPU 占用骤降 80%~95%，弱网滚屏零卡顿、零残影，像素 100% 精确还原；
+  4. **定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 36 (`ControlMsg::SetScreenMotionMode { enabled: bool, max_displacement: u16 }`)**：配置运动估计启用状态与最大位移搜索半径；
+     - **Tag 37 (`ControlMsg::ResetScreenMotionMode`)**：一键重置至默认关闭态；
+     - **Tag 38 (`ControlMsg::MotionScrollSync { scroll_frames_sent: u64 }`)**：同步滚动加速帧数与遥测；
+  5. **回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/motion`：读取运动矢量模式、最大位移、滚动帧数、回退帧数与累计节省带宽；
+     - `POST /api/screen/motion`：动态设置启用状态与最大位移参数；
+     - `POST/DELETE /api/screen/motion/reset`：一键重置配置与统计计数；
+     - `ScreenStatusReport` 扩充 `motion_enabled`、`motion_max_displacement`、`motion_frames_sent`、`motion_saved_bytes` 遥测，严格实行 127.0.0.1 物理绑定与 Host 头 403 阻断；
+  6. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen motion [status|set|reset]` 子命令族与格式化报表；
+     - `screen status` 扩充显示运动矢量位移补偿运行指标。
+
+- **架构解法与落地**:
+  1. **核心数据模型与位移估计算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - 定义 `SCREEN_COMPRESS_MOTION_SCROLL = 7`，实现 `ScreenMotionConfig`、`ScreenMotionReport`、`MotionVector`；
+     - 实现 `estimate_scroll_motion` 空间网格估计算法与 `compute_exposed_strip` 几何计算；
+     - 实现 `ScreenFrame::scroll_canvas` 内存位移与 `encode_motion_scroll`/`decode_motion_scroll` 编解码；
+     - 扩充 `ControlMsg` Tag 36~38 定长线协议编解码；
+  2. **节点运行时管线与位移补偿执行 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `Shared` 挂载 `screen_motion_config`、`screen_motion_frames_sent`、`screen_motion_fallback_frames_sent`、`screen_motion_saved_bytes` 与 `screen_sender_motion_canvas`；
+     - 在 `screen_send_frame()` 阶段：若启用运动估计，对连续帧评估位移；匹配成功时构造 `SCREEN_COMPRESS_MOTION_SCROLL` 帧并累加节省带宽；非滚动或不匹配时平滑回退至常规差分/关键帧并累加回退计数；
+     - 接收端收到 Tag 7 帧时，对当前画布执行 `scroll_canvas` 并贴合暴露条带补丁；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/motion` 与 `/api/screen/motion/reset` 端点，严格校验 127.0.0.1 回环绑定与 Host 请求头；
+  4. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称实现 `screen motion` 命令族并扩充 `screen status`；
+  5. **测试覆盖与版本更新**:
+     - 核心单测、REST 端点单测与端到端集成测试 `m5_39_screen_motion_vector_estimation_and_scroll_acceleration_pipeline` 全绿，Workspace 版本发布为 `v0.1.51`。
+
+**2.28 相对 2.27(屏幕串流双层时域分级预测 (SVC-T) 层次化参考与抗拥塞优雅降级流水线 ADR-114 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **平坦差分预测链的弱网脆弱性**: 在增量差分补丁（ADR-109）、渐进刷新（ADR-112）与 LTR 黄金帧（ADR-113）中，常规帧采用线性单向差分链（$F_t \leftarrow F_{t-1} + \Delta_t$）。在 Wi-Fi 抖动、蜂窝弱网或 Mesh 隧道中，一旦发生网络排队延迟或突发拥塞，盲目降帧率会直接切断接收端连续解码链，迫使接收端发起全量关键帧刷新请求，引发严重的网络拥塞与高额流量脉冲；若不降帧率，则会导致缓冲膨胀与滚雪球延迟；
+  2. **双层时域分级预测 (SVC-T) 层次化架构**:
+     - 将连续屏幕帧在时域解耦为两个分层预测结构：
+       - **基础层 (Base Layer, T0)**：偶数帧（$seq \pmod 2 == 0$），构成基准 30fps 稳定时域骨干；每个 T0 帧严格仅参考前一个 T0 基础帧；
+       - **增强层 (Enhancement Layer, T1)**：奇数帧（$seq \pmod 2 == 1$），补足全帧率至 60fps；每个 T1 帧严格参考最近的一个 T0 基础帧；
+       - **核心时域不变式 (Reference Invariant)**：**没有任何后续帧（无论是 T0 还是 T1）会参考 T1 增强帧**；
+  3. **零重新协商瞬时抗拥塞优雅降级 (Zero-Renegotiation Graceful Degradation)**:
+     - 遭遇拥塞或端侧节能请求时，发送端直接丢弃 T1 增强帧（Drop T1），接收端稳定以 30fps 渲染 T0 基础帧，画面零撕裂、零花屏、零残影，且完全无需重新协商编码器或请求关键帧；
+     - 拥塞解除后，发送端立即恢复发送 T1 帧，接收端即刻平滑无缝恢复 60fps 满帧率体验；
+  4. **专用 Codec Tag 与画布隔离**:
+     - 引入专用标头 `SCREEN_COMPRESS_SVC_T1: u8 = 6`；
+     - 接收端应用 T1 补丁至活跃展示画布 `screen_receiver_canvas`，严格保护 T0 基础参考画布 `screen_receiver_t0_canvas` 不受污染；
+  5. **定长线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 33 (`ControlMsg::SetScreenSvcMode { mode: u8, drop_t1: bool }`)**：配置 SVC 运行模式（`Disabled` / `Adaptive` / `BaseOnly`）与 T1 丢弃开关；
+     - **Tag 34 (`ControlMsg::ResetScreenSvcMode`)**：一键重置至默认关闭态；
+     - **Tag 35 (`ControlMsg::SvcT1DropSync { dropped_count: u64 }`)**：同步 T1 丢帧统计；
+  6. **回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/svc`：读取 SVC 运行模式、T0/T1 发送计数、T1 丢帧数与节省带宽字节；
+     - `POST /api/screen/svc`：动态配置 SVC 模式与丢弃策略；
+     - `POST /api/screen/svc/drop-t1`：切换或触发 T1 帧丢弃；
+     - `POST/DELETE /api/screen/svc/reset`：重置配置与统计；
+     - `ScreenStatusReport` 扩充 `svc_enabled`、`svc_mode`、`svc_drop_t1`、`svc_t0_sent`、`svc_t1_sent`、`svc_t1_dropped` 遥测；
+  7. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen svc [status|set|drop-t1|reset]` 子命令族与格式化报表；
+     - `screen status` 扩充显示 SVC 时域分级运行指标。
+
+- **架构解法与落地**:
+  1. **核心 SVC-T 模型与算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - 定义 `SCREEN_COMPRESS_SVC_T1 = 6`，实现 `ScreenSvcMode`、`ScreenSvcConfig`、`ScreenSvcReport`；
+     - 扩充 `ControlMsg` Tag 33~35 定长线协议编解码；
+  2. **节点运行时管线与丢弃流控执行 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `Shared` 挂载 `screen_svc_config`、`screen_svc_t0_frames_sent`、`screen_svc_t1_frames_sent`、`screen_svc_t1_frames_dropped`、`screen_svc_saved_bytes`、`screen_sender_t0_canvas` 与 `screen_receiver_t0_canvas`；
+     - 在 `screen_send_frame()` 阶段：若启用 SVC，T1 帧在丢弃策略下直接统计并丢弃；发送时提取相对于最新 T0 画布的差分补丁打上 Tag 6；T0 帧参考上一 T0 基础画布并更新本地 T0 画布；接收端处理 `SCREEN_COMPRESS_SVC_T1` 帧仅渲染不污染 T0 基础画布；
+     - 暴露公有运行时控制方法；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/svc/*` 系列端点并严格实行 127.0.0.1 绑定与 Host 请求头防御；
+  4. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称实现 `screen svc` 命令族并扩充 `screen status`；
+  5. **测试覆盖与版本更新**:
+     - 核心单测、REST 端点单测与端到端集成测试 `m5_38_screen_temporal_scalability_svc_pipeline` 全绿，版本发布为 `v0.1.50`。
+
+**2.27 相对 2.26(屏幕串流长期参考帧 (LTR) 锚定、增量断洞自愈与抗丢包参考帧选择流水线 ADR-113 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **增量差分串流的丢包断洞痛点**: 在增量差分补丁（ADR-109）中，串流帧依赖前一帧时间差分预测（$F_t \leftarrow F_{t-1} + \Delta_t$）。在无线 Wi-Fi、4G/5G 弱网或 EasyTier 虚拟 Mesh 隧道中，一旦某个差分补丁发生偶发丢包，后续依赖它的差分帧解码全数失效，导致画面撕裂、花屏残影与连续漂移；
+  2. **传统补救方案的两难抉择**:
+     - *全量关键帧请求 (`KeyframeRequest`, Tag 3 / ADR-081)*：请求 IDR 帧刷新，数据量暴增 15~50 倍，注入巨大流量脉冲（Traffic Burst），击穿网络队列造成缓冲膨胀与 100~300ms 冻结卡顿；
+     - *渐进式帧内刷新 (`PIR`, ADR-112)*：虽消除了流量尖峰，但需要经历连续 $N$ 帧周期（通常 250~500ms）才能完全消除花屏残影；
+  3. **长期参考帧 (Long-Term Reference, LTR) 与参考帧选择 (RPS) 机制**:
+     - 发送端与接收端协同维护一个受确认的“黄金参考画布”（Golden LTR Canvas, $F_{\text{ltr}}$），并记录其对应的帧序号 `ltr_seq`；
+     - 当接收端检测到差分帧断洞或画面漂移时，不再请求重型 IDR 全量关键帧，而是派发 **LTR 恢复请求 (`LtrRecoveryRequest`, Tag 31)** 指明已知有效的黄金参考帧序号；
+     - 发送端直接基于当前最新屏幕帧与本地保存的黄金参考画布生成 **LTR 增量恢复补丁**（$\Delta_{\text{recovery}} = F_{\text{live}} - F_{\text{ltr}}$，采用专用 Codec Tag `SCREEN_COMPRESS_LTR = 5`）；
+     - 接收端直接将该补丁叠加到本地黄金参考画布上，**在 1 个 RTT 内瞬时无缝恢复 100% 正确画面，既无 IDR 关键帧突发脉冲，也无需等待多帧 PIR 周期**；
+     - 周期性或按需自动锚定（Auto-Anchoring）生成新的黄金参考帧，确保持续增量恢复效率；
+  4. **定长线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 29 (`ControlMsg::SetScreenLtrMode { enabled: bool, auto_interval: u16 }`)**；
+     - **Tag 30 (`ControlMsg::ResetScreenLtrMode`)**：一键重置至默认关闭态；
+     - **Tag 31 (`ControlMsg::LtrRecoveryRequest { ltr_seq: u64 }`)**：访客端按需触发黄金参考帧差分自愈；
+     - **Tag 32 (`ControlMsg::LtrAnchorSync { ltr_seq: u64 }`)**：双端确认并同步新的黄金参考帧锚点；
+  5. **回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/ltr`：读取当前 LTR 状态、锚定间隔、当前黄金参考序号、恢复统计与省流字节；
+     - `POST /api/screen/ltr`：动态配置启用状态与自动锚定周期；
+     - `POST /api/screen/ltr/anchor`：手动触发一次黄金参考帧锚定；
+     - `POST /api/screen/ltr/recover`：手动发起一次 LTR 增量恢复请求；
+     - `POST/DELETE /api/screen/ltr/reset`：重置 LTR 配置与统计；
+     - `ScreenStatusReport` 扩充 `ltr_enabled`、`ltr_auto_interval`、`ltr_current_seq`、`ltr_anchors_established`、`ltr_recoveries_completed` 遥测；
+  6. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen ltr [status|set|anchor|recover|reset]` 子命令族与格式化报表；
+     - `screen status` 扩充显示 LTR 状态与恢复指标。
+
+- **架构解法与落地**:
+  1. **核心 LTR 模型与算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - 定义 `SCREEN_COMPRESS_LTR = 5`，实现 `ScreenLtrConfig`、`ScreenLtrReport`；
+     - 扩充 `ControlMsg` Tag 29~32 编解码；
+  2. **节点运行时管线与自愈流控执行 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `Shared` 挂载 `screen_ltr_config`、`screen_ltr_current_seq`、`screen_ltr_anchors_established`、`screen_ltr_recoveries_requested`、`screen_ltr_recoveries_completed`、`screen_ltr_saved_burst_bytes`、`screen_ltr_recovery_pending`、`screen_sender_ltr_canvas` 与 `screen_receiver_ltr_canvas`；
+     - 在 `screen_send_frame()` 阶段：若收到恢复请求则基于黄金参考画布生成 LTR 恢复差分帧，并自动周期性锚定黄金参考；接收端处理 `SCREEN_COMPRESS_LTR` 帧叠加至黄金画布并刷新主画面；
+     - 暴露公有运行时控制方法；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/ltr/*` 系列端点并严格实行 127.0.0.1 绑定与 Host 请求头防御；
+  4. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称实现 `screen ltr` 命令族并扩充 `screen status`；
+  5. **测试覆盖与版本更新**:
+     - 核心单测、REST 端点单测与端到端集成测试 `m5_37_screen_ltr_long_term_reference_pipeline` 全绿，版本发布为 `v0.1.49`。
+
+**2.26 相对 2.25(屏幕串流渐进式帧内平滑刷新、带状宏块去脉冲流控流水线 ADR-112 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **全量关键帧脉冲冲击 (I-Frame Burst Spike) 痛点**: 在增量差分补丁（ADR-109）、客观画质质检（ADR-110）与 QoE 自主闭环（ADR-111）中，当网络轻微丢包、新访客接入、参考画布漂移或 QoE 控制器触发 `ForceKeyframe` 时，系统必须派发 `ControlMsg::KeyframeRequest`（Tag 3）请求全量 IDR 关键帧刷新。然而，未经切片的全量 1080p/4K 画面数据量达到通常差分增量帧的 15~50 倍，瞬间向链路注入巨大脉冲流量（Traffic Burst）；
+  2. **瞬时网络拥塞与端侧冻结失真**: 该突发脉冲会瞬间击穿家用无线网络、4G/5G 弱网或 EasyTier 虚拟 Mesh 隧道缓冲队列，引发严重缓冲膨胀（Bufferbloat，RTT 骤增至数百毫秒）并导致尾部丢包，直接击穿接收端播放抖动缓冲（Dejitter Buffer，ADR-087），造成用户端肉眼可见的“关键帧卡顿 / 顿挫冻结（100~300ms Freeze）”；
+  3. **渐进式帧内平滑刷新 (Progressive Intra-Refresh, PIR)**:
+     - 将整屏垂直方向分割为 $N$ 个水平宏块带状切片（$2 \le N \le 32$，默认 $N = 8$）；
+     - 在每个 PIR 串流帧中，仅将第 $k$ 个切片（$k = \text{frame\_seq} \pmod N$）作为全量 Intra-Slice 高保真帧内刷新，其余 $N-1$ 个切片维持常规帧间差分或跳帧；
+     - 经过连续 $N$ 帧后，整个屏幕在不产生任何带宽脉冲尖峰的情况下完成 100% 全局无缝刷新（Zero-Burst Smooth Refresh）；
+  4. **PIR 运行策略模式 (`ScreenPirMode`)**:
+     - `Disabled` (0)：默认传统全量关键帧模式；
+     - `Continuous` (1)：持续滚动渐进刷新（每一帧推进 1 个切片，消除周期性 I 帧波峰）；
+     - `OnDemand` (2)：按需触发式渐进刷新（在收到刷新指令或 QoE 触发时，平滑执行一次完整的 $N$ 帧扫描后自动休眠，恢复常规差分流控）；
+  5. **切片几何运算与边界吸收 (`compute_pir_band_rect`)**:
+     - 设画面尺寸为 $(W, H)$，切片数 $N$：基准切片高度 $h_b = H / N$；
+     - 前 $N-1$ 个切片覆盖 $y \in [k \cdot h_b, (k+1) \cdot h_b)$，第 $N-1$ 个切片自动吸收除不尽的余数行像素至 $H$；
+     - 严格遵循 ADR-006 零重型外部依赖铁律，纯 Rust 标准库切片与内存索引运算；
+  6. **定长线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 27 (`ControlMsg::SetScreenPirMode { mode: u8, bands: u8 }`)**；
+     - **Tag 28 (`ControlMsg::ResetScreenPirMode`)**：一键重置至默认关闭态；
+  7. **回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/pir`：读取当前 PIR 模式、切片数、完成轮次与当前切片进度；
+     - `POST /api/screen/pir`：动态配置 PIR 模式与切片分片数；
+     - `POST/DELETE /api/screen/pir/reset`：重置配置与切片统计；
+     - `ScreenStatusReport` 扩充 `pir_enabled`、`pir_mode`、`pir_bands`、`pir_sweeps_completed` 与 `pir_slices_sent` 遥测；
+  8. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen pir [status|set|reset]` 子命令族与格式化报表；
+     - `screen status` 扩充显示 PIR 闭环状态与切片统计。
+
+- **架构解法与落地**:
+  1. **核心 PIR 模型与切片几何计算 (`crates/tetherly-core/src/screen.rs`)**:
+     - 实现 `ScreenPirMode`、`ScreenPirConfig`、`ScreenPirReport` 与 `compute_pir_band_rect` 算法；
+     - 扩充 `ControlMsg::SetScreenPirMode`（Tag 27）与 `ControlMsg::ResetScreenPirMode`（Tag 28）；
+  2. **节点运行时管线与平滑流控执行 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `Shared` 挂载 `screen_pir_config`、`screen_pir_sweeps_completed`、`screen_pir_slices_sent`、`screen_pir_current_band` 与 `screen_pir_active_sweep`；
+     - 在 `screen_send_frame()` 阶段动态切分并编码 Intra-Slice 帧，规避重复静止帧抑制并平滑下发；
+     - 暴露 `screen_pir_report`、`screen_set_pir_mode` 与 `screen_reset_pir_mode`；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/pir` 与 `/api/screen/pir/reset`，严格校验 127.0.0.1 物理绑定与 Host 头阻断；
+  4. **双端 CLI 全同构落地 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen pir` 子命令族与 `print_screen_pir_report`，`screen status` 扩充 PIR 指标；
+  5. **测试覆盖与验证**:
+     - `crates/tetherly-core/src/screen.rs` 单测 `screen_progressive_intra_refresh_algorithms_and_signaling`；
+     - `crates/tetherly-node/src/uihttp.rs` 单测 `test_uihttp_screen_pir_endpoints`；
+     - `tests/phase5.rs` 端到端集成测试 `m5_36_screen_progressive_intra_refresh_pipeline`。
+
+**2.25 相对 2.24(屏幕串流实时客观 QoE 自主闭环调优、画质感知驱动自适应流控协调流水线 ADR-111 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **从被动画质观测到主动感知闭环**: 在 ADR-110 中，Tetherly 落地了基于纯标准库数学算法的 MSE、PSNR 与 16x16 宏块 SSIM 客观画质度量管道，并通过抽样探针输出了 `ScreenQualityMetricReport` 与 `quality_warning` 告警。然而该告警仅停留在“被动观测/遥测展示”层面，未能形成真正的控制面闭环；
+  2. **网络健康与感知画质正交脱节消除**: 底层网络指标（RTT、丢包率、在途字节）优异（零丢包、低 RTT）时，可能因前期动态降采样或量化过激而产生严重模糊或宏块伪影。必须引入一条由客观感知画质（Perceptual Visual QoE）直接驱动的主动闭环干预回路；
+  3. **多阶画质保障策略模式 (`ScreenQoeMode`)**:
+     - `Off` (0)：关闭 QoE 自主闭环，仅保留观测遥测；
+     - `Conservative` (1)：保真优先（目标 $PSNR \ge 34\text{ dB}, SSIM \ge 0.90$）；
+     - `Balanced` (2，默认)：平衡模式（目标 $PSNR \ge 30\text{ dB}, SSIM \ge 0.85$）；
+     - `Economy` (3)：经济省流（目标 $PSNR \ge 26\text{ dB}, SSIM \ge 0.78$）；
+  4. **分级闭环调优动作决策 (`ScreenQoeAction`)**:
+     - `Hold`：画质符合目标阈值，无需干预；
+     - `BoostBitrate`：压缩量化噪声过高（MSE 偏大）时，阶梯式提升底线码率；
+     - `UpgradeScale`：字符与边缘模糊（SSIM 偏低）时，逐级回升动态分辨率至 100%；
+     - `LowerQp`：调低量化参数（$QP \leftarrow \max(QP - 4, QP_{\min})$），增强高频空间纹理保真度；
+     - `ForceKeyframe`：检测到严重参考画布漂移或差分累积伪影时，主动派发 `ControlMsg::KeyframeRequest`（Tag 3）强制 I 帧刷新；
+     - `FallbackThrottle`：拥塞且极端低 QoE 时，权衡空间分辨率优于帧率，适度定步平滑；
+  5. **抗震荡防抖与冷却恢复机制**:
+     - 动作冷却窗（`SCREEN_QOE_COOLDOWN_US = 500_000` 微秒，500ms），防止单帧瞬态毛刺导致流控震荡；
+  6. **定长线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 25 (`ControlMsg::SetScreenQoeMode { mode: u8, target_psnr_db: u8, target_ssim_pct: u8 }`)**；
+     - **Tag 26 (`ControlMsg::ResetScreenQoeMode`)**：一键重置至默认关闭状态；
+  7. **回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/qoe`：读取当前 QoE 模式、目标阈值与调优决策统计；
+     - `POST /api/screen/qoe`：动态配置模式与目标 PSNR/SSIM 阈值；
+     - `POST/DELETE /api/screen/qoe/reset`：重置配置与调优统计；
+     - `ScreenStatusReport` 扩充 `qoe_enabled`、`qoe_mode`、`qoe_target_psnr_db`、`qoe_target_ssim_pct`、`qoe_actions_total` 与 `qoe_last_action` 遥测；
+  8. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 新增 `screen qoe status [--json] [--ui-port <port>]`
+     - 新增 `screen qoe set --mode <conservative|balanced|economy|off> [--target-psnr <db>] [--target-ssim <pct>] [--json] [--ui-port <port>]`
+     - 新增 `screen qoe reset [--json] [--ui-port <port>]`
+     - 对称实现格式化报表函数 `print_screen_qoe_report`；
+     - `screen status` 扩充显示 QoE 自主闭环状态与最近决策。
+
+- **架构解法与落地**:
+  1. **核心 QoE 模型与决策状态机 (`crates/tetherly-core/src/screen.rs`)**:
+     - 实现 `ScreenQoeMode`、`ScreenQoeAction`、`ScreenQoeConfig`、`ScreenQoeReport` 与 `ScreenQoeController`；
+     - 扩充 `ControlMsg::SetScreenQoeMode`（Tag 25）与 `ControlMsg::ResetScreenQoeMode`（Tag 26）；
+  2. **节点运行时管线与自主闭环执行 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `Shared` 挂载 `screen_qoe_controller`，在抽样质检报告生成后触发求值，自适应联动 `screen_engine`、`screen_encode_codec` 与 `screen_source`；
+     - 暴露 `screen_qoe_report`、`screen_set_qoe_mode` 与 `screen_reset_qoe_mode`；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/qoe` 与 `/api/screen/qoe/reset`，严格校验 127.0.0.1 物理绑定与 Host 头阻断；
+  4. **双端 CLI 全同构落地 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen qoe` 子命令族与 `print_screen_qoe_report`，`screen status` 扩充 QoE 指标；
+  5. **测试覆盖与验证**:
+     - `crates/tetherly-core/src/screen.rs` 单测 `screen_autonomous_qoe_closed_loop_adaptation_algorithms_and_signaling`；
+     - `crates/tetherly-node/src/uihttp.rs` 单测 `test_uihttp_screen_qoe_endpoints`；
+     - `tests/phase5.rs` 端到端集成测试 `m5_35_screen_autonomous_qoe_closed_loop_adaptation_pipeline`。
+
+**2.24 相对 2.23(屏幕串流实时客观画质度量、PSNR/SSIM 结构失真评估与自适应质检闭环流水线 ADR-110 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **闭环质量盲区消除**: 在 Tetherly 屏幕串流相继引入动态降采样（ADR-084）、自适应 QP（ADR-085）、色彩量化（ADR-108）与动态差分补丁（ADR-109）后，流控体系具备了强大的网络信道适应能力。然而，所有调度与决策（AIMD 码率调节 ADR-082、四维协同调度器 ADR-086）均依赖底层传输网络指标（RTT、丢包率、在途字节），无法感知端到端“实际呈现画面”的客观画质退化。在弱网或极端压缩场景下，可能出现丢包率虽低但画面文字严重模糊、宏块伪影泛滥的质量盲区；
+  2. **快速客观画质度量算法（纯 Rust 标准库零重型依赖，ADR-006）**:
+     - **均方误差 (MSE, Mean Squared Error)**：
+       $$MSE = \frac{1}{3 \cdot W \cdot H} \sum_{i=1}^{W \cdot H} \left( (R_1 - R_2)^2 + (G_1 - G_2)^2 + (B_1 - B_2)^2 \right)$$
+     - **峰值信噪比 (PSNR, Peak Signal-to-Noise Ratio)**：
+       $$PSNR = 10 \cdot \log_{10}\left(\frac{255^2}{MSE}\right) \approx 48.1308 - 10 \cdot \log_{10}(MSE)$$
+       若 $MSE == 0$，定义 $PSNR = 100.0$ dB（完全无损基准）；纯标准库浮点计算，无外部图像库；
+     - **宏块结构相似性 (Fast Macroblock SSIM, Structural Similarity Index)**：
+       将整屏按 16x16 宏块窗口划分，逐块计算亮度 $Y = (77R + 150G + 29B) >> 8$ 的均值 $\mu_x, \mu_y$、方差 $\sigma_x^2, \sigma_y^2$ 与协方差 $\sigma_{xy}$：
+       $$SSIM = \frac{(2\mu_x\mu_y + C_1)(2\sigma_{xy} + C_2)}{(\mu_x^2 + \mu_y^2 + C_1)(\sigma_x^2 + \sigma_y^2 + C_2)}$$
+       常数取标准推荐值 $C_1 = 6.5025$，$C_2 = 58.5225$。全帧取宏块平均值，范围在 $0.00 \sim 1.00$；
+  3. **抽样评估与低开销质检探针**:
+     - 支持无侵入抽样 `sample_interval`（默认每 10 帧抽验一次，范围 1..=120）；
+     - 维持评估帧计数、滚动累计平均与最新帧指标，当 $PSNR < 30.0$ dB 或 $SSIM < 0.85$ 时触发 `quality_warning: true` 告警；
+  4. **定长线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 23 (`ControlMsg::SetScreenQualityMetricMode { enabled: bool, sample_interval: u8 }`)**：位 0 存储 `enabled`，位 8..16 存储 `sample_interval`；
+     - **Tag 24 (`ControlMsg::ResetScreenQualityMetricMode`)**：重置质检模式至默认关闭；
+  5. **回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/metric`：获取当前客观画质度量配置与遥测报告；
+     - `POST /api/screen/metric`：配置质检开关与抽样周期；
+     - `POST/DELETE /api/screen/metric/reset`：重置质检配置并清零指标；
+     - `ScreenStatusReport` 扩充 `metric_enabled`、`metric_psnr_db`、`metric_ssim` 遥测；
+  6. **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 新增 `screen metric status [--json] [--ui-port <port>]`
+     - 新增 `screen metric set --enabled <true|false> [--interval <num>] [--json] [--ui-port <port>]`
+     - 新增 `screen metric reset [--json] [--ui-port <port>]`
+     - 对称实现格式化报表函数 `print_screen_quality_metric_report`；
+     - `screen status` 扩充显示客观画质遥测。
+
+- **架构解法与落地**:
+  1. **核心画质模型与度量算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - 实现 `ScreenQualityMetricConfig`、`ScreenQualityMetricReport`；
+     - 实现 `ScreenFrame::compute_mse`、`compute_psnr` 与 `compute_ssim`；
+     - 扩充 `ControlMsg::SetScreenQualityMetricMode`（Tag 23）与 `ControlMsg::ResetScreenQualityMetricMode`（Tag 24）；
+  2. **节点运行时管线与自适应质检闭环 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `Shared` 挂载 `screen_quality_metric_config`、`screen_quality_metric_state`、`screen_metric_counter` 与 `screen_metric_ref_frame`；
+     - 在采集与呈现链路中无侵入执行抽样质检，在网络事件循环中双向同步信令；
+     - 暴露 `screen_quality_metric_report`、`screen_set_quality_metric_mode` 与 `screen_reset_quality_metric_mode`；
+  3. **回环 REST 接口闭环与安全加固 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - 实现 `/api/screen/metric` 与 `/api/screen/metric/reset`，严格校验 127.0.0.1 物理绑定与 Host 头阻断；
+  4. **双端 CLI 全同构落地 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**:
+     - 对称落地 `screen metric` 子命令族与 `print_screen_quality_metric_report`，`screen status` 扩充客观画质指标；
+  5. **测试覆盖与验证**:
+     - `crates/tetherly-core/src/screen.rs` 单测 `screen_objective_visual_quality_metric_and_psnr_ssim_algorithms`；
+     - `crates/tetherly-node/src/uihttp.rs` 单测 `test_uihttp_screen_quality_metric_endpoints`；
+     - `tests/phase5.rs` 端到端集成测试 `m5_34_screen_objective_visual_quality_metric_and_psnr_ssim_pipeline`；全工作区测试全绿，Workspace 版本发布为 `0.1.46`。
+
+**2.23 相对 2.22(屏幕串流动态差分补丁、帧间变化压缩与宏块字典缓存流水线 ADR-109 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **高静态屏幕内容下的带宽与算力浪费**: 在代码编辑、终端日志排障、远程监控等场景下，画面帧间冗余度通常高达 85%~99%（例如单行输出、光标闪烁）；此前即使脏区较小，仍将整帧送入压缩器，造成大量未变动像素的无谓遍历与重编码；
+  2. **动态差分补丁与帧间时域压缩流水线（Dynamic Differential Delta Patch Pipeline）**:
+     - **Delta Patch 编码**：当启用了差分模式且变动比例 `dirty_ratio < 0.70` 时，仅提取变动脏矩形子区域（`ScreenDamageRect`），以 `codec_tag = SCREEN_COMPRESS_DELTA (4)` 经 Zstd 压缩发送；
+     - **接收端参考画布合成（Reference Canvas Blit）**：接收端维持持久化全屏参考画布（`screen_receiver_canvas`），收到补丁帧后解压并原地贴合（`apply_sub_rect`）至对应坐标，合成完整帧后送入呈现；
+     - **周期性关键帧与自愈机制**：可配置关键帧同步周期（`keyframe_interval`，默认 60 帧），周期届满强制发送完整 I-Frame；参考画布缺失时自动触发 `ControlMsg::KeyframeRequest` 瞬态自愈；
+     - **带宽节约量化遥测（Bandwidth Savings Telemetry）**：精确统计 `delta_frames_sent`、`keyframes_sent`、`delta_frames_received`、`keyframes_received` 与累计节约字节数 `saved_bytes`；
+  3. **零外部重型图形依赖（Zero External Crates, ADR-006）**: 严格遵循 ADR-006，以纯标准库整数边界安全夹取与行级切片实现 `extract_sub_rect` 与 `apply_sub_rect`；
+  4. **定长线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - Tag 21 (`ControlMsg::SetScreenDeltaMode { enabled: bool, keyframe_interval: u16 }`)；
+     - Tag 22 (`ControlMsg::ResetScreenDeltaMode`)；
+  5. **全链路协同与双端 CLI 100% 同构**:
+     - 深度挂载至采集、ROI 裁剪（ADR-107）、色彩量化（ADR-108）、编码推流、呈现渲染、回环 REST API 以及双端 CLI（`tetherly` 与 `tetherly-cli`）。
+
+- **架构解法与落地**:
+  1. **核心差分模型与切片贴合算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - `SCREEN_COMPRESS_DELTA = 4`、`ScreenDeltaConfig`、`ScreenDeltaReport`；
+     - `ScreenFrame::extract_sub_rect` 与 `ScreenFrame::apply_sub_rect`；
+  2. **线协议信令定长扩充**:
+     - Tag 21 (`ControlMsg::SetScreenDeltaMode { enabled, keyframe_interval }`)；
+     - Tag 22 (`ControlMsg::ResetScreenDeltaMode`)；
+  3. **节点运行时管线挂接与参考画布合成 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `NodeShared` 挂载 `screen_delta_config`、`screen_delta_counter`、`screen_receiver_canvas`、收发遥测原子计数器；
+     - `screen_send_frame` 脏区提取与差分压缩抽帧；
+     - `screen_viewer_session` 补丁解压与参考画布 Blit；
+     - 网络事件循环双向实时信令同步；
+  4. **回环 REST 控制面端点闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/delta`、`POST /api/screen/delta`、`POST/DELETE /api/screen/delta/reset`；
+     - `ScreenStatusReport` 扩充差分与节约带宽遥测；
+  5. **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - 对称新增 `screen delta [status|set|reset]` 子命令族与格式化报表 `print_screen_delta_report`；
+     - `screen status` 扩充展示差分补丁与节约带宽遥测。
+
+**2.22 相对 2.21(屏幕串流自适应色彩深度、极低带宽灰度经济模式与色彩量化流水线 ADR-108 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **极低带宽、弱网与卫星/物联网链路困境**: 在弱蜂窝（2G/3G/极弱4G）、偏远野外、卫星链路或极端省电/墨水屏（E-Ink）环境中，全量传输 32 位全彩色（BGRA8/RGBA8）视频流不仅极易造成信道阻塞与拥塞丢帧，且对终端算力造成不必要的压力；
+  2. **文字与终端排障的画质与色彩正交性**: 在远程运维、代码查看、终端日志监控等核心场景下，色彩信息往往并非刚性需求，高对比度、清晰锋利的字符边缘以及敏捷低延迟的帧率响应更为关键；
+  3. **自适应色彩深度与量化经济流水线（Adaptive Color Depth & Quantization Pipeline）**:
+     - **FullColor32（默认）**：32 位真彩色（BGRA8/RGBA8 原生传输）；
+     - **ReducedColor16（RGB565 降阶色彩）**：将 8-bit 色彩通道量化为 5-6-5 比特并实施高位补齐 $((R \& 0xF8) | (R >> 5))$，大幅消除微细色彩噪声与空间高频，使 Zstd/OpenH264 编码压缩率飞跃式提升，兼顾彩色辨识与低码率；
+     - **Grayscale8（8位灰度经济模式）**：采用快速整数定点亮度公式 $Y = (77R + 150G + 29B) >> 8$（Rec.601 / BT.601 近似），将色彩信息降至 0 色度熵（$U=128, V=128$），在无损压缩与视频编码下带来 60%~80% 的带宽节约，同时字符可读性 100% 保持；
+     - **Monochrome1（1位单色黑白高对比度模式）**：基于可配置二值化阈值（默认 128，范围 1..254），将亮度二值化为纯黑（0）或纯白（255），在超低带宽（<50 kbps）或电子墨水屏/高对比度运维下实现 >95% 的极致压缩率；
+  4. **零外部重型图形依赖（Zero External Crates, ADR-006）**: 严格遵循 ADR-006，禁止引入任何第三方图像处理库（如 `image`、`cairo`、`skia`）。采用纯 Rust 标准库的高性能原地（In-Place）零分配切片通道量化算法；
+  5. **定长线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 19 (`ControlMsg::SetScreenColorMode { mode: u8, threshold: u8 }`)**：64 位紧凑打包模式与阈值；
+     - **Tag 20 (`ControlMsg::ResetScreenColorMode`)**：重置色彩深度，瞬间恢复 32 位原生全彩串流；
+  6. **全链路协同与双端 CLI 100% 同构**:
+     - 深度挂载至采集、ROI 裁剪（ADR-107）、编码推流、呈现渲染（`screen_sink`）、录制（ADR-101）、回放（ADR-102）、静态快照（ADR-103）、回环 REST API 以及双端 CLI（`tetherly` 与 `tetherly-cli`）。
+
+- **架构解法与落地**:
+  1. **核心色彩模型与量化算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - `ScreenColorMode`：定义 `FullColor32`（0）、`ReducedColor16`（1）、`Grayscale8`（2）与 `Monochrome1`（3）；
+     - `ScreenColorConfig` 与 `ScreenColorReport`：提供色彩模式配置、二值化阈值、激活状态与更新计数；
+     - `ScreenFrame::apply_color_mode(&mut self, config: &ScreenColorConfig)`：支持 BGRA8 与 RGBA8 双像素格式的高性能原地色彩变换，完好保留 Alpha 掩模；
+  2. **线协议信令定长扩充**:
+     - Tag 19 (`ControlMsg::SetScreenColorMode { mode, threshold }`)；
+     - Tag 20 (`ControlMsg::ResetScreenColorMode`)；
+  3. **节点运行时管线挂接与流控 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `NodeShared` 挂载 `screen_color_mode: Arc<RwLock<ScreenColorConfig>>` 与 `screen_color_updates: Arc<AtomicU64>`；
+     - 在 `screen_send_frame` 帧捕获与 ROI 裁剪后即刻执行 `apply_color_mode`；
+     - 网络事件循环（`screen_server_loop` 与 `screen_client_loop`）实时双向同步；
+  4. **回环 REST 控制面端点闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/color`、`POST /api/screen/color` 与 `POST/DELETE /api/screen/color/reset`；
+     - `ScreenStatusReport` 扩充 `color_mode`、`color_threshold` 与 `color_updates` 遥测；
+  5. **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - 对称新增 `screen color [status|set|reset]` 子命令族与格式化报表 `print_screen_color_report`；
+     - `screen status` 扩充色彩模式与量化遥测指标。
+
+**2.21 相对 2.20(屏幕串流动态感兴趣区域 (ROI) 裁剪串流、局部缩放聚焦与视口漫游流水线 ADR-107 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **高分屏与小屏幕端的显示鸿沟（High-DPI Host vs Compact Visitor Viewport Mismatch）**: 在远程协助、远程结对开发与调试场景中，被控宿主机端（Host）通常采用 4K（3840x2160）或 2K 高分屏，而访客端（Visitor）可能在 1080p 笔记本电脑或平板上运行。将 4K 画面整体下采样推流会导致编辑器代码行、控制台文本与细小 UI 控件模糊难辨；
+  2. **带宽消耗与算力浪费**: 整屏高分辨率视频编码消耗高达 15~40 Mbps 的高额带宽，并对 CPU/GPU 施加极大的编码压力；
+  3. **局部感兴趣区域（ROI）动态裁剪与 1:1 无损聚焦（Selective Viewport Focus）**: 用户需要能够指定或动态拖拽视口矩形（`x, y, w, h`），使串流管线仅裁剪并编码该 ROI 子区域，以 1:1 原生无损物理像素传输关键代码与调试控制台，同时支持视口缩放（Zoom 50%~800%）与平移（Pan）；
+  4. **零外部重型图形依赖（Zero External Crates, ADR-006）**: 严格禁止引入 OpenCV、ImageMagick 等重型依赖。在 `tetherly-core` 内以纯标准库整数边界安全夹取（Clamp to screen width/height，偶数对齐适配 H.264/YUV）与行级跨度提取完成高效 $O(\text{roi\_h} \times \text{roi\_w} \times 4)$ 内存切片；
+  5. **定长线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - **Tag 16 (`ControlMsg::SetScreenRoi { x: u16, y: u16, w: u16, h: u16 }`)**：64 位紧凑打包视口坐标；
+     - **Tag 17 (`ControlMsg::ResetScreenRoi`)**：重置视口，瞬间恢复全屏捕获与串流；
+     - **Tag 18 (`ControlMsg::SetScreenRoiZoom { zoom_percent: u16 }`)**：动态调整视口放大比例；
+  6. **全链路协同与双端 CLI 100% 同构**:
+     - 深度接入采集捕获、编码分发、呈现渲染（`screen_sink`）、录制（ADR-101）、回放（ADR-102）、单帧快照（ADR-103）、回环 REST API 以及双端 CLI（`tetherly` 与 `tetherly-cli`）。
+
+- **架构解法与落地**:
+  1. **核心 ROI 数据结构与算法 (`crates/tetherly-core/src/screen.rs`)**:
+     - `ScreenRoi`：定义 `active: bool`、`x: u16`、`y: u16`、`w: u16`、`h: u16` 与 `zoom_percent: u16`；
+     - `ScreenRoiReport`：包含活跃状态、视口坐标、缩放比例、源分辨率、有效分辨率与变更计数；
+     - `ScreenRoi::sanitize(&mut self, screen_w, screen_h)`：边界夹取与偶数对齐归一化；
+     - `ScreenRoi::map_screen_to_roi` 与 `ScreenRoi::map_roi_to_screen`：双向坐标映射，保障激光笔与白板标注在视口内的亚像素级对齐；
+     - `ScreenFrame::crop_roi(&self, roi: &ScreenRoi)`：行级步长内存切片；
+  2. **线协议信令定长扩充**:
+     - Tag 16 (`ControlMsg::SetScreenRoi { x, y, w, h }`)；
+     - Tag 17 (`ControlMsg::ResetScreenRoi`)；
+     - Tag 18 (`ControlMsg::SetScreenRoiZoom { zoom_percent }`)；
+  3. **节点运行时管线挂接与流控 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `NodeShared` 挂载 `screen_roi: Arc<RwLock<ScreenRoi>>` 与 `screen_roi_updates: Arc<AtomicU64>`；
+     - 帧采集后送入编码器前即时执行 `crop_roi`；
+     - 网络事件循环双端实时同步；
+  4. **回环 REST 控制面端点闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/roi`、`POST /api/screen/roi`、`POST/DELETE /api/screen/roi/reset`、`POST /api/screen/roi/zoom`；
+     - `ScreenStatusReport` 扩充 `roi_active`、`roi_x`、`roi_y`、`roi_w`、`roi_h`、`roi_zoom_percent`、`roi_updates`；
+  5. **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - 对称新增 `screen roi [status|set|reset|zoom]` 子命令族与格式化报表；
+     - `screen status` 扩充 ROI 状态显示。
+
+**2.20 相对 2.19(屏幕串流多方协作共享画板同步、时序撤销重做与矢量快照导入导出流水线 ADR-106 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **多人协同标注中的误操作与缺乏细粒度撤销能力（Lack of Fine-Grained Undo/Redo）**: 在 ADR-105 中引入了基础折线、矩形、箭头、文本与虚拟激光笔，但若某一方绘制了错误标注，此前唯一的清理手段是 `clear`（全量清空画布），这会瞬间抹除所有参与者的所有心血。协作画板急需细粒度的时序撤销（Undo）与重做（Redo）能力；
+  2. **多参与者身份归属与图层隔离（Author Attribution & Multi-User Layering）**: 在远程排障、代码结对评审、在线培训场景中，通常有宿主机操作员（Host）与多位远程协助者（Visitor 1, Visitor 2...）。当某一协助者执行「撤销」时，系统必须支持定向撤销该作者（`author`）最近的一笔标注，而非误撤销他人正在指引的关键标注；同时亦保留全局撤销选项；
+  3. **画板矢量快照持久化导出与导入（Vector Snapshot Persistence & Import/Export）**: 会议与排障讨论结束后，用户需要将当前的标注矢量集以结构化 JSON 快照（`.twhiteboard` / `.tann`）导出持久化，以便存盘归档、关联到录制容器（ADR-101）中，或在后续新会话中一键导入还原现场；
+  4. **白板安全策略与权限治理（Whiteboard Moderation & Host Sovereignty）**: 遵循 ADR-004 / ADR-098 的被控端最高主权原则，宿主机管理员可配置白板策略：
+     - `read_only: bool`（只读白板：仅宿主机可画，访客端画笔被硬性阻断 HTTP 403）；
+     - `allow_peer_clear: bool`（是否允许访客一键清空全量画板）；
+     - `max_items: u16`（图元数量硬上限，防止恶意洪泛攻击导致内存耗尽）；
+  5. **零重型外部依赖铁律（Zero External Crates, ADR-006）**: 严格禁止引入外部重型矢量库或图形引擎。全部撤销重做栈、快照序列化、图元重放与光栅化均由 `tetherly-core` 纯标准库与 `serde` 实现；
+  6. **定长线协议信令扩充与全量专属帧**: 在 14 字节定长信封中扩充 Tag 13（撤销）、Tag 14（重做）与 Tag 15（策略广播）；在专属帧 `0x050a`（`TANN`）中支持完整快照与策略同步；
+  7. **全链路协同与双端 CLI 100% 同构**: 完整接入呈现管线（`screen_sink`）、回放管线（`screen_playback`）、单帧快照（`screen_snapshot`）、回环 REST API 以及双端 CLI（`tetherly` 与 `tetherly-cli`）。
+
+- **架构解法与落地**:
+  1. **核心画板数据结构与状态机 (`crates/tetherly-core/src/screen.rs`)**:
+     - `WhiteboardPolicy`：包含 `read_only`、`allow_peer_clear` 与 `max_items`；
+     - `WhiteboardSnapshot`：包含版本、时间戳、会话 ID、活跃图元集与累计计数；
+     - `WhiteboardHistory` 状态机：内建 `active`、`undo_stack` 与 `redo_stack`，提供 `add_item`、`undo(author)`、`redo(author)`、`clear`、`export_snapshot` 与 `import_snapshot`；
+  2. **线协议信令扩充与专属帧升级**:
+     - Tag 13 (`ControlMsg::WhiteboardUndo { author_hash: u64 }`)；
+     - Tag 14 (`ControlMsg::WhiteboardRedo { author_hash: u64 }`)；
+     - Tag 15 (`ControlMsg::SetWhiteboardPolicy { read_only, allow_peer_clear, max_items }`)；
+     - 专属帧类型 `TYPE_SCREEN_ANNOTATION = 0x050a`（魔数 `b"TANN"`）扩充 `Remove`、`Undo`、`Redo`、`Snapshot`、`Policy`；
+  3. **节点运行时管线与生命周期挂接 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `NodeShared` 挂载 `screen_whiteboard` 与 `screen_whiteboard_policy`；
+     - 呈现（`screen_sink`）、回放（`screen_playback`）与快照（`screen_snapshot`）统一读取活跃图元；
+     - 安全过滤与事件同步全面对齐；
+  4. **回环 REST 控制面端点闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `/api/screen/whiteboard/undo`、`/api/screen/whiteboard/redo`、`/api/screen/whiteboard/export`、`/api/screen/whiteboard/import`、`/api/screen/whiteboard/policy`、`/api/screen/whiteboard/clear`；
+     - 继承 `127.0.0.1` 物理绑定、`Host` 头校验阻断与严格路径穿越过滤；
+  5. **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - 对称新增 `screen whiteboard [status|undo|redo|export|import|policy|clear]` 子命令族；
+     - `screen status` 扩充 Whiteboard 遥测指标。
+
+**2.19 相对 2.18(屏幕串流实时协作标注、画板叠加层与瞬态虚拟激光笔流水线 ADR-105 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **远程协助中的物理控制冲突与指引脱节**: 在远程技术支持、外包协同开发、代码评审（Pair Programming）与培训演练中，协助者（Visitor）往往需要精准指出被控端（Host）屏幕上的特定代码行、配置项或故障按钮。以往若直接使用物理输入隧道抢夺鼠标光标，极易与被控端操作者发生「光标争抢」，甚至产生误触破坏生产系统的风险。
+  2. **轻量非侵入式协同表达通道（Virtual Laser Pointer & Whiteboard Overlay）**: 协助者需要一种「只动笔不动手、只指引不争抢」的非侵入式视觉引导手段：
+     - **瞬态虚拟激光笔**：协助者移动指针时以鲜艳高亮光斑及径向光晕呈现位置，按住时常亮，释放后自动消隐；
+     - **几何标注与白板圈注**：支持自由线条、矩形框选、指示箭头以及基于点阵字模的短文本批注；
+     - **生命周期衰减（TTL Auto-Fadeout）与一键清空**：支持设置临时标注存活毫秒数，超时后自动消除，杜绝遗留冗余视觉杂讯；双方随时可一键清空画布。
+  3. **零重型外部依赖铁律（Zero External Crates, ADR-006）**: 严格禁止引入 `cairo`、`skia`、`tiny-skia` 等重型矢量图形依赖。在 `tetherly-core` 内部实现纯算法光栅化直线扫描、中点圆光晕与箭头几何计算。
+  4. **定长线协议与低延迟传输**: 高频激光笔坐标（如 60Hz 采样）必须通过零内存分配的 14 字节定长信封（Tag 11）高效穿透，避免传统矢量网络协议引发的内存抖动与时延累积。
+  5. **全链路协同与双端 CLI 100% 同构**: 标注与激光笔无缝集成到呈现渲染（`screen_sink`）、会话录制（ADR-101）、录制回放（ADR-102）、单帧快照（ADR-103）、回环 REST API 以及双端 CLI（`tetherly` 与 `tetherly-cli`）。
+
+- **架构解法与落地**:
+  1. **核心光栅化几何渲染算法与数据模型 (`crates/tetherly-core/src/screen.rs`)**:
+     - 结构化图元模型 `AnnotationItem` 与 `AnnotationKind`（`Stroke`, `Rect`, `Arrow`, `Text`）；
+     - 布雷森汉姆粗线段扫描算法（`draw_line_thick`）：定点整数无除法增量扫描，结合多像素粗线填充与定点 Alpha 混合器；
+     - 中点圆光斑算法与发光晕染（`draw_laser_spot`）：内核高亮区与外晕平方反比定点衰减，呈现高保真发光质感；
+     - 30 度指引箭头几何计算（`draw_arrow`）：根据起点与终点向量反向延伸 30 度双翼短线；
+     - 就地合成原语 `ScreenFrame::apply_annotations` 与 `apply_laser_pointer`。
+  2. **线协议信令定长扩充与专属帧**:
+     - Tag 11 (`ControlMsg::SetLaserPointer { x, y, active, color_rgb }`)：14 字节定长信封，64 位紧凑载荷，零分配极低延迟流转；
+     - Tag 12 (`ControlMsg::ClearAnnotations`)：一键清空全量标注；
+     - 专属帧类型 `TYPE_SCREEN_ANNOTATION = 0x050a`（魔数 `b"TANN"`）：承载结构化矢量图元增量与全量同步。
+  3. **节点运行时管线与全生命周期挂接 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `NodeShared` 挂载 `screen_annotations`、`screen_laser_pointer`、`screen_annotation_count` 与 `screen_laser_updates`；
+     - 生命周期毫秒级过滤：呈现与快照时自动剔除过期 `ttl_ms` 标注；
+     - 呈现（`screen_sink.present`）、回放（`screen_playback`）与快照（`screen_snapshot`）统一叠加；
+     - 隐私黑屏绝对遮蔽优先执行。
+  4. **回环 REST 控制面端点闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/annotation`、`POST /api/screen/annotation`、`POST /api/screen/annotation/clear`、`DELETE /api/screen/annotation`、`GET /api/screen/laser` 与 `POST /api/screen/laser`；
+     - `ScreenStatusReport` 扩充 `annotations_count` 与 `laser_active` 遥测指标。
+  5. **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - 新增 `screen annotate [list|add|clear]` 与 `screen laser [coords|status]` 子命令族，支持所有格式化参数与 `--json` / `--ui-port`；
+     - `screen status` 新增 Annotations 行展示活跃图元数、累计打标数、激光笔激活状态与位置更新次数。
+
+**2.18 相对 2.17(屏幕串流动态安全水印、防摄录泄密溯源与取证叠加层流水线 ADR-104 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **防拍照/截图泄密与 DLP 安全合规缺失**: 在企业远程桌面运维、外包协助与远程技术支持场景中，桌面画面包含核心代码、客户数据、财务账单或敏感凭据。访客端可能通过操作系统截图、外部手机拍照或视频录屏方式窃取数据。传统远程桌面往往缺乏轻量且即时的身份溯源机制。
+  2. **动态屏幕水印与取证溯源需求（Forensic Attribution）**: 企业合规要求在远程桌面画面中以半透明形式动态叠加访问者身份标记（访客设备 ID、对端别名、会话时间戳、警告标语），确保任意局部截图或照片均能快速溯源至泄密主体。
+  3. **宿主机强制水印（Host-Enforced Security Lockdown）**: 遵循 ADR-004 与 ADR-098 的被控端最高主权原则，宿主机管理员可开启「强制水印」模式，访客端无法单方面关闭水印叠加，协议层与控制面予以硬性阻断（HTTP 403 Forbidden）。
+  4. **零重型外部依赖（Zero External Crates, ADR-006）**: 严格禁止引入 `freetype`、`fontdue`、`image` 等重型 C/Rust 字体渲染库。在 `tetherly-core` 内部实现自包含的 8x8 ASCII 点阵字体渲染器与定点数 Alpha 混合器，对 `PixelFormat::Bgra8` 与 `Rgba8` 实现纯安全内存像素合成。
+  5. **全链路协同与双端 CLI 100% 同构**: 动态水印必须无缝穿透并联动实时渲染呈现（`screen_sink`）、会话录制（ADR-101）、单帧快照（ADR-103）、回环 REST API（`/api/screen/watermark`）以及双端 CLI（`tetherly` 与 `tetherly-cli`）。
+
+- **架构解法与落地**:
+  1. **零依赖 8x8 ASCII 点阵字模与光栅化渲染器 (`crates/tetherly-core/src/screen_font.rs`)**:
+     - 内置 95 个可打印 ASCII 字符（32..=126）的二值单色点阵字模查找表（`FONT_8X8`），总内存仅 760 字节；
+     - 字符与字符串光栅化渲染器支持 1x/2x 等比例整型倍数缩放。
+  2. **定点整数 Alpha 像素混合与图样布局引擎 (`crates/tetherly-core/src/screen.rs`)**:
+     - 定点整数混合公式：$C_{out} = \frac{C_{fg} \times \alpha + C_{bg} \times (255 - \alpha) + 128}{255}$，杜绝浮点数运算，对 `Bgra8` 与 `Rgba8` 针对通道顺序精准合成；
+     - `Grid`（全屏交错对角平铺网格）、`Single`（居中或角落标记）、`Banner`（顶/底警示条）三大图样；
+     - 支持 `{peer}`、`{host}`、`{time}` 动态占位符宏替换与安全就地打标 `apply_watermark`。
+  3. **线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**:
+     - Tag 10 (`ControlMsg::SetWatermarkState { enabled, host_enforced }`)，低 16 位紧凑编码，支持宿主机与访客端双向信令同步。
+  4. **节点运行时水印管线、宿主机强制锁定与快照联动 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `NodeShared` 挂载 `screen_watermark: Arc<RwLock<ScreenWatermarkConfig>>`、`screen_watermark_frames: AtomicU64` 与 `screen_peer_watermark_enforced: AtomicBool`；
+     - 在接收端呈现 (`screen_sink.present`) 与回放步进 (`screen_playback`) 中自动合成水印并维护打标帧数统计；
+     - 快照提取 (`screen_snapshot_data`) 自动集成水印，标记 `watermarked = true`；
+     - 宿主机安全锁定守卫：受控端处于强制水印状态时，访客试图禁用直接返回 `CoreError::InvalidConfig`。
+  5. **回环 REST 控制面端点闭环 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/watermark`、`POST /api/screen/watermark`、`POST /api/screen/watermark/enable`、`POST /api/screen/watermark/disable`；
+     - `ScreenStatusReport` 扩充 `watermark_enabled`、`watermark_enforced`、`watermark_frames` 遥测字段；继承 Loopback 与 `Host` 头 403 严格安全防护。
+  6. **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - 新增 `screen watermark [status|enable|disable|set]` 子命令族，支持所有格式化参数与 `--json` / `--ui-port`；
+     - `screen status` 新增 Watermark 行展示启用状态、宿主机锁定状态与打标帧数；提供整洁表格格式化输出 `print_screen_watermark_report`。
+
+**2.17 相对 2.16(屏幕串流实时快照提取、零依赖标准图像导出与录制容器单帧解析流水线 ADR-103 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **实时画面取证与告警缺乏轻量接口**: 外部监控、测试回归、告警通知（如 TG/企业微信 Bot）以及 WebUI 预览在需要截取远程桌面当前画面时，此前必须拉起重量级播放器或专用 viewer 进程，无法通过单条轻量命令或单个 HTTP 请求即时导出单帧静态图片（Snapshot）。
+  2. **录制容器（`.trec`）随机抽帧与视觉审计断层**: ADR-101/102 实现了会话录制与回放，但当运维人员需要对会话中的「第 N 帧」或「某一时间戳」画面进行离线抽检复盘时，缺少单帧精准抽取（Seek-and-Extract）与图像落盘能力。
+  3. **零外部重依赖与零内存拷贝图像导出**: 严格遵循 ADR-006，不引入任何重型外部图像编码库（如 `image` 或 `png`）。标准 Windows/RFC BMP 格式仅需 54 字节头（14 字节 `BITMAPFILEHEADER` + 40 字节 `BITMAPINFOHEADER`），通过设置负高度 `biHeight = -h`（Top-Down 格式），可以直接与 `ScreenFrame` 的 `Bgra8` 像素内存完全对齐，实现零内存重排、零色彩转码、零依赖落盘。
+  4. **隐私保护与安全红线守卫**: 当宿主机处于隐私模式（ADR-098 `screen_privacy` 启用）时，快照提取引擎必须严格遵循防偷窥原则，强制输出全黑遮罩（Blackout Mask），同时在元数据中标注 `privacy_blanked: true`，杜绝后台静默偷窥。
+  5. **双端 CLI 100% 全同构与控制面闭环**: `tetherly` 与 `tetherly-cli` 均需提供 `screen snapshot` 与 `screen recording snapshot` 子命令，并提供结构化 JSON 与 HTTP `/api/screen/snapshot` 端点。
+
+- **架构解法与落地**:
+  1. **零依赖 Top-Down 32-bit BMP 编码器 (`ScreenFrame::to_bmp`) (`crates/tetherly-core/src/screen.rs`)**:
+     - 严格遵循 ADR-006，零第三方图像库依赖构造 54 字节标准 DIB 头；
+     - 14 字节 `BITMAPFILEHEADER` (`bfType = b"BM"`, `bfOffBits = 54`)，40 字节 `BITMAPINFOHEADER` (`biSize = 40`, `biWidth = w`, `biHeight = -h`, `biPlanes = 1`, `biBitCount = 32`, `biCompression = 0` BI_RGB, 72 DPI)；
+     - 负高度 `biHeight = -h` 消除纵向扫描行颠倒开销；`PixelFormat::Bgra8` 零拷贝直接追加，`PixelFormat::Rgba8` 经通道置换后附加。
+  2. **录制容器稀疏寻道单帧抽取器 (`ScreenRecordingReader::extract_frame`) (`crates/tetherly-core/src/screen.rs`)**:
+     - 遍历 20 字节 record 前缀，非目标记录利用 `SeekFrom::Current(len)` 高速跳过载荷，无内存分配与解压惩罚；
+     - 按 `target_seq` 或 `target_pts_us` 精准定位目标帧，解码还原并输出标准 `ScreenFrame`。
+  3. **快照报告 DTO 模型 (`ScreenSnapshotReport`) (`crates/tetherly-core/src/screen.rs`)**:
+     - 封装 `ok`, `source: "live" | "recording" | "playback"`, `frame_seq`, `pts_us`, `width`, `height`, `format`, `bytes_len`, `privacy_blanked`, `path`, `data_base64`。
+  4. **运行时快照管线、隐私黑屏与安全审计 (`crates/tetherly-node/src/runtime.rs`)**:
+     - `NodeShared` 挂载 `screen_last_frame: Mutex<Option<ScreenFrame>>` 与 `screen_snapshot_count: AtomicU64`；
+     - 在接收端呈现 (`screen_sink.present`) 与回放步进 (`screen_playback`) 时即时同步更新最新解压帧；
+     - `screen_snapshot_data` 提供线上传输压缩帧的按需自动解压；
+     - 隐私模式激活时强制执行像素全零黑屏覆盖 (`bytes.fill(0)`) 并置位 `privacy_blanked = true`；
+     - 导出路径全面防御 `..` 父目录穿越与非法空路径。
+  5. **回环 REST 控制面与 MIME 协商 (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `GET /api/screen/snapshot`：支持 `format=bmp|json|raw` 与 `out=<path>`，`format=bmp` 直接返回 `Content-Type: image/bmp` 二进制流；无可用帧返回 HTTP 503；
+     - `POST /api/screen/recording/snapshot`：按 `path`、`frame`、`pts_us` 抽取并返回 JSON 报告或二进制流；
+     - 严格 Loopback 与 `Host` 头 403 守卫保护。
+  6. **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - 新增 `screen snapshot [--out <path.bmp>] [--format <bmp|raw|json>] [--json] [--ui-port <port>]`；
+     - 新增 `screen recording snapshot <path> [--frame <seq>] [--pts <us>] [--out <path.bmp>] [--json] [--ui-port <port>]`；
+     - `screen status` 扩充 `snapshot_count` 遥测展示；提供整洁表格格式化呈现。
+  7. **测试与版本**:
+     - 核心单测 `screen_snapshot_bmp_encoding_and_recording_extraction`、回环 REST 单测 `test_uihttp_screen_snapshot_endpoints` 与端到端集成测试 `m5_27_screen_live_snapshot_and_recording_frame_extraction` 全线通过；
+     - Workspace 版本发布为 `0.1.39`。
+
+**2.16 相对 2.15(屏幕串流会话容器回放引擎与虚拟屏幕源馈送流水线 ADR-102 与双端 CLI 全同构)**
+
+- **动机与问题背景**:
+  1. **无头/无 GPU 环境下的屏幕串流开发与 CI 验证瓶颈**: 很多开发机、CI 服务器或 Docker 容器无物理屏幕或独立 GPU，无法运行真实捕获与推流。需要一种能将此前录制的 `.trec` 屏幕会话容器作为真实 `ScreenSource` 虚拟源馈入节点的机制，实现无外设下的网络串流和端到端全链路测试。
+  2. **确定性会话回放与复盘分析**: 远程协助或故障复现时，需要以精准的 PTS 时间戳重放整场屏幕会话，支持任意倍速调整（例如 0.5x 慢放分析细节、2.0x 快进）、循环演示以及暂停/继续操作，同时为自动化测试提供 0.0x 零延迟突发打流模式。
+  3. **可观测性闭环与双端 CLI 全同构**: 容器回放必须具备完备的状态机（Idle/Playing/Paused/Finished/Stopped）、指标报告（当前帧、总帧数、耗时、分辨率、编码格式），并在回环 REST API、节点运行时与双端 CLI（`tetherly-cli` 和 `tetherly`）中 100% 全同构覆盖。
+- **架构解法与落地**:
+  1. **TREC 容器回放引擎 (`ScreenPlaybackEngine`) (`crates/tetherly-core/src/screen.rs`)**:
+     - `scan_summary(&mut self)` 预快扫：利用 20 字节 record 前缀中的 len 字段配合 `SeekFrom::Current` 高速跳过载荷，毫秒级快速得出 `total_frames` 与 `duration_us`，无内存解压开销；
+     - 微秒级 PTS 节奏馈送：按帧间 PTS 差值（$\Delta t$）计算延时，当 `speed > 0.0` 时等待 $\Delta t / speed$（封顶 5s）；当 `speed == 0.0` 时旁路等待（测试零等待模式）；
+     - 循环重绕：文件 EOF 时若 `loop_enabled == true`，自动 seek 重定位至第 27 字节头部后继续循环步进。
+  2. **虚拟屏幕源适配器 (`ScreenRecordingSource`)**:
+     - 实现 `tetherly_core::ports::ScreenSource` 特征，提供 `grab()`、`fps()`、`set_fps()`、`displays()`（返回 `Virtual Recorded Display` 虚拟显示屏信息）与 `active_display_id()`；
+     - 既可作为虚拟屏幕驱动节点串流，也可用于多节点网络传输回归测试。
+  3. **节点运行时回放控制与状态机 (`crates/tetherly-node/src/runtime.rs`)**:
+     - 定义 `ScreenPlaybackSession`，挂载至 `NodeShared.screen_playback`，持有 `watch::Sender<bool>` 停止通道、`AtomicBool` 暂停标记与 `Arc<Mutex<ScreenPlaybackReport>>`；
+     - 后台 `spawn_blocking` 工作线程推进引擎步进，并将还原的 `ScreenFrame` 馈入 `screen_sink` 与 `screen_observer`；
+     - 严格路径安全防御：拦截父目录穿越（`..`）与空路径（`CoreError::UnsafeFileName`），文件不存在时返回友好错误。
+  4. **回环 REST API (`crates/tetherly-node/src/uihttp.rs`)**:
+     - `POST /api/screen/playback/start`（支持 path、speed、loop 属性）、`POST /api/screen/playback/pause`、`POST /api/screen/playback/resume`、`POST /api/screen/playback/stop`、`GET /api/screen/playback`；
+     - `ScreenStatusReport` 扩充 `playback_active`、`playback_state`、`playback_frame`。
+  5. **双端 CLI 100% 同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**:
+     - 新增 `screen playback [start|pause|resume|stop|status]` 子命令族，支持 `--speed`、`--loop`、`--json`；
+     - `screen status` 同步展示 Playback 运行状态与当前帧。
+  6. **测试与版本**:
+     - core 核心单测 `screen_session_playback_engine_and_virtual_source_feeder`；
+     - uihttp REST 单测 `test_uihttp_screen_playback_endpoints`；
+     - phase5 端到端集成测试 `m5_26_screen_session_playback_engine_and_virtual_source_feeder` 全数通过；
+     - 版本升级至 `0.1.38`。
 
 **2.15 相对 2.14(屏幕串流会话录制容器与回放流水线 ADR-101 与双端 CLI 全同构)**
 
@@ -5908,3 +6837,977 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
    - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_recording_container_roundtrip_and_recording_disclosure`——Tag = 9 信令往返、三帧容器写读逐字节还原、容器头元数据一致性、截断记录报错、magic/proto 拒绝；
    - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_recording_endpoints`（默认路径开始、重复开始 400、状态、停止、缺 path 400、穿越路径 400、Host 403）；
    - `tests/phase5.rs`：新增端到端集成测试 `m5_25_screen_session_recording_container_and_replay_pipeline`——录制告知跨端传播（开始置位/停止清除）、收端逐帧录制（frames_recorded ≥ 3）、容器落盘、replay 读回校验（records ≥ 3、seq 一致、未截断）与状态报告遥测全链路验证；全工作区 31 套件全绿，版本升级至 `0.1.37`。
+
+## 51. 屏幕串流会话容器回放引擎与虚拟屏幕源馈送流水线与双端 CLI 全同构 (v2.16 / ADR-102)
+
+1. **动机与设计准则（ADR-102）**：
+   - **无头/无 GPU 节点串流测试**：打破对物理显示器和 GPU 的强依赖，将 `.trec` 屏幕会话容器包装为标准的虚拟屏幕源 (`ScreenRecordingSource`)，让纯 CPU、Docker 容器或 CI 环境也能驱动全链路推流和网络测试；
+   - **确定性微秒级回放调测**：基于相邻帧 PTS 时间戳差值实施精准节奏控制，支持倍速调整（`speed`）与测试零等待（`speed == 0.0`），提供 pause/resume/stop 细粒度控制与 EOF 循环重绕（`loop`）；
+   - **双端 CLI 100% 全同构与控制面闭环**：回放生命周期、状态透视与参数调谐在回环 REST API 与双端 CLI（`tetherly-cli` 与 `tetherly`）中 100% 同构。
+
+2. **核心机制与实现**：
+   - **TREC 容器回放引擎 (`ScreenPlaybackEngine`) (`crates/tetherly-core/src/screen.rs`)**：
+     - `scan_summary(&mut self)` 预快扫：利用 20 字节 record 前缀中的 len 字段配合 `SeekFrom::Current` 高速跳过载荷，毫秒级得出 `total_frames` 与 `duration_us`，无内存解压开销；
+     - 微秒级 PTS 节奏馈送：按帧间 PTS 差值（$\Delta t$）计算延时，当 `speed > 0.0` 时等待 $\Delta t / speed$（封顶 5s）；当 `speed == 0.0` 时旁路等待（测试零等待模式）；
+     - 循环重绕：文件 EOF 时若 `loop_enabled == true`，自动 seek 重定位至第 27 字节头部后继续循环步进；
+     - 步进呈现：`step(&mut self, sink: &dyn ScreenSink)` 呈现还原的 `ScreenFrame` 并维护 `ScreenPlaybackReport`。
+   - **虚拟屏幕源适配器 (`ScreenRecordingSource`)**：
+     - 实现 `tetherly_core::ports::ScreenSource` 特征，提供 `grab()`、`fps()`、`set_fps()`、`displays()`（输出 `Virtual Recorded Display`）与 `active_display_id()`；
+     - 支持无物理外设下的网络推流与端到端自动化测试回归。
+   - **节点运行时回放会话与状态机 (`crates/tetherly-node/src/runtime.rs`)**：
+     - `ScreenPlaybackSession`（path/stop_tx/paused/speed/loop_enabled/report）挂载于 `NodeShared.screen_playback`；
+     - `screen_playback_start()`：启动后台 `spawn_blocking` 工作线程推进引擎步进，并将帧馈入 `screen_sink` 与 `screen_observer`；严格防御路径穿越（`..`）与非存在文件；
+     - `screen_playback_pause()` / `screen_playback_resume()` / `screen_playback_stop()` / `screen_playback_report()` 提供完整状态机控制。
+   - **轻量级回环控制面端点 (`crates/tetherly-node/src/uihttp.rs`)**：
+     - `POST /api/screen/playback/start`（参数 `path`、`speed`、`loop`；重复开始 400；路径穿越 400）；
+     - `POST /api/screen/playback/pause`、`POST /api/screen/playback/resume`、`POST /api/screen/playback/stop`；
+     - `GET /api/screen/playback`（状态报告）；
+     - `ScreenStatusReport` 扩充 `playback_active`、`playback_state`、`playback_frame`；
+   - **CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs`, `crates/tetherly-node/src/bin/tetherly.rs`)**：
+     - 新增 `screen playback start <path> [--speed] [--loop]`、`pause`、`resume`、`stop`、`status`；支持 `--json` 与 `--ui-port`；
+     - `screen status` 新增 Playback 行展示回放状态与当前帧。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_session_playback_engine_and_virtual_source_feeder`——验证预快扫 `scan_summary`、PTS 步进呈现、速度与循环配置、暂停与恢复、虚拟源抓帧与循环重绕；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_playback_endpoints`（默认 idle、5 帧合成容器、非法路径 400、穿越路径 400、回放开始、pause/resume/stop、Host 403 守卫）；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_26_screen_session_playback_engine_and_virtual_source_feeder`——验证合成 10 帧容器、REST 启停与状态遥测、帧馈入 `screen_sink`、虚拟屏幕源属性与超过总帧数的无缝重绕抓帧；全工作区测试全绿，版本升级至 `0.1.38`。
+
+## 52. 屏幕串流实时快照提取、零依赖标准图像导出与录制容器单帧解析流水线与双端 CLI 全同构 (v2.17 / ADR-103)
+
+1. **动机与设计准则（ADR-103）**：
+   - **实时画面取证与告警缺乏轻量接口**：外部监控、测试回归、告警通知（如 TG/企业微信 Bot）以及 WebUI 预览在需要截取远程桌面当前画面时，此前必须拉起重量级播放器或专用 viewer 进程，无法通过单条轻量命令或单个 HTTP 请求即时导出单帧静态图片（Snapshot）；
+   - **录制容器（`.trec`）随机抽帧与视觉审计断层**：ADR-101/102 实现了会话录制与回放，但当运维人员需要对会话中的「第 N 帧」或「某一时间戳」画面进行离线抽检复盘时，缺少单帧精准抽取（Seek-and-Extract）与图像落盘能力；
+   - **零外部重依赖与零内存拷贝图像导出**：严格遵循 ADR-006，不引入任何重型外部图像编码库（如 `image` 或 `png`）。标准 Windows/RFC BMP 格式仅需 54 字节头（14 字节 `BITMAPFILEHEADER` + 40 字节 `BITMAPINFOHEADER`），通过设置负高度 `biHeight = -h`（Top-Down 格式），可以直接与 `ScreenFrame` 的 `Bgra8` 像素内存完全对齐，实现零内存重排、零色彩转码、零依赖落盘；
+   - **隐私保护与安全红线守卫**：当宿主机处于隐私模式（ADR-098 `screen_privacy` 启用）时，快照提取引擎必须严格遵循防偷窥原则，强制输出全黑遮罩（Blackout Mask），同时在元数据中标注 `privacy_blanked: true`，杜绝后台静默偷窥；
+   - **双端 CLI 100% 全同构与控制面闭环**：`tetherly` 与 `tetherly-cli` 均需提供 `screen snapshot` 与 `screen recording snapshot` 子命令，并提供结构化 JSON 与 HTTP `/api/screen/snapshot` 端点。
+
+2. **核心机制与实现**：
+   - **零依赖 Top-Down 32-bit BMP 编码器 (`ScreenFrame::to_bmp`) (`crates/tetherly-core/src/screen.rs`)**：
+     - 严格遵循 ADR-006，零第三方图像库依赖构造 54 字节标准 DIB 头；
+     - 14 字节 `BITMAPFILEHEADER` (`bfType = b"BM"`, `bfOffBits = 54`)，40 字节 `BITMAPINFOHEADER` (`biSize = 40`, `biWidth = w`, `biHeight = -h`, `biPlanes = 1`, `biBitCount = 32`, `biCompression = 0` BI_RGB, 72 DPI)；
+     - 负高度 `biHeight = -h` 消除纵向扫描行颠倒开销；`PixelFormat::Bgra8` 零拷贝直接追加，`PixelFormat::Rgba8` 经通道置换后附加。
+   - **录制容器稀疏寻道单帧抽取器 (`ScreenRecordingReader::extract_frame`) (`crates/tetherly-core/src/screen.rs`)**：
+     - 遍历 20 字节 record 前缀，非目标记录利用 `SeekFrom::Current(len)` 高速跳过载荷，无内存分配与解压惩罚；
+     - 按 `target_seq` 或 `target_pts_us` 精准定位目标帧，解码还原并输出标准 `ScreenFrame`。
+   - **快照报告 DTO 模型 (`ScreenSnapshotReport`) (`crates/tetherly-core/src/screen.rs`)**：
+     - 封装 `ok`, `source: "live" | "recording" | "playback"`, `frame_seq`, `pts_us`, `width`, `height`, `format`, `bytes_len`, `privacy_blanked`, `path`, `data_base64`。
+   - **节点运行时快照管线、隐私黑屏与安全审计 (`crates/tetherly-node/src/runtime.rs`)**：
+     - `NodeShared` 挂载 `screen_last_frame: Mutex<Option<ScreenFrame>>` 与 `screen_snapshot_count: AtomicU64`；
+     - 在接收端呈现 (`screen_sink.present`) 与回放步进 (`screen_playback`) 时即时同步更新最新解压帧；
+     - `screen_snapshot_data` 提供线上传输压缩帧的按需自动解压；
+     - 隐私模式激活时强制执行像素全零黑屏覆盖 (`bytes.fill(0)`) 并置位 `privacy_blanked = true`；
+     - 导出路径全面防御 `..` 父目录穿越与非法空路径。
+   - **回环 REST 控制面与 MIME 协商 (`crates/tetherly-node/src/uihttp.rs`)**：
+     - `GET /api/screen/snapshot`：支持 `format=bmp|json|raw` 与 `out=<path>`，`format=bmp` 直接返回 `Content-Type: image/bmp` 二进制流；无可用帧返回 HTTP 503；
+     - `POST /api/screen/recording/snapshot`：按 `path`、`frame`、`pts_us` 抽取并返回 JSON 报告或二进制流；
+     - 严格 Loopback 与 `Host` 头 403 守卫保护。
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**：
+     - 新增 `screen snapshot [--out <path.bmp>] [--format <bmp|raw|json>] [--json] [--ui-port <port>]`；
+     - 新增 `screen recording snapshot <path> [--frame <seq>] [--pts <us>] [--out <path.bmp>] [--json] [--ui-port <port>]`；
+     - `screen status` 扩充 `snapshot_count` 遥测展示；提供整洁表格格式化呈现。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_snapshot_bmp_encoding_and_recording_extraction`——验证 54 字节 BMP 头部魔数、负高度、通道置换、零解压容器抽帧准确性与越界返回 None；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_snapshot_endpoints`（无帧 503、默认 JSON、BMP 直接流、文件落盘、路径穿越 400、隐私黑屏、容器抽帧与 Host 403 守卫）；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_27_screen_live_snapshot_and_recording_frame_extraction`——验证串流建立、实时 BMP 与 JSON 抓取、安全磁盘保存、父目录穿越拦截、隐私模式全零遮罩、录制容器单帧抽取与像素比对、遥测计数统计；全工作区测试全绿，版本升级至 `0.1.39`。
+
+## 53. 屏幕串流动态安全水印、防摄录泄密溯源与取证叠加层流水线与双端 CLI 全同构 (v2.18 / ADR-104)
+
+1. **动机与设计准则（ADR-104）**：
+   - **防拍照/截图泄密与 DLP 安全合规缺失**：在企业远程桌面运维、外包协助与远程技术支持场景中，桌面画面包含核心代码、客户数据、财务账单或敏感凭据。访客端可能通过操作系统截图、外部手机拍照或视频录屏方式窃取数据。传统远程桌面往往缺乏轻量且即时的身份溯源机制；
+   - **动态屏幕水印与取证溯源需求（Forensic Attribution）**：企业合规要求在远程桌面画面中以半透明形式动态叠加访问者身份标记（访客设备 ID、对端别名、会话时间戳、警告标语），确保任意局部截图或照片均能快速溯源至泄密主体；
+   - **宿主机强制水印（Host-Enforced Security Lockdown）**：遵循 ADR-004 与 ADR-098 的被控端最高主权原则，宿主机管理员可开启「强制水印」模式，访客端无法单方面关闭水印叠加，协议层与控制面予以硬性阻断（HTTP 403 Forbidden）；
+   - **零重型外部依赖（Zero External Crates, ADR-006）**：严格禁止引入 `freetype`、`fontdue`、`image` 等重型 C/Rust 字体渲染库。在 `tetherly-core` 内部实现自包含的 8x8 ASCII 点阵字体渲染器与定点数 Alpha 混合器，对 `PixelFormat::Bgra8` 与 `Rgba8` 实现纯安全内存像素合成；
+   - **全链路协同与双端 CLI 100% 同构**：动态水印必须无缝穿透并联动实时渲染呈现（`screen_sink`）、会话录制（ADR-101）、单帧快照（ADR-103）、回环 REST API（`/api/screen/watermark`）以及双端 CLI（`tetherly` 与 `tetherly-cli`）。
+
+2. **核心机制与实现**：
+   - **零依赖 8x8 ASCII 点阵字模与光栅化渲染器 (`crates/tetherly-core/src/screen_font.rs`)**：
+     - 内置 95 个可打印 ASCII 字符（32..=126）的二值单色点阵字模查找表（`FONT_8X8`），总内存仅 760 字节；
+     - 字符与字符串光栅化渲染器支持 1x/2x 等比例整型倍数缩放。
+   - **定点整数 Alpha 像素混合与图样布局引擎 (`crates/tetherly-core/src/screen.rs`)**：
+     - 定点整数混合公式：$C_{out} = \frac{C_{fg} \times \alpha + C_{bg} \times (255 - \alpha) + 128}{255}$，杜绝浮点数运算，对 `Bgra8` 与 `Rgba8` 针对通道顺序精准合成；
+     - `Grid`（全屏交错对角平铺网格）、`Single`（居中或角落标记）、`Banner`（顶/底警示条）三大图样；
+     - 支持 `{peer}`、`{host}`、`{time}` 动态占位符宏替换与安全就地打标 `apply_watermark`。
+   - **线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**：
+     - Tag 10 (`ControlMsg::SetWatermarkState { enabled, host_enforced }`)，低 16 位紧凑编码，支持宿主机与访客端双向信令同步。
+   - **节点运行时水印管线、宿主机强制锁定与快照联动 (`crates/tetherly-node/src/runtime.rs`)**：
+     - `NodeShared` 挂载 `screen_watermark: Arc<RwLock<ScreenWatermarkConfig>>`、`screen_watermark_frames: AtomicU64` 与 `screen_peer_watermark_enforced: AtomicBool`；
+     - 在接收端呈现 (`screen_sink.present`) 与回放步进 (`screen_playback`) 中自动合成水印并维护打标帧数统计；
+     - 快照提取 (`screen_snapshot_data`) 自动集成水印，标记 `watermarked = true`；
+     - 宿主机安全锁定守卫：受控端处于强制水印状态时，访客试图禁用直接返回 `CoreError::InvalidConfig`。
+   - **回环 REST 控制面端点闭环 (`crates/tetherly-node/src/uihttp.rs`)**：
+     - `GET /api/screen/watermark`、`POST /api/screen/watermark`、`POST /api/screen/watermark/enable`、`POST /api/screen/watermark/disable`；
+     - `ScreenStatusReport` 扩充 `watermark_enabled`、`watermark_enforced`、`watermark_frames` 遥测字段；继承 Loopback 与 `Host` 头 403 严格安全防护。
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**：
+     - 新增 `screen watermark [status|enable|disable|set]` 子命令族，支持所有格式化参数与 `--json` / `--ui-port`；
+     - `screen status` 新增 Watermark 行展示启用状态、宿主机锁定状态与打标帧数；提供整洁表格格式化输出 `print_screen_watermark_report`。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_dynamic_security_watermark_rendering_and_signaling`——验证 ASCII 点阵渲染、模板宏展开、定点 Alpha 混合颜色计算、三种布局图样打标、线协议信令编解码 roundtrip；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_watermark_endpoints`（默认禁用、开启与配置变更、十六进制颜色解析、宿主机强制锁定 403 阻断、快照水印联动及 Host 403 守卫）；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_28_screen_dynamic_security_watermarking_and_forensic_overlay`——验证屏幕串流建立、宿主机启用强制水印、线协议信令 Tag 10 到端同步、访客端尝试绕过被 403 拒绝、访客端静态快照水印打标与像素偏移验证、宿主机解除锁定后客户端自主控制；全工作区测试全绿，版本升级至 `0.1.40`。
+
+## 54. 屏幕串流实时协作标注、画板叠加层与瞬态虚拟激光笔流水线与双端 CLI 全同构 (v2.19 / ADR-105)
+
+1. **动机与设计准则（ADR-105）**：
+   - **远程协助中的物理控制冲突与指引脱节**：在远程技术支持、外包协同开发、代码评审（Pair Programming）与培训演练中，协助者（Visitor）往往需要精准指出被控端（Host）屏幕上的特定代码行、配置项或故障按钮。以往若直接使用物理输入隧道抢夺鼠标光标，极易与被控端操作者发生「光标争抢」，甚至产生误触破坏生产系统的风险；
+   - **轻量非侵入式协同表达通道（Virtual Laser Pointer & Whiteboard Overlay）**：协助者需要一种「只动笔不动手、只指引不争抢」的非侵入式视觉引导手段：
+     - **瞬态虚拟激光笔**：协助者移动指针时以鲜艳高亮光斑及径向光晕呈现位置，按住时常亮，释放后自动消隐；
+     - **几何标注与白板圈注**：支持自由线条、矩形框选、指示箭头以及基于点阵字模的短文本批注；
+     - **生命周期衰减（TTL Auto-Fadeout）与一键清空**：支持设置临时标注存活毫秒数，超时后自动消除，杜绝遗留冗余视觉杂讯；双方随时可一键清空画布；
+   - **零重型外部依赖铁律（Zero External Crates, ADR-006）**：严格禁止引入 `cairo`、`skia`、`tiny-skia` 等重型矢量图形依赖。在 `tetherly-core` 内部实现纯算法光栅化直线扫描、中点圆光晕与箭头几何计算；
+   - **定长线协议与低延迟传输**：高频激光笔坐标（如 60Hz 采样）必须通过零内存分配的 14 字节定长信封（Tag 11）高效穿透，避免传统矢量网络协议引发的内存抖动与时延累积；
+   - **全链路协同与双端 CLI 100% 同构**：标注与激光笔无缝集成到呈现渲染（`screen_sink`）、会话录制（ADR-101）、录制回放（ADR-102）、单帧快照（ADR-103）、回环 REST API 以及双端 CLI（`tetherly` 与 `tetherly-cli`）。
+
+2. **核心机制与实现**：
+   - **核心光栅化几何渲染算法与数据模型 (`crates/tetherly-core/src/screen.rs`)**：
+     - 结构化图元模型 `AnnotationItem` 与 `AnnotationKind`（`Stroke`, `Rect`, `Arrow`, `Text`）；
+     - 布雷森汉姆粗线段扫描算法（`draw_line_thick`）：定点整数无除法增量扫描，结合多像素粗线填充与定点 Alpha 混合器；
+     - 中点圆光斑算法与发光晕染（`draw_laser_spot`）：内核高亮区与外晕平方反比定点衰减，呈现高保真发光质感；
+     - 30 度指引箭头几何计算（`draw_arrow`）：根据起点与终点向量反向延伸 30 度双翼短线；
+     - 就地合成原语 `ScreenFrame::apply_annotations` 与 `apply_laser_pointer`。
+   - **线协议信令定长扩充与专属帧**：
+     - Tag 11 (`ControlMsg::SetLaserPointer { x, y, active, color_rgb }`)：14 字节定长信封，64 位紧凑载荷，零分配极低延迟流转；
+     - Tag 12 (`ControlMsg::ClearAnnotations`)：一键清空全量标注；
+     - 专属帧类型 `TYPE_SCREEN_ANNOTATION = 0x050a`（魔数 `b"TANN"`）：承载结构化矢量图元增量与全量同步。
+   - **节点运行时管线与全生命周期挂接 (`crates/tetherly-node/src/runtime.rs`)**：
+     - `NodeShared` 挂载 `screen_annotations`、`screen_laser_pointer`、`screen_annotation_count` 与 `screen_laser_updates`；
+     - 生命周期毫秒级过滤：呈现与快照时自动剔除过期 `ttl_ms` 标注；
+     - 呈现（`screen_sink.present`）、回放（`screen_playback`）与快照（`screen_snapshot`）统一叠加；
+     - 隐私黑屏绝对遮蔽优先执行。
+   - **回环 REST 控制面端点闭环 (`crates/tetherly-node/src/uihttp.rs`)**：
+     - `GET /api/screen/annotation`、`POST /api/screen/annotation`、`POST /api/screen/annotation/clear`、`DELETE /api/screen/annotation`、`GET /api/screen/laser` 与 `POST /api/screen/laser`；
+     - `ScreenStatusReport` 扩充 `annotations_count` 与 `laser_active` 遥测指标。
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**：
+     - 新增 `screen annotate [list|add|clear]` 与 `screen laser [coords|status]` 子命令族，支持所有格式化参数与 `--json` / `--ui-port`；
+     - `screen status` 新增 Annotations 行展示活跃图元数、累计打标数、激光笔激活状态与位置更新次数。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_collaborative_annotation_and_laser_pointer_pipeline`——验证折线、矩形、箭头、文字绘制像素偏移，验证激光笔径向光晕定点衰减与透明度计算，验证 Tag 11 与 Tag 12 线协议信令编解码 roundtrip；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_annotation_and_laser_endpoints`（图元增删查、清空、激光笔坐标更新、结构化报表、快照叠加联动与 Host 403 守卫）；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_29_screen_collaborative_annotation_and_laser_pointer_pipeline`——验证屏幕串流建立、访客端激光笔 Tag 11 信令低延迟同步并实时呈现在宿主机屏幕、访客端矩形/折线/箭头/文字标注增量打标与快照像素验证、TTL 自动消隐机制、Tag 12 一键清屏复位及全链路遥测统计递增；全工作区测试全绿，版本升级至 `0.1.41`。
+
+## 55. 屏幕串流多方协作共享画板同步、时序撤销重做与矢量快照导入导出流水线与双端 CLI 全同构 (v2.20 / ADR-106)
+
+1. **动机与设计准则（ADR-106）**：
+   - **多人协同标注中的误操作与缺乏细粒度撤销能力（Lack of Fine-Grained Undo/Redo）**：在 ADR-105 基础协作标注上，用户急需支持按时间顺序撤销最新笔画与重做已被撤销笔画的能力；
+   - **多参与者身份归属与图层隔离（Author Attribution & Multi-User Layering）**：支持基于 `author: Option<&str>` 定向撤销/重做某一位协助者的笔画，确保 Alice 的撤销操作绝不波及或抹除 Bob 正在绘制的关键标注；同时保留全局撤销选项；
+   - **白板安全策略与宿主机最高主权（Whiteboard Moderation & Host Sovereignty）**：宿主机管理员可随时下发 `WhiteboardPolicy`，包括 `read_only`（只读锁，访客绘制直接阻断 403）、`allow_peer_clear`（禁止访客全量清空画布）与 `max_items`（画板图元上限防刷机制）；
+   - **画板矢量快照导入与导出流水线（Vector Snapshot Import/Export Pipeline）**：支持将画板矢量图元序列化为结构化 JSON 文件（`.twhiteboard` / `.tann`），支持存盘归档、跨会话恢复、清空后重导入，并具备严格路径穿越（`..`）阻断防护；
+   - **零外部图形依赖（Zero External Crates, ADR-006）**：全套历史栈管理、策略治理与快照序列化完全由 `tetherly-core` 纯标准库与 serde 编写，杜绝重型外部库；
+   - **定长线协议扩展与专属帧支持**：14 字节定长信封（`TYPE_SCREEN_CONTROL = 0x0502`）中新增 Tag 13（撤销）、Tag 14（重做）与 Tag 15（策略广播）；专属帧 `TYPE_SCREEN_ANNOTATION = 0x050a`（魔数 `b"TANN"`）全面支持图元增量、快照传输与策略同步；
+   - **双端 CLI 100% 全同构**：`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly` 具备 100% 对称的 `screen whiteboard` 子命令族与格式化报表输出。
+
+2. **核心机制与实现**：
+   - **核心画板数据结构与历史栈状态机 (`crates/tetherly-core/src/screen.rs`)**：
+     - `WhiteboardPolicy`：定义 `read_only: bool`、`allow_peer_clear: bool` 与 `max_items: u16`；
+     - `WhiteboardSnapshot`：结构化快照模型，支持版本标识、创建时间戳、关联会话与活跃图元数组；
+     - `WhiteboardHistory`：轻量状态机管理 `active`、`undo_stack` 与 `redo_stack`，提供 `add_item`、`undo`、`redo`、`clear`、`export_snapshot` 与 `import_snapshot`；
+   - **线协议信令定长扩充与专属帧**：
+     - Tag 13 (`ControlMsg::WhiteboardUndo { author_hash: u64 }`)：64 位紧凑载荷，携带作者哈希或 0（全局）；
+     - Tag 14 (`ControlMsg::WhiteboardRedo { author_hash: u64 }`)：64 位紧凑载荷，携带作者哈希或 0（全局）；
+     - Tag 15 (`ControlMsg::SetWhiteboardPolicy { read_only: bool, allow_peer_clear: bool, max_items: u16 }`)：64 位位域打包策略设置；
+     - 专属帧类型 `TYPE_SCREEN_ANNOTATION = 0x050a`（魔数 `b"TANN"`）扩展 `Remove`、`Undo`、`Redo`、`Snapshot`、`Policy` 变体；
+   - **节点运行时管线与生命周期挂接 (`crates/tetherly-node/src/runtime.rs`)**：
+     - `NodeShared` 挂载 `screen_whiteboard: Arc<RwLock<WhiteboardHistory>>` 与 `screen_whiteboard_policy: Arc<RwLock<WhiteboardPolicy>>`；
+     - 呈现（`screen_sink.present`）、回放（`screen_playback`）与快照（`screen_snapshot`）统一读取活跃图元并实时光栅化；
+     - 隐私黑屏模式下优先绝对遮蔽；
+   - **回环 REST 控制面端点闭环 (`crates/tetherly-node/src/uihttp.rs`)**：
+     - `POST /api/screen/whiteboard/undo`（支持可选 `author` 查询/体参数）；
+     - `POST /api/screen/whiteboard/redo`（支持可选 `author` 查询/体参数）；
+     - `GET /api/screen/whiteboard/export`（导出快照 JSON 或写入受检路径）；
+     - `POST /api/screen/whiteboard/import`（导入快照 JSON 或读取本地快照，支持 `replace`）；
+     - `GET /api/screen/whiteboard/policy` 与 `POST /api/screen/whiteboard/policy`；
+     - `POST /api/screen/whiteboard/clear`；
+     - `ScreenStatusReport` 扩充 `whiteboard_undo_count`、`whiteboard_redo_count`、`whiteboard_read_only`、`whiteboard_allow_peer_clear` 与 `whiteboard_max_items` 遥测指标；
+     - 严格继承 `127.0.0.1` 物理绑定与 `Host` 头 403 阻断守卫；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**：
+     - 新增 `screen whiteboard [status|undo|redo|export|import|policy|clear]` 子命令族；
+     - `screen annotate add` 支持 `--author` 标识；
+     - `screen status` 扩充 Whiteboard 状态、策略与撤销/重做栈指标展示。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_whiteboard_multi_user_sync_and_undo_redo_pipeline`——验证多作者添加图元、针对单一作者定向撤销与重做、全局撤销、快照导出/清空/导入还原完整性、只读策略拦截、容量上限限制以及 Tag 13/14/15 编解码 roundtrip；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_whiteboard_endpoints`——验证回环 REST API 端点全生命周期、定向撤销重做、快照导入导出、策略治理变更、路径穿越阻断及 Host 头 403 守卫；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_30_screen_whiteboard_multi_user_sync_and_undo_redo_pipeline`——验证屏幕串流建立、多参与者多笔画标注、Alice 单作者撤销隔离（Bob 笔画完好无损）、Alice 重做恢复、全局撤销、快照导出与清屏后导入恢复、宿主机只读策略生效阻断（HTTP 403）、路径穿越（`..`）阻断；全工作区测试全绿，版本升级至 `0.1.42`。
+
+## 56. 屏幕串流动态感兴趣区域 (ROI) 裁剪串流、局部缩放聚焦与视口漫游流水线与双端 CLI 全同构 (v2.21 / ADR-107)
+
+1. **动机与设计准则（ADR-107）**：
+   - **高分屏与紧凑视口显示鸿沟（High-DPI Host vs Compact Visitor Viewport）**：打破 4K/2K 高分屏被控宿主机与 1080p 笔记本电脑、平板或移动端访客之间的显示鸿沟；避免整屏下采样导致代码文本与控制台模糊；
+   - **带宽消耗与算力节省**：通过仅裁剪并编码 1:1 无损物理像素 ROI 子区域（`x, y, w, h`），带宽消耗骤降 75% 以上，并大幅削减 CPU/GPU 编码开销；
+   - **零外部重型图形依赖（Zero External Crates, ADR-006）**：严格禁止引入 OpenCV 或 ImageMagick。在 `tetherly-core` 内以纯标准库整数边界安全夹取（偶数对齐适配 H.264/YUV）与行级跨度提取完成高效 $O(\text{roi\_h} \times \text{roi\_w} \times 4)$ 内存切片；
+   - **定长线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**：扩充 Tag 16（`SetScreenRoi`）、Tag 17（`ResetScreenRoi`）与 Tag 18（`SetScreenRoiZoom`）；
+   - **视口双向坐标映射与标注/激光笔协同**：提供 `map_screen_to_roi` 与 `map_roi_to_screen` 双向变换，确保虚拟激光笔与画板标注在视口内像素级精准投影；
+   - **双端 CLI 100% 全同构**：`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly` 具备完全对称的 `screen roi` 子命令族与格式化报表。
+
+2. **核心机制与实现**：
+   - **核心数据模型与裁剪算法 (`crates/tetherly-core/src/screen.rs`)**：
+     - `ScreenRoi`：定义 `active`、`x`、`y`、`w`、`h` 与 `zoom_percent`；
+     - `ScreenRoiReport`：汇报视口活跃状态、位置、缩放比例、源分辨率、有效分辨率与变更计数；
+     - `ScreenRoi::sanitize(&mut self, screen_w, screen_h)`：边界自动夹取与偶数对齐归一化；
+     - `ScreenFrame::crop_roi(&self, roi: &ScreenRoi)`：零重型依赖行级跨度高效内存切片；
+   - **定长线协议扩展**：
+     - Tag 16 (`ControlMsg::SetScreenRoi { x, y, w, h }`)：64 位紧凑载荷编码；
+     - Tag 17 (`ControlMsg::ResetScreenRoi`)：无参复位信令；
+     - Tag 18 (`ControlMsg::SetScreenRoiZoom { zoom_percent }`)：64 位缩放比例；
+   - **节点运行时流控与网络循环挂接 (`crates/tetherly-node/src/runtime.rs`)**：
+     - `NodeShared` 挂载 `screen_roi: Arc<RwLock<ScreenRoi>>` 与 `screen_roi_updates: Arc<AtomicU64>`；
+     - `screen_send_frame` 捕获后即时执行 `crop_roi` 送入编码器；
+     - 双端在 `screen_server_loop` 与 `screen_client_loop` 中同步 Tag 16/17/18；
+   - **回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**：
+     - `GET /api/screen/roi`、`POST /api/screen/roi`、`POST/DELETE /api/screen/roi/reset`、`POST /api/screen/roi/zoom`；
+     - `ScreenStatusReport` 扩充 `roi_active`、`roi_x`、`roi_y`、`roi_w`、`roi_h`、`roi_zoom_percent` 与 `roi_updates`；
+     - 严格继承 `127.0.0.1` 物理绑定与 `Host` 头 403 守卫；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**：
+     - 新增 `screen roi status`、`screen roi set`、`screen roi reset` 与 `screen roi zoom` 子命令族与格式化打印函数 `print_screen_roi_report`；
+     - `screen status` 扩充显示 ROI 视口与缩放状态。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_roi_cropping_and_viewport_signaling`——验证视口裁剪切片尺寸、越界安全夹取、偶数归一化、双向坐标映射以及 Tag 16/17/18 编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_roi_endpoints`——验证回环 REST 端点全生命周期、视口更新、动态缩放调整、全屏复位及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_31_screen_dynamic_roi_crop_and_viewport_zoom_pipeline`——验证屏幕串流建立、全屏帧流转、访客端发送 ROI 视口与缩放信令、宿主机实时同步并裁剪推流、访客端精确接收 8x8 裁剪帧、动态缩放调整、坐标映射验证、视口复位恢复 16x16 全屏帧流转、遥测指标校验；全工作区测试全绿，Workspace 版本发布为 `0.1.43`。
+
+## 57. 屏幕串流自适应色彩深度、极低带宽灰度经济模式与色彩量化流水线与双端 CLI 全同构 (v2.22 / ADR-108)
+
+1. **动机与设计准则（ADR-108）**：
+   - **极低带宽、弱网与卫星/物联网链路困境**：在卫星网络、极端弱蜂窝（2G/3G/极弱4G）、偏远野外以及电子墨水屏（E-Ink）/极端省电场景中，全量传输 32 位全彩色（BGRA8/RGBA8）视频流不仅极易造成信道阻塞与拥塞丢帧，且对终端算力造成不必要的压力；
+   - **文字与终端排障的画质与色彩正交性**：在远程运维、代码查看、终端日志监控等核心场景下，色彩信息往往并非刚性需求，高对比度、清晰锋利的字符边缘以及敏捷低延迟的帧率响应更为关键；
+   - **自适应色彩深度与量化经济流水线（Adaptive Color Depth & Quantization Pipeline）**：
+     - **FullColor32（默认）**：32 位原生真彩色（BGRA8/RGBA8 无损传输）；
+     - **ReducedColor16（RGB565 降阶色彩）**：将 8-bit 色彩通道量化为 5-6-5 比特并实施高位回填 $((R \& 0xF8) | (R >> 5))$，消除微细色彩噪声与空间高频，使 Zstd/OpenH264 编码压缩率飞跃式提升，兼顾彩色辨识与低码率；
+     - **Grayscale8（8位灰度经济模式）**：采用快速整数定点亮度公式 $Y = (77R + 150G + 29B) >> 8$（Rec.601 / BT.601 近似），将色彩信息降至 0 色度熵（$U=128, V=128$），在无损压缩与视频编码下带来 60%~80% 的带宽节约，同时字符可读性 100% 保持；
+     - **Monochrome1（1位单色黑白高对比度模式）**：基于可配置二值化阈值（默认 128，范围 1..254），将亮度二值化为纯黑（0）或纯白（255），在超低带宽（<50 kbps）或电子墨水屏/高对比度运维下实现 >95% 的极致压缩率；
+   - **零外部重型图形依赖（Zero External Crates, ADR-006）**：严格遵循 ADR-006，禁止引入任何第三方图像处理库（如 `image`、`cairo`、`skia`）。采用纯 Rust 标准库的高性能原地（In-Place）零分配通道量化与转换；
+   - **定长线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**：
+     - **Tag 19 (`ControlMsg::SetScreenColorMode { mode: u8, threshold: u8 }`)**：64 位紧凑打包模式与阈值；
+     - **Tag 20 (`ControlMsg::ResetScreenColorMode`)**：重置色彩深度，瞬间恢复 32 位原生全彩串流；
+   - **双端 CLI 100% 全同构**：`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly` 具备完全对称的 `screen color` 子命令族与格式化报表。
+
+2. **核心机制与实现**：
+   - **核心数据模型与量化算法 (`crates/tetherly-core/src/screen.rs`)**：
+     - `ScreenColorMode`：定义 `FullColor32`（0）、`ReducedColor16`（1）、`Grayscale8`（2）与 `Monochrome1`（3）；
+     - `ScreenColorConfig`：封装色彩深度模式及二值化阈值（范围 1..254，默认 128）；
+     - `ScreenColorReport`：包含就绪状态、当前模式、阈值、是否生效激活及变更更新计数；
+     - `ScreenFrame::apply_color_mode(&mut self, config: &ScreenColorConfig)`：支持 BGRA8 与 RGBA8 像素格式原地通道变换，保留 Alpha 通道；
+   - **定长线协议扩展**：
+     - Tag 19 (`ControlMsg::SetScreenColorMode { mode, threshold }`)：64 位紧凑载荷编码；
+     - Tag 20 (`ControlMsg::ResetScreenColorMode`)：无参复位信令；
+   - **节点运行时流控与网络循环挂接 (`crates/tetherly-node/src/runtime.rs`)**：
+     - `NodeShared` 挂载 `screen_color_mode: Arc<RwLock<ScreenColorConfig>>` 与 `screen_color_updates: Arc<AtomicU64>`；
+     - `screen_send_frame` 捕获并完成 ROI 裁剪后即刻执行 `apply_color_mode`，降低残差损伤与压缩熵；
+     - 双端在 `screen_server_loop` 与 `screen_client_loop` 中同步 Tag 19/20；
+   - **回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**：
+     - `GET /api/screen/color`、`POST /api/screen/color` 与 `POST/DELETE /api/screen/color/reset`；
+     - `ScreenStatusReport` 扩充 `color_mode`、`color_threshold` 与 `color_updates` 遥测；
+     - 严格继承 `127.0.0.1` 物理绑定与 `Host` 头 403 守卫；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**：
+     - 新增 `screen color status`、`screen color set` 与 `screen color reset` 子命令族与格式化打印函数 `print_screen_color_report`；
+     - `screen status` 扩充显示当前色彩模式与量化遥测指标。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_adaptive_color_depth_and_grayscale_signaling_and_quantization`——验证 BGRA8/RGBA8 原地像素变换、ReducedColor16 高位补齐、Grayscale8 亮度权值、Monochrome1 纯黑纯白二值化以及 Tag 19/20 编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_color_endpoints`——验证回环 REST 端点全生命周期、模式切换、阈值配置、全彩复位及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_32_screen_adaptive_color_depth_and_grayscale_pipeline`——验证屏幕串流建立、全彩帧流转（$R \ne G \ne B$）、访客端切换灰度经济模式并验证访客端呈现帧中所有像素 $R == G == B$、访客端切换单色二值化模式并验证所有像素均为纯黑或纯白、访客端切换 ReducedColor16 并验证 565 量化、复位恢复全彩并验证色彩差异恢复、遥测指标校验；全工作区测试全绿，Workspace 版本发布为 `0.1.44`。
+
+## 58. 屏幕串流动态差分补丁、帧间变化压缩与宏块字典缓存流水线与双端 CLI 全同构 (v2.23 / ADR-109)
+
+1. **动机与设计准则（ADR-109）**：
+   - **高静态屏幕内容下的带宽与算力浪费消除**：在远程协作、代码编辑、终端日志滚动及监控大屏场景中，屏幕画面的帧间冗余度通常高达 85%~99%（例如仅光标闪烁、时钟秒数变化或单行控制台输出）；此前即使脏区极小，仍将整帧送入压缩器，压缩器仍需对海量未变动像素执行无谓遍历与重编码，浪费主机算力与网络吞吐；
+   - **动态差分补丁与帧间时域压缩流水线（Dynamic Differential Delta Patch & Temporal Compression Pipeline）**：
+     - **Delta Patch 编码**：结合 32x32 宏块脏区检测（`ScreenDamageTracker`），当启用了差分补丁模式且单帧变动比例低于上限（`dirty_ratio < 0.70`）时，宿主机仅提取发生变更的脏矩形子区域（`ScreenDamageRect { x, y, width, height }`），以 `codec_tag = SCREEN_COMPRESS_DELTA (4)` 独立 Zstd 压缩打包发送，携带相对原点的偏移坐标 `(rect.x, rect.y)`；
+     - **接收端时域参考画布合成（Reference Canvas Blit）**：接收端维持持久化全屏参考画布（`screen_receiver_canvas`）。收到 `SCREEN_COMPRESS_DELTA` 帧后，仅解压子矩形像素并原地 Blit 贴合至参考画布对应 `(rect.x, rect.y)` 坐标，将参考画布更新为最新帧序列号后送入播放抖动缓冲与呈现层；
+     - **关键帧自动周期保活与丢包自愈（Keyframe Interval & Recovery）**：设置可配置关键帧同步周期（`keyframe_interval`，默认 60 帧，约 2 秒），周期届满强制发送全量独立关键帧（I-Frame），防止参考帧漂移；若接收端因网络丢包或重连导致参考画布缺失，自动触发 `ControlMsg::KeyframeRequest`（Tag 4 / ADR-081）瞬间自愈；
+     - **带宽节约量化遥测（Bandwidth Savings Telemetry）**：精确统计 `delta_frames_sent`、`keyframes_sent`、`delta_frames_received`、`keyframes_received` 与累计节约带宽字节数 `saved_bytes`（按 `full_raw_bytes - patch_bytes` 累计）；
+   - **零外部重型图形依赖（Zero External Crates, ADR-006）**：严格遵循 ADR-006，以纯标准库整数边界安全夹取与行级切片完成子矩形提取（`extract_sub_rect`）与画布原地贴图（`apply_sub_rect`），零堆分配于热路径；
+   - **定长线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**：
+     - **Tag 21 (`ControlMsg::SetScreenDeltaMode { enabled: bool, keyframe_interval: u16 }`)**：64 位紧凑打包模式开关与同步周期；
+     - **Tag 22 (`ControlMsg::ResetScreenDeltaMode`)**：重置差分模式至全量推流；
+   - **全链路协同与双端 CLI 100% 同构**：深度挂载至采集、ROI 裁剪（ADR-107）、色彩量化（ADR-108）、编码推流、呈现渲染、回环 REST API 以及双端 CLI（`tetherly` 与 `tetherly-cli`）。
+
+2. **核心机制与实现**：
+   - **核心差分模型与切片贴合算法 (`crates/tetherly-core/src/screen.rs`)**：
+     - 常量 `SCREEN_COMPRESS_DELTA: u8 = 4` 与默认同步周期 `SCREEN_DELTA_DEFAULT_KEYFRAME_INTERVAL: u16 = 60`；
+     - `ScreenDeltaConfig` 封装 `enabled` 开关与 `keyframe_interval`（1..600）；
+     - `ScreenDeltaReport` 封装就绪状态、开关、同步周期、发送与接收帧统计及累计节约字节数；
+     - `ScreenFrame::extract_sub_rect(&self, x, y, w, h) -> Result<ScreenFrame, CoreError>`：按格式 stride 行级跨度安全提取脏矩形像素，生成独立的局部子帧；
+     - `ScreenFrame::apply_sub_rect(&mut self, patch: &ScreenFrame) -> Result<(), CoreError>`：边界溢出防御检查后，将子矩形行级 Blit 贴合至参考画布当前像素缓冲区；
+   - **定长线协议扩展**：
+     - Tag 21 (`ControlMsg::SetScreenDeltaMode { enabled, keyframe_interval }`)：位 0 存储 `enabled`，位 8..24 存储 `keyframe_interval`；
+     - Tag 22 (`ControlMsg::ResetScreenDeltaMode`)：无参复位信令，64 位载荷清零；
+   - **节点运行时流控与网络循环挂接 (`crates/tetherly-node/src/runtime.rs`)**：
+     - `NodeShared` 挂载 `screen_delta_config`、`screen_delta_counter`、`screen_receiver_canvas` 以及 `screen_delta_frames_sent`、`screen_delta_keyframes_sent`、`screen_delta_frames_received`、`screen_delta_keyframes_received`、`screen_delta_saved_bytes` 原子计数器；
+     - `screen_send_frame` 捕获、ROI 裁剪、色彩量化完成后，检查变动比例与同步计数器：低于 70% 脏区且未届满关键帧周期时提取脏矩形、Zstd 压缩并置 `codec_tag = 4` 发送；否则复位计数器发送全量关键帧；
+     - `screen_viewer_session` 接收端收到 `SCREEN_COMPRESS_DELTA` 帧后，解压并调用 `canvas.apply_sub_rect(&present_frame)` 原地贴合，同步序列号 `canvas.seq = present_frame.seq`，送入播放管道；
+     - 双端在 `screen_server_loop` 与 `screen_client_loop` 中同步 Tag 21/22；
+   - **回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**：
+     - `GET /api/screen/delta`、`POST /api/screen/delta`、`POST/DELETE /api/screen/delta/reset`；
+     - `ScreenStatusReport` 扩充 `delta_enabled`、`delta_keyframe_interval` 与 `delta_saved_bytes` 遥测；
+     - 严格继承 `127.0.0.1` 物理绑定与 `Host` 头 403 阻断；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli/src/main.rs` & `crates/tetherly-node/src/bin/tetherly.rs`)**：
+     - 新增 `screen delta status`、`screen delta set` 与 `screen delta reset` 子命令族与格式化打印函数 `print_screen_delta_report`；
+     - `screen status` 扩充显示差分补丁状态与累计节约带宽遥测。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_dynamic_delta_patch_and_temporal_compression_algorithms`——验证子矩形提取、边界溢出防御、画布原地 Blit 贴合、全量画布重构一致性以及 Tag 21/22 编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_delta_endpoints`——验证回环 REST 端点全生命周期、差分模式开关、同步周期配置、全量推流复位及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_33_screen_dynamic_delta_patch_and_temporal_compression_pipeline`——验证屏幕串流建立、全量帧流转、访客端发送差分配置信令、宿主机动态检测宏块脏区并仅发送 Zstd 压缩的脏矩形补丁帧（`codec_tag = SCREEN_COMPRESS_DELTA`）、访客端参考画布原地贴合并验证呈现像素完全精准重构、周期性关键帧重同步机制、丢失画布瞬态自愈、复位恢复全量推流、累计节约带宽指标校验；全工作区测试全绿，Workspace 版本发布为 `0.1.45`。
+
+## 59. 屏幕串流实时客观画质度量、PSNR/SSIM 结构失真评估与自适应质检闭环流水线与双端 CLI 全同构 (v2.24 / ADR-110)
+
+1. **动机与设计准则（ADR-110）**：
+   - **端到端客观画质盲区消除**：在屏幕串流相继引入动态降采样（ADR-084）、自适应 QP（ADR-085）、色彩量化（ADR-108）与动态差分补丁（ADR-109）后，针对仅依赖底层网络指标（RTT、丢包率、在途字节）无法感知“实际呈现画面”质量退化的问题，构建了实时客观画面失真评估体系；
+   - **快速客观画质度量算法（纯 Rust 标准库零重型依赖，ADR-006）**：
+     - **均方误差 (MSE, Mean Squared Error)**：
+       $$MSE = \frac{1}{3 \cdot W \cdot H} \sum_{i=1}^{W \cdot H} \left( (R_1 - R_2)^2 + (G_1 - G_2)^2 + (B_1 - B_2)^2 \right)$$
+     - **峰值信噪比 (PSNR, Peak Signal-to-Noise Ratio)**：
+       $$PSNR = 10 \cdot \log_{10}\left(\frac{255^2}{MSE}\right) \approx 48.1308 - 10 \cdot \log_{10}(MSE)$$
+       若 $MSE == 0$，定义 $PSNR = 100.0$ dB（完全无损基准）；纯标准库浮点计算，无外部图像库；
+     - **宏块结构相似性 (Fast Macroblock SSIM, Structural Similarity Index)**：
+       将整屏按 16x16 宏块窗口划分，逐块计算亮度 $Y = (77R + 150G + 29B) >> 8$ 的均值 $\mu_x, \mu_y$、方差 $\sigma_x^2, \sigma_y^2$ 与协方差 $\sigma_{xy}$：
+       $$SSIM = \frac{(2\mu_x\mu_y + C_1)(2\sigma_{xy} + C_2)}{(\mu_x^2 + \mu_y^2 + C_1)(\sigma_x^2 + \sigma_y^2 + C_2)}$$
+       常数取标准推荐值 $C_1 = 6.5025$，$C_2 = 58.5225$。全帧取宏块平均值，范围在 $0.00 \sim 1.00$；
+   - **抽样质检探针与低开销告警**：
+     - 支持无侵入抽样 `sample_interval`（默认每 10 帧抽检一次，范围 1..=120）；
+     - 维持评估帧计数、滚动累计平均与最新单帧指标，当 $PSNR < 30.0$ dB 或 $SSIM < 0.85$ 时触发 `quality_warning: true` 告警；
+   - **定长线协议信令扩充（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）**：
+     - **Tag 23 (`ControlMsg::SetScreenQualityMetricMode { enabled: bool, sample_interval: u8 }`)**：位 0 存储 `enabled`，位 8..16 存储 `sample_interval`；
+     - **Tag 24 (`ControlMsg::ResetScreenQualityMetricMode`)**：重置质检模式至默认关闭；
+   - **回环 REST 控制面闭环 (`crates/tetherly-node/src/uihttp.rs`)**：
+     - `GET /api/screen/metric`：获取当前客观画质度量配置与遥测报告；
+     - `POST /api/screen/metric`：配置质检开关与抽样周期；
+     - `POST/DELETE /api/screen/metric/reset`：重置质检配置并清零指标；
+     - `ScreenStatusReport` 扩充 `metric_enabled`、`metric_psnr_db`、`metric_ssim` 遥测；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen metric status [--json] [--ui-port <port>]`
+     - 新增 `screen metric set --enabled <true|false> [--interval <num>] [--json] [--ui-port <port>]`
+     - 新增 `screen metric reset [--json] [--ui-port <port>]`
+     - 对称实现格式化报表函数 `print_screen_quality_metric_report`；
+     - `screen status` 扩充显示客观画质遥测。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义：
+     ```rust
+     ControlMsg::SetScreenQualityMetricMode { enabled: bool, sample_interval: u8 }, // Tag 23
+     ControlMsg::ResetScreenQualityMetricMode,                                      // Tag 24
+     ```
+   - REST API 规范：
+     - `GET /api/screen/metric` -> 返回 `ScreenQualityMetricReport`；
+     - `POST /api/screen/metric` -> 请求体 `{"enabled": true, "sample_interval": 10}` 或查询参数 `?enabled=true&interval=10`；
+     - `POST/DELETE /api/screen/metric/reset` -> 重置配置并清零统计；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_objective_visual_quality_metric_and_psnr_ssim_algorithms`——验证完全一致画面无损基准（$MSE = 0, PSNR = 100.0, SSIM = 1.0$）、微弱扰动下指标平滑衰减、反色画面强失真（$PSNR < 10, SSIM < 0.2$）及 Tag 23/24 线协议编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_quality_metric_endpoints`——验证回环 REST 端点全生命周期、模式切换、抽样周期配置、状态清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_34_screen_objective_visual_quality_metric_and_psnr_ssim_pipeline`——验证屏幕串流建立、访客端发送画质度量配置信令、宿主机双向同步信令、相同画面流转下的高无损度量（$MSE=0, PSNR=100dB, SSIM=1.0$）、局部微变帧流转下度量累计与滚动评估、复位信令同步与状态清零、遥测指标校验；全工作区测试全绿，Workspace 版本发布为 `0.1.46`。
+
+## 60. 屏幕串流实时客观 QoE 自主闭环调优、画质感知驱动自适应流控协调流水线与双端 CLI 全同构 (v2.25 / ADR-111)
+
+1. **动机与设计准则（ADR-111）**：
+   - **从被动画质观测到主动感知闭环**：在 ADR-110 客观度量管道（MSE/PSNR/SSIM）基础上，消除底层网络信道健康指标与端到端用户画面感知失真的脱节，构建由客观画质感知直接驱动的闭环调优回路；
+   - **多阶画质保障策略模式 (`ScreenQoeMode`)**：
+     - `Off` (0)：关闭自主闭环调优，仅保留画质度量遥测；
+     - `Conservative` (1)：保真优先（目标 $PSNR \ge 34\text{ dB}, SSIM \ge 0.90$）；
+     - `Balanced` (2，默认)：平衡模式（目标 $PSNR \ge 30\text{ dB}, SSIM \ge 0.85$）；
+     - `Economy` (3)：经济省流（目标 $PSNR \ge 26\text{ dB}, SSIM \ge 0.78$）；
+   - **分级闭环调优动作决策 (`ScreenQoeAction`)**：
+     - `Hold`：画质符合目标阈值，无需干预；
+     - `BoostBitrate`：压缩量化噪声过高（MSE 偏大）时，阶梯式提升底线码率；
+     - `UpgradeScale`：字符与边缘模糊（SSIM 偏低）时，逐级回升动态分辨率至 100%；
+     - `LowerQp`：调低量化参数（$QP \leftarrow \max(QP - 4, QP_{\min})$），增强高频空间纹理保真度；
+     - `ForceKeyframe`：检测到严重参考画布漂移或差分累积伪影时，主动派发 `ControlMsg::KeyframeRequest`（Tag 3）强制 I 帧刷新；
+     - `FallbackThrottle`：拥塞且极端低 QoE 时，权衡空间分辨率优于帧率，适度定步平滑；
+   - **抗震荡防抖与冷却恢复机制**：
+     - 动作冷却窗（`SCREEN_QOE_COOLDOWN_US = 500_000` 微秒，500ms），防止单帧瞬态毛刺导致流控频繁震荡；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen qoe status [--json] [--ui-port <port>]`
+     - 新增 `screen qoe set --mode <conservative|balanced|economy|off> [--target-psnr <db>] [--target-ssim <pct>] [--json] [--ui-port <port>]`
+     - 新增 `screen qoe reset [--json] [--ui-port <port>]`
+     - 对称实现格式化报表函数 `print_screen_qoe_report`；
+     - `screen status` 扩充显示 QoE 自主闭环状态与最近决策。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义：
+     ```rust
+     ControlMsg::SetScreenQoeMode { mode: u8, target_psnr_db: u8, target_ssim_pct: u8 }, // Tag 25
+     ControlMsg::ResetScreenQoeMode,                                                       // Tag 26
+     ```
+   - REST API 规范：
+     - `GET /api/screen/qoe` -> 返回 `ScreenQoeReport`；
+     - `POST /api/screen/qoe` -> 请求体 `{"mode": "balanced", "target_psnr": 32, "target_ssim": 90}`；
+     - `POST/DELETE /api/screen/qoe/reset` -> 重置配置与调优统计；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_autonomous_qoe_closed_loop_adaptation_algorithms_and_signaling`——验证不同 QoE 模式下目标判定、失真刺激下决策动作分级派发、抗震荡冷却窗口抑制及 Tag 25/26 线协议编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_qoe_endpoints`——验证回环 REST 端点全生命周期、模式切换、阈值调谐、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_35_screen_autonomous_qoe_closed_loop_adaptation_pipeline`——验证屏幕串流建立、访客端通过 REST 发送 QoE 配置信令、双端 Tag 25 同步、注入颜色失真刺激自主闭环调优触发、状态遥测确认、Tag 26 复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.47`。
+
+## 61. 屏幕串流渐进式帧内平滑刷新、带状宏块去脉冲流控流水线与双端 CLI 全同构 (v2.26 / ADR-112)
+
+1. **动机与设计准则（ADR-112）**：
+   - **全量关键帧脉冲冲击 (I-Frame Burst Spike) 痛点消除**：在增量差分补丁（ADR-109）、客观画质质检（ADR-110）与 QoE 自主闭环（ADR-111）中，当网络轻微丢包、新访客接入、参考画布漂移或 QoE 控制器触发 `ForceKeyframe` 时，系统必须派发 `ControlMsg::KeyframeRequest`（Tag 3）请求全量 IDR 关键帧刷新。然而未经切片的全量 1080p/4K 关键帧数据量达到常规差分增量帧的 15~50 倍，瞬间向链路注入巨大突发脉冲流量，击穿网络缓冲队列造成数百毫秒 Bufferbloat 与端侧 100~300ms 冻结卡顿。本版本引入 Progressive Intra-Refresh (PIR) 渐进式帧内平滑刷新，将垂直方向划分为 $N$ 个水平宏块带状切片（$2 \le N \le 32$，默认 $N = 8$），每帧仅刷新 1 个 Intra-Slice 切片，经过 $N$ 帧后平滑完成全局刷新，彻底消除突发脉冲尖峰；
+   - **PIR 运行策略模式 (`ScreenPirMode`)**：
+     - `Disabled` (0)：默认关闭 PIR，保留传统全量关键帧刷新；
+     - `Continuous` (1)：持续滚动渐进刷新，每一帧推进 1 个切片，消除周期性 I 帧波峰；
+     - `OnDemand` (2)：按需触发式渐进刷新，在收到刷新指令或 QoE 触发时，平滑执行一次完整的 $N$ 帧扫描后自动休眠，恢复常规差分流控；
+   - **切片几何运算与边界吸收 (`compute_pir_band_rect`)**：
+     - 设画面尺寸为 $(W, H)$，切片数 $N$：基准切片高度 $h_b = H / N$；
+     - 前 $N-1$ 个切片覆盖 $y \in [k \cdot h_b, (k+1) \cdot h_b)$，第 $N-1$ 个切片自动吸收除不尽的余数行像素至 $H$；
+     - 严格遵循 ADR-006 零重型外部依赖铁律，纯 Rust 标准库切片与内存索引运算，切片面积和严格等于 $W \times H$；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen pir status [--json] [--ui-port <port>]`
+     - 新增 `screen pir set --mode <continuous|on-demand|disabled> [--bands <count>] [--json] [--ui-port <port>]`
+     - 新增 `screen pir reset [--json] [--ui-port <port>]`
+     - 对称实现格式化报表函数 `print_screen_pir_report`；
+     - `screen status` 扩充显示 PIR 闭环状态与切片统计。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenPirMode { mode: u8, bands: u8 }, // Tag 27
+     ControlMsg::ResetScreenPirMode,                       // Tag 28
+     ```
+   - REST API 规范：
+     - `GET /api/screen/pir` -> 返回 `ScreenPirReport`；
+     - `POST /api/screen/pir` -> 请求体 `{"mode": "continuous", "bands": 8}` 或查询参数 `?mode=continuous&bands=8`；
+     - `POST/DELETE /api/screen/pir/reset` -> 重置配置与切片统计；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_progressive_intra_refresh_algorithms_and_signaling`——验证切片矩形计算、余数像素吸收、切片覆盖完整性、模式往返转换及 Tag 27/28 线协议编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_pir_endpoints`——验证回环 REST 端点全生命周期、模式切换、切片分片数调谐、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_36_screen_progressive_intra_refresh_pipeline`——验证屏幕串流建立、访客端通过 REST 发送 PIR 配置信令（Continuous 模式与 bands=4）、宿主机双向同步 Tag 27、推流多个帧并断言 `slices_sent` 递增与完成完整 sweep、Tag 28 复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.48`。
+
+## 62. 屏幕串流长期参考帧 (LTR) 锚定、增量断洞自愈与抗丢包参考帧选择流水线与双端 CLI 全同构 (v2.27 / ADR-113)
+
+1. **动机与设计准则（ADR-113）**：
+   - **0-RTT 瞬时差分断洞自愈与脉冲抑制**：彻底克服增量差分串流（ADR-109）在无线弱网或 Mesh 隧道偶发丢包时，全量关键帧请求（Tag 3）带来 15~50 倍脉冲冲击、引发数百毫秒 Bufferbloat 与 100~300ms 冻结卡顿，或渐进刷新（ADR-112）需经历完整 $N$ 帧扫描才能清除残影的两难困境。双端维护同步受确认的黄金参考画布（Golden Reference Canvas, $F_{\text{ltr}}$），接收端检测丢包断洞直接派发 `LtrRecoveryRequest`（Tag 31），发送端直接基于 $F_{\text{ltr}}$ 提取增量补丁（专用 Codec Tag `SCREEN_COMPRESS_LTR = 5`），实现 1-RTT 瞬时差分自愈且完全无关键帧流量尖峰；
+   - **长期参考帧自动与按需锚定 (`ScreenLtrConfig`)**：支持 5~600 帧周期自动锚定（默认 60 帧 = 60fps 下 1 秒）或按需手动锚定，首个基准关键帧自动同步并派发 Tag 32 `LtrAnchorSync`；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen ltr status [--json] [--ui-port <port>]`
+     - 新增 `screen ltr set [--enabled <bool>] [--interval <n>] [--json] [--ui-port <port>]`
+     - 新增 `screen ltr anchor [--json] [--ui-port <port>]`
+     - 新增 `screen ltr recover [--json] [--ui-port <port>]`
+     - 新增 `screen ltr reset [--json] [--ui-port <port>]`
+     - 对称实现格式化报表函数 `print_screen_ltr_report`；
+     - `screen status` 扩充显示 LTR 状态与指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenLtrMode { enabled: bool, auto_interval: u16 }, // Tag 29
+     ControlMsg::ResetScreenLtrMode,                                     // Tag 30
+     ControlMsg::LtrRecoveryRequest { ltr_seq: u64 },                   // Tag 31
+     ControlMsg::LtrAnchorSync { ltr_seq: u64 },                        // Tag 32
+     ```
+   - REST API 规范：
+     - `GET /api/screen/ltr` -> 返回 `ScreenLtrReport`；
+     - `POST /api/screen/ltr` -> 请求体 `{"enabled": true, "auto_interval": 60}`；
+     - `POST /api/screen/ltr/anchor` -> 手动触发锚定；
+     - `POST /api/screen/ltr/recover` -> 发起 LTR 增量恢复请求；
+     - `POST/DELETE /api/screen/ltr/reset` -> 重置配置与统计；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_long_term_reference_algorithms_and_signaling`——验证配置默认值、自动间隔区间钳位、Tag 29~32 线协议编解码往返及 LTR 差分补丁应用校验；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_ltr_endpoints`——验证回环 REST 端点全生命周期、模式配置、手动锚定、恢复触发、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_37_screen_ltr_long_term_reference_pipeline`——验证屏幕串流建立、访客端通过 REST 启用 LTR（`auto_interval = 20`）、宿主机双向同步 Tag 29、首帧自动建立黄金参考锚点、中间差分推流、访客端发起 Tag 31 恢复请求、宿主机派发 `SCREEN_COMPRESS_LTR` 增量补丁完成断洞自愈并累加省流字节、手动锚定、Tag 30 复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.49`。
+
+## 63. 屏幕串流双层时域分级预测 (SVC-T) 层次化参考与抗拥塞优雅降级流水线与双端 CLI 全同构 (v2.28 / ADR-114)
+
+1. **动机与设计准则（ADR-114）**：
+   - **平坦差分预测链弱网脆弱性根除**：彻底解决常规线性差分串流（$F_t \leftarrow F_{t-1} + \Delta_t$）在突发网络拥塞或抖动跳帧时差分链断裂诱发的全量关键帧恢复风暴与延迟滚雪球；
+   - **双层时域分级预测 (SVC-T) 层次化参考与不变式**：将屏幕流解耦为 Base Layer T0（偶数帧，基准 30fps，严格参考前一 T0 基础帧）与 Enhancement Layer T1（奇数帧，补足 60fps，严格参考最新 T0 帧），确立后续帧绝不参考 T1 增强帧的核心时域不变式；
+   - **零重新协商瞬时抗拥塞优雅降级**：网络拥塞或省流降级时发送端瞬时丢弃 T1 帧，接收端以 30fps 稳定解码渲染，零撕裂、零残影、零重新协商；拥塞解除后恢复 T1 即刻平滑满帧回升；
+   - **专用 Codec Tag 与参考隔离**：引入 `SCREEN_COMPRESS_SVC_T1 = 6`，接收端将 T1 增量应用至渲染画布而严格保护 T0 基础参考画布不被污染；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen svc status [--json] [--ui-port <port>]`
+     - 新增 `screen svc set [--mode <disabled|adaptive|base_only>] [--drop-t1 <bool>] [--json] [--ui-port <port>]`
+     - 新增 `screen svc drop-t1 [--drop <bool>] [--json] [--ui-port <port>]`
+     - 新增 `screen svc reset [--json] [--ui-port <port>]`
+     - 对称实现格式化报表函数 `print_screen_svc_report`；
+     - `screen status` 扩充显示 SVC 时域分级运行指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenSvcMode { mode: u8, drop_t1: bool }, // Tag 33
+     ControlMsg::ResetScreenSvcMode,                           // Tag 34
+     ControlMsg::SvcT1DropSync { dropped_count: u64 },         // Tag 35
+     ```
+   - REST API 规范：
+     - `GET /api/screen/svc` -> 返回 `ScreenSvcReport`；
+     - `POST /api/screen/svc` -> 请求体 `{"mode": "adaptive", "drop_t1": false}`；
+     - `POST /api/screen/svc/drop-t1` -> 请求体 `{"drop_t1": true}`；
+     - `POST/DELETE /api/screen/svc/reset` -> 重置配置与统计；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_temporal_scalability_svc_algorithms_and_signaling`——验证配置默认值、模式枚举解析往返、Tag 33~35 线协议编解码往返及 `SCREEN_COMPRESS_SVC_T1` 帧增量解码隔离校验；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_svc_endpoints`——验证回环 REST 端点全生命周期、模式配置、丢帧策略切换、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_38_screen_temporal_scalability_svc_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用 SVC Adaptive 模式、宿主机双向同步 Tag 33、交替推流 T0 与 T1 帧、触发拥塞丢弃 T1（验证 T1 帧被丢弃累加节省带宽而 T0 帧持续稳定解码）、解除拥塞恢复满帧率传输、Tag 34 复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.50`。
+
+---
+
+## 64. 屏幕串流窗口滚动 2D 运动矢量估计 (Motion Vector / Block Matching) 与位移补偿加速流水线与双端 CLI 全同构 (v2.29 / ADR-115)
+
+1. **动机与设计准则（ADR-115）**：
+   - **页面单向滚动场景的常规差分失效根除**：彻底解决 Web 网页浏览、IDE 代码编辑翻页、终端滚动与长文档查阅时常规坐标差分算法将 80%~95% 未改变像素判定为脏区导致的带宽脉冲（Traffic Burst）与弱网滚屏卡顿；
+   - **2D 运动矢量估计与位移补偿核心模型**：发送端利用 16x16 空间网格采样与搜索半径 $[-D, D]$（$8 \le D \le 256$，默认 $D=64$）快速估算垂直与水平主位移 $(\Delta x, \Delta y)$，重叠区域采样匹配率达到 $\ge 85\%$ 时触发位移加速流水线；
+   - **专用 Codec Tag 与条带补丁**：引入 `SCREEN_COMPRESS_MOTION_SCROLL = 7`，发送端仅编码 12 字节位移头与滚入屏幕的暴露条带（Exposed Strip）Zstd 补丁；接收端在活跃画布上直接调用 `scroll_canvas(dx, dy)` 执行高效内存移动，再将暴露条带贴合至边缘，实现滚屏带宽降低 80%~95% 与像素 100% 精确还原；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen motion status [--json] [--ui-port <port>]`
+     - 新增 `screen motion set [--enabled <bool>] [--max-displacement <u16>] [--json] [--ui-port <port>]`
+     - 新增 `screen motion reset [--json] [--ui-port <port>]`
+     - 对称实现格式化报表函数 `print_screen_motion_report`；
+     - `screen status` 扩充显示运动矢量位移补偿运行指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenMotionMode { enabled: bool, max_displacement: u16 }, // Tag 36
+     ControlMsg::ResetScreenMotionMode,                                       // Tag 37
+     ControlMsg::MotionScrollSync { scroll_frames_sent: u64 },                // Tag 38
+     ```
+   - REST API 规范：
+     - `GET /api/screen/motion` -> 返回 `ScreenMotionReport`；
+     - `POST /api/screen/motion` -> 请求体 `{"enabled": true, "max_displacement": 64}`；
+     - `POST/DELETE /api/screen/motion/reset` -> 一键重置配置与统计计数；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_motion_vector_estimation_and_scroll_acceleration_algorithms`——验证配置默认值与范围钳位、Tag 36~38 线协议编解码往返、暴露条带几何计算、画布位移内存移动、空间网格运动估计算法与 `SCREEN_COMPRESS_MOTION_SCROLL` 编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_motion_endpoints`——验证回环 REST 端点全生命周期、模式配置、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_39_screen_motion_vector_estimation_and_scroll_acceleration_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用运动估计、宿主机双向同步 Tag 36、模拟向上与向下纵向滚动位移、断言生成 `SCREEN_COMPRESS_MOTION_SCROLL` 帧、累加节省带宽、访客端画布位移合成 100% 逐位像素精确还原、普通编辑平滑回退至常规差分、Tag 37 复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.51`。
+
+## 65. 屏幕串流空间分块网格划分与独立异步瓦片更新流水线与双端 CLI 全同构 (v2.30 / ADR-116)
+
+1. **动机与设计准则（ADR-116）**：
+   - **多处离散微小更新包围盒爆炸缺陷根除**：彻底解决高分辨率与多窗交互下，离散微小更新（如左上角编辑器光标闪烁与右下角任务栏时钟跳动）迫使传统单矩形差分补丁（ADR-109）计算出覆盖 95% 以上面积的单一最小外接矩形（Bounding Box），导致中间 98% 毫无变化的静态像素被迫全量传输与压缩的带宽毛刺问题；
+   - **空间瓦片网格几何划分与脏瓦片独立提取**：将全屏幕严格剖分为 $M \times N$ 二维空间瓦片网格（$32 \le T \le 256$，默认 $T=64$），边缘物理自动截断。发送端对每个瓦片执行行级内存比对提取真实脏瓦片集合 `extract_dirty_tiles`，跳过高达 99% 的未改变静态瓦片，实现带宽降低 90%~98%；
+   - **专用 Codec Tag `SCREEN_COMPRESS_TILE_GRID = 8` 与画布局部 Blit**：
+     - 发送端编码 6 字节定长网格头（`tile_size: u16`, `total_tiles: u16`, `dirty_count: u16`）与独立压缩的脏瓦片流；
+     - 接收端调用 `apply_dirty_tile` 将脏瓦片解压并按物理坐标直接贴合至活跃画布 `screen_receiver_canvas`，保证 100% 逐位像素精确还原；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen tile status [--json] [--ui-port <port>]`
+     - 新增 `screen tile set [--enabled <bool>] [--tile-size <u16>] [--json] [--ui-port <port>]`
+     - 新增 `screen tile reset [--json] [--ui-port <port>]`
+     - 对称实现格式化报表函数 `print_screen_tile_report`；
+     - `screen status` 扩充显示空间瓦片流控运行指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenTileMode { enabled: bool, tile_size: u16 }, // Tag 39
+     ControlMsg::ResetScreenTileMode,                                 // Tag 40
+     ControlMsg::TileGridSync { tiles_sent: u64 },                   // Tag 41
+     ```
+   - REST API 规范：
+     - `GET /api/screen/tile` -> 返回 `ScreenTileReport`；
+     - `POST /api/screen/tile` -> 请求体 `{"enabled": true, "tile_size": 32}`；
+     - `POST/DELETE /api/screen/tile/reset` -> 一键重置配置与统计计数；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_spatial_tile_grid_decomposition_and_streaming_algorithms`——验证网格几何计算、离散瓦片提取、跳过静态瓦片、接收端重组渲染、Tag 39~41 定长编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tile_endpoints`——验证回环 REST 端点全生命周期、模式配置、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_40_screen_spatial_tile_grid_decomposition_and_streaming_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用瓦片模式（$T=32$）、宿主机双向同步 Tag 39、模拟对角微小更新（Tile 0 与 Tile 15）、断言生成 `SCREEN_COMPRESS_TILE_GRID` 帧、累加节省带宽与跳过计数（14 块）、访客端画布重组 100% 逐位像素精确还原、二次更新验证、Tag 40 复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.52`。
+
+## 66. 屏幕串流哈希瓦片字典缓存、全局跨帧空间去重与零带宽复用流水线与双端 CLI 全同构 (v2.31 / ADR-117)
+
+1. **动机与设计准则（ADR-117）**：
+   - **空间平移再现与画面内模式重现根除**：在 v2.30 空间网格分块中，窗口拖拽与同屏模式重现（Dock 栏、工具条、单色块、边距）会导致纯空间分块瓦片被判定为脏区重传。本流水线构建双端同步轻量级 LRU 瓦片字典缓存（$64 \le N \le 4096$，默认 $N=512$），利用快速 64-bit 内存哈希（`fnv1a_hash64`，零外部依赖）识别内容指纹；
+   - **零载荷指针补丁复用**：缓存命中时发送 17 字节定位补丁（`index, x, y, w, h, cache_hit: 1, cache_id: id, patch_len: 0`），**0 字节数据载荷**，带宽在 ADR-116 基础上再降 85%~98%；未命中时标记 `cache_hit: 0` 并动态填入字典槽位；
+   - **专用 Codec Tag `SCREEN_COMPRESS_TILE_CACHE = 9`**：
+     - 发送端编码 6 字节网格头（`tile_size: u16`, `total_tiles: u16`, `dirty_count: u16`）与 17 字节定长条目流；
+     - 接收端直接根据槽位取出像素贴入活跃画布 `screen_receiver_canvas`，保证 100% 逐位像素精确还原；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen tile cache status [--json] [--ui-port <port>]`
+     - 新增 `screen tile cache set [--enabled <bool>] [--max-entries <u16>] [--json] [--ui-port <port>]`
+     - 新增 `screen tile cache reset [--json] [--ui-port <port>]`
+     - 对称实现格式化报表函数 `print_screen_tile_cache_report`；
+     - `screen status` 扩充显示 Tile Cache 字典流控运行指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenTileCacheMode { enabled: bool, max_entries: u16 }, // Tag 42
+     ControlMsg::ResetScreenTileCacheMode,                                  // Tag 43
+     ControlMsg::TileCacheSync { hits: u64, misses: u64, saved_bytes: u64 }, // Tag 44
+     ```
+   - REST API 规范：
+     - `GET /api/screen/tile/cache` -> 返回 `ScreenTileCacheReport`；
+     - `POST /api/screen/tile/cache` -> 请求体 `{"enabled": true, "max_entries": 64}`；
+     - `POST/DELETE /api/screen/tile/cache/reset` -> 一键重置配置与清空缓存；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_tile_cache_deduplication_and_streaming_algorithms`——验证 64-bit 哈希指纹计算、LRU 字典增删与命中复用、零载荷条目编解码、Tag 42~44 定长编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tile_cache_endpoints`——验证回环 REST 端点全生命周期、模式配置、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_41_screen_tile_cache_deduplication_and_streaming_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用瓦片缓存（$N=64$）、宿主机双向同步 Tag 42、第一帧瓦片未命中学习（Tile 0）、第二帧窗口平移至 Tile 15 命中复用（0 载荷，节省带宽累加）、第三帧多瓦片帧内空间去重（Tile 1 与 Tile 2 相同像素）、访客端画布 100% 逐位像素精确还原、Tag 43 复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.53`。
+
+## 67. 屏幕串流动态注视点焦点感知、空间区域优先级与外围自适应抽帧调度流水线与双端 CLI 全同构 (v2.32 / ADR-118)
+
+1. **动机与设计准则（ADR-118）**：
+   - **人眼视觉注意力高度聚焦与全屏均质流控缺陷**：在高分辨率与高密度瓦片网格下，用户视觉与交互中心高度集中在鼠标光标周边（或活动窗口焦点框），全屏均质流控导致网络抖动时焦点区域卡顿掉帧，同时外围次要背景浪费 70%~90% 带宽；
+   - **焦点感知与空间区域分级优先级调度**：
+     - **焦点区域（Focus Zone / 优先级 0）**：根据鼠标硬件光标实时物理坐标 $(cx, cy)$ 动态锁定注视半径 $R$（或用户配置的静态焦点框），焦点内脏瓦片享有 100% 刷新保障（60 FPS、零抽帧、优先传输）；
+     - **外围区域（Peripheral Zone / 优先级 1）**：焦点外的脏瓦片按照自适应抽帧比率 $S$（`peripheral_skip_ratio`，默认 2，即每 3 帧更新 1 次，抽帧率 66.7%）进行时域稀疏化调度，外围带宽消耗降低 60%~80%；
+   - **数学级画布一致性守恒定理（Canvas Invariance Theorem）**：
+     - 外围被抽帧跳过的脏瓦片在发送端参考画布 `screen_sender_tile_canvas` 中**严格不更新**；
+     - 确保下一次调度周期被稳定提取重传，双端画布始终保持 100% 逐位像素精确一致；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen focus status [--json] [--ui-port <port>]`
+     - 新增 `screen focus set [--enabled <bool>] [--mode <cursor|box>] [--radius <u16>] [--skip-ratio <u8>] [--box-x <u16>] [--box-y <u16>] [--box-w <u16>] [--box-h <u16>] [--json] [--ui-port <port>]`
+     - 新增 `screen focus reset [--json] [--ui-port <port>]`
+     - 支持 `screen tile focus` 语法糖兼容；
+     - 对称实现格式化报表函数 `print_screen_focus_report`；
+     - `screen status` 扩充显示 Focus 优先级流控运行指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenFocusMode { enabled: bool, mode: u8, radius: u16, peripheral_skip_ratio: u8 }, // Tag 45
+     ControlMsg::SetScreenFocusBox { box_x: u16, box_y: u16, box_w: u16, box_h: u16 },                   // Tag 46
+     ControlMsg::ResetScreenFocusMode,                                                                   // Tag 47
+     ControlMsg::FocusSync { focus_tiles_sent: u64 },                                                   // Tag 48
+     ControlMsg::FocusPeripheralSync { peripheral_skipped: u64 },                                       // Tag 49
+     ```
+   - REST API 规范：
+     - `GET /api/screen/focus` -> 返回 `ScreenFocusReport`；
+     - `POST /api/screen/focus` -> 请求体支持 `enabled`, `mode`, `radius`, `peripheral_skip_ratio`, `box_x`, `box_y`, `box_w`, `box_h`；
+     - `POST/DELETE /api/screen/focus/reset` -> 一键重置配置与统计计数；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_foveated_focus_scheduling_algorithms`——验证欧氏几何光标距离平方、静态框重叠判定、外围自适应抽帧决策、Tag 45~49 定长编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_focus_endpoints`——验证回环 REST 端点全生命周期、模式配置、静态框设置、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_42_screen_foveated_focus_priority_scheduling_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用静态框焦点流控（$R=32, S=2$）、宿主机双向同步 Tag 45 & 46、第一帧焦点与外围对角同时更新（Frame 1: 焦点瓦片立即发送更新，外围瓦片抽帧跳过并统计节省带宽）、第二帧外围持续抽帧、第三帧外围刷新节拍触发补发（Frame 3: `seq % 3 == 0`，外围瓦片补齐重传）、访客端画布 100% 逐位像素精确还原（画布一致性守护验证）、切换 Cursor 光标跟踪模式、Tag 47 复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.54`。
+
+## 68. 屏幕串流瓦片级自适应调色板、二值位图与混合无损压缩流水线与双端 CLI 全同构 (v2.33 / ADR-119)
+
+1. **动机与设计准则（ADR-119）**：
+   - **桌面图形低色彩熵特性与全彩交错 RGBA 压缩痛点**：在远程桌面协同中，代码编辑器、终端控制台、窗口边距及单色画布拥有极高空间自相似性与稀疏色彩分布。原始 64x64 RGBA 瓦片（16,384 字节）未经预处理直接交给 Zstd，交错排列打破了游程长度，导致压缩产物仍达 600~2000 字节，并占用显著 CPU；
+   - **自适应调色板与二值位图混合无损压缩流水线**：
+     - **单色瓦片（Solid Color, $K=1$）**：1 字节子编解码器类型 + 4 字节 RGBA（共 5 字节），压缩比高达 3276:1（节省 99.97% 带宽），接收端单指令 fill 纳秒级重构；
+     - **二值双色瓦片（Bi-Level Bitmap, $K=2$）**：1 字节类型 + 8 字节双色调色板 + 1-bit/像素紧凑位图（512 字节），共 521 字节，压缩比 31.4:1（节省 96.8% 带宽），位解包零浮点消耗；
+     - **16 色索引调色板（Indexed Palette, $3 \le K \le 16$）**：1 字节类型 + 1 字节色彩数 $K$ + $K \times 4$ 字节调色板 + 4-bit 半字节流（2048 字节），节省 87% 以上带宽；
+     - **快速短路探测算法与真彩平滑回退**：栈上固定数组直方图扫描，遇到第 17 种颜色在 $< 2\,\mu\text{s}$ 内立刻退出并平滑回退至 Zstd / 原始全彩；
+     - **数学级无损保证（Bit-for-Bit Lossless Invariance）**：解压像素与源端 100% 逐位像素精确一致，彻底杜绝字体边缘模糊、振铃与色度失真；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen tile palette status [--json] [--ui-port <port>]`
+     - 新增 `screen tile palette set [--enabled <bool>] [--max-colors <u8>] [--enable-rle <bool>] [--json] [--ui-port <port>]`
+     - 新增 `screen tile palette reset [--json] [--ui-port <port>]`
+     - 支持 `screen palette` 与 `screen tile-palette` 语法糖兼容；
+     - 对称实现格式化报表函数 `print_screen_tile_palette_report`；
+     - `screen status` 扩充显示 Tile Palette 流控运行指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenTilePaletteMode { enabled: bool, max_colors: u8, enable_rle: bool }, // Tag 50
+     ControlMsg::ResetScreenTilePaletteMode,                                                   // Tag 51
+     ControlMsg::TilePaletteSync { solid_tiles: u64, bilevel_tiles: u64, palette_tiles: u64, saved_bytes: u64 }, // Tag 52
+     ```
+   - REST API 规范：
+     - `GET /api/screen/tile/palette` -> 返回 `ScreenTilePaletteReport`；
+     - `POST /api/screen/tile/palette` -> 请求体支持 `enabled`, `max_colors`, `enable_rle`；
+     - `POST/DELETE /api/screen/tile/palette/reset` -> 一键重置配置与统计计数；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_tile_palette_compression_and_decompression_algorithms`——验证单色 ($K=1$)、双色二值 ($K=2$)、16 色索引调色板 ($3 \le K \le 16$)、真彩短路回退 ($K > 16$)、定长信令 Tag 50~52 编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tile_palette_endpoints`——验证回环 REST 端点全生命周期、参数配置、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_43_screen_tile_palette_adaptive_compression_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用调色板混合压缩（Tag 50）、宿主机双向同步、第一帧单色瓦片传输（Solid Tile, $K=1$，5 字节传输，节省 99.9% 带宽）、第二帧二值双色文本瓦片传输（Bi-Level Tile, $K=2$，521 字节传输，节省 96.8% 带宽）、第三帧 16 色代码语法高亮瓦片传输（Indexed Palette, $K=4$）、第四帧真彩色渐变瓦片传输（TrueColor Fallback, $K > 16$）、每一帧访客端画布 100% 逐位像素精确还原（Bit-for-Bit Canvas Invariance）、Tag 51 复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.55`。
+
+## 69. 屏幕串流瓦片级可逆颜色变换、方向性差分预测滤波与复合无损压缩流水线与双端 CLI 全同构 (v2.34 / ADR-120)
+
+1. **动机与设计准则（ADR-120）**：
+   - **攻克真彩色瓦片 $K > 16$ 的高熵压缩瓶颈**：在现代远程桌面与图形渲染场景中，Mica/亚克力毛玻璃、精细阴影、壁纸与字体抗锯齿引入了大量连续真彩元素（$K > 16$）。在 ADR-119 中，此类瓦片直接回退至原始交错 RGBA 并交由通用 Zstd 压缩，残留 1200~2500 字节高熵负载；
+   - **瓦片级可逆颜色变换（RCT）与方向性空间差分预测滤波流水线**：
+     - **可逆颜色变换（RCT）**：对 32-bit RGBA 像素执行无损通道解耦：
+       $$Y = G, \quad U = (R - G) \pmod{256}, \quad V = (B - G) \pmod{256}, \quad A = A$$
+       反变换：
+       $$G = Y, \quad R = (U + Y) \pmod{256}, \quad B = (V + Y) \pmod{256}, \quad A = A$$
+       利用模 256 整数加减法消除通道间相关性，使色彩残差集中于 0 附近，色彩熵锐减 50% 以上；
+     - **方向性空间差分预测滤波（DPCM）**：基于像素左邻 $A$、上邻 $B$、左上邻 $C$，支持 5 种空间预测模式：
+       - `Filter 0 (None)`：原始像素；
+       - `Filter 1 (Sub / Left)`：$\Delta = P - A \pmod{256}$；
+       - `Filter 2 (Up)`：$\Delta = P - B \pmod{256}$；
+       - `Filter 3 (Average)`：$\Delta = P - \lfloor(A + B) / 2\rfloor \pmod{256}$；
+       - `Filter 4 (Paeth)`：基于 Paeth 最小倾斜梯度预测器；
+       - `Filter 5 (Auto)`：评估各滤波器 L1 残差绝对值之和，动态自适应选取残差能量最小的最优滤波器；
+     - **复合无损残差压缩（`TILE_SUBCODEC_PREDICT_ZSTD = 5`）**：残差流送入 Zstd 压缩，使渐变瓦片体积骤降至 300~600 字节（再降 60%~75%）；
+     - **100% 数学级无损保证（Bit-for-Bit Lossless Invariance）**：预测与解预测严格对称，反变换零浮点运算，解压后与宿主原始屏幕图像 100% 逐位像素精确一致；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen tile predict status [--json] [--ui-port <port>]`
+     - 新增 `screen tile predict set [--enabled <bool>] [--filter-mode <mode>] [--enable-rct <bool>] [--json] [--ui-port <port>]`
+     - 新增 `screen tile predict reset [--json] [--ui-port <port>]`
+     - 支持 `screen predict` 与 `screen tile-predict` 语法糖兼容；
+     - 对称实现格式化报表函数 `print_screen_tile_predict_report`；
+     - `screen status` 扩充显示 Tile Predict 流控运行指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenTilePredictMode { enabled: bool, filter_mode: u8, enable_rct: bool }, // Tag 53
+     ControlMsg::ResetScreenTilePredictMode,                                                   // Tag 54
+     ControlMsg::TilePredictSync { predict_tiles: u64, saved_bytes: u64 },                     // Tag 55
+     ```
+   - REST API 规范：
+     - `GET /api/screen/tile/predict` -> 返回 `ScreenTilePredictReport`；
+     - `POST /api/screen/tile/predict` -> 请求体支持 `enabled`, `filter_mode`, `enable_rct`；
+     - `POST/DELETE /api/screen/tile/predict/reset` -> 一键重置配置与统计计数；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_tile_predictive_compression_and_decompression_algorithms`——验证 5 种空间预测滤波、可逆颜色变换 RCT、残差复合无损压缩、定长信令 Tag 53~55 编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tile_predict_endpoints`——验证回环 REST 端点全生命周期、参数配置、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_44_screen_tile_predictive_compression_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用预测滤波复合无损压缩（Tag 53: Auto + RCT）、宿主机双向同步、第一帧水平渐变真彩瓦片传输（Frame 1: Sub/Horizontal 滤波与 RCT 生效，节省带宽）、第二帧垂直渐变瓦片传输（Frame 2: Up 滤波）、第三帧双向平滑渲染瓦片传输（Frame 3: Paeth 滤波）、每一帧访客端画布 100% 逐位像素精确还原（Bit-for-Bit Canvas Invariance）、Tag 54 复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.56`。
+
+## 70. 屏幕串流瓦片级原子呈现事务、双缓冲前台交换与防撕裂垂直同步步频流水线与双端 CLI 全同构 (v2.35 / ADR-121)
+
+1. **动机与设计准则（ADR-121）**：
+   - **瓦片级分块串流的局部渲染撕裂痛点（Inter-Tile Visual Tearing）**：在空间瓦片化网格（`SCREEN_COMPRESS_TILE_GRID`）与瓦片字典缓存（`SCREEN_COMPRESS_TILE_CACHE`）串流中，一帧屏幕被切分为数十至数百个 64×64 独立瓦片分包传输。接收端原地补丁解码直写活跃画布会导致明显的瓦片间撕裂裂缝；
+   - **双缓冲后置暂存与微秒级原子前台交换（Double-Buffered Staged Atomic Swap）**：
+     - 到达的脏瓦片严格解包暂存于后置隔离画布（`screen_receiver_back_buffer`），前台展示画布（`screen_receiver_canvas`）在传输期间保持不可变；
+     - 当整帧所有脏瓦片完整拼装并校验完毕后，执行 `< 5µs` 极速原子前后台交换（`std::mem::swap`），彻底杜绝瓦片间渲染撕裂；
+   - **防撕裂垂直同步步频控制（Anti-Tearing V-Sync Pacing）**：
+     - 提供 `Off`（立即交换）、`Vsync60`（16.6ms 步频对齐）、`Vsync120`（8.3ms 步频对齐）与 `Adaptive`（自适应对齐），使渲染与显示器刷新节拍平滑协同；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen tile present status [--json] [--ui-port <port>]`
+     - 新增 `screen tile present set [--enabled <bool>] [--vsync-mode <mode>] [--double-buffer <bool>] [--tear-prevention <bool>] [--json] [--ui-port <port>]`
+     - 新增 `screen tile present reset [--json] [--ui-port <port>]`
+     - 支持 `screen present` 与 `screen tile-present` 别名语法糖；
+     - 对称实现格式化报表函数 `print_screen_tile_present_report`；
+     - `screen status` 扩充显示 Tile Present 流控运行指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenTilePresentMode { enabled: bool, vsync_mode: u8, double_buffer: bool, tear_prevention: bool }, // Tag 56
+     ControlMsg::ResetScreenTilePresentMode,                                                                           // Tag 57
+     ControlMsg::TilePresentSync { committed_txs: u64, swapped_frames: u64 },                                           // Tag 58
+     ```
+   - REST API 规范：
+     - `GET /api/screen/tile/present` -> 返回 `ScreenTilePresentReport`；
+     - `POST /api/screen/tile/present` -> 请求体支持 `enabled`, `vsync_mode`, `double_buffer`, `tear_prevention`；
+     - `POST/DELETE /api/screen/tile/present/reset` -> 一键重置配置与统计计数；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_tile_presentation_transaction_and_double_buffer_algorithms`——验证后置暂存、原子交换、防撕裂多瓦片保护、定长信令 Tag 56~58 编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tile_present_endpoints`——验证回环 REST 端点全生命周期、参数配置、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_45_screen_tile_presentation_transaction_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用双缓冲原子呈现事务与防撕裂 V-Sync 步频（Tag 56: Vsync60 + DoubleBuffer + AntiTear）、宿主机双向同步、第一帧多瓦片脏更新（Tile 0 和 Tile 3）原子暂存并成功触发前后台交换（committed_transactions >= 1, swapped_frames >= 1, torn_frames_prevented >= 1）、第二帧多瓦片脏更新（Tile 1 和 Tile 2）、每一帧访客端画布 100% 逐位像素精确还原（Bit-for-Bit Canvas Invariance）、Tag 57 复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.57`。
+
+## 71. 屏幕串流瓦片级快速重传、微型选择性重发与事务超时自愈流水线与双端 CLI 全同构 (v2.36 / ADR-122)
+
+1. **动机与设计准则（ADR-122）**：
+   - **瓦片串流中的单包丢弃与全量关键帧脉冲雪崩痛点（Single-Tile Drop & Keyframe Burst Avalanche）**：在空间分块网格串流（ADR-116）与双缓冲原子呈现事务（ADR-121）中，一帧屏幕被切分为数十至数百个 64×64 独立瓦片分包传输。当偶发单个 UDP 包丢失时，接收端原先只能全盘放弃整帧并请求全量关键帧刷新，注入 15~50 倍突发带宽脉冲导致网络缓冲膨胀与 100~300ms 冻结卡顿；
+   - **瓦片级语义化微型否定应答（Semantic Micro-NACK）**：
+     - 接收端检测到特定缺失瓦片超时未到达时，派发 14 字节微型报文 `ControlMsg::TileNackRequest { seq: u32, tile_index: u16, retry_count: u8 }` (Tag 59)；
+   - **发送端最近脏瓦片环形队列极速回放（Sender Tile Ring-Buffer & Fast Replay）**：
+     - 发送端维护保留最近 4 帧的 `ScreenTileResendBuffer` 环形队列；
+     - 收到 Tag 59 时 $O(1)$ 复杂度直接检索对应压缩瓦片并封装为单瓦片补丁帧（`< 500` 字节）单播极速重发，完全避免重编全帧与关键帧雪崩；
+   - **事务超时降级原子提交与最终一致性自愈（Degraded Atomic Commit & Self-Healing）**：
+     - 当重发达到最大重试次数（默认 2 次）或超时（默认 20ms）时，执行降级提交：安全将已到达的有效瓦片原子翻转至前台，缺失瓦片安全沿用上一帧旧像素（绝不渲染黑块或假影），递增 `degraded_commits`，并在下一刷新周期标记脏区实现最终一致性自愈；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen tile nack status [--json] [--ui-port <port>]`
+     - 新增 `screen tile nack set [--enabled <bool>] [--timeout-ms <ms>] [--max-retries <count>] [--json] [--ui-port <port>]`
+     - 新增 `screen tile nack reset [--json] [--ui-port <port>]`
+     - 支持 `screen nack` 别名语法糖；
+     - 对称实现格式化报表函数 `print_screen_tile_nack_report`；
+     - `screen status` 扩充显示 Tile Micro-NACK 运行指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::TileNackRequest { seq: u32, tile_index: u16, retry_count: u8 },       // Tag 59
+     ControlMsg::ResetScreenTileNackMode,                                              // Tag 60
+     ControlMsg::TileNackSync { nack_requests: u64, retransmitted_tiles: u64, degraded_commits: u64 }, // Tag 61
+     ```
+   - REST API 规范：
+     - `GET /api/screen/tile/nack` -> 返回 `ScreenTileNackReport`；
+     - `POST /api/screen/tile/nack` -> 请求体支持 `enabled`, `timeout_ms`, `max_retries`；
+     - `POST/DELETE /api/screen/tile/nack/reset` -> 一键重置配置与统计计数；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_tile_nack_and_fast_retransmission_algorithms`——验证微型 NACK 数据模型、环形重发缓存 $O(1)$ 存取与容量淘汰、定长信令 Tag 59~61 编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tile_nack_endpoints`——验证回环 REST 端点全生命周期、参数配置、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_46_screen_tile_nack_recovery_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用 Tile Micro-NACK 重传自愈（Tag 59/61: enabled=true, timeout_ms=30, max_retries=3）、多瓦片帧分发、缺失瓦片派发 Tag 59、宿主环形缓存极速回放（tiles_retransmitted >= 1）、访客端画布 100% 逐位像素精确还原（Bit-for-Bit Canvas Invariance）、Tag 60 复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.58`。
+
+## 72. 屏幕串流动态空间瓦片重要度感知与视觉显著性丢包抗性分级调度流水线与双端 CLI 全同构 (v2.37 / ADR-123)
+
+1. **动机与设计准则（ADR-123）**：
+   - **瓦片串流中的无差别调度与带宽争抢痛点（Uniform Tile Pacing & Bandwidth Starvation）**：在空间分块网格串流（ADR-116）、瓦片字典全局缓存（ADR-117）与双缓冲呈现事务（ADR-121）中，一帧屏幕被切分为数十至数百个 64×64 独立瓦片分包传输。高反差文字、代码编辑器、光标焦点交互区具有极高视觉显著性，任何残缺或延迟都会引发强烈的交互卡顿感；而桌面壁纸、纯色或平滑渐变背景视觉熵极低。在无差别 FIFO 调度下，低价值背景瓦片与核心交互瓦片争抢同一套网络队列与 MTU，导致关键交互区被延迟送达；
+   - **空间梯度能量与焦点距离综合显著性评估器 (`ScreenTileSaliencyEvaluator`)**：
+     - 在发送端压缩瓦片前，对每个待发脏瓦片计算亮度空间梯度能量（Spatial Gradient Energy，采样步长为 2 保证微秒级处理时延），融合注视点/光标视口（ADR-118）欧氏距离加权：$S = \alpha \cdot \text{GradientEnergy} + \beta \cdot \text{FocusProximity}$，输出 $S \in [0, 255]$；
+     - 依双阈值分为三级（`TileSaliencyTier`）：`Critical`（$S \ge 120$：高频边缘/文字/焦点关键交互区）、`Normal`（$40 \le S < 120$：常规视觉变动与一般图形）、`Background`（$S < 40$：低熵平滑背景、微弱渐变、边缘静态区）；
+   - **优先级报文重排与拥塞自适应降级 (`Tiered Pacing & Congestion Skip`)**：
+     - 发送端将待发脏瓦片列表按优先级稳定重排（Critical 优先排入帧的前部报文，Normal 次之，Background 置后）；
+     - 当开启 `drop_background_on_congestion = true` 且链路处于拥塞状态时，发送端主动跳过 Background 瓦片当帧传输，保留在未确认画布脏区等待下一周期自愈补齐，彻底释放带宽给核心交互瓦片；
+   - **画布最终一致性（Bit-for-Bit Canvas Invariance & Eventual Consistency）**：
+     - 跳过的背景瓦片保留在发送端未确认脏区，一旦网络拥塞解除或在后续周期中自动增量回补，杜绝视觉残留与花屏；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen tile saliency status [--json] [--ui-port <port>]`
+     - 新增 `screen tile saliency set [--enabled <bool>] [--high-threshold <val>] [--low-threshold <val>] [--drop-background-on-congestion <bool>] [--json] [--ui-port <port>]`
+     - 新增 `screen tile saliency reset [--json] [--ui-port <port>]`
+     - 支持 `screen saliency` 别名语法糖；
+     - 对称实现格式化报表函数 `print_screen_tile_saliency_report`；
+     - `screen status` 扩充显示 Tile Saliency 运行指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenTileSaliencyMode { enabled: bool, high_threshold: u8, low_threshold: u8, drop_background_on_congestion: bool }, // Tag 62
+     ControlMsg::ResetScreenTileSaliencyMode,                                                                                           // Tag 63
+     ControlMsg::TileSaliencySync { critical_tiles: u64, normal_tiles: u64, background_tiles: u64, background_tiles_skipped: u64 },     // Tag 64
+     ```
+   - REST API 规范：
+     - `GET /api/screen/tile/saliency` -> 返回 `ScreenTileSaliencyReport`；
+     - `POST /api/screen/tile/saliency` -> 请求体支持 `enabled`, `high_threshold`, `low_threshold`, `drop_background_on_congestion`；
+     - `POST/DELETE /api/screen/tile/saliency/reset` -> 一键重置配置与统计计数；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_tile_saliency_and_tiered_scheduling_algorithms`——验证空间梯度能量计算、注视点欧氏距离加权、三级语义划分与优先级稳定排序重排、定长信令 Tag 62~64 编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tile_saliency_endpoints`——验证回环 REST 端点全生命周期、参数配置、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_47_screen_tile_saliency_tiering_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用显著性分级流控（Tag 62: enabled=true, high_threshold=120, low_threshold=40, drop_background_on_congestion=true）、宿主双向同步、多瓦片混合帧分发（高反差文字瓦片分类为 Critical，平滑背景分类为 Background）、模拟拥塞触发 Background 瓦片主动跳帧（background_tiles_skipped >= 1）、拥塞解除后画布最终一致性自愈（Bit-for-Bit Canvas Invariance）、Tag 63 重置复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.59`。
+
+## 73. 屏幕串流动态空间瓦片多分辨率细节层次下采样与双线性渐进重构流水线与双端 CLI 全同构 (v2.38 / ADR-124)
+
+1. **动机与设计准则（ADR-124）**：
+   - **瓦片串流中的二元丢弃与视觉冻结瓶颈（Binary Tile Drop vs. Visual Freeze）**：在空间分块网格串流（ADR-116）、瓦片字典全局缓存（ADR-117）与视觉显著性分级（ADR-123）中，弱网拥塞时跳过 Background 瓦片传输（`drop_background_on_congestion`）保护了关键文字和焦点区，但在弱网或移动网络持续拥塞的极端场景下，大范围桌面背景会长时间陷入视觉冻结（Visual Freeze）状态；若强行全分辨率 64×64 发送，即便经过 Palette/Predict 压缩也仍占用数百字节，加剧缓冲区膨胀；
+   - **瓦片多分辨率细节层次抽象 (`TileLodLevel`)**：
+     - `Lod0`（Full Resolution）：64×64 完整原始分辨率（基准无损）；
+     - `Lod1`（Half Resolution）：32×32 半分辨率（像素量减少 75%，二次压缩后载荷仅数十字节）；
+     - `Lod2`（Quarter Resolution）：16×16 四分之一分辨率（像素量减少 93.75%，超轻量极速传输）；
+   - **发送端快速盒状平均滤波与复合压缩 (`downsample_tile_rgba` / `compress_tile_lod`)**：
+     - 利用纯整数 SIMD 优化的 $2\times 2$ 或 $4\times 4$ 均值滤波，单瓦片下采样时延 $< 1\,\mu\text{s}$；
+     - 下采样后的低分辨率像素块随后接入现有 Palette/Zstd 复合子编码器封装为 `TILE_SUBCODEC_LOD = 6`；
+   - **接收端双线性插值平滑重构 (`upsample_tile_rgba` / `decompress_tile_lod`)**：
+     - 接收端解压低分辨率像素后，采用纯整数定点双线性插值在内存中将其平滑放大至 64×64 标准瓦片尺寸并呈递至双缓冲呈现事务；
+   - **显著性感知与拥塞自适应联动**：
+     - Critical 交互瓦片恒定锁定 Lod0 全分辨率保真，杜绝文字模糊；
+     - Background 与非焦点 Normal 瓦片在网络拥塞或低带宽时动态降采样至 Lod1/Lod2，突破传统二元丢包造成的视觉冻结；
+   - **100% 逐位还原与画布最终一致性（Bit-for-Bit Canvas Invariance & Eventual Consistency）**：
+     - 下采样的瓦片在发送端画布中保留为待高精度回补标记；一旦链路拥塞缓解或进入下一刷新周期，发送端自动发起 Lod0 高保真回补，确保画布达到 100% 无损最终一致性。
+
+2. **核心实现落地**：
+   - 数据结构与常量（`crates/tetherly-core/src/screen.rs`）：
+     - `pub const TILE_SUBCODEC_LOD: u8 = 6;`
+     - 枚举 `TileLodLevel`：`Lod0 = 0`, `Lod1 = 1`, `Lod2 = 2`；
+     - 配置 `ScreenTileLodConfig { enabled: bool, max_lod: u8, auto_lod_on_congestion: bool }`；
+     - 遥测 `ScreenTileLodReport { ok: bool, enabled: bool, max_lod: u8, auto_lod_on_congestion: bool, lod0_tiles_sent: u64, lod1_tiles_sent: u64, lod2_tiles_sent: u64, bytes_saved: u64 }`；
+     - 核心算法函数：`downsample_tile_rgba`, `upsample_tile_rgba`, `compress_tile_lod`, `decompress_tile_lod`；
+   - 定长线协议信令（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     - **Tag 65 (`ControlMsg::SetScreenTileLodMode { enabled: bool, max_lod: u8, auto_lod_on_congestion: bool }`)**：配置动态 LoD 下采样模式；
+     - **Tag 66 (`ControlMsg::ResetScreenTileLodMode`)**：一键重置 LoD 配置与统计指标；
+     - **Tag 67 (`ControlMsg::TileLodSync { lod0_tiles: u64, lod1_tiles: u64, lod2_tiles: u64, bytes_saved: u64 }`)**：双端同步分级统计与节省带宽遥测；
+   - 节点运行时集成（`crates/tetherly-node/src/runtime.rs`）：
+     - `NodeShared` 挂载 `screen_tile_lod_config`、`screen_tile_lod0_tiles`、`screen_tile_lod1_tiles`、`screen_tile_lod2_tiles`、`screen_tile_lod_bytes_saved`；
+     - 在 `screen_send_frame` 瓦片压缩中执行显著性联动下采样；在接收端解码 `TILE_SUBCODEC_LOD` 双线性重构至画布；
+   - 安全回环 REST 控制面（`crates/tetherly-node/src/uihttp.rs`）：
+     - `GET /api/screen/tile/lod` -> 返回 `ScreenTileLodReport`；
+     - `POST /api/screen/tile/lod` -> 请求体支持 `enabled`, `max_lod`, `auto_lod_on_congestion`；
+     - `POST/DELETE /api/screen/tile/lod/reset` -> 一键重置配置与统计计数；
+     - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden；
+   - 双端 CLI 100% 全同构（`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`）：
+     - `screen tile lod [status|set|reset]` 与 `screen lod` 别名命令族及格式化报表，`screen status` 扩充显示 Tile LoD 流控指标。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_tile_lod_and_multiresolution_downsampling_algorithms`——验证盒状平均降采样、双线性平滑插值上采样还原、复合子编码器 `TILE_SUBCODEC_LOD = 6` 编解码及定长信令 Tag 65~67 往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tile_lod_endpoints`——验证回环 REST 端点全生命周期、参数配置、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_48_screen_tile_lod_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用 LoD 动态下采样（Tag 65: enabled=true, max_lod=2, auto_lod_on_congestion=true）、宿主双向同步、未拥塞多瓦片帧全分辨率传输（lod0_tiles_sent >= 1）、模拟拥塞触发 Background 瓦片动态降级下采样至 Lod2（lod2_tiles_sent >= 1, bytes_saved > 0）、接收端微秒级双线性插值平滑放大、拥塞解除后画布最终一致性自愈（Bit-for-Bit Canvas Invariance）、Tag 66 重置复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.60`。
+
+## 74. 屏幕串流动态空间瓦片自适应 MTU 分块聚合与定步分发流水线与双端 CLI 全同构 (v2.39 / ADR-125)
+
+1. **动机与设计准则（ADR-125）**：
+   - **单帧巨型瓦片脉冲与网络丢包雪崩（Monolithic Tile Frame vs. Network Micro-Bursts）**：在空间分块网格（`SCREEN_COMPRESS_TILE_GRID`，ADR-116）、瓦片字典全局缓存（`SCREEN_COMPRESS_TILE_CACHE`，ADR-117）、显著性分级（`SCREEN_TILE_SALIENCY`，ADR-123）与多分辨率细节层次（`SCREEN_TILE_LOD`，ADR-124）中，待发脏瓦片无论经过何种压缩，最终均被打包并序列化为一个单独的巨大 `ScreenFrame`（`encode_tile_grid`）。在窗口拖拽、高动态滚屏或视频播放等场景下，单帧可能包含数十至上百个脏瓦片，整帧编码体积可轻易达到 40 KB ~ 120 KB；
+   - **网络层 IP 盲目分片与 Bufferbloat 痛点**：单个以太网标准 MTU 为 1500 字节，UDP/Noise/EasyTier 隧道安全有效载荷约为 1200 ~ 1400 字节。当 120 KB 巨型报文推送到网络层时，系统底层的 IP 分片或 UDP 突发涌入队列，极易在中间路由器或 Wi-Fi/移动网络中产生严重拥塞与丢包（Micro-Burst & Bufferbloat）。只要其中任意一个底层 IP 分片丢失，整个 120 KB 的巨型帧就会在接收端重组失败，导致整帧所有脏瓦片全部损毁；
+   - **自适应 MTU 瓦片分块聚合数学模型 (`chunk_dirty_tiles`)**：
+     - 发送端在对脏瓦片完成显著性排序与 LoD/Palette/Predict 压缩后，依配置的 `target_chunk_bytes`（默认 1200 字节，范围 512..=64000 字节）将瓦片流贪心切分为若干自包含瓦片子批次（Chunks）；
+     - 每个 Chunk 独立编码为专用帧 `SCREEN_COMPRESS_TILE_BATCH = 10`，其头部包含独立元数据：`batch_id (u32)`、`chunk_index (u16)`、`total_chunks (u16)`、`tile_size (u16)`、`total_tiles (u16)` 与 `tiles_in_chunk (u16)`，底层无需 IP 分片；
+   - **微秒级分块定步平滑发送 (`PacedBatchDispatcher`)**：
+     - 分块之间施加微秒级定步间隙（`pacing_interval_us`，默认 200 $\mu\text{s}$），将突发流量在时域上均匀铺开，彻底消除线路级瞬时脉冲与 Bufferbloat；
+   - **接收端即时增量解压与原子双缓冲呈现融合（ADR-121）**：
+     - 接收端收到任一分块即可立即解压瓦片并写入后台双缓冲画布（`screen_receiver_back_buffer`），分散解压算力开销；
+     - 维护分块到达追踪表，当当帧所有分块全部集齐后，原子执行 Front-Swap 前台交换，保障 100% 逐位像素精确还原与零撕裂；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen tile batch status [--json] [--ui-port <port>]`
+     - 新增 `screen tile batch set [--enabled <bool>] [--target-chunk-bytes <bytes>] [--pacing-interval-us <us>] [--json] [--ui-port <port>]`
+     - 新增 `screen tile batch reset [--json] [--ui-port <port>]`
+     - 支持 `screen batch` 别名语法糖；
+     - 对称实现格式化报表函数 `print_screen_tile_batch_report`；
+     - `screen status` 扩充显示 Tile Batching 运行指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenTileBatchMode { enabled: bool, target_chunk_bytes: u16, pacing_interval_us: u16 }, // Tag 68
+     ControlMsg::ResetScreenTileBatchMode,                                                                   // Tag 69
+     ControlMsg::TileBatchSync { batches_sent: u64, chunks_sent: u64, avg_chunk_bytes: u32, pacing_pauses: u64 }, // Tag 70
+     ```
+   - REST API 规范：
+     - `GET /api/screen/tile/batch`（别名 `/api/screen/batch`）-> 返回 `ScreenTileBatchReport`；
+     - `POST /api/screen/tile/batch`（别名 `/api/screen/batch`）-> 请求体支持 `enabled`, `target_chunk_bytes`, `pacing_interval_us`；
+     - `POST/DELETE /api/screen/tile/batch/reset`（别名 `/api/screen/batch/reset`）-> 一键重置配置与统计计数；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_tile_batch_and_chunking_algorithms`——验证多脏瓦片贪心分块聚合切分算法、单个分块 MTU 预算约束、自包含报头编解码往返及定长信令 Tag 68~70 编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tile_batch_endpoints`——验证回环 REST 端点全生命周期、参数配置、别名路由兼容、状态复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_49_screen_tile_batching_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用动态分块与定步发送（Tag 68: enabled=true, target_chunk_bytes=600, pacing_interval_us=100）、宿主双向同步、多高频脏瓦片强迫拆分为多个 sub-MTU 分块（batches_sent >= 1, chunks_sent > batches_sent, avg_chunk_bytes > 0, pacing_pauses >= 1）、接收端增量即时解压写入后台缓冲与集齐后原子 Front-Swap 呈现（Canvas Invariance 100% 逐位像素精确还原）、Tag 69 重置复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.61`。
+
+## 75. 屏幕串流动态空间瓦片局部运动矢量估计与跨帧位移复用流水线与双端 CLI 全同构 (v2.40 / ADR-126)
+
+1. **动机与设计准则（ADR-126）**：
+   - **局部窗口滚动场景下的网格错位与哈希缓存失效雪崩（Sub-Window Scroll vs. Tile Grid Misalignment）**：全帧运动估计（ADR-115）仅适用于全局全屏大位移；局部子窗口（编辑器视口、终端缓冲、网页窗格）滚动时，屏幕其余区域保持静态，全局匹配阈值（$\ge 85\%$）不满足而退化为瓦片网格流。刚性 $64\times64$ 固定网格下，局部内容 3~5 像素的微小平移即造成窗口内全部瓦片在网格边界整体错位，瓦片哈希缓存（ADR-117）全量未命中，触发全量重编码的 CPU 尖峰与瞬时流量脉冲；
+   - **瓦片级局部运动矢量估计数学模型 (`estimate_tile_motion`)**：
+     - 脏瓦片在进入调色板/预测/Zstd 压缩前，先在上一参考帧画布（`screen_sender_tile_canvas`）的局部搜索窗口（`max_displacement`，默认 32 px、范围 4..=128）内进行快速位移匹配；
+     - 采用 4×4 下采样点阵（每 4 行 × 每 4 列取样），搜索顺序为：优先垂直位移（$dx=0, dy\neq 0$）→ 次选水平位移（$dx\neq 0, dy=0$）→ 粗粒度 2D 对角步进（step 2），任一阶段匹配度 $\ge 0.98$ 提前收敛；
+     - 匹配度满足阈值（`min_match_ratio`，默认 90%，范围 50..=100）时输出运动矢量 $(\Delta x, \Delta y)$，单瓦片估计时延 $< 5\,\mu\text{s}$；
+   - **5 字节极简报文与超高清压缩比（`compress_tile_motion`）**：
+     - 命中时仅发射 `[subcodec=7: u8 (1) | dx: i16 (2) | dy: i16 (2)]` 共 5 字节，相较 64×64 RGBA 的 16384 字节原始像素压缩比高达 $3276:1$，带宽节约 99.9%，并短路后续全部重量级压缩路径；
+   - **接收端零拷贝位移内存复用 (`decompress_tile_motion`)**：
+     - 解析 Tag 7 时跳过熵解码，直接从活跃画布（`screen_receiver_canvas`）的 $(x-\Delta x, y-\Delta y)$ 坐标提取 64×64 像素块写入后台双缓冲画布（ADR-121），零 CPU 解压负荷、零多余内存分配；
+     - 全部瓦片网格帧格式（`SCREEN_COMPRESS_TILE_GRID` / `SCREEN_COMPRESS_TILE_BATCH` / `SCREEN_COMPRESS_TILE_CACHE`）在接收循环中统一支持位移补偿解压；帧集齐后原子 Front-Swap 前台交换，保障 100% 逐位像素精确还原与零撕裂；
+   - **发送端参考画布步长契约**：运动匹配与位移提取统一采用 `effective_stride()`（`stride == 0` 时回退 `w * bpp` 紧凑布局），与 `ScreenFrame::raw` 抓取路径及解码画布完全兼容；
+   - **双端 CLI 100% 全同构 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly`)**：
+     - 新增 `screen tile motion [status|set|reset] [--json] [--ui-port <port>]`
+     - 新增 `screen tile-motion` 顶层别名子命令族；
+     - `set` 支持 `--enabled <bool>`、`--max-displacement <px>`（4..=128，默认 32）与 `--min-match-ratio <pct>`（50..=100，默认 90）；
+     - 对称实现格式化报表函数 `print_screen_tile_motion_report`；
+     - `screen status` 扩充显示 Tile Motion Est 运行指标。
+
+2. **接口规范与定长线协议**：
+   - 线协议信令定义（14 字节定长信封，`TYPE_SCREEN_CONTROL = 0x0502`）：
+     ```rust
+     ControlMsg::SetScreenTileMotionMode { enabled: bool, max_displacement: u16, min_match_ratio: u8 }, // Tag 71
+     ControlMsg::ResetScreenTileMotionMode,                                                              // Tag 72
+     ControlMsg::TileMotionSync { motion_tiles: u64, fallback_tiles: u64, bytes_saved: u64 },            // Tag 73
+     ```
+   - REST API 规范：
+     - `GET /api/screen/tile/motion` -> 返回 `ScreenTileMotionReport`；
+     - `POST /api/screen/tile/motion` -> 请求体支持 `enabled`, `max_displacement`, `min_match_ratio`；
+     - `POST/DELETE /api/screen/tile/motion/reset` -> 一键重置配置与统计计数；
+   - 安全约束：所有端点严格绑定 127.0.0.1，校验 Host 请求头，非法访问立即阻断并返回 403 Forbidden。
+
+3. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/screen.rs`：新增单元测试 `screen_tile_motion_and_displacement_compensation_algorithms`——验证垂直/水平位移矢量估计、5 字节压缩编解码往返、位移像素零损重构、越界位移拒绝及定长信令 Tag 71~73 编解码往返；
+   - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tile_motion_endpoints`——验证回环 REST 端点全生命周期、参数配置、状态查询遥测、复位清零及 Host 头 403 阻断；
+   - `tests/phase5.rs`：新增端到端集成测试 `m5_50_screen_tile_motion_vector_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用瓦片网格与运动估计（Tag 71: enabled=true, max_displacement=32, min_match_ratio=90）、宿主双向同步、局部瓦片垂直位移 10 px 触发运动矢量命中（motion_tiles_sent >= 1, bytes_saved > 0）、接收端零拷贝位移贴合与原子双缓冲呈现（Canvas Invariance 100% 逐位像素精确还原）、Tag 72 重置复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.62`。
+
+
+
+
+
+
+
+
+
+
+

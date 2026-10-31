@@ -27,7 +27,7 @@ use crate::telemetry::{TrafficReport, TrafficTelemetry};
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tetherly_core::frame::{
@@ -64,19 +64,20 @@ use tetherly_core::{
     ScreenCursorMode, ScreenCursorStats, ScreenCursorUpdate, ScreenDamageTracker, ScreenFecMode,
     ScreenFecReport, ScreenFecShard, ScreenFrame, ScreenHarqMode, ScreenHarqReport,
     ScreenLatencyBreakdown, ScreenLatencyReport, ScreenNack, ScreenPacerMode, ScreenPacerReport,
-    ScreenPlayoutAction, ScreenPlayoutMode, ScreenPlayoutStats, ScreenProbeMode, ScreenProbePacket,
-    ScreenProbeReport, ScreenProbeState, ScreenProbeStats, ScreenProfileFrame, ScreenProfilerMode,
-    ScreenReceiver, ScreenRecordingMeta, ScreenRecordingReader, ScreenRecordingWriter,
-    ScreenSender, ScreenSink, ScreenSource, ScreenSquelchMode, ScreenState, ScreenStats,
+    ScreenPlaybackEngine, ScreenPlaybackReport, ScreenPlaybackState, ScreenPlayoutAction,
+    ScreenPlayoutMode, ScreenPlayoutStats, ScreenProbeMode, ScreenProbePacket, ScreenProbeReport,
+    ScreenProbeState, ScreenProbeStats, ScreenProfileFrame, ScreenProfilerMode, ScreenReceiver,
+    ScreenRecordingMeta, ScreenRecordingReader, ScreenRecordingWriter, ScreenSender, ScreenSink,
+    ScreenSnapshotReport, ScreenSource, ScreenSquelchMode, ScreenState, ScreenStats,
     ScreenTrendlineMode, ScreenTrendlineReport, ScreenTunerMode, ScreenTuningReport,
-    ScreenTwccFeedback, ScreenTwccMode, ScreenTwccReport, ScreenTwccStats, SensitiveContentGuard,
-    TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator, TrustStore,
-    VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
+    ScreenTwccFeedback, ScreenTwccMode, ScreenTwccReport, ScreenTwccStats, ScreenWatermarkReport,
+    SensitiveContentGuard, TcpLimiter, TopologyStateFrame, TopologySyncReqFrame, TopologyValidator,
+    TrustStore, VirtualDisplayAnnounceFrame, VirtualDisplayAttachFrame, VirtualDisplayCodec,
     VirtualDisplayDetachFrame, VirtualDisplayFrameAck, VirtualDisplayMode,
     VirtualDisplayPixelFormat, VirtualDisplayRole, VirtualDisplayValidator, CLIPBOARD_OTP_CLEAR_MS,
     DEFAULT_LOCATE_DURATION_SECS, OVERLAY_PROBE_MS, SCREEN_RECORDING_REPLAY_LIMIT_MAX,
-    TYPE_SCREEN_FEC, TYPE_SCREEN_NACK, TYPE_SCREEN_PROBE, TYPE_SCREEN_PROFILE, TYPE_SCREEN_SYNC,
-    TYPE_SCREEN_TWCC,
+    TYPE_SCREEN_CONTROL, TYPE_SCREEN_FEC, TYPE_SCREEN_NACK, TYPE_SCREEN_PROBE, TYPE_SCREEN_PROFILE,
+    TYPE_SCREEN_SYNC, TYPE_SCREEN_TWCC,
 };
 use tetherly_crypto::Identity;
 use tetherly_net::dispatch::SessionEvent;
@@ -3078,6 +3079,343 @@ pub struct ScreenStatusReport {
     pub peer_recording: bool,
     #[serde(default)]
     pub recording_frames: u64,
+    #[serde(default)]
+    pub playback_active: bool,
+    #[serde(default)]
+    pub playback_state: String,
+    #[serde(default)]
+    pub playback_frame: u64,
+    #[serde(default)]
+    pub snapshot_count: u64,
+    #[serde(default)]
+    pub watermark_enabled: bool,
+    #[serde(default)]
+    pub watermark_enforced: bool,
+    #[serde(default)]
+    pub watermark_frames: u64,
+    #[serde(default)]
+    pub annotations_count: usize,
+    #[serde(default)]
+    pub laser_active: bool,
+    #[serde(default)]
+    pub annotations_total: u64,
+    #[serde(default)]
+    pub laser_updates_total: u64,
+    #[serde(default)]
+    pub whiteboard_undo_count: u64,
+    #[serde(default)]
+    pub whiteboard_redo_count: u64,
+    #[serde(default)]
+    pub whiteboard_read_only: bool,
+    #[serde(default)]
+    pub whiteboard_max_items: u16,
+    #[serde(default)]
+    pub roi_active: bool,
+    #[serde(default)]
+    pub roi_x: u16,
+    #[serde(default)]
+    pub roi_y: u16,
+    #[serde(default)]
+    pub roi_w: u16,
+    #[serde(default)]
+    pub roi_h: u16,
+    #[serde(default)]
+    pub roi_zoom_percent: u16,
+    #[serde(default)]
+    pub roi_updates: u64,
+    #[serde(default)]
+    pub color_mode: String,
+    #[serde(default)]
+    pub color_threshold: u8,
+    #[serde(default)]
+    pub color_updates: u64,
+    #[serde(default)]
+    pub delta_enabled: bool,
+    #[serde(default)]
+    pub delta_keyframe_interval: u16,
+    #[serde(default)]
+    pub delta_frames_sent: u64,
+    #[serde(default)]
+    pub delta_keyframes_sent: u64,
+    #[serde(default)]
+    pub delta_frames_received: u64,
+    #[serde(default)]
+    pub delta_keyframes_received: u64,
+    #[serde(default)]
+    pub delta_saved_bytes: u64,
+    #[serde(default)]
+    pub metric_enabled: bool,
+    #[serde(default)]
+    pub metric_sample_interval: u8,
+    #[serde(default)]
+    pub metric_evaluated_frames: u64,
+    #[serde(default)]
+    pub metric_psnr_db: f64,
+    #[serde(default)]
+    pub metric_ssim: f64,
+    #[serde(default)]
+    pub metric_quality_warning: bool,
+    #[serde(default)]
+    pub qoe_enabled: bool,
+    #[serde(default)]
+    pub qoe_mode: String,
+    #[serde(default)]
+    pub qoe_target_psnr_db: u8,
+    #[serde(default)]
+    pub qoe_target_ssim_pct: u8,
+    #[serde(default)]
+    pub qoe_actions_total: u64,
+    #[serde(default)]
+    pub qoe_last_action: String,
+    #[serde(default)]
+    pub pir_enabled: bool,
+    #[serde(default)]
+    pub pir_mode: String,
+    #[serde(default)]
+    pub pir_bands: u8,
+    #[serde(default)]
+    pub pir_sweeps_completed: u64,
+    #[serde(default)]
+    pub pir_slices_sent: u64,
+    #[serde(default)]
+    pub ltr_enabled: bool,
+    #[serde(default)]
+    pub ltr_auto_interval: u16,
+    #[serde(default)]
+    pub ltr_current_seq: u64,
+    #[serde(default)]
+    pub ltr_anchors_established: u64,
+    #[serde(default)]
+    pub ltr_recoveries_completed: u64,
+    #[serde(default)]
+    pub svc_enabled: bool,
+    #[serde(default)]
+    pub svc_mode: String,
+    #[serde(default)]
+    pub svc_drop_t1: bool,
+    #[serde(default)]
+    pub svc_t0_sent: u64,
+    #[serde(default)]
+    pub svc_t1_sent: u64,
+    #[serde(default)]
+    pub svc_t1_dropped: u64,
+    #[serde(default)]
+    pub motion_enabled: bool,
+    #[serde(default)]
+    pub motion_max_displacement: u16,
+    #[serde(default)]
+    pub motion_frames_sent: u64,
+    #[serde(default)]
+    pub motion_fallback_frames_sent: u64,
+    #[serde(default)]
+    pub motion_saved_bytes: u64,
+    #[serde(default)]
+    pub tile_enabled: bool,
+    #[serde(default)]
+    pub tile_size: u16,
+    #[serde(default)]
+    pub tile_frames_sent: u64,
+    #[serde(default)]
+    pub dirty_tiles_sent: u64,
+    #[serde(default)]
+    pub skipped_tiles_count: u64,
+    #[serde(default)]
+    pub tile_saved_bytes: u64,
+    #[serde(default)]
+    pub tile_cache_enabled: bool,
+    #[serde(default)]
+    pub tile_cache_max_entries: u16,
+    #[serde(default)]
+    pub tile_cache_entries: u16,
+    #[serde(default)]
+    pub tile_cache_hits: u64,
+    #[serde(default)]
+    pub tile_cache_misses: u64,
+    #[serde(default)]
+    pub tile_cache_hit_ratio_pct: f32,
+    #[serde(default)]
+    pub tile_cache_saved_bytes: u64,
+    #[serde(default)]
+    pub focus_enabled: bool,
+    #[serde(default)]
+    pub focus_mode: String,
+    #[serde(default)]
+    pub focus_radius: u16,
+    #[serde(default)]
+    pub focus_peripheral_skip_ratio: u8,
+    #[serde(default)]
+    pub focus_box_x: u16,
+    #[serde(default)]
+    pub focus_box_y: u16,
+    #[serde(default)]
+    pub focus_box_w: u16,
+    #[serde(default)]
+    pub focus_box_h: u16,
+    #[serde(default)]
+    pub focus_tiles_sent: u64,
+    #[serde(default)]
+    pub peripheral_tiles_sent: u64,
+    #[serde(default)]
+    pub peripheral_tiles_skipped: u64,
+    #[serde(default)]
+    pub focus_saved_bandwidth_bytes: u64,
+    #[serde(default)]
+    pub tile_palette_enabled: bool,
+    #[serde(default)]
+    pub tile_palette_max_colors: u8,
+    #[serde(default)]
+    pub tile_palette_enable_rle: bool,
+    #[serde(default)]
+    pub tile_palette_solid_tiles: u64,
+    #[serde(default)]
+    pub tile_palette_bilevel_tiles: u64,
+    #[serde(default)]
+    pub tile_palette_palette_tiles: u64,
+    #[serde(default)]
+    pub tile_palette_truecolor_tiles: u64,
+    #[serde(default)]
+    pub tile_palette_saved_bytes: u64,
+    #[serde(default)]
+    pub tile_predict_enabled: bool,
+    #[serde(default)]
+    pub tile_predict_filter_mode: String,
+    #[serde(default)]
+    pub tile_predict_enable_rct: bool,
+    #[serde(default)]
+    pub tile_predict_tiles_sent: u64,
+    #[serde(default)]
+    pub tile_predict_saved_bytes: u64,
+    #[serde(default)]
+    pub tile_present_enabled: bool,
+    #[serde(default)]
+    pub tile_present_vsync_mode: String,
+    #[serde(default)]
+    pub tile_present_double_buffer: bool,
+    #[serde(default)]
+    pub tile_present_tear_prevention: bool,
+    #[serde(default)]
+    pub tile_present_committed_transactions: u64,
+    #[serde(default)]
+    pub tile_present_swapped_frames: u64,
+    #[serde(default)]
+    pub tile_present_torn_frames_prevented: u64,
+    #[serde(default)]
+    pub tile_present_avg_swap_latency_us: u64,
+    #[serde(default)]
+    pub tile_nack_enabled: bool,
+    #[serde(default)]
+    pub tile_nack_timeout_ms: u16,
+    #[serde(default)]
+    pub tile_nack_max_retries: u8,
+    #[serde(default)]
+    pub tile_nack_requests_sent: u64,
+    #[serde(default)]
+    pub tile_nack_tiles_retransmitted: u64,
+    #[serde(default)]
+    pub tile_nack_degraded_commits: u64,
+    #[serde(default)]
+    pub tile_saliency_enabled: bool,
+    #[serde(default)]
+    pub tile_saliency_high_threshold: u8,
+    #[serde(default)]
+    pub tile_saliency_low_threshold: u8,
+    #[serde(default)]
+    pub tile_saliency_drop_background_on_congestion: bool,
+    #[serde(default)]
+    pub tile_saliency_critical_tiles: u64,
+    #[serde(default)]
+    pub tile_saliency_normal_tiles: u64,
+    #[serde(default)]
+    pub tile_saliency_background_tiles: u64,
+    #[serde(default)]
+    pub tile_saliency_background_skipped: u64,
+    #[serde(default)]
+    pub tile_lod_enabled: bool,
+    #[serde(default)]
+    pub tile_lod_max_lod: u8,
+    #[serde(default)]
+    pub tile_lod_auto_lod_on_congestion: bool,
+    #[serde(default)]
+    pub tile_lod0_tiles: u64,
+    #[serde(default)]
+    pub tile_lod1_tiles: u64,
+    #[serde(default)]
+    pub tile_lod2_tiles: u64,
+    #[serde(default)]
+    pub tile_lod_bytes_saved: u64,
+    #[serde(default)]
+    pub tile_batch_enabled: bool,
+    #[serde(default)]
+    pub tile_batch_target_chunk_bytes: u16,
+    #[serde(default)]
+    pub tile_batch_pacing_interval_us: u16,
+    #[serde(default)]
+    pub tile_batches_sent: u64,
+    #[serde(default)]
+    pub tile_chunks_sent: u64,
+    #[serde(default)]
+    pub tile_batch_avg_chunk_bytes: u32,
+    #[serde(default)]
+    pub tile_batch_pacing_pauses: u64,
+    #[serde(default)]
+    pub tile_motion_enabled: bool,
+    #[serde(default)]
+    pub tile_motion_max_displacement: u16,
+    #[serde(default)]
+    pub tile_motion_min_match_ratio: u8,
+    #[serde(default)]
+    pub tile_motion_tiles_sent: u64,
+    #[serde(default)]
+    pub tile_motion_fallback_tiles_sent: u64,
+    #[serde(default)]
+    pub tile_motion_bytes_saved: u64,
+}
+
+/// Internal accumulation state for Screen Objective Visual Quality Metric evaluation (v2.24 / ADR-110).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenQualityMetricState {
+    pub evaluated_frames: u64,
+    pub sum_mse: f64,
+    pub sum_psnr_db: f64,
+    pub sum_ssim: f64,
+    pub last_psnr_db: f64,
+    pub last_ssim: f64,
+}
+
+impl Default for ScreenQualityMetricState {
+    fn default() -> Self {
+        Self {
+            evaluated_frames: 0,
+            sum_mse: 0.0,
+            sum_psnr_db: 0.0,
+            sum_ssim: 0.0,
+            last_psnr_db: 100.0,
+            last_ssim: 1.0,
+        }
+    }
+}
+
+/// Update payload for screen security watermark configuration (v2.18 / ADR-104).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
+pub struct ScreenWatermarkUpdate {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub host_enforced: Option<bool>,
+    #[serde(default)]
+    pub text_template: Option<String>,
+    #[serde(default)]
+    pub opacity: Option<u8>,
+    #[serde(default)]
+    pub color_rgb: Option<[u8; 3]>,
+    #[serde(default)]
+    pub scale: Option<u8>,
+    #[serde(default)]
+    pub pattern: Option<String>,
+    #[serde(default)]
+    pub spacing_x: Option<u16>,
+    #[serde(default)]
+    pub spacing_y: Option<u16>,
 }
 
 /// Status report for the screen session recorder (v2.15 / ADR-101).
@@ -3128,6 +3466,27 @@ pub struct ScreenRecordingSession {
     pub frames: u64,
     pub bytes: u64,
     pub last_seq: u64,
+}
+
+/// Armed screen session in-container playback session (v2.16 / ADR-102).
+pub struct ScreenPlaybackSession {
+    pub path: std::path::PathBuf,
+    pub stop_tx: tokio::sync::watch::Sender<bool>,
+    pub paused: Arc<AtomicBool>,
+    pub speed: Arc<AtomicU32>,
+    pub loop_enabled: Arc<AtomicBool>,
+    pub report: Arc<Mutex<ScreenPlaybackReport>>,
+}
+
+impl ScreenPlaybackSession {
+    pub fn state(&self) -> ScreenPlaybackState {
+        let r = self.report.lock().unwrap();
+        r.state.parse().unwrap_or(ScreenPlaybackState::Idle)
+    }
+
+    pub fn current_report(&self) -> ScreenPlaybackReport {
+        self.report.lock().unwrap().clone()
+    }
 }
 
 /// Status report for screen damage detection and static frame adaptive squelch (v2.03 / ADR-089).
@@ -3396,6 +3755,14 @@ impl ScreenIntervalTracker {
     }
 }
 
+/// Active tile batch reassembly tracking on the receiver (v2.39 / ADR-125).
+#[derive(Debug, Clone)]
+pub struct TileBatchReceiverState {
+    pub batch_id: u32,
+    pub total_chunks: u16,
+    pub chunks_received: std::collections::BTreeSet<u16>,
+}
+
 struct Shared {
     identity: Identity,
     cfg: NodeConfig,
@@ -3513,6 +3880,249 @@ struct Shared {
     screen_recording: Mutex<Option<ScreenRecordingSession>>,
     /// Peer disclosed recording state via ControlMsg::SetRecordingState (ADR-101).
     screen_peer_recording: std::sync::atomic::AtomicBool,
+    /// Active screen session in-container playback session (ADR-102).
+    screen_playback: Mutex<Option<ScreenPlaybackSession>>,
+    /// Most recent uncompressed screen frame presented or grabbed for snapshots (ADR-103).
+    screen_last_frame: Mutex<Option<ScreenFrame>>,
+    /// Cumulative count of screen snapshots captured (ADR-103).
+    screen_snapshot_count: AtomicU64,
+    /// Dynamic security watermark configuration (v2.18 / ADR-104).
+    screen_watermark: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenWatermarkConfig>>,
+    /// Total frames presented with watermark overlay (v2.18 / ADR-104).
+    screen_watermark_frames: AtomicU64,
+    /// Whether peer host enforced security watermark overlay (v2.18 / ADR-104).
+    screen_peer_watermark_enforced: AtomicBool,
+    /// Collaborative whiteboard annotation items (v2.19 / ADR-105).
+    screen_annotations: std::sync::Arc<std::sync::RwLock<Vec<tetherly_core::AnnotationItem>>>,
+    /// Collaborative whiteboard history and undo/redo engine (v2.20 / ADR-106).
+    screen_whiteboard: std::sync::Arc<std::sync::RwLock<tetherly_core::WhiteboardHistory>>,
+    /// Total whiteboard undo operations executed (v2.20 / ADR-106).
+    screen_whiteboard_undo_count: AtomicU64,
+    /// Total whiteboard redo operations executed (v2.20 / ADR-106).
+    screen_whiteboard_redo_count: AtomicU64,
+    /// Transient virtual laser pointer state (v2.19 / ADR-105).
+    screen_laser_pointer:
+        std::sync::Arc<std::sync::RwLock<Option<tetherly_core::LaserPointerState>>>,
+    /// Active Screen Region-of-Interest (ROI) viewport configuration (v2.21 / ADR-107).
+    screen_roi: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenRoi>>,
+    /// Total count of ROI viewport updates applied (v2.21 / ADR-107).
+    screen_roi_updates: AtomicU64,
+    /// Active screen adaptive color depth & quantization configuration (v2.22 / ADR-108).
+    screen_color_mode: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenColorConfig>>,
+    /// Total count of color mode adjustments applied (v2.22 / ADR-108).
+    screen_color_updates: AtomicU64,
+    /// Active screen differential delta patch configuration (v2.23 / ADR-109).
+    screen_delta_config: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenDeltaConfig>>,
+    /// Total count of differential delta frames sent (v2.23 / ADR-109).
+    screen_delta_frames_sent: AtomicU64,
+    /// Total count of full keyframes sent (v2.23 / ADR-109).
+    screen_delta_keyframes_sent: AtomicU64,
+    /// Total count of differential delta frames received (v2.23 / ADR-109).
+    screen_delta_frames_received: AtomicU64,
+    /// Total count of full keyframes received (v2.23 / ADR-109).
+    screen_delta_keyframes_received: AtomicU64,
+    /// Total bytes saved by delta compression (v2.23 / ADR-109).
+    screen_delta_saved_bytes: AtomicU64,
+    /// Monotonic delta frame counter since last keyframe (v2.23 / ADR-109).
+    screen_delta_counter: AtomicU64,
+    /// Receiver-side persistent full reference canvas for delta patch blitting (v2.23 / ADR-109).
+    screen_receiver_canvas: std::sync::Arc<std::sync::RwLock<Option<tetherly_core::ScreenFrame>>>,
+    /// Receiver-side double-buffered back-buffer for atomic tile presentation transactions (v2.35 / ADR-121).
+    screen_receiver_back_buffer:
+        std::sync::Arc<std::sync::RwLock<Option<tetherly_core::ScreenFrame>>>,
+    /// Active screen objective visual quality metric configuration (v2.24 / ADR-110).
+    screen_quality_metric_config:
+        std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenQualityMetricConfig>>,
+    /// Active screen objective visual quality metric state and evaluation telemetry (v2.24 / ADR-110).
+    screen_quality_metric_state: std::sync::Arc<std::sync::RwLock<ScreenQualityMetricState>>,
+    /// Frame counter for metric sampling (v2.24 / ADR-110).
+    screen_metric_counter: AtomicU64,
+    /// Reference frame for objective visual quality metric distortion evaluation (v2.24 / ADR-110).
+    screen_metric_ref_frame: std::sync::Arc<std::sync::RwLock<Option<tetherly_core::ScreenFrame>>>,
+    /// Active screen autonomous closed-loop QoE adaptation controller (v2.25 / ADR-111).
+    screen_qoe_controller: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenQoeController>>,
+    /// Screen Streaming Progressive Intra-Refresh (PIR) configuration (v2.26 / ADR-112).
+    screen_pir_config: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenPirConfig>>,
+    /// Screen PIR total sweeps completed (v2.26 / ADR-112).
+    screen_pir_sweeps_completed: AtomicU64,
+    /// Screen PIR total band slices sent (v2.26 / ADR-112).
+    screen_pir_slices_sent: AtomicU64,
+    /// Screen PIR current band slice index [0..bands) (v2.26 / ADR-112).
+    screen_pir_current_band: AtomicU8,
+    /// Screen PIR active sweep in progress flag (v2.26 / ADR-112).
+    screen_pir_active_sweep: AtomicBool,
+    /// Screen Streaming Long-Term Reference (LTR) configuration (v2.27 / ADR-113).
+    screen_ltr_config: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenLtrConfig>>,
+    /// Current synchronized golden LTR reference frame sequence number (v2.27 / ADR-113).
+    screen_ltr_current_seq: AtomicU64,
+    /// Total LTR golden reference anchors established (v2.27 / ADR-113).
+    screen_ltr_anchors_established: AtomicU64,
+    /// Total LTR gap recovery requests dispatched (v2.27 / ADR-113).
+    screen_ltr_recoveries_requested: AtomicU64,
+    /// Total LTR differential recovery frames successfully completed (v2.27 / ADR-113).
+    screen_ltr_recoveries_completed: AtomicU64,
+    /// Total burst traffic bytes saved by LTR differential recovery vs full IDR keyframe (v2.27 / ADR-113).
+    screen_ltr_saved_burst_bytes: AtomicU64,
+    /// Flag indicating an incoming LTR recovery request is pending next frame emission (v2.27 / ADR-113).
+    screen_ltr_recovery_pending: AtomicBool,
+    /// Sender-side persistent golden reference frame canvas (v2.27 / ADR-113).
+    screen_sender_ltr_canvas: std::sync::Arc<std::sync::RwLock<Option<tetherly_core::ScreenFrame>>>,
+    /// Receiver-side persistent golden reference frame canvas (v2.27 / ADR-113).
+    screen_receiver_ltr_canvas:
+        std::sync::Arc<std::sync::RwLock<Option<tetherly_core::ScreenFrame>>>,
+    /// Screen 2-Layer Temporal Scalability (SVC-T) Configuration (v2.28 / ADR-114).
+    screen_svc_config: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenSvcConfig>>,
+    /// Total T0 base layer frames emitted (v2.28 / ADR-114).
+    screen_svc_t0_frames_sent: AtomicU64,
+    /// Total T1 enhancement layer frames emitted (v2.28 / ADR-114).
+    screen_svc_t1_frames_sent: AtomicU64,
+    /// Total T1 enhancement layer frames dropped for congestion mitigation (v2.28 / ADR-114).
+    screen_svc_t1_frames_dropped: AtomicU64,
+    /// Total bandwidth bytes saved by dropping T1 frames (v2.28 / ADR-114).
+    screen_svc_saved_bytes: AtomicU64,
+    /// Sender-side T0 base layer reference frame canvas (v2.28 / ADR-114).
+    screen_sender_t0_canvas: std::sync::Arc<std::sync::RwLock<Option<tetherly_core::ScreenFrame>>>,
+    /// Receiver-side T0 base layer reference frame canvas (v2.28 / ADR-114).
+    screen_receiver_t0_canvas:
+        std::sync::Arc<std::sync::RwLock<Option<tetherly_core::ScreenFrame>>>,
+    /// Screen 2D Motion Vector Estimation & Displacement Compensation Configuration (v2.29 / ADR-115).
+    screen_motion_config: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenMotionConfig>>,
+    /// Total motion scroll accelerated frames emitted (v2.29 / ADR-115).
+    screen_motion_frames_sent: AtomicU64,
+    /// Total fallback frames when motion match failed (v2.29 / ADR-115).
+    screen_motion_fallback_frames_sent: AtomicU64,
+    /// Total bandwidth bytes saved by motion scroll strip compression (v2.29 / ADR-115).
+    screen_motion_saved_bytes: AtomicU64,
+    /// Sender-side motion estimation reference frame canvas (v2.29 / ADR-115).
+    screen_sender_motion_canvas:
+        std::sync::Arc<std::sync::RwLock<Option<tetherly_core::ScreenFrame>>>,
+    /// Screen Spatial Tile-Grid Decomposition Configuration (v2.30 / ADR-116).
+    screen_tile_config: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenTileConfig>>,
+    /// Total spatial tile-grid frames emitted (v2.30 / ADR-116).
+    screen_tile_frames_sent: AtomicU64,
+    /// Total dirty tiles emitted (v2.30 / ADR-116).
+    screen_tile_dirty_tiles_sent: AtomicU64,
+    /// Total unchanged tiles skipped (v2.30 / ADR-116).
+    screen_tile_skipped_count: AtomicU64,
+    /// Total bandwidth bytes saved by skipping unchanged tiles (v2.30 / ADR-116).
+    screen_tile_saved_bytes: AtomicU64,
+    /// Sender-side spatial tile-grid reference frame canvas (v2.30 / ADR-116).
+    screen_sender_tile_canvas:
+        std::sync::Arc<std::sync::RwLock<Option<tetherly_core::ScreenFrame>>>,
+    /// Screen Spatial Tile Dictionary Cache Configuration (v2.31 / ADR-117).
+    screen_tile_cache_config:
+        std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenTileCacheConfig>>,
+    /// Sender-side tile dictionary cache (v2.31 / ADR-117).
+    screen_tile_cache_dict: std::sync::Arc<Mutex<tetherly_core::ScreenTileDictionary>>,
+    /// Receiver-side tile dictionary cache slots (v2.31 / ADR-117).
+    screen_tile_cache_receiver: std::sync::Arc<Mutex<Vec<Option<Vec<u8>>>>>,
+    /// Total tile cache hits (zero-payload reuse) (v2.31 / ADR-117).
+    screen_tile_cache_hits: AtomicU64,
+    /// Total tile cache misses (compressed patch transmission) (v2.31 / ADR-117).
+    screen_tile_cache_misses: AtomicU64,
+    /// Total bandwidth bytes saved by zero-payload cache hits (v2.31 / ADR-117).
+    screen_tile_cache_saved_bytes: AtomicU64,
+    /// Screen Foveated Focus Awareness & Priority Scheduling Configuration (v2.32 / ADR-118).
+    screen_focus_config: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenFocusConfig>>,
+    /// Total Priority 0 (Focus Zone) tiles sent with zero decimation (v2.32 / ADR-118).
+    screen_focus_tiles_sent: AtomicU64,
+    /// Total Priority 1 (Peripheral Zone) tiles sent on cadence refresh (v2.32 / ADR-118).
+    screen_focus_peripheral_sent: AtomicU64,
+    /// Total Priority 1 (Peripheral Zone) tiles skipped due to foveated decimation (v2.32 / ADR-118).
+    screen_focus_peripheral_skipped: AtomicU64,
+    /// Total bandwidth bytes saved by peripheral foveated tile decimation (v2.32 / ADR-118).
+    screen_focus_saved_bytes: AtomicU64,
+    /// Screen tile-level adaptive palette compression configuration (v2.33 / ADR-119).
+    screen_tile_palette_config:
+        std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenTilePaletteConfig>>,
+    /// Total solid color tiles compressed (v2.33 / ADR-119).
+    screen_tile_palette_solid_count: AtomicU64,
+    /// Total bi-level bitmap tiles compressed (v2.33 / ADR-119).
+    screen_tile_palette_bilevel_count: AtomicU64,
+    /// Total 16-color indexed palette tiles compressed (v2.33 / ADR-119).
+    screen_tile_palette_palette_count: AtomicU64,
+    /// Total truecolor tiles fallback (v2.33 / ADR-119).
+    screen_tile_palette_truecolor_count: AtomicU64,
+    /// Total bandwidth bytes saved by tile palette compression (v2.33 / ADR-119).
+    screen_tile_palette_saved_bytes: AtomicU64,
+    /// Screen tile-level predictive filter & reversible color transform configuration (v2.34 / ADR-120).
+    screen_tile_predict_config:
+        std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenTilePredictConfig>>,
+    /// Total truecolor tiles compressed using predictive filter pipeline (v2.34 / ADR-120).
+    screen_tile_predict_tiles_count: AtomicU64,
+    /// Total bandwidth bytes saved by tile predictive filter pipeline (v2.34 / ADR-120).
+    screen_tile_predict_saved_bytes: AtomicU64,
+    /// Screen tile presentation transaction and double-buffered swap configuration (v2.35 / ADR-121).
+    screen_tile_present_config:
+        std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenTilePresentConfig>>,
+    /// Total presentation transactions committed (v2.35 / ADR-121).
+    screen_tile_present_committed_txs: AtomicU64,
+    /// Total frames swapped atomically into the front display buffer (v2.35 / ADR-121).
+    screen_tile_present_swapped_frames: AtomicU64,
+    /// Total visual tear occurrences prevented by atomic staging (v2.35 / ADR-121).
+    screen_tile_present_torn_prevented: AtomicU64,
+    /// Cumulative swap latency in microseconds (v2.35 / ADR-121).
+    screen_tile_present_total_latency_us: AtomicU64,
+    /// Screen streaming tile-level fast retransmission and micro-NACK configuration (v2.36 / ADR-122).
+    screen_tile_nack_config: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenTileNackConfig>>,
+    /// Sender bounded ring-buffer of recent dirty tiles for instant retransmission (v2.36 / ADR-122).
+    screen_tile_resend_buffer:
+        std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenTileResendBuffer>>,
+    /// Total tile-level micro-NACK requests sent (v2.36 / ADR-122).
+    screen_tile_nack_requests_sent: AtomicU64,
+    /// Total tiles retransmitted upon micro-NACK requests (v2.36 / ADR-122).
+    screen_tile_nack_tiles_retransmitted: AtomicU64,
+    /// Total presentation transactions degraded-committed due to timeout or max retries (v2.36 / ADR-122).
+    screen_tile_nack_degraded_commits: AtomicU64,
+    /// Screen streaming dynamic tile saliency and tiered priority scheduling configuration (v2.37 / ADR-123).
+    screen_tile_saliency_config:
+        std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenTileSaliencyConfig>>,
+    /// Cumulative count of critical-tier tiles sent (v2.37 / ADR-123).
+    screen_tile_saliency_critical_tiles: AtomicU64,
+    /// Cumulative count of normal-tier tiles sent (v2.37 / ADR-123).
+    screen_tile_saliency_normal_tiles: AtomicU64,
+    /// Cumulative count of background-tier tiles sent (v2.37 / ADR-123).
+    screen_tile_saliency_background_tiles: AtomicU64,
+    /// Cumulative count of background-tier tiles skipped during network congestion (v2.37 / ADR-123).
+    screen_tile_saliency_background_skipped: AtomicU64,
+    /// Configuration for screen tile dynamic multi-resolution Level-of-Detail (LoD) downsampling (v2.38 / ADR-124).
+    screen_tile_lod_config: std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenTileLodConfig>>,
+    /// Cumulative count of full-resolution Lod0 tiles sent (v2.38 / ADR-124).
+    screen_tile_lod0_tiles: AtomicU64,
+    /// Cumulative count of half-resolution Lod1 tiles sent (v2.38 / ADR-124).
+    screen_tile_lod1_tiles: AtomicU64,
+    /// Cumulative count of quarter-resolution Lod2 tiles sent (v2.38 / ADR-124).
+    screen_tile_lod2_tiles: AtomicU64,
+    /// Cumulative bytes saved via LoD downsampling (v2.38 / ADR-124).
+    screen_tile_lod_bytes_saved: AtomicU64,
+    /// Configuration for screen dynamic tile MTU chunking and pacing (v2.39 / ADR-125).
+    screen_tile_batch_config:
+        std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenTileBatchConfig>>,
+    /// Cumulative count of tile batches sent (v2.39 / ADR-125).
+    screen_tile_batches_sent: AtomicU64,
+    /// Cumulative count of tile chunks sent (v2.39 / ADR-125).
+    screen_tile_chunks_sent: AtomicU64,
+    /// Cumulative payload bytes across all tile batch chunks sent (v2.39 / ADR-125).
+    screen_tile_batch_bytes_total: AtomicU64,
+    /// Cumulative count of pacing delays applied between chunks (v2.39 / ADR-125).
+    screen_tile_batch_pacing_pauses: AtomicU64,
+    /// Active tile batch reassembly tracking on the receiver (v2.39 / ADR-125).
+    screen_tile_batch_receiver_state: Mutex<Option<TileBatchReceiverState>>,
+    /// Configuration for screen tile local motion estimation and displacement compensation (v2.40 / ADR-126).
+    screen_tile_motion_config:
+        std::sync::Arc<std::sync::RwLock<tetherly_core::ScreenTileMotionConfig>>,
+    /// Cumulative count of tiles compressed using local motion displacement (v2.40 / ADR-126).
+    screen_tile_motion_tiles_sent: AtomicU64,
+    /// Cumulative count of tiles falling back from motion estimation to other subcodecs (v2.40 / ADR-126).
+    screen_tile_motion_fallback_tiles_sent: AtomicU64,
+    /// Cumulative payload bytes saved via tile motion displacement (v2.40 / ADR-126).
+    screen_tile_motion_bytes_saved: AtomicU64,
+    /// Total annotations added (v2.19 / ADR-105).
+    screen_annotation_count: AtomicU64,
+    /// Total laser pointer coordinate updates (v2.19 / ADR-105).
+    screen_laser_updates: AtomicU64,
+    /// Client-side outbound channel for raw InnerFrames (v2.19 / ADR-105).
+    screen_client_out: AsyncMutex<Option<mpsc::Sender<InnerFrame>>>,
     /// Active display ID for screen capture (ADR-097). Defaults to 0 (Primary).
     screen_active_display_id: AtomicU8,
     /// Known displays available on this host (ADR-097).
@@ -3614,6 +4224,134 @@ struct Shared {
     active_bench: Mutex<Option<ActiveBenchSession>>,
     last_bench_report: Mutex<Option<BenchReportFrame>>,
     bandwidth_profiles: Mutex<BandwidthProfileTable>,
+}
+
+impl Shared {
+    pub fn record_quality_metric(&self, frame: &tetherly_core::ScreenFrame) {
+        let (enabled, sample_interval) = {
+            let cfg = self.screen_quality_metric_config.read().unwrap();
+            let qoe_active = self
+                .screen_qoe_controller
+                .read()
+                .unwrap()
+                .config()
+                .is_active();
+            (cfg.enabled || qoe_active, cfg.sample_interval)
+        };
+        if !enabled || sample_interval == 0 || frame.compressed() {
+            return;
+        }
+
+        let mut ref_guard = self.screen_metric_ref_frame.write().unwrap();
+        match ref_guard.as_ref() {
+            None => {
+                *ref_guard = Some(frame.clone());
+            }
+            Some(ref_frame) => {
+                if ref_frame.rect.w != frame.rect.w
+                    || ref_frame.rect.h != frame.rect.h
+                    || ref_frame.format != frame.format
+                {
+                    *ref_guard = Some(frame.clone());
+                    return;
+                }
+                let count = self
+                    .screen_metric_counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if (count + 1) % (sample_interval as u64) == 0 {
+                    if let (Ok(mse), Ok(psnr), Ok(ssim)) = (
+                        frame.compute_mse(ref_frame),
+                        frame.compute_psnr(ref_frame),
+                        frame.compute_ssim(ref_frame),
+                    ) {
+                        let mut state = self.screen_quality_metric_state.write().unwrap();
+                        state.evaluated_frames += 1;
+                        state.sum_mse += mse;
+                        state.sum_psnr_db += psnr;
+                        state.sum_ssim += ssim;
+                        state.last_psnr_db = psnr;
+                        state.last_ssim = ssim;
+
+                        // ADR-111 / v2.25: Autonomous Closed-Loop QoE Adaptation
+                        let now_us = self.clock.unix_us();
+                        let metric_rep = tetherly_core::ScreenQualityMetricReport {
+                            ok: true,
+                            enabled: true,
+                            sample_interval,
+                            evaluated_frames: state.evaluated_frames,
+                            avg_mse: state.sum_mse / (state.evaluated_frames as f64),
+                            avg_psnr_db: state.sum_psnr_db / (state.evaluated_frames as f64),
+                            avg_ssim: state.sum_ssim / (state.evaluated_frames as f64),
+                            last_psnr_db: psnr,
+                            last_ssim: ssim,
+                            quality_warning: psnr < 30.0 || ssim < 0.85,
+                        };
+                        let action = {
+                            let mut qoe = self.screen_qoe_controller.write().unwrap();
+                            qoe.evaluate(&metric_rep, now_us)
+                        };
+                        match action {
+                            tetherly_core::ScreenQoeAction::Hold => {}
+                            tetherly_core::ScreenQoeAction::BoostBitrate => {
+                                if let Ok(mut engine) = self.screen_engine.lock() {
+                                    let cur = engine.bitrate_bps();
+                                    let boosted = (cur.saturating_mul(120) / 100)
+                                        .min(tetherly_core::SCREEN_BITRATE_MAX_BPS);
+                                    engine.set_bitrate_bps(boosted);
+                                    if let Some(sel) = &self.screen_encode_codec {
+                                        sel.set_bitrate_bps(boosted);
+                                    }
+                                    self.screen_source.set_bitrate_bps(boosted);
+                                }
+                            }
+                            tetherly_core::ScreenQoeAction::UpgradeScale => {
+                                if let Ok(mut engine) = self.screen_engine.lock() {
+                                    let cur = engine.scale_pct();
+                                    if cur < 100 {
+                                        engine.set_scale_pct(100);
+                                        if let Some(sel) = &self.screen_encode_codec {
+                                            sel.set_scale_pct(100);
+                                        }
+                                        self.screen_source.set_scale_pct(100);
+                                    }
+                                }
+                            }
+                            tetherly_core::ScreenQoeAction::LowerQp => {
+                                if let Ok(mut engine) = self.screen_engine.lock() {
+                                    let (min_qp, max_qp) = engine.qp_range();
+                                    let new_min = min_qp.saturating_sub(4).max(10);
+                                    let new_max = max_qp.saturating_sub(4).max(20);
+                                    engine.set_qp_range(new_min, new_max);
+                                }
+                            }
+                            tetherly_core::ScreenQoeAction::ForceKeyframe => {
+                                if let Ok(mut engine) = self.screen_engine.lock() {
+                                    let _ = engine
+                                        .on_control(tetherly_core::ControlMsg::KeyframeRequest);
+                                }
+                                self.screen_source.force_idr();
+                                if let Some(sel) = &self.screen_encode_codec {
+                                    sel.force_idr();
+                                }
+                            }
+                            tetherly_core::ScreenQoeAction::FallbackThrottle => {
+                                if let Ok(mut engine) = self.screen_engine.lock() {
+                                    let cur = engine.fps_target();
+                                    let new_fps = cur.saturating_sub(5).max(15);
+                                    engine.set_fps(new_fps);
+                                    if let Some(sel) = &self.screen_encode_codec {
+                                        sel.set_fps(new_fps);
+                                    }
+                                    self.screen_source.set_fps(new_fps);
+                                }
+                            }
+                        }
+                    }
+                    *ref_guard = Some(frame.clone());
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -3963,6 +4701,176 @@ impl Node {
             }),
             screen_recording: Mutex::new(None),
             screen_peer_recording: std::sync::atomic::AtomicBool::new(false),
+            screen_playback: Mutex::new(None),
+            screen_last_frame: Mutex::new(None),
+            screen_snapshot_count: AtomicU64::new(0),
+            screen_watermark: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenWatermarkConfig::default(),
+            )),
+            screen_watermark_frames: AtomicU64::new(0),
+            screen_peer_watermark_enforced: AtomicBool::new(false),
+            screen_annotations: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
+            screen_whiteboard: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::WhiteboardHistory::default(),
+            )),
+            screen_whiteboard_undo_count: AtomicU64::new(0),
+            screen_whiteboard_redo_count: AtomicU64::new(0),
+            screen_laser_pointer: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            screen_roi: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenRoi::default(),
+            )),
+            screen_roi_updates: AtomicU64::new(0),
+            screen_color_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenColorConfig::default(),
+            )),
+            screen_color_updates: AtomicU64::new(0),
+            screen_delta_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenDeltaConfig::default(),
+            )),
+            screen_delta_frames_sent: AtomicU64::new(0),
+            screen_delta_keyframes_sent: AtomicU64::new(0),
+            screen_delta_frames_received: AtomicU64::new(0),
+            screen_delta_keyframes_received: AtomicU64::new(0),
+            screen_delta_saved_bytes: AtomicU64::new(0),
+            screen_delta_counter: AtomicU64::new(0),
+            screen_receiver_canvas: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            screen_receiver_back_buffer: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            screen_quality_metric_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenQualityMetricConfig::default(),
+            )),
+            screen_quality_metric_state: std::sync::Arc::new(std::sync::RwLock::new(
+                ScreenQualityMetricState::default(),
+            )),
+            screen_metric_counter: AtomicU64::new(0),
+            screen_metric_ref_frame: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            screen_qoe_controller: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenQoeController::default(),
+            )),
+            screen_pir_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenPirConfig::default(),
+            )),
+            screen_pir_sweeps_completed: AtomicU64::new(0),
+            screen_pir_slices_sent: AtomicU64::new(0),
+            screen_pir_current_band: AtomicU8::new(0),
+            screen_pir_active_sweep: AtomicBool::new(false),
+            screen_ltr_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenLtrConfig::default(),
+            )),
+            screen_ltr_current_seq: AtomicU64::new(0),
+            screen_ltr_anchors_established: AtomicU64::new(0),
+            screen_ltr_recoveries_requested: AtomicU64::new(0),
+            screen_ltr_recoveries_completed: AtomicU64::new(0),
+            screen_ltr_saved_burst_bytes: AtomicU64::new(0),
+            screen_ltr_recovery_pending: AtomicBool::new(false),
+            screen_sender_ltr_canvas: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            screen_receiver_ltr_canvas: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            screen_svc_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenSvcConfig::default(),
+            )),
+            screen_svc_t0_frames_sent: AtomicU64::new(0),
+            screen_svc_t1_frames_sent: AtomicU64::new(0),
+            screen_svc_t1_frames_dropped: AtomicU64::new(0),
+            screen_svc_saved_bytes: AtomicU64::new(0),
+            screen_sender_t0_canvas: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            screen_receiver_t0_canvas: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            screen_motion_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenMotionConfig::default(),
+            )),
+            screen_motion_frames_sent: AtomicU64::new(0),
+            screen_motion_fallback_frames_sent: AtomicU64::new(0),
+            screen_motion_saved_bytes: AtomicU64::new(0),
+            screen_sender_motion_canvas: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            screen_tile_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenTileConfig::default(),
+            )),
+            screen_tile_frames_sent: AtomicU64::new(0),
+            screen_tile_dirty_tiles_sent: AtomicU64::new(0),
+            screen_tile_skipped_count: AtomicU64::new(0),
+            screen_tile_saved_bytes: AtomicU64::new(0),
+            screen_sender_tile_canvas: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            screen_tile_cache_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenTileCacheConfig::default(),
+            )),
+            screen_tile_cache_dict: std::sync::Arc::new(Mutex::new(
+                tetherly_core::ScreenTileDictionary::new(
+                    tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES,
+                ),
+            )),
+            screen_tile_cache_receiver: std::sync::Arc::new(Mutex::new(vec![
+                None;
+                tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES
+                    as usize
+            ])),
+            screen_tile_cache_hits: AtomicU64::new(0),
+            screen_tile_cache_misses: AtomicU64::new(0),
+            screen_tile_cache_saved_bytes: AtomicU64::new(0),
+            screen_focus_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenFocusConfig::default(),
+            )),
+            screen_focus_tiles_sent: AtomicU64::new(0),
+            screen_focus_peripheral_sent: AtomicU64::new(0),
+            screen_focus_peripheral_skipped: AtomicU64::new(0),
+            screen_focus_saved_bytes: AtomicU64::new(0),
+            screen_tile_palette_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenTilePaletteConfig::default(),
+            )),
+            screen_tile_palette_solid_count: AtomicU64::new(0),
+            screen_tile_palette_bilevel_count: AtomicU64::new(0),
+            screen_tile_palette_palette_count: AtomicU64::new(0),
+            screen_tile_palette_truecolor_count: AtomicU64::new(0),
+            screen_tile_palette_saved_bytes: AtomicU64::new(0),
+            screen_tile_predict_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenTilePredictConfig::default(),
+            )),
+            screen_tile_predict_tiles_count: AtomicU64::new(0),
+            screen_tile_predict_saved_bytes: AtomicU64::new(0),
+            screen_tile_present_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenTilePresentConfig::default(),
+            )),
+            screen_tile_present_committed_txs: AtomicU64::new(0),
+            screen_tile_present_swapped_frames: AtomicU64::new(0),
+            screen_tile_present_torn_prevented: AtomicU64::new(0),
+            screen_tile_present_total_latency_us: AtomicU64::new(0),
+            screen_tile_nack_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenTileNackConfig::default(),
+            )),
+            screen_tile_resend_buffer: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenTileResendBuffer::default(),
+            )),
+            screen_tile_nack_requests_sent: AtomicU64::new(0),
+            screen_tile_nack_tiles_retransmitted: AtomicU64::new(0),
+            screen_tile_nack_degraded_commits: AtomicU64::new(0),
+            screen_tile_saliency_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenTileSaliencyConfig::default(),
+            )),
+            screen_tile_saliency_critical_tiles: AtomicU64::new(0),
+            screen_tile_saliency_normal_tiles: AtomicU64::new(0),
+            screen_tile_saliency_background_tiles: AtomicU64::new(0),
+            screen_tile_saliency_background_skipped: AtomicU64::new(0),
+            screen_tile_lod_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenTileLodConfig::default(),
+            )),
+            screen_tile_lod0_tiles: AtomicU64::new(0),
+            screen_tile_lod1_tiles: AtomicU64::new(0),
+            screen_tile_lod2_tiles: AtomicU64::new(0),
+            screen_tile_lod_bytes_saved: AtomicU64::new(0),
+            screen_tile_batch_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenTileBatchConfig::default(),
+            )),
+            screen_tile_batches_sent: AtomicU64::new(0),
+            screen_tile_chunks_sent: AtomicU64::new(0),
+            screen_tile_batch_bytes_total: AtomicU64::new(0),
+            screen_tile_batch_pacing_pauses: AtomicU64::new(0),
+            screen_tile_batch_receiver_state: Mutex::new(None),
+            screen_tile_motion_config: std::sync::Arc::new(std::sync::RwLock::new(
+                tetherly_core::ScreenTileMotionConfig::default(),
+            )),
+            screen_tile_motion_tiles_sent: AtomicU64::new(0),
+            screen_tile_motion_fallback_tiles_sent: AtomicU64::new(0),
+            screen_tile_motion_bytes_saved: AtomicU64::new(0),
+            screen_annotation_count: AtomicU64::new(0),
+            screen_laser_updates: AtomicU64::new(0),
+            screen_client_out: AsyncMutex::new(None),
             screen_active_display_id: AtomicU8::new(initial_display_id),
             screen_displays: Mutex::new(initial_displays),
             screen_display_switches_count: AtomicU64::new(0),
@@ -20573,6 +21481,58 @@ impl Node {
                                     }
                                     continue;
                                 }
+                                if frame.ty == tetherly_core::TYPE_SCREEN_ANNOTATION {
+                                    if let Ok(msg) = tetherly_core::ScreenAnnotationMsg::from_frame(&frame) {
+                                        match msg {
+                                            tetherly_core::ScreenAnnotationMsg::Add(item) => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                let _ = wb.add_item(item);
+                                                node.shared.screen_annotation_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                            }
+                                            tetherly_core::ScreenAnnotationMsg::Remove { id } => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                wb.active_items_mut().retain(|it| it.id != id);
+                                                *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                            }
+                                            tetherly_core::ScreenAnnotationMsg::Undo { author } => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                let a_opt = if author.is_empty() { None } else { Some(author.as_str()) };
+                                                let undone = wb.undo(a_opt);
+                                                if undone.is_some() {
+                                                    node.shared.screen_whiteboard_undo_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                    *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                                }
+                                            }
+                                            tetherly_core::ScreenAnnotationMsg::Redo { author } => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                let a_opt = if author.is_empty() { None } else { Some(author.as_str()) };
+                                                let redone = wb.redo(a_opt);
+                                                if redone.is_some() {
+                                                    node.shared.screen_whiteboard_redo_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                    *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                                }
+                                            }
+                                            tetherly_core::ScreenAnnotationMsg::Clear => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                if wb.policy().allow_peer_clear {
+                                                    wb.clear();
+                                                    node.shared.screen_annotations.write().unwrap().clear();
+                                                }
+                                            }
+                                            tetherly_core::ScreenAnnotationMsg::Snapshot(snapshot) => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                let _ = wb.import_snapshot(snapshot, true);
+                                                *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                            }
+                                            tetherly_core::ScreenAnnotationMsg::Policy(policy) => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                wb.set_policy(policy);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
                                 if frame.ty == TYPE_SCREEN_PROFILE {
                                     if let Ok(profile) = ScreenProfileFrame::decode(&frame.payload) {
                                         let mut engine = node
@@ -20657,6 +21617,14 @@ impl Node {
                                         node.shared.screen_privacy_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                                         node.shared.screen_privacy_lock_input.store(false, std::sync::atomic::Ordering::Relaxed);
                                         node.shared.screen_privacy_last_change_us.store(now_us, std::sync::atomic::Ordering::Relaxed);
+                                        node.shared.screen_peer_watermark_enforced.store(false, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    if let ControlMsg::SetWatermarkState { enabled, host_enforced } = msg {
+                                        let mut cfg = node.shared.screen_watermark.write().unwrap();
+                                        cfg.enabled = enabled;
+                                        cfg.host_enforced = host_enforced;
+                                        node.shared.screen_peer_watermark_enforced.store(host_enforced, std::sync::atomic::Ordering::Relaxed);
+                                        tracing::info!(enabled, host_enforced, "host updated screen watermark state from peer");
                                     }
                                     if matches!(msg, ControlMsg::ResetLatencyProfile) {
                                         *node.shared.screen_latency_stats.lock().expect("latency stats") = {
@@ -20685,6 +21653,482 @@ impl Node {
                                             .screen_peer_recording
                                             .store(active, std::sync::atomic::Ordering::Relaxed);
                                         tracing::info!(active, "peer screen recording state updated");
+                                    }
+                                    match &msg {
+                                        ControlMsg::SetLaserPointer { x, y, active, color_rgb } => {
+                                            let state = if *active {
+                                                Some(tetherly_core::LaserPointerState {
+                                                    x: *x,
+                                                    y: *y,
+                                                    active: true,
+                                                    color_rgb: *color_rgb,
+                                                    radius: 12,
+                                                })
+                                            } else {
+                                                None
+                                            };
+                                            *node.shared.screen_laser_pointer.write().unwrap() = state;
+                                            node.shared.screen_laser_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::ClearAnnotations => {
+                                            let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                            if wb.policy().allow_peer_clear {
+                                                wb.clear();
+                                                node.shared.screen_annotations.write().unwrap().clear();
+                                            }
+                                        }
+                                        ControlMsg::WhiteboardUndo { author_hash } => {
+                                            let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                            let undone = if *author_hash == 0 {
+                                                wb.undo(None)
+                                            } else {
+                                                let target = wb
+                                                    .active_items()
+                                                    .iter()
+                                                    .rfind(|it| tetherly_core::hash_author(&it.author) == *author_hash)
+                                                    .map(|it| it.author.clone());
+                                                wb.undo(target.as_deref())
+                                            };
+                                            if undone.is_some() {
+                                                node.shared.screen_whiteboard_undo_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                            }
+                                        }
+                                        ControlMsg::WhiteboardRedo { author_hash: _ } => {
+                                            let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                            let redone = wb.redo(None);
+                                            if redone.is_some() {
+                                                node.shared.screen_whiteboard_redo_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                            }
+                                        }
+                                        ControlMsg::SetWhiteboardPolicy {
+                                            read_only,
+                                            allow_peer_clear,
+                                            max_items,
+                                        } => {
+                                            let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                            wb.set_policy(tetherly_core::WhiteboardPolicy {
+                                                read_only: *read_only,
+                                                allow_peer_clear: *allow_peer_clear,
+                                                max_items: *max_items,
+                                            });
+                                        }
+                                        ControlMsg::SetScreenRoi { x, y, w, h } => {
+                                            let mut roi = node.shared.screen_roi.write().unwrap();
+                                            roi.active = true;
+                                            roi.x = *x;
+                                            roi.y = *y;
+                                            roi.w = *w;
+                                            roi.h = *h;
+                                            node.shared.screen_roi_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::ResetScreenRoi => {
+                                            let mut roi = node.shared.screen_roi.write().unwrap();
+                                            roi.active = false;
+                                            roi.zoom_percent = 100;
+                                            node.shared.screen_roi_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenRoiZoom { zoom_percent } => {
+                                            let mut roi = node.shared.screen_roi.write().unwrap();
+                                            roi.zoom_percent = *zoom_percent;
+                                            node.shared.screen_roi_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenColorMode { mode, threshold } => {
+                                            let mut cfg = node.shared.screen_color_mode.write().unwrap();
+                                            cfg.mode = tetherly_core::ScreenColorMode::from_tag(*mode);
+                                            cfg.threshold = *threshold;
+                                            node.shared.screen_color_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::ResetScreenColorMode => {
+                                            let mut cfg = node.shared.screen_color_mode.write().unwrap();
+                                            *cfg = tetherly_core::ScreenColorConfig::default();
+                                            node.shared.screen_color_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenDeltaMode { enabled, keyframe_interval } => {
+                                            let mut cfg = node.shared.screen_delta_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.keyframe_interval = *keyframe_interval;
+                                            node.shared.screen_delta_counter.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::ResetScreenDeltaMode => {
+                                            let mut cfg = node.shared.screen_delta_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenDeltaConfig::default();
+                                            node.shared.screen_delta_counter.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenQualityMetricMode { enabled, sample_interval } => {
+                                            let mut cfg = node.shared.screen_quality_metric_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.sample_interval = *sample_interval;
+                                            node.shared.screen_metric_counter.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::ResetScreenQualityMetricMode => {
+                                            let mut cfg = node.shared.screen_quality_metric_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenQualityMetricConfig::default();
+                                            node.shared.screen_metric_counter.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            let mut state = node.shared.screen_quality_metric_state.write().unwrap();
+                                            *state = ScreenQualityMetricState::default();
+                                            *node.shared.screen_metric_ref_frame.write().unwrap() = None;
+                                        }
+                                        ControlMsg::SetScreenQoeMode { mode, target_psnr_db, target_ssim_pct } => {
+                                            let qoe_mode = tetherly_core::ScreenQoeMode::from_tag(*mode);
+                                            let mut qoe = node.shared.screen_qoe_controller.write().unwrap();
+                                            let cfg = tetherly_core::ScreenQoeConfig {
+                                                mode: qoe_mode,
+                                                target_psnr_db: *target_psnr_db,
+                                                target_ssim_pct: *target_ssim_pct,
+                                            };
+                                            qoe.set_config(cfg);
+                                            if qoe_mode.is_active() {
+                                                let mut metric_cfg = node.shared.screen_quality_metric_config.write().unwrap();
+                                                metric_cfg.enabled = true;
+                                            }
+                                        }
+                                        ControlMsg::ResetScreenQoeMode => {
+                                            let mut qoe = node.shared.screen_qoe_controller.write().unwrap();
+                                            qoe.reset();
+                                        }
+                                        ControlMsg::SetScreenPirMode { mode, bands } => {
+                                            let pir_mode = tetherly_core::ScreenPirMode::from_u8(*mode);
+                                            let mut pir_cfg = node.shared.screen_pir_config.write().unwrap();
+                                            pir_cfg.mode = pir_mode;
+                                            pir_cfg.bands = *bands;
+                                            if pir_mode == tetherly_core::ScreenPirMode::OnDemand {
+                                                node.shared.screen_pir_active_sweep.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_pir_current_band.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            } else if pir_mode == tetherly_core::ScreenPirMode::Continuous {
+                                                node.shared.screen_pir_active_sweep.store(true, std::sync::atomic::Ordering::Relaxed);
+                                            } else {
+                                                node.shared.screen_pir_active_sweep.store(false, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                        }
+                                        ControlMsg::ResetScreenPirMode => {
+                                            let mut pir_cfg = node.shared.screen_pir_config.write().unwrap();
+                                            *pir_cfg = tetherly_core::ScreenPirConfig::default();
+                                            node.shared.screen_pir_active_sweep.store(false, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_pir_current_band.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenLtrMode { enabled, auto_interval } => {
+                                            let mut cfg = node.shared.screen_ltr_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.auto_interval = *auto_interval;
+                                            if !*enabled {
+                                                *node.shared.screen_sender_ltr_canvas.write().unwrap() = None;
+                                                *node.shared.screen_receiver_ltr_canvas.write().unwrap() = None;
+                                                node.shared.screen_ltr_current_seq.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_ltr_recovery_pending.store(false, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                        }
+                                        ControlMsg::ResetScreenLtrMode => {
+                                            let mut cfg = node.shared.screen_ltr_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenLtrConfig::default();
+                                            *node.shared.screen_sender_ltr_canvas.write().unwrap() = None;
+                                            *node.shared.screen_receiver_ltr_canvas.write().unwrap() = None;
+                                            node.shared.screen_ltr_current_seq.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_ltr_recovery_pending.store(false, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::LtrRecoveryRequest { ltr_seq: _ } => {
+                                            node.shared.screen_ltr_recoveries_requested.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_ltr_recovery_pending.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::LtrAnchorSync { ltr_seq } => {
+                                            let cur_canvas = node.shared.screen_receiver_canvas.read().unwrap().clone();
+                                            if let Some(canvas) = cur_canvas {
+                                                *node.shared.screen_receiver_ltr_canvas.write().unwrap() = Some(canvas);
+                                            }
+                                            node.shared.screen_ltr_current_seq.store(*ltr_seq, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_ltr_anchors_established.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenSvcMode { mode, drop_t1 } => {
+                                            let mut cfg = node.shared.screen_svc_config.write().unwrap();
+                                            cfg.mode = tetherly_core::ScreenSvcMode::from_u8(*mode);
+                                            cfg.drop_t1 = *drop_t1;
+                                            if !cfg.is_enabled() {
+                                                *node.shared.screen_sender_t0_canvas.write().unwrap() = None;
+                                                *node.shared.screen_receiver_t0_canvas.write().unwrap() = None;
+                                            }
+                                        }
+                                        ControlMsg::ResetScreenSvcMode => {
+                                            let mut cfg = node.shared.screen_svc_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenSvcConfig::default();
+                                            *node.shared.screen_sender_t0_canvas.write().unwrap() = None;
+                                            *node.shared.screen_receiver_t0_canvas.write().unwrap() = None;
+                                            node.shared.screen_svc_t0_frames_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_svc_t1_frames_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_svc_t1_frames_dropped.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_svc_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SvcT1DropSync { dropped_count } => {
+                                            node.shared.screen_svc_t1_frames_dropped.store(*dropped_count, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenMotionMode { enabled, max_displacement } => {
+                                            let mut cfg = node.shared.screen_motion_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.max_displacement = (*max_displacement).clamp(
+                                                tetherly_core::SCREEN_MOTION_MIN_DISPLACEMENT,
+                                                tetherly_core::SCREEN_MOTION_MAX_DISPLACEMENT,
+                                            );
+                                            if !*enabled {
+                                                *node.shared.screen_sender_motion_canvas.write().unwrap() = None;
+                                            }
+                                        }
+                                        ControlMsg::ResetScreenMotionMode => {
+                                            let mut cfg = node.shared.screen_motion_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenMotionConfig::default();
+                                            *node.shared.screen_sender_motion_canvas.write().unwrap() = None;
+                                            node.shared.screen_motion_frames_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_motion_fallback_frames_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_motion_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::MotionScrollSync { scroll_frames_sent } => {
+                                            node.shared.screen_motion_frames_sent.store(*scroll_frames_sent, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenTileMode { enabled, tile_size } => {
+                                            let mut cfg = node.shared.screen_tile_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.tile_size = (*tile_size).clamp(
+                                                tetherly_core::SCREEN_TILE_MIN_SIZE,
+                                                tetherly_core::SCREEN_TILE_MAX_SIZE,
+                                            );
+                                            if !*enabled {
+                                                *node.shared.screen_sender_tile_canvas.write().unwrap() = None;
+                                            }
+                                        }
+                                        ControlMsg::ResetScreenTileMode => {
+                                            let mut cfg = node.shared.screen_tile_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenTileConfig::default();
+                                            *node.shared.screen_sender_tile_canvas.write().unwrap() = None;
+                                            node.shared.screen_tile_frames_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_dirty_tiles_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_skipped_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::TileGridSync { tiles_sent } => {
+                                            node.shared.screen_tile_dirty_tiles_sent.store(*tiles_sent, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenTileCacheMode { enabled, max_entries } => {
+                                            let mut cfg = node.shared.screen_tile_cache_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.max_entries = (*max_entries).clamp(
+                                                tetherly_core::SCREEN_TILE_CACHE_MIN_ENTRIES,
+                                                tetherly_core::SCREEN_TILE_CACHE_MAX_ENTRIES,
+                                            );
+                                            node.shared.screen_tile_cache_dict.lock().unwrap().resize(cfg.max_entries);
+                                            node.shared.screen_tile_cache_receiver.lock().unwrap().resize(cfg.max_entries as usize, None);
+                                        }
+                                        ControlMsg::ResetScreenTileCacheMode => {
+                                            let mut cfg = node.shared.screen_tile_cache_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenTileCacheConfig::default();
+                                            node.shared.screen_tile_cache_dict.lock().unwrap().clear();
+                                            let mut rx = node.shared.screen_tile_cache_receiver.lock().unwrap();
+                                            rx.clear();
+                                            rx.resize(tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES as usize, None);
+                                            node.shared.screen_tile_cache_hits.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_cache_misses.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_cache_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::TileCacheSync { hits } => {
+                                            node.shared.screen_tile_cache_hits.store(*hits, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenFocusMode { enabled, mode, radius, peripheral_skip_ratio } => {
+                                            let mut cfg = node.shared.screen_focus_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.mode = tetherly_core::ScreenFocusMode::from_u8(*mode);
+                                            cfg.radius = (*radius).clamp(
+                                                tetherly_core::SCREEN_FOCUS_MIN_RADIUS,
+                                                tetherly_core::SCREEN_FOCUS_MAX_RADIUS,
+                                            );
+                                            cfg.peripheral_skip_ratio = (*peripheral_skip_ratio).clamp(
+                                                0,
+                                                tetherly_core::SCREEN_FOCUS_MAX_SKIP_RATIO,
+                                            );
+                                        }
+                                        ControlMsg::SetScreenFocusBox { box_x, box_y, box_w, box_h } => {
+                                            let mut cfg = node.shared.screen_focus_config.write().unwrap();
+                                            cfg.box_x = *box_x;
+                                            cfg.box_y = *box_y;
+                                            cfg.box_w = *box_w;
+                                            cfg.box_h = *box_h;
+                                        }
+                                        ControlMsg::ResetScreenFocusMode => {
+                                            let mut cfg = node.shared.screen_focus_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenFocusConfig::default();
+                                            node.shared.screen_focus_tiles_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_focus_peripheral_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_focus_peripheral_skipped.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_focus_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::FocusSync { focus_tiles_sent } => {
+                                            node.shared.screen_focus_tiles_sent.store(*focus_tiles_sent, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::FocusPeripheralSync { peripheral_skipped } => {
+                                            node.shared.screen_focus_peripheral_skipped.store(*peripheral_skipped, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenTilePaletteMode { enabled, max_colors, enable_rle } => {
+                                            let mut cfg = node.shared.screen_tile_palette_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.max_colors = (*max_colors).clamp(2, 16);
+                                            cfg.enable_rle = *enable_rle;
+                                        }
+                                        ControlMsg::ResetScreenTilePaletteMode => {
+                                            let mut cfg = node.shared.screen_tile_palette_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenTilePaletteConfig::default();
+                                            node.shared.screen_tile_palette_solid_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_palette_bilevel_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_palette_palette_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_palette_truecolor_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_palette_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::TilePaletteSync { saved_bytes, .. } => {
+                                            node.shared.screen_tile_palette_saved_bytes.store(*saved_bytes, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenTilePredictMode { enabled, filter_mode, enable_rct } => {
+                                            let mut cfg = node.shared.screen_tile_predict_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.filter_mode = tetherly_core::ScreenTilePredictFilter::from_u8(*filter_mode);
+                                            cfg.enable_rct = *enable_rct;
+                                        }
+                                        ControlMsg::ResetScreenTilePredictMode => {
+                                            let mut cfg = node.shared.screen_tile_predict_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenTilePredictConfig::default();
+                                            node.shared.screen_tile_predict_tiles_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_predict_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::TilePredictSync { saved_bytes, .. } => {
+                                            node.shared.screen_tile_predict_saved_bytes.store(*saved_bytes, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenTilePresentMode { enabled, vsync_mode, double_buffer, tear_prevention } => {
+                                            let mut cfg = node.shared.screen_tile_present_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.vsync_mode = tetherly_core::ScreenTilePresentVsyncMode::from_u8(*vsync_mode);
+                                            cfg.double_buffer = *double_buffer;
+                                            cfg.tear_prevention = *tear_prevention;
+                                        }
+                                        ControlMsg::ResetScreenTilePresentMode => {
+                                            let mut cfg = node.shared.screen_tile_present_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenTilePresentConfig::default();
+                                            node.shared.screen_tile_present_committed_txs.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_present_swapped_frames.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_present_torn_prevented.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_present_total_latency_us.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::TilePresentSync { committed_txs, swapped_frames } => {
+                                            node.shared.screen_tile_present_committed_txs.store(*committed_txs, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_present_swapped_frames.store(*swapped_frames, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::TileNackRequest { seq, tile_index, .. } => {
+                                            let tile_opt = {
+                                                let buf = node.shared.screen_tile_resend_buffer.read().unwrap();
+                                                buf.get_tile(*seq, *tile_index)
+                                            };
+                                            if let Some(tile) = tile_opt {
+                                                let w = tile.w.max(64);
+                                                let h = tile.h.max(64);
+                                                let resent_frame = tetherly_core::ScreenFrame::encode_tile_grid(
+                                                    *seq as u64,
+                                                    tetherly_core::ScreenRect::new(tile.x as i32, tile.y as i32, w, h).unwrap_or_else(|_| tetherly_core::ScreenRect::new(0, 0, 64, 64).unwrap()),
+                                                    tetherly_core::PixelFormat::Rgba8,
+                                                    64,
+                                                    1,
+                                                    &[tile],
+                                                );
+                                                if let Ok(f) = resent_frame.to_frame() {
+                                                    let _ = sess.send_bounded(f).await;
+                                                    node.shared.screen_tile_nack_tiles_retransmitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                }
+                                            }
+                                        }
+                                        ControlMsg::ResetScreenTileNackMode => {
+                                            let mut cfg = node.shared.screen_tile_nack_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenTileNackConfig::default();
+                                            node.shared.screen_tile_resend_buffer.write().unwrap().clear();
+                                            node.shared.screen_tile_nack_requests_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_nack_tiles_retransmitted.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_nack_degraded_commits.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::TileNackSync { nack_requests, retransmitted_tiles, degraded_commits } => {
+                                            node.shared.screen_tile_nack_requests_sent.store(*nack_requests, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_nack_tiles_retransmitted.store(*retransmitted_tiles, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_nack_degraded_commits.store(*degraded_commits, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenTileSaliencyMode { enabled, high_threshold, low_threshold, drop_background_on_congestion } => {
+                                            let mut cfg = node.shared.screen_tile_saliency_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.high_threshold = *high_threshold;
+                                            cfg.low_threshold = *low_threshold;
+                                            cfg.drop_background_on_congestion = *drop_background_on_congestion;
+                                        }
+                                        ControlMsg::ResetScreenTileSaliencyMode => {
+                                            let mut cfg = node.shared.screen_tile_saliency_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenTileSaliencyConfig::default();
+                                            node.shared.screen_tile_saliency_critical_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_saliency_normal_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_saliency_background_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_saliency_background_skipped.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::TileSaliencySync { critical_tiles, normal_tiles, background_tiles, background_tiles_skipped } => {
+                                            node.shared.screen_tile_saliency_critical_tiles.store(*critical_tiles, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_saliency_normal_tiles.store(*normal_tiles, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_saliency_background_tiles.store(*background_tiles, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_saliency_background_skipped.store(*background_tiles_skipped, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenTileLodMode { enabled, max_lod, auto_lod_on_congestion } => {
+                                            let mut cfg = node.shared.screen_tile_lod_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.max_lod = *max_lod;
+                                            cfg.auto_lod_on_congestion = *auto_lod_on_congestion;
+                                        }
+                                        ControlMsg::ResetScreenTileLodMode => {
+                                            let mut cfg = node.shared.screen_tile_lod_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenTileLodConfig::default();
+                                            node.shared.screen_tile_lod0_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_lod1_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_lod2_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_lod_bytes_saved.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::TileLodSync { bytes_saved, .. } => {
+                                            node.shared.screen_tile_lod_bytes_saved.store(*bytes_saved, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenTileBatchMode { enabled, target_chunk_bytes, pacing_interval_us } => {
+                                            let mut cfg = node.shared.screen_tile_batch_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.target_chunk_bytes = *target_chunk_bytes;
+                                            cfg.pacing_interval_us = *pacing_interval_us;
+                                        }
+                                        ControlMsg::ResetScreenTileBatchMode => {
+                                            let mut cfg = node.shared.screen_tile_batch_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenTileBatchConfig::default();
+                                            node.shared.screen_tile_batches_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_chunks_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_batch_bytes_total.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_batch_pacing_pauses.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            *node.shared.screen_tile_batch_receiver_state.lock().unwrap() = None;
+                                        }
+                                        ControlMsg::TileBatchSync { batches_sent, chunks_sent, avg_chunk_bytes, pacing_pauses } => {
+                                            node.shared.screen_tile_batches_sent.store(*batches_sent, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_chunks_sent.store(*chunks_sent, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_batch_bytes_total.store((*avg_chunk_bytes as u64) * (*chunks_sent), std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_batch_pacing_pauses.store(*pacing_pauses, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::SetScreenTileMotionMode { enabled, max_displacement, min_match_ratio } => {
+                                            let mut cfg = node.shared.screen_tile_motion_config.write().unwrap();
+                                            cfg.enabled = *enabled;
+                                            cfg.max_displacement = *max_displacement;
+                                            cfg.min_match_ratio = *min_match_ratio;
+                                        }
+                                        ControlMsg::ResetScreenTileMotionMode => {
+                                            let mut cfg = node.shared.screen_tile_motion_config.write().unwrap();
+                                            *cfg = tetherly_core::ScreenTileMotionConfig::default();
+                                            node.shared.screen_tile_motion_tiles_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_motion_fallback_tiles_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_motion_bytes_saved.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        ControlMsg::TileMotionSync { motion_tiles, fallback_tiles, bytes_saved } => {
+                                            node.shared.screen_tile_motion_tiles_sent.store(*motion_tiles, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_motion_fallback_tiles_sent.store(*fallback_tiles, std::sync::atomic::Ordering::Relaxed);
+                                            node.shared.screen_tile_motion_bytes_saved.store(*bytes_saved, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        _ => {}
                                     }
                                     let (reply, dynamic_bitrate, dynamic_fps, dynamic_scale) = {
                                         let mut engine = node
@@ -20768,6 +22212,9 @@ impl Node {
         let peer_id = sess.peer_id.clone();
         let (ctl_tx, mut ctl_rx) = mpsc::channel::<ControlMsg>(SCREEN_QUEUE_DEPTH);
         *self.shared.screen_ctl.lock().await = Some(ctl_tx);
+        let (client_frame_tx, mut client_frame_rx) =
+            mpsc::channel::<InnerFrame>(SCREEN_QUEUE_DEPTH);
+        *self.shared.screen_client_out.lock().await = Some(client_frame_tx);
         *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
         // A new screen session re-evaluates the ADR-078 bitrate tier.
         self.shared
@@ -20861,12 +22308,44 @@ impl Node {
                         }
                         let mut played = false;
                         while let ScreenPlayoutAction::Play(ready_frame) = receiver.pop_playout(now_us) {
-                            let _ = node.shared.screen_sink.present(&ready_frame);
+                            let mut presented_frame = ready_frame;
+                            {
+                                let wm_cfg = node.shared.screen_watermark.read().unwrap();
+                                if wm_cfg.enabled {
+                                    let peer_id_str = node
+                                        .shared
+                                        .screen_peer
+                                        .lock()
+                                        .ok()
+                                        .and_then(|g| g.clone())
+                                        .map(|p| p.to_string())
+                                        .unwrap_or_else(|| "peer".to_string());
+                                    let time_str = format!("{}", now_us / 1_000_000);
+                                    if let Ok(applied) = presented_frame.apply_watermark(&wm_cfg, &peer_id_str, &time_str) {
+                                        if applied {
+                                            node.shared.screen_watermark_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+                            }
+                            // Collaborative whiteboard annotations & transient virtual laser pointer (ADR-105)
+                            {
+                                let now_ms = now_us / 1_000;
+                                let annotations = node.shared.screen_annotations.read().unwrap();
+                                if !annotations.is_empty() {
+                                    let _ = presented_frame.apply_annotations(&annotations, now_ms);
+                                }
+                                if let Some(laser) = node.shared.screen_laser_pointer.read().unwrap().as_ref() {
+                                    let _ = presented_frame.apply_laser_pointer(laser);
+                                }
+                            }
+                            let _ = node.shared.screen_sink.present(&presented_frame);
+                            *node.shared.screen_last_frame.lock().expect("last_frame") = Some(presented_frame.clone());
                             if let Ok(mut slot) = node.shared.screen_recording.try_lock() {
                                 if let Some(sess) = slot.as_mut() {
                                     if sess.writer.is_none() {
                                         let meta =
-                                            ScreenRecordingMeta::from_frame(&ready_frame, sess.started_at_us);
+                                            ScreenRecordingMeta::from_frame(&presented_frame, sess.started_at_us);
                                         match std::fs::File::create(&sess.path) {
                                             Ok(file) => {
                                                 match ScreenRecordingWriter::new(
@@ -20885,12 +22364,12 @@ impl Node {
                                         }
                                     }
                                     if let Some(w) = sess.writer.as_mut() {
-                                        if w.append(&ready_frame, now_us).is_ok() {
+                                        if w.append(&presented_frame, now_us).is_ok() {
                                             sess.frames = sess.frames.saturating_add(1);
                                             sess.bytes = sess
                                                 .bytes
-                                                .saturating_add(ready_frame.bytes.len() as u64 + 32);
-                                            sess.last_seq = ready_frame.seq;
+                                                .saturating_add(presented_frame.bytes.len() as u64 + 32);
+                                            sess.last_seq = presented_frame.seq;
                                         }
                                     }
                                 }
@@ -20938,11 +22417,566 @@ impl Node {
                             None => break,
                         }
                     }
+                    client_frame = client_frame_rx.recv() => {
+                        match client_frame {
+                            Some(f) => {
+                                let f_len = (f.payload.len() + 12) as u64;
+                                if sess.send_bounded(f).await.is_err() {
+                                    break;
+                                }
+                                node.shared.telemetry.record_screen_tx(f_len);
+                            }
+                            None => break,
+                        }
+                    }
                     inbound = sess.recv_inner() => {
                         match inbound {
                             Ok(frame) => {
                                 let f_len = (frame.payload.len() + 12) as u64;
                                 node.shared.telemetry.record_screen_rx(f_len);
+                                if frame.ty == TYPE_SCREEN_CONTROL {
+                                    if let Ok(msg) = ControlMsg::from_frame(&frame) {
+                                        if let ControlMsg::SetWatermarkState { enabled, host_enforced } = msg {
+                                            let mut cfg = node.shared.screen_watermark.write().unwrap();
+                                            cfg.enabled = enabled;
+                                            cfg.host_enforced = host_enforced;
+                                            node.shared.screen_peer_watermark_enforced.store(host_enforced, std::sync::atomic::Ordering::Relaxed);
+                                            tracing::info!(enabled, host_enforced, "viewer received screen watermark state from host");
+                                        }
+                                        if let ControlMsg::SetRecordingState { active } = msg {
+                                            node.shared.screen_peer_recording.store(active, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        match &msg {
+                                            ControlMsg::SetLaserPointer { x, y, active, color_rgb } => {
+                                                let state = if *active {
+                                                    Some(tetherly_core::LaserPointerState {
+                                                        x: *x,
+                                                        y: *y,
+                                                        active: true,
+                                                        color_rgb: *color_rgb,
+                                                        radius: 12,
+                                                    })
+                                                } else {
+                                                    None
+                                                };
+                                                *node.shared.screen_laser_pointer.write().unwrap() = state;
+                                                node.shared.screen_laser_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::ClearAnnotations => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                if wb.policy().allow_peer_clear {
+                                                    wb.clear();
+                                                    node.shared.screen_annotations.write().unwrap().clear();
+                                                }
+                                            }
+                                            ControlMsg::WhiteboardUndo { author_hash } => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                let undone = if *author_hash == 0 {
+                                                    wb.undo(None)
+                                                } else {
+                                                    let target = wb
+                                                        .active_items()
+                                                        .iter()
+                                                        .rfind(|it| tetherly_core::hash_author(&it.author) == *author_hash)
+                                                        .map(|it| it.author.clone());
+                                                    wb.undo(target.as_deref())
+                                                };
+                                                if undone.is_some() {
+                                                    node.shared.screen_whiteboard_undo_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                    *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                                }
+                                            }
+                                            ControlMsg::WhiteboardRedo { author_hash: _ } => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                let redone = wb.redo(None);
+                                                if redone.is_some() {
+                                                    node.shared.screen_whiteboard_redo_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                    *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                                }
+                                            }
+                                            ControlMsg::SetWhiteboardPolicy {
+                                                read_only,
+                                                allow_peer_clear,
+                                                max_items,
+                                            } => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                wb.set_policy(tetherly_core::WhiteboardPolicy {
+                                                    read_only: *read_only,
+                                                    allow_peer_clear: *allow_peer_clear,
+                                                    max_items: *max_items,
+                                                });
+                                            }
+                                            ControlMsg::SetScreenRoi { x, y, w, h } => {
+                                                let mut roi = node.shared.screen_roi.write().unwrap();
+                                                roi.active = true;
+                                                roi.x = *x;
+                                                roi.y = *y;
+                                                roi.w = *w;
+                                                roi.h = *h;
+                                                node.shared.screen_roi_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::ResetScreenRoi => {
+                                                let mut roi = node.shared.screen_roi.write().unwrap();
+                                                roi.active = false;
+                                                roi.zoom_percent = 100;
+                                                node.shared.screen_roi_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenRoiZoom { zoom_percent } => {
+                                                let mut roi = node.shared.screen_roi.write().unwrap();
+                                                roi.zoom_percent = *zoom_percent;
+                                                node.shared.screen_roi_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenColorMode { mode, threshold } => {
+                                                let mut cfg = node.shared.screen_color_mode.write().unwrap();
+                                                cfg.mode = tetherly_core::ScreenColorMode::from_tag(*mode);
+                                                cfg.threshold = *threshold;
+                                                node.shared.screen_color_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::ResetScreenColorMode => {
+                                                let mut cfg = node.shared.screen_color_mode.write().unwrap();
+                                                *cfg = tetherly_core::ScreenColorConfig::default();
+                                                node.shared.screen_color_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenDeltaMode { enabled, keyframe_interval } => {
+                                                let mut cfg = node.shared.screen_delta_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.keyframe_interval = *keyframe_interval;
+                                                node.shared.screen_delta_counter.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::ResetScreenDeltaMode => {
+                                                let mut cfg = node.shared.screen_delta_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenDeltaConfig::default();
+                                                node.shared.screen_delta_counter.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenQualityMetricMode { enabled, sample_interval } => {
+                                                let mut cfg = node.shared.screen_quality_metric_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.sample_interval = *sample_interval;
+                                                node.shared.screen_metric_counter.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::ResetScreenQualityMetricMode => {
+                                                let mut cfg = node.shared.screen_quality_metric_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenQualityMetricConfig::default();
+                                                node.shared.screen_metric_counter.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                let mut state = node.shared.screen_quality_metric_state.write().unwrap();
+                                                *state = ScreenQualityMetricState::default();
+                                                *node.shared.screen_metric_ref_frame.write().unwrap() = None;
+                                            }
+                                            ControlMsg::SetScreenQoeMode { mode, target_psnr_db, target_ssim_pct } => {
+                                                let qoe_mode = tetherly_core::ScreenQoeMode::from_tag(*mode);
+                                                let mut qoe = node.shared.screen_qoe_controller.write().unwrap();
+                                                let cfg = tetherly_core::ScreenQoeConfig {
+                                                    mode: qoe_mode,
+                                                    target_psnr_db: *target_psnr_db,
+                                                    target_ssim_pct: *target_ssim_pct,
+                                                };
+                                                qoe.set_config(cfg);
+                                                if qoe_mode.is_active() {
+                                                    let mut metric_cfg = node.shared.screen_quality_metric_config.write().unwrap();
+                                                    metric_cfg.enabled = true;
+                                                }
+                                            }
+                                            ControlMsg::ResetScreenQoeMode => {
+                                                let mut qoe = node.shared.screen_qoe_controller.write().unwrap();
+                                                qoe.reset();
+                                            }
+                                            ControlMsg::SetScreenPirMode { mode, bands } => {
+                                                let pir_mode = tetherly_core::ScreenPirMode::from_u8(*mode);
+                                                let mut pir_cfg = node.shared.screen_pir_config.write().unwrap();
+                                                pir_cfg.mode = pir_mode;
+                                                pir_cfg.bands = *bands;
+                                                if pir_mode == tetherly_core::ScreenPirMode::OnDemand {
+                                                    node.shared.screen_pir_active_sweep.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                    node.shared.screen_pir_current_band.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                } else if pir_mode == tetherly_core::ScreenPirMode::Continuous {
+                                                    node.shared.screen_pir_active_sweep.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                } else {
+                                                    node.shared.screen_pir_active_sweep.store(false, std::sync::atomic::Ordering::Relaxed);
+                                                }
+                                            }
+                                            ControlMsg::ResetScreenPirMode => {
+                                                let mut pir_cfg = node.shared.screen_pir_config.write().unwrap();
+                                                *pir_cfg = tetherly_core::ScreenPirConfig::default();
+                                                node.shared.screen_pir_active_sweep.store(false, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_pir_current_band.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenLtrMode { enabled, auto_interval } => {
+                                                let mut cfg = node.shared.screen_ltr_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.auto_interval = *auto_interval;
+                                                if !*enabled {
+                                                    *node.shared.screen_sender_ltr_canvas.write().unwrap() = None;
+                                                    *node.shared.screen_receiver_ltr_canvas.write().unwrap() = None;
+                                                    node.shared.screen_ltr_current_seq.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                    node.shared.screen_ltr_recovery_pending.store(false, std::sync::atomic::Ordering::Relaxed);
+                                                }
+                                            }
+                                            ControlMsg::ResetScreenLtrMode => {
+                                                let mut cfg = node.shared.screen_ltr_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenLtrConfig::default();
+                                                *node.shared.screen_sender_ltr_canvas.write().unwrap() = None;
+                                                *node.shared.screen_receiver_ltr_canvas.write().unwrap() = None;
+                                                node.shared.screen_ltr_current_seq.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_ltr_recovery_pending.store(false, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::LtrRecoveryRequest { ltr_seq: _ } => {
+                                                node.shared.screen_ltr_recoveries_requested.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_ltr_recovery_pending.store(true, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::LtrAnchorSync { ltr_seq } => {
+                                                let cur_canvas = node.shared.screen_receiver_canvas.read().unwrap().clone();
+                                                if let Some(canvas) = cur_canvas {
+                                                    *node.shared.screen_receiver_ltr_canvas.write().unwrap() = Some(canvas);
+                                                }
+                                                node.shared.screen_ltr_current_seq.store(*ltr_seq, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_ltr_anchors_established.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenSvcMode { mode, drop_t1 } => {
+                                                let mut cfg = node.shared.screen_svc_config.write().unwrap();
+                                                cfg.mode = tetherly_core::ScreenSvcMode::from_u8(*mode);
+                                                cfg.drop_t1 = *drop_t1;
+                                                if !cfg.is_enabled() {
+                                                    *node.shared.screen_sender_t0_canvas.write().unwrap() = None;
+                                                    *node.shared.screen_receiver_t0_canvas.write().unwrap() = None;
+                                                }
+                                            }
+                                            ControlMsg::ResetScreenSvcMode => {
+                                                let mut cfg = node.shared.screen_svc_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenSvcConfig::default();
+                                                *node.shared.screen_sender_t0_canvas.write().unwrap() = None;
+                                                *node.shared.screen_receiver_t0_canvas.write().unwrap() = None;
+                                                node.shared.screen_svc_t0_frames_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_svc_t1_frames_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_svc_t1_frames_dropped.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_svc_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SvcT1DropSync { dropped_count } => {
+                                                node.shared.screen_svc_t1_frames_dropped.store(*dropped_count, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenMotionMode { enabled, max_displacement } => {
+                                                let mut cfg = node.shared.screen_motion_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.max_displacement = (*max_displacement).clamp(
+                                                    tetherly_core::SCREEN_MOTION_MIN_DISPLACEMENT,
+                                                    tetherly_core::SCREEN_MOTION_MAX_DISPLACEMENT,
+                                                );
+                                                if !*enabled {
+                                                    *node.shared.screen_sender_motion_canvas.write().unwrap() = None;
+                                                }
+                                            }
+                                            ControlMsg::ResetScreenMotionMode => {
+                                                let mut cfg = node.shared.screen_motion_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenMotionConfig::default();
+                                                *node.shared.screen_sender_motion_canvas.write().unwrap() = None;
+                                                node.shared.screen_motion_frames_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_motion_fallback_frames_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_motion_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::MotionScrollSync { scroll_frames_sent } => {
+                                                node.shared.screen_motion_frames_sent.store(*scroll_frames_sent, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenTileMode { enabled, tile_size } => {
+                                                let mut cfg = node.shared.screen_tile_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.tile_size = (*tile_size).clamp(
+                                                    tetherly_core::SCREEN_TILE_MIN_SIZE,
+                                                    tetherly_core::SCREEN_TILE_MAX_SIZE,
+                                                );
+                                                if !*enabled {
+                                                    *node.shared.screen_sender_tile_canvas.write().unwrap() = None;
+                                                }
+                                            }
+                                            ControlMsg::ResetScreenTileMode => {
+                                                let mut cfg = node.shared.screen_tile_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenTileConfig::default();
+                                                *node.shared.screen_sender_tile_canvas.write().unwrap() = None;
+                                                node.shared.screen_tile_frames_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_dirty_tiles_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_skipped_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::TileGridSync { tiles_sent } => {
+                                                node.shared.screen_tile_dirty_tiles_sent.store(*tiles_sent, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenTileCacheMode { enabled, max_entries } => {
+                                                let mut cfg = node.shared.screen_tile_cache_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.max_entries = (*max_entries).clamp(
+                                                    tetherly_core::SCREEN_TILE_CACHE_MIN_ENTRIES,
+                                                    tetherly_core::SCREEN_TILE_CACHE_MAX_ENTRIES,
+                                                );
+                                                node.shared.screen_tile_cache_dict.lock().unwrap().resize(cfg.max_entries);
+                                                node.shared.screen_tile_cache_receiver.lock().unwrap().resize(cfg.max_entries as usize, None);
+                                            }
+                                            ControlMsg::ResetScreenTileCacheMode => {
+                                                let mut cfg = node.shared.screen_tile_cache_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenTileCacheConfig::default();
+                                                node.shared.screen_tile_cache_dict.lock().unwrap().clear();
+                                                let mut rx = node.shared.screen_tile_cache_receiver.lock().unwrap();
+                                                rx.clear();
+                                                rx.resize(tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES as usize, None);
+                                                node.shared.screen_tile_cache_hits.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_cache_misses.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_cache_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::TileCacheSync { hits } => {
+                                                node.shared.screen_tile_cache_hits.store(*hits, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenFocusMode { enabled, mode, radius, peripheral_skip_ratio } => {
+                                                let mut cfg = node.shared.screen_focus_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.mode = tetherly_core::ScreenFocusMode::from_u8(*mode);
+                                                cfg.radius = (*radius).clamp(
+                                                    tetherly_core::SCREEN_FOCUS_MIN_RADIUS,
+                                                    tetherly_core::SCREEN_FOCUS_MAX_RADIUS,
+                                                );
+                                                cfg.peripheral_skip_ratio = (*peripheral_skip_ratio).clamp(
+                                                    0,
+                                                    tetherly_core::SCREEN_FOCUS_MAX_SKIP_RATIO,
+                                                );
+                                            }
+                                            ControlMsg::SetScreenFocusBox { box_x, box_y, box_w, box_h } => {
+                                                let mut cfg = node.shared.screen_focus_config.write().unwrap();
+                                                cfg.box_x = *box_x;
+                                                cfg.box_y = *box_y;
+                                                cfg.box_w = *box_w;
+                                                cfg.box_h = *box_h;
+                                            }
+                                            ControlMsg::ResetScreenFocusMode => {
+                                                let mut cfg = node.shared.screen_focus_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenFocusConfig::default();
+                                                node.shared.screen_focus_tiles_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_focus_peripheral_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_focus_peripheral_skipped.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_focus_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::FocusSync { focus_tiles_sent } => {
+                                                node.shared.screen_focus_tiles_sent.store(*focus_tiles_sent, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::FocusPeripheralSync { peripheral_skipped } => {
+                                                node.shared.screen_focus_peripheral_skipped.store(*peripheral_skipped, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenTilePaletteMode { enabled, max_colors, enable_rle } => {
+                                                let mut cfg = node.shared.screen_tile_palette_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.max_colors = (*max_colors).clamp(2, 16);
+                                                cfg.enable_rle = *enable_rle;
+                                            }
+                                            ControlMsg::ResetScreenTilePaletteMode => {
+                                                let mut cfg = node.shared.screen_tile_palette_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenTilePaletteConfig::default();
+                                                node.shared.screen_tile_palette_solid_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_palette_bilevel_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_palette_palette_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_palette_truecolor_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_palette_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::TilePaletteSync { saved_bytes, .. } => {
+                                                node.shared.screen_tile_palette_saved_bytes.store(*saved_bytes, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenTilePredictMode { enabled, filter_mode, enable_rct } => {
+                                                let mut cfg = node.shared.screen_tile_predict_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.filter_mode = tetherly_core::ScreenTilePredictFilter::from_u8(*filter_mode);
+                                                cfg.enable_rct = *enable_rct;
+                                            }
+                                            ControlMsg::ResetScreenTilePredictMode => {
+                                                let mut cfg = node.shared.screen_tile_predict_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenTilePredictConfig::default();
+                                                node.shared.screen_tile_predict_tiles_count.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_predict_saved_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::TilePredictSync { saved_bytes, .. } => {
+                                                node.shared.screen_tile_predict_saved_bytes.store(*saved_bytes, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenTilePresentMode { enabled, vsync_mode, double_buffer, tear_prevention } => {
+                                                let mut cfg = node.shared.screen_tile_present_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.vsync_mode = tetherly_core::ScreenTilePresentVsyncMode::from_u8(*vsync_mode);
+                                                cfg.double_buffer = *double_buffer;
+                                                cfg.tear_prevention = *tear_prevention;
+                                            }
+                                            ControlMsg::ResetScreenTilePresentMode => {
+                                                let mut cfg = node.shared.screen_tile_present_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenTilePresentConfig::default();
+                                                node.shared.screen_tile_present_committed_txs.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_present_swapped_frames.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_present_torn_prevented.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_present_total_latency_us.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::TilePresentSync { committed_txs, swapped_frames } => {
+                                                node.shared.screen_tile_present_committed_txs.store(*committed_txs, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_present_swapped_frames.store(*swapped_frames, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::TileNackRequest { seq, tile_index, .. } => {
+                                                let tile_opt = {
+                                                    let buf = node.shared.screen_tile_resend_buffer.read().unwrap();
+                                                    buf.get_tile(*seq, *tile_index)
+                                                };
+                                                if let Some(tile) = tile_opt {
+                                                    let w = tile.w.max(64);
+                                                    let h = tile.h.max(64);
+                                                    let resent_frame = tetherly_core::ScreenFrame::encode_tile_grid(
+                                                        *seq as u64,
+                                                        tetherly_core::ScreenRect::new(tile.x as i32, tile.y as i32, w, h).unwrap_or_else(|_| tetherly_core::ScreenRect::new(0, 0, 64, 64).unwrap()),
+                                                        tetherly_core::PixelFormat::Rgba8,
+                                                        64,
+                                                        1,
+                                                        &[tile],
+                                                    );
+                                                    if let Ok(f) = resent_frame.to_frame() {
+                                                        let _ = sess.send_bounded(f).await;
+                                                        node.shared.screen_tile_nack_tiles_retransmitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                    }
+                                                }
+                                            }
+                                            ControlMsg::ResetScreenTileNackMode => {
+                                                let mut cfg = node.shared.screen_tile_nack_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenTileNackConfig::default();
+                                                node.shared.screen_tile_resend_buffer.write().unwrap().clear();
+                                                node.shared.screen_tile_nack_requests_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_nack_tiles_retransmitted.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_nack_degraded_commits.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::TileNackSync { nack_requests, retransmitted_tiles, degraded_commits } => {
+                                                node.shared.screen_tile_nack_requests_sent.store(*nack_requests, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_nack_tiles_retransmitted.store(*retransmitted_tiles, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_nack_degraded_commits.store(*degraded_commits, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenTileSaliencyMode { enabled, high_threshold, low_threshold, drop_background_on_congestion } => {
+                                                let mut cfg = node.shared.screen_tile_saliency_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.high_threshold = *high_threshold;
+                                                cfg.low_threshold = *low_threshold;
+                                                cfg.drop_background_on_congestion = *drop_background_on_congestion;
+                                            }
+                                            ControlMsg::ResetScreenTileSaliencyMode => {
+                                                let mut cfg = node.shared.screen_tile_saliency_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenTileSaliencyConfig::default();
+                                                node.shared.screen_tile_saliency_critical_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_saliency_normal_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_saliency_background_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_saliency_background_skipped.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::TileSaliencySync { critical_tiles, normal_tiles, background_tiles, background_tiles_skipped } => {
+                                                node.shared.screen_tile_saliency_critical_tiles.store(*critical_tiles, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_saliency_normal_tiles.store(*normal_tiles, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_saliency_background_tiles.store(*background_tiles, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_saliency_background_skipped.store(*background_tiles_skipped, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenTileLodMode { enabled, max_lod, auto_lod_on_congestion } => {
+                                                let mut cfg = node.shared.screen_tile_lod_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.max_lod = *max_lod;
+                                                cfg.auto_lod_on_congestion = *auto_lod_on_congestion;
+                                            }
+                                            ControlMsg::ResetScreenTileLodMode => {
+                                                let mut cfg = node.shared.screen_tile_lod_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenTileLodConfig::default();
+                                                node.shared.screen_tile_lod0_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_lod1_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_lod2_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_lod_bytes_saved.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::TileLodSync { bytes_saved, .. } => {
+                                                node.shared.screen_tile_lod_bytes_saved.store(*bytes_saved, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenTileBatchMode { enabled, target_chunk_bytes, pacing_interval_us } => {
+                                                let mut cfg = node.shared.screen_tile_batch_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.target_chunk_bytes = *target_chunk_bytes;
+                                                cfg.pacing_interval_us = *pacing_interval_us;
+                                            }
+                                            ControlMsg::ResetScreenTileBatchMode => {
+                                                let mut cfg = node.shared.screen_tile_batch_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenTileBatchConfig::default();
+                                                node.shared.screen_tile_batches_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_chunks_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_batch_bytes_total.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_batch_pacing_pauses.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                *node.shared.screen_tile_batch_receiver_state.lock().unwrap() = None;
+                                            }
+                                            ControlMsg::TileBatchSync { batches_sent, chunks_sent, avg_chunk_bytes, pacing_pauses } => {
+                                                node.shared.screen_tile_batches_sent.store(*batches_sent, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_chunks_sent.store(*chunks_sent, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_batch_bytes_total.store((*avg_chunk_bytes as u64) * (*chunks_sent), std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_batch_pacing_pauses.store(*pacing_pauses, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::SetScreenTileMotionMode { enabled, max_displacement, min_match_ratio } => {
+                                                let mut cfg = node.shared.screen_tile_motion_config.write().unwrap();
+                                                cfg.enabled = *enabled;
+                                                cfg.max_displacement = *max_displacement;
+                                                cfg.min_match_ratio = *min_match_ratio;
+                                            }
+                                            ControlMsg::ResetScreenTileMotionMode => {
+                                                let mut cfg = node.shared.screen_tile_motion_config.write().unwrap();
+                                                *cfg = tetherly_core::ScreenTileMotionConfig::default();
+                                                node.shared.screen_tile_motion_tiles_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_motion_fallback_tiles_sent.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_motion_bytes_saved.store(0, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            ControlMsg::TileMotionSync { motion_tiles, fallback_tiles, bytes_saved } => {
+                                                node.shared.screen_tile_motion_tiles_sent.store(*motion_tiles, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_motion_fallback_tiles_sent.store(*fallback_tiles, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_tile_motion_bytes_saved.store(*bytes_saved, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if frame.ty == tetherly_core::TYPE_SCREEN_ANNOTATION {
+                                    if let Ok(msg) = tetherly_core::ScreenAnnotationMsg::from_frame(&frame) {
+                                        match msg {
+                                            tetherly_core::ScreenAnnotationMsg::Add(item) => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                let _ = wb.add_item(item);
+                                                node.shared.screen_annotation_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                            }
+                                            tetherly_core::ScreenAnnotationMsg::Remove { id } => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                wb.active_items_mut().retain(|it| it.id != id);
+                                                *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                            }
+                                            tetherly_core::ScreenAnnotationMsg::Undo { author } => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                let a_opt = if author.is_empty() { None } else { Some(author.as_str()) };
+                                                let undone = wb.undo(a_opt);
+                                                if undone.is_some() {
+                                                    node.shared.screen_whiteboard_undo_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                    *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                                }
+                                            }
+                                            tetherly_core::ScreenAnnotationMsg::Redo { author } => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                let a_opt = if author.is_empty() { None } else { Some(author.as_str()) };
+                                                let redone = wb.redo(a_opt);
+                                                if redone.is_some() {
+                                                    node.shared.screen_whiteboard_redo_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                    *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                                }
+                                            }
+                                            tetherly_core::ScreenAnnotationMsg::Clear => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                if wb.policy().allow_peer_clear {
+                                                    wb.clear();
+                                                    node.shared.screen_annotations.write().unwrap().clear();
+                                                }
+                                            }
+                                            tetherly_core::ScreenAnnotationMsg::Snapshot(snapshot) => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                let _ = wb.import_snapshot(snapshot, true);
+                                                *node.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+                                            }
+                                            tetherly_core::ScreenAnnotationMsg::Policy(policy) => {
+                                                let mut wb = node.shared.screen_whiteboard.write().unwrap();
+                                                wb.set_policy(policy);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
                                 if frame.ty == tetherly_core::TYPE_SCREEN_CURSOR {
                                     if let Ok(update) = tetherly_core::ScreenCursorUpdate::from_frame(&frame) {
                                         receiver.on_cursor(update);
@@ -21058,7 +23092,13 @@ impl Node {
                                     let codec_tag = sf.codec_tag;
                                     // Decode by the frame's wire tag:
                                     // zstd (1) or H.264 (3, ADR-079).
-                                    let present_frame = if sf.compressed() {
+                                    let present_frame = if sf.codec_tag == tetherly_core::SCREEN_COMPRESS_MOTION_SCROLL
+                                        || sf.codec_tag == tetherly_core::SCREEN_COMPRESS_TILE_GRID
+                                        || sf.codec_tag == tetherly_core::SCREEN_COMPRESS_TILE_CACHE
+                                        || sf.codec_tag == tetherly_core::SCREEN_COMPRESS_TILE_BATCH
+                                    {
+                                        sf
+                                    } else if sf.compressed() {
                                         let codec = if sf.codec_tag
                                             == tetherly_core::SCREEN_COMPRESS_H264
                                         {
@@ -21092,6 +23132,839 @@ impl Node {
                                     } else {
                                         sf
                                     };
+                                    let present_frame = if codec_tag == tetherly_core::SCREEN_COMPRESS_TILE_GRID {
+                                        let (need_recovery, frame_opt, nack_opt) = {
+                                            match present_frame.decode_tile_grid() {
+                                                Ok((_tile_size, total_tiles, dirty_tiles)) => {
+                                                    let mut canvas_guard = node.shared.screen_receiver_canvas.write().unwrap();
+                                                    match canvas_guard.as_mut() {
+                                                        Some(canvas) => {
+                                                            let mut apply_ok = true;
+                                                            let mut failed_tile_idx: Option<u16> = None;
+                                                            let count = dirty_tiles.len() as u64;
+                                                            let bpp = canvas.format.bpp();
+                                                            let present_cfg = *node.shared.screen_tile_present_config.read().unwrap();
+                                                            let mut back_opt = if present_cfg.enabled {
+                                                                let expected_len = (canvas.rect.w as usize) * (canvas.rect.h as usize) * bpp;
+                                                                let mut bg = node.shared.screen_receiver_back_buffer.write().unwrap();
+                                                                if bg.is_none()
+                                                                    || bg.as_ref().map(|b| b.rect != canvas.rect || b.bytes.len() != expected_len).unwrap_or(true)
+                                                                {
+                                                                    *bg = Some(canvas.clone());
+                                                                }
+                                                                Some(bg)
+                                                            } else {
+                                                                None
+                                                            };
+                                                            for tile in dirty_tiles {
+                                                                let raw_len = (tile.w as usize) * (tile.h as usize) * bpp;
+                                                                let raw_data = if tile.data.len() == raw_len {
+                                                                    tile.data
+                                                                } else {
+                                                                    let subcodec = if !tile.data.is_empty() { tile.data[0] } else { 0 };
+                                                                    if subcodec == tetherly_core::TILE_SUBCODEC_SOLID
+                                                                        || subcodec == tetherly_core::TILE_SUBCODEC_BILEVEL
+                                                                        || subcodec == tetherly_core::TILE_SUBCODEC_PALETTE16
+                                                                    {
+                                                                        match tetherly_core::decompress_tile_palette(subcodec, &tile.data, tile.w, tile.h, raw_len) {
+                                                                            Ok(decomp) => decomp,
+                                                                            Err(_) => {
+                                                                                match node.shared.screen_codec.decompress_frame(
+                                                                                    &tile.data,
+                                                                                    tile.w,
+                                                                                    tile.h,
+                                                                                    raw_len,
+                                                                                ) {
+                                                                                    Ok(decomp) => decomp,
+                                                                                    Err(e) => {
+                                                                                        tracing::warn!(%e, "tile patch decompress failed");
+                                                                                        failed_tile_idx = Some(tile.index);
+                                                                                        apply_ok = false;
+                                                                                        break;
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    } else if subcodec == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD {
+                                                                        match tetherly_core::decompress_tile_predictive(
+                                                                            &tile.data,
+                                                                            tile.w,
+                                                                            tile.h,
+                                                                            raw_len,
+                                                                            node.shared.screen_codec.as_ref(),
+                                                                        ) {
+                                                                            Ok(decomp) => decomp,
+                                                                            Err(e) => {
+                                                                                tracing::warn!(%e, "tile predictive decompress failed");
+                                                                                failed_tile_idx = Some(tile.index);
+                                                                                apply_ok = false;
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    } else if subcodec == tetherly_core::TILE_SUBCODEC_LOD {
+                                                                        match tetherly_core::decompress_tile_lod(
+                                                                            &tile.data,
+                                                                            tile.w,
+                                                                            tile.h,
+                                                                            raw_len,
+                                                                            node.shared.screen_codec.as_ref(),
+                                                                        ) {
+                                                                            Ok(decomp) => decomp,
+                                                                            Err(e) => {
+                                                                                tracing::warn!(%e, "tile lod decompress failed");
+                                                                                failed_tile_idx = Some(tile.index);
+                                                                                apply_ok = false;
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    } else if subcodec == tetherly_core::TILE_SUBCODEC_MOTION {
+                                                                        match tetherly_core::decompress_tile_motion(
+                                                                            &tile.data,
+                                                                            tile.x,
+                                                                            tile.y,
+                                                                            tile.w,
+                                                                            tile.h,
+                                                                            canvas,
+                                                                        ) {
+                                                                            Ok(decomp) => decomp,
+                                                                            Err(e) => {
+                                                                                tracing::warn!(%e, "tile motion decompress failed");
+                                                                                failed_tile_idx = Some(tile.index);
+                                                                                apply_ok = false;
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    } else {
+                                                                        match node.shared.screen_codec.decompress_frame(
+                                                                            &tile.data,
+                                                                            tile.w,
+                                                                            tile.h,
+                                                                            raw_len,
+                                                                        ) {
+                                                                            Ok(decomp) => decomp,
+                                                                            Err(e) => {
+                                                                                tracing::warn!(%e, "tile patch decompress failed");
+                                                                                failed_tile_idx = Some(tile.index);
+                                                                                apply_ok = false;
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                };
+                                                                let raw_tile = tetherly_core::DirtyTile {
+                                                                    data: raw_data,
+                                                                    ..tile
+                                                                };
+                                                                let res = if let Some(ref mut bg) = back_opt {
+                                                                    bg.as_mut().unwrap().apply_dirty_tile(&raw_tile)
+                                                                } else {
+                                                                    canvas.apply_dirty_tile(&raw_tile)
+                                                                };
+                                                                if let Err(e) = res {
+                                                                    tracing::warn!(%e, "apply_dirty_tile failed; requesting keyframe recovery");
+                                                                    failed_tile_idx = Some(tile.index);
+                                                                    apply_ok = false;
+                                                                    break;
+                                                                }
+                                                            }
+                                                            if apply_ok {
+                                                                node.shared.screen_tile_frames_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                node.shared.screen_tile_dirty_tiles_sent.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+                                                                let skipped = (total_tiles as u64).saturating_sub(count);
+                                                                node.shared.screen_tile_skipped_count.fetch_add(skipped, std::sync::atomic::Ordering::Relaxed);
+                                                                if let Some(mut bg) = back_opt {
+                                                                    let t0 = std::time::Instant::now();
+                                                                    if present_cfg.tear_prevention && count > 1 {
+                                                                        node.shared.screen_tile_present_torn_prevented.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                    }
+                                                                    node.shared.screen_tile_present_committed_txs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                    node.shared.screen_tile_present_swapped_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                    let swap_lat = t0.elapsed().as_micros().max(1) as u64;
+                                                                    node.shared.screen_tile_present_total_latency_us.fetch_add(swap_lat, std::sync::atomic::Ordering::Relaxed);
+                                                                    if let Some(back) = bg.as_mut() {
+                                                                        back.seq = present_frame.seq;
+                                                                        canvas.bytes.copy_from_slice(&back.bytes);
+                                                                    }
+                                                                }
+                                                                canvas.seq = present_frame.seq;
+                                                                let updated = canvas.clone();
+                                                                let svc_enabled = node.shared.screen_svc_config.read().unwrap().is_enabled();
+                                                                if svc_enabled {
+                                                                    *node.shared.screen_receiver_t0_canvas.write().unwrap() = Some(updated.clone());
+                                                                }
+                                                                (false, Some(updated), None)
+                                                            } else {
+                                                                let nack_cfg = *node.shared.screen_tile_nack_config.read().unwrap();
+                                                                if nack_cfg.enabled {
+                                                                    let tidx = failed_tile_idx.unwrap_or(0);
+                                                                    node.shared.screen_tile_nack_requests_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                    node.shared.screen_tile_nack_degraded_commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                    if let Some(mut bg) = back_opt {
+                                                                        if let Some(back) = bg.as_mut() {
+                                                                            back.seq = present_frame.seq;
+                                                                            canvas.bytes.copy_from_slice(&back.bytes);
+                                                                        }
+                                                                    }
+                                                                    canvas.seq = present_frame.seq;
+                                                                    let updated = canvas.clone();
+                                                                    let svc_enabled = node.shared.screen_svc_config.read().unwrap().is_enabled();
+                                                                    if svc_enabled {
+                                                                        *node.shared.screen_receiver_t0_canvas.write().unwrap() = Some(updated.clone());
+                                                                    }
+                                                                    (false, Some(updated), Some((present_frame.seq as u32, tidx)))
+                                                                } else {
+                                                                    (true, None, None)
+                                                                }
+                                                            }
+                                                        }
+                                                        None => {
+                                                            tracing::warn!("received tile grid frame before base keyframe; requesting keyframe recovery");
+                                                            (true, None, None)
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(%e, "decode_tile_grid failed; requesting keyframe recovery");
+                                                    (true, None, None)
+                                                }
+                                            }
+                                        };
+                                        if let Some((s, tidx)) = nack_opt {
+                                            let nack = ControlMsg::TileNackRequest {
+                                                seq: s,
+                                                tile_index: tidx,
+                                                retry_count: 1,
+                                            };
+                                            if let Ok(f) = nack.to_frame() {
+                                                let r_len = (f.payload.len() + 12) as u64;
+                                                if sess.send_bounded(f).await.is_ok() {
+                                                    node.shared.telemetry.record_screen_tx(r_len);
+                                                }
+                                            }
+                                        }
+                                        if need_recovery {
+                                            let req = ControlMsg::KeyframeRequest;
+                                            if let Ok(f) = req.to_frame() {
+                                                let r_len = (f.payload.len() + 12) as u64;
+                                                if sess.send_bounded(f).await.is_ok() {
+                                                    node.shared.telemetry.record_screen_tx(r_len);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        frame_opt.unwrap()
+                                    } else if codec_tag == tetherly_core::SCREEN_COMPRESS_TILE_BATCH {
+                                        let (need_recovery, frame_opt) = {
+                                            match present_frame.decode_tile_batch() {
+                                                Ok((batch_id, chunk_index, total_chunks, _tile_size, _total_tiles, dirty_tiles)) => {
+                                                    let mut canvas_guard = node.shared.screen_receiver_canvas.write().unwrap();
+                                                    match canvas_guard.as_mut() {
+                                                        Some(canvas) => {
+                                                            let bpp = canvas.format.bpp();
+                                                            let expected_len = (canvas.rect.w as usize) * (canvas.rect.h as usize) * bpp;
+                                                            let mut bg = node.shared.screen_receiver_back_buffer.write().unwrap();
+                                                            if bg.is_none()
+                                                                || bg.as_ref().map(|b| b.rect != canvas.rect || b.bytes.len() != expected_len).unwrap_or(true)
+                                                            {
+                                                                *bg = Some(canvas.clone());
+                                                            }
+
+                                                            let mut apply_ok = true;
+                                                            for tile in dirty_tiles {
+                                                                let raw_len = (tile.w as usize) * (tile.h as usize) * bpp;
+                                                                let raw_data = if tile.data.len() == raw_len {
+                                                                    tile.data
+                                                                } else {
+                                                                    let subcodec = if !tile.data.is_empty() { tile.data[0] } else { 0 };
+                                                                    if subcodec == tetherly_core::TILE_SUBCODEC_SOLID
+                                                                        || subcodec == tetherly_core::TILE_SUBCODEC_BILEVEL
+                                                                        || subcodec == tetherly_core::TILE_SUBCODEC_PALETTE16
+                                                                    {
+                                                                        match tetherly_core::decompress_tile_palette(subcodec, &tile.data, tile.w, tile.h, raw_len) {
+                                                                            Ok(decomp) => decomp,
+                                                                            Err(_) => {
+                                                                                match node.shared.screen_codec.decompress_frame(
+                                                                                    &tile.data,
+                                                                                    tile.w,
+                                                                                    tile.h,
+                                                                                    raw_len,
+                                                                                ) {
+                                                                                    Ok(decomp) => decomp,
+                                                                                    Err(e) => {
+                                                                                        tracing::warn!(%e, "tile batch patch decompress failed");
+                                                                                        apply_ok = false;
+                                                                                        break;
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    } else if subcodec == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD {
+                                                                        match tetherly_core::decompress_tile_predictive(
+                                                                            &tile.data,
+                                                                            tile.w,
+                                                                            tile.h,
+                                                                            raw_len,
+                                                                            node.shared.screen_codec.as_ref(),
+                                                                        ) {
+                                                                            Ok(decomp) => decomp,
+                                                                            Err(e) => {
+                                                                                tracing::warn!(%e, "tile batch predictive decompress failed");
+                                                                                apply_ok = false;
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    } else if subcodec == tetherly_core::TILE_SUBCODEC_LOD {
+                                                                        match tetherly_core::decompress_tile_lod(
+                                                                            &tile.data,
+                                                                            tile.w,
+                                                                            tile.h,
+                                                                            raw_len,
+                                                                            node.shared.screen_codec.as_ref(),
+                                                                        ) {
+                                                                            Ok(decomp) => decomp,
+                                                                            Err(e) => {
+                                                                                tracing::warn!(%e, "tile batch lod decompress failed");
+                                                                                apply_ok = false;
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    } else if subcodec == tetherly_core::TILE_SUBCODEC_MOTION {
+                                                                        match tetherly_core::decompress_tile_motion(
+                                                                            &tile.data,
+                                                                            tile.x,
+                                                                            tile.y,
+                                                                            tile.w,
+                                                                            tile.h,
+                                                                            canvas,
+                                                                        ) {
+                                                                            Ok(decomp) => decomp,
+                                                                            Err(e) => {
+                                                                                tracing::warn!(%e, "tile batch motion decompress failed");
+                                                                                apply_ok = false;
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    } else {
+                                                                        match node.shared.screen_codec.decompress_frame(
+                                                                            &tile.data,
+                                                                            tile.w,
+                                                                            tile.h,
+                                                                            raw_len,
+                                                                        ) {
+                                                                            Ok(decomp) => decomp,
+                                                                            Err(e) => {
+                                                                                tracing::warn!(%e, "tile batch decompress failed");
+                                                                                apply_ok = false;
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                };
+                                                                let raw_tile = tetherly_core::DirtyTile {
+                                                                    data: raw_data,
+                                                                    ..tile
+                                                                };
+                                                                if let Err(e) = bg.as_mut().unwrap().apply_dirty_tile(&raw_tile) {
+                                                                    tracing::warn!(%e, "batch apply_dirty_tile failed");
+                                                                    apply_ok = false;
+                                                                    break;
+                                                                }
+                                                            }
+
+                                                            if !apply_ok {
+                                                                (true, None)
+                                                            } else {
+                                                                let mut rx_state_guard = node.shared.screen_tile_batch_receiver_state.lock().unwrap();
+                                                                let state = rx_state_guard.get_or_insert_with(|| TileBatchReceiverState {
+                                                                    batch_id,
+                                                                    total_chunks,
+                                                                    chunks_received: std::collections::BTreeSet::new(),
+                                                                });
+                                                                if state.batch_id != batch_id {
+                                                                    *state = TileBatchReceiverState {
+                                                                        batch_id,
+                                                                        total_chunks,
+                                                                        chunks_received: std::collections::BTreeSet::new(),
+                                                                    };
+                                                                }
+                                                                state.chunks_received.insert(chunk_index);
+                                                                let all_done = state.chunks_received.len() >= (total_chunks as usize);
+                                                                if all_done {
+                                                                    *rx_state_guard = None;
+                                                                    if let Some(back) = bg.as_mut() {
+                                                                        back.seq = present_frame.seq;
+                                                                        canvas.bytes.copy_from_slice(&back.bytes);
+                                                                    }
+                                                                    canvas.seq = present_frame.seq;
+                                                                    let updated = canvas.clone();
+                                                                    let svc_enabled = node.shared.screen_svc_config.read().unwrap().is_enabled();
+                                                                    if svc_enabled {
+                                                                        *node.shared.screen_receiver_t0_canvas.write().unwrap() = Some(updated.clone());
+                                                                    }
+                                                                    (false, Some(updated))
+                                                                } else {
+                                                                    (false, None)
+                                                                }
+                                                            }
+                                                        }
+                                                        None => {
+                                                            tracing::warn!("received tile batch chunk before base keyframe; requesting keyframe recovery");
+                                                            (true, None)
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(%e, "decode_tile_batch failed; requesting keyframe recovery");
+                                                    (true, None)
+                                                }
+                                            }
+                                        };
+                                        if need_recovery {
+                                            let req = ControlMsg::KeyframeRequest;
+                                            if let Ok(f) = req.to_frame() {
+                                                let r_len = (f.payload.len() + 12) as u64;
+                                                if sess.send_bounded(f).await.is_ok() {
+                                                    node.shared.telemetry.record_screen_tx(r_len);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        match frame_opt {
+                                            Some(frame) => frame,
+                                            None => continue,
+                                        }
+                                    } else if codec_tag == tetherly_core::SCREEN_COMPRESS_TILE_CACHE {
+                                        let (need_recovery, frame_opt) = {
+                                            match present_frame.decode_tile_cache() {
+                                                Ok((_tile_size, _total_tiles, entries)) => {
+                                                    let mut canvas_guard = node.shared.screen_receiver_canvas.write().unwrap();
+                                                    match canvas_guard.as_mut() {
+                                                        Some(canvas) => {
+                                                            let mut apply_ok = true;
+                                                            let present_cfg = *node.shared.screen_tile_present_config.read().unwrap();
+                                                            let mut back_opt = if present_cfg.enabled {
+                                                                let bpp = canvas.format.bpp();
+                                                                let expected_len = (canvas.rect.w as usize) * (canvas.rect.h as usize) * bpp;
+                                                                let mut bg = node.shared.screen_receiver_back_buffer.write().unwrap();
+                                                                if bg.is_none()
+                                                                    || bg.as_ref().map(|b| b.rect != canvas.rect || b.bytes.len() != expected_len).unwrap_or(true)
+                                                                {
+                                                                    *bg = Some(canvas.clone());
+                                                                }
+                                                                Some(bg)
+                                                            } else {
+                                                                None
+                                                            };
+                                                            let mut rx_guard = node.shared.screen_tile_cache_receiver.lock().unwrap();
+                                                            for entry in &entries {
+                                                                if entry.cache_hit {
+                                                                    let id = entry.cache_id as usize;
+                                                                    if id < rx_guard.len() {
+                                                                        if let Some(cached_data) = &rx_guard[id] {
+                                                                            let res = if let Some(ref mut bg) = back_opt {
+                                                                                bg.as_mut().unwrap().apply_cached_tile(entry.x, entry.y, entry.w, entry.h, cached_data)
+                                                                            } else {
+                                                                                canvas.apply_cached_tile(entry.x, entry.y, entry.w, entry.h, cached_data)
+                                                                            };
+                                                                            if let Err(e) = res {
+                                                                                tracing::warn!(%e, "apply_cached_tile hit failed; requesting keyframe recovery");
+                                                                                apply_ok = false;
+                                                                                break;
+                                                                            }
+                                                                        } else {
+                                                                            tracing::warn!(cache_id = entry.cache_id, "tile cache hit missing in receiver dictionary; requesting keyframe recovery");
+                                                                            apply_ok = false;
+                                                                            break;
+                                                                        }
+                                                                    } else {
+                                                                        tracing::warn!(cache_id = entry.cache_id, "tile cache id exceeds dictionary size; requesting keyframe recovery");
+                                                                        apply_ok = false;
+                                                                        break;
+                                                                    }
+                                                                } else {
+                                                                    let bpp = canvas.format.bpp();
+                                                                    let raw_len = (entry.w as usize) * (entry.h as usize) * bpp;
+                                                                    let raw_data = if entry.data.len() == raw_len {
+                                                                        entry.data.clone()
+                                                                    } else {
+                                                                        let subcodec = if !entry.data.is_empty() { entry.data[0] } else { 0 };
+                                                                        if subcodec == tetherly_core::TILE_SUBCODEC_SOLID
+                                                                            || subcodec == tetherly_core::TILE_SUBCODEC_BILEVEL
+                                                                            || subcodec == tetherly_core::TILE_SUBCODEC_PALETTE16
+                                                                        {
+                                                                            match tetherly_core::decompress_tile_palette(subcodec, &entry.data, entry.w, entry.h, raw_len) {
+                                                                                Ok(decomp) => decomp,
+                                                                                Err(_) => {
+                                                                                    match node.shared.screen_codec.decompress_frame(
+                                                                                        &entry.data,
+                                                                                        entry.w,
+                                                                                        entry.h,
+                                                                                        raw_len,
+                                                                                    ) {
+                                                                                        Ok(decomp) => decomp,
+                                                                                        Err(e) => {
+                                                                                            tracing::warn!(%e, "tile cache patch decompress failed");
+                                                                                            apply_ok = false;
+                                                                                            break;
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        } else if subcodec == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD {
+                                                                            match tetherly_core::decompress_tile_predictive(
+                                                                                &entry.data,
+                                                                                entry.w,
+                                                                                entry.h,
+                                                                                raw_len,
+                                                                                node.shared.screen_codec.as_ref(),
+                                                                            ) {
+                                                                                Ok(decomp) => decomp,
+                                                                                Err(e) => {
+                                                                                    tracing::warn!(%e, "tile cache predictive decompress failed");
+                                                                                    apply_ok = false;
+                                                                                    break;
+                                                                                }
+                                                                            }
+                                                                        } else if subcodec == tetherly_core::TILE_SUBCODEC_LOD {
+                                                                            match tetherly_core::decompress_tile_lod(
+                                                                                &entry.data,
+                                                                                entry.w,
+                                                                                entry.h,
+                                                                                raw_len,
+                                                                                node.shared.screen_codec.as_ref(),
+                                                                            ) {
+                                                                                Ok(decomp) => decomp,
+                                                                                Err(e) => {
+                                                                                    tracing::warn!(%e, "tile cache lod decompress failed");
+                                                                                    apply_ok = false;
+                                                                                    break;
+                                                                                }
+                                                                            }
+                                                                        } else if subcodec == tetherly_core::TILE_SUBCODEC_MOTION {
+                                                                            match tetherly_core::decompress_tile_motion(
+                                                                                &entry.data,
+                                                                                entry.x,
+                                                                                entry.y,
+                                                                                entry.w,
+                                                                                entry.h,
+                                                                                canvas,
+                                                                            ) {
+                                                                                Ok(decomp) => decomp,
+                                                                                Err(e) => {
+                                                                                    tracing::warn!(%e, "tile cache motion decompress failed");
+                                                                                    apply_ok = false;
+                                                                                    break;
+                                                                                }
+                                                                            }
+                                                                        } else {
+                                                                            match node.shared.screen_codec.decompress_frame(
+                                                                                &entry.data,
+                                                                                entry.w,
+                                                                                entry.h,
+                                                                                raw_len,
+                                                                            ) {
+                                                                                Ok(decomp) => decomp,
+                                                                                Err(e) => {
+                                                                                    tracing::warn!(%e, "tile cache patch decompress failed");
+                                                                                    apply_ok = false;
+                                                                                    break;
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    };
+                                                                    let id = entry.cache_id as usize;
+                                                                    if id >= rx_guard.len() {
+                                                                        rx_guard.resize(id + 1, None);
+                                                                    }
+                                                                    rx_guard[id] = Some(raw_data.clone());
+                                                                    let res = if let Some(ref mut bg) = back_opt {
+                                                                        bg.as_mut().unwrap().apply_cached_tile(entry.x, entry.y, entry.w, entry.h, &raw_data)
+                                                                    } else {
+                                                                        canvas.apply_cached_tile(entry.x, entry.y, entry.w, entry.h, &raw_data)
+                                                                    };
+                                                                    if let Err(e) = res {
+                                                                        tracing::warn!(%e, "apply_cached_tile miss failed; requesting keyframe recovery");
+                                                                        apply_ok = false;
+                                                                        break;
+                                                                    }
+                                                                }
+                                                            }
+                                                            drop(rx_guard);
+                                                            if apply_ok {
+                                                                if let Some(mut bg) = back_opt {
+                                                                    let t0 = std::time::Instant::now();
+                                                                    if present_cfg.tear_prevention && entries.len() > 1 {
+                                                                        node.shared.screen_tile_present_torn_prevented.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                    }
+                                                                    node.shared.screen_tile_present_committed_txs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                    node.shared.screen_tile_present_swapped_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                    let swap_lat = t0.elapsed().as_micros().max(1) as u64;
+                                                                    node.shared.screen_tile_present_total_latency_us.fetch_add(swap_lat, std::sync::atomic::Ordering::Relaxed);
+                                                                    if let Some(back) = bg.as_mut() {
+                                                                        back.seq = present_frame.seq;
+                                                                        canvas.bytes.copy_from_slice(&back.bytes);
+                                                                    }
+                                                                }
+                                                                canvas.seq = present_frame.seq;
+                                                                let updated = canvas.clone();
+                                                                let svc_enabled = node.shared.screen_svc_config.read().unwrap().is_enabled();
+                                                                if svc_enabled {
+                                                                    *node.shared.screen_receiver_t0_canvas.write().unwrap() = Some(updated.clone());
+                                                                }
+                                                                (false, Some(updated))
+                                                            } else {
+                                                                (true, None)
+                                                            }
+                                                        }
+                                                        None => {
+                                                            tracing::warn!("received tile cache frame before base keyframe; requesting keyframe recovery");
+                                                            (true, None)
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(%e, "decode_tile_cache failed; requesting keyframe recovery");
+                                                    (true, None)
+                                                }
+                                            }
+                                        };
+                                        if need_recovery {
+                                            let req = ControlMsg::KeyframeRequest;
+                                            if let Ok(f) = req.to_frame() {
+                                                let r_len = (f.payload.len() + 12) as u64;
+                                                if sess.send_bounded(f).await.is_ok() {
+                                                    node.shared.telemetry.record_screen_tx(r_len);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        frame_opt.unwrap()
+                                    } else if codec_tag == tetherly_core::SCREEN_COMPRESS_MOTION_SCROLL {
+                                        let (need_recovery, frame_opt) = {
+                                            match present_frame.decode_motion_scroll() {
+                                                Ok((dx, dy, exposed_rect, compressed_patch)) => {
+                                                    let patch_raw_len = (exposed_rect.width as usize) * (exposed_rect.height as usize) * 4;
+                                                    let patch_res = node.shared.screen_codec.decompress_frame(
+                                                        compressed_patch,
+                                                        exposed_rect.width,
+                                                        exposed_rect.height,
+                                                        patch_raw_len,
+                                                    );
+                                                    match patch_res {
+                                                        Ok(raw_patch_bytes) => {
+                                                            let mut canvas_guard = node.shared.screen_receiver_canvas.write().unwrap();
+                                                            match canvas_guard.as_mut() {
+                                                                Some(canvas) => {
+                                                                    canvas.scroll_canvas(dx, dy);
+                                                                    if let Ok(patch_rect) = tetherly_core::ScreenRect::new(
+                                                                        exposed_rect.x as i32,
+                                                                        exposed_rect.y as i32,
+                                                                        exposed_rect.width,
+                                                                        exposed_rect.height,
+                                                                    ) {
+                                                                        if let Ok(patch_frame) = ScreenFrame::raw(
+                                                                            present_frame.seq,
+                                                                            patch_rect,
+                                                                            canvas.format,
+                                                                            raw_patch_bytes,
+                                                                        ) {
+                                                                            if let Ok(()) = canvas.apply_sub_rect(&patch_frame) {
+                                                                                node.shared.screen_motion_frames_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                                canvas.seq = present_frame.seq;
+                                                                                let updated = canvas.clone();
+                                                                                let svc_enabled = node.shared.screen_svc_config.read().unwrap().is_enabled();
+                                                                                if svc_enabled {
+                                                                                    *node.shared.screen_receiver_t0_canvas.write().unwrap() = Some(updated.clone());
+                                                                                }
+                                                                                (false, Some(updated))
+                                                                            } else {
+                                                                                tracing::warn!("motion scroll patch apply failed; requesting keyframe recovery");
+                                                                                (true, None)
+                                                                            }
+                                                                        } else {
+                                                                            tracing::warn!("failed to construct motion patch frame");
+                                                                            (true, None)
+                                                                        }
+                                                                    } else {
+                                                                        tracing::warn!("invalid motion exposed rect");
+                                                                        (true, None)
+                                                                    }
+                                                                }
+                                                                None => {
+                                                                    tracing::warn!("received motion scroll frame before base keyframe; requesting keyframe recovery");
+                                                                    (true, None)
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::warn!(%e, "motion scroll patch decompress failed");
+                                                            (true, None)
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(%e, "decode_motion_scroll failed; requesting keyframe recovery");
+                                                    (true, None)
+                                                }
+                                            }
+                                        };
+                                        if need_recovery {
+                                            let req = ControlMsg::KeyframeRequest;
+                                            if let Ok(f) = req.to_frame() {
+                                                let r_len = (f.payload.len() + 12) as u64;
+                                                if sess.send_bounded(f).await.is_ok() {
+                                                    node.shared.telemetry.record_screen_tx(r_len);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        frame_opt.unwrap()
+                                    } else if codec_tag == tetherly_core::SCREEN_COMPRESS_LTR {
+                                        let (need_recovery, frame_opt) = {
+                                            let mut ltr_guard = node.shared.screen_receiver_ltr_canvas.write().unwrap();
+                                            match ltr_guard.as_mut() {
+                                                Some(golden) => match golden.apply_sub_rect(&present_frame) {
+                                                    Ok(()) => {
+                                                        node.shared.screen_ltr_recoveries_completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                        golden.seq = present_frame.seq;
+                                                        let updated = golden.clone();
+                                                        *node.shared.screen_receiver_canvas.write().unwrap() = Some(updated.clone());
+                                                        (false, Some(updated))
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(%e, "LTR recovery patch blit failed; requesting keyframe recovery");
+                                                        (true, None)
+                                                    }
+                                                },
+                                                None => {
+                                                    tracing::warn!("received LTR recovery frame before golden reference anchor; requesting keyframe recovery");
+                                                    (true, None)
+                                                }
+                                            }
+                                        };
+                                        if need_recovery {
+                                            let req = ControlMsg::KeyframeRequest;
+                                            if let Ok(f) = req.to_frame() {
+                                                let r_len = (f.payload.len() + 12) as u64;
+                                                if sess.send_bounded(f).await.is_ok() {
+                                                    node.shared.telemetry.record_screen_tx(r_len);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        frame_opt.unwrap()
+                                    } else if codec_tag == tetherly_core::SCREEN_COMPRESS_SVC_T1 {
+                                        let (need_recovery, frame_opt) = {
+                                            let t0_guard = node.shared.screen_receiver_t0_canvas.read().unwrap();
+                                            match t0_guard.as_ref() {
+                                                Some(t0_base) => {
+                                                    let mut display_canvas = t0_base.clone();
+                                                    match display_canvas.apply_sub_rect(&present_frame) {
+                                                        Ok(()) => {
+                                                            node.shared.screen_svc_t1_frames_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                            display_canvas.seq = present_frame.seq;
+                                                            *node.shared.screen_receiver_canvas.write().unwrap() = Some(display_canvas.clone());
+                                                            (false, Some(display_canvas))
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::warn!(%e, "SVC T1 patch blit failed; requesting keyframe recovery");
+                                                            (true, None)
+                                                        }
+                                                    }
+                                                }
+                                                None => {
+                                                    let mut canvas_guard = node.shared.screen_receiver_canvas.write().unwrap();
+                                                    match canvas_guard.as_mut() {
+                                                        Some(canvas) => match canvas.apply_sub_rect(&present_frame) {
+                                                            Ok(()) => {
+                                                                node.shared.screen_svc_t1_frames_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                canvas.seq = present_frame.seq;
+                                                                (false, Some(canvas.clone()))
+                                                            }
+                                                            Err(e) => {
+                                                                tracing::warn!(%e, "SVC T1 fallback blit failed; requesting keyframe recovery");
+                                                                (true, None)
+                                                            }
+                                                        },
+                                                        None => {
+                                                            tracing::warn!("received SVC T1 frame before base keyframe; requesting keyframe recovery");
+                                                            (true, None)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        };
+                                        if need_recovery {
+                                            let req = ControlMsg::KeyframeRequest;
+                                            if let Ok(f) = req.to_frame() {
+                                                let r_len = (f.payload.len() + 12) as u64;
+                                                if sess.send_bounded(f).await.is_ok() {
+                                                    node.shared.telemetry.record_screen_tx(r_len);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        frame_opt.unwrap()
+                                    } else if codec_tag == tetherly_core::SCREEN_COMPRESS_DELTA {
+                                        let (need_recovery, frame_opt) = {
+                                            let mut canvas_guard = node.shared.screen_receiver_canvas.write().unwrap();
+                                            match canvas_guard.as_mut() {
+                                                Some(canvas) => match canvas.apply_sub_rect(&present_frame) {
+                                                    Ok(()) => {
+                                                        node.shared.screen_delta_frames_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                        canvas.seq = present_frame.seq;
+                                                        let updated = canvas.clone();
+                                                        let svc_enabled = node.shared.screen_svc_config.read().unwrap().is_enabled();
+                                                        if svc_enabled {
+                                                            *node.shared.screen_receiver_t0_canvas.write().unwrap() = Some(updated.clone());
+                                                            node.shared.screen_svc_t0_frames_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                        }
+                                                        (false, Some(updated))
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(%e, "delta patch blit failed; requesting keyframe recovery");
+                                                        (true, None)
+                                                    }
+                                                },
+                                                None => {
+                                                    tracing::warn!("received delta frame before base keyframe; requesting keyframe recovery");
+                                                    (true, None)
+                                                }
+                                            }
+                                        };
+                                        if need_recovery {
+                                            let req = ControlMsg::KeyframeRequest;
+                                            if let Ok(f) = req.to_frame() {
+                                                let r_len = (f.payload.len() + 12) as u64;
+                                                if sess.send_bounded(f).await.is_ok() {
+                                                    node.shared.telemetry.record_screen_tx(r_len);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        frame_opt.unwrap()
+                                    } else {
+                                        *node.shared.screen_receiver_canvas.write().unwrap() = Some(present_frame.clone());
+                                        *node.shared.screen_receiver_back_buffer.write().unwrap() = Some(present_frame.clone());
+                                        node.shared.screen_delta_keyframes_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        let svc_cfg = *node.shared.screen_svc_config.read().unwrap();
+                                        if svc_cfg.is_enabled() {
+                                            *node.shared.screen_receiver_t0_canvas.write().unwrap() = Some(present_frame.clone());
+                                            node.shared.screen_svc_t0_frames_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        let ltr_cfg = *node.shared.screen_ltr_config.read().unwrap();
+                                        if ltr_cfg.enabled {
+                                            let mut ltr_guard = node.shared.screen_receiver_ltr_canvas.write().unwrap();
+                                            if ltr_guard.is_none() {
+                                                *ltr_guard = Some(present_frame.clone());
+                                                node.shared.screen_ltr_current_seq.store(present_frame.seq, std::sync::atomic::Ordering::Relaxed);
+                                                node.shared.screen_ltr_anchors_established.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            }
+                                        }
+                                        present_frame
+                                    };
+                                    // ADR-110 / v2.24: Objective Visual Quality Metric sampling & distortion profiling
+                                    node.shared.record_quality_metric(&present_frame);
                                     let is_gap = receiver.last_seq() != 0
                                         && present_frame.seq > receiver.last_seq() + 1;
                                     match receiver.apply(&present_frame) {
@@ -21128,10 +24001,41 @@ impl Node {
                                                 let arrival_us = node.shared.clock.unix_us();
                                                 receiver.push_playout(present_frame, arrival_us);
                                                 while let ScreenPlayoutAction::Play(ready_frame) = receiver.pop_playout(arrival_us) {
+                                                    let mut presented_frame = ready_frame;
+                                                    {
+                                                        let wm_cfg = node.shared.screen_watermark.read().unwrap();
+                                                        if wm_cfg.enabled {
+                                                            let peer_id_str = node
+                                                                .shared
+                                                                .screen_peer
+                                                                .lock()
+                                                                .ok()
+                                                                .and_then(|g| g.clone())
+                                                                .map(|p| p.to_string())
+                                                                .unwrap_or_else(|| "peer".to_string());
+                                                            let time_str = format!("{}", arrival_us / 1_000_000);
+                                                            if let Ok(applied) = presented_frame.apply_watermark(&wm_cfg, &peer_id_str, &time_str) {
+                                                                if applied {
+                                                                    node.shared.screen_watermark_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    {
+                                                        let now_ms = arrival_us / 1_000;
+                                                        let annotations = node.shared.screen_annotations.read().unwrap();
+                                                        if !annotations.is_empty() {
+                                                            let _ = presented_frame.apply_annotations(&annotations, now_ms);
+                                                        }
+                                                        if let Some(laser) = node.shared.screen_laser_pointer.read().unwrap().as_ref() {
+                                                            let _ = presented_frame.apply_laser_pointer(laser);
+                                                        }
+                                                    }
                                                     let _ = node
                                                         .shared
                                                         .screen_sink
-                                                        .present(&ready_frame);
+                                                        .present(&presented_frame);
+                                                    *node.shared.screen_last_frame.lock().expect("last_frame") = Some(presented_frame.clone());
                                                 }
                                                 *node
                                                     .shared
@@ -21179,6 +24083,7 @@ impl Node {
             *node.shared.screen_sync_stats.lock().expect("sync stats") = receiver.sync_stats();
             *node.shared.screen_peer.lock().expect("screen_peer") = None;
             *node.shared.screen_ctl.lock().await = None;
+            *node.shared.screen_client_out.lock().await = None;
             node.shared
                 .screen_privacy_enabled
                 .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -21196,6 +24101,9 @@ impl Node {
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             node.shared
                 .screen_profile_applied
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            node.shared
+                .screen_peer_watermark_enforced
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             node.emit(UiEvent::screen_state_changed("idle", false, None));
         });
@@ -21337,6 +24245,77 @@ impl Node {
         let Some(frame) = frame else {
             return Ok(false);
         };
+        let full_w = frame.rect.w;
+        let full_h = frame.rect.h;
+        *self.shared.screen_last_frame.lock().expect("last_frame") = Some(frame.clone());
+
+        // ADR-107 / v2.21: Dynamic Region-of-Interest (ROI) viewport cropping
+        let mut frame = {
+            let mut roi = *self.shared.screen_roi.read().unwrap();
+            if roi.active {
+                roi.sanitize(full_w, full_h);
+                frame.crop_roi(&roi)?
+            } else {
+                frame
+            }
+        };
+
+        // ADR-108 / v2.22: Adaptive Color Depth & Grayscale Economy Pipeline
+        {
+            let color_cfg = *self.shared.screen_color_mode.read().unwrap();
+            if color_cfg.is_active() {
+                frame.apply_color_mode(&color_cfg)?;
+            }
+        }
+
+        // ADR-110 / v2.24: Objective Visual Quality Metric sampling & distortion profiling
+        // and ADR-111 / v2.25: Autonomous Closed-Loop QoE Adaptation
+        self.shared.record_quality_metric(&frame);
+
+        // ADR-113 / v2.27: Long-Term Reference (LTR) Frame Anchoring
+        let ltr_cfg = *self.shared.screen_ltr_config.read().unwrap();
+        let ltr_sync_seq = if ltr_cfg.enabled && !frame.compressed() {
+            let mut sender_ltr = self.shared.screen_sender_ltr_canvas.write().unwrap();
+            let should_anchor = sender_ltr.is_none()
+                || (ltr_cfg.auto_interval > 0
+                    && frame.seq > 0
+                    && frame.seq % (ltr_cfg.auto_interval as u64) == 0);
+            if should_anchor {
+                *sender_ltr = Some(frame.clone());
+                self.shared
+                    .screen_ltr_current_seq
+                    .store(frame.seq, std::sync::atomic::Ordering::Relaxed);
+                self.shared
+                    .screen_ltr_anchors_established
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some(frame.seq)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // ADR-114 / v2.28: Screen Streaming 2-Layer Temporal Scalability (SVC-T) Graceful Degradation
+        let svc_cfg = *self.shared.screen_svc_config.read().unwrap();
+        if svc_cfg.is_enabled() && (frame.seq % 2 != 0) && svc_cfg.should_drop_t1() {
+            self.shared
+                .screen_svc_t1_frames_dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let raw_bytes =
+                (frame.rect.w as u64) * (frame.rect.h as u64) * (frame.format.bpp() as u64);
+            self.shared
+                .screen_svc_saved_bytes
+                .fetch_add(raw_bytes, std::sync::atomic::Ordering::Relaxed);
+            return Ok(false);
+        }
+
+        // ADR-123 / v2.37: When tile saliency tiering is enabled, per-tile priority scheduling and
+        // background dropping protects interactive critical tiles without dropping whole frames.
+        let saliency_cfg = *self.shared.screen_tile_saliency_config.read().unwrap();
+        // ADR-124 / v2.38: Dynamic multi-resolution Level-of-Detail downsampling under congestion.
+        let lod_cfg = *self.shared.screen_tile_lod_config.read().unwrap();
+
         let outbound = {
             let mut engine = self.shared.screen_engine.lock().expect("screen");
             let now_us = self.shared.clock.unix_us();
@@ -21344,7 +24323,22 @@ impl Node {
             // When link is congested (in_flight >= 4 or RTT >= 250ms), drop non-initial frames
             // to eliminate bufferbloat and socket stall while maintaining presentation continuity.
             // On drop, AIMD multiplicative decrease cuts bitrate by 20% and arms an immediate IDR.
-            if engine.is_congested() && engine.stats().sent > 0 {
+            if engine.is_congested()
+                && engine.stats().sent > 0
+                && !saliency_cfg.enabled
+                && !lod_cfg.enabled
+            {
+                if svc_cfg.is_enabled() && (frame.seq % 2 != 0) {
+                    self.shared
+                        .screen_svc_t1_frames_dropped
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let raw_bytes =
+                        (frame.rect.w as u64) * (frame.rect.h as u64) * (frame.format.bpp() as u64);
+                    self.shared
+                        .screen_svc_saved_bytes
+                        .fetch_add(raw_bytes, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(false);
+                }
                 engine.record_drop_with_time(now_us);
                 engine.consume_pacing(now_us);
                 let new_rate = engine.bitrate_bps();
@@ -21373,7 +24367,7 @@ impl Node {
             }
 
             // ADR-089 Screen Damage Detection & Adaptive Squelch:
-            let (is_dirty, dirty_ratio) = {
+            let (is_dirty, dirty_ratio, bounding_rect) = {
                 let mut prev_guard = self.shared.screen_prev_frame.lock().expect("prev frame");
                 let mut tracker = self
                     .shared
@@ -21400,17 +24394,1474 @@ impl Node {
                         }
                     }
                 };
-                (!report.is_static, report.dirty_ratio)
+                (!report.is_static, report.dirty_ratio, report.bounding_rect)
             };
 
-            let pushed = engine.push_with_damage_time(frame, is_dirty, dirty_ratio, now_us);
+            // ADR-112 / v2.26: Screen Streaming Progressive Intra-Refresh (PIR) Anti-Burst Pipeline
+            let pir_cfg = *self.shared.screen_pir_config.read().unwrap();
+            let is_pir_active = match pir_cfg.mode {
+                tetherly_core::ScreenPirMode::Disabled => false,
+                tetherly_core::ScreenPirMode::Continuous => true,
+                tetherly_core::ScreenPirMode::OnDemand => self
+                    .shared
+                    .screen_pir_active_sweep
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            };
+
+            // ADR-113 / v2.27: Screen Streaming LTR Recovery Pipeline
+            let is_ltr_recovery = ltr_cfg.enabled
+                && self
+                    .shared
+                    .screen_ltr_recovery_pending
+                    .swap(false, std::sync::atomic::Ordering::SeqCst);
+
+            // ADR-115 / v2.29: 2D Motion Vector Estimation & Scroll Acceleration Pipeline
+            let motion_cfg = *self.shared.screen_motion_config.read().unwrap();
+            let motion_frame_opt = if motion_cfg.enabled && !frame.compressed() {
+                let prev_opt = self
+                    .shared
+                    .screen_sender_motion_canvas
+                    .read()
+                    .unwrap()
+                    .clone();
+                let mut encoded_motion = None;
+                if let Some(prev) = prev_opt {
+                    if prev.rect.w == frame.rect.w
+                        && prev.rect.h == frame.rect.h
+                        && prev.format == frame.format
+                    {
+                        if let Some(mv) = tetherly_core::estimate_scroll_motion(
+                            &prev,
+                            &frame,
+                            motion_cfg.max_displacement,
+                            tetherly_core::SCREEN_MOTION_MIN_MATCH_RATIO,
+                        ) {
+                            if mv.dx != 0 || mv.dy != 0 {
+                                if let Some(exposed_rect) = tetherly_core::compute_exposed_strip(
+                                    frame.rect.w,
+                                    frame.rect.h,
+                                    mv.dx,
+                                    mv.dy,
+                                ) {
+                                    if let Ok(patch) = frame.extract_sub_rect(
+                                        exposed_rect.x,
+                                        exposed_rect.y,
+                                        exposed_rect.width,
+                                        exposed_rect.height,
+                                    ) {
+                                        if let Ok(compressed) =
+                                            self.shared.screen_codec.compress_frame(
+                                                &patch.bytes,
+                                                patch.rect.w,
+                                                patch.rect.h,
+                                            )
+                                        {
+                                            let full_raw_bytes = (frame.rect.w as u64)
+                                                * (frame.rect.h as u64)
+                                                * (frame.format.bpp() as u64);
+                                            let encoded_bytes = (compressed.len() + 12) as u64;
+                                            if full_raw_bytes > encoded_bytes {
+                                                self.shared.screen_motion_saved_bytes.fetch_add(
+                                                    full_raw_bytes - encoded_bytes,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            }
+                                            self.shared
+                                                .screen_motion_frames_sent
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            *self
+                                                .shared
+                                                .screen_sender_motion_canvas
+                                                .write()
+                                                .unwrap() = Some(frame.clone());
+                                            encoded_motion =
+                                                Some(ScreenFrame::encode_motion_scroll(
+                                                    frame.rect,
+                                                    frame.format,
+                                                    frame.seq,
+                                                    mv.dx,
+                                                    mv.dy,
+                                                    exposed_rect,
+                                                    &compressed,
+                                                ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if encoded_motion.is_none() {
+                    if is_dirty {
+                        self.shared
+                            .screen_motion_fallback_frames_sent
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    *self.shared.screen_sender_motion_canvas.write().unwrap() = Some(frame.clone());
+                }
+                encoded_motion
+            } else {
+                if !frame.compressed() {
+                    *self.shared.screen_sender_motion_canvas.write().unwrap() = Some(frame.clone());
+                }
+                None
+            };
+            let is_motion = motion_frame_opt.is_some();
+
+            // ADR-117 / v2.31 takes precedence over basic Tile-Grid when tile_cache_cfg.enabled
+            let mut tile_resend_entry: Option<(u32, Vec<tetherly_core::DirtyTile>)> = None;
+            let tile_cache_cfg = *self.shared.screen_tile_cache_config.read().unwrap();
+            let tile_batch_cfg = *self.shared.screen_tile_batch_config.read().unwrap();
+            let tile_motion_cfg = *self.shared.screen_tile_motion_config.read().unwrap();
+            let tile_cfg = *self.shared.screen_tile_config.read().unwrap();
+            let focus_cfg = *self.shared.screen_focus_config.read().unwrap();
+            let palette_cfg = *self.shared.screen_tile_palette_config.read().unwrap();
+            let predict_cfg = *self.shared.screen_tile_predict_config.read().unwrap();
+            let is_congested = engine.is_congested();
+            let cursor_pos = if focus_cfg.enabled {
+                let stats = self
+                    .shared
+                    .screen_cursor_stats
+                    .lock()
+                    .ok()
+                    .map(|s| (s.current_x, s.current_y));
+                if let Some((cx, cy)) = stats {
+                    if cx != 0 || cy != 0 {
+                        Some((cx, cy))
+                    } else {
+                        self.shared.cursor_last_pos.lock().ok().map(|p| *p)
+                    }
+                } else {
+                    self.shared.cursor_last_pos.lock().ok().map(|p| *p)
+                }
+            } else {
+                None
+            };
+            let focus_box = if focus_cfg.enabled {
+                match focus_cfg.mode {
+                    tetherly_core::ScreenFocusMode::Box => Some((
+                        focus_cfg.box_x,
+                        focus_cfg.box_y,
+                        focus_cfg.box_w,
+                        focus_cfg.box_h,
+                    )),
+                    tetherly_core::ScreenFocusMode::Cursor => cursor_pos.map(|(cx, cy)| {
+                        let r = focus_cfg.radius;
+                        let x = cx.max(0) as u16;
+                        let y = cy.max(0) as u16;
+                        let bx = x.saturating_sub(r);
+                        let by = y.saturating_sub(r);
+                        let bw = r.saturating_mul(2);
+                        let bh = r.saturating_mul(2);
+                        (bx, by, bw, bh)
+                    }),
+                }
+            } else {
+                None
+            };
+
+            let (tile_cache_frame_opt, tile_frame_opt, tile_batch_chunks_opt) = if tile_cache_cfg
+                .enabled
+                && !frame.compressed()
+                && !is_motion
+            {
+                let prev_opt = self
+                    .shared
+                    .screen_sender_tile_canvas
+                    .read()
+                    .unwrap()
+                    .clone();
+                let mut encoded_tile_cache = None;
+                if let Some(prev) = &prev_opt {
+                    if prev.rect.w == frame.rect.w
+                        && prev.rect.h == frame.rect.h
+                        && prev.format == frame.format
+                    {
+                        let tile_size = if tile_cfg.enabled {
+                            tile_cfg.tile_size
+                        } else {
+                            tetherly_core::SCREEN_TILE_DEFAULT_SIZE
+                        };
+                        let (total_tiles, raw_dirty_tiles) =
+                            tetherly_core::extract_dirty_tiles(prev, &frame, tile_size);
+                        let (dirty_tiles, any_peripheral_skipped) = if focus_cfg.enabled {
+                            let cadence = (focus_cfg.peripheral_skip_ratio as u64) + 1;
+                            let send_peripheral = (frame.seq % cadence) == 0;
+                            let mut kept = Vec::with_capacity(raw_dirty_tiles.len());
+                            let mut skipped = false;
+                            for tile in raw_dirty_tiles {
+                                let in_focus = tetherly_core::is_tile_in_focus(
+                                    tile.x, tile.y, tile.w, tile.h, &focus_cfg, cursor_pos,
+                                );
+                                if in_focus {
+                                    self.shared
+                                        .screen_focus_tiles_sent
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    kept.push(tile);
+                                } else if send_peripheral {
+                                    self.shared
+                                        .screen_focus_peripheral_sent
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    kept.push(tile);
+                                } else {
+                                    self.shared
+                                        .screen_focus_peripheral_skipped
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    self.shared.screen_focus_saved_bytes.fetch_add(
+                                        tile.data.len() as u64,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    skipped = true;
+                                }
+                            }
+                            (kept, skipped)
+                        } else {
+                            (raw_dirty_tiles, false)
+                        };
+
+                        let (dirty_tiles, any_saliency_skipped) = if saliency_cfg.enabled {
+                            let (scheduled, crit, norm, bg, skipped) =
+                                tetherly_core::ScreenTileSaliencyEvaluator::schedule_tiles(
+                                    dirty_tiles,
+                                    focus_box,
+                                    &saliency_cfg,
+                                    is_congested,
+                                );
+                            self.shared
+                                .screen_tile_saliency_critical_tiles
+                                .fetch_add(crit, std::sync::atomic::Ordering::Relaxed);
+                            self.shared
+                                .screen_tile_saliency_normal_tiles
+                                .fetch_add(norm, std::sync::atomic::Ordering::Relaxed);
+                            self.shared
+                                .screen_tile_saliency_background_tiles
+                                .fetch_add(bg, std::sync::atomic::Ordering::Relaxed);
+                            self.shared
+                                .screen_tile_saliency_background_skipped
+                                .fetch_add(skipped, std::sync::atomic::Ordering::Relaxed);
+                            (scheduled, skipped > 0)
+                        } else {
+                            (dirty_tiles, false)
+                        };
+                        let any_skipped = any_peripheral_skipped || any_saliency_skipped;
+
+                        if !dirty_tiles.is_empty() {
+                            let mut cached_entries = Vec::with_capacity(dirty_tiles.len());
+                            let mut dict = self.shared.screen_tile_cache_dict.lock().unwrap();
+                            let mut any_lod_downsampled = false;
+                            let mut lod_flags = Vec::with_capacity(dirty_tiles.len());
+                            for tile in &dirty_tiles {
+                                let hash = tetherly_core::fnv1a_hash64(&tile.data);
+                                let (hit, cache_id) = dict.lookup_or_insert(hash);
+                                if hit {
+                                    lod_flags.push(false);
+                                    self.shared
+                                        .screen_tile_cache_hits
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    let saved = (tile.data.len() as u64).saturating_sub(17);
+                                    self.shared
+                                        .screen_tile_cache_saved_bytes
+                                        .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
+                                    cached_entries.push(tetherly_core::CachedTileEntry {
+                                        index: tile.index,
+                                        x: tile.x,
+                                        y: tile.y,
+                                        w: tile.w,
+                                        h: tile.h,
+                                        cache_hit: true,
+                                        cache_id,
+                                        data: Vec::new(),
+                                    });
+                                } else {
+                                    self.shared
+                                        .screen_tile_cache_misses
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    let raw_len = tile.data.len();
+                                    let motion_opt = if tile_motion_cfg.enabled {
+                                        tetherly_core::compress_tile_motion(
+                                            &tile.data,
+                                            tile.x,
+                                            tile.y,
+                                            tile.w,
+                                            tile.h,
+                                            prev,
+                                            &tile_motion_cfg,
+                                        )
+                                    } else {
+                                        None
+                                    };
+
+                                    let (to_send, subc) = if let Some((
+                                        motion_subc,
+                                        motion_payload,
+                                    )) = motion_opt
+                                    {
+                                        self.shared
+                                            .screen_tile_motion_tiles_sent
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        let saved = (raw_len as u64)
+                                            .saturating_sub(motion_payload.len() as u64);
+                                        self.shared
+                                            .screen_tile_motion_bytes_saved
+                                            .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
+                                        lod_flags.push(false);
+                                        (motion_payload, motion_subc)
+                                    } else {
+                                        if tile_motion_cfg.enabled {
+                                            self.shared
+                                                .screen_tile_motion_fallback_tiles_sent
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        let (target_lod, is_lod) = if lod_cfg.enabled {
+                                            let (_, tier) = if saliency_cfg.enabled {
+                                                tetherly_core::ScreenTileSaliencyEvaluator::evaluate_tile(tile, focus_box, &saliency_cfg)
+                                            } else {
+                                                (100, tetherly_core::TileSaliencyTier::Normal)
+                                            };
+                                            if tier == tetherly_core::TileSaliencyTier::Critical {
+                                                (tetherly_core::TileLodLevel::Lod0, false)
+                                            } else if lod_cfg.auto_lod_on_congestion {
+                                                if is_congested {
+                                                    if tier == tetherly_core::TileSaliencyTier::Background && lod_cfg.max_lod >= 2 {
+                                                        (tetherly_core::TileLodLevel::Lod2, true)
+                                                    } else if lod_cfg.max_lod >= 1 {
+                                                        if !saliency_cfg.enabled && lod_cfg.max_lod >= 2 {
+                                                            (tetherly_core::TileLodLevel::Lod2, true)
+                                                        } else {
+                                                            (tetherly_core::TileLodLevel::Lod1, true)
+                                                        }
+                                                    } else {
+                                                        (tetherly_core::TileLodLevel::Lod0, false)
+                                                    }
+                                                } else {
+                                                    (tetherly_core::TileLodLevel::Lod0, false)
+                                                }
+                                            } else {
+                                                if (tier
+                                                    == tetherly_core::TileSaliencyTier::Background
+                                                    || !saliency_cfg.enabled)
+                                                    && lod_cfg.max_lod >= 2
+                                                {
+                                                    (tetherly_core::TileLodLevel::Lod2, true)
+                                                } else if lod_cfg.max_lod >= 1 {
+                                                    (tetherly_core::TileLodLevel::Lod1, true)
+                                                } else {
+                                                    (tetherly_core::TileLodLevel::Lod0, false)
+                                                }
+                                            }
+                                        } else {
+                                            (tetherly_core::TileLodLevel::Lod0, false)
+                                        };
+                                        if is_lod {
+                                            any_lod_downsampled = true;
+                                        }
+                                        lod_flags.push(is_lod);
+
+                                        if target_lod != tetherly_core::TileLodLevel::Lod0 {
+                                            let (subc, comp) = tetherly_core::compress_tile_lod(
+                                                &tile.data,
+                                                tile.w,
+                                                tile.h,
+                                                target_lod,
+                                                self.shared.screen_codec.as_ref(),
+                                            );
+                                            let saved =
+                                                (raw_len as u64).saturating_sub(comp.len() as u64);
+                                            self.shared.screen_tile_lod_bytes_saved.fetch_add(
+                                                saved,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            );
+                                            match target_lod {
+                                                tetherly_core::TileLodLevel::Lod1 => {
+                                                    self.shared.screen_tile_lod1_tiles.fetch_add(
+                                                        1,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                }
+                                                tetherly_core::TileLodLevel::Lod2 => {
+                                                    self.shared.screen_tile_lod2_tiles.fetch_add(
+                                                        1,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                }
+                                                _ => {}
+                                            }
+                                            (comp, subc)
+                                        } else {
+                                            if lod_cfg.enabled {
+                                                self.shared.screen_tile_lod0_tiles.fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            }
+                                            if palette_cfg.enabled {
+                                                let (subcodec, encoded) =
+                                                    tetherly_core::compress_tile_palette(
+                                                        &tile.data,
+                                                        tile.w,
+                                                        tile.h,
+                                                        &palette_cfg,
+                                                    );
+                                                if subcodec == tetherly_core::TILE_SUBCODEC_SOLID
+                                                    || subcodec
+                                                        == tetherly_core::TILE_SUBCODEC_BILEVEL
+                                                    || subcodec
+                                                        == tetherly_core::TILE_SUBCODEC_PALETTE16
+                                                {
+                                                    (encoded, subcodec)
+                                                } else if predict_cfg.enabled {
+                                                    let (pred_subc, pred_data) =
+                                                        tetherly_core::compress_tile_predictive(
+                                                            &tile.data,
+                                                            tile.w,
+                                                            tile.h,
+                                                            &predict_cfg,
+                                                            self.shared.screen_codec.as_ref(),
+                                                        );
+                                                    if pred_subc
+                                                        == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
+                                                        && pred_data.len() < raw_len
+                                                    {
+                                                        (pred_data, tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD)
+                                                    } else {
+                                                        let comp = if let Ok(compressed) =
+                                                            self.shared.screen_codec.compress_frame(
+                                                                &tile.data, tile.w, tile.h,
+                                                            ) {
+                                                            if compressed.len() < raw_len {
+                                                                compressed
+                                                            } else {
+                                                                tile.data.clone()
+                                                            }
+                                                        } else {
+                                                            tile.data.clone()
+                                                        };
+                                                        (comp, tetherly_core::TILE_SUBCODEC_RAW)
+                                                    }
+                                                } else {
+                                                    let comp = if let Ok(compressed) = self
+                                                        .shared
+                                                        .screen_codec
+                                                        .compress_frame(&tile.data, tile.w, tile.h)
+                                                    {
+                                                        if compressed.len() < raw_len {
+                                                            compressed
+                                                        } else {
+                                                            tile.data.clone()
+                                                        }
+                                                    } else {
+                                                        tile.data.clone()
+                                                    };
+                                                    (comp, tetherly_core::TILE_SUBCODEC_RAW)
+                                                }
+                                            } else if predict_cfg.enabled {
+                                                let (pred_subc, pred_data) =
+                                                    tetherly_core::compress_tile_predictive(
+                                                        &tile.data,
+                                                        tile.w,
+                                                        tile.h,
+                                                        &predict_cfg,
+                                                        self.shared.screen_codec.as_ref(),
+                                                    );
+                                                if pred_subc
+                                                    == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
+                                                    && pred_data.len() < raw_len
+                                                {
+                                                    (
+                                                        pred_data,
+                                                        tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD,
+                                                    )
+                                                } else {
+                                                    let comp = if let Ok(compressed) = self
+                                                        .shared
+                                                        .screen_codec
+                                                        .compress_frame(&tile.data, tile.w, tile.h)
+                                                    {
+                                                        if compressed.len() < raw_len {
+                                                            compressed
+                                                        } else {
+                                                            tile.data.clone()
+                                                        }
+                                                    } else {
+                                                        tile.data.clone()
+                                                    };
+                                                    (comp, tetherly_core::TILE_SUBCODEC_RAW)
+                                                }
+                                            } else {
+                                                let comp = if let Ok(compressed) = self
+                                                    .shared
+                                                    .screen_codec
+                                                    .compress_frame(&tile.data, tile.w, tile.h)
+                                                {
+                                                    if compressed.len() < raw_len {
+                                                        compressed
+                                                    } else {
+                                                        tile.data.clone()
+                                                    }
+                                                } else {
+                                                    tile.data.clone()
+                                                };
+                                                (comp, tetherly_core::TILE_SUBCODEC_RAW)
+                                            }
+                                        }
+                                    };
+                                    if palette_cfg.enabled {
+                                        let saved =
+                                            (raw_len as u64).saturating_sub(to_send.len() as u64);
+                                        match subc {
+                                            tetherly_core::TILE_SUBCODEC_SOLID => {
+                                                self.shared
+                                                    .screen_tile_palette_solid_count
+                                                    .fetch_add(
+                                                        1,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                self.shared
+                                                    .screen_tile_palette_saved_bytes
+                                                    .fetch_add(
+                                                        saved,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                            }
+                                            tetherly_core::TILE_SUBCODEC_BILEVEL => {
+                                                self.shared
+                                                    .screen_tile_palette_bilevel_count
+                                                    .fetch_add(
+                                                        1,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                self.shared
+                                                    .screen_tile_palette_saved_bytes
+                                                    .fetch_add(
+                                                        saved,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                            }
+                                            tetherly_core::TILE_SUBCODEC_PALETTE16 => {
+                                                self.shared
+                                                    .screen_tile_palette_palette_count
+                                                    .fetch_add(
+                                                        1,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                self.shared
+                                                    .screen_tile_palette_saved_bytes
+                                                    .fetch_add(
+                                                        saved,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                            }
+                                            _ => {
+                                                self.shared
+                                                    .screen_tile_palette_truecolor_count
+                                                    .fetch_add(
+                                                        1,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                            }
+                                        }
+                                    }
+                                    if predict_cfg.enabled
+                                        && subc == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
+                                    {
+                                        let saved =
+                                            (raw_len as u64).saturating_sub(to_send.len() as u64);
+                                        self.shared
+                                            .screen_tile_predict_tiles_count
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        self.shared
+                                            .screen_tile_predict_saved_bytes
+                                            .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    cached_entries.push(tetherly_core::CachedTileEntry {
+                                        index: tile.index,
+                                        x: tile.x,
+                                        y: tile.y,
+                                        w: tile.w,
+                                        h: tile.h,
+                                        cache_hit: false,
+                                        cache_id,
+                                        data: to_send,
+                                    });
+                                }
+                            }
+                            drop(dict);
+                            if any_skipped || any_lod_downsampled {
+                                let mut prev_canvas = prev.clone();
+                                for (t, was_lod) in dirty_tiles.iter().zip(lod_flags.iter()) {
+                                    if !*was_lod {
+                                        let _ = prev_canvas
+                                            .apply_cached_tile(t.x, t.y, t.w, t.h, &t.data);
+                                    }
+                                }
+                                *self.shared.screen_sender_tile_canvas.write().unwrap() =
+                                    Some(prev_canvas);
+                            } else {
+                                *self.shared.screen_sender_tile_canvas.write().unwrap() =
+                                    Some(frame.clone());
+                            }
+                            encoded_tile_cache = Some(ScreenFrame::encode_tile_cache(
+                                frame.seq,
+                                frame.rect,
+                                frame.format,
+                                tile_size,
+                                total_tiles,
+                                &cached_entries,
+                            ));
+                        }
+                    }
+                }
+                if encoded_tile_cache.is_none()
+                    && (prev_opt.is_none()
+                        || (!focus_cfg.enabled
+                            && !saliency_cfg.enabled
+                            && !lod_cfg.enabled
+                            && !tile_motion_cfg.enabled))
+                {
+                    *self.shared.screen_sender_tile_canvas.write().unwrap() = Some(frame.clone());
+                }
+                (encoded_tile_cache, None, None)
+            } else if (tile_cfg.enabled
+                || focus_cfg.enabled
+                || palette_cfg.enabled
+                || predict_cfg.enabled
+                || saliency_cfg.enabled
+                || lod_cfg.enabled
+                || tile_batch_cfg.enabled
+                || tile_motion_cfg.enabled)
+                && !frame.compressed()
+                && !is_motion
+            {
+                let prev_opt = self
+                    .shared
+                    .screen_sender_tile_canvas
+                    .read()
+                    .unwrap()
+                    .clone();
+                let mut encoded_tile = None;
+                let mut encoded_tile_batch = None;
+                if let Some(prev) = &prev_opt {
+                    if prev.rect.w == frame.rect.w
+                        && prev.rect.h == frame.rect.h
+                        && prev.format == frame.format
+                    {
+                        let tile_size = if tile_cfg.enabled {
+                            tile_cfg.tile_size
+                        } else {
+                            tetherly_core::SCREEN_TILE_DEFAULT_SIZE
+                        };
+                        let (total_tiles, raw_dirty_tiles) =
+                            tetherly_core::extract_dirty_tiles(prev, &frame, tile_size);
+                        let (dirty_tiles, any_peripheral_skipped) = if focus_cfg.enabled {
+                            let cadence = (focus_cfg.peripheral_skip_ratio as u64) + 1;
+                            let send_peripheral = (frame.seq % cadence) == 0;
+                            let mut kept = Vec::with_capacity(raw_dirty_tiles.len());
+                            let mut skipped = false;
+                            for tile in raw_dirty_tiles {
+                                let in_focus = tetherly_core::is_tile_in_focus(
+                                    tile.x, tile.y, tile.w, tile.h, &focus_cfg, cursor_pos,
+                                );
+                                if in_focus {
+                                    self.shared
+                                        .screen_focus_tiles_sent
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    kept.push(tile);
+                                } else if send_peripheral {
+                                    self.shared
+                                        .screen_focus_peripheral_sent
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    kept.push(tile);
+                                } else {
+                                    self.shared
+                                        .screen_focus_peripheral_skipped
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    self.shared.screen_focus_saved_bytes.fetch_add(
+                                        tile.data.len() as u64,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    skipped = true;
+                                }
+                            }
+                            (kept, skipped)
+                        } else {
+                            (raw_dirty_tiles, false)
+                        };
+
+                        let (dirty_tiles, any_saliency_skipped) = if saliency_cfg.enabled {
+                            let (scheduled, crit, norm, bg, skipped) =
+                                tetherly_core::ScreenTileSaliencyEvaluator::schedule_tiles(
+                                    dirty_tiles,
+                                    focus_box,
+                                    &saliency_cfg,
+                                    is_congested,
+                                );
+                            self.shared
+                                .screen_tile_saliency_critical_tiles
+                                .fetch_add(crit, std::sync::atomic::Ordering::Relaxed);
+                            self.shared
+                                .screen_tile_saliency_normal_tiles
+                                .fetch_add(norm, std::sync::atomic::Ordering::Relaxed);
+                            self.shared
+                                .screen_tile_saliency_background_tiles
+                                .fetch_add(bg, std::sync::atomic::Ordering::Relaxed);
+                            self.shared
+                                .screen_tile_saliency_background_skipped
+                                .fetch_add(skipped, std::sync::atomic::Ordering::Relaxed);
+                            (scheduled, skipped > 0)
+                        } else {
+                            (dirty_tiles, false)
+                        };
+                        let any_skipped = any_peripheral_skipped || any_saliency_skipped;
+
+                        let threshold_ok = focus_cfg.enabled
+                            || palette_cfg.enabled
+                            || predict_cfg.enabled
+                            || saliency_cfg.enabled
+                            || lod_cfg.enabled
+                            || tile_batch_cfg.enabled
+                            || tile_motion_cfg.enabled
+                            || dirty_tiles.len() < ((total_tiles as usize) * 3 / 4).max(1);
+                        if !dirty_tiles.is_empty() && threshold_ok {
+                            let mut compressed_tiles = Vec::with_capacity(dirty_tiles.len());
+                            let mut payload_bytes = 6u64;
+                            let mut any_lod_downsampled = false;
+                            let mut lod_flags = Vec::with_capacity(dirty_tiles.len());
+                            for tile in &dirty_tiles {
+                                let raw_len = tile.data.len();
+                                let motion_opt = if tile_motion_cfg.enabled {
+                                    tetherly_core::compress_tile_motion(
+                                        &tile.data,
+                                        tile.x,
+                                        tile.y,
+                                        tile.w,
+                                        tile.h,
+                                        prev,
+                                        &tile_motion_cfg,
+                                    )
+                                } else {
+                                    None
+                                };
+
+                                let (to_send, subc) = if let Some((motion_subc, motion_payload)) =
+                                    motion_opt
+                                {
+                                    self.shared
+                                        .screen_tile_motion_tiles_sent
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    let saved = (raw_len as u64)
+                                        .saturating_sub(motion_payload.len() as u64);
+                                    self.shared
+                                        .screen_tile_motion_bytes_saved
+                                        .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
+                                    lod_flags.push(false);
+                                    (motion_payload, motion_subc)
+                                } else {
+                                    if tile_motion_cfg.enabled {
+                                        self.shared
+                                            .screen_tile_motion_fallback_tiles_sent
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    let (target_lod, is_lod) = if lod_cfg.enabled {
+                                        let (_, tier) = if saliency_cfg.enabled {
+                                            tetherly_core::ScreenTileSaliencyEvaluator::evaluate_tile(tile, focus_box, &saliency_cfg)
+                                        } else {
+                                            (100, tetherly_core::TileSaliencyTier::Normal)
+                                        };
+                                        if tier == tetherly_core::TileSaliencyTier::Critical {
+                                            (tetherly_core::TileLodLevel::Lod0, false)
+                                        } else if lod_cfg.auto_lod_on_congestion {
+                                            if is_congested {
+                                                if tier
+                                                    == tetherly_core::TileSaliencyTier::Background
+                                                    && lod_cfg.max_lod >= 2
+                                                {
+                                                    (tetherly_core::TileLodLevel::Lod2, true)
+                                                } else if lod_cfg.max_lod >= 1 {
+                                                    if !saliency_cfg.enabled && lod_cfg.max_lod >= 2
+                                                    {
+                                                        (tetherly_core::TileLodLevel::Lod2, true)
+                                                    } else {
+                                                        (tetherly_core::TileLodLevel::Lod1, true)
+                                                    }
+                                                } else {
+                                                    (tetherly_core::TileLodLevel::Lod0, false)
+                                                }
+                                            } else {
+                                                (tetherly_core::TileLodLevel::Lod0, false)
+                                            }
+                                        } else {
+                                            if (tier == tetherly_core::TileSaliencyTier::Background
+                                                || !saliency_cfg.enabled)
+                                                && lod_cfg.max_lod >= 2
+                                            {
+                                                (tetherly_core::TileLodLevel::Lod2, true)
+                                            } else if lod_cfg.max_lod >= 1 {
+                                                (tetherly_core::TileLodLevel::Lod1, true)
+                                            } else {
+                                                (tetherly_core::TileLodLevel::Lod0, false)
+                                            }
+                                        }
+                                    } else {
+                                        (tetherly_core::TileLodLevel::Lod0, false)
+                                    };
+                                    if is_lod {
+                                        any_lod_downsampled = true;
+                                    }
+                                    lod_flags.push(is_lod);
+
+                                    if target_lod != tetherly_core::TileLodLevel::Lod0 {
+                                        let (subc, comp) = tetherly_core::compress_tile_lod(
+                                            &tile.data,
+                                            tile.w,
+                                            tile.h,
+                                            target_lod,
+                                            self.shared.screen_codec.as_ref(),
+                                        );
+                                        let saved =
+                                            (raw_len as u64).saturating_sub(comp.len() as u64);
+                                        self.shared
+                                            .screen_tile_lod_bytes_saved
+                                            .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
+                                        match target_lod {
+                                            tetherly_core::TileLodLevel::Lod1 => {
+                                                self.shared.screen_tile_lod1_tiles.fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            }
+                                            tetherly_core::TileLodLevel::Lod2 => {
+                                                self.shared.screen_tile_lod2_tiles.fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            }
+                                            _ => {}
+                                        }
+                                        (comp, subc)
+                                    } else {
+                                        if lod_cfg.enabled {
+                                            self.shared
+                                                .screen_tile_lod0_tiles
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        if palette_cfg.enabled {
+                                            let (subcodec, encoded) =
+                                                tetherly_core::compress_tile_palette(
+                                                    &tile.data,
+                                                    tile.w,
+                                                    tile.h,
+                                                    &palette_cfg,
+                                                );
+                                            if subcodec == tetherly_core::TILE_SUBCODEC_SOLID
+                                                || subcodec == tetherly_core::TILE_SUBCODEC_BILEVEL
+                                                || subcodec
+                                                    == tetherly_core::TILE_SUBCODEC_PALETTE16
+                                            {
+                                                (encoded, subcodec)
+                                            } else if predict_cfg.enabled {
+                                                let (pred_subc, pred_data) =
+                                                    tetherly_core::compress_tile_predictive(
+                                                        &tile.data,
+                                                        tile.w,
+                                                        tile.h,
+                                                        &predict_cfg,
+                                                        self.shared.screen_codec.as_ref(),
+                                                    );
+                                                if pred_subc
+                                                    == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
+                                                    && pred_data.len() < raw_len
+                                                {
+                                                    (
+                                                        pred_data,
+                                                        tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD,
+                                                    )
+                                                } else {
+                                                    let comp = if let Ok(compressed) = self
+                                                        .shared
+                                                        .screen_codec
+                                                        .compress_frame(&tile.data, tile.w, tile.h)
+                                                    {
+                                                        if compressed.len() < raw_len {
+                                                            compressed
+                                                        } else {
+                                                            tile.data.clone()
+                                                        }
+                                                    } else {
+                                                        tile.data.clone()
+                                                    };
+                                                    (comp, tetherly_core::TILE_SUBCODEC_RAW)
+                                                }
+                                            } else {
+                                                let comp = if let Ok(compressed) = self
+                                                    .shared
+                                                    .screen_codec
+                                                    .compress_frame(&tile.data, tile.w, tile.h)
+                                                {
+                                                    if compressed.len() < raw_len {
+                                                        compressed
+                                                    } else {
+                                                        tile.data.clone()
+                                                    }
+                                                } else {
+                                                    tile.data.clone()
+                                                };
+                                                (comp, tetherly_core::TILE_SUBCODEC_RAW)
+                                            }
+                                        } else if predict_cfg.enabled {
+                                            let (pred_subc, pred_data) =
+                                                tetherly_core::compress_tile_predictive(
+                                                    &tile.data,
+                                                    tile.w,
+                                                    tile.h,
+                                                    &predict_cfg,
+                                                    self.shared.screen_codec.as_ref(),
+                                                );
+                                            if pred_subc
+                                                == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
+                                                && pred_data.len() < raw_len
+                                            {
+                                                (
+                                                    pred_data,
+                                                    tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD,
+                                                )
+                                            } else {
+                                                let comp = if let Ok(compressed) = self
+                                                    .shared
+                                                    .screen_codec
+                                                    .compress_frame(&tile.data, tile.w, tile.h)
+                                                {
+                                                    if compressed.len() < raw_len {
+                                                        compressed
+                                                    } else {
+                                                        tile.data.clone()
+                                                    }
+                                                } else {
+                                                    tile.data.clone()
+                                                };
+                                                (comp, tetherly_core::TILE_SUBCODEC_RAW)
+                                            }
+                                        } else {
+                                            let comp = if let Ok(compressed) = self
+                                                .shared
+                                                .screen_codec
+                                                .compress_frame(&tile.data, tile.w, tile.h)
+                                            {
+                                                if compressed.len() < raw_len {
+                                                    compressed
+                                                } else {
+                                                    tile.data.clone()
+                                                }
+                                            } else {
+                                                tile.data.clone()
+                                            };
+                                            (comp, tetherly_core::TILE_SUBCODEC_RAW)
+                                        }
+                                    }
+                                };
+
+                                if palette_cfg.enabled {
+                                    let saved =
+                                        (raw_len as u64).saturating_sub(to_send.len() as u64);
+                                    match subc {
+                                        tetherly_core::TILE_SUBCODEC_SOLID => {
+                                            self.shared
+                                                .screen_tile_palette_solid_count
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            self.shared.screen_tile_palette_saved_bytes.fetch_add(
+                                                saved,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            );
+                                        }
+                                        tetherly_core::TILE_SUBCODEC_BILEVEL => {
+                                            self.shared
+                                                .screen_tile_palette_bilevel_count
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            self.shared.screen_tile_palette_saved_bytes.fetch_add(
+                                                saved,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            );
+                                        }
+                                        tetherly_core::TILE_SUBCODEC_PALETTE16 => {
+                                            self.shared
+                                                .screen_tile_palette_palette_count
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            self.shared.screen_tile_palette_saved_bytes.fetch_add(
+                                                saved,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            );
+                                        }
+                                        _ => {
+                                            self.shared
+                                                .screen_tile_palette_truecolor_count
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+                                if predict_cfg.enabled
+                                    && subc == tetherly_core::TILE_SUBCODEC_PREDICT_ZSTD
+                                {
+                                    let saved =
+                                        (raw_len as u64).saturating_sub(to_send.len() as u64);
+                                    self.shared
+                                        .screen_tile_predict_tiles_count
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    self.shared
+                                        .screen_tile_predict_saved_bytes
+                                        .fetch_add(saved, std::sync::atomic::Ordering::Relaxed);
+                                }
+
+                                payload_bytes += 14 + to_send.len() as u64;
+                                compressed_tiles.push(tetherly_core::DirtyTile {
+                                    data: to_send,
+                                    ..tile.clone()
+                                });
+                            }
+                            let full_raw_bytes = (frame.rect.w as u64)
+                                * (frame.rect.h as u64)
+                                * (frame.format.bpp() as u64);
+                            if full_raw_bytes > payload_bytes {
+                                self.shared.screen_tile_saved_bytes.fetch_add(
+                                    full_raw_bytes - payload_bytes,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
+                            let count = compressed_tiles.len() as u64;
+                            self.shared
+                                .screen_tile_frames_sent
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.shared
+                                .screen_tile_dirty_tiles_sent
+                                .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+                            let skipped = (total_tiles as u64).saturating_sub(count);
+                            self.shared
+                                .screen_tile_skipped_count
+                                .fetch_add(skipped, std::sync::atomic::Ordering::Relaxed);
+
+                            if any_skipped || any_lod_downsampled {
+                                let mut prev_canvas = prev.clone();
+                                for (t, was_lod) in dirty_tiles.iter().zip(lod_flags.iter()) {
+                                    if !*was_lod {
+                                        let _ = prev_canvas
+                                            .apply_cached_tile(t.x, t.y, t.w, t.h, &t.data);
+                                    }
+                                }
+                                *self.shared.screen_sender_tile_canvas.write().unwrap() =
+                                    Some(prev_canvas);
+                            } else {
+                                *self.shared.screen_sender_tile_canvas.write().unwrap() =
+                                    Some(frame.clone());
+                            }
+
+                            tile_resend_entry = Some((frame.seq as u32, compressed_tiles.clone()));
+                            self.shared
+                                .screen_tile_resend_buffer
+                                .write()
+                                .unwrap()
+                                .push_frame(frame.seq as u32, compressed_tiles.clone());
+                            if tile_batch_cfg.enabled {
+                                let batch_id = self
+                                    .shared
+                                    .screen_tile_batches_sent
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                    as u32
+                                    + 1;
+                                let chunks = tetherly_core::chunk_dirty_tiles(
+                                    frame.seq,
+                                    frame.rect,
+                                    frame.format,
+                                    compressed_tiles.clone(),
+                                    tile_batch_cfg.target_chunk_bytes as usize,
+                                    tile_size,
+                                    total_tiles,
+                                    batch_id,
+                                );
+                                let chunk_count = chunks.len() as u64;
+                                self.shared
+                                    .screen_tile_chunks_sent
+                                    .fetch_add(chunk_count, std::sync::atomic::Ordering::Relaxed);
+                                let total_bytes: u64 =
+                                    chunks.iter().map(|c| c.bytes.len() as u64).sum();
+                                self.shared
+                                    .screen_tile_batch_bytes_total
+                                    .fetch_add(total_bytes, std::sync::atomic::Ordering::Relaxed);
+                                encoded_tile_batch = Some(chunks);
+                            } else {
+                                encoded_tile = Some(ScreenFrame::encode_tile_grid(
+                                    frame.seq,
+                                    frame.rect,
+                                    frame.format,
+                                    tile_size,
+                                    total_tiles,
+                                    &compressed_tiles,
+                                ));
+                            }
+                        }
+                    }
+                }
+                if encoded_tile.is_none()
+                    && encoded_tile_batch.is_none()
+                    && (prev_opt.is_none()
+                        || (!focus_cfg.enabled
+                            && !saliency_cfg.enabled
+                            && !lod_cfg.enabled
+                            && !tile_batch_cfg.enabled))
+                {
+                    *self.shared.screen_sender_tile_canvas.write().unwrap() = Some(frame.clone());
+                }
+                (None, encoded_tile, encoded_tile_batch)
+            } else {
+                if !frame.compressed() {
+                    *self.shared.screen_sender_tile_canvas.write().unwrap() = Some(frame.clone());
+                }
+                (None, None, None)
+            };
+            let is_tile = tile_frame_opt.is_some();
+            let is_tile_cache = tile_cache_frame_opt.is_some();
+            let is_tile_batch = tile_batch_chunks_opt.is_some();
+
+            let frame = if let Some(cf) = tile_cache_frame_opt {
+                cf
+            } else if let Some(chunks) = &tile_batch_chunks_opt {
+                chunks[0].clone()
+            } else if let Some(mf) = motion_frame_opt {
+                mf
+            } else if let Some(tf) = tile_frame_opt {
+                tf
+            } else if is_ltr_recovery && !frame.compressed() {
+                let golden_opt = self.shared.screen_sender_ltr_canvas.read().unwrap().clone();
+                match golden_opt {
+                    Some(golden)
+                        if golden.rect.w == frame.rect.w
+                            && golden.rect.h == frame.rect.h
+                            && golden.format == frame.format =>
+                    {
+                        let mut tracker = self
+                            .shared
+                            .screen_damage_tracker
+                            .lock()
+                            .expect("damage tracker");
+                        let report = tracker.evaluate_rgba(
+                            &golden.bytes,
+                            &frame.bytes,
+                            frame.rect.w as u32,
+                            frame.rect.h as u32,
+                        );
+                        drop(tracker);
+                        let rect =
+                            report
+                                .bounding_rect
+                                .unwrap_or(tetherly_core::ScreenDamageRect {
+                                    x: 0,
+                                    y: 0,
+                                    width: 1.min(frame.rect.w),
+                                    height: 1.min(frame.rect.h),
+                                });
+                        let patch =
+                            frame.extract_sub_rect(rect.x, rect.y, rect.width, rect.height)?;
+                        let compressed = self.shared.screen_codec.compress_frame(
+                            &patch.bytes,
+                            patch.rect.w,
+                            patch.rect.h,
+                        )?;
+                        let full_raw_bytes = (frame.rect.w as u64)
+                            * (frame.rect.h as u64)
+                            * (frame.format.bpp() as u64);
+                        let patch_bytes = compressed.len() as u64;
+                        if full_raw_bytes > patch_bytes {
+                            self.shared.screen_ltr_saved_burst_bytes.fetch_add(
+                                full_raw_bytes - patch_bytes,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                        self.shared
+                            .screen_ltr_recoveries_completed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        ScreenFrame {
+                            codec_tag: tetherly_core::SCREEN_COMPRESS_LTR,
+                            bytes: compressed,
+                            ..patch
+                        }
+                    }
+                    _ => {
+                        self.shared
+                            .screen_delta_counter
+                            .store(0, std::sync::atomic::Ordering::Relaxed);
+                        self.shared
+                            .screen_delta_keyframes_sent
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        frame
+                    }
+                }
+            } else if is_pir_active && !frame.compressed() {
+                let cur_band = self
+                    .shared
+                    .screen_pir_current_band
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let bands = pir_cfg.bands.clamp(
+                    tetherly_core::SCREEN_PIR_MIN_BANDS,
+                    tetherly_core::SCREEN_PIR_MAX_BANDS,
+                );
+                let (bx, by, bw, bh) = tetherly_core::compute_pir_band_rect(
+                    frame.rect.w as u32,
+                    frame.rect.h as u32,
+                    bands,
+                    cur_band,
+                );
+                let slice = frame.extract_sub_rect(bx as u16, by as u16, bw as u16, bh as u16)?;
+                let compressed = self.shared.screen_codec.compress_frame(
+                    &slice.bytes,
+                    slice.rect.w,
+                    slice.rect.h,
+                )?;
+                let next_band = (cur_band + 1) % bands;
+                self.shared
+                    .screen_pir_current_band
+                    .store(next_band, std::sync::atomic::Ordering::Relaxed);
+                self.shared
+                    .screen_pir_slices_sent
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if next_band == 0 {
+                    self.shared
+                        .screen_pir_sweeps_completed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if pir_cfg.mode == tetherly_core::ScreenPirMode::OnDemand {
+                        self.shared
+                            .screen_pir_active_sweep
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                ScreenFrame {
+                    codec_tag: tetherly_core::SCREEN_COMPRESS_DELTA,
+                    bytes: compressed,
+                    ..slice
+                }
+            } else if svc_cfg.is_enabled() && !frame.compressed() {
+                // ADR-114 / v2.28: 2-Layer Temporal Scalability (SVC-T) Hierarchical Delta & Leaf Branch
+                let is_t1 = (frame.seq % 2) != 0;
+                if is_t1 {
+                    // Enhancement Layer (T1): strictly references latest T0 anchor; never updates T0 anchor
+                    let t0_opt = self.shared.screen_sender_t0_canvas.read().unwrap().clone();
+                    match t0_opt {
+                        Some(t0_ref)
+                            if t0_ref.rect.w == frame.rect.w
+                                && t0_ref.rect.h == frame.rect.h
+                                && t0_ref.format == frame.format =>
+                        {
+                            let mut tracker = self
+                                .shared
+                                .screen_damage_tracker
+                                .lock()
+                                .expect("damage tracker");
+                            let report = tracker.evaluate_rgba(
+                                &t0_ref.bytes,
+                                &frame.bytes,
+                                frame.rect.w as u32,
+                                frame.rect.h as u32,
+                            );
+                            drop(tracker);
+                            let rect =
+                                report
+                                    .bounding_rect
+                                    .unwrap_or(tetherly_core::ScreenDamageRect {
+                                        x: 0,
+                                        y: 0,
+                                        width: 1.min(frame.rect.w),
+                                        height: 1.min(frame.rect.h),
+                                    });
+                            let patch =
+                                frame.extract_sub_rect(rect.x, rect.y, rect.width, rect.height)?;
+                            let compressed = self.shared.screen_codec.compress_frame(
+                                &patch.bytes,
+                                patch.rect.w,
+                                patch.rect.h,
+                            )?;
+                            let full_raw_bytes = (frame.rect.w as u64)
+                                * (frame.rect.h as u64)
+                                * (frame.format.bpp() as u64);
+                            let patch_bytes = compressed.len() as u64;
+                            if full_raw_bytes > patch_bytes {
+                                self.shared.screen_svc_saved_bytes.fetch_add(
+                                    full_raw_bytes - patch_bytes,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
+                            self.shared
+                                .screen_svc_t1_frames_sent
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            ScreenFrame {
+                                codec_tag: tetherly_core::SCREEN_COMPRESS_SVC_T1,
+                                bytes: compressed,
+                                ..patch
+                            }
+                        }
+                        _ => {
+                            self.shared
+                                .screen_svc_t1_frames_sent
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            frame
+                        }
+                    }
+                } else {
+                    // Base Layer (T0): strictly references previous T0 anchor and updates T0 canvas
+                    self.shared
+                        .screen_svc_t0_frames_sent
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let prev_t0_opt = self.shared.screen_sender_t0_canvas.read().unwrap().clone();
+                    match prev_t0_opt {
+                        Some(prev_t0)
+                            if prev_t0.rect.w == frame.rect.w
+                                && prev_t0.rect.h == frame.rect.h
+                                && prev_t0.format == frame.format =>
+                        {
+                            let mut tracker = self
+                                .shared
+                                .screen_damage_tracker
+                                .lock()
+                                .expect("damage tracker");
+                            let report = tracker.evaluate_rgba(
+                                &prev_t0.bytes,
+                                &frame.bytes,
+                                frame.rect.w as u32,
+                                frame.rect.h as u32,
+                            );
+                            drop(tracker);
+                            if let Some(rect) = report
+                                .bounding_rect
+                                .filter(|_| !report.is_static && report.dirty_ratio < 0.70)
+                            {
+                                let patch = frame.extract_sub_rect(
+                                    rect.x,
+                                    rect.y,
+                                    rect.width,
+                                    rect.height,
+                                )?;
+                                let compressed = self.shared.screen_codec.compress_frame(
+                                    &patch.bytes,
+                                    patch.rect.w,
+                                    patch.rect.h,
+                                )?;
+                                let full_raw_bytes = (frame.rect.w as u64)
+                                    * (frame.rect.h as u64)
+                                    * (frame.format.bpp() as u64);
+                                let patch_bytes = compressed.len() as u64;
+                                if full_raw_bytes > patch_bytes {
+                                    self.shared.screen_delta_saved_bytes.fetch_add(
+                                        full_raw_bytes - patch_bytes,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                }
+                                *self.shared.screen_sender_t0_canvas.write().unwrap() =
+                                    Some(frame.clone());
+                                ScreenFrame {
+                                    codec_tag: tetherly_core::SCREEN_COMPRESS_DELTA,
+                                    bytes: compressed,
+                                    ..patch
+                                }
+                            } else {
+                                *self.shared.screen_sender_t0_canvas.write().unwrap() =
+                                    Some(frame.clone());
+                                frame
+                            }
+                        }
+                        _ => {
+                            *self.shared.screen_sender_t0_canvas.write().unwrap() =
+                                Some(frame.clone());
+                            frame
+                        }
+                    }
+                }
+            } else {
+                // ADR-109 / v2.23: Dynamic Differential Delta Patch & Temporal Compression
+                let delta_cfg = *self.shared.screen_delta_config.read().unwrap();
+                if delta_cfg.enabled && !frame.compressed() {
+                    let cur_counter = self
+                        .shared
+                        .screen_delta_counter
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if let Some(rect) = bounding_rect.filter(|_| {
+                        cur_counter < delta_cfg.keyframe_interval as u64
+                            && is_dirty
+                            && dirty_ratio < 0.70
+                    }) {
+                        let patch =
+                            frame.extract_sub_rect(rect.x, rect.y, rect.width, rect.height)?;
+                        let compressed = self.shared.screen_codec.compress_frame(
+                            &patch.bytes,
+                            patch.rect.w,
+                            patch.rect.h,
+                        )?;
+                        let full_raw_bytes = (frame.rect.w as u64)
+                            * (frame.rect.h as u64)
+                            * (frame.format.bpp() as u64);
+                        let patch_bytes = compressed.len() as u64;
+                        if full_raw_bytes > patch_bytes {
+                            self.shared.screen_delta_saved_bytes.fetch_add(
+                                full_raw_bytes - patch_bytes,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                        self.shared
+                            .screen_delta_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.shared
+                            .screen_delta_frames_sent
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        ScreenFrame {
+                            codec_tag: tetherly_core::SCREEN_COMPRESS_DELTA,
+                            bytes: compressed,
+                            ..patch
+                        }
+                    } else {
+                        self.shared
+                            .screen_delta_counter
+                            .store(0, std::sync::atomic::Ordering::Relaxed);
+                        self.shared
+                            .screen_delta_keyframes_sent
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        frame
+                    }
+                } else {
+                    frame
+                }
+            };
+
+            let effective_dirty = is_dirty
+                || is_pir_active
+                || is_ltr_recovery
+                || svc_cfg.is_enabled()
+                || is_motion
+                || is_tile
+                || is_tile_cache
+                || is_tile_batch;
+            let pushed = engine.push_with_damage_time(frame, effective_dirty, dirty_ratio, now_us);
             if pushed.is_none() {
                 // Suppressed by adaptive squelch due to static screen
                 engine.consume_pacing(now_us);
                 return Ok(false);
             }
+            if let Some(pseq) = pushed {
+                if let Some((orig_seq, tiles)) = tile_resend_entry {
+                    let mut buf = self.shared.screen_tile_resend_buffer.write().unwrap();
+                    buf.push_frame(pseq as u32, tiles.clone());
+                    if (pseq as u32) != orig_seq {
+                        buf.push_frame(orig_seq, tiles);
+                    }
+                }
+            }
             engine.consume_pacing(now_us);
-            engine.drain()
+            let mut outbound = engine.drain();
+            if let Some(chunks) = tile_batch_chunks_opt {
+                if let Some(pseq) = pushed {
+                    if let Some(first) = outbound.first_mut() {
+                        first.seq = pseq;
+                    }
+                    for mut chunk in chunks.into_iter().skip(1) {
+                        chunk.seq = pseq;
+                        outbound.push(chunk);
+                    }
+                }
+            }
+            outbound
         };
         self.shared
             .screen_interval
@@ -21418,6 +25869,10 @@ impl Node {
             .expect("interval")
             .record();
         self.send_screen_frames(outbound).await?;
+        if let Some(seq) = ltr_sync_seq {
+            let sync_msg = ControlMsg::LtrAnchorSync { ltr_seq: seq };
+            let _ = self.send_screen_control(sync_msg).await;
+        }
         Ok(true)
     }
 
@@ -21429,7 +25884,22 @@ impl Node {
             .await
             .clone()
             .ok_or_else(|| CoreError::Json("screen channel closed".into()))?;
-        for f in frames {
+        let pacing_us = self
+            .shared
+            .screen_tile_batch_config
+            .read()
+            .unwrap()
+            .pacing_interval_us;
+        for (f_idx, f) in frames.into_iter().enumerate() {
+            if f_idx > 0
+                && f.codec_tag == tetherly_core::SCREEN_COMPRESS_TILE_BATCH
+                && pacing_us > 0
+            {
+                tokio::time::sleep(std::time::Duration::from_micros(pacing_us as u64)).await;
+                self.shared
+                    .screen_tile_batch_pacing_pauses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             let (frags, delays_us) = {
                 let now_us = self.shared.clock.unix_us();
                 let mut engine = self.shared.screen_engine.lock().expect("screen");
@@ -21532,23 +26002,59 @@ impl Node {
         Ok(())
     }
 
-    async fn send_screen_control(&self, msg: ControlMsg) -> Result<(), CoreError> {
-        let tx = self
-            .shared
-            .screen_ctl
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| CoreError::Json("screen control channel closed".into()))?;
-        match tx.try_send(msg) {
-            Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                Err(CoreError::Json("screen control queue full".into()))
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Err(CoreError::Json("screen peer gone".into()))
-            }
+    pub async fn send_screen_control(&self, msg: ControlMsg) -> Result<(), CoreError> {
+        if let Some(tx) = self.shared.screen_ctl.lock().await.clone() {
+            return match tx.try_send(msg) {
+                Ok(()) => Ok(()),
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    Err(CoreError::Json("screen control queue full".into()))
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    Err(CoreError::Json("screen peer gone".into()))
+                }
+            };
         }
+        if let Some(tx) = self.shared.screen_out.lock().await.clone() {
+            let frame = msg
+                .to_frame()
+                .map_err(|e| CoreError::Json(format!("bad control frame: {e}")))?;
+            return match tx.try_send(frame) {
+                Ok(()) => Ok(()),
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    Err(CoreError::Json("screen frame queue full".into()))
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    Err(CoreError::Json("screen peer gone".into()))
+                }
+            };
+        }
+        Err(CoreError::Json("screen control channel closed".into()))
+    }
+
+    async fn send_screen_frame_raw(&self, frame: InnerFrame) -> Result<(), CoreError> {
+        if let Some(tx) = self.shared.screen_out.lock().await.clone() {
+            return match tx.try_send(frame) {
+                Ok(()) => Ok(()),
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    Err(CoreError::Json("screen frame queue full".into()))
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    Err(CoreError::Json("screen peer gone".into()))
+                }
+            };
+        }
+        if let Some(tx) = self.shared.screen_client_out.lock().await.clone() {
+            return match tx.try_send(frame) {
+                Ok(()) => Ok(()),
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    Err(CoreError::Json("screen frame queue full".into()))
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    Err(CoreError::Json("screen peer gone".into()))
+                }
+            };
+        }
+        Err(CoreError::Json("screen channel closed".into()))
     }
 
     /// Local consent for the currently connected visitor. This is the ONLY path
@@ -21939,6 +26445,640 @@ impl Node {
                 .screen_peer_recording
                 .load(std::sync::atomic::Ordering::Relaxed),
             recording_frames: self.screen_recording_report().frames_recorded,
+            playback_active: matches!(
+                self.screen_playback_report().state.as_str(),
+                "playing" | "paused"
+            ),
+            playback_state: self.screen_playback_report().state,
+            playback_frame: self.screen_playback_report().current_frame,
+            snapshot_count: self
+                .shared
+                .screen_snapshot_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            watermark_enabled: self.shared.screen_watermark.read().unwrap().enabled,
+            watermark_enforced: self.shared.screen_watermark.read().unwrap().host_enforced
+                || self
+                    .shared
+                    .screen_peer_watermark_enforced
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            watermark_frames: self
+                .shared
+                .screen_watermark_frames
+                .load(std::sync::atomic::Ordering::Relaxed),
+            annotations_count: self.shared.screen_annotations.read().unwrap().len(),
+            laser_active: self
+                .shared
+                .screen_laser_pointer
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|l| l.active)
+                .unwrap_or(false),
+            annotations_total: self
+                .shared
+                .screen_annotation_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            laser_updates_total: self
+                .shared
+                .screen_laser_updates
+                .load(std::sync::atomic::Ordering::Relaxed),
+            whiteboard_undo_count: self
+                .shared
+                .screen_whiteboard_undo_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            whiteboard_redo_count: self
+                .shared
+                .screen_whiteboard_redo_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            whiteboard_read_only: self
+                .shared
+                .screen_whiteboard
+                .read()
+                .unwrap()
+                .policy()
+                .read_only,
+            whiteboard_max_items: self
+                .shared
+                .screen_whiteboard
+                .read()
+                .unwrap()
+                .policy()
+                .max_items,
+            roi_active: self.shared.screen_roi.read().unwrap().active,
+            roi_x: self.shared.screen_roi.read().unwrap().x,
+            roi_y: self.shared.screen_roi.read().unwrap().y,
+            roi_w: self.shared.screen_roi.read().unwrap().w,
+            roi_h: self.shared.screen_roi.read().unwrap().h,
+            roi_zoom_percent: self.shared.screen_roi.read().unwrap().zoom_percent,
+            roi_updates: self
+                .shared
+                .screen_roi_updates
+                .load(std::sync::atomic::Ordering::Relaxed),
+            color_mode: self
+                .shared
+                .screen_color_mode
+                .read()
+                .unwrap()
+                .mode
+                .as_str()
+                .to_string(),
+            color_threshold: self.shared.screen_color_mode.read().unwrap().threshold,
+            color_updates: self
+                .shared
+                .screen_color_updates
+                .load(std::sync::atomic::Ordering::Relaxed),
+            delta_enabled: self.shared.screen_delta_config.read().unwrap().enabled,
+            delta_keyframe_interval: self
+                .shared
+                .screen_delta_config
+                .read()
+                .unwrap()
+                .keyframe_interval,
+            delta_frames_sent: self
+                .shared
+                .screen_delta_frames_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            delta_keyframes_sent: self
+                .shared
+                .screen_delta_keyframes_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            delta_frames_received: self
+                .shared
+                .screen_delta_frames_received
+                .load(std::sync::atomic::Ordering::Relaxed),
+            delta_keyframes_received: self
+                .shared
+                .screen_delta_keyframes_received
+                .load(std::sync::atomic::Ordering::Relaxed),
+            delta_saved_bytes: self
+                .shared
+                .screen_delta_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            metric_enabled: self
+                .shared
+                .screen_quality_metric_config
+                .read()
+                .unwrap()
+                .enabled,
+            metric_sample_interval: self
+                .shared
+                .screen_quality_metric_config
+                .read()
+                .unwrap()
+                .sample_interval,
+            metric_evaluated_frames: self
+                .shared
+                .screen_quality_metric_state
+                .read()
+                .unwrap()
+                .evaluated_frames,
+            metric_psnr_db: self
+                .shared
+                .screen_quality_metric_state
+                .read()
+                .unwrap()
+                .last_psnr_db,
+            metric_ssim: self
+                .shared
+                .screen_quality_metric_state
+                .read()
+                .unwrap()
+                .last_ssim,
+            metric_quality_warning: {
+                let cfg = *self.shared.screen_quality_metric_config.read().unwrap();
+                let state = self.shared.screen_quality_metric_state.read().unwrap();
+                cfg.enabled
+                    && state.evaluated_frames > 0
+                    && (state.last_psnr_db < 30.0 || state.last_ssim < 0.85)
+            },
+            qoe_enabled: self
+                .shared
+                .screen_qoe_controller
+                .read()
+                .unwrap()
+                .config()
+                .is_active(),
+            qoe_mode: self
+                .shared
+                .screen_qoe_controller
+                .read()
+                .unwrap()
+                .config()
+                .mode
+                .as_str()
+                .to_string(),
+            qoe_target_psnr_db: self
+                .shared
+                .screen_qoe_controller
+                .read()
+                .unwrap()
+                .config()
+                .target_psnr_db,
+            qoe_target_ssim_pct: self
+                .shared
+                .screen_qoe_controller
+                .read()
+                .unwrap()
+                .config()
+                .target_ssim_pct,
+            qoe_actions_total: self
+                .shared
+                .screen_qoe_controller
+                .read()
+                .unwrap()
+                .actions_total(),
+            qoe_last_action: self
+                .shared
+                .screen_qoe_controller
+                .read()
+                .unwrap()
+                .last_action()
+                .as_str()
+                .to_string(),
+            pir_enabled: self
+                .shared
+                .screen_pir_config
+                .read()
+                .unwrap()
+                .mode
+                .is_active(),
+            pir_mode: self
+                .shared
+                .screen_pir_config
+                .read()
+                .unwrap()
+                .mode
+                .as_str()
+                .to_string(),
+            pir_bands: self.shared.screen_pir_config.read().unwrap().bands,
+            pir_sweeps_completed: self
+                .shared
+                .screen_pir_sweeps_completed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            pir_slices_sent: self
+                .shared
+                .screen_pir_slices_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            ltr_enabled: self.shared.screen_ltr_config.read().unwrap().enabled,
+            ltr_auto_interval: self.shared.screen_ltr_config.read().unwrap().auto_interval,
+            ltr_current_seq: self
+                .shared
+                .screen_ltr_current_seq
+                .load(std::sync::atomic::Ordering::Relaxed),
+            ltr_anchors_established: self
+                .shared
+                .screen_ltr_anchors_established
+                .load(std::sync::atomic::Ordering::Relaxed),
+            ltr_recoveries_completed: self
+                .shared
+                .screen_ltr_recoveries_completed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            svc_enabled: self.shared.screen_svc_config.read().unwrap().is_enabled(),
+            svc_mode: self
+                .shared
+                .screen_svc_config
+                .read()
+                .unwrap()
+                .mode
+                .as_str()
+                .to_string(),
+            svc_drop_t1: self.shared.screen_svc_config.read().unwrap().drop_t1,
+            svc_t0_sent: self
+                .shared
+                .screen_svc_t0_frames_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            svc_t1_sent: self
+                .shared
+                .screen_svc_t1_frames_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            svc_t1_dropped: self
+                .shared
+                .screen_svc_t1_frames_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            motion_enabled: self.shared.screen_motion_config.read().unwrap().enabled,
+            motion_max_displacement: self
+                .shared
+                .screen_motion_config
+                .read()
+                .unwrap()
+                .max_displacement,
+            motion_frames_sent: self
+                .shared
+                .screen_motion_frames_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            motion_fallback_frames_sent: self
+                .shared
+                .screen_motion_fallback_frames_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            motion_saved_bytes: self
+                .shared
+                .screen_motion_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_enabled: self.shared.screen_tile_config.read().unwrap().enabled,
+            tile_size: self.shared.screen_tile_config.read().unwrap().tile_size,
+            tile_frames_sent: self
+                .shared
+                .screen_tile_frames_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            dirty_tiles_sent: self
+                .shared
+                .screen_tile_dirty_tiles_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            skipped_tiles_count: self
+                .shared
+                .screen_tile_skipped_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_saved_bytes: self
+                .shared
+                .screen_tile_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_cache_enabled: self.shared.screen_tile_cache_config.read().unwrap().enabled,
+            tile_cache_max_entries: self
+                .shared
+                .screen_tile_cache_config
+                .read()
+                .unwrap()
+                .max_entries,
+            tile_cache_entries: self
+                .shared
+                .screen_tile_cache_dict
+                .lock()
+                .unwrap()
+                .current_entries(),
+            tile_cache_hits: self
+                .shared
+                .screen_tile_cache_hits
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_cache_misses: self
+                .shared
+                .screen_tile_cache_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_cache_hit_ratio_pct: {
+                let hits = self
+                    .shared
+                    .screen_tile_cache_hits
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let misses = self
+                    .shared
+                    .screen_tile_cache_misses
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let total = hits + misses;
+                if total > 0 {
+                    (hits as f32 / total as f32) * 100.0
+                } else {
+                    0.0
+                }
+            },
+            tile_cache_saved_bytes: self
+                .shared
+                .screen_tile_cache_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            focus_enabled: self.shared.screen_focus_config.read().unwrap().enabled,
+            focus_mode: self
+                .shared
+                .screen_focus_config
+                .read()
+                .unwrap()
+                .mode
+                .as_str()
+                .to_string(),
+            focus_radius: self.shared.screen_focus_config.read().unwrap().radius,
+            focus_peripheral_skip_ratio: self
+                .shared
+                .screen_focus_config
+                .read()
+                .unwrap()
+                .peripheral_skip_ratio,
+            focus_box_x: self.shared.screen_focus_config.read().unwrap().box_x,
+            focus_box_y: self.shared.screen_focus_config.read().unwrap().box_y,
+            focus_box_w: self.shared.screen_focus_config.read().unwrap().box_w,
+            focus_box_h: self.shared.screen_focus_config.read().unwrap().box_h,
+            focus_tiles_sent: self
+                .shared
+                .screen_focus_tiles_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            peripheral_tiles_sent: self
+                .shared
+                .screen_focus_peripheral_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            peripheral_tiles_skipped: self
+                .shared
+                .screen_focus_peripheral_skipped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            focus_saved_bandwidth_bytes: self
+                .shared
+                .screen_focus_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_palette_enabled: self
+                .shared
+                .screen_tile_palette_config
+                .read()
+                .unwrap()
+                .enabled,
+            tile_palette_max_colors: self
+                .shared
+                .screen_tile_palette_config
+                .read()
+                .unwrap()
+                .max_colors,
+            tile_palette_enable_rle: self
+                .shared
+                .screen_tile_palette_config
+                .read()
+                .unwrap()
+                .enable_rle,
+            tile_palette_solid_tiles: self
+                .shared
+                .screen_tile_palette_solid_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_palette_bilevel_tiles: self
+                .shared
+                .screen_tile_palette_bilevel_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_palette_palette_tiles: self
+                .shared
+                .screen_tile_palette_palette_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_palette_truecolor_tiles: self
+                .shared
+                .screen_tile_palette_truecolor_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_palette_saved_bytes: self
+                .shared
+                .screen_tile_palette_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_predict_enabled: self
+                .shared
+                .screen_tile_predict_config
+                .read()
+                .unwrap()
+                .enabled,
+            tile_predict_filter_mode: self
+                .shared
+                .screen_tile_predict_config
+                .read()
+                .unwrap()
+                .filter_mode
+                .as_str()
+                .to_string(),
+            tile_predict_enable_rct: self
+                .shared
+                .screen_tile_predict_config
+                .read()
+                .unwrap()
+                .enable_rct,
+            tile_predict_tiles_sent: self
+                .shared
+                .screen_tile_predict_tiles_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_predict_saved_bytes: self
+                .shared
+                .screen_tile_predict_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_present_enabled: self
+                .shared
+                .screen_tile_present_config
+                .read()
+                .unwrap()
+                .enabled,
+            tile_present_vsync_mode: self
+                .shared
+                .screen_tile_present_config
+                .read()
+                .unwrap()
+                .vsync_mode
+                .as_str()
+                .to_string(),
+            tile_present_double_buffer: self
+                .shared
+                .screen_tile_present_config
+                .read()
+                .unwrap()
+                .double_buffer,
+            tile_present_tear_prevention: self
+                .shared
+                .screen_tile_present_config
+                .read()
+                .unwrap()
+                .tear_prevention,
+            tile_present_committed_transactions: self
+                .shared
+                .screen_tile_present_committed_txs
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_present_swapped_frames: self
+                .shared
+                .screen_tile_present_swapped_frames
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_present_torn_frames_prevented: self
+                .shared
+                .screen_tile_present_torn_prevented
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_present_avg_swap_latency_us: {
+                let swaps = self
+                    .shared
+                    .screen_tile_present_swapped_frames
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let total_lat = self
+                    .shared
+                    .screen_tile_present_total_latency_us
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                total_lat.checked_div(swaps).unwrap_or(0)
+            },
+            tile_nack_enabled: self.shared.screen_tile_nack_config.read().unwrap().enabled,
+            tile_nack_timeout_ms: self
+                .shared
+                .screen_tile_nack_config
+                .read()
+                .unwrap()
+                .timeout_ms,
+            tile_nack_max_retries: self
+                .shared
+                .screen_tile_nack_config
+                .read()
+                .unwrap()
+                .max_retries,
+            tile_nack_requests_sent: self
+                .shared
+                .screen_tile_nack_requests_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_nack_tiles_retransmitted: self
+                .shared
+                .screen_tile_nack_tiles_retransmitted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_nack_degraded_commits: self
+                .shared
+                .screen_tile_nack_degraded_commits
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_saliency_enabled: self
+                .shared
+                .screen_tile_saliency_config
+                .read()
+                .unwrap()
+                .enabled,
+            tile_saliency_high_threshold: self
+                .shared
+                .screen_tile_saliency_config
+                .read()
+                .unwrap()
+                .high_threshold,
+            tile_saliency_low_threshold: self
+                .shared
+                .screen_tile_saliency_config
+                .read()
+                .unwrap()
+                .low_threshold,
+            tile_saliency_drop_background_on_congestion: self
+                .shared
+                .screen_tile_saliency_config
+                .read()
+                .unwrap()
+                .drop_background_on_congestion,
+            tile_saliency_critical_tiles: self
+                .shared
+                .screen_tile_saliency_critical_tiles
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_saliency_normal_tiles: self
+                .shared
+                .screen_tile_saliency_normal_tiles
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_saliency_background_tiles: self
+                .shared
+                .screen_tile_saliency_background_tiles
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_saliency_background_skipped: self
+                .shared
+                .screen_tile_saliency_background_skipped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_lod_enabled: self.shared.screen_tile_lod_config.read().unwrap().enabled,
+            tile_lod_max_lod: self.shared.screen_tile_lod_config.read().unwrap().max_lod,
+            tile_lod_auto_lod_on_congestion: self
+                .shared
+                .screen_tile_lod_config
+                .read()
+                .unwrap()
+                .auto_lod_on_congestion,
+            tile_lod0_tiles: self
+                .shared
+                .screen_tile_lod0_tiles
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_lod1_tiles: self
+                .shared
+                .screen_tile_lod1_tiles
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_lod2_tiles: self
+                .shared
+                .screen_tile_lod2_tiles
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_lod_bytes_saved: self
+                .shared
+                .screen_tile_lod_bytes_saved
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_batch_enabled: self.shared.screen_tile_batch_config.read().unwrap().enabled,
+            tile_batch_target_chunk_bytes: self
+                .shared
+                .screen_tile_batch_config
+                .read()
+                .unwrap()
+                .target_chunk_bytes,
+            tile_batch_pacing_interval_us: self
+                .shared
+                .screen_tile_batch_config
+                .read()
+                .unwrap()
+                .pacing_interval_us,
+            tile_batches_sent: self
+                .shared
+                .screen_tile_batches_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_chunks_sent: self
+                .shared
+                .screen_tile_chunks_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_batch_avg_chunk_bytes: {
+                let chunks = self
+                    .shared
+                    .screen_tile_chunks_sent
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let bytes = self
+                    .shared
+                    .screen_tile_batch_bytes_total
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                bytes.checked_div(chunks).unwrap_or(0) as u32
+            },
+            tile_batch_pacing_pauses: self
+                .shared
+                .screen_tile_batch_pacing_pauses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_motion_enabled: self
+                .shared
+                .screen_tile_motion_config
+                .read()
+                .unwrap()
+                .enabled,
+            tile_motion_max_displacement: self
+                .shared
+                .screen_tile_motion_config
+                .read()
+                .unwrap()
+                .max_displacement,
+            tile_motion_min_match_ratio: self
+                .shared
+                .screen_tile_motion_config
+                .read()
+                .unwrap()
+                .min_match_ratio,
+            tile_motion_tiles_sent: self
+                .shared
+                .screen_tile_motion_tiles_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_motion_fallback_tiles_sent: self
+                .shared
+                .screen_tile_motion_fallback_tiles_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tile_motion_bytes_saved: self
+                .shared
+                .screen_tile_motion_bytes_saved
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -23428,6 +28568,2581 @@ impl Node {
         })
     }
 
+    /// Report current screen playback state and metrics (v2.16 / ADR-102).
+    pub fn screen_playback_report(&self) -> ScreenPlaybackReport {
+        let guard = self.shared.screen_playback.lock().expect("playback");
+        match guard.as_ref() {
+            Some(s) => s.current_report(),
+            None => ScreenPlaybackReport::default(),
+        }
+    }
+
+    /// Start in-container screen session playback from a recorded TREC container (v2.16 / ADR-102).
+    pub async fn screen_playback_start(
+        &self,
+        path: String,
+        speed: Option<f32>,
+        loop_enabled: Option<bool>,
+    ) -> Result<ScreenPlaybackReport, CoreError> {
+        {
+            let guard = self.shared.screen_playback.lock().expect("playback");
+            if let Some(s) = guard.as_ref() {
+                let state = s.state();
+                if state == ScreenPlaybackState::Playing || state == ScreenPlaybackState::Paused {
+                    return Err(CoreError::InvalidConfig(
+                        "screen playback already active; stop it first".into(),
+                    ));
+                }
+            }
+        }
+
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::InvalidConfig(
+                "playback recording path is required".into(),
+            ));
+        }
+        let raw = std::path::PathBuf::from(trimmed);
+        if raw.file_name().is_none()
+            || raw
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(CoreError::UnsafeFileName);
+        }
+        let resolved = if raw.is_absolute() {
+            raw
+        } else {
+            self.shared.cfg.data_dir.join(raw)
+        };
+
+        if !resolved.exists() {
+            return Err(CoreError::OpenRefused(format!(
+                "recording file not found: {}",
+                resolved.display()
+            )));
+        }
+
+        let sp = speed.unwrap_or(1.0).max(0.0);
+        let lp = loop_enabled.unwrap_or(false);
+
+        let mut engine = ScreenPlaybackEngine::from_file(&resolved, sp, lp)?;
+        let mut rep = engine.report();
+        rep.path = resolved.display().to_string();
+
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        let paused = Arc::new(AtomicBool::new(false));
+        let speed_atomic = Arc::new(AtomicU32::new(sp.to_bits()));
+        let loop_atomic = Arc::new(AtomicBool::new(lp));
+        let report_arc = Arc::new(Mutex::new(rep.clone()));
+
+        let session = ScreenPlaybackSession {
+            path: resolved.clone(),
+            stop_tx,
+            paused: paused.clone(),
+            speed: speed_atomic.clone(),
+            loop_enabled: loop_atomic.clone(),
+            report: report_arc.clone(),
+        };
+        *self.shared.screen_playback.lock().expect("playback") = Some(session);
+
+        let shared = self.shared.clone();
+        let rep_clone = report_arc.clone();
+        let path_str = resolved.display().to_string();
+
+        tokio::task::spawn_blocking(move || {
+            while !*stop_rx.borrow() {
+                if stop_rx.has_changed().unwrap_or(false) && *stop_rx.borrow_and_update() {
+                    break;
+                }
+                if paused.load(std::sync::atomic::Ordering::Relaxed) {
+                    engine.pause();
+                    let mut r = engine.report();
+                    r.path = path_str.clone();
+                    *rep_clone.lock().unwrap() = r;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    continue;
+                } else if engine.state() == ScreenPlaybackState::Paused {
+                    engine.resume();
+                }
+
+                let curr_sp =
+                    f32::from_bits(speed_atomic.load(std::sync::atomic::Ordering::Relaxed));
+                if (curr_sp - engine.speed()).abs() > f32::EPSILON {
+                    engine.set_speed(curr_sp);
+                }
+                let curr_lp = loop_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                if curr_lp != engine.loop_enabled() {
+                    engine.set_loop_enabled(curr_lp);
+                }
+
+                let res = engine.step(&*shared.screen_sink);
+                let mut r = engine.report();
+                r.path = path_str.clone();
+
+                match res {
+                    Ok(Some(mut frame)) => {
+                        {
+                            let wm_cfg = shared.screen_watermark.read().unwrap();
+                            if wm_cfg.enabled {
+                                let peer_id_str = shared
+                                    .screen_peer
+                                    .lock()
+                                    .ok()
+                                    .and_then(|g| g.clone())
+                                    .map(|p| p.to_string())
+                                    .unwrap_or_else(|| "playback".to_string());
+                                let time_str = format!("{}", shared.clock.unix_us() / 1_000_000);
+                                if let Ok(applied) =
+                                    frame.apply_watermark(&wm_cfg, &peer_id_str, &time_str)
+                                {
+                                    if applied {
+                                        shared
+                                            .screen_watermark_frames
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                        {
+                            let now_ms = shared.clock.unix_us() / 1_000;
+                            let annotations = shared.screen_annotations.read().unwrap();
+                            if !annotations.is_empty() {
+                                let _ = frame.apply_annotations(&annotations, now_ms);
+                            }
+                            if let Some(laser) =
+                                shared.screen_laser_pointer.read().unwrap().as_ref()
+                            {
+                                let _ = frame.apply_laser_pointer(laser);
+                            }
+                        }
+                        let _ = shared.screen_observer.lock().map(|o| o.present(&frame));
+                        *shared.screen_last_frame.lock().expect("last_frame") = Some(frame.clone());
+                        if !*stop_rx.borrow() {
+                            *rep_clone.lock().unwrap() = r;
+                        }
+                    }
+                    Ok(None) => {
+                        if !*stop_rx.borrow() {
+                            *rep_clone.lock().unwrap() = r;
+                        }
+                        if engine.state() == ScreenPlaybackState::Finished
+                            || engine.state() == ScreenPlaybackState::Stopped
+                        {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "screen playback step error");
+                        r.state = ScreenPlaybackState::Stopped.as_str().to_string();
+                        *rep_clone.lock().unwrap() = r;
+                        break;
+                    }
+                }
+            }
+            if *stop_rx.borrow() {
+                let mut guard = rep_clone.lock().unwrap();
+                guard.state = ScreenPlaybackState::Stopped.as_str().to_string();
+            }
+        });
+
+        Ok(rep)
+    }
+
+    /// Pause the active screen playback session (v2.16 / ADR-102).
+    pub fn screen_playback_pause(&self) -> Result<ScreenPlaybackReport, CoreError> {
+        let guard = self.shared.screen_playback.lock().expect("playback");
+        if let Some(s) = guard.as_ref() {
+            if s.state() == ScreenPlaybackState::Finished
+                || s.state() == ScreenPlaybackState::Stopped
+            {
+                return Err(CoreError::InvalidConfig("playback is not active".into()));
+            }
+            s.paused.store(true, std::sync::atomic::Ordering::Relaxed);
+            let mut r = s.report.lock().unwrap();
+            r.state = ScreenPlaybackState::Paused.as_str().to_string();
+            Ok(r.clone())
+        } else {
+            Err(CoreError::InvalidConfig(
+                "no screen playback session active".into(),
+            ))
+        }
+    }
+
+    /// Resume the paused screen playback session (v2.16 / ADR-102).
+    pub fn screen_playback_resume(&self) -> Result<ScreenPlaybackReport, CoreError> {
+        let guard = self.shared.screen_playback.lock().expect("playback");
+        if let Some(s) = guard.as_ref() {
+            if s.state() == ScreenPlaybackState::Finished
+                || s.state() == ScreenPlaybackState::Stopped
+            {
+                return Err(CoreError::InvalidConfig("playback is not active".into()));
+            }
+            s.paused.store(false, std::sync::atomic::Ordering::Relaxed);
+            let mut r = s.report.lock().unwrap();
+            r.state = ScreenPlaybackState::Playing.as_str().to_string();
+            Ok(r.clone())
+        } else {
+            Err(CoreError::InvalidConfig(
+                "no screen playback session active".into(),
+            ))
+        }
+    }
+
+    /// Stop the active screen playback session (v2.16 / ADR-102).
+    pub fn screen_playback_stop(&self) -> Result<ScreenPlaybackReport, CoreError> {
+        let guard = self.shared.screen_playback.lock().expect("playback");
+        if let Some(s) = guard.as_ref() {
+            let _ = s.stop_tx.send(true);
+            let mut r = s.report.lock().unwrap();
+            r.state = ScreenPlaybackState::Stopped.as_str().to_string();
+            Ok(r.clone())
+        } else {
+            Ok(ScreenPlaybackReport::default())
+        }
+    }
+
+    /// Capture a live screen snapshot as raw or standard BMP bytes along with a structured telemetry report (v2.17 / ADR-103).
+    ///
+    /// When privacy mode is enabled (`screen_privacy_enabled`), screen contents are strictly blanked (all zero pixels)
+    /// to prevent surveillance while returning `privacy_blanked: true`.
+    pub fn screen_snapshot_data(
+        &self,
+        format: Option<String>,
+        out: Option<String>,
+    ) -> Result<(Vec<u8>, ScreenSnapshotReport), CoreError> {
+        let fmt = format
+            .map(|f| f.trim().to_ascii_lowercase())
+            .filter(|f| !f.is_empty())
+            .unwrap_or_else(|| "bmp".to_string());
+        if fmt != "bmp" && fmt != "raw" && fmt != "json" {
+            return Err(CoreError::InvalidConfig(format!(
+                "unsupported snapshot format: {fmt} (supported: bmp, raw, json)"
+            )));
+        }
+
+        // 1. Fetch latest live frame: cached last frame -> observer sink -> screen source grab
+        let mut frame = self
+            .shared
+            .screen_last_frame
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .or_else(|| {
+                self.shared
+                    .screen_observer
+                    .lock()
+                    .ok()
+                    .and_then(|o| o.last())
+            })
+            .or_else(|| self.shared.screen_source.grab().ok().flatten())
+            .ok_or_else(|| {
+                CoreError::ScreenRefused("no screen frame available for snapshot".into())
+            })?;
+
+        // 2. If frame is compressed, decode it to raw pixel buffer using negotiated codec
+        if frame.compressed() {
+            let codec = if frame.codec_tag == tetherly_core::SCREEN_COMPRESS_H264 {
+                self.shared.screen_codec_h264.clone()
+            } else {
+                self.shared.screen_codec.clone()
+            };
+            let raw = codec.decompress_frame(
+                &frame.bytes,
+                frame.rect.w,
+                frame.rect.h,
+                frame.raw_len(),
+            )?;
+            frame = ScreenFrame {
+                bytes: raw,
+                codec_tag: tetherly_core::SCREEN_COMPRESS_NONE,
+                ..frame
+            };
+        }
+
+        // 3. Privacy defense check (ADR-098): blank screen if privacy mode is active
+        let privacy_active = self
+            .shared
+            .screen_privacy_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if privacy_active {
+            frame.bytes.fill(0);
+        }
+
+        // 4. Dynamic security watermark overlay (ADR-104)
+        let mut watermarked = false;
+        if !privacy_active {
+            let wm_cfg = self.shared.screen_watermark.read().unwrap();
+            if wm_cfg.enabled {
+                let peer_id_str = self
+                    .shared
+                    .screen_peer
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone())
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "local".to_string());
+                let time_str = format!("{}", self.shared.clock.unix_us() / 1_000_000);
+                if let Ok(applied) = frame.apply_watermark(&wm_cfg, &peer_id_str, &time_str) {
+                    watermarked = applied;
+                    if applied {
+                        self.shared
+                            .screen_watermark_frames
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+            // Collaborative whiteboard annotations & transient virtual laser pointer (ADR-105)
+            let now_ms = self.shared.clock.unix_us() / 1_000;
+            let annotations = self.shared.screen_annotations.read().unwrap();
+            if !annotations.is_empty() {
+                let _ = frame.apply_annotations(&annotations, now_ms);
+            }
+            if let Some(laser) = self.shared.screen_laser_pointer.read().unwrap().as_ref() {
+                let _ = frame.apply_laser_pointer(laser);
+            }
+        }
+
+        // 5. Encode image bytes
+        let (bytes, final_fmt) = if fmt == "raw" {
+            (frame.bytes.clone(), "raw".to_string())
+        } else {
+            let bmp = frame.to_bmp()?;
+            (bmp, "bmp".to_string())
+        };
+
+        // 4. Save to disk if out path is specified
+        let mut saved_path = None;
+        if let Some(out_p) = out.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+            let out_path = std::path::PathBuf::from(&out_p);
+            if out_path.file_name().is_none()
+                || out_path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(CoreError::UnsafeFileName);
+            }
+            if let Some(parent) = out_path.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
+            std::fs::write(&out_path, &bytes)?;
+            saved_path = Some(out_path.display().to_string());
+        }
+
+        self.shared
+            .screen_snapshot_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let data_b64 = if saved_path.is_none() {
+            use base64::engine::general_purpose::STANDARD;
+            use base64::Engine;
+            Some(STANDARD.encode(&bytes))
+        } else {
+            None
+        };
+
+        let report = ScreenSnapshotReport {
+            ok: true,
+            source: if self.screen_playback_report().state == "playing" {
+                "playback".to_string()
+            } else {
+                "live".to_string()
+            },
+            frame_seq: frame.seq,
+            pts_us: self.shared.clock.unix_us(),
+            width: frame.rect.w as u32,
+            height: frame.rect.h as u32,
+            format: final_fmt,
+            bytes_len: bytes.len(),
+            privacy_blanked: privacy_active,
+            watermarked,
+            path: saved_path,
+            data_base64: data_b64,
+        };
+
+        Ok((bytes, report))
+    }
+
+    /// Capture a live screen snapshot and return its structured telemetry report (v2.17 / ADR-103).
+    pub fn screen_snapshot(
+        &self,
+        format: Option<String>,
+        out: Option<String>,
+    ) -> Result<ScreenSnapshotReport, CoreError> {
+        self.screen_snapshot_data(format, out).map(|(_, rep)| rep)
+    }
+
+    /// Extract a single frame from a recording container (.trec) and export as BMP (v2.17 / ADR-103).
+    pub fn screen_recording_snapshot_data(
+        &self,
+        path: &str,
+        frame_seq: Option<u64>,
+        pts_us: Option<u64>,
+        out: Option<String>,
+    ) -> Result<(Vec<u8>, ScreenSnapshotReport), CoreError> {
+        let trimmed_path = path.trim();
+        if trimmed_path.is_empty() {
+            return Err(CoreError::InvalidConfig(
+                "recording path cannot be empty".into(),
+            ));
+        }
+        let raw_path = std::path::PathBuf::from(trimmed_path);
+        if raw_path.file_name().is_none()
+            || raw_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(CoreError::UnsafeFileName);
+        }
+
+        let file = std::fs::File::open(&raw_path).map_err(|e| {
+            CoreError::InvalidConfig(format!("failed to open recording file {trimmed_path}: {e}"))
+        })?;
+        let mut reader = ScreenRecordingReader::new(std::io::BufReader::new(file))?;
+        let (frame, frame_pts) = reader
+            .extract_frame_with_pts(frame_seq, pts_us)?
+            .ok_or_else(|| {
+                CoreError::ScreenRefused("no matching frame found in recording".into())
+            })?;
+
+        let bmp_bytes = frame.to_bmp()?;
+
+        let mut saved_path = None;
+        if let Some(out_p) = out.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+            let out_path = std::path::PathBuf::from(&out_p);
+            if out_path.file_name().is_none()
+                || out_path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(CoreError::UnsafeFileName);
+            }
+            if let Some(parent) = out_path.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
+            std::fs::write(&out_path, &bmp_bytes)?;
+            saved_path = Some(out_path.display().to_string());
+        }
+
+        self.shared
+            .screen_snapshot_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let data_b64 = if saved_path.is_none() {
+            use base64::engine::general_purpose::STANDARD;
+            use base64::Engine;
+            Some(STANDARD.encode(&bmp_bytes))
+        } else {
+            None
+        };
+
+        let report = ScreenSnapshotReport {
+            ok: true,
+            source: "recording".to_string(),
+            frame_seq: frame.seq,
+            pts_us: frame_pts,
+            width: frame.rect.w as u32,
+            height: frame.rect.h as u32,
+            format: "bmp".to_string(),
+            bytes_len: bmp_bytes.len(),
+            privacy_blanked: false,
+            watermarked: false,
+            path: saved_path,
+            data_base64: data_b64,
+        };
+
+        Ok((bmp_bytes, report))
+    }
+
+    /// Extract a single frame from a recording container (.trec) and return report (v2.17 / ADR-103).
+    pub fn screen_recording_snapshot(
+        &self,
+        path: &str,
+        frame_seq: Option<u64>,
+        pts_us: Option<u64>,
+        out: Option<String>,
+    ) -> Result<ScreenSnapshotReport, CoreError> {
+        self.screen_recording_snapshot_data(path, frame_seq, pts_us, out)
+            .map(|(_, rep)| rep)
+    }
+
+    #[cfg(test)]
+    pub fn set_screen_last_frame_for_test(&self, frame: ScreenFrame) {
+        *self.shared.screen_last_frame.lock().unwrap() = Some(frame);
+    }
+
+    #[cfg(test)]
+    pub fn set_screen_peer_watermark_enforced_for_test(&self, enforced: bool) {
+        self.shared
+            .screen_peer_watermark_enforced
+            .store(enforced, Ordering::Relaxed);
+    }
+
+    /// Report dynamic security watermark status and configuration (v2.18 / ADR-104).
+    pub fn screen_watermark_report(&self) -> ScreenWatermarkReport {
+        let cfg = self.shared.screen_watermark.read().unwrap().clone();
+        let peer_id = self
+            .shared
+            .screen_peer
+            .lock()
+            .ok()
+            .and_then(|p| p.clone())
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "local".to_string());
+        let timestamp = format!("{}", self.shared.clock.unix_us() / 1_000_000);
+        let frames = self.shared.screen_watermark_frames.load(Ordering::Relaxed);
+        let mut rep = cfg.report(&peer_id, &timestamp, frames);
+        if self
+            .shared
+            .screen_peer_watermark_enforced
+            .load(Ordering::Relaxed)
+        {
+            rep.host_enforced = true;
+        }
+        rep
+    }
+
+    /// Set dynamic security watermark configuration with host enforcement check (v2.18 / ADR-104).
+    pub async fn screen_set_watermark(
+        &self,
+        update: ScreenWatermarkUpdate,
+    ) -> Result<ScreenWatermarkReport, CoreError> {
+        // If peer host enforced watermark, visitor cannot disable it
+        if let Some(false) = update.enabled {
+            if self
+                .shared
+                .screen_peer_watermark_enforced
+                .load(Ordering::Relaxed)
+            {
+                return Err(CoreError::InvalidConfig(
+                    "watermark is enforced by host and cannot be disabled".into(),
+                ));
+            }
+        }
+
+        let (enabled, host_enforced) = {
+            let mut cfg = self.shared.screen_watermark.write().unwrap();
+            if let Some(e) = update.enabled {
+                cfg.enabled = e;
+            }
+            if let Some(he) = update.host_enforced {
+                cfg.host_enforced = he;
+            }
+            if let Some(t) = update.text_template {
+                let trimmed = t.trim();
+                if trimmed.is_empty() {
+                    return Err(CoreError::InvalidConfig(
+                        "watermark text cannot be empty".into(),
+                    ));
+                }
+                cfg.text_template = trimmed.to_string();
+            }
+            if let Some(op) = update.opacity {
+                cfg.opacity = op;
+            }
+            if let Some(c) = update.color_rgb {
+                cfg.color_rgb = c;
+            }
+            if let Some(s) = update.scale {
+                if s == 0 || s > 4 {
+                    return Err(CoreError::InvalidConfig(
+                        "watermark scale must be between 1 and 4".into(),
+                    ));
+                }
+                cfg.scale = s;
+            }
+            if let Some(p) = update.pattern {
+                cfg.pattern = p.parse()?;
+            }
+            if let Some(sx) = update.spacing_x {
+                cfg.spacing_x = sx.max(40);
+            }
+            if let Some(sy) = update.spacing_y {
+                cfg.spacing_y = sy.max(30);
+            }
+            (cfg.enabled, cfg.host_enforced)
+        };
+
+        // Synchronize to peer via screen control channel
+        let msg = ControlMsg::SetWatermarkState {
+            enabled,
+            host_enforced,
+        };
+        let _ = self.send_screen_control(msg).await;
+
+        Ok(self.screen_watermark_report())
+    }
+
+    /// Enable dynamic security watermark with optional host enforcement (v2.18 / ADR-104).
+    pub async fn screen_enable_watermark(
+        &self,
+        host_enforced: bool,
+    ) -> Result<ScreenWatermarkReport, CoreError> {
+        self.screen_set_watermark(ScreenWatermarkUpdate {
+            enabled: Some(true),
+            host_enforced: Some(host_enforced),
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Disable dynamic security watermark, blocked if host enforced (v2.18 / ADR-104).
+    pub async fn screen_disable_watermark(&self) -> Result<ScreenWatermarkReport, CoreError> {
+        self.screen_set_watermark(ScreenWatermarkUpdate {
+            enabled: Some(false),
+            host_enforced: Some(false),
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Add a collaborative screen annotation item (v2.19 / ADR-105, v2.20 / ADR-106).
+    pub async fn screen_add_annotation(
+        &self,
+        mut item: tetherly_core::AnnotationItem,
+    ) -> Result<u32, CoreError> {
+        if item.created_at_ms == 0 {
+            item.created_at_ms = self.shared.clock.unix_ms();
+        }
+        let item_id = {
+            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            let id = wb.add_item(item.clone())?;
+            item.id = id;
+            *self.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+            id
+        };
+        self.shared
+            .screen_annotation_count
+            .fetch_add(1, Ordering::Relaxed);
+
+        // Broadcast/synchronize to peer via dedicated annotation frame
+        let msg = tetherly_core::ScreenAnnotationMsg::Add(item.clone());
+        if let Ok(frame) = msg.to_frame() {
+            let _ = self.send_screen_frame_raw(frame).await;
+        }
+
+        Ok(item_id)
+    }
+
+    /// Clear all collaborative screen whiteboard annotations (v2.19 / ADR-105, v2.20 / ADR-106).
+    pub async fn screen_clear_annotations(&self) -> Result<(), CoreError> {
+        {
+            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            wb.clear();
+            self.shared.screen_annotations.write().unwrap().clear();
+        }
+
+        // Broadcast clear control to peer
+        let _ = self.send_screen_control(ControlMsg::ClearAnnotations).await;
+        // Also send dedicated clear frame
+        let msg = tetherly_core::ScreenAnnotationMsg::Clear;
+        if let Ok(frame) = msg.to_frame() {
+            let _ = self.send_screen_frame_raw(frame).await;
+        }
+        Ok(())
+    }
+
+    /// Undo last annotation for a specific author or global (v2.20 / ADR-106).
+    pub async fn screen_whiteboard_undo(
+        &self,
+        author: Option<&str>,
+    ) -> Result<Option<tetherly_core::AnnotationItem>, CoreError> {
+        let undone = {
+            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            let res = wb.undo(author);
+            *self.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+            res
+        };
+        if undone.is_some() {
+            self.shared
+                .screen_whiteboard_undo_count
+                .fetch_add(1, Ordering::Relaxed);
+            let author_str = author.unwrap_or("").to_string();
+            let author_hash = tetherly_core::hash_author(&author_str);
+            let _ = self
+                .send_screen_control(ControlMsg::WhiteboardUndo { author_hash })
+                .await;
+            let msg = tetherly_core::ScreenAnnotationMsg::Undo { author: author_str };
+            if let Ok(frame) = msg.to_frame() {
+                let _ = self.send_screen_frame_raw(frame).await;
+            }
+        }
+        Ok(undone)
+    }
+
+    /// Redo last undone annotation for a specific author or global (v2.20 / ADR-106).
+    pub async fn screen_whiteboard_redo(
+        &self,
+        author: Option<&str>,
+    ) -> Result<Option<tetherly_core::AnnotationItem>, CoreError> {
+        let redone = {
+            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            let res = wb.redo(author);
+            *self.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+            res
+        };
+        if let Some(ref it) = redone {
+            self.shared
+                .screen_whiteboard_redo_count
+                .fetch_add(1, Ordering::Relaxed);
+            let author_str = author.unwrap_or("").to_string();
+            let author_hash = tetherly_core::hash_author(&author_str);
+            let _ = self
+                .send_screen_control(ControlMsg::WhiteboardRedo { author_hash })
+                .await;
+            let msg = tetherly_core::ScreenAnnotationMsg::Redo { author: author_str };
+            if let Ok(frame) = msg.to_frame() {
+                let _ = self.send_screen_frame_raw(frame).await;
+            }
+            let add_msg = tetherly_core::ScreenAnnotationMsg::Add(it.clone());
+            if let Ok(frame) = add_msg.to_frame() {
+                let _ = self.send_screen_frame_raw(frame).await;
+            }
+        }
+        Ok(redone)
+    }
+
+    /// Export whiteboard vector snapshot (v2.20 / ADR-106).
+    pub fn screen_whiteboard_export(
+        &self,
+        out: Option<&str>,
+    ) -> Result<tetherly_core::WhiteboardSnapshot, CoreError> {
+        let now_ms = self.shared.clock.unix_ms();
+        let session_id = self.shared.identity.device_id().to_string();
+        let snapshot = {
+            let wb = self.shared.screen_whiteboard.read().unwrap();
+            wb.export_snapshot(session_id, now_ms)
+        };
+        if let Some(path_str) = out {
+            let path = std::path::Path::new(path_str);
+            if path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(CoreError::InvalidConfig("path traversal rejected".into()));
+            }
+            let json_bytes = serde_json::to_vec_pretty(&snapshot)
+                .map_err(|e| CoreError::InvalidConfig(e.to_string()))?;
+            std::fs::write(path, json_bytes)
+                .map_err(|e| CoreError::InvalidConfig(e.to_string()))?;
+        }
+        Ok(snapshot)
+    }
+
+    /// Import whiteboard vector snapshot (v2.20 / ADR-106).
+    pub async fn screen_whiteboard_import(
+        &self,
+        snapshot: tetherly_core::WhiteboardSnapshot,
+        replace: bool,
+    ) -> Result<usize, CoreError> {
+        let count = {
+            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            let c = wb.import_snapshot(snapshot.clone(), replace)?;
+            *self.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+            c
+        };
+        let msg = tetherly_core::ScreenAnnotationMsg::Snapshot(snapshot);
+        if let Ok(frame) = msg.to_frame() {
+            let _ = self.send_screen_frame_raw(frame).await;
+        }
+        Ok(count)
+    }
+
+    /// Update whiteboard policy (v2.20 / ADR-106).
+    pub async fn screen_whiteboard_set_policy(
+        &self,
+        policy: tetherly_core::WhiteboardPolicy,
+    ) -> Result<(), CoreError> {
+        {
+            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            wb.set_policy(policy);
+        }
+        let msg = ControlMsg::SetWhiteboardPolicy {
+            read_only: policy.read_only,
+            allow_peer_clear: policy.allow_peer_clear,
+            max_items: policy.max_items,
+        };
+        let _ = self.send_screen_control(msg).await;
+        let frame_msg = tetherly_core::ScreenAnnotationMsg::Policy(policy);
+        if let Ok(frame) = frame_msg.to_frame() {
+            let _ = self.send_screen_frame_raw(frame).await;
+        }
+        Ok(())
+    }
+
+    /// Get current whiteboard policy (v2.20 / ADR-106).
+    pub fn screen_whiteboard_get_policy(&self) -> tetherly_core::WhiteboardPolicy {
+        self.shared.screen_whiteboard.read().unwrap().policy()
+    }
+
+    /// Update transient virtual laser pointer state (v2.19 / ADR-105).
+    pub async fn screen_set_laser_pointer(
+        &self,
+        state: tetherly_core::LaserPointerState,
+    ) -> Result<(), CoreError> {
+        let active = state.active;
+        let x = state.x;
+        let y = state.y;
+        let color_rgb = state.color_rgb;
+
+        *self.shared.screen_laser_pointer.write().unwrap() =
+            if active { Some(state) } else { None };
+        self.shared
+            .screen_laser_updates
+            .fetch_add(1, Ordering::Relaxed);
+
+        // Send 14-byte ControlMsg Tag 11
+        let msg = ControlMsg::SetLaserPointer {
+            x,
+            y,
+            active,
+            color_rgb,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(())
+    }
+
+    /// Report current collaborative annotations and laser pointer state (v2.19 / ADR-105, v2.20 / ADR-106).
+    pub fn screen_annotation_report(&self) -> tetherly_core::ScreenAnnotationReport {
+        let now_ms = self.shared.clock.unix_ms();
+        let (items, policy, redo_cnt) = {
+            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            wb.prune_expired(now_ms);
+            *self.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+            (wb.active_items().to_vec(), wb.policy(), wb.redo_count())
+        };
+        let laser = *self.shared.screen_laser_pointer.read().unwrap();
+        tetherly_core::ScreenAnnotationReport {
+            ok: true,
+            annotations_count: items.len(),
+            laser_active: laser.as_ref().map(|l| l.active).unwrap_or(false),
+            laser,
+            annotations: items,
+            total_annotations_added: self.shared.screen_annotation_count.load(Ordering::Relaxed),
+            laser_updates_total: self.shared.screen_laser_updates.load(Ordering::Relaxed),
+            timestamp_ms: now_ms,
+            whiteboard_policy: policy,
+            redo_count: redo_cnt,
+        }
+    }
+
+    /// Report dynamic Screen Region-of-Interest (ROI) status and dimensions (v2.21 / ADR-107).
+    pub fn screen_roi_report(&self) -> tetherly_core::ScreenRoiReport {
+        let roi = *self.shared.screen_roi.read().unwrap();
+        let updates = self.shared.screen_roi_updates.load(Ordering::Relaxed);
+        let (src_w, src_h) = {
+            let last = self.shared.screen_last_frame.lock().expect("last_frame");
+            if let Some(f) = &*last {
+                (f.rect.w, f.rect.h)
+            } else {
+                (0, 0)
+            }
+        };
+        let (eff_w, eff_h) = if roi.active {
+            (roi.w, roi.h)
+        } else {
+            (src_w, src_h)
+        };
+        tetherly_core::ScreenRoiReport {
+            active: roi.active,
+            x: roi.x,
+            y: roi.y,
+            w: roi.w,
+            h: roi.h,
+            zoom_percent: roi.zoom_percent,
+            source_w: src_w,
+            source_h: src_h,
+            effective_w: eff_w,
+            effective_h: eff_h,
+            update_count: updates,
+        }
+    }
+
+    /// Set dynamic Region-of-Interest (ROI) viewport cropping bounds and optional zoom (v2.21 / ADR-107).
+    pub async fn screen_set_roi(
+        &self,
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+        zoom_percent: Option<u16>,
+    ) -> Result<tetherly_core::ScreenRoiReport, CoreError> {
+        let (src_w, src_h) = {
+            let last = self.shared.screen_last_frame.lock().expect("last_frame");
+            if let Some(f) = &*last {
+                (f.rect.w, f.rect.h)
+            } else {
+                (3840, 2160) // fallback max bounding box
+            }
+        };
+        let mut new_roi = tetherly_core::ScreenRoi {
+            active: true,
+            x,
+            y,
+            w,
+            h,
+            zoom_percent: zoom_percent
+                .unwrap_or_else(|| self.shared.screen_roi.read().unwrap().zoom_percent),
+        };
+        new_roi.sanitize(src_w, src_h);
+        {
+            let mut roi = self.shared.screen_roi.write().unwrap();
+            *roi = new_roi;
+            self.shared
+                .screen_roi_updates
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Send 14-byte ControlMsg Tag 16
+        let msg = ControlMsg::SetScreenRoi {
+            x: new_roi.x,
+            y: new_roi.y,
+            w: new_roi.w,
+            h: new_roi.h,
+        };
+        let _ = self.send_screen_control(msg).await;
+        if let Some(zp) = zoom_percent {
+            let zoom_msg = ControlMsg::SetScreenRoiZoom { zoom_percent: zp };
+            let _ = self.send_screen_control(zoom_msg).await;
+        }
+
+        Ok(self.screen_roi_report())
+    }
+
+    /// Reset Region-of-Interest (ROI) back to full screen capture (v2.21 / ADR-107).
+    pub async fn screen_reset_roi(&self) -> Result<tetherly_core::ScreenRoiReport, CoreError> {
+        {
+            let mut roi = self.shared.screen_roi.write().unwrap();
+            roi.active = false;
+            roi.zoom_percent = 100;
+            self.shared
+                .screen_roi_updates
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenRoi;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_roi_report())
+    }
+
+    /// Set Region-of-Interest (ROI) zoom scale percentage (v2.21 / ADR-107).
+    pub async fn screen_set_roi_zoom(
+        &self,
+        zoom_percent: u16,
+    ) -> Result<tetherly_core::ScreenRoiReport, CoreError> {
+        let clamped = zoom_percent.clamp(50, 800);
+        {
+            let mut roi = self.shared.screen_roi.write().unwrap();
+            roi.zoom_percent = clamped;
+            self.shared
+                .screen_roi_updates
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let msg = ControlMsg::SetScreenRoiZoom {
+            zoom_percent: clamped,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_roi_report())
+    }
+
+    /// Report screen adaptive color depth & quantization configuration (v2.22 / ADR-108).
+    pub fn screen_color_report(&self) -> tetherly_core::ScreenColorReport {
+        let cfg = *self.shared.screen_color_mode.read().unwrap();
+        let updates = self.shared.screen_color_updates.load(Ordering::Relaxed);
+        tetherly_core::ScreenColorReport {
+            ok: true,
+            mode: cfg.mode,
+            threshold: cfg.threshold,
+            is_active: cfg.is_active(),
+            update_count: updates,
+        }
+    }
+
+    /// Set screen adaptive color depth mode and optional binarization threshold (v2.22 / ADR-108).
+    pub async fn screen_set_color_mode(
+        &self,
+        mode: tetherly_core::ScreenColorMode,
+        threshold: Option<u8>,
+    ) -> Result<tetherly_core::ScreenColorReport, CoreError> {
+        let th = threshold
+            .unwrap_or(tetherly_core::SCREEN_COLOR_DEFAULT_THRESHOLD)
+            .clamp(1, 254);
+        {
+            let mut cfg = self.shared.screen_color_mode.write().unwrap();
+            cfg.mode = mode;
+            cfg.threshold = th;
+            self.shared
+                .screen_color_updates
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let msg = ControlMsg::SetScreenColorMode {
+            mode: mode.tag(),
+            threshold: th,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_color_report())
+    }
+
+    /// Reset screen adaptive color depth back to 32-bit native full color (v2.22 / ADR-108).
+    pub async fn screen_reset_color_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenColorReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_color_mode.write().unwrap();
+            *cfg = tetherly_core::ScreenColorConfig::default();
+            self.shared
+                .screen_color_updates
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenColorMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_color_report())
+    }
+
+    /// Report screen differential delta patch configuration and telemetry (v2.23 / ADR-109).
+    pub fn screen_delta_report(&self) -> tetherly_core::ScreenDeltaReport {
+        let cfg = *self.shared.screen_delta_config.read().unwrap();
+        tetherly_core::ScreenDeltaReport {
+            ok: true,
+            enabled: cfg.enabled,
+            keyframe_interval: cfg.keyframe_interval,
+            delta_frames_sent: self.shared.screen_delta_frames_sent.load(Ordering::Relaxed),
+            keyframes_sent: self
+                .shared
+                .screen_delta_keyframes_sent
+                .load(Ordering::Relaxed),
+            delta_frames_received: self
+                .shared
+                .screen_delta_frames_received
+                .load(Ordering::Relaxed),
+            keyframes_received: self
+                .shared
+                .screen_delta_keyframes_received
+                .load(Ordering::Relaxed),
+            saved_bytes: self.shared.screen_delta_saved_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Set screen differential delta patch mode and keyframe interval (v2.23 / ADR-109).
+    pub async fn screen_set_delta_mode(
+        &self,
+        enabled: bool,
+        keyframe_interval: Option<u16>,
+    ) -> Result<tetherly_core::ScreenDeltaReport, CoreError> {
+        let interval = keyframe_interval
+            .unwrap_or(tetherly_core::SCREEN_DELTA_DEFAULT_KEYFRAME_INTERVAL)
+            .clamp(1, 600);
+        {
+            let mut cfg = self.shared.screen_delta_config.write().unwrap();
+            cfg.enabled = enabled;
+            cfg.keyframe_interval = interval;
+            self.shared.screen_delta_counter.store(0, Ordering::Relaxed);
+        }
+        let msg = ControlMsg::SetScreenDeltaMode {
+            enabled,
+            keyframe_interval: interval,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_delta_report())
+    }
+
+    /// Reset screen differential delta patch mode back to default full-frame streaming (v2.23 / ADR-109).
+    pub async fn screen_reset_delta_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenDeltaReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_delta_config.write().unwrap();
+            *cfg = tetherly_core::ScreenDeltaConfig::default();
+            self.shared.screen_delta_counter.store(0, Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenDeltaMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_delta_report())
+    }
+
+    /// Report screen objective visual quality metric configuration and evaluation telemetry (v2.24 / ADR-110).
+    pub fn screen_quality_metric_report(&self) -> tetherly_core::ScreenQualityMetricReport {
+        let cfg = *self.shared.screen_quality_metric_config.read().unwrap();
+        let state = self
+            .shared
+            .screen_quality_metric_state
+            .read()
+            .unwrap()
+            .clone();
+        let (avg_mse, avg_psnr_db, avg_ssim) = if state.evaluated_frames > 0 {
+            (
+                state.sum_mse / (state.evaluated_frames as f64),
+                state.sum_psnr_db / (state.evaluated_frames as f64),
+                state.sum_ssim / (state.evaluated_frames as f64),
+            )
+        } else {
+            (0.0, 100.0, 1.0)
+        };
+        let quality_warning = cfg.enabled
+            && state.evaluated_frames > 0
+            && (state.last_psnr_db < 30.0 || state.last_ssim < 0.85);
+
+        tetherly_core::ScreenQualityMetricReport {
+            ok: true,
+            enabled: cfg.enabled,
+            sample_interval: cfg.sample_interval,
+            evaluated_frames: state.evaluated_frames,
+            avg_mse,
+            avg_psnr_db,
+            avg_ssim,
+            last_psnr_db: state.last_psnr_db,
+            last_ssim: state.last_ssim,
+            quality_warning,
+        }
+    }
+
+    /// Set screen objective visual quality metric mode and sample interval (v2.24 / ADR-110).
+    pub async fn screen_set_quality_metric_mode(
+        &self,
+        enabled: bool,
+        sample_interval: Option<u8>,
+    ) -> Result<tetherly_core::ScreenQualityMetricReport, CoreError> {
+        let interval = sample_interval
+            .unwrap_or(tetherly_core::SCREEN_METRIC_DEFAULT_SAMPLE_INTERVAL)
+            .clamp(1, 120);
+        {
+            let mut cfg = self.shared.screen_quality_metric_config.write().unwrap();
+            cfg.enabled = enabled;
+            cfg.sample_interval = interval;
+            self.shared
+                .screen_metric_counter
+                .store(0, Ordering::Relaxed);
+        }
+        let msg = ControlMsg::SetScreenQualityMetricMode {
+            enabled,
+            sample_interval: interval,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_quality_metric_report())
+    }
+
+    /// Reset screen objective visual quality metric mode back to default disabled (v2.24 / ADR-110).
+    pub async fn screen_reset_quality_metric_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenQualityMetricReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_quality_metric_config.write().unwrap();
+            *cfg = tetherly_core::ScreenQualityMetricConfig::default();
+            self.shared
+                .screen_metric_counter
+                .store(0, Ordering::Relaxed);
+            let mut state = self.shared.screen_quality_metric_state.write().unwrap();
+            *state = ScreenQualityMetricState::default();
+            *self.shared.screen_metric_ref_frame.write().unwrap() = None;
+        }
+        let msg = ControlMsg::ResetScreenQualityMetricMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_quality_metric_report())
+    }
+
+    /// Report screen autonomous closed-loop QoE adaptation configuration and controller status (v2.25 / ADR-111).
+    pub fn screen_qoe_report(&self) -> tetherly_core::ScreenQoeReport {
+        let now_us = self.shared.clock.unix_us();
+        self.shared
+            .screen_qoe_controller
+            .read()
+            .unwrap()
+            .report(now_us)
+    }
+
+    /// Configure screen autonomous closed-loop QoE adaptation policy mode and targets (v2.25 / ADR-111).
+    pub async fn screen_set_qoe_mode(
+        &self,
+        mode: tetherly_core::ScreenQoeMode,
+        target_psnr_db: Option<u8>,
+        target_ssim_pct: Option<u8>,
+    ) -> Result<tetherly_core::ScreenQoeReport, CoreError> {
+        let (psnr, ssim) = {
+            let mut qoe = self.shared.screen_qoe_controller.write().unwrap();
+            let cfg = tetherly_core::ScreenQoeConfig::new(mode, target_psnr_db, target_ssim_pct);
+            qoe.set_config(cfg);
+            (cfg.target_psnr_db, cfg.target_ssim_pct)
+        };
+
+        if mode.is_active() {
+            let mut metric_cfg = self.shared.screen_quality_metric_config.write().unwrap();
+            metric_cfg.enabled = true;
+        }
+
+        let msg = ControlMsg::SetScreenQoeMode {
+            mode: mode.tag(),
+            target_psnr_db: psnr,
+            target_ssim_pct: ssim,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_qoe_report())
+    }
+
+    /// Reset screen autonomous closed-loop QoE adaptation back to default disabled state (v2.25 / ADR-111).
+    pub async fn screen_reset_qoe_mode(&self) -> Result<tetherly_core::ScreenQoeReport, CoreError> {
+        {
+            let mut qoe = self.shared.screen_qoe_controller.write().unwrap();
+            qoe.reset();
+        }
+        let msg = ControlMsg::ResetScreenQoeMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_qoe_report())
+    }
+
+    /// Report screen streaming Progressive Intra-Refresh (PIR) configuration and status (v2.26 / ADR-112).
+    pub fn screen_pir_report(&self) -> tetherly_core::ScreenPirReport {
+        let cfg = *self.shared.screen_pir_config.read().unwrap();
+        tetherly_core::ScreenPirReport {
+            ok: true,
+            mode: cfg.mode.as_str().to_string(),
+            bands: cfg.bands,
+            sweeps_completed: self
+                .shared
+                .screen_pir_sweeps_completed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            slices_sent: self
+                .shared
+                .screen_pir_slices_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            current_band: self
+                .shared
+                .screen_pir_current_band
+                .load(std::sync::atomic::Ordering::Relaxed),
+            active_sweep: self
+                .shared
+                .screen_pir_active_sweep
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Configure screen streaming Progressive Intra-Refresh (PIR) mode and bands (v2.26 / ADR-112).
+    pub async fn screen_set_pir_mode(
+        &self,
+        mode: tetherly_core::ScreenPirMode,
+        bands: Option<u8>,
+    ) -> Result<tetherly_core::ScreenPirReport, CoreError> {
+        let b = bands
+            .unwrap_or(tetherly_core::SCREEN_PIR_DEFAULT_BANDS)
+            .clamp(
+                tetherly_core::SCREEN_PIR_MIN_BANDS,
+                tetherly_core::SCREEN_PIR_MAX_BANDS,
+            );
+        {
+            let mut cfg = self.shared.screen_pir_config.write().unwrap();
+            cfg.mode = mode;
+            cfg.bands = b;
+            if mode == tetherly_core::ScreenPirMode::OnDemand {
+                self.shared
+                    .screen_pir_active_sweep
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.shared
+                    .screen_pir_current_band
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+            } else if mode == tetherly_core::ScreenPirMode::Continuous {
+                self.shared
+                    .screen_pir_active_sweep
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                self.shared
+                    .screen_pir_active_sweep
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let msg = ControlMsg::SetScreenPirMode {
+            mode: mode.tag(),
+            bands: b,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_pir_report())
+    }
+
+    /// Reset screen streaming Progressive Intra-Refresh (PIR) back to default disabled state (v2.26 / ADR-112).
+    pub async fn screen_reset_pir_mode(&self) -> Result<tetherly_core::ScreenPirReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_pir_config.write().unwrap();
+            *cfg = tetherly_core::ScreenPirConfig::default();
+            self.shared
+                .screen_pir_active_sweep
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_pir_current_band
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenPirMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_pir_report())
+    }
+
+    /// Report screen streaming Long-Term Reference (LTR) configuration and metrics (v2.27 / ADR-113).
+    pub fn screen_ltr_report(&self) -> tetherly_core::ScreenLtrReport {
+        let cfg = *self.shared.screen_ltr_config.read().unwrap();
+        tetherly_core::ScreenLtrReport {
+            ok: true,
+            enabled: cfg.enabled,
+            auto_interval: cfg.auto_interval,
+            current_ltr_seq: self
+                .shared
+                .screen_ltr_current_seq
+                .load(std::sync::atomic::Ordering::Relaxed),
+            anchors_established: self
+                .shared
+                .screen_ltr_anchors_established
+                .load(std::sync::atomic::Ordering::Relaxed),
+            recoveries_requested: self
+                .shared
+                .screen_ltr_recoveries_requested
+                .load(std::sync::atomic::Ordering::Relaxed),
+            recoveries_completed: self
+                .shared
+                .screen_ltr_recoveries_completed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            saved_burst_bytes: self
+                .shared
+                .screen_ltr_saved_burst_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Configure screen streaming Long-Term Reference (LTR) mode and auto-anchor interval (v2.27 / ADR-113).
+    pub async fn screen_set_ltr_mode(
+        &self,
+        enabled: bool,
+        auto_interval: Option<u16>,
+    ) -> Result<tetherly_core::ScreenLtrReport, CoreError> {
+        let interval = auto_interval
+            .unwrap_or(tetherly_core::SCREEN_LTR_DEFAULT_AUTO_INTERVAL)
+            .clamp(
+                tetherly_core::SCREEN_LTR_MIN_INTERVAL,
+                tetherly_core::SCREEN_LTR_MAX_INTERVAL,
+            );
+        {
+            let mut cfg = self.shared.screen_ltr_config.write().unwrap();
+            cfg.enabled = enabled;
+            cfg.auto_interval = interval;
+            if !enabled {
+                *self.shared.screen_sender_ltr_canvas.write().unwrap() = None;
+                *self.shared.screen_receiver_ltr_canvas.write().unwrap() = None;
+                self.shared
+                    .screen_ltr_current_seq
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                self.shared
+                    .screen_ltr_recovery_pending
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let msg = ControlMsg::SetScreenLtrMode {
+            enabled,
+            auto_interval: interval,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_ltr_report())
+    }
+
+    /// Explicitly trigger anchoring of the current frame as the golden LTR reference (v2.27 / ADR-113).
+    pub async fn screen_anchor_ltr(&self) -> Result<tetherly_core::ScreenLtrReport, CoreError> {
+        let ltr_seq = {
+            let maybe_canvas = self
+                .shared
+                .screen_receiver_canvas
+                .read()
+                .unwrap()
+                .clone()
+                .or_else(|| self.shared.screen_sender_ltr_canvas.read().unwrap().clone());
+            if let Some(canvas) = maybe_canvas {
+                *self.shared.screen_sender_ltr_canvas.write().unwrap() = Some(canvas.clone());
+                *self.shared.screen_receiver_ltr_canvas.write().unwrap() = Some(canvas.clone());
+                self.shared
+                    .screen_ltr_current_seq
+                    .store(canvas.seq, std::sync::atomic::Ordering::Relaxed);
+                self.shared
+                    .screen_ltr_anchors_established
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                canvas.seq
+            } else {
+                let seq = self
+                    .shared
+                    .screen_ltr_current_seq
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                self.shared
+                    .screen_ltr_anchors_established
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                seq
+            }
+        };
+        let msg = ControlMsg::LtrAnchorSync { ltr_seq };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_ltr_report())
+    }
+
+    /// Request instant differential recovery against the current golden LTR anchor (v2.27 / ADR-113).
+    pub async fn screen_request_ltr_recovery(
+        &self,
+    ) -> Result<tetherly_core::ScreenLtrReport, CoreError> {
+        let ltr_seq = self
+            .shared
+            .screen_ltr_current_seq
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .screen_ltr_recoveries_requested
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .screen_ltr_recovery_pending
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let msg = ControlMsg::LtrRecoveryRequest { ltr_seq };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_ltr_report())
+    }
+
+    /// Reset screen streaming LTR mode back to default disabled state and purge golden canvases (v2.27 / ADR-113).
+    pub async fn screen_reset_ltr_mode(&self) -> Result<tetherly_core::ScreenLtrReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_ltr_config.write().unwrap();
+            *cfg = tetherly_core::ScreenLtrConfig::default();
+            *self.shared.screen_sender_ltr_canvas.write().unwrap() = None;
+            *self.shared.screen_receiver_ltr_canvas.write().unwrap() = None;
+            self.shared
+                .screen_ltr_current_seq
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_ltr_recovery_pending
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenLtrMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_ltr_report())
+    }
+
+    /// Report screen streaming 2-Layer Temporal Scalability (SVC-T) status and telemetry (v2.28 / ADR-114).
+    pub fn screen_svc_report(&self) -> tetherly_core::ScreenSvcReport {
+        let cfg = *self.shared.screen_svc_config.read().unwrap();
+        tetherly_core::ScreenSvcReport {
+            ok: true,
+            enabled: cfg.is_enabled(),
+            mode: cfg.mode.as_str().to_string(),
+            drop_t1: cfg.drop_t1,
+            t0_frames_sent: self
+                .shared
+                .screen_svc_t0_frames_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            t1_frames_sent: self
+                .shared
+                .screen_svc_t1_frames_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            t1_frames_dropped: self
+                .shared
+                .screen_svc_t1_frames_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            saved_bandwidth_bytes: self
+                .shared
+                .screen_svc_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Configure screen streaming SVC mode and T1 frame drop policy (v2.28 / ADR-114).
+    pub async fn screen_set_svc_mode(
+        &self,
+        mode: tetherly_core::ScreenSvcMode,
+        drop_t1: bool,
+    ) -> Result<tetherly_core::ScreenSvcReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_svc_config.write().unwrap();
+            cfg.mode = mode;
+            cfg.drop_t1 = drop_t1;
+            if !cfg.is_enabled() {
+                *self.shared.screen_sender_t0_canvas.write().unwrap() = None;
+                *self.shared.screen_receiver_t0_canvas.write().unwrap() = None;
+            }
+        }
+        let msg = ControlMsg::SetScreenSvcMode {
+            mode: mode.as_u8(),
+            drop_t1,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_svc_report())
+    }
+
+    /// Set or toggle T1 frame drop policy under SVC mode (v2.28 / ADR-114).
+    pub async fn screen_set_svc_drop_t1(
+        &self,
+        drop_t1: bool,
+    ) -> Result<tetherly_core::ScreenSvcReport, CoreError> {
+        let mode = self.shared.screen_svc_config.read().unwrap().mode;
+        self.screen_set_svc_mode(mode, drop_t1).await
+    }
+
+    /// Reset screen streaming SVC mode to default disabled state and reset metrics (v2.28 / ADR-114).
+    pub async fn screen_reset_svc_mode(&self) -> Result<tetherly_core::ScreenSvcReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_svc_config.write().unwrap();
+            *cfg = tetherly_core::ScreenSvcConfig::default();
+            *self.shared.screen_sender_t0_canvas.write().unwrap() = None;
+            *self.shared.screen_receiver_t0_canvas.write().unwrap() = None;
+            self.shared
+                .screen_svc_t0_frames_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_svc_t1_frames_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_svc_t1_frames_dropped
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_svc_saved_bytes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenSvcMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_svc_report())
+    }
+
+    /// Report screen streaming 2D motion vector estimation and scroll acceleration status (v2.29 / ADR-115).
+    pub fn screen_motion_report(&self) -> tetherly_core::ScreenMotionReport {
+        let cfg = *self.shared.screen_motion_config.read().unwrap();
+        tetherly_core::ScreenMotionReport {
+            ok: true,
+            enabled: cfg.enabled,
+            max_displacement: cfg.max_displacement,
+            motion_frames_sent: self
+                .shared
+                .screen_motion_frames_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            fallback_frames_sent: self
+                .shared
+                .screen_motion_fallback_frames_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            saved_bandwidth_bytes: self
+                .shared
+                .screen_motion_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Configure screen streaming 2D motion vector estimation mode (v2.29 / ADR-115).
+    pub async fn screen_set_motion_mode(
+        &self,
+        enabled: bool,
+        max_displacement: u16,
+    ) -> Result<tetherly_core::ScreenMotionReport, CoreError> {
+        let max_displacement = max_displacement.clamp(
+            tetherly_core::SCREEN_MOTION_MIN_DISPLACEMENT,
+            tetherly_core::SCREEN_MOTION_MAX_DISPLACEMENT,
+        );
+        {
+            let mut cfg = self.shared.screen_motion_config.write().unwrap();
+            cfg.enabled = enabled;
+            cfg.max_displacement = max_displacement;
+            if !enabled {
+                *self.shared.screen_sender_motion_canvas.write().unwrap() = None;
+            }
+        }
+        let msg = ControlMsg::SetScreenMotionMode {
+            enabled,
+            max_displacement,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_motion_report())
+    }
+
+    /// Reset screen streaming 2D motion vector estimation mode to default and clear metrics (v2.29 / ADR-115).
+    pub async fn screen_reset_motion_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenMotionReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_motion_config.write().unwrap();
+            *cfg = tetherly_core::ScreenMotionConfig::default();
+            *self.shared.screen_sender_motion_canvas.write().unwrap() = None;
+            self.shared
+                .screen_motion_frames_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_motion_fallback_frames_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_motion_saved_bytes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenMotionMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_motion_report())
+    }
+
+    /// Report screen streaming spatial tile-grid decomposition status (v2.30 / ADR-116).
+    pub fn screen_tile_report(&self) -> tetherly_core::ScreenTileReport {
+        let cfg = *self.shared.screen_tile_config.read().unwrap();
+        tetherly_core::ScreenTileReport {
+            ok: true,
+            enabled: cfg.enabled,
+            tile_size: cfg.tile_size,
+            grid_frames_sent: self
+                .shared
+                .screen_tile_frames_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            dirty_tiles_sent: self
+                .shared
+                .screen_tile_dirty_tiles_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            skipped_tiles_count: self
+                .shared
+                .screen_tile_skipped_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            saved_bandwidth_bytes: self
+                .shared
+                .screen_tile_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Configure screen streaming spatial tile-grid decomposition mode (v2.30 / ADR-116).
+    pub async fn screen_set_tile_mode(
+        &self,
+        enabled: bool,
+        tile_size: u16,
+    ) -> Result<tetherly_core::ScreenTileReport, CoreError> {
+        let tile_size = if tile_size == 0 {
+            tetherly_core::SCREEN_TILE_DEFAULT_SIZE
+        } else {
+            tile_size.clamp(
+                tetherly_core::SCREEN_TILE_MIN_SIZE,
+                tetherly_core::SCREEN_TILE_MAX_SIZE,
+            )
+        };
+        {
+            let mut cfg = self.shared.screen_tile_config.write().unwrap();
+            cfg.enabled = enabled;
+            cfg.tile_size = tile_size;
+            if !enabled {
+                *self.shared.screen_sender_tile_canvas.write().unwrap() = None;
+            }
+        }
+        let msg = ControlMsg::SetScreenTileMode { enabled, tile_size };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_report())
+    }
+
+    /// Reset screen streaming spatial tile-grid decomposition mode to default and clear metrics (v2.30 / ADR-116).
+    pub async fn screen_reset_tile_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenTileReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_tile_config.write().unwrap();
+            *cfg = tetherly_core::ScreenTileConfig::default();
+            *self.shared.screen_sender_tile_canvas.write().unwrap() = None;
+            self.shared
+                .screen_tile_frames_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_dirty_tiles_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_skipped_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_saved_bytes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenTileMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_report())
+    }
+
+    /// Report screen streaming tile dictionary cache status (v2.31 / ADR-117).
+    pub fn screen_tile_cache_report(&self) -> tetherly_core::ScreenTileCacheReport {
+        let cfg = *self.shared.screen_tile_cache_config.read().unwrap();
+        let hits = self
+            .shared
+            .screen_tile_cache_hits
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let misses = self
+            .shared
+            .screen_tile_cache_misses
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let total = hits + misses;
+        let hit_ratio_pct = if total > 0 {
+            (hits as f32 / total as f32) * 100.0
+        } else {
+            0.0
+        };
+        let current_entries = self
+            .shared
+            .screen_tile_cache_dict
+            .lock()
+            .unwrap()
+            .current_entries();
+        tetherly_core::ScreenTileCacheReport {
+            ok: true,
+            enabled: cfg.enabled,
+            max_entries: cfg.max_entries,
+            current_entries,
+            cache_hits: hits,
+            cache_misses: misses,
+            hit_ratio_pct,
+            saved_bandwidth_bytes: self
+                .shared
+                .screen_tile_cache_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Configure screen streaming tile dictionary cache mode (v2.31 / ADR-117).
+    pub async fn screen_set_tile_cache_mode(
+        &self,
+        enabled: bool,
+        max_entries: u16,
+    ) -> Result<tetherly_core::ScreenTileCacheReport, CoreError> {
+        let max_entries = if max_entries == 0 {
+            tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES
+        } else {
+            max_entries.clamp(
+                tetherly_core::SCREEN_TILE_CACHE_MIN_ENTRIES,
+                tetherly_core::SCREEN_TILE_CACHE_MAX_ENTRIES,
+            )
+        };
+        {
+            let mut cfg = self.shared.screen_tile_cache_config.write().unwrap();
+            cfg.enabled = enabled;
+            cfg.max_entries = max_entries;
+            self.shared
+                .screen_tile_cache_dict
+                .lock()
+                .unwrap()
+                .resize(max_entries);
+            self.shared
+                .screen_tile_cache_receiver
+                .lock()
+                .unwrap()
+                .resize(max_entries as usize, None);
+        }
+        let msg = ControlMsg::SetScreenTileCacheMode {
+            enabled,
+            max_entries,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_cache_report())
+    }
+
+    /// Reset screen streaming tile dictionary cache mode to default disabled and purge dictionary (v2.31 / ADR-117).
+    pub async fn screen_reset_tile_cache_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenTileCacheReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_tile_cache_config.write().unwrap();
+            *cfg = tetherly_core::ScreenTileCacheConfig::default();
+            self.shared.screen_tile_cache_dict.lock().unwrap().clear();
+            let mut rx = self.shared.screen_tile_cache_receiver.lock().unwrap();
+            rx.clear();
+            rx.resize(
+                tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES as usize,
+                None,
+            );
+            self.shared
+                .screen_tile_cache_hits
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_cache_misses
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_cache_saved_bytes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenTileCacheMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_cache_report())
+    }
+
+    /// Report screen streaming foveated focus awareness and spatial priority scheduling status (v2.32 / ADR-118).
+    pub fn screen_focus_report(&self) -> tetherly_core::ScreenFocusReport {
+        let cfg = *self.shared.screen_focus_config.read().unwrap();
+        tetherly_core::ScreenFocusReport {
+            ok: true,
+            enabled: cfg.enabled,
+            mode: cfg.mode,
+            radius: cfg.radius,
+            peripheral_skip_ratio: cfg.peripheral_skip_ratio,
+            box_x: cfg.box_x,
+            box_y: cfg.box_y,
+            box_w: cfg.box_w,
+            box_h: cfg.box_h,
+            focus_tiles_sent: self
+                .shared
+                .screen_focus_tiles_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            peripheral_tiles_sent: self
+                .shared
+                .screen_focus_peripheral_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            peripheral_tiles_skipped: self
+                .shared
+                .screen_focus_peripheral_skipped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            saved_bandwidth_bytes: self
+                .shared
+                .screen_focus_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Configure screen streaming foveated focus mode and parameters (v2.32 / ADR-118).
+    pub async fn screen_set_focus_mode(
+        &self,
+        enabled: bool,
+        mode: Option<tetherly_core::ScreenFocusMode>,
+        radius: Option<u16>,
+        peripheral_skip_ratio: Option<u8>,
+        box_coords: Option<(u16, u16, u16, u16)>,
+    ) -> Result<tetherly_core::ScreenFocusReport, CoreError> {
+        let (mode, radius, peripheral_skip_ratio, (box_x, box_y, box_w, box_h)) = {
+            let mut cfg = self.shared.screen_focus_config.write().unwrap();
+            cfg.enabled = enabled;
+            if let Some(m) = mode {
+                cfg.mode = m;
+            }
+            if let Some(r) = radius {
+                cfg.radius = r.clamp(
+                    tetherly_core::SCREEN_FOCUS_MIN_RADIUS,
+                    tetherly_core::SCREEN_FOCUS_MAX_RADIUS,
+                );
+            }
+            if let Some(s) = peripheral_skip_ratio {
+                cfg.peripheral_skip_ratio = s.clamp(0, tetherly_core::SCREEN_FOCUS_MAX_SKIP_RATIO);
+            }
+            if let Some((bx, by, bw, bh)) = box_coords {
+                cfg.box_x = bx;
+                cfg.box_y = by;
+                cfg.box_w = bw;
+                cfg.box_h = bh;
+            }
+            (
+                cfg.mode,
+                cfg.radius,
+                cfg.peripheral_skip_ratio,
+                (cfg.box_x, cfg.box_y, cfg.box_w, cfg.box_h),
+            )
+        };
+        let msg = ControlMsg::SetScreenFocusMode {
+            enabled,
+            mode: mode.to_u8(),
+            radius,
+            peripheral_skip_ratio,
+        };
+        let _ = self.send_screen_control(msg).await;
+        if box_coords.is_some() {
+            let box_msg = ControlMsg::SetScreenFocusBox {
+                box_x,
+                box_y,
+                box_w,
+                box_h,
+            };
+            let _ = self.send_screen_control(box_msg).await;
+        }
+        Ok(self.screen_focus_report())
+    }
+
+    /// Reset screen streaming foveated focus mode to default disabled and clear statistics (v2.32 / ADR-118).
+    pub async fn screen_reset_focus_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenFocusReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_focus_config.write().unwrap();
+            *cfg = tetherly_core::ScreenFocusConfig::default();
+            self.shared
+                .screen_focus_tiles_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_focus_peripheral_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_focus_peripheral_skipped
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_focus_saved_bytes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenFocusMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_focus_report())
+    }
+
+    /// Report screen streaming tile-level adaptive palette compression status (v2.33 / ADR-119).
+    pub fn screen_tile_palette_report(&self) -> tetherly_core::ScreenTilePaletteReport {
+        let cfg = *self.shared.screen_tile_palette_config.read().unwrap();
+        tetherly_core::ScreenTilePaletteReport {
+            ok: true,
+            enabled: cfg.enabled,
+            max_colors: cfg.max_colors,
+            enable_rle: cfg.enable_rle,
+            solid_tiles_count: self
+                .shared
+                .screen_tile_palette_solid_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            bilevel_tiles_count: self
+                .shared
+                .screen_tile_palette_bilevel_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            palette_tiles_count: self
+                .shared
+                .screen_tile_palette_palette_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            truecolor_tiles_count: self
+                .shared
+                .screen_tile_palette_truecolor_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            saved_bandwidth_bytes: self
+                .shared
+                .screen_tile_palette_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Configure screen streaming tile-level adaptive palette mode and parameters (v2.33 / ADR-119).
+    pub async fn screen_set_tile_palette_mode(
+        &self,
+        enabled: bool,
+        max_colors: Option<u8>,
+        enable_rle: Option<bool>,
+    ) -> Result<tetherly_core::ScreenTilePaletteReport, CoreError> {
+        let (max_c, rle) = {
+            let mut cfg = self.shared.screen_tile_palette_config.write().unwrap();
+            cfg.enabled = enabled;
+            if let Some(mc) = max_colors {
+                cfg.max_colors = mc.clamp(2, 16);
+            }
+            if let Some(r) = enable_rle {
+                cfg.enable_rle = r;
+            }
+            (cfg.max_colors, cfg.enable_rle)
+        };
+        let msg = ControlMsg::SetScreenTilePaletteMode {
+            enabled,
+            max_colors: max_c,
+            enable_rle: rle,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_palette_report())
+    }
+
+    /// Reset screen streaming tile-level adaptive palette mode to default disabled and clear statistics (v2.33 / ADR-119).
+    pub async fn screen_reset_tile_palette_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenTilePaletteReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_tile_palette_config.write().unwrap();
+            *cfg = tetherly_core::ScreenTilePaletteConfig::default();
+            self.shared
+                .screen_tile_palette_solid_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_palette_bilevel_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_palette_palette_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_palette_truecolor_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_palette_saved_bytes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenTilePaletteMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_palette_report())
+    }
+
+    /// Report current screen streaming tile predictive filter configuration and statistics (v2.34 / ADR-120).
+    pub fn screen_tile_predict_report(&self) -> tetherly_core::ScreenTilePredictReport {
+        let cfg = *self.shared.screen_tile_predict_config.read().unwrap();
+        tetherly_core::ScreenTilePredictReport {
+            ok: true,
+            enabled: cfg.enabled,
+            filter_mode: cfg.filter_mode,
+            enable_rct: cfg.enable_rct,
+            predict_tiles_count: self
+                .shared
+                .screen_tile_predict_tiles_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            saved_bandwidth_bytes: self
+                .shared
+                .screen_tile_predict_saved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Configure screen streaming tile-level predictive filter & reversible color transform mode (v2.34 / ADR-120).
+    pub async fn screen_set_tile_predict_mode(
+        &self,
+        enabled: bool,
+        filter_mode: Option<tetherly_core::ScreenTilePredictFilter>,
+        enable_rct: Option<bool>,
+    ) -> Result<tetherly_core::ScreenTilePredictReport, CoreError> {
+        let (filter, rct) = {
+            let mut cfg = self.shared.screen_tile_predict_config.write().unwrap();
+            cfg.enabled = enabled;
+            if let Some(fm) = filter_mode {
+                cfg.filter_mode = fm;
+            }
+            if let Some(r) = enable_rct {
+                cfg.enable_rct = r;
+            }
+            (cfg.filter_mode, cfg.enable_rct)
+        };
+        let msg = ControlMsg::SetScreenTilePredictMode {
+            enabled,
+            filter_mode: filter.to_u8(),
+            enable_rct: rct,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_predict_report())
+    }
+
+    /// Reset screen streaming tile-level predictive filter mode to default disabled and clear statistics (v2.34 / ADR-120).
+    pub async fn screen_reset_tile_predict_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenTilePredictReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_tile_predict_config.write().unwrap();
+            *cfg = tetherly_core::ScreenTilePredictConfig::default();
+            self.shared
+                .screen_tile_predict_tiles_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_predict_saved_bytes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenTilePredictMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_predict_report())
+    }
+
+    /// Report current screen streaming tile presentation transaction and double-buffer state (v2.35 / ADR-121).
+    pub fn screen_tile_present_report(&self) -> tetherly_core::ScreenTilePresentReport {
+        let cfg = *self.shared.screen_tile_present_config.read().unwrap();
+        let committed = self
+            .shared
+            .screen_tile_present_committed_txs
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let swapped = self
+            .shared
+            .screen_tile_present_swapped_frames
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let torn = self
+            .shared
+            .screen_tile_present_torn_prevented
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let total_lat = self
+            .shared
+            .screen_tile_present_total_latency_us
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let avg_lat = total_lat.checked_div(swapped).unwrap_or(0);
+        tetherly_core::ScreenTilePresentReport {
+            ok: true,
+            enabled: cfg.enabled,
+            vsync_mode: cfg.vsync_mode.as_str().to_string(),
+            double_buffer: cfg.double_buffer,
+            tear_prevention: cfg.tear_prevention,
+            committed_transactions: committed,
+            swapped_frames: swapped,
+            torn_frames_prevented: torn,
+            avg_swap_latency_us: avg_lat,
+        }
+    }
+
+    /// Configure screen streaming tile presentation transaction & double-buffer mode (v2.35 / ADR-121).
+    pub async fn screen_set_tile_present_mode(
+        &self,
+        enabled: bool,
+        vsync_mode: Option<tetherly_core::ScreenTilePresentVsyncMode>,
+        double_buffer: Option<bool>,
+        tear_prevention: Option<bool>,
+    ) -> Result<tetherly_core::ScreenTilePresentReport, CoreError> {
+        let (v_mode, db, tp) = {
+            let mut cfg = self.shared.screen_tile_present_config.write().unwrap();
+            cfg.enabled = enabled;
+            if let Some(vm) = vsync_mode {
+                cfg.vsync_mode = vm;
+            }
+            if let Some(d) = double_buffer {
+                cfg.double_buffer = d;
+            }
+            if let Some(t) = tear_prevention {
+                cfg.tear_prevention = t;
+            }
+            (cfg.vsync_mode, cfg.double_buffer, cfg.tear_prevention)
+        };
+        let msg = ControlMsg::SetScreenTilePresentMode {
+            enabled,
+            vsync_mode: v_mode.to_u8(),
+            double_buffer: db,
+            tear_prevention: tp,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_present_report())
+    }
+
+    /// Reset screen streaming tile presentation mode to default disabled and clear statistics (v2.35 / ADR-121).
+    pub async fn screen_reset_tile_present_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenTilePresentReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_tile_present_config.write().unwrap();
+            *cfg = tetherly_core::ScreenTilePresentConfig::default();
+            self.shared
+                .screen_tile_present_committed_txs
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_present_swapped_frames
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_present_torn_prevented
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_present_total_latency_us
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenTilePresentMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_present_report())
+    }
+
+    /// Report current screen streaming tile NACK and fast retransmission state (v2.36 / ADR-122).
+    pub fn screen_tile_nack_report(&self) -> tetherly_core::ScreenTileNackReport {
+        let cfg = *self.shared.screen_tile_nack_config.read().unwrap();
+        let sent = self
+            .shared
+            .screen_tile_nack_requests_sent
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let retried = self
+            .shared
+            .screen_tile_nack_tiles_retransmitted
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let degraded = self
+            .shared
+            .screen_tile_nack_degraded_commits
+            .load(std::sync::atomic::Ordering::Relaxed);
+        tetherly_core::ScreenTileNackReport {
+            ok: true,
+            enabled: cfg.enabled,
+            timeout_ms: cfg.timeout_ms,
+            max_retries: cfg.max_retries,
+            nack_requests_sent: sent,
+            tiles_retransmitted: retried,
+            degraded_commits: degraded,
+        }
+    }
+
+    /// Configure screen streaming tile NACK & fast retransmission mode (v2.36 / ADR-122).
+    pub async fn screen_set_tile_nack_mode(
+        &self,
+        enabled: bool,
+        timeout_ms: Option<u16>,
+        max_retries: Option<u8>,
+    ) -> Result<tetherly_core::ScreenTileNackReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_tile_nack_config.write().unwrap();
+            cfg.enabled = enabled;
+            if let Some(t) = timeout_ms {
+                cfg.timeout_ms = t;
+            }
+            if let Some(r) = max_retries {
+                cfg.max_retries = r;
+            }
+        }
+        let msg = ControlMsg::TileNackSync {
+            nack_requests: self
+                .shared
+                .screen_tile_nack_requests_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            retransmitted_tiles: self
+                .shared
+                .screen_tile_nack_tiles_retransmitted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            degraded_commits: self
+                .shared
+                .screen_tile_nack_degraded_commits
+                .load(std::sync::atomic::Ordering::Relaxed),
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_nack_report())
+    }
+
+    /// Reset screen streaming tile NACK mode to default disabled and clear statistics (v2.36 / ADR-122).
+    pub async fn screen_reset_tile_nack_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenTileNackReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_tile_nack_config.write().unwrap();
+            *cfg = tetherly_core::ScreenTileNackConfig::default();
+            self.shared
+                .screen_tile_resend_buffer
+                .write()
+                .unwrap()
+                .clear();
+            self.shared
+                .screen_tile_nack_requests_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_nack_tiles_retransmitted
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_nack_degraded_commits
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenTileNackMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_nack_report())
+    }
+
+    /// Report current screen streaming tile saliency and tiered scheduling state (v2.37 / ADR-123).
+    pub fn screen_tile_saliency_report(&self) -> tetherly_core::ScreenTileSaliencyReport {
+        let cfg = *self.shared.screen_tile_saliency_config.read().unwrap();
+        let crit = self
+            .shared
+            .screen_tile_saliency_critical_tiles
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let norm = self
+            .shared
+            .screen_tile_saliency_normal_tiles
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let bg = self
+            .shared
+            .screen_tile_saliency_background_tiles
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let skipped = self
+            .shared
+            .screen_tile_saliency_background_skipped
+            .load(std::sync::atomic::Ordering::Relaxed);
+        tetherly_core::ScreenTileSaliencyReport {
+            ok: true,
+            enabled: cfg.enabled,
+            high_threshold: cfg.high_threshold,
+            low_threshold: cfg.low_threshold,
+            drop_background_on_congestion: cfg.drop_background_on_congestion,
+            critical_tiles_sent: crit,
+            normal_tiles_sent: norm,
+            background_tiles_sent: bg,
+            background_tiles_skipped: skipped,
+        }
+    }
+
+    /// Configure screen streaming tile saliency & tiered scheduling mode (v2.37 / ADR-123).
+    pub async fn screen_set_tile_saliency_mode(
+        &self,
+        enabled: bool,
+        high_threshold: Option<u8>,
+        low_threshold: Option<u8>,
+        drop_background_on_congestion: Option<bool>,
+    ) -> Result<tetherly_core::ScreenTileSaliencyReport, CoreError> {
+        let (high, low, drop_bg) = {
+            let mut cfg = self.shared.screen_tile_saliency_config.write().unwrap();
+            cfg.enabled = enabled;
+            if let Some(h) = high_threshold {
+                cfg.high_threshold = h;
+            }
+            if let Some(l) = low_threshold {
+                cfg.low_threshold = l;
+            }
+            if let Some(d) = drop_background_on_congestion {
+                cfg.drop_background_on_congestion = d;
+            }
+            if cfg.high_threshold < cfg.low_threshold {
+                cfg.high_threshold = cfg.low_threshold;
+            }
+            (
+                cfg.high_threshold,
+                cfg.low_threshold,
+                cfg.drop_background_on_congestion,
+            )
+        };
+        let msg = ControlMsg::SetScreenTileSaliencyMode {
+            enabled,
+            high_threshold: high,
+            low_threshold: low,
+            drop_background_on_congestion: drop_bg,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_saliency_report())
+    }
+
+    /// Reset screen streaming tile saliency mode to default disabled and clear statistics (v2.37 / ADR-123).
+    pub async fn screen_reset_tile_saliency_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenTileSaliencyReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_tile_saliency_config.write().unwrap();
+            *cfg = tetherly_core::ScreenTileSaliencyConfig::default();
+            self.shared
+                .screen_tile_saliency_critical_tiles
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_saliency_normal_tiles
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_saliency_background_tiles
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_saliency_background_skipped
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenTileSaliencyMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_saliency_report())
+    }
+
+    /// Report current screen streaming tile Level-of-Detail (LoD) downsampling state (v2.38 / ADR-124).
+    pub fn screen_tile_lod_report(&self) -> tetherly_core::ScreenTileLodReport {
+        let cfg = *self.shared.screen_tile_lod_config.read().unwrap();
+        let lod0 = self
+            .shared
+            .screen_tile_lod0_tiles
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let lod1 = self
+            .shared
+            .screen_tile_lod1_tiles
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let lod2 = self
+            .shared
+            .screen_tile_lod2_tiles
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let bytes_saved = self
+            .shared
+            .screen_tile_lod_bytes_saved
+            .load(std::sync::atomic::Ordering::Relaxed);
+        tetherly_core::ScreenTileLodReport {
+            ok: true,
+            enabled: cfg.enabled,
+            max_lod: cfg.max_lod,
+            auto_lod_on_congestion: cfg.auto_lod_on_congestion,
+            lod0_tiles_sent: lod0,
+            lod1_tiles_sent: lod1,
+            lod2_tiles_sent: lod2,
+            bytes_saved,
+        }
+    }
+
+    /// Configure screen streaming tile Level-of-Detail (LoD) downsampling mode (v2.38 / ADR-124).
+    pub async fn screen_set_tile_lod_mode(
+        &self,
+        enabled: bool,
+        max_lod: Option<u8>,
+        auto_lod_on_congestion: Option<bool>,
+    ) -> Result<tetherly_core::ScreenTileLodReport, CoreError> {
+        let (max_lod_val, auto_lod_val) = {
+            let mut cfg = self.shared.screen_tile_lod_config.write().unwrap();
+            cfg.enabled = enabled;
+            if let Some(m) = max_lod {
+                cfg.max_lod = m.clamp(1, 2);
+            }
+            if let Some(a) = auto_lod_on_congestion {
+                cfg.auto_lod_on_congestion = a;
+            }
+            (cfg.max_lod, cfg.auto_lod_on_congestion)
+        };
+        let msg = ControlMsg::SetScreenTileLodMode {
+            enabled,
+            max_lod: max_lod_val,
+            auto_lod_on_congestion: auto_lod_val,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_lod_report())
+    }
+
+    /// Reset screen streaming tile Level-of-Detail (LoD) mode to default and clear statistics (v2.38 / ADR-124).
+    pub async fn screen_reset_tile_lod_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenTileLodReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_tile_lod_config.write().unwrap();
+            *cfg = tetherly_core::ScreenTileLodConfig::default();
+            self.shared
+                .screen_tile_lod0_tiles
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_lod1_tiles
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_lod2_tiles
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_lod_bytes_saved
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenTileLodMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_lod_report())
+    }
+
+    /// Dynamic tile batching and pacing status report (v2.39 / ADR-125).
+    pub fn screen_tile_batch_report(&self) -> tetherly_core::ScreenTileBatchReport {
+        let cfg = *self.shared.screen_tile_batch_config.read().unwrap();
+        let batches = self
+            .shared
+            .screen_tile_batches_sent
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let chunks = self
+            .shared
+            .screen_tile_chunks_sent
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let bytes = self
+            .shared
+            .screen_tile_batch_bytes_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let pacing_pauses = self
+            .shared
+            .screen_tile_batch_pacing_pauses
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let avg_chunk_bytes = bytes.checked_div(chunks).unwrap_or(0) as u32;
+        tetherly_core::ScreenTileBatchReport {
+            ok: true,
+            enabled: cfg.enabled,
+            target_chunk_bytes: cfg.target_chunk_bytes,
+            pacing_interval_us: cfg.pacing_interval_us,
+            batches_sent: batches,
+            chunks_sent: chunks,
+            avg_chunk_bytes,
+            pacing_pauses,
+        }
+    }
+
+    /// Configure screen streaming tile batching, MTU chunking and pacing (v2.39 / ADR-125).
+    pub async fn screen_set_tile_batch_mode(
+        &self,
+        enabled: bool,
+        target_chunk_bytes: Option<u16>,
+        pacing_interval_us: Option<u16>,
+    ) -> Result<tetherly_core::ScreenTileBatchReport, CoreError> {
+        let (target_val, pacing_val) = {
+            let mut cfg = self.shared.screen_tile_batch_config.write().unwrap();
+            cfg.enabled = enabled;
+            if let Some(tb) = target_chunk_bytes {
+                cfg.target_chunk_bytes = tb.clamp(
+                    tetherly_core::SCREEN_TILE_BATCH_MIN_CHUNK_BYTES,
+                    tetherly_core::SCREEN_TILE_BATCH_MAX_CHUNK_BYTES,
+                );
+            }
+            if let Some(pu) = pacing_interval_us {
+                cfg.pacing_interval_us =
+                    pu.clamp(0, tetherly_core::SCREEN_TILE_BATCH_MAX_PACING_US);
+            }
+            (cfg.target_chunk_bytes, cfg.pacing_interval_us)
+        };
+        let msg = ControlMsg::SetScreenTileBatchMode {
+            enabled,
+            target_chunk_bytes: target_val,
+            pacing_interval_us: pacing_val,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_batch_report())
+    }
+
+    /// Reset screen streaming tile batching mode to default and clear statistics (v2.39 / ADR-125).
+    pub async fn screen_reset_tile_batch_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenTileBatchReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_tile_batch_config.write().unwrap();
+            *cfg = tetherly_core::ScreenTileBatchConfig::default();
+            self.shared
+                .screen_tile_batches_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_chunks_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_batch_bytes_total
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_batch_pacing_pauses
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            *self.shared.screen_tile_batch_receiver_state.lock().unwrap() = None;
+        }
+        let msg = ControlMsg::ResetScreenTileBatchMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_batch_report())
+    }
+
+    /// Dynamic tile motion estimation and displacement compensation status report (v2.40 / ADR-126).
+    pub fn screen_tile_motion_report(&self) -> tetherly_core::ScreenTileMotionReport {
+        let cfg = *self.shared.screen_tile_motion_config.read().unwrap();
+        let motion = self
+            .shared
+            .screen_tile_motion_tiles_sent
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let fallback = self
+            .shared
+            .screen_tile_motion_fallback_tiles_sent
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let bytes = self
+            .shared
+            .screen_tile_motion_bytes_saved
+            .load(std::sync::atomic::Ordering::Relaxed);
+        tetherly_core::ScreenTileMotionReport {
+            ok: true,
+            enabled: cfg.enabled,
+            max_displacement: cfg.max_displacement,
+            min_match_ratio: cfg.min_match_ratio,
+            motion_tiles_sent: motion,
+            fallback_tiles_sent: fallback,
+            bytes_saved: bytes,
+        }
+    }
+
+    /// Configure screen streaming tile motion estimation and displacement compensation (v2.40 / ADR-126).
+    pub async fn screen_set_tile_motion_mode(
+        &self,
+        enabled: bool,
+        max_displacement: Option<u16>,
+        min_match_ratio: Option<u8>,
+    ) -> Result<tetherly_core::ScreenTileMotionReport, CoreError> {
+        let (disp_val, ratio_val) = {
+            let mut cfg = self.shared.screen_tile_motion_config.write().unwrap();
+            cfg.enabled = enabled;
+            if let Some(md) = max_displacement {
+                cfg.max_displacement = md.clamp(
+                    tetherly_core::SCREEN_TILE_MOTION_MIN_DISPLACEMENT,
+                    tetherly_core::SCREEN_TILE_MOTION_MAX_DISPLACEMENT,
+                );
+            }
+            if let Some(mr) = min_match_ratio {
+                cfg.min_match_ratio = mr.clamp(1, 100);
+            }
+            (cfg.max_displacement, cfg.min_match_ratio)
+        };
+        let msg = ControlMsg::SetScreenTileMotionMode {
+            enabled,
+            max_displacement: disp_val,
+            min_match_ratio: ratio_val,
+        };
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_motion_report())
+    }
+
+    /// Reset screen streaming tile motion mode to default and clear statistics (v2.40 / ADR-126).
+    pub async fn screen_reset_tile_motion_mode(
+        &self,
+    ) -> Result<tetherly_core::ScreenTileMotionReport, CoreError> {
+        {
+            let mut cfg = self.shared.screen_tile_motion_config.write().unwrap();
+            *cfg = tetherly_core::ScreenTileMotionConfig::default();
+            self.shared
+                .screen_tile_motion_tiles_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_motion_fallback_tiles_sent
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .screen_tile_motion_bytes_saved
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let msg = ControlMsg::ResetScreenTileMotionMode;
+        let _ = self.send_screen_control(msg).await;
+        Ok(self.screen_tile_motion_report())
+    }
+
     /// Comprehensive status report for input sharing.
     pub async fn input_status_report(&self) -> InputStatusReport {
         let channel_open = self.input_channel_open().await;
@@ -23535,6 +31250,13 @@ impl Node {
             .lock()
             .expect("screen")
             .is_congested()
+    }
+
+    /// Sets an explicit congestion override for testing and deterministic simulation (v2.37 / ADR-123).
+    pub fn set_screen_congestion_override(&self, forced: Option<bool>) {
+        if let Ok(mut engine) = self.shared.screen_engine.lock() {
+            engine.set_congested_override(forced);
+        }
     }
 
     /// Visitor-side receiver counters. All zeros until this node views a peer.

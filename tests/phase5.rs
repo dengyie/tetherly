@@ -4438,6 +4438,424 @@ async fn m5_25_screen_session_recording_container_and_replay_pipeline() {
     let _ = std::fs::remove_dir_all(&out_dir);
 }
 
+#[tokio::test]
+async fn m5_26_screen_session_playback_engine_and_virtual_source_feeder() {
+    use tetherly_core::ScreenSource;
+
+    let (host, visitor, ga, gb) = pair_view().await;
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+
+    let out_dir = std::env::temp_dir().join(format!(
+        "tetherly_m5_26_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    ));
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let container = out_dir.join("playback_sample.trec");
+
+    // 1. Synthesize a valid 10-frame .trec container
+    let mut buf = Vec::new();
+    let frame0 = tetherly_core::ScreenFrame {
+        seq: 0,
+        rect: tetherly_core::ScreenRect {
+            x: 0,
+            y: 0,
+            w: 64,
+            h: 48,
+        },
+        format: tetherly_core::PixelFormat::Bgra8,
+        codec_tag: tetherly_core::SCREEN_COMPRESS_NONE,
+        stride: 64 * 4,
+        bytes: vec![0x42; 64 * 48 * 4],
+    };
+    let meta = tetherly_core::ScreenRecordingMeta::from_frame(&frame0, 1000);
+    let mut writer =
+        tetherly_core::ScreenRecordingWriter::new(meta, std::io::Cursor::new(&mut buf)).unwrap();
+    for i in 0..10 {
+        let frame = tetherly_core::ScreenFrame {
+            seq: i,
+            rect: tetherly_core::ScreenRect {
+                x: 0,
+                y: 0,
+                w: 64,
+                h: 48,
+            },
+            format: tetherly_core::PixelFormat::Bgra8,
+            codec_tag: tetherly_core::SCREEN_COMPRESS_NONE,
+            stride: 64 * 4,
+            bytes: vec![(i as u8) * 10; 64 * 48 * 4],
+        };
+        writer.append(&frame, 1000 + i * 16666).unwrap();
+    }
+    writer.finish().unwrap();
+    std::fs::write(&container, &buf).unwrap();
+
+    // 2. REST API: GET /api/screen/playback default report (idle)
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/playback")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let pb_rep: tetherly_core::ScreenPlaybackReport = serde_json::from_slice(&b).unwrap();
+    assert!(pb_rep.ok);
+    assert_eq!(pb_rep.state, "idle");
+    assert_eq!(pb_rep.current_frame, 0);
+
+    // 3. REST API: POST /api/screen/playback/start with looping test mode
+    let start_req = serde_json::json!({
+        "path": container.display().to_string(),
+        "speed": 0.0,
+        "loop": true
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/playback/start",
+        &serde_json::to_vec(&start_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let pb_rep: tetherly_core::ScreenPlaybackReport = serde_json::from_slice(&b).unwrap();
+    assert!(pb_rep.ok);
+    assert_eq!(pb_rep.total_frames, 10);
+    assert_eq!(pb_rep.width, 64);
+    assert_eq!(pb_rep.height, 48);
+
+    // Give background playback task time to step frames
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Verify frames presented to screen sink
+    assert!(
+        visitor.screen_sink_snapshot().count() >= 5,
+        "playback engine must feed frames to screen sink, got {}",
+        visitor.screen_sink_snapshot().count()
+    );
+
+    // 4. REST API: GET /api/screen carries playback telemetry
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let s_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(s_rep.playback_active);
+    assert_eq!(s_rep.playback_state, "playing");
+
+    // 5. REST API: Pause & Resume
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/playback/pause", &[])
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let pb_rep: tetherly_core::ScreenPlaybackReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(pb_rep.state, "paused");
+
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/playback/resume", &[])
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let pb_rep: tetherly_core::ScreenPlaybackReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(pb_rep.state, "playing");
+
+    // 6. REST API: Stop playback
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/playback/stop", &[])
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let pb_rep: tetherly_core::ScreenPlaybackReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(pb_rep.state, "stopped");
+
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/playback")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let pb_rep: tetherly_core::ScreenPlaybackReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(pb_rep.state, "stopped");
+
+    // 7. Virtual Screen Source Feeder (ScreenRecordingSource)
+    let virtual_source = tetherly_core::ScreenRecordingSource::from_file(&container, true).unwrap();
+    let displays = virtual_source.displays();
+    assert_eq!(displays.len(), 1);
+    assert_eq!(displays[0].title, "Virtual Recorded Display");
+    assert_eq!(displays[0].width, 64);
+    assert_eq!(displays[0].height, 48);
+
+    assert_eq!(virtual_source.fps(), 30);
+    virtual_source.set_fps(60);
+    assert_eq!(virtual_source.fps(), 60);
+
+    // Grab 15 frames (surpassing total 10 to verify seamless loop rewinding)
+    for expected_seq in 0..15 {
+        let frame = virtual_source.grab().unwrap().expect("frame grabbed");
+        assert_eq!(frame.rect.w, 64);
+        assert_eq!(frame.rect.h, 48);
+        assert_eq!(frame.seq, (expected_seq % 10) as u64);
+    }
+    assert_eq!(virtual_source.frames_grabbed(), 15);
+
+    // Non-looping virtual source reaches EOF and finishes gracefully
+    let finite_source = tetherly_core::ScreenRecordingSource::from_file(&container, false).unwrap();
+    for _ in 0..10 {
+        assert!(finite_source.grab().unwrap().is_some());
+    }
+    // 11th grab on non-loop source returns None
+    assert!(finite_source.grab().unwrap().is_none());
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+    let _ = std::fs::remove_dir_all(&out_dir);
+}
+
+#[tokio::test]
+async fn m5_27_screen_live_snapshot_and_recording_frame_extraction() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host sends 1 frame (MemoryScreenSource 16x16)
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor screen sink
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received first frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 3. Visitor live snapshot in BMP format
+    let (c, bmp_bytes) = tetherly_node::loopback_get(visitor_ui, "/api/screen/snapshot?format=bmp")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    assert_eq!(&bmp_bytes[0..2], b"BM");
+    assert_eq!(bmp_bytes.len(), 54 + (16 * 16 * 4));
+    let bi_w = i32::from_le_bytes(bmp_bytes[18..22].try_into().unwrap());
+    let bi_h = i32::from_le_bytes(bmp_bytes[22..26].try_into().unwrap());
+    assert_eq!(bi_w, 16);
+    assert_eq!(bi_h, -16); // Top-Down DIB
+
+    // 4. Visitor live snapshot in JSON format
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/snapshot?format=json")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let snap_rep: tetherly_core::ScreenSnapshotReport = serde_json::from_slice(&b).unwrap();
+    assert!(snap_rep.ok);
+    assert_eq!(snap_rep.source, "live");
+    assert_eq!(snap_rep.width, 16);
+    assert_eq!(snap_rep.height, 16);
+    assert_eq!(snap_rep.format, "bmp");
+    assert_eq!(snap_rep.bytes_len, 54 + (16 * 16 * 4));
+    assert!(!snap_rep.privacy_blanked);
+    assert!(snap_rep.data_base64.is_some());
+
+    // 5. Visitor live snapshot with disk output
+    let temp_snap_dir = std::env::temp_dir().join(format!(
+        "tetherly_m5_27_snap_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_snap_dir).unwrap();
+    let out_file = temp_snap_dir.join("live_screen.bmp");
+    let q_out = format!(
+        "/api/screen/snapshot?out={}",
+        urlencode_query(out_file.to_str().unwrap())
+    );
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, &q_out)
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_core::ScreenSnapshotReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep.path.as_deref(), out_file.to_str());
+    assert!(out_file.exists());
+    let disk_bytes = std::fs::read(&out_file).unwrap();
+    assert_eq!(&disk_bytes[0..2], b"BM");
+    assert_eq!(disk_bytes.len(), 54 + (16 * 16 * 4));
+
+    // 6. Security guard: directory traversal in `out` is rejected with 400
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/snapshot?out=../escape.bmp")
+        .await
+        .unwrap();
+    assert_eq!(c, 400);
+    assert!(String::from_utf8_lossy(&b)
+        .to_lowercase()
+        .contains("unsafe"));
+
+    // 7. Privacy mode test on host (ADR-098 & ADR-103)
+    host.screen_set_privacy_mode(true, false).await.unwrap();
+    let (c, host_bmp) = tetherly_node::loopback_get(host_ui, "/api/screen/snapshot?format=bmp")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    assert_eq!(&host_bmp[0..2], b"BM");
+    // All pixels blanked to 0
+    for &b in &host_bmp[54..] {
+        assert_eq!(b, 0, "privacy mode must blank all pixels");
+    }
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/snapshot?format=json")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_rep: tetherly_core::ScreenSnapshotReport = serde_json::from_slice(&b).unwrap();
+    assert!(host_rep.privacy_blanked);
+    host.screen_set_privacy_mode(false, false).await.unwrap();
+
+    // 8. Recording container single-frame extraction (ADR-101 & ADR-103)
+    let container_file = temp_snap_dir.join("session_rec.trec");
+    {
+        let f0 = tetherly_core::ScreenFrame {
+            seq: 0,
+            rect: tetherly_core::ScreenRect {
+                x: 0,
+                y: 0,
+                w: 32,
+                h: 24,
+            },
+            format: tetherly_core::PixelFormat::Bgra8,
+            codec_tag: tetherly_core::SCREEN_COMPRESS_NONE,
+            stride: 32 * 4,
+            bytes: vec![0x33; 32 * 24 * 4],
+        };
+        let f1 = tetherly_core::ScreenFrame {
+            seq: 1,
+            rect: tetherly_core::ScreenRect {
+                x: 0,
+                y: 0,
+                w: 32,
+                h: 24,
+            },
+            format: tetherly_core::PixelFormat::Bgra8,
+            codec_tag: tetherly_core::SCREEN_COMPRESS_NONE,
+            stride: 32 * 4,
+            bytes: vec![0x88; 32 * 24 * 4],
+        };
+        let meta = tetherly_core::ScreenRecordingMeta::from_frame(&f0, 2);
+        let file = std::fs::File::create(&container_file).unwrap();
+        let mut writer = tetherly_core::ScreenRecordingWriter::new(meta, file).unwrap();
+        writer.append(&f0, 50_000).unwrap();
+        writer.append(&f1, 150_000).unwrap();
+        writer.finish().unwrap();
+    }
+
+    // Extract frame 1 via POST /api/screen/recording/snapshot
+    let rec_req = serde_json::json!({
+        "path": container_file.to_str().unwrap(),
+        "frame": 1,
+        "format": "json"
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/recording/snapshot",
+        &serde_json::to_vec(&rec_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let rec_rep: tetherly_core::ScreenSnapshotReport = serde_json::from_slice(&b).unwrap();
+    assert!(rec_rep.ok);
+    assert_eq!(rec_rep.source, "recording");
+    assert_eq!(rec_rep.frame_seq, 1);
+    assert_eq!(rec_rep.pts_us, 150_000);
+    assert_eq!(rec_rep.width, 32);
+    assert_eq!(rec_rep.height, 24);
+    assert_eq!(rec_rep.bytes_len, 54 + (32 * 24 * 4));
+
+    // Extract frame 0 as BMP binary stream and verify pixel values
+    let rec_bmp_req = serde_json::json!({
+        "path": container_file.to_str().unwrap(),
+        "pts": 50_000,
+        "format": "bmp"
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/recording/snapshot",
+        &serde_json::to_vec(&rec_bmp_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    assert_eq!(&b[0..2], b"BM");
+    assert_eq!(b.len(), 54 + (32 * 24 * 4));
+    for &pixel_byte in &b[54..] {
+        assert_eq!(pixel_byte, 0x33);
+    }
+
+    // Extract with traversal rejected
+    let evil_rec = serde_json::json!({
+        "path": "../not_allowed.trec",
+        "frame": 0
+    });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/recording/snapshot",
+        &serde_json::to_vec(&evil_rec).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 400);
+
+    // Verify snapshot telemetry on status endpoint
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let st: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(st.snapshot_count >= 3);
+
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+    let _ = std::fs::remove_dir_all(&temp_snap_dir);
+}
+
 fn urlencode_query(p: &str) -> String {
     let mut out = String::with_capacity(p.len());
     for b in p.bytes() {
@@ -4449,4 +4867,6972 @@ fn urlencode_query(p: &str) -> String {
         }
     }
     out
+}
+
+#[tokio::test]
+async fn m5_28_screen_dynamic_security_watermarking_and_forensic_overlay() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host sends 1 frame (MemoryScreenSource 16x16)
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor screen sink
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received first frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial live snapshot before watermark: watermarked must be false
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/snapshot?format=json")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let initial_snap: tetherly_core::ScreenSnapshotReport = serde_json::from_slice(&b).unwrap();
+    assert!(initial_snap.ok);
+    assert!(!initial_snap.watermarked);
+
+    // 3. Host enables host-enforced watermark overlay via POST /api/screen/watermark
+    let wm_cfg = serde_json::json!({
+        "enabled": true,
+        "host_enforced": true,
+        "text": "CONFIDENTIAL-{peer}",
+        "opacity": 200,
+        "color": "#00FF00",
+        "pattern": "grid",
+        "scale": 1,
+        "spacing_x": 40,
+        "spacing_y": 30
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/watermark",
+        &serde_json::to_vec(&wm_cfg).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let host_wm_rep: tetherly_core::ScreenWatermarkReport = serde_json::from_slice(&b).unwrap();
+    assert!(host_wm_rep.ok);
+    assert!(host_wm_rep.enabled);
+    assert!(host_wm_rep.host_enforced);
+    assert_eq!(host_wm_rep.color_hex, "#00FF00");
+    assert_eq!(host_wm_rep.pattern, "grid");
+
+    // 4. Wait for line protocol Tag 10 (ControlMsg::SetWatermarkState) to propagate to visitor
+    let wait_sync = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/watermark")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let vis_rep: tetherly_core::ScreenWatermarkReport = serde_json::from_slice(&b).unwrap();
+        if vis_rep.enabled && vis_rep.host_enforced {
+            break;
+        }
+        if wait_sync.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received host_enforced watermark state via line protocol Tag 10");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Host sovereignty guard (ADR-004 / ADR-104):
+    // Visitor tries to disable the watermark or clear host_enforced, expecting HTTP 403 Forbidden!
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/watermark/disable", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(
+        c, 403,
+        "visitor must not be able to disable host-enforced watermark"
+    );
+    assert!(String::from_utf8_lossy(&b).contains("enforced by host"));
+
+    let try_disable_cfg = serde_json::json!({
+        "enabled": false
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/watermark",
+        &serde_json::to_vec(&try_disable_cfg).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 403);
+    assert!(String::from_utf8_lossy(&b).contains("enforced by host"));
+
+    // 6. Visitor takes live snapshot while watermark is enforced: watermarked == true
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/snapshot?format=json")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let wm_snap: tetherly_core::ScreenSnapshotReport = serde_json::from_slice(&b).unwrap();
+    assert!(wm_snap.ok);
+    assert!(
+        wm_snap.watermarked,
+        "live snapshot must reflect active watermark overlay"
+    );
+
+    // Also verify binary BMP output contains watermark
+    let (c, wm_bmp) = tetherly_node::loopback_get(visitor_ui, "/api/screen/snapshot?format=bmp")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    assert_eq!(&wm_bmp[0..2], b"BM");
+
+    // 7. Telemetry verification on status endpoint
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let st: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(st.watermark_enabled);
+    assert!(st.watermark_enforced);
+
+    // 8. Host relaxes lockdown: disables watermark
+    let relax_cfg = serde_json::json!({
+        "enabled": false,
+        "host_enforced": false
+    });
+    let (c, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/watermark",
+        &serde_json::to_vec(&relax_cfg).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Wait for visitor to receive relaxed state
+    let wait_relax = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/watermark")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let vis_rep: tetherly_core::ScreenWatermarkReport = serde_json::from_slice(&b).unwrap();
+        if !vis_rep.enabled && !vis_rep.host_enforced {
+            break;
+        }
+        if wait_relax.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received relaxed watermark state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 9. Now visitor is free to enable and disable client-side watermark
+    let (c, _) = tetherly_node::loopback_post(visitor_ui, "/api/screen/watermark/enable", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let (c, _) = tetherly_node::loopback_post(visitor_ui, "/api/screen/watermark/disable", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    // 10. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_29_screen_collaborative_annotation_and_laser_pointer_pipeline() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host sends 1 frame (MemoryScreenSource 16x16)
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor screen sink
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received first frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Collaborative Transient Laser Pointer Flow
+    // Initial laser status: off
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/laser")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let l_rep: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(l_rep["ok"], true);
+    assert_eq!(l_rep["laser_active"], false);
+
+    // Visitor activates laser pointer at (12, 14) with color #00FF00 and radius 8
+    let laser_req = serde_json::json!({
+        "x": 12,
+        "y": 14,
+        "active": true,
+        "color": "#00FF00",
+        "radius": 8
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/laser",
+        &serde_json::to_vec(&laser_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let l_rep: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(l_rep["ok"], true);
+    assert_eq!(l_rep["laser_active"], true);
+    assert_eq!(l_rep["laser"]["x"], 12);
+    assert_eq!(l_rep["laser"]["y"], 14);
+
+    // Host should also receive Tag 11 control message
+    let wait_laser = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/laser")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let hl_rep: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        if hl_rep["laser_active"].as_bool().unwrap_or(false) {
+            assert_eq!(hl_rep["laser"]["x"], 12);
+            assert_eq!(hl_rep["laser"]["y"], 14);
+            break;
+        }
+        if wait_laser.elapsed() > Duration::from_secs(5) {
+            panic!("host never received Tag 11 laser pointer message");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Deactivate laser pointer
+    let laser_off = serde_json::json!({ "active": false });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/laser",
+        &serde_json::to_vec(&laser_off).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let l_rep: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(l_rep["laser_active"], false);
+
+    // 3. Collaborative Whiteboard Annotations Flow
+    // Add rect annotation
+    let rect_ann = serde_json::json!({
+        "kind": "rect",
+        "x": 2,
+        "y": 2,
+        "w": 10,
+        "h": 8,
+        "color": "#FF0000",
+        "thickness": 1
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/annotation",
+        &serde_json::to_vec(&rect_ann).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let ann_res: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(ann_res["ok"], true);
+    assert!(ann_res["id"].as_u64().unwrap_or(0) > 0);
+
+    // Add stroke annotation
+    let stroke_ann = serde_json::json!({
+        "kind": "stroke",
+        "points_str": "1,1;5,5;10,5",
+        "color": "#0000FF",
+        "thickness": 2
+    });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/annotation",
+        &serde_json::to_vec(&stroke_ann).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Add arrow annotation
+    let arrow_ann = serde_json::json!({
+        "kind": "arrow",
+        "from_str": "0,0",
+        "to_str": "12,12",
+        "color": "#FFFF00"
+    });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/annotation",
+        &serde_json::to_vec(&arrow_ann).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Add text annotation
+    let text_ann = serde_json::json!({
+        "kind": "text",
+        "text": "HI",
+        "x": 4,
+        "y": 4,
+        "scale": 1,
+        "color": "#FFFFFF"
+    });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/annotation",
+        &serde_json::to_vec(&text_ann).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Add temporary TTL annotation with 100ms TTL
+    let temp_ann = serde_json::json!({
+        "kind": "text",
+        "text": "TMP",
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "ttl_ms": 100
+    });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/annotation",
+        &serde_json::to_vec(&temp_ann).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Verify all 5 annotations are active
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/annotation")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_core::ScreenAnnotationReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep.annotations_count, 5);
+    assert_eq!(rep.total_annotations_added, 5);
+
+    // Sleep for 150ms to allow the temporary annotation to expire
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Send a frame to trigger apply_annotations with expired item cleanup
+    assert!(host.screen_send_frame().await.unwrap());
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    // Verify TTL annotation expired
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/annotation")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_core::ScreenAnnotationReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep.annotations_count, 4);
+
+    // 4. Whiteboard clear flow: POST /api/screen/annotation/clear
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/annotation/clear", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_core::ScreenAnnotationReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep.annotations_count, 0);
+
+    // 5. Verify telemetry via GET /api/screen
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(s.annotations_count, 0);
+    assert!(s.annotations_total >= 5);
+    assert!(s.laser_updates_total >= 2);
+
+    // 6. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_30_screen_whiteboard_multi_user_sync_and_undo_redo_pipeline() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host sends 1 frame (MemoryScreenSource 16x16)
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor screen sink
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received first frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Whiteboard Policy Query
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/whiteboard/policy")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let pol_rep: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(pol_rep["ok"], true);
+    assert_eq!(pol_rep["policy"]["read_only"], false);
+    assert_eq!(pol_rep["policy"]["allow_peer_clear"], true);
+    assert_eq!(pol_rep["policy"]["max_items"], 1000);
+
+    // 3. Multi-Author Drawing: Alice and Bob draw distinct annotations
+    let stroke_alice = serde_json::json!({
+        "kind": "stroke",
+        "author": "alice",
+        "points_str": "1,1;4,4;8,8",
+        "color": "#FF0000",
+        "thickness": 2
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/annotation",
+        &serde_json::to_vec(&stroke_alice).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let res: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(res["ok"], true);
+    let alice_id = res["id"].as_u64().unwrap();
+
+    let rect_bob = serde_json::json!({
+        "kind": "rect",
+        "author": "bob",
+        "x": 2,
+        "y": 2,
+        "w": 6,
+        "h": 6,
+        "color": "#00FF00",
+        "thickness": 1
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/annotation",
+        &serde_json::to_vec(&rect_bob).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let res: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(res["ok"], true);
+    let bob_id = res["id"].as_u64().unwrap();
+
+    let text_alice2 = serde_json::json!({
+        "kind": "text",
+        "author": "alice",
+        "text": "ALICE2",
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "color": "#FFFFFF"
+    });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/annotation",
+        &serde_json::to_vec(&text_alice2).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Verify 3 active items on visitor
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/annotation")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_core::ScreenAnnotationReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep.annotations_count, 3);
+    assert_eq!(rep.redo_count, 0);
+
+    // 4. Per-Author Undo Isolation:
+    // Visitor requests undo specifically for "alice".
+    // This should undo "ALICE2", leaving Bob's rect and Alice's first stroke active.
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/whiteboard/undo?author=alice",
+        b"{}",
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let undo_rep: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(undo_rep["ok"], true);
+    assert_eq!(undo_rep["undone"]["author"], "alice");
+    assert_eq!(undo_rep["report"]["annotations_count"], 2);
+    assert_eq!(undo_rep["report"]["redo_count"], 1);
+
+    // Verify Bob's item (#bob_id) is still active in the annotations list
+    let annotations = undo_rep["report"]["annotations"].as_array().unwrap();
+    assert!(annotations.iter().any(|it| it["id"] == bob_id));
+    assert!(annotations.iter().any(|it| it["id"] == alice_id));
+
+    // 5. Per-Author Redo:
+    // Redo Alice's annotation -> ALICE2 is restored
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/whiteboard/redo?author=alice",
+        b"{}",
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let redo_rep: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(redo_rep["ok"], true);
+    assert_eq!(redo_rep["redone"]["author"], "alice");
+    assert_eq!(redo_rep["report"]["annotations_count"], 3);
+    assert_eq!(redo_rep["report"]["redo_count"], 0);
+
+    // 6. Global Undo:
+    // Undo without author parameter undos the globally most recent item (ALICE2)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/whiteboard/undo", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let undo_rep: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(undo_rep["report"]["annotations_count"], 2);
+
+    // 7. Vector Snapshot Export and Import Pipeline
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/whiteboard/export")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let export_rep: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(export_rep["ok"], true);
+    let snap = export_rep["export"].clone();
+    assert_eq!(snap["active_items"].as_array().unwrap().len(), 2);
+
+    // Clear canvas
+    let (c, _) = tetherly_node::loopback_post(visitor_ui, "/api/screen/whiteboard/clear", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/annotation")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_core::ScreenAnnotationReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(rep.annotations_count, 0);
+
+    // Import snapshot back
+    let import_body = serde_json::json!({
+        "snapshot": snap,
+        "replace": true
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/whiteboard/import",
+        &serde_json::to_vec(&import_body).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let imp_rep: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(imp_rep["imported_count"], 2);
+    assert_eq!(imp_rep["report"]["annotations_count"], 2);
+
+    // 8. Whiteboard Moderation Policy & Host Sovereignty
+    // Host sets policy: read_only = true
+    let pol_body = serde_json::json!({
+        "read_only": true,
+        "allow_peer_clear": false,
+        "max_items": 500
+    });
+    let (c, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/whiteboard/policy",
+        &serde_json::to_vec(&pol_body).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Host attempts to draw while whiteboard is read-only -> 403 Forbidden!
+    let blocked_draw = serde_json::json!({
+        "kind": "rect",
+        "author": "visitor",
+        "x": 0,
+        "y": 0,
+        "w": 5,
+        "h": 5
+    });
+    let (c, _) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/annotation",
+        &serde_json::to_vec(&blocked_draw).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 403);
+
+    // 9. Path Traversal Guard
+    let (c, _) = tetherly_node::loopback_get(
+        visitor_ui,
+        "/api/screen/whiteboard/export?out=../../evil.json",
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 400);
+
+    // 10. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_31_screen_dynamic_roi_crop_and_viewport_zoom_pipeline() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: ROI is inactive, full-frame streaming (16x16)
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/roi")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let roi_rep: tetherly_core::ScreenRoiReport = serde_json::from_slice(&b).unwrap();
+    assert!(!roi_rep.active);
+    assert_eq!(roi_rep.zoom_percent, 100);
+
+    // Host sends 1 frame (MemoryScreenSource 16x16)
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor screen sink
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received first frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let last_frame = visitor.screen_sink_snapshot().last().expect("frame");
+    assert_eq!(last_frame.rect.w, 16);
+    assert_eq!(last_frame.rect.h, 16);
+
+    // 3. Visitor requests dynamic ROI crop and zoom (x=4, y=4, w=8, h=8, zoom=200)
+    let roi_req = serde_json::json!({
+        "x": 4,
+        "y": 4,
+        "w": 8,
+        "h": 8,
+        "zoom_percent": 200
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/roi",
+        &serde_json::to_vec(&roi_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let visitor_roi_rep: tetherly_core::ScreenRoiReport = serde_json::from_slice(&b).unwrap();
+    assert!(visitor_roi_rep.active);
+    assert_eq!(visitor_roi_rep.x, 4);
+    assert_eq!(visitor_roi_rep.y, 4);
+    assert_eq!(visitor_roi_rep.w, 8);
+    assert_eq!(visitor_roi_rep.h, 8);
+    assert_eq!(visitor_roi_rep.zoom_percent, 200);
+    assert_eq!(visitor_roi_rep.effective_w, 8);
+    assert_eq!(visitor_roi_rep.effective_h, 8);
+
+    // Verify host receives the ROI signaling via network loop (Tags 16 & 18)
+    let wait_host_roi = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/roi")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_roi_rep: tetherly_core::ScreenRoiReport = serde_json::from_slice(&b).unwrap();
+        if host_roi_rep.active && host_roi_rep.w == 8 && host_roi_rep.h == 8 {
+            assert_eq!(host_roi_rep.x, 4);
+            assert_eq!(host_roi_rep.y, 4);
+            assert_eq!(host_roi_rep.zoom_percent, 200);
+            break;
+        }
+        if wait_host_roi.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized ROI from visitor signal");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Host sends frame with active ROI -> cropped to 8x8 in pipeline
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let prev_count = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_roi_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count {
+            break;
+        }
+        if wait_roi_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received ROI-cropped frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let cropped_frame = visitor
+        .screen_sink_snapshot()
+        .last()
+        .expect("cropped frame");
+    assert_eq!(cropped_frame.rect.w, 8);
+    assert_eq!(cropped_frame.rect.h, 8);
+    assert_eq!(cropped_frame.rect.x, 4);
+    assert_eq!(cropped_frame.rect.y, 4);
+
+    // 5. Dynamic Zoom Adjustment via POST /api/screen/roi/zoom
+    let zoom_req = serde_json::json!({ "zoom_percent": 300 });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/roi/zoom",
+        &serde_json::to_vec(&zoom_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let zoom_rep: tetherly_core::ScreenRoiReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(zoom_rep.zoom_percent, 300);
+
+    // 6. Coordinate Mapping Verification (Bidirectional)
+    let roi = tetherly_core::ScreenRoi {
+        active: true,
+        x: 4,
+        y: 4,
+        w: 8,
+        h: 8,
+        zoom_percent: 300,
+    };
+    // (6, 6) is inside ROI -> relative is (2, 2)
+    assert_eq!(roi.map_screen_to_roi(6, 6), Some((2, 2)));
+    // (2, 2) is outside ROI -> None
+    assert_eq!(roi.map_screen_to_roi(2, 2), None);
+    // Relative (2, 2) maps back to screen (6, 6)
+    assert_eq!(roi.map_roi_to_screen(2, 2), (6, 6));
+
+    // 7. Reset ROI Viewport via POST /api/screen/roi/reset
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/roi/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenRoiReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.active);
+
+    // Verify host receives Tag 17 reset signal
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/roi")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_roi_rep: tetherly_core::ScreenRoiReport = serde_json::from_slice(&b).unwrap();
+        if !host_roi_rep.active {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized ROI reset from visitor signal");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host sends frame after reset -> restores full 16x16 frame
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let prev_count2 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_full_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count2 {
+            break;
+        }
+        if wait_full_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received full frame after reset");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let restored_frame = visitor
+        .screen_sink_snapshot()
+        .last()
+        .expect("restored frame");
+    assert_eq!(restored_frame.rect.w, 16);
+    assert_eq!(restored_frame.rect.h, 16);
+
+    // 8. Telemetry Status Verification (/api/screen)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!s.roi_active);
+    assert_eq!(s.roi_zoom_percent, 100);
+    assert!(s.roi_updates > 0);
+
+    // 9. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_32_screen_adaptive_color_depth_and_grayscale_pipeline() {
+    let (host, visitor, ga, gb) = pair_view().await;
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: FullColor32 (inactive transformation, full color)
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/color")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let color_rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(color_rep.mode, tetherly_core::ScreenColorMode::FullColor32);
+    assert_eq!(color_rep.threshold, 128);
+    assert!(!color_rep.is_active);
+
+    // Host sends 1 frame (MemoryScreenSource 16x16 with distinct color channels)
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor screen sink
+    let wait_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received first frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let full_color_frame = visitor.screen_sink_snapshot().last().expect("frame");
+    assert_eq!(full_color_frame.rect.w, 16);
+    assert_eq!(full_color_frame.rect.h, 16);
+    // In full color, color channels are distinct
+    let mut has_color_variance = false;
+    for px in full_color_frame.bytes.chunks_exact(4) {
+        if px[0] != px[1] || px[1] != px[2] {
+            has_color_variance = true;
+            break;
+        }
+    }
+    assert!(has_color_variance, "native frame must have color variance");
+
+    // 3. Visitor requests Grayscale8 mode via POST /api/screen/color
+    let gray_req = serde_json::json!({ "mode": "grayscale" });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/color",
+        &serde_json::to_vec(&gray_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let gray_rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(gray_rep.mode, tetherly_core::ScreenColorMode::Grayscale8);
+    assert!(gray_rep.is_active);
+
+    // Verify host receives Tag 19 and synchronizes to Grayscale8
+    let wait_host_gray = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/color")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_color_rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&b).unwrap();
+        if host_color_rep.mode == tetherly_core::ScreenColorMode::Grayscale8
+            && host_color_rep.is_active
+        {
+            break;
+        }
+        if wait_host_gray.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized Grayscale8 color mode from visitor signal");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host sends frame with active Grayscale8 mode -> R == G == B on all pixels
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let prev_count = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_gray_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count {
+            break;
+        }
+        if wait_gray_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Grayscale8 frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let gray_frame = visitor.screen_sink_snapshot().last().expect("gray frame");
+    assert_eq!(gray_frame.rect.w, 16);
+    assert_eq!(gray_frame.rect.h, 16);
+    for px in gray_frame.bytes.chunks_exact(4) {
+        assert_eq!(px[0], px[1], "grayscale R and G channels must match");
+        assert_eq!(px[1], px[2], "grayscale G and B channels must match");
+    }
+
+    // 4. Visitor requests Monochrome1 mode with threshold = 128
+    let mono_req = serde_json::json!({
+        "mode": "monochrome",
+        "threshold": 128
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/color",
+        &serde_json::to_vec(&mono_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let mono_rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(mono_rep.mode, tetherly_core::ScreenColorMode::Monochrome1);
+    assert_eq!(mono_rep.threshold, 128);
+    assert!(mono_rep.is_active);
+
+    // Verify host synchronizes Monochrome1
+    let wait_host_mono = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/color")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_color_rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&b).unwrap();
+        if host_color_rep.mode == tetherly_core::ScreenColorMode::Monochrome1
+            && host_color_rep.threshold == 128
+        {
+            break;
+        }
+        if wait_host_mono.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized Monochrome1 mode from visitor signal");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host sends frame with active Monochrome1 mode -> each pixel is pure 0 or 255
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let prev_count2 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_mono_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count2 {
+            break;
+        }
+        if wait_mono_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Monochrome1 frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mono_frame = visitor.screen_sink_snapshot().last().expect("mono frame");
+    assert_eq!(mono_frame.rect.w, 16);
+    assert_eq!(mono_frame.rect.h, 16);
+    for px in mono_frame.bytes.chunks_exact(4) {
+        assert_eq!(px[0], px[1]);
+        assert_eq!(px[1], px[2]);
+        assert!(
+            px[0] == 0 || px[0] == 255,
+            "monochrome pixel value must be either 0 or 255"
+        );
+    }
+
+    // 5. Visitor requests ReducedColor16 (RGB565) mode
+    let red_req = serde_json::json!({ "mode": "reduced" });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/color",
+        &serde_json::to_vec(&red_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let red_rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(red_rep.mode, tetherly_core::ScreenColorMode::ReducedColor16);
+    assert!(red_rep.is_active);
+
+    // Verify host synchronizes ReducedColor16
+    let wait_host_red = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/color")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_color_rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&b).unwrap();
+        if host_color_rep.mode == tetherly_core::ScreenColorMode::ReducedColor16 {
+            break;
+        }
+        if wait_host_red.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized ReducedColor16 mode from visitor signal");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host sends frame with ReducedColor16 mode -> verify high-bit replenishment
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let prev_count3 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_red_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count3 {
+            break;
+        }
+        if wait_red_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received ReducedColor16 frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let red_frame = visitor
+        .screen_sink_snapshot()
+        .last()
+        .expect("reduced frame");
+    for px in red_frame.bytes.chunks_exact(4) {
+        assert_eq!(
+            px[0] & 0x07,
+            px[0] >> 5,
+            "5-bit channel low bits match high bits"
+        );
+        assert_eq!(
+            px[1] & 0x03,
+            px[1] >> 6,
+            "6-bit channel low bits match high bits"
+        );
+        assert_eq!(
+            px[2] & 0x07,
+            px[2] >> 5,
+            "5-bit channel low bits match high bits"
+        );
+    }
+
+    // 6. Reset to FullColor32 via POST /api/screen/color/reset
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/color/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(reset_rep.mode, tetherly_core::ScreenColorMode::FullColor32);
+    assert!(!reset_rep.is_active);
+
+    // Verify host receives Tag 20 reset signal
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/color")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_color_rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&b).unwrap();
+        if host_color_rep.mode == tetherly_core::ScreenColorMode::FullColor32
+            && !host_color_rep.is_active
+        {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized color reset from visitor signal");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host sends frame after reset -> restores full color
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let prev_count4 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_restored_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count4 {
+            break;
+        }
+        if wait_restored_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received full color frame after reset");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let restored_frame = visitor
+        .screen_sink_snapshot()
+        .last()
+        .expect("restored frame");
+    let mut restored_variance = false;
+    for px in restored_frame.bytes.chunks_exact(4) {
+        if px[0] != px[1] || px[1] != px[2] {
+            restored_variance = true;
+            break;
+        }
+    }
+    assert!(
+        restored_variance,
+        "restored frame must exhibit color variance"
+    );
+
+    // 7. Telemetry Status Verification (/api/screen)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(s.color_mode, "full_color32");
+    assert_eq!(s.color_threshold, 128);
+    assert!(s.color_updates >= 4);
+
+    // 8. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[derive(Debug)]
+struct ControllableDeltaScreenSource {
+    rect: tetherly_core::ScreenRect,
+    seq: std::sync::atomic::AtomicU64,
+    pixels: std::sync::Mutex<Vec<u8>>,
+}
+
+impl ControllableDeltaScreenSource {
+    fn new(w: u16, h: u16) -> Self {
+        Self::with_seq(w, h, 1)
+    }
+
+    fn with_seq(w: u16, h: u16, seq: u64) -> Self {
+        let size = (w as usize) * (h as usize) * 4;
+        let mut pixels = vec![0x20u8; size];
+        for px in pixels.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        Self {
+            rect: tetherly_core::ScreenRect::new(0, 0, w, h).unwrap(),
+            seq: std::sync::atomic::AtomicU64::new(seq),
+            pixels: std::sync::Mutex::new(pixels),
+        }
+    }
+
+    fn update_rect(&self, x: u16, y: u16, w: u16, h: u16, color: [u8; 4]) {
+        let mut lock = self.pixels.lock().unwrap();
+        let stride = (self.rect.w as usize) * 4;
+        for row in 0..h as usize {
+            for col in 0..w as usize {
+                let offset = (y as usize + row) * stride + (x as usize + col) * 4;
+                if offset + 4 <= lock.len() {
+                    lock[offset..offset + 4].copy_from_slice(&color);
+                }
+            }
+        }
+    }
+
+    fn update_rect_with<F: FnMut(usize, usize) -> [u8; 4]>(
+        &self,
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+        mut f: F,
+    ) {
+        let mut lock = self.pixels.lock().unwrap();
+        let stride = (self.rect.w as usize) * 4;
+        for row in 0..h as usize {
+            for col in 0..w as usize {
+                let color = f(col, row);
+                let offset = (y as usize + row) * stride + (x as usize + col) * 4;
+                if offset + 4 <= lock.len() {
+                    lock[offset..offset + 4].copy_from_slice(&color);
+                }
+            }
+        }
+    }
+
+    fn set_pattern(&self) {
+        let mut lock = self.pixels.lock().unwrap();
+        let w = self.rect.w as usize;
+        let h = self.rect.h as usize;
+        for y in 0..h {
+            for x in 0..w {
+                let idx = (y * w + x) * 4;
+                lock[idx] = ((x * 3) & 0xFF) as u8;
+                lock[idx + 1] = ((y * 7) & 0xFF) as u8;
+                lock[idx + 2] = ((x ^ y) & 0xFF) as u8;
+                lock[idx + 3] = 255;
+            }
+        }
+    }
+
+    fn scroll_vertical(&self, dy: i16, fill_color: [u8; 4]) {
+        let mut lock = self.pixels.lock().unwrap();
+        let w = self.rect.w as usize;
+        let h = self.rect.h as usize;
+        let stride = w * 4;
+        if dy < 0 {
+            let shift = ((-dy) as usize).min(h);
+            lock.copy_within(shift * stride..h * stride, 0);
+            for row in (h - shift)..h {
+                let off = row * stride;
+                for col in 0..w {
+                    lock[off + col * 4..off + col * 4 + 4].copy_from_slice(&fill_color);
+                }
+            }
+        } else if dy > 0 {
+            let shift = (dy as usize).min(h);
+            lock.copy_within(0..(h - shift) * stride, shift * stride);
+            for row in 0..shift {
+                let off = row * stride;
+                for col in 0..w {
+                    lock[off + col * 4..off + col * 4 + 4].copy_from_slice(&fill_color);
+                }
+            }
+        }
+    }
+
+    fn pixels_snapshot(&self) -> Vec<u8> {
+        self.pixels.lock().unwrap().clone()
+    }
+}
+
+impl tetherly_core::ScreenSource for ControllableDeltaScreenSource {
+    fn grab(&self) -> Result<Option<tetherly_core::ScreenFrame>, tetherly_core::CoreError> {
+        let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let bytes = self.pixels.lock().unwrap().clone();
+        Ok(Some(tetherly_core::ScreenFrame::raw(
+            seq,
+            self.rect,
+            tetherly_core::PixelFormat::Bgra8,
+            bytes,
+        )?))
+    }
+}
+
+#[tokio::test]
+async fn m5_33_screen_dynamic_delta_patch_and_temporal_compression_pipeline() {
+    let (da, ga) = temp_dir("host-delta");
+    let (db, gb) = temp_dir("visitor-delta");
+    let source = Arc::new(ControllableDeltaScreenSource::new(64, 64));
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: delta mode is disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/delta")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let delta_rep: tetherly_core::ScreenDeltaReport = serde_json::from_slice(&b).unwrap();
+    assert!(!delta_rep.enabled);
+    assert_eq!(delta_rep.keyframe_interval, 60);
+    assert_eq!(delta_rep.saved_bytes, 0);
+
+    // Host sends 1 initial base keyframe (64x64 uniform 0x20 pixels)
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor screen sink
+    let wait_frame1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received initial keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let frame1 = visitor.screen_sink_snapshot().last().expect("frame 1");
+    assert_eq!(frame1.rect.w, 64);
+    assert_eq!(frame1.rect.h, 64);
+    assert_eq!(frame1.bytes[0], 0x20);
+
+    // 3. Visitor configures delta mode via POST /api/screen/delta with keyframe_interval = 3
+    let delta_req = serde_json::json!({
+        "enabled": true,
+        "keyframe_interval": 3
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/delta",
+        &serde_json::to_vec(&delta_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let delta_rep: tetherly_core::ScreenDeltaReport = serde_json::from_slice(&b).unwrap();
+    assert!(delta_rep.enabled);
+    assert_eq!(delta_rep.keyframe_interval, 3);
+
+    // Verify host receives Tag 21 and synchronizes delta mode
+    let wait_host_delta = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/delta")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_delta_rep: tetherly_core::ScreenDeltaReport = serde_json::from_slice(&b).unwrap();
+        if host_delta_rep.enabled && host_delta_rep.keyframe_interval == 3 {
+            break;
+        }
+        if wait_host_delta.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized delta mode from visitor signal");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Host modifies sub-rectangle (16x16 at 0,0) and sends a delta patch frame
+    source.update_rect(0, 0, 16, 16, [0xAA, 0xBB, 0xCC, 255]);
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let prev_count = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    // Wait for frame to reach visitor screen sink
+    let wait_frame2 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count {
+            break;
+        }
+        if wait_frame2.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received delta patch frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Verify visitor synthesized full frame with patched region and retained canvas
+    let frame2 = visitor.screen_sink_snapshot().last().expect("frame 2");
+    assert_eq!(frame2.rect.w, 64);
+    assert_eq!(frame2.rect.h, 64);
+    // Patched region at (0, 0)
+    assert_eq!(frame2.bytes[0], 0xAA);
+    assert_eq!(frame2.bytes[1], 0xBB);
+    assert_eq!(frame2.bytes[2], 0xCC);
+    assert_eq!(frame2.bytes[3], 255);
+    // Unmodified region at (48, 48) retains 0x20
+    let offset_48 = (48 * 64 + 48) * 4;
+    assert_eq!(frame2.bytes[offset_48], 0x20);
+
+    // Verify host delta telemetry
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/delta")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_rep: tetherly_core::ScreenDeltaReport = serde_json::from_slice(&b).unwrap();
+    assert!(host_rep.delta_frames_sent >= 1);
+    assert!(host_rep.saved_bytes > 0);
+
+    // 5. Send subsequent frames until keyframe_interval (3) triggers a fresh keyframe
+    source.update_rect(0, 0, 16, 16, [0x11, 0x22, 0x33, 255]);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let prev_count2 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap()); // delta 2
+    let wait_frame3 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count2 {
+            break;
+        }
+        if wait_frame3.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received delta frame 2");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    source.update_rect(0, 0, 16, 16, [0x44, 0x55, 0x66, 255]);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let prev_count3 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap()); // delta 3
+    let wait_frame4 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count3 {
+            break;
+        }
+        if wait_frame4.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received delta frame 3");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Next frame reaches keyframe_interval threshold -> triggers keyframe
+    source.update_rect(0, 0, 16, 16, [0x77, 0x88, 0x99, 255]);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let prev_count4 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap()); // keyframe
+    let wait_frame5 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count4 {
+            break;
+        }
+        if wait_frame5.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received periodic keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Verify keyframes_sent increased
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/delta")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_rep: tetherly_core::ScreenDeltaReport = serde_json::from_slice(&b).unwrap();
+    assert!(host_rep.keyframes_sent >= 1);
+    assert!(host_rep.delta_frames_sent >= 2);
+
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/delta")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let vis_rep: tetherly_core::ScreenDeltaReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_rep.keyframes_received >= 2);
+    assert!(vis_rep.delta_frames_received >= 2);
+
+    // 6. Reset delta mode via POST /api/screen/delta/reset
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/delta/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenDeltaReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+
+    // Verify host receives Tag 22 reset signal
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/delta")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_delta_rep: tetherly_core::ScreenDeltaReport = serde_json::from_slice(&b).unwrap();
+        if !host_delta_rep.enabled {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized delta reset from visitor signal");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 7. Telemetry Status Verification (/api/screen)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!s.delta_enabled);
+    assert!(s.delta_frames_sent >= 2);
+    assert!(s.delta_saved_bytes > 0);
+
+    // 8. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_34_screen_objective_visual_quality_metric_and_psnr_ssim_pipeline() {
+    let (da, ga) = temp_dir("host-metric");
+    let (db, gb) = temp_dir("visitor-metric");
+    let source = Arc::new(ControllableDeltaScreenSource::new(64, 64));
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: quality metric is disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/metric")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let metric_rep: tetherly_core::ScreenQualityMetricReport = serde_json::from_slice(&b).unwrap();
+    assert!(!metric_rep.enabled);
+    assert_eq!(metric_rep.sample_interval, 10);
+    assert_eq!(metric_rep.evaluated_frames, 0);
+
+    // Host sends initial frame
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_frame1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_frame1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received initial frame");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 3. Visitor enables metric mode via POST /api/screen/metric with sample_interval = 2
+    let metric_req = serde_json::json!({
+        "enabled": true,
+        "sample_interval": 2
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/metric",
+        &serde_json::to_vec(&metric_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let metric_rep: tetherly_core::ScreenQualityMetricReport = serde_json::from_slice(&b).unwrap();
+    assert!(metric_rep.enabled);
+    assert_eq!(metric_rep.sample_interval, 2);
+
+    // Verify host receives Tag 23 and synchronizes metric mode
+    let wait_host_metric = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/metric")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_metric_rep: tetherly_core::ScreenQualityMetricReport =
+            serde_json::from_slice(&b).unwrap();
+        if host_metric_rep.enabled && host_metric_rep.sample_interval == 2 {
+            break;
+        }
+        if wait_host_metric.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized metric mode from visitor signal");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Stream 3 identical frames -> triggers at least 1 evaluation on host and visitor
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let prev = visitor.screen_sink_snapshot().count();
+        assert!(host.screen_send_frame().await.unwrap());
+        let wait_frame = std::time::Instant::now();
+        loop {
+            if visitor.screen_sink_snapshot().count() > prev {
+                break;
+            }
+            if wait_frame.elapsed() > Duration::from_secs(5) {
+                panic!("visitor frame timeout during identical stream");
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    }
+
+    // Verify host metric telemetry: identical frames yield MSE = 0.0, PSNR = 100.0, SSIM = 1.0, no warning
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/metric")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_metric_rep: tetherly_core::ScreenQualityMetricReport =
+        serde_json::from_slice(&b).unwrap();
+    assert!(host_metric_rep.evaluated_frames >= 1);
+    assert_eq!(host_metric_rep.avg_mse, 0.0);
+    assert_eq!(host_metric_rep.avg_psnr_db, 100.0);
+    assert_eq!(host_metric_rep.avg_ssim, 1.0);
+    assert!(!host_metric_rep.quality_warning);
+
+    // 5. Update sub-rectangle and stream perturbed frames
+    source.update_rect(0, 0, 32, 32, [0xFF, 0x00, 0x00, 255]);
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let prev = visitor.screen_sink_snapshot().count();
+        assert!(host.screen_send_frame().await.unwrap());
+        let wait_frame = std::time::Instant::now();
+        loop {
+            if visitor.screen_sink_snapshot().count() > prev {
+                break;
+            }
+            if wait_frame.elapsed() > Duration::from_secs(5) {
+                panic!("visitor frame timeout during perturbed stream");
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    }
+
+    // Verify evaluated_frames incremented
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/metric")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_metric_rep: tetherly_core::ScreenQualityMetricReport =
+        serde_json::from_slice(&b).unwrap();
+    assert!(host_metric_rep.evaluated_frames >= 2);
+
+    // 6. Reset metric mode via POST /api/screen/metric/reset
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/metric/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenQualityMetricReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.sample_interval, 10);
+    assert_eq!(reset_rep.evaluated_frames, 0);
+
+    // Verify host receives Tag 24 reset signal
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/metric")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_metric_rep: tetherly_core::ScreenQualityMetricReport =
+            serde_json::from_slice(&b).unwrap();
+        if !host_metric_rep.enabled && host_metric_rep.evaluated_frames == 0 {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized metric reset from visitor signal");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 7. Telemetry Status Verification (/api/screen)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!s.metric_enabled);
+    assert_eq!(s.metric_evaluated_frames, 0);
+
+    // 8. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_35_screen_autonomous_qoe_closed_loop_adaptation_pipeline() {
+    let (da, ga) = temp_dir("host-qoe");
+    let (db, gb) = temp_dir("visitor-qoe");
+    let source = Arc::new(ControllableDeltaScreenSource::new(64, 64));
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170395").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: QoE closed-loop is disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/qoe")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let qoe_rep: tetherly_core::ScreenQoeReport = serde_json::from_slice(&b).unwrap();
+    assert!(qoe_rep.ok);
+    assert_eq!(qoe_rep.mode, "off");
+    assert_eq!(qoe_rep.actions_total, 0);
+    assert_eq!(qoe_rep.last_action, "hold");
+
+    // Check status telemetry initially shows qoe_enabled = false
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!status_rep.qoe_enabled);
+    assert_eq!(status_rep.qoe_mode, "off");
+
+    // 3. Visitor configures Balanced QoE mode via POST /api/screen/qoe
+    let qoe_req = serde_json::json!({
+        "mode": "balanced",
+        "target_psnr": 32,
+        "target_ssim": 90
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/qoe",
+        &serde_json::to_vec(&qoe_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let qoe_rep: tetherly_core::ScreenQoeReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(qoe_rep.mode, "balanced");
+    assert_eq!(qoe_rep.target_psnr_db, 32);
+    assert_eq!(qoe_rep.target_ssim_pct, 90);
+
+    // Verify host receives Tag 25 and synchronizes QoE config
+    let wait_host_qoe = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/qoe")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_qoe_rep: tetherly_core::ScreenQoeReport = serde_json::from_slice(&b).unwrap();
+        if host_qoe_rep.mode == "balanced"
+            && host_qoe_rep.target_psnr_db == 32
+            && host_qoe_rep.target_ssim_pct == 90
+        {
+            break;
+        }
+        if wait_host_qoe.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never synchronized QoE mode from visitor signal: {:?}",
+                host_qoe_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Also set sample interval to 1 so evaluations trigger on every frame
+    let metric_req = serde_json::json!({
+        "enabled": true,
+        "sample_interval": 1
+    });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/metric",
+        &serde_json::to_vec(&metric_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // 4. Send initial frame to establish baseline
+    assert!(host.screen_send_frame().await.unwrap());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 5. Inject full color distortion into source to trigger QoE action
+    source.update_rect(0, 0, 64, 64, [0x00, 0xFF, 0x00, 255]);
+    for i in 0..3 {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let prev = visitor.screen_sink_snapshot().count();
+        assert!(host.screen_send_frame().await.unwrap());
+        let wait_frame = std::time::Instant::now();
+        loop {
+            if visitor.screen_sink_snapshot().count() > prev {
+                break;
+            }
+            if wait_frame.elapsed() > Duration::from_secs(5) {
+                panic!(
+                    "visitor frame timeout during QoE perturbed stream, iter {}",
+                    i
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    }
+
+    // Verify host QoE controller executed at least one action
+    let wait_action = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/qoe")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_qoe_rep: tetherly_core::ScreenQoeReport = serde_json::from_slice(&b).unwrap();
+        if host_qoe_rep.actions_total >= 1 {
+            assert_ne!(host_qoe_rep.last_action, "hold");
+            break;
+        }
+        if wait_action.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host QoE controller never triggered closed-loop action: {:?}",
+                host_qoe_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Verify status telemetry shows active QoE with action counts
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.qoe_enabled);
+    assert_eq!(status_rep.qoe_mode, "balanced");
+    assert!(status_rep.qoe_actions_total >= 1);
+
+    // 6. Reset QoE mode via POST /api/screen/qoe/reset (Tag 26)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/qoe/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenQoeReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(reset_rep.mode, "off");
+    assert_eq!(reset_rep.actions_total, 0);
+    assert_eq!(reset_rep.last_action, "hold");
+
+    // Verify host synchronizes Tag 26 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/qoe")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_qoe_rep: tetherly_core::ScreenQoeReport = serde_json::from_slice(&b).unwrap();
+        if host_qoe_rep.mode == "off" && host_qoe_rep.actions_total == 0 {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never synchronized QoE reset from visitor signal: {:?}",
+                host_qoe_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 7. Verify status telemetry shows QoE disabled
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!status_rep.qoe_enabled);
+    assert_eq!(status_rep.qoe_mode, "off");
+    assert_eq!(status_rep.qoe_actions_total, 0);
+
+    // 8. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_36_screen_progressive_intra_refresh_pipeline() {
+    let (da, ga) = temp_dir("host-pir");
+    let (db, gb) = temp_dir("visitor-pir");
+    let source = Arc::new(ControllableDeltaScreenSource::new(64, 64));
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170396").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: PIR is disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/pir")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let pir_rep: tetherly_core::ScreenPirReport = serde_json::from_slice(&b).unwrap();
+    assert!(pir_rep.ok);
+    assert_eq!(pir_rep.mode, "disabled");
+    assert_eq!(pir_rep.bands, tetherly_core::SCREEN_PIR_DEFAULT_BANDS);
+    assert_eq!(pir_rep.sweeps_completed, 0);
+    assert_eq!(pir_rep.slices_sent, 0);
+    assert!(!pir_rep.active_sweep);
+
+    // Check status telemetry initially shows pir_enabled = false
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!status_rep.pir_enabled);
+    assert_eq!(status_rep.pir_mode, "disabled");
+
+    // 3. Send initial base keyframe to establish canvas
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_init_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_init_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received initial keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Visitor configures Continuous PIR mode via POST /api/screen/pir with bands = 4
+    let pir_req = serde_json::json!({
+        "mode": "continuous",
+        "bands": 4
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/pir",
+        &serde_json::to_vec(&pir_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let pir_rep: tetherly_core::ScreenPirReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(pir_rep.mode, "continuous");
+    assert_eq!(pir_rep.bands, 4);
+    assert!(pir_rep.active_sweep);
+
+    // Verify host receives Tag 27 and synchronizes PIR config
+    let wait_host_pir = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/pir")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_pir_rep: tetherly_core::ScreenPirReport = serde_json::from_slice(&b).unwrap();
+        if host_pir_rep.mode == "continuous" && host_pir_rep.bands == 4 {
+            break;
+        }
+        if wait_host_pir.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never synchronized PIR mode from visitor signal: {:?}",
+                host_pir_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Host pushes frames; with bands = 4, 4 frames complete 1 full sweep
+    for i in 0..6 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let prev = visitor.screen_sink_snapshot().count();
+        assert!(host.screen_send_frame().await.unwrap());
+        let wait_frame = std::time::Instant::now();
+        loop {
+            if visitor.screen_sink_snapshot().count() > prev {
+                break;
+            }
+            if wait_frame.elapsed() > Duration::from_secs(5) {
+                panic!("visitor frame timeout during PIR streaming, iter {}", i);
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    }
+
+    // Verify host PIR telemetry shows completed sweeps and slice progression
+    let wait_sweep = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/pir")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_pir_rep: tetherly_core::ScreenPirReport = serde_json::from_slice(&b).unwrap();
+        if host_pir_rep.sweeps_completed >= 1 && host_pir_rep.slices_sent >= 4 {
+            break;
+        }
+        if wait_sweep.elapsed() > Duration::from_secs(5) {
+            panic!("host PIR sweep never completed: {:?}", host_pir_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Verify status telemetry shows active PIR telemetry
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.pir_enabled);
+    assert_eq!(status_rep.pir_mode, "continuous");
+    assert_eq!(status_rep.pir_bands, 4);
+    assert!(status_rep.pir_sweeps_completed >= 1);
+    assert!(status_rep.pir_slices_sent >= 4);
+
+    // 6. Reset PIR mode via POST /api/screen/pir/reset (Tag 28)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/pir/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenPirReport = serde_json::from_slice(&b).unwrap();
+    assert_eq!(reset_rep.mode, "disabled");
+    assert!(!reset_rep.active_sweep);
+
+    // Verify host synchronizes Tag 28 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/pir")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_pir_rep: tetherly_core::ScreenPirReport = serde_json::from_slice(&b).unwrap();
+        if host_pir_rep.mode == "disabled" && !host_pir_rep.active_sweep {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never synchronized PIR reset from visitor signal: {:?}",
+                host_pir_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 7. Verify status telemetry reflects disabled PIR mode
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!status_rep.pir_enabled);
+    assert_eq!(status_rep.pir_mode, "disabled");
+
+    // 8. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_37_screen_ltr_long_term_reference_pipeline() {
+    let (da, ga) = temp_dir("host-ltr");
+    let (db, gb) = temp_dir("visitor-ltr");
+    let source = Arc::new(ControllableDeltaScreenSource::new(64, 64));
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170396").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: LTR is disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/ltr")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let ltr_rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&b).unwrap();
+    assert!(ltr_rep.ok);
+    assert!(!ltr_rep.enabled);
+    assert_eq!(
+        ltr_rep.auto_interval,
+        tetherly_core::SCREEN_LTR_DEFAULT_AUTO_INTERVAL
+    );
+    assert_eq!(ltr_rep.current_ltr_seq, 0);
+    assert_eq!(ltr_rep.anchors_established, 0);
+    assert_eq!(ltr_rep.recoveries_requested, 0);
+    assert_eq!(ltr_rep.recoveries_completed, 0);
+    assert_eq!(ltr_rep.saved_burst_bytes, 0);
+
+    // Check status telemetry initially shows ltr_enabled = false
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!status_rep.ltr_enabled);
+    assert_eq!(
+        status_rep.ltr_auto_interval,
+        tetherly_core::SCREEN_LTR_DEFAULT_AUTO_INTERVAL
+    );
+
+    // 3. Visitor configures LTR mode via POST /api/screen/ltr with auto_interval = 20 (Tag 29)
+    let ltr_req = serde_json::json!({
+        "enabled": true,
+        "auto_interval": 20
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/ltr",
+        &serde_json::to_vec(&ltr_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let ltr_rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&b).unwrap();
+    assert!(ltr_rep.enabled);
+    assert_eq!(ltr_rep.auto_interval, 20);
+
+    // Verify host receives Tag 29 and synchronizes LTR config
+    let wait_host_ltr = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/ltr")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_ltr_rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&b).unwrap();
+        if host_ltr_rep.enabled && host_ltr_rep.auto_interval == 20 {
+            break;
+        }
+        if wait_host_ltr.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never synchronized LTR mode from visitor signal: {:?}",
+                host_ltr_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Send initial base keyframe to establish canvas and golden LTR anchor
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_init_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_init_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received initial keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Verify host established golden LTR anchor
+    let wait_anchor = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/ltr")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_ltr_rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&b).unwrap();
+        if host_ltr_rep.anchors_established >= 1 && host_ltr_rep.current_ltr_seq > 0 {
+            break;
+        }
+        if wait_anchor.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never established golden LTR anchor: {:?}",
+                host_ltr_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Host pushes intermediate frames with damaged region
+    for i in 0..3 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        source.update_rect(10 + i * 2, 10 + i * 2, 16, 16, [0x80, 0x10, 0x40, 0xff]);
+        let prev = visitor.screen_sink_snapshot().count();
+        assert!(host.screen_send_frame().await.unwrap());
+        let wait_frame = std::time::Instant::now();
+        loop {
+            if visitor.screen_sink_snapshot().count() > prev {
+                break;
+            }
+            if wait_frame.elapsed() > Duration::from_secs(5) {
+                panic!(
+                    "visitor frame timeout during intermediate streaming, iter {}",
+                    i
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    }
+
+    // 6. Visitor requests LTR differential gap recovery via POST /api/screen/ltr/recover (Tag 31)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/ltr/recover", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let visitor_ltr_rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&b).unwrap();
+    assert!(visitor_ltr_rep.recoveries_requested >= 1);
+
+    // Verify host receives Tag 31 recovery request
+    let wait_host_rec_req = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/ltr")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_ltr_rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&b).unwrap();
+        if host_ltr_rep.recoveries_requested >= 1 {
+            break;
+        }
+        if wait_host_rec_req.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never received LTR recovery request: {:?}",
+                host_ltr_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host pushes next frame which triggers differential LTR recovery patch (SCREEN_COMPRESS_LTR = 5)
+    source.update_rect(20, 20, 16, 16, [0x00, 0xee, 0x11, 0xff]);
+    let prev_rec = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_rec_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_rec {
+            break;
+        }
+        if wait_rec_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received LTR recovery frame");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports recovery completed and burst bytes saved
+    let wait_rec_comp = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/ltr")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_ltr_rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&b).unwrap();
+        if host_ltr_rep.recoveries_completed >= 1 && host_ltr_rep.saved_burst_bytes > 0 {
+            break;
+        }
+        if wait_rec_comp.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host LTR recovery never reported completed: {:?}",
+                host_ltr_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Verify visitor telemetry shows recovery completed
+    let wait_vis_rec = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/ltr")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let vis_ltr_rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&b).unwrap();
+        if vis_ltr_rep.recoveries_completed >= 1 {
+            break;
+        }
+        if wait_vis_rec.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "visitor LTR recovery completion not synchronized: {:?}",
+                vis_ltr_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Verify status telemetry shows active LTR telemetry
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.ltr_enabled);
+    assert_eq!(status_rep.ltr_auto_interval, 20);
+    assert!(status_rep.ltr_anchors_established >= 1);
+    assert!(status_rep.ltr_recoveries_completed >= 1);
+
+    // 7. Manual anchor via POST /api/screen/ltr/anchor (Tag 32)
+    let (c, b) = tetherly_node::loopback_post(host_ui, "/api/screen/ltr/anchor", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let manual_rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&b).unwrap();
+    assert!(manual_rep.anchors_established >= 2);
+
+    // 8. Reset LTR mode via POST /api/screen/ltr/reset (Tag 30)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/ltr/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.current_ltr_seq, 0);
+
+    // Verify host synchronizes Tag 30 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/ltr")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_ltr_rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&b).unwrap();
+        if !host_ltr_rep.enabled && host_ltr_rep.current_ltr_seq == 0 {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never synchronized LTR reset from visitor signal: {:?}",
+                host_ltr_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 9. Verify status telemetry reflects disabled LTR mode
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!status_rep.ltr_enabled);
+
+    // 10. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_38_screen_temporal_scalability_svc_pipeline() {
+    let (da, ga) = temp_dir("host-svc");
+    let (db, gb) = temp_dir("visitor-svc");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(64, 64, 0));
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170396").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: SVC is disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/svc")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let svc_rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&b).unwrap();
+    assert!(svc_rep.ok);
+    assert!(!svc_rep.enabled);
+    assert_eq!(svc_rep.mode, "disabled");
+    assert!(!svc_rep.drop_t1);
+    assert_eq!(svc_rep.t0_frames_sent, 0);
+    assert_eq!(svc_rep.t1_frames_sent, 0);
+    assert_eq!(svc_rep.t1_frames_dropped, 0);
+    assert_eq!(svc_rep.saved_bandwidth_bytes, 0);
+
+    // Check status telemetry initially shows svc_enabled = false
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!status_rep.svc_enabled);
+    assert_eq!(status_rep.svc_mode, "disabled");
+
+    // 3. Visitor configures SVC mode via POST /api/screen/svc (mode: adaptive, drop_t1: false) (Tag 33)
+    let svc_req = serde_json::json!({
+        "mode": "adaptive",
+        "drop_t1": false
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/svc",
+        &serde_json::to_vec(&svc_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let svc_rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&b).unwrap();
+    assert!(svc_rep.enabled);
+    assert_eq!(svc_rep.mode, "adaptive");
+    assert!(!svc_rep.drop_t1);
+
+    // Verify host receives Tag 33 and synchronizes SVC config
+    let wait_host_svc = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/svc")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_svc_rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&b).unwrap();
+        if host_svc_rep.enabled && host_svc_rep.mode == "adaptive" && !host_svc_rep.drop_t1 {
+            break;
+        }
+        if wait_host_svc.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never synchronized SVC mode from visitor signal: {:?}",
+                host_svc_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Host pushes alternating T0 and T1 frames
+    // Frame 0: Base Layer T0 (seq 0 % 2 == 0)
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_f0 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_f0.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 0");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Frame 1: Enhancement Layer T1 (seq 1 % 2 == 1)
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(10, 10, 16, 16, [0x11, 0x22, 0x33, 0xff]);
+    let prev1 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_f1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev1 {
+            break;
+        }
+        if wait_f1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 1 (T1)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Frame 2: Base Layer T0 (seq 2 % 2 == 0)
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(12, 12, 16, 16, [0x44, 0x55, 0x66, 0xff]);
+    let prev2 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_f2 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev2 {
+            break;
+        }
+        if wait_f2.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 2 (T0)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Frame 3: Enhancement Layer T1 (seq 3 % 2 == 1)
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(14, 14, 16, 16, [0x77, 0x88, 0x99, 0xff]);
+    let prev3 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_f3 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev3 {
+            break;
+        }
+        if wait_f3.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 3 (T1)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports alternating T0 and T1 frames emitted
+    let wait_frames_stat = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/svc")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_svc_rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&b).unwrap();
+        if host_svc_rep.t0_frames_sent >= 2 && host_svc_rep.t1_frames_sent >= 2 {
+            break;
+        }
+        if wait_frames_stat.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never reported >= 2 T0 and >= 2 T1 frames sent: {:?}",
+                host_svc_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Congestion simulation: trigger Drop T1 via POST /api/screen/svc/drop-t1 (Tag 33)
+    let drop_req = serde_json::json!({ "drop_t1": true });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/svc/drop-t1",
+        &serde_json::to_vec(&drop_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_svc_rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_svc_rep.drop_t1);
+
+    // Verify host synchronizes Tag 33 drop_t1 = true
+    let wait_drop_t1 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/svc")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_svc_rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&b).unwrap();
+        if host_svc_rep.drop_t1 {
+            break;
+        }
+        if wait_drop_t1.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized drop_t1 = true: {:?}", host_svc_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host pushes Frame 4 (Base Layer T0: seq 4 % 2 == 0) -> MUST be sent and received
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(16, 16, 16, 16, [0xaa, 0xbb, 0xcc, 0xff]);
+    let prev4 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_f4 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev4 {
+            break;
+        }
+        if wait_f4.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 4 (T0 base under drop_t1)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Host pushes Frame 5 (Enhancement Layer T1: seq 5 % 2 == 1) -> MUST be dropped at sender!
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(18, 18, 16, 16, [0xdd, 0xee, 0xff, 0xff]);
+    let sent_f5 = host.screen_send_frame().await.unwrap();
+    assert!(
+        !sent_f5,
+        "Frame 5 (T1) was expected to be dropped by SVC-T degradation policy"
+    );
+
+    // Verify host reports t1_frames_dropped >= 1 and saved_bandwidth_bytes > 0
+    let wait_dropped = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/svc")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_svc_rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&b).unwrap();
+        if host_svc_rep.t1_frames_dropped >= 1 && host_svc_rep.saved_bandwidth_bytes > 0 {
+            break;
+        }
+        if wait_dropped.elapsed() > Duration::from_secs(5) {
+            panic!("host never reported dropped T1 frame: {:?}", host_svc_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 6. Restore transmission: disable drop_t1 via POST /api/screen/svc/drop-t1
+    let restore_req = serde_json::json!({ "drop_t1": false });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/svc/drop-t1",
+        &serde_json::to_vec(&restore_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Verify host synchronizes Tag 33 drop_t1 = false
+    let wait_restore = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/svc")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_svc_rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&b).unwrap();
+        if !host_svc_rep.drop_t1 {
+            break;
+        }
+        if wait_restore.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never synchronized drop_t1 = false: {:?}",
+                host_svc_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host pushes Frame 6 (T0) and Frame 7 (T1) -> Both must be sent now
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(20, 20, 16, 16, [0x12, 0x34, 0x56, 0xff]);
+    let prev6 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_f6 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev6 {
+            break;
+        }
+        if wait_f6.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 6 (T0)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(22, 22, 16, 16, [0x78, 0x9a, 0xbc, 0xff]);
+    let prev7 = visitor.screen_sink_snapshot().count();
+    let sent_f7 = host.screen_send_frame().await.unwrap();
+    assert!(
+        sent_f7,
+        "Frame 7 (T1) should be transmitted after drop_t1 disabled"
+    );
+    let wait_f7 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev7 {
+            break;
+        }
+        if wait_f7.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 7 (T1)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // 7. Verify status report telemetry reflects active SVC metrics
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.svc_enabled);
+    assert_eq!(status_rep.svc_mode, "adaptive");
+    assert!(!status_rep.svc_drop_t1);
+    assert!(status_rep.svc_t0_sent >= 3);
+    assert!(status_rep.svc_t1_sent >= 2);
+    assert!(status_rep.svc_t1_dropped >= 1);
+
+    // 8. Reset SVC mode via POST /api/screen/svc/reset (Tag 34)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/svc/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.mode, "disabled");
+
+    // Verify host synchronizes Tag 34 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/svc")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_svc_rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&b).unwrap();
+        if !host_svc_rep.enabled && host_svc_rep.mode == "disabled" {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized SVC reset: {:?}", host_svc_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 9. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_39_screen_motion_vector_estimation_and_scroll_acceleration_pipeline() {
+    let (da, ga) = temp_dir("host-motion");
+    let (db, gb) = temp_dir("visitor-motion");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(64, 64, 0));
+    source.set_pattern();
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170397").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: Motion estimation is disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/motion")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let motion_rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&b).unwrap();
+    assert!(motion_rep.ok);
+    assert!(!motion_rep.enabled);
+    assert_eq!(
+        motion_rep.max_displacement,
+        tetherly_core::SCREEN_MOTION_DEFAULT_MAX_DISPLACEMENT
+    );
+    assert_eq!(motion_rep.motion_frames_sent, 0);
+    assert_eq!(motion_rep.fallback_frames_sent, 0);
+    assert_eq!(motion_rep.saved_bandwidth_bytes, 0);
+
+    // Initial status report telemetry
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!status_rep.motion_enabled);
+
+    // Send initial baseline keyframe
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_base = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_base.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received baseline keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    // Verify baseline keyframe matches source
+    let baseline_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(baseline_frame.bytes, source.pixels_snapshot());
+
+    // 3. Visitor configures Motion Mode via POST /api/screen/motion (Tag 36)
+    let motion_req = serde_json::json!({
+        "enabled": true,
+        "max_displacement": 32
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/motion",
+        &serde_json::to_vec(&motion_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_rep.enabled);
+    assert_eq!(vis_rep.max_displacement, 32);
+
+    // Verify host receives Tag 36 and synchronizes motion config
+    let wait_host_motion = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/motion")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.max_displacement == 32 {
+            break;
+        }
+        if wait_host_motion.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized motion config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Upward scroll: dy = -8 (scroll up 8 pixels, newly exposed bottom 8 rows)
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.scroll_vertical(-8, [0xFE, 0xDC, 0xBA, 0xFF]);
+    let prev_count = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_scroll1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count {
+            break;
+        }
+        if wait_scroll1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received upward scroll frame");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports motion_frames_sent >= 1 and saved_bandwidth_bytes > 0
+    let wait_motion_stat = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/motion")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&b).unwrap();
+        if rep.motion_frames_sent >= 1 && rep.saved_bandwidth_bytes > 0 {
+            break;
+        }
+        if wait_motion_stat.elapsed() > Duration::from_secs(5) {
+            panic!("host never incremented motion_frames_sent: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Bit-exact verification: receiver reconstructed canvas matches host source 100%
+    let reconstructed1 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        reconstructed1.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame after upward scroll must match source exactly"
+    );
+
+    // 5. Downward scroll: dy = 8 (scroll down 8 pixels, newly exposed top 8 rows)
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.scroll_vertical(8, [0x12, 0x34, 0x56, 0xFF]);
+    let prev_count2 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_scroll2 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count2 {
+            break;
+        }
+        if wait_scroll2.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received downward scroll frame");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports motion_frames_sent >= 2
+    let wait_motion_stat2 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/motion")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&b).unwrap();
+        if rep.motion_frames_sent >= 2 {
+            break;
+        }
+        if wait_motion_stat2.elapsed() > Duration::from_secs(5) {
+            panic!("host never reached motion_frames_sent >= 2: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Bit-exact verification: receiver reconstructed canvas matches host source 100%
+    let reconstructed2 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        reconstructed2.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame after downward scroll must match source exactly"
+    );
+
+    // 6. Non-scroll edit: fallback to standard differential/keyframe pipeline
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(16, 16, 8, 8, [0x99, 0x88, 0x77, 0xFF]);
+    let prev_count3 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_edit = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count3 {
+            break;
+        }
+        if wait_edit.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received non-scroll fallback frame");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports fallback_frames_sent >= 1
+    let wait_fallback = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/motion")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&b).unwrap();
+        if rep.fallback_frames_sent >= 1 {
+            break;
+        }
+        if wait_fallback.elapsed() > Duration::from_secs(5) {
+            panic!("host never incremented fallback_frames_sent: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let reconstructed3 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        reconstructed3.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame after non-scroll edit must match source exactly"
+    );
+
+    // 7. Verify status report telemetry reflects motion metrics
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.motion_enabled);
+    assert_eq!(status_rep.motion_max_displacement, 32);
+    assert!(status_rep.motion_frames_sent >= 2);
+    assert!(status_rep.motion_fallback_frames_sent >= 1);
+    assert!(status_rep.motion_saved_bytes > 0);
+
+    // 8. Reset motion mode via POST /api/screen/motion/reset (Tag 37)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/motion/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(
+        reset_rep.max_displacement,
+        tetherly_core::SCREEN_MOTION_DEFAULT_MAX_DISPLACEMENT
+    );
+
+    // Verify host synchronizes Tag 37 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/motion")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&b).unwrap();
+        if !host_rep.enabled {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized motion reset: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 9. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_40_screen_spatial_tile_grid_decomposition_and_streaming_pipeline() {
+    let (da, ga) = temp_dir("host-tile");
+    let (db, gb) = temp_dir("visitor-tile");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(128, 128, 0));
+    source.set_pattern();
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170397").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: Spatial Tile-Grid mode is disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let tile_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(tile_rep.ok);
+    assert!(!tile_rep.enabled);
+    assert_eq!(tile_rep.tile_size, tetherly_core::SCREEN_TILE_DEFAULT_SIZE);
+    assert_eq!(tile_rep.grid_frames_sent, 0);
+    assert_eq!(tile_rep.dirty_tiles_sent, 0);
+    assert_eq!(tile_rep.skipped_tiles_count, 0);
+    assert_eq!(tile_rep.saved_bandwidth_bytes, 0);
+
+    // Initial status report telemetry
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!status_rep.tile_enabled);
+
+    // Send initial baseline keyframe
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_base = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_base.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received baseline keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    // Verify baseline keyframe matches source
+    let baseline_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(baseline_frame.bytes, source.pixels_snapshot());
+
+    // 3. Visitor configures Spatial Tile-Grid mode via POST /api/screen/tile (Tag 39)
+    let tile_req = serde_json::json!({
+        "enabled": true,
+        "tile_size": 32
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile",
+        &serde_json::to_vec(&tile_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_rep.enabled);
+    assert_eq!(vis_rep.tile_size, 32);
+
+    // Verify host receives Tag 39 and synchronizes tile config
+    let wait_host_tile = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.tile_size == 32 {
+            break;
+        }
+        if wait_host_tile.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Disjoint discrete micro-updates: modify top-left (Tile 0) and bottom-right (Tile 15)
+    // In a 128x128 screen with tile_size = 32, there are (128/32)*(128/32) = 16 tiles total.
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(2, 2, 4, 4, [0xAA, 0xBB, 0xCC, 0xFF]);
+    source.update_rect(120, 120, 4, 4, [0x11, 0x22, 0x33, 0xFF]);
+    let prev_count = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_tile1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count {
+            break;
+        }
+        if wait_tile1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received tile grid frame");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports grid_frames_sent >= 1, dirty_tiles_sent == 2, skipped_tiles_count == 14, saved_bandwidth_bytes > 0
+    let wait_tile_stat = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if rep.grid_frames_sent >= 1
+            && rep.dirty_tiles_sent >= 2
+            && rep.skipped_tiles_count >= 14
+            && rep.saved_bandwidth_bytes > 0
+        {
+            break;
+        }
+        if wait_tile_stat.elapsed() > Duration::from_secs(5) {
+            panic!("host never reported tile streaming stats: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Bit-exact verification: receiver reconstructed canvas matches host source 100%
+    let reconstructed1 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        reconstructed1.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame after tile streaming must match source exactly"
+    );
+
+    // 5. Another discrete update: single tile update at Tile 5 (x=36, y=36, w=4, h=4)
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(36, 36, 4, 4, [0x55, 0x66, 0x77, 0xFF]);
+    let prev_count2 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_tile2 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count2 {
+            break;
+        }
+        if wait_tile2.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received second tile grid frame");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports grid_frames_sent >= 2, dirty_tiles_sent >= 3, skipped_tiles_count >= 29
+    let wait_tile_stat2 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if rep.grid_frames_sent >= 2 && rep.dirty_tiles_sent >= 3 && rep.skipped_tiles_count >= 29 {
+            break;
+        }
+        if wait_tile_stat2.elapsed() > Duration::from_secs(5) {
+            panic!("host never reached grid_frames_sent >= 2: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let reconstructed2 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        reconstructed2.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame after second tile update must match source exactly"
+    );
+
+    // 6. Verify status report telemetry reflects tile metrics
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.tile_enabled);
+    assert_eq!(status_rep.tile_size, 32);
+    assert!(status_rep.tile_frames_sent >= 2);
+    assert!(status_rep.dirty_tiles_sent >= 3);
+    assert!(status_rep.skipped_tiles_count >= 29);
+    assert!(status_rep.tile_saved_bytes > 0);
+
+    // 7. Reset tile mode via POST /api/screen/tile/reset (Tag 40)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/tile/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.tile_size, tetherly_core::SCREEN_TILE_DEFAULT_SIZE);
+
+    // Verify host synchronizes Tag 40 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if !host_rep.enabled {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile reset: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 8. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_41_screen_tile_cache_deduplication_and_streaming_pipeline() {
+    let (da, ga) = temp_dir("host-tile-cache");
+    let (db, gb) = temp_dir("visitor-tile-cache");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(128, 128, 0));
+    source.set_pattern();
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170398").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: Tile dictionary cache is disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/cache")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let cache_rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&b).unwrap();
+    assert!(cache_rep.ok);
+    assert!(!cache_rep.enabled);
+    assert_eq!(
+        cache_rep.max_entries,
+        tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES
+    );
+    assert_eq!(cache_rep.current_entries, 0);
+    assert_eq!(cache_rep.cache_hits, 0);
+    assert_eq!(cache_rep.cache_misses, 0);
+    assert_eq!(cache_rep.saved_bandwidth_bytes, 0);
+
+    // Initial status report telemetry check
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!status_rep.tile_cache_enabled);
+
+    // Send initial baseline keyframe
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_base = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_base.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received baseline keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    // Verify baseline keyframe matches source
+    let baseline_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(baseline_frame.bytes, source.pixels_snapshot());
+
+    // 3. Visitor enables spatial tile-grid streaming (tile_size = 32)
+    let tile_req = serde_json::json!({
+        "enabled": true,
+        "tile_size": 32
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile",
+        &serde_json::to_vec(&tile_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let tile_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(tile_rep.enabled);
+
+    // Verify host receives Tag 39 and synchronizes tile config
+    let wait_host_tile = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.tile_size == 32 {
+            break;
+        }
+        if wait_host_tile.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Visitor configures Tile Dictionary Cache via POST /api/screen/tile/cache (Tag 42)
+    let cache_req = serde_json::json!({
+        "enabled": true,
+        "max_entries": 64
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile/cache",
+        &serde_json::to_vec(&cache_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_cache_rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_cache_rep.enabled);
+    assert_eq!(vis_cache_rep.max_entries, 64);
+
+    // Verify host receives Tag 42 and synchronizes tile cache config
+    let wait_host_cache = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/cache")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.max_entries == 64 {
+            break;
+        }
+        if wait_host_cache.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile cache config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. First Frame: Cache Miss & Dynamic Learning
+    // Update Tile 0 (x=0..32, y=0..32) with a distinctive block pattern
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(0, 0, 32, 32, [0x11, 0x22, 0x33, 0xFF]);
+    let prev_count1 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count1 {
+            break;
+        }
+        if wait_frame1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 1 (tile cache miss)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports cache_misses >= 1 and current_entries >= 1
+    let wait_miss_stat = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/cache")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&b).unwrap();
+        if rep.cache_misses >= 1 && rep.current_entries >= 1 {
+            break;
+        }
+        if wait_miss_stat.elapsed() > Duration::from_secs(5) {
+            panic!("host never reported tile cache miss: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Bit-exact canvas check: receiver reconstructed canvas matches host source 100%
+    let reconstructed1 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        reconstructed1.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame after tile cache miss must match source exactly"
+    );
+
+    // 6. Second Frame: Spatial Translation (Window Movement Simulation) -> Cache Hit!
+    // Move the exact same 32x32 block from Tile 0 to Tile 15 (x=96..128, y=96..128), and reset Tile 0 to dark gray
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(0, 0, 32, 32, [0x05, 0x05, 0x05, 0xFF]);
+    source.update_rect(96, 96, 32, 32, [0x11, 0x22, 0x33, 0xFF]);
+    let prev_count2 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame2 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count2 {
+            break;
+        }
+        if wait_frame2.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 2 (tile cache hit)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports cache_hits >= 1 and saved_bandwidth_bytes > 0!
+    let wait_hit_stat = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/cache")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&b).unwrap();
+        if rep.cache_hits >= 1 && rep.saved_bandwidth_bytes > 0 {
+            break;
+        }
+        if wait_hit_stat.elapsed() > Duration::from_secs(5) {
+            panic!("host never reported tile cache hit: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Bit-exact canvas check: receiver reconstructed canvas with cache hit matches source 100%!
+    let reconstructed2 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        reconstructed2.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame with spatial cache hit must match source exactly"
+    );
+
+    // 7. Third Frame: Intra-Frame Spatial Pattern Repetition (Multi-Tile Deduplication)
+    // Simultaneously update Tile 1 (x=32..64, y=0..32) and Tile 2 (x=64..96, y=0..32) with identical pixels
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(32, 0, 32, 32, [0x77, 0x88, 0x99, 0xFF]);
+    source.update_rect(64, 0, 32, 32, [0x77, 0x88, 0x99, 0xFF]);
+    let prev_count3 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame3 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count3 {
+            break;
+        }
+        if wait_frame3.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 3 (intra-frame tile deduplication)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports increased cache_hits (at least 2 hits now)
+    let wait_hit_stat2 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/cache")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&b).unwrap();
+        if rep.cache_hits >= 2 {
+            assert!(rep.hit_ratio_pct > 0.0);
+            break;
+        }
+        if wait_hit_stat2.elapsed() > Duration::from_secs(5) {
+            panic!("host never reached cache_hits >= 2: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Bit-exact canvas check: receiver canvas after intra-frame deduplication matches source 100%!
+    let reconstructed3 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        reconstructed3.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame after intra-frame deduplication must match source exactly"
+    );
+
+    // 8. Verify status report telemetry reflects active tile cache metrics
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.tile_cache_enabled);
+    assert!(status_rep.tile_cache_entries >= 2);
+    assert!(status_rep.tile_cache_hits >= 2);
+    assert!(status_rep.tile_cache_misses >= 1);
+    assert!(status_rep.tile_cache_saved_bytes > 0);
+
+    // 9. Reset tile cache mode via POST /api/screen/tile/cache/reset (Tag 43)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/tile/cache/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.current_entries, 0);
+    assert_eq!(reset_rep.cache_hits, 0);
+    assert_eq!(reset_rep.cache_misses, 0);
+    assert_eq!(reset_rep.saved_bandwidth_bytes, 0);
+
+    // Verify host synchronizes Tag 43 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/cache")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&b).unwrap();
+        if !host_rep.enabled && host_rep.current_entries == 0 {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile cache reset: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 10. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_42_screen_foveated_focus_priority_scheduling_pipeline() {
+    let (da, ga) = temp_dir("host-focus");
+    let (db, gb) = temp_dir("visitor-focus");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(128, 128, 0));
+    source.set_pattern();
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170398").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: Foveated focus is disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/focus")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let focus_rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&b).unwrap();
+    assert!(focus_rep.ok);
+    assert!(!focus_rep.enabled);
+    assert_eq!(focus_rep.mode, tetherly_core::ScreenFocusMode::Cursor);
+    assert_eq!(focus_rep.focus_tiles_sent, 0);
+    assert_eq!(focus_rep.peripheral_tiles_sent, 0);
+    assert_eq!(focus_rep.peripheral_tiles_skipped, 0);
+    assert_eq!(focus_rep.saved_bandwidth_bytes, 0);
+
+    // Initial status report telemetry check
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!status_rep.focus_enabled);
+
+    // 3. Send initial baseline keyframe
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_base = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_base.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received baseline keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    let baseline_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(baseline_frame.bytes, source.pixels_snapshot());
+
+    // 4. Visitor enables spatial tile-grid streaming (tile_size = 32)
+    let tile_req = serde_json::json!({
+        "enabled": true,
+        "tile_size": 32
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile",
+        &serde_json::to_vec(&tile_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let tile_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(tile_rep.enabled);
+
+    // Wait for host to synchronize tile config
+    let wait_host_tile = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.tile_size == 32 {
+            break;
+        }
+        if wait_host_tile.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Visitor configures Foveated Focus in Box mode (Tag 45 & Tag 46)
+    // Box: x=0..32, y=0..32 (Tile 0), peripheral_skip_ratio = 2 (cadence = 3 frames)
+    let focus_req = serde_json::json!({
+        "enabled": true,
+        "mode": "box",
+        "box_x": 0,
+        "box_y": 0,
+        "box_w": 32,
+        "box_h": 32,
+        "peripheral_skip_ratio": 2
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/focus",
+        &serde_json::to_vec(&focus_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_focus_rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_focus_rep.enabled);
+    assert_eq!(vis_focus_rep.mode, tetherly_core::ScreenFocusMode::Box);
+    assert_eq!(vis_focus_rep.box_w, 32);
+    assert_eq!(vis_focus_rep.peripheral_skip_ratio, 2);
+
+    // Verify host receives Tag 45 & 46 and synchronizes focus config
+    let wait_host_focus = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/focus")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled
+            && host_rep.mode == tetherly_core::ScreenFocusMode::Box
+            && host_rep.box_w == 32
+        {
+            break;
+        }
+        if wait_host_focus.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized focus config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 6. Frame 1 (seq = 1, seq % 3 != 0): Focus vs Peripheral Spatial Priority
+    // Update Focus zone (Tile 0, x=0..32, y=0..32) and Peripheral zone (Tile 15, x=96..128, y=96..128)
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(0, 0, 32, 32, [0xAA, 0xBB, 0xCC, 0xFF]);
+    source.update_rect(96, 96, 32, 32, [0x11, 0x22, 0x33, 0xFF]);
+    let prev_count1 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count1 {
+            break;
+        }
+        if wait_frame1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 1");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports: focus_tiles_sent >= 1, peripheral_tiles_skipped >= 1, saved_bandwidth_bytes > 0
+    let wait_stat1 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/focus")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&b).unwrap();
+        if rep.focus_tiles_sent >= 1
+            && rep.peripheral_tiles_skipped >= 1
+            && rep.saved_bandwidth_bytes > 0
+        {
+            break;
+        }
+        if wait_stat1.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never reported focus sent and peripheral skipped: {:?}",
+                rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Check receiver canvas after Frame 1:
+    // Focus zone (Tile 0) is updated, while Peripheral zone (Tile 15) was skipped and holds baseline pixels!
+    let reconstructed1 = visitor.screen_sink_snapshot().last().unwrap();
+    let focus_pixel = &reconstructed1.bytes[0..4];
+    assert_eq!(
+        focus_pixel,
+        &[0xAA, 0xBB, 0xCC, 0xFF],
+        "Focus zone pixel must be updated in Frame 1"
+    );
+    // Tile 15 start pixel index: (96 * 128 + 96) * 4 = 12384 * 4 = 49536
+    let periph_idx = ((96 * 128 + 96) * 4) as usize;
+    let periph_pixel = &reconstructed1.bytes[periph_idx..periph_idx + 4];
+    assert_ne!(
+        periph_pixel,
+        &[0x11, 0x22, 0x33, 0xFF],
+        "Peripheral pixel must be skipped in Frame 1"
+    );
+
+    // 7. Frame 2 (seq = 2, seq % 3 != 0): Peripheral tile remains skipped
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(host.screen_send_frame().await.unwrap());
+    // Give time for frame processing
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Verify peripheral_tiles_skipped increased
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/focus")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&b).unwrap();
+    assert!(
+        rep.peripheral_tiles_skipped >= 2,
+        "peripheral tile skipped count must increment on Frame 2"
+    );
+
+    // 8. Frame 3 (seq = 3, seq % 3 == 0): Cadence tick! Peripheral tile is transmitted!
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    let prev_count3 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame3 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count3 {
+            break;
+        }
+        if wait_frame3.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 3 (cadence tick)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports peripheral_tiles_sent >= 1
+    let wait_stat3 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/focus")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&b).unwrap();
+        if rep.peripheral_tiles_sent >= 1 {
+            break;
+        }
+        if wait_stat3.elapsed() > Duration::from_secs(5) {
+            panic!("host never reported peripheral_tiles_sent: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Bit-exact canvas check: After cadence tick, visitor reconstructed canvas matches source 100%!
+    let reconstructed3 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        reconstructed3.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame after cadence tick must match source exactly (Canvas Invariance)"
+    );
+
+    // 9. Switch to Cursor mode via POST /api/screen/focus
+    let cursor_req = serde_json::json!({
+        "enabled": true,
+        "mode": "cursor",
+        "radius": 128,
+        "peripheral_skip_ratio": 1
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/focus",
+        &serde_json::to_vec(&cursor_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let cur_rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&b).unwrap();
+    assert!(cur_rep.enabled);
+    assert_eq!(cur_rep.mode, tetherly_core::ScreenFocusMode::Cursor);
+    assert_eq!(cur_rep.radius, 128);
+    assert_eq!(cur_rep.peripheral_skip_ratio, 1);
+
+    // Verify host synchronizes Cursor mode
+    let wait_cursor_sync = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/focus")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.mode == tetherly_core::ScreenFocusMode::Cursor
+            && host_rep.radius == 128
+            && host_rep.peripheral_skip_ratio == 1
+        {
+            break;
+        }
+        if wait_cursor_sync.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized cursor mode: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 10. Verify host status report contains focus telemetry
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.focus_enabled);
+    assert_eq!(status_rep.focus_mode, "cursor");
+    assert_eq!(status_rep.focus_radius, 128);
+    assert_eq!(status_rep.focus_peripheral_skip_ratio, 1);
+    assert!(status_rep.focus_tiles_sent >= 1);
+    assert!(status_rep.peripheral_tiles_sent >= 1);
+    assert!(status_rep.peripheral_tiles_skipped >= 2);
+    assert!(status_rep.focus_saved_bandwidth_bytes > 0);
+
+    // 11. Reset Focus mode via POST /api/screen/focus/reset (Tag 47)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/focus/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.focus_tiles_sent, 0);
+    assert_eq!(reset_rep.peripheral_tiles_sent, 0);
+    assert_eq!(reset_rep.peripheral_tiles_skipped, 0);
+    assert_eq!(reset_rep.saved_bandwidth_bytes, 0);
+
+    // Verify host synchronizes Tag 47 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/focus")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&b).unwrap();
+        if !host_rep.enabled
+            && host_rep.focus_tiles_sent == 0
+            && host_rep.peripheral_tiles_skipped == 0
+        {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized focus reset: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 12. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_43_screen_tile_palette_adaptive_compression_pipeline() {
+    let (da, ga) = temp_dir("host-palette");
+    let (db, gb) = temp_dir("visitor-palette");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(128, 128, 0));
+    source.set_pattern();
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170398").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    let wait_start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let s: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if s.state == "streaming" {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            panic!("host screen never reached streaming state");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Initial state: Tile Palette is disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/palette")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let pal_rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&b).unwrap();
+    assert!(pal_rep.ok);
+    assert!(!pal_rep.enabled);
+    assert_eq!(pal_rep.max_colors, 16);
+    assert_eq!(pal_rep.solid_tiles_count, 0);
+    assert_eq!(pal_rep.bilevel_tiles_count, 0);
+    assert_eq!(pal_rep.palette_tiles_count, 0);
+    assert_eq!(pal_rep.truecolor_tiles_count, 0);
+    assert_eq!(pal_rep.saved_bandwidth_bytes, 0);
+
+    // Initial status report telemetry check
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(!status_rep.tile_palette_enabled);
+
+    // 3. Send initial baseline keyframe
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_base = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_base.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received baseline keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    let baseline_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(baseline_frame.bytes, source.pixels_snapshot());
+
+    // 4. Visitor enables spatial tile-grid streaming (tile_size = 64)
+    let tile_req = serde_json::json!({
+        "enabled": true,
+        "tile_size": 64
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile",
+        &serde_json::to_vec(&tile_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let tile_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(tile_rep.enabled);
+
+    // Wait for host to synchronize tile config
+    let wait_host_tile = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.tile_size == 64 {
+            break;
+        }
+        if wait_host_tile.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Visitor enables Tile-Level Adaptive Palette Compression (Tag 50)
+    let pal_req = serde_json::json!({
+        "enabled": true,
+        "max_colors": 16,
+        "enable_rle": false
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile/palette",
+        &serde_json::to_vec(&pal_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_pal_rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_pal_rep.enabled);
+    assert_eq!(vis_pal_rep.max_colors, 16);
+
+    // Verify host receives Tag 50 and synchronizes palette config
+    let wait_host_pal = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/palette")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.max_colors == 16 {
+            break;
+        }
+        if wait_host_pal.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized palette config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 6. Frame 1 (Solid Color Tile, K=1):
+    // Update Tile 0 (x=0..64, y=0..64) with solid blue
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect(0, 0, 64, 64, [0x00, 0x00, 0xFF, 0xFF]);
+    let prev_count1 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count1 {
+            break;
+        }
+        if wait_frame1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 1 (solid tile)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports solid_tiles_count >= 1 and saved_bandwidth_bytes > 0
+    let wait_stat1 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/palette")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&b).unwrap();
+        if rep.solid_tiles_count >= 1 && rep.saved_bandwidth_bytes > 0 {
+            break;
+        }
+        if wait_stat1.elapsed() > Duration::from_secs(5) {
+            panic!("host never reported solid tile: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Canvas Invariance check for Frame 1
+    let rec1 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec1.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 1 must match source exactly (Canvas Invariance)"
+    );
+    assert_eq!(&rec1.bytes[0..4], &[0x00, 0x00, 0xFF, 0xFF]);
+
+    // 7. Frame 2 (Bi-Level Tile, K=2):
+    // Update Tile 1 (x=64..128, y=0..64) with alternating black and white pattern
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(64, 0, 64, 64, |col, row| {
+        if (col + row) % 2 == 0 {
+            [0x00, 0x00, 0x00, 0xFF]
+        } else {
+            [0xFF, 0xFF, 0xFF, 0xFF]
+        }
+    });
+    let prev_count2 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame2 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count2 {
+            break;
+        }
+        if wait_frame2.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 2 (bilevel tile)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports bilevel_tiles_count >= 1
+    let wait_stat2 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/palette")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&b).unwrap();
+        if rep.bilevel_tiles_count >= 1 {
+            break;
+        }
+        if wait_stat2.elapsed() > Duration::from_secs(5) {
+            panic!("host never reported bilevel tile: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Canvas Invariance check for Frame 2
+    let rec2 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec2.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 2 must match source exactly (Canvas Invariance)"
+    );
+
+    // 8. Frame 3 (16-Color Indexed Palette Tile, 3 <= K <= 16):
+    // Update Tile 2 (x=0..64, y=64..128) with 4-color syntax highlighting blocks
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(0, 64, 64, 64, |col, row| {
+        let colors = [
+            [0xFF, 0x00, 0x00, 0xFF],
+            [0x00, 0xFF, 0x00, 0xFF],
+            [0x00, 0x00, 0xFF, 0xFF],
+            [0xFF, 0xFF, 0x00, 0xFF],
+        ];
+        colors[(col / 16 + row / 16) % 4]
+    });
+    let prev_count3 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame3 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count3 {
+            break;
+        }
+        if wait_frame3.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 3 (palette tile)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports palette_tiles_count >= 1
+    let wait_stat3 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/palette")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&b).unwrap();
+        if rep.palette_tiles_count >= 1 {
+            break;
+        }
+        if wait_stat3.elapsed() > Duration::from_secs(5) {
+            panic!("host never reported palette tile: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Canvas Invariance check for Frame 3
+    let rec3 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec3.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 3 must match source exactly (Canvas Invariance)"
+    );
+
+    // 9. Frame 4 (TrueColor Fallback, K > 16):
+    // Update Tile 3 (x=64..128, y=64..128) with gradient (> 16 colors)
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(64, 64, 64, 64, |col, row| {
+        [
+            ((col * 4) & 0xFF) as u8,
+            ((row * 4) & 0xFF) as u8,
+            ((col ^ row) & 0xFF) as u8,
+            0xFF,
+        ]
+    });
+    let prev_count4 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame4 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count4 {
+            break;
+        }
+        if wait_frame4.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 4 (truecolor fallback)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports truecolor_tiles_count >= 1
+    let wait_stat4 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/palette")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&b).unwrap();
+        if rep.truecolor_tiles_count >= 1 {
+            break;
+        }
+        if wait_stat4.elapsed() > Duration::from_secs(5) {
+            panic!("host never reported truecolor tile: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Canvas Invariance check for Frame 4
+    let rec4 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec4.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 4 must match source exactly (Canvas Invariance)"
+    );
+
+    // 10. Verify host status report contains tile palette telemetry
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.tile_palette_enabled);
+    assert_eq!(status_rep.tile_palette_max_colors, 16);
+    assert!(status_rep.tile_palette_solid_tiles >= 1);
+    assert!(status_rep.tile_palette_bilevel_tiles >= 1);
+    assert!(status_rep.tile_palette_palette_tiles >= 1);
+    assert!(status_rep.tile_palette_truecolor_tiles >= 1);
+    assert!(status_rep.tile_palette_saved_bytes > 0);
+
+    // 11. Reset Tile Palette mode via POST /api/screen/tile/palette/reset (Tag 51)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/tile/palette/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.solid_tiles_count, 0);
+    assert_eq!(reset_rep.bilevel_tiles_count, 0);
+    assert_eq!(reset_rep.palette_tiles_count, 0);
+    assert_eq!(reset_rep.truecolor_tiles_count, 0);
+    assert_eq!(reset_rep.saved_bandwidth_bytes, 0);
+
+    // Verify host synchronizes Tag 51 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/palette")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&b).unwrap();
+        if !host_rep.enabled && host_rep.solid_tiles_count == 0 {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized palette reset: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 12. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_44_screen_tile_predictive_compression_pipeline() {
+    let (da, ga) = temp_dir("host-predict");
+    let (db, gb) = temp_dir("visitor-predict");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(128, 128, 0));
+    source.set_pattern();
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170398").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Initial status report telemetry check: Predict should be disabled
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/predict")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&b).unwrap();
+    assert!(!init_rep.enabled);
+
+    // Send initial baseline keyframe
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_base = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_base.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received baseline keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    // Verify baseline keyframe matches source
+    let baseline_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(baseline_frame.bytes, source.pixels_snapshot());
+
+    // 2. Visitor enables spatial tile-grid streaming (tile_size = 64)
+    let tile_req = serde_json::json!({
+        "enabled": true,
+        "tile_size": 64
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile",
+        &serde_json::to_vec(&tile_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let tile_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(tile_rep.enabled);
+
+    // Verify host receives Tag 39 and synchronizes tile config
+    let wait_host_tile = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.tile_size == 64 {
+            break;
+        }
+        if wait_host_tile.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 3. Visitor configures Predictive Filter via POST /api/screen/tile/predict (Tag 53)
+    let predict_req = serde_json::json!({
+        "enabled": true,
+        "filter_mode": "auto",
+        "enable_rct": true
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile/predict",
+        &serde_json::to_vec(&predict_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_pred_rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_pred_rep.enabled);
+    assert_eq!(
+        vis_pred_rep.filter_mode,
+        tetherly_core::ScreenTilePredictFilter::Auto
+    );
+    assert!(vis_pred_rep.enable_rct);
+
+    // Verify host receives Tag 53 and synchronizes predict config
+    let wait_host_pred = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/predict")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled
+            && host_rep.filter_mode == tetherly_core::ScreenTilePredictFilter::Auto
+            && host_rep.enable_rct
+        {
+            break;
+        }
+        if wait_host_pred.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized predict config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Frame 1 (Horizontal Continuous Gradient Tile, K > 16):
+    // Update Tile 0 (x=0..64, y=0..64) with smooth horizontal gradient
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(0, 0, 64, 64, |col, row| {
+        let base_r = (col * 3) as u8;
+        let base_g = (col * 3 + (row % 4)) as u8;
+        let base_b = (col * 3 + 12) as u8;
+        [base_r, base_g, base_b, 0xFF]
+    });
+    let prev_count1 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count1 {
+            break;
+        }
+        if wait_frame1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 1 (predict tile)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports predict_tiles_count >= 1 and saved_bandwidth_bytes > 0
+    let wait_stat1 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/predict")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&b).unwrap();
+        if rep.predict_tiles_count >= 1 && rep.saved_bandwidth_bytes > 0 {
+            break;
+        }
+        if wait_stat1.elapsed() > Duration::from_secs(5) {
+            panic!("host never reported predict tile stats: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Canvas Invariance check for Frame 1
+    let rec1 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec1.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 1 must match source exactly (Canvas Invariance)"
+    );
+
+    // 5. Frame 2 (Vertical Continuous Gradient Tile, K > 16):
+    // Update Tile 1 (x=64..128, y=0..64) with vertical linear gradient
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(64, 0, 64, 64, |_col, row| {
+        let base_r = (row * 3 + 20) as u8;
+        let base_g = (row * 3 + 25) as u8;
+        let base_b = (row * 3 + 30) as u8;
+        [base_r, base_g, base_b, 0xFF]
+    });
+    let prev_count2 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame2 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count2 {
+            break;
+        }
+        if wait_frame2.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 2");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports predict_tiles_count >= 2
+    let wait_stat2 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/predict")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&b).unwrap();
+        if rep.predict_tiles_count >= 2 {
+            break;
+        }
+        if wait_stat2.elapsed() > Duration::from_secs(5) {
+            panic!("host never reported predict tile count >= 2: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Canvas Invariance check for Frame 2
+    let rec2 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec2.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 2 must match source exactly (Canvas Invariance)"
+    );
+
+    // 6. Frame 3 (Two-Dimensional Smooth Surface with Paeth / Diagonal Gradient):
+    // Update Tile 2 (x=0..64, y=64..128)
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(0, 64, 64, 64, |col, row| {
+        let v = ((col + row) * 2) as u8;
+        [v, v.wrapping_add(10), v.wrapping_add(20), 0xFF]
+    });
+    let prev_count3 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame3 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count3 {
+            break;
+        }
+        if wait_frame3.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 3");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host reports predict_tiles_count >= 3
+    let wait_stat3 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/predict")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&b).unwrap();
+        if rep.predict_tiles_count >= 3 {
+            break;
+        }
+        if wait_stat3.elapsed() > Duration::from_secs(5) {
+            panic!("host never reported predict tile count >= 3: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Canvas Invariance check for Frame 3
+    let rec3 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec3.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 3 must match source exactly (Canvas Invariance)"
+    );
+
+    // 7. Verify host status report contains tile predict telemetry
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.tile_predict_enabled);
+    assert_eq!(status_rep.tile_predict_filter_mode, "auto");
+    assert!(status_rep.tile_predict_enable_rct);
+    assert!(status_rep.tile_predict_tiles_sent >= 3);
+    assert!(status_rep.tile_predict_saved_bytes > 0);
+
+    // 8. Reset Tile Predict mode via POST /api/screen/tile/predict/reset (Tag 54)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/tile/predict/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.predict_tiles_count, 0);
+    assert_eq!(reset_rep.saved_bandwidth_bytes, 0);
+
+    // Verify host synchronizes Tag 54 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/predict")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&b).unwrap();
+        if !host_rep.enabled && host_rep.predict_tiles_count == 0 {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized predict reset: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 9. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_45_screen_tile_presentation_transaction_pipeline() {
+    let (da, ga) = temp_dir("host-present");
+    let (db, gb) = temp_dir("visitor-present");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(128, 128, 0));
+    source.set_pattern();
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170398").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Initial status report telemetry check: Present should be disabled
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/present")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenTilePresentReport = serde_json::from_slice(&b).unwrap();
+    assert!(!init_rep.enabled);
+    assert_eq!(init_rep.committed_transactions, 0);
+    assert_eq!(init_rep.swapped_frames, 0);
+
+    // Send initial baseline keyframe
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_base = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_base.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received baseline keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    // Verify baseline keyframe matches source
+    let baseline_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(baseline_frame.bytes, source.pixels_snapshot());
+
+    // 2. Visitor enables spatial tile-grid streaming (tile_size = 64)
+    let tile_req = serde_json::json!({
+        "enabled": true,
+        "tile_size": 64
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile",
+        &serde_json::to_vec(&tile_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let tile_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(tile_rep.enabled);
+
+    // Verify host receives Tag 39 and synchronizes tile config
+    let wait_host_tile = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.tile_size == 64 {
+            break;
+        }
+        if wait_host_tile.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 3. Visitor configures Double-Buffered Presentation Transaction & Anti-Tearing V-Sync via POST /api/screen/tile/present (Tag 56)
+    let present_req = serde_json::json!({
+        "enabled": true,
+        "vsync_mode": "vsync60",
+        "double_buffer": true,
+        "tear_prevention": true
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile/present",
+        &serde_json::to_vec(&present_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_pres_rep: tetherly_core::ScreenTilePresentReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_pres_rep.enabled);
+    assert_eq!(vis_pres_rep.vsync_mode, "vsync60");
+    assert!(vis_pres_rep.double_buffer);
+    assert!(vis_pres_rep.tear_prevention);
+
+    // Verify host receives Tag 56 and synchronizes present config
+    let wait_host_pres = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/present")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTilePresentReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.vsync_mode == "vsync60" && host_rep.double_buffer {
+            break;
+        }
+        if wait_host_pres.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized present config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Frame 1 (Multi-Tile Update: Tile 0 [0..64, 0..64] and Tile 3 [64..128, 64..128]):
+    // Two dirty tiles in a single frame to verify atomic staging, anti-tearing guard and front-swap
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(0, 0, 64, 64, |col, row| {
+        let r = (col * 3 + 10) as u8;
+        let g = (row * 3 + 20) as u8;
+        let b = 180u8;
+        [r, g, b, 0xFF]
+    });
+    source.update_rect_with(64, 64, 64, 64, |col, row| {
+        let r = 70u8;
+        let g = (col * 2 + 50) as u8;
+        let b = (row * 2 + 60) as u8;
+        [r, g, b, 0xFF]
+    });
+    let prev_count1 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count1 {
+            break;
+        }
+        if wait_frame1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 1 (present transaction)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify visitor reports presentation transaction telemetry:
+    // committed_transactions >= 1, swapped_frames >= 1, torn_frames_prevented >= 1 (due to multi-tile dirty frame)
+    let wait_stat1 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/present")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTilePresentReport = serde_json::from_slice(&b).unwrap();
+        if rep.committed_transactions >= 1
+            && rep.swapped_frames >= 1
+            && rep.torn_frames_prevented >= 1
+        {
+            break;
+        }
+        if wait_stat1.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "visitor never reported present transaction metrics: {:?}",
+                rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Canvas Invariance check for Frame 1
+    let rec1 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec1.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 1 must match source exactly (Canvas Invariance)"
+    );
+
+    // 5. Frame 2 (Another Multi-Tile Update: Tile 1 [64..128, 0..64] and Tile 2 [0..64, 64..128]):
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(64, 0, 64, 64, |col, row| {
+        let r = (col * 2 + 80) as u8;
+        let g = 210u8;
+        let b = (row * 2 + 90) as u8;
+        [r, g, b, 0xFF]
+    });
+    source.update_rect_with(0, 64, 64, 64, |col, row| {
+        let r = 240u8;
+        let g = (col * 3 + 30) as u8;
+        let b = (row * 3 + 40) as u8;
+        [r, g, b, 0xFF]
+    });
+    let prev_count2 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame2 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count2 {
+            break;
+        }
+        if wait_frame2.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 2");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify visitor reports committed_transactions >= 2, swapped_frames >= 2, torn_frames_prevented >= 2
+    let wait_stat2 = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/present")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_core::ScreenTilePresentReport = serde_json::from_slice(&b).unwrap();
+        if rep.committed_transactions >= 2
+            && rep.swapped_frames >= 2
+            && rep.torn_frames_prevented >= 2
+        {
+            break;
+        }
+        if wait_stat2.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never reported present count >= 2: {:?}", rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Canvas Invariance check for Frame 2
+    let rec2 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec2.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 2 must match source exactly (Canvas Invariance)"
+    );
+
+    // 6. Verify visitor screen status report contains tile present telemetry
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.tile_present_enabled);
+    assert_eq!(status_rep.tile_present_vsync_mode, "vsync60");
+    assert!(status_rep.tile_present_double_buffer);
+    assert!(status_rep.tile_present_tear_prevention);
+    assert!(status_rep.tile_present_committed_transactions >= 2);
+    assert!(status_rep.tile_present_swapped_frames >= 2);
+    assert!(status_rep.tile_present_torn_frames_prevented >= 2);
+
+    // 7. Reset Tile Present mode via POST /api/screen/tile/present/reset (Tag 57)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/tile/present/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenTilePresentReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.committed_transactions, 0);
+    assert_eq!(reset_rep.swapped_frames, 0);
+    assert_eq!(reset_rep.torn_frames_prevented, 0);
+
+    // Verify host synchronizes Tag 57 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/present")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTilePresentReport = serde_json::from_slice(&b).unwrap();
+        if !host_rep.enabled {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized present reset: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 8. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+#[tokio::test]
+async fn m5_46_screen_tile_nack_recovery_pipeline() {
+    let (da, ga) = temp_dir("host-nack");
+    let (db, gb) = temp_dir("visitor-nack");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(128, 128, 0));
+    source.set_pattern();
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170398").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Initial status report telemetry check: Tile NACK should be disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/nack")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenTileNackReport = serde_json::from_slice(&b).unwrap();
+    assert!(!init_rep.enabled);
+    assert_eq!(init_rep.timeout_ms, 20);
+    assert_eq!(init_rep.max_retries, 2);
+    assert_eq!(init_rep.nack_requests_sent, 0);
+    assert_eq!(init_rep.tiles_retransmitted, 0);
+    assert_eq!(init_rep.degraded_commits, 0);
+
+    // Send initial baseline keyframe
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_base = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_base.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received baseline keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    // Verify baseline keyframe matches source
+    let baseline_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(baseline_frame.bytes, source.pixels_snapshot());
+
+    // 2. Visitor enables spatial tile-grid streaming (tile_size = 64)
+    let tile_req = serde_json::json!({
+        "enabled": true,
+        "tile_size": 64
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile",
+        &serde_json::to_vec(&tile_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let tile_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(tile_rep.enabled);
+
+    // Verify host receives Tag 39 and synchronizes tile config
+    let wait_host_tile = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.tile_size == 64 {
+            break;
+        }
+        if wait_host_tile.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 3. Visitor configures Tile Micro-NACK Fast Retransmission via POST /api/screen/tile/nack
+    let nack_req = serde_json::json!({
+        "enabled": true,
+        "timeout_ms": 30,
+        "max_retries": 3
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile/nack",
+        &serde_json::to_vec(&nack_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_nack_rep: tetherly_core::ScreenTileNackReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_nack_rep.enabled);
+    assert_eq!(vis_nack_rep.timeout_ms, 30);
+    assert_eq!(vis_nack_rep.max_retries, 3);
+
+    // 4. Send multi-tile update frame (Frame 1):
+    // Updates Tile 0 (0..64, 0..64) and Tile 3 (64..128, 64..128)
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(0, 0, 64, 64, |col, row| {
+        let r = (col * 3 + 15) as u8;
+        let g = (row * 3 + 25) as u8;
+        let b = 195u8;
+        [r, g, b, 0xFF]
+    });
+    source.update_rect_with(64, 64, 64, 64, |col, row| {
+        let r = 85u8;
+        let g = (col * 2 + 55) as u8;
+        let b = (row * 2 + 65) as u8;
+        [r, g, b, 0xFF]
+    });
+    let prev_count1 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count1 {
+            break;
+        }
+        if wait_frame1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 1 (tile grid frame)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify Canvas Invariance for Frame 1
+    let rec1 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec1.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 1 must match source exactly (Canvas Invariance)"
+    );
+
+    // 5. Verify Host-side Ring-Buffered Fast Replay:
+    // Visitor sends Tag 59 (ControlMsg::TileNackRequest) targeting Tile 0 of Frame 1.
+    // Host must find the dirty tile in its screen_tile_resend_buffer, fast replay it,
+    // and increment tiles_retransmitted.
+    let nack_msg = tetherly_core::ControlMsg::TileNackRequest {
+        seq: rec1.seq as u32,
+        tile_index: 0,
+        retry_count: 1,
+    };
+    visitor.send_screen_control(nack_msg).await.unwrap();
+
+    let wait_host_retransmit = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/nack")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileNackReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.tiles_retransmitted >= 1 {
+            break;
+        }
+        if wait_host_retransmit.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never recorded tiles_retransmitted >= 1: {:?}",
+                host_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 6. Verify full screen status telemetry includes Tile Micro-NACK fields
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.tile_nack_tiles_retransmitted >= 1);
+
+    // 7. Reset Tile NACK mode via POST /api/screen/tile/nack/reset (Tag 60)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/tile/nack/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenTileNackReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.timeout_ms, 20);
+    assert_eq!(reset_rep.max_retries, 2);
+    assert_eq!(reset_rep.nack_requests_sent, 0);
+    assert_eq!(reset_rep.tiles_retransmitted, 0);
+    assert_eq!(reset_rep.degraded_commits, 0);
+
+    // Verify host synchronizes Tag 60 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/nack")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileNackReport = serde_json::from_slice(&b).unwrap();
+        if !host_rep.enabled && host_rep.tiles_retransmitted == 0 {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile nack reset: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 8. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+// --------------------------------------------------------------------------
+// M5.47 — Screen Streaming Dynamic Tile Saliency, Semantic Importance Tiering
+// & Per-Tile Priority Protection Pipeline (ADR-123 / v2.37)
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_47_screen_tile_saliency_tiering_pipeline() {
+    let (da, ga) = temp_dir("host-saliency");
+    let (db, gb) = temp_dir("visitor-saliency");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(128, 128, 0));
+    source.set_pattern();
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170399").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Initial status report check: Tile Saliency should be disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/saliency")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenTileSaliencyReport = serde_json::from_slice(&b).unwrap();
+    assert!(!init_rep.enabled);
+    assert_eq!(init_rep.high_threshold, 120);
+    assert_eq!(init_rep.low_threshold, 40);
+    assert!(init_rep.drop_background_on_congestion);
+    assert_eq!(init_rep.critical_tiles_sent, 0);
+    assert_eq!(init_rep.normal_tiles_sent, 0);
+    assert_eq!(init_rep.background_tiles_sent, 0);
+    assert_eq!(init_rep.background_tiles_skipped, 0);
+
+    let wait_streaming = std::time::Instant::now();
+    loop {
+        if host.screen_state() == tetherly_core::ScreenState::Streaming {
+            break;
+        }
+        if wait_streaming.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never entered streaming state: {:?}",
+                host.screen_state()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Send initial baseline keyframe
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_base = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_base.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received baseline keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    let baseline_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(baseline_frame.bytes, source.pixels_snapshot());
+
+    // 2. Visitor enables spatial tile-grid streaming (tile_size = 64)
+    let tile_req = serde_json::json!({
+        "enabled": true,
+        "tile_size": 64
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile",
+        &serde_json::to_vec(&tile_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let tile_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(tile_rep.enabled);
+
+    // Verify host receives Tag 39 and synchronizes tile config
+    let wait_host_tile = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.tile_size == 64 {
+            break;
+        }
+        if wait_host_tile.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 3. Visitor configures Tile Saliency Mode via POST /api/screen/tile/saliency (Tag 62)
+    let saliency_req = serde_json::json!({
+        "enabled": true,
+        "high_threshold": 120,
+        "low_threshold": 40,
+        "drop_background_on_congestion": true
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile/saliency",
+        &serde_json::to_vec(&saliency_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_saliency_rep: tetherly_core::ScreenTileSaliencyReport =
+        serde_json::from_slice(&b).unwrap();
+    assert!(vis_saliency_rep.enabled);
+    assert_eq!(vis_saliency_rep.high_threshold, 120);
+    assert_eq!(vis_saliency_rep.low_threshold, 40);
+    assert!(vis_saliency_rep.drop_background_on_congestion);
+
+    // Verify host receives Tag 62 and synchronizes saliency config
+    let wait_host_saliency = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/saliency")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileSaliencyReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.high_threshold == 120 && host_rep.low_threshold == 40 {
+            break;
+        }
+        if wait_host_saliency.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized saliency config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Send multi-tier dirty tiles frame (Frame 1):
+    // Updates Tile 0 (0..64, 0..64) with high contrast alternating pattern -> Critical
+    // Updates Tile 3 (64..128, 64..128) with flat smooth pattern -> Background
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(0, 0, 64, 64, |col, row| {
+        if (col / 4 + row / 4) % 2 == 0 {
+            [255, 255, 255, 0xFF]
+        } else {
+            [0, 0, 0, 0xFF]
+        }
+    });
+    source.update_rect_with(64, 64, 64, 64, |_col, _row| [30, 30, 30, 0xFF]);
+    let prev_count1 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count1 {
+            break;
+        }
+        if wait_frame1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 1 (multi-tier frame)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify Canvas Invariance for Frame 1
+    let rec1 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec1.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 1 must match source exactly (Canvas Invariance)"
+    );
+
+    // Query host saliency telemetry: Critical and Background tiles tracked, no skips yet
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/saliency")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_rep1: tetherly_core::ScreenTileSaliencyReport = serde_json::from_slice(&b).unwrap();
+    assert!(
+        host_rep1.critical_tiles_sent >= 1,
+        "expected critical_tiles_sent >= 1, got {:?}",
+        host_rep1
+    );
+    assert!(
+        host_rep1.background_tiles_sent >= 1,
+        "expected background_tiles_sent >= 1, got {:?}",
+        host_rep1
+    );
+    assert_eq!(
+        host_rep1.background_tiles_skipped, 0,
+        "no skips before congestion"
+    );
+
+    // 5. Simulate Link Congestion (Frame 2):
+    // Under congestion, background tiles should be dropped/skipped, while critical tiles are sent.
+    host.set_screen_congestion_override(Some(true));
+    assert!(host.is_screen_congested());
+
+    // Update Tile 0 with high-contrast text pattern (Critical)
+    source.update_rect_with(0, 0, 64, 64, |col, row| {
+        if (col / 4 + row / 4) % 2 == 0 {
+            [240, 240, 240, 0xFF]
+        } else {
+            [10, 10, 10, 0xFF]
+        }
+    });
+    // Update Tile 3 with flat smooth color (Background)
+    source.update_rect_with(64, 64, 64, 64, |_col, _row| [50, 50, 50, 0xFF]);
+
+    let prev_count2 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame2 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count2 {
+            break;
+        }
+        if wait_frame2.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 2 (congested critical frame)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host saliency telemetry recorded background tile skip under congestion
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/saliency")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_rep2: tetherly_core::ScreenTileSaliencyReport = serde_json::from_slice(&b).unwrap();
+    assert!(
+        host_rep2.background_tiles_skipped >= 1,
+        "background tiles must be skipped during congestion: {:?}",
+        host_rep2
+    );
+
+    // 6. Clear Congestion & Verify Eventual Consistency (Frame 3):
+    // Skipped background tile was kept dirty in host canvas, and should now heal cleanly.
+    host.set_screen_congestion_override(None);
+    assert!(!host.is_screen_congested());
+
+    let prev_count3 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame3 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count3 {
+            break;
+        }
+        if wait_frame3.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 3 (recovery frame)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    let rec3 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec3.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 3 must match source exactly after congestion clears (Eventual Consistency)"
+    );
+
+    // 7. Verify full screen status telemetry includes Tile Saliency fields
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.tile_saliency_enabled);
+    assert_eq!(status_rep.tile_saliency_high_threshold, 120);
+    assert_eq!(status_rep.tile_saliency_low_threshold, 40);
+    assert!(status_rep.tile_saliency_drop_background_on_congestion);
+    assert!(status_rep.tile_saliency_critical_tiles >= 2);
+    assert!(status_rep.tile_saliency_background_skipped >= 1);
+
+    // 8. Reset Tile Saliency mode via POST /api/screen/tile/saliency/reset (Tag 63)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/tile/saliency/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenTileSaliencyReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.high_threshold, 120);
+    assert_eq!(reset_rep.low_threshold, 40);
+    assert!(reset_rep.drop_background_on_congestion);
+    assert_eq!(reset_rep.critical_tiles_sent, 0);
+    assert_eq!(reset_rep.normal_tiles_sent, 0);
+    assert_eq!(reset_rep.background_tiles_sent, 0);
+    assert_eq!(reset_rep.background_tiles_skipped, 0);
+
+    // Verify host synchronizes Tag 63 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/saliency")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileSaliencyReport = serde_json::from_slice(&b).unwrap();
+        if !host_rep.enabled && host_rep.critical_tiles_sent == 0 {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never synchronized tile saliency reset: {:?}",
+                host_rep
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 9. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+// --------------------------------------------------------------------------
+// M5.48 — Screen Streaming Dynamic Spatial Tile Multi-Resolution Level-of-Detail
+// Downsampling & Progressive Bilinear Reconstruction Pipeline (ADR-124 / v2.38)
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_48_screen_tile_lod_pipeline() {
+    let (da, ga) = temp_dir("host-lod");
+    let (db, gb) = temp_dir("visitor-lod");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(128, 128, 0));
+    source.set_pattern();
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170399").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Initial status report check: Tile LoD should be disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/lod")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenTileLodReport = serde_json::from_slice(&b).unwrap();
+    assert!(!init_rep.enabled);
+    assert_eq!(init_rep.max_lod, 1);
+    assert!(init_rep.auto_lod_on_congestion);
+    assert_eq!(init_rep.lod0_tiles_sent, 0);
+    assert_eq!(init_rep.lod1_tiles_sent, 0);
+    assert_eq!(init_rep.lod2_tiles_sent, 0);
+    assert_eq!(init_rep.bytes_saved, 0);
+
+    let wait_streaming = std::time::Instant::now();
+    loop {
+        if host.screen_state() == tetherly_core::ScreenState::Streaming {
+            break;
+        }
+        if wait_streaming.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never entered streaming state: {:?}",
+                host.screen_state()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Send initial baseline keyframe
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_base = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_base.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received baseline keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    let baseline_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(baseline_frame.bytes, source.pixels_snapshot());
+
+    // 2. Visitor enables spatial tile-grid streaming (tile_size = 64)
+    let tile_req = serde_json::json!({
+        "enabled": true,
+        "tile_size": 64
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile",
+        &serde_json::to_vec(&tile_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let tile_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(tile_rep.enabled);
+
+    // Verify host receives Tag 39 and synchronizes tile config
+    let wait_host_tile = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.tile_size == 64 {
+            break;
+        }
+        if wait_host_tile.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 3. Visitor enables Saliency awareness with drop_background = false
+    let saliency_req = serde_json::json!({
+        "enabled": true,
+        "high_threshold": 120,
+        "low_threshold": 40,
+        "drop_background_on_congestion": false
+    });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile/saliency",
+        &serde_json::to_vec(&saliency_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // 4. Visitor configures Tile LoD Mode via POST /api/screen/tile/lod (Tag 65)
+    let lod_req = serde_json::json!({
+        "enabled": true,
+        "max_lod": 2,
+        "auto_lod_on_congestion": true
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile/lod",
+        &serde_json::to_vec(&lod_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_lod_rep: tetherly_core::ScreenTileLodReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_lod_rep.enabled);
+    assert_eq!(vis_lod_rep.max_lod, 2);
+    assert!(vis_lod_rep.auto_lod_on_congestion);
+
+    // Verify host receives Tag 65 and synchronizes LoD config
+    let wait_host_lod = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/lod")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileLodReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.max_lod == 2 && host_rep.auto_lod_on_congestion {
+            break;
+        }
+        if wait_host_lod.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized lod config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 5. Send multi-tier dirty tiles frame without congestion (Frame 1):
+    // Updates Tile 0 (0..64, 0..64) with high contrast alternating pattern -> Critical
+    // Updates Tile 3 (64..128, 64..128) with flat smooth pattern -> Background
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(0, 0, 64, 64, |col, row| {
+        if (col / 4 + row / 4) % 2 == 0 {
+            [255, 255, 255, 0xFF]
+        } else {
+            [0, 0, 0, 0xFF]
+        }
+    });
+    source.update_rect_with(64, 64, 64, 64, |_col, _row| [30, 30, 30, 0xFF]);
+    let prev_count1 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame1 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count1 {
+            break;
+        }
+        if wait_frame1.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 1 (uncongested frame)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify Canvas Invariance for Frame 1
+    let rec1 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec1.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 1 must match source exactly (Canvas Invariance)"
+    );
+
+    // Query host LoD telemetry: uncongested frame transmits full resolution (Lod0)
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/lod")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_rep1: tetherly_core::ScreenTileLodReport = serde_json::from_slice(&b).unwrap();
+    assert!(
+        host_rep1.lod0_tiles_sent >= 1,
+        "expected lod0_tiles_sent >= 1, got {:?}",
+        host_rep1
+    );
+
+    // 6. Simulate Link Congestion (Frame 2):
+    // Under congestion, background tiles should be downsampled (Lod2), while critical tiles remain Lod0.
+    host.set_screen_congestion_override(Some(true));
+    assert!(host.is_screen_congested());
+
+    // Update Tile 0 with high-contrast text pattern (Critical)
+    source.update_rect_with(0, 0, 64, 64, |col, row| {
+        if (col / 4 + row / 4) % 2 == 0 {
+            [240, 240, 240, 0xFF]
+        } else {
+            [10, 10, 10, 0xFF]
+        }
+    });
+    // Update Tile 3 with flat smooth color (Background)
+    source.update_rect_with(64, 64, 64, 64, |_col, _row| [50, 50, 50, 0xFF]);
+
+    let prev_count2 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame2 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count2 {
+            break;
+        }
+        if wait_frame2.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 2 (congested lod downsampled frame)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify host LoD telemetry recorded downsampled tiles and bandwidth savings
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/lod")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_rep2: tetherly_core::ScreenTileLodReport = serde_json::from_slice(&b).unwrap();
+    assert!(
+        host_rep2.lod1_tiles_sent + host_rep2.lod2_tiles_sent >= 1,
+        "downsampled tiles must be sent during congestion: {:?}",
+        host_rep2
+    );
+    assert!(
+        host_rep2.bytes_saved > 0,
+        "bytes_saved must be positive: {:?}",
+        host_rep2
+    );
+
+    // 7. Clear Congestion & Verify Eventual Consistency (Frame 3):
+    // Downsampled background tile was flagged for healing on host, and should now be retransmitted as Lod0 lossless.
+    host.set_screen_congestion_override(None);
+    assert!(!host.is_screen_congested());
+
+    let prev_count3 = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_frame3 = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count3 {
+            break;
+        }
+        if wait_frame3.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received Frame 3 (recovery frame)");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    let rec3 = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec3.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame 3 must match source exactly after congestion clears (Eventual Consistency & Canvas Invariance)"
+    );
+
+    // 8. Verify full screen status telemetry includes Tile LoD fields
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.tile_lod_enabled);
+    assert_eq!(status_rep.tile_lod_max_lod, 2);
+    assert!(status_rep.tile_lod_auto_lod_on_congestion);
+    assert!(status_rep.tile_lod0_tiles >= 1);
+    assert!(status_rep.tile_lod1_tiles + status_rep.tile_lod2_tiles >= 1);
+    assert!(status_rep.tile_lod_bytes_saved > 0);
+
+    // 9. Reset Tile LoD mode via POST /api/screen/tile/lod/reset (Tag 66)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/tile/lod/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenTileLodReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.max_lod, 1);
+    assert!(reset_rep.auto_lod_on_congestion);
+    assert_eq!(reset_rep.lod0_tiles_sent, 0);
+    assert_eq!(reset_rep.lod1_tiles_sent, 0);
+    assert_eq!(reset_rep.lod2_tiles_sent, 0);
+    assert_eq!(reset_rep.bytes_saved, 0);
+
+    // Verify host synchronizes Tag 66 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/lod")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileLodReport = serde_json::from_slice(&b).unwrap();
+        if !host_rep.enabled && host_rep.lod0_tiles_sent == 0 {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile lod reset: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 10. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+// --------------------------------------------------------------------------
+// M5.49: Screen Streaming Dynamic Tile Batching, MTU Chunking & Coalesced
+// Pacing Pipeline with Dual CLI Isomorphism (ADR-125 / v2.39)
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_49_screen_tile_batching_pipeline() {
+    let (da, ga) = temp_dir("host-batch");
+    let (db, gb) = temp_dir("visitor-batch");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(128, 128, 0));
+    source.set_pattern();
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170399").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Initial status report check: Tile Batching should be disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/batch")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenTileBatchReport = serde_json::from_slice(&b).unwrap();
+    assert!(!init_rep.enabled);
+    assert_eq!(init_rep.target_chunk_bytes, 1200);
+    assert_eq!(init_rep.pacing_interval_us, 200);
+    assert_eq!(init_rep.batches_sent, 0);
+    assert_eq!(init_rep.chunks_sent, 0);
+    assert_eq!(init_rep.avg_chunk_bytes, 0);
+    assert_eq!(init_rep.pacing_pauses, 0);
+
+    let wait_streaming = std::time::Instant::now();
+    loop {
+        if host.screen_state() == tetherly_core::ScreenState::Streaming {
+            break;
+        }
+        if wait_streaming.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never entered streaming state: {:?}",
+                host.screen_state()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Send initial baseline keyframe
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_base = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_base.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received baseline keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    let baseline_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(baseline_frame.bytes, source.pixels_snapshot());
+
+    // 2. Visitor enables spatial tile-grid streaming (tile_size = 64)
+    let tile_req = serde_json::json!({
+        "enabled": true,
+        "tile_size": 64
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile",
+        &serde_json::to_vec(&tile_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let tile_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(tile_rep.enabled);
+
+    // Verify host receives Tag 39 and synchronizes tile config
+    let wait_host_tile = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.tile_size == 64 {
+            break;
+        }
+        if wait_host_tile.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 3. Visitor configures Tile Batch Mode via POST /api/screen/tile/batch (Tag 68)
+    let batch_req = serde_json::json!({
+        "enabled": true,
+        "target_chunk_bytes": 600,
+        "pacing_interval_us": 100
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile/batch",
+        &serde_json::to_vec(&batch_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_batch_rep: tetherly_core::ScreenTileBatchReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_batch_rep.enabled);
+    assert_eq!(vis_batch_rep.target_chunk_bytes, 600);
+    assert_eq!(vis_batch_rep.pacing_interval_us, 100);
+
+    // Verify host receives Tag 68 and synchronizes Batch config
+    let wait_host_batch = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/batch")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileBatchReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled
+            && host_rep.target_chunk_bytes == 600
+            && host_rep.pacing_interval_us == 100
+        {
+            break;
+        }
+        if wait_host_batch.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized batch config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Update all 4 tiles with distinct patterns to trigger multi-chunk batching:
+    // Tile (0, 0): (0..64, 0..64)
+    // Tile (1, 0): (64..128, 0..64)
+    // Tile (0, 1): (0..64, 64..128)
+    // Tile (1, 1): (64..128, 64..128)
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(0, 0, 64, 64, |col, row| {
+        if (col / 4 + row / 4) % 2 == 0 {
+            [220, 50, 50, 0xFF]
+        } else {
+            [30, 20, 20, 0xFF]
+        }
+    });
+    source.update_rect_with(64, 0, 64, 64, |col, row| {
+        if (col / 3 + row / 3) % 2 == 0 {
+            [50, 220, 50, 0xFF]
+        } else {
+            [20, 40, 20, 0xFF]
+        }
+    });
+    source.update_rect_with(0, 64, 64, 64, |col, row| {
+        if (col / 5 + row / 5) % 2 == 0 {
+            [50, 50, 220, 0xFF]
+        } else {
+            [20, 20, 50, 0xFF]
+        }
+    });
+    source.update_rect_with(64, 64, 64, 64, |col, row| {
+        if (col / 2 + row / 2) % 2 == 0 {
+            [200, 200, 50, 0xFF]
+        } else {
+            [40, 40, 10, 0xFF]
+        }
+    });
+
+    let prev_count = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_batched = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count {
+            break;
+        }
+        if wait_batched.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received batched & paced frame");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify Canvas Invariance: the reconstructed image on the receiver
+    // matches the source exactly pixel-by-pixel after chunk reassembly and double-buffered presentation.
+    let rec_batched = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec_batched.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame must match source exactly (Canvas Invariance across MTU chunks)"
+    );
+
+    // 5. Verify host tile batch telemetry:
+    // Should have sent 1 batch with >= 2 chunks, positive avg chunk bytes, and >= 1 pacing pauses.
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/batch")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_batch_rep: tetherly_core::ScreenTileBatchReport = serde_json::from_slice(&b).unwrap();
+    assert!(
+        host_batch_rep.batches_sent >= 1,
+        "expected batches_sent >= 1, got {:?}",
+        host_batch_rep
+    );
+    assert!(
+        host_batch_rep.chunks_sent > host_batch_rep.batches_sent,
+        "chunks_sent ({}) must exceed batches_sent ({}) demonstrating sub-MTU chunking",
+        host_batch_rep.chunks_sent,
+        host_batch_rep.batches_sent
+    );
+    assert!(
+        host_batch_rep.avg_chunk_bytes > 0,
+        "avg_chunk_bytes must be positive"
+    );
+    assert!(
+        host_batch_rep.pacing_pauses >= 1,
+        "pacing_pauses must be >= 1 for multi-chunk batch dispersion"
+    );
+
+    // 6. Verify full ScreenStatusReport includes Tile Batch telemetry
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.tile_batch_enabled);
+    assert_eq!(status_rep.tile_batch_target_chunk_bytes, 600);
+    assert_eq!(status_rep.tile_batch_pacing_interval_us, 100);
+    assert!(status_rep.tile_batches_sent >= 1);
+    assert!(status_rep.tile_chunks_sent >= 2);
+    assert!(status_rep.tile_batch_avg_chunk_bytes > 0);
+    assert!(status_rep.tile_batch_pacing_pauses >= 1);
+
+    // 7. Reset Tile Batch mode via POST /api/screen/tile/batch/reset (Tag 69)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/tile/batch/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenTileBatchReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.target_chunk_bytes, 1200);
+    assert_eq!(reset_rep.pacing_interval_us, 200);
+    assert_eq!(reset_rep.batches_sent, 0);
+    assert_eq!(reset_rep.chunks_sent, 0);
+    assert_eq!(reset_rep.pacing_pauses, 0);
+
+    // Verify host synchronizes Tag 69 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/batch")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileBatchReport = serde_json::from_slice(&b).unwrap();
+        if !host_rep.enabled && host_rep.batches_sent == 0 {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile batch reset: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 8. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
+}
+
+// --------------------------------------------------------------------------
+// M5.50: Screen Streaming Dynamic Tile Local Motion Vector Estimation &
+// Inter-Tile Displacement Compensation Pipeline with Dual CLI Isomorphism (ADR-126 / v2.40)
+// --------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn m5_50_screen_tile_motion_vector_pipeline() {
+    let (da, ga) = temp_dir("host-motion");
+    let (db, gb) = temp_dir("visitor-motion");
+    let source = Arc::new(ControllableDeltaScreenSource::with_seq(128, 128, 0));
+    source.set_pattern();
+    let host = Node::start(cfg(da, "host", Some(source.clone()))).unwrap();
+    let visitor = Node::start(cfg(db, "visitor", None)).unwrap();
+    host.spawn_listeners().await.unwrap();
+    visitor.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170399").unwrap();
+    host.set_pin(pin);
+    visitor.set_pin(pin);
+    host.dial(visitor.control_addr()).await.unwrap();
+    wait_live(&host, Duration::from_secs(25)).await;
+    wait_live(&visitor, Duration::from_secs(25)).await;
+
+    let host_ui = host.spawn_ui().await.unwrap();
+    let visitor_ui = visitor.spawn_ui().await.unwrap();
+    let host_id = host.identity().device_id().clone();
+    let visitor_id = visitor.identity().device_id().clone();
+
+    wait_screen_port(&host, &visitor_id, Duration::from_secs(3)).await;
+    wait_screen_port(&visitor, &host_id, Duration::from_secs(3)).await;
+
+    // 1. Establish screen streaming session
+    visitor.open_screen(&host_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let (c, _) = tetherly_node::loopback_post(host_ui, "/api/screen/allow", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+
+    let start_payload = serde_json::json!({ "peer": host_id.as_str() });
+    let (c, _) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/start",
+        &serde_json::to_vec(&start_payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+
+    // Initial status report check: Tile Motion Estimation should be disabled by default
+    let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/motion")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let init_rep: tetherly_core::ScreenTileMotionReport = serde_json::from_slice(&b).unwrap();
+    assert!(!init_rep.enabled);
+    assert_eq!(init_rep.max_displacement, 32);
+    assert_eq!(init_rep.min_match_ratio, 90);
+    assert_eq!(init_rep.motion_tiles_sent, 0);
+    assert_eq!(init_rep.fallback_tiles_sent, 0);
+    assert_eq!(init_rep.bytes_saved, 0);
+
+    let wait_streaming = std::time::Instant::now();
+    loop {
+        if host.screen_state() == tetherly_core::ScreenState::Streaming {
+            break;
+        }
+        if wait_streaming.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host never entered streaming state: {:?}",
+                host.screen_state()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Send initial baseline keyframe
+    assert!(host.screen_send_frame().await.unwrap());
+    let wait_base = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() >= 1 {
+            break;
+        }
+        if wait_base.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received baseline keyframe");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    let baseline_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(baseline_frame.bytes, source.pixels_snapshot());
+
+    // 2. Visitor enables spatial tile-grid streaming (tile_size = 64)
+    let tile_req = serde_json::json!({
+        "enabled": true,
+        "tile_size": 64
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile",
+        &serde_json::to_vec(&tile_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let tile_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+    assert!(tile_rep.enabled);
+
+    // Verify host receives Tag 39 and synchronizes tile config
+    let wait_host_tile = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.tile_size == 64 {
+            break;
+        }
+        if wait_host_tile.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 3. Visitor configures Tile Motion Mode via POST /api/screen/tile/motion (Tag 71)
+    let motion_req = serde_json::json!({
+        "enabled": true,
+        "max_displacement": 32,
+        "min_match_ratio": 90
+    });
+    let (c, b) = tetherly_node::loopback_post(
+        visitor_ui,
+        "/api/screen/tile/motion",
+        &serde_json::to_vec(&motion_req).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c, 200);
+    let vis_motion_rep: tetherly_core::ScreenTileMotionReport = serde_json::from_slice(&b).unwrap();
+    assert!(vis_motion_rep.enabled);
+    assert_eq!(vis_motion_rep.max_displacement, 32);
+    assert_eq!(vis_motion_rep.min_match_ratio, 90);
+
+    // Verify host receives Tag 71 and synchronizes Motion config
+    let wait_host_motion = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/motion")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileMotionReport = serde_json::from_slice(&b).unwrap();
+        if host_rep.enabled && host_rep.max_displacement == 32 && host_rep.min_match_ratio == 90 {
+            break;
+        }
+        if wait_host_motion.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized motion config: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Update tile (0, 1) at (0, 64) with a local displacement (vertical shift dy = 10 px) from previous frame:
+    // Tile (0, 1) covers x: 0..64, y: 64..128.
+    // In reference canvas, pattern was P(x, y).
+    // With dy = 10, ref_y = tile_y - dy = 64 - 10 = 54.
+    // Now we set tile (0, 1) to P(col, 54 + row).
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    source.update_rect_with(0, 64, 64, 64, |col, row| {
+        let x = col;
+        let y = 54 + row;
+        [
+            ((x * 3) & 0xFF) as u8,
+            ((y * 7) & 0xFF) as u8,
+            ((x ^ y) & 0xFF) as u8,
+            0xFF,
+        ]
+    });
+
+    let prev_count = visitor.screen_sink_snapshot().count();
+    assert!(host.screen_send_frame().await.unwrap());
+
+    let wait_motion_frame = std::time::Instant::now();
+    loop {
+        if visitor.screen_sink_snapshot().count() > prev_count {
+            break;
+        }
+        if wait_motion_frame.elapsed() > Duration::from_secs(5) {
+            panic!("visitor never received motion compensated tile frame");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // Verify Canvas Invariance: the reconstructed image on the receiver
+    // matches the source exactly pixel-by-pixel after zero-copy displacement blit.
+    let rec_frame = visitor.screen_sink_snapshot().last().unwrap();
+    assert_eq!(
+        rec_frame.bytes,
+        source.pixels_snapshot(),
+        "reconstructed frame must match source exactly (Canvas Invariance across motion displacement blit)"
+    );
+
+    // 5. Verify host tile motion telemetry:
+    // At least 1 motion tile was identified and sent, with positive bytes saved.
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/motion")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let host_motion_rep: tetherly_core::ScreenTileMotionReport =
+        serde_json::from_slice(&b).unwrap();
+    assert!(
+        host_motion_rep.motion_tiles_sent >= 1,
+        "expected motion_tiles_sent >= 1, got {:?}",
+        host_motion_rep
+    );
+    assert!(
+        host_motion_rep.bytes_saved > 0,
+        "bytes_saved must be positive, got {:?}",
+        host_motion_rep
+    );
+
+    // 6. Verify full ScreenStatusReport includes Tile Motion telemetry
+    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let status_rep: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+    assert!(status_rep.tile_motion_enabled);
+    assert_eq!(status_rep.tile_motion_max_displacement, 32);
+    assert_eq!(status_rep.tile_motion_min_match_ratio, 90);
+    assert!(status_rep.tile_motion_tiles_sent >= 1);
+    assert!(status_rep.tile_motion_bytes_saved > 0);
+
+    // 7. Reset Tile Motion mode via POST /api/screen/tile/motion/reset (Tag 72)
+    let (c, b) = tetherly_node::loopback_post(visitor_ui, "/api/screen/tile/motion/reset", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(c, 200);
+    let reset_rep: tetherly_core::ScreenTileMotionReport = serde_json::from_slice(&b).unwrap();
+    assert!(!reset_rep.enabled);
+    assert_eq!(reset_rep.max_displacement, 32);
+    assert_eq!(reset_rep.min_match_ratio, 90);
+    assert_eq!(reset_rep.motion_tiles_sent, 0);
+    assert_eq!(reset_rep.bytes_saved, 0);
+
+    // Verify host synchronizes Tag 72 reset
+    let wait_host_reset = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/tile/motion")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let host_rep: tetherly_core::ScreenTileMotionReport = serde_json::from_slice(&b).unwrap();
+        if !host_rep.enabled && host_rep.motion_tiles_sent == 0 {
+            break;
+        }
+        if wait_host_reset.elapsed() > Duration::from_secs(5) {
+            panic!("host never synchronized tile motion reset: {:?}", host_rep);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 8. Clean shutdown
+    host.shutdown();
+    visitor.shutdown();
+    drop(ga);
+    drop(gb);
 }

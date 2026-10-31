@@ -1669,6 +1669,19 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&bytes).to_string()
 }
 
+pub fn urlencode_path(p: &str) -> String {
+    let mut out = String::with_capacity(p.len());
+    for b in p.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b'~' => {
+                out.push(b as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
 fn parse_query_map(q: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for pair in q.split('&') {
@@ -4902,6 +4915,1992 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             match node.screen_recording_replay(path, limit) {
                 Ok(rep) => json_ok(&rep),
                 Err(e) => err(400, &format!("recording replay failed: {e}")),
+            }
+        }
+        ("POST", "/api/screen/playback/start") => {
+            #[derive(serde::Deserialize)]
+            struct PlaybackStartBody {
+                path: Option<String>,
+                speed: Option<f32>,
+                #[serde(rename = "loop")]
+                loop_enabled: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<PlaybackStartBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let path_opt = parsed_body
+                .as_ref()
+                .and_then(|b| b.path.clone())
+                .or_else(|| qmap.get("path").cloned());
+            let speed_opt = parsed_body
+                .as_ref()
+                .and_then(|b| b.speed)
+                .or_else(|| qmap.get("speed").and_then(|v| v.parse::<f32>().ok()));
+            let loop_opt = parsed_body
+                .as_ref()
+                .and_then(|b| b.loop_enabled)
+                .or_else(|| qmap.get("loop").and_then(|v| v.parse::<bool>().ok()));
+
+            let Some(path) = path_opt else {
+                return err(400, "playback requires a path parameter or JSON body");
+            };
+
+            match node.screen_playback_start(path, speed_opt, loop_opt).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &format!("failed to start screen playback: {e}")),
+            }
+        }
+        ("POST", "/api/screen/playback/pause") => match node.screen_playback_pause() {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(400, &format!("failed to pause screen playback: {e}")),
+        },
+        ("POST", "/api/screen/playback/resume") => match node.screen_playback_resume() {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(400, &format!("failed to resume screen playback: {e}")),
+        },
+        ("POST", "/api/screen/playback/stop") => match node.screen_playback_stop() {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(500, &format!("failed to stop screen playback: {e}")),
+        },
+        ("GET", "/api/screen/playback") => {
+            let rep = node.screen_playback_report();
+            json_ok(&rep)
+        }
+        ("GET", "/api/screen/snapshot") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let format_param = qmap
+                .get("format")
+                .cloned()
+                .unwrap_or_else(|| "json".to_string());
+            let out_param = qmap.get("out").cloned();
+
+            if format_param.eq_ignore_ascii_case("bmp") {
+                match node.screen_snapshot_data(Some("bmp".to_string()), out_param) {
+                    Ok((bmp_bytes, _rep)) => UiResponse::new(200, "image/bmp", bmp_bytes),
+                    Err(tetherly_core::CoreError::ScreenRefused(msg))
+                        if msg.contains("no screen frame available") =>
+                    {
+                        err(503, &format!("screen snapshot failed: {msg}"))
+                    }
+                    Err(e) => err(400, &format!("screen snapshot failed: {e}")),
+                }
+            } else {
+                match node.screen_snapshot(Some(format_param), out_param) {
+                    Ok(rep) => json_ok(&rep),
+                    Err(tetherly_core::CoreError::ScreenRefused(msg))
+                        if msg.contains("no screen frame available") =>
+                    {
+                        err(503, &format!("screen snapshot failed: {msg}"))
+                    }
+                    Err(e) => err(400, &format!("screen snapshot failed: {e}")),
+                }
+            }
+        }
+        ("POST", "/api/screen/recording/snapshot") | ("GET", "/api/screen/recording/snapshot") => {
+            #[derive(serde::Deserialize)]
+            struct RecordingSnapshotBody {
+                path: Option<String>,
+                frame: Option<u64>,
+                pts: Option<u64>,
+                pts_us: Option<u64>,
+                out: Option<String>,
+                format: Option<String>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<RecordingSnapshotBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let path_opt = parsed_body
+                .as_ref()
+                .and_then(|b| b.path.clone())
+                .or_else(|| qmap.get("path").cloned());
+            let frame_opt = parsed_body
+                .as_ref()
+                .and_then(|b| b.frame)
+                .or_else(|| qmap.get("frame").and_then(|v| v.parse::<u64>().ok()));
+            let pts_opt = parsed_body
+                .as_ref()
+                .and_then(|b| b.pts.or(b.pts_us))
+                .or_else(|| {
+                    qmap.get("pts")
+                        .or_else(|| qmap.get("pts_us"))
+                        .and_then(|v| v.parse::<u64>().ok())
+                });
+            let out_opt = parsed_body
+                .as_ref()
+                .and_then(|b| b.out.clone())
+                .or_else(|| qmap.get("out").cloned());
+            let format_opt = parsed_body
+                .as_ref()
+                .and_then(|b| b.format.clone())
+                .or_else(|| qmap.get("format").cloned());
+
+            let Some(path) = path_opt else {
+                return err(
+                    400,
+                    "recording snapshot requires a path parameter or JSON body",
+                );
+            };
+
+            let is_bmp_direct = format_opt
+                .as_deref()
+                .map(|f| f.eq_ignore_ascii_case("bmp"))
+                .unwrap_or(false);
+
+            if is_bmp_direct {
+                match node.screen_recording_snapshot_data(&path, frame_opt, pts_opt, out_opt) {
+                    Ok((bmp_bytes, _rep)) => UiResponse::new(200, "image/bmp", bmp_bytes),
+                    Err(e) => err(400, &format!("screen recording snapshot failed: {e}")),
+                }
+            } else {
+                match node.screen_recording_snapshot(&path, frame_opt, pts_opt, out_opt) {
+                    Ok(rep) => json_ok(&rep),
+                    Err(e) => err(400, &format!("screen recording snapshot failed: {e}")),
+                }
+            }
+        }
+        ("GET", "/api/screen/watermark") => {
+            let rep = node.screen_watermark_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/watermark") => {
+            #[derive(serde::Deserialize, Default)]
+            struct WatermarkBody {
+                enabled: Option<bool>,
+                #[serde(default, alias = "enforce", alias = "enforced")]
+                host_enforced: Option<bool>,
+                #[serde(default, alias = "text_template", alias = "template")]
+                text: Option<String>,
+                opacity: Option<u8>,
+                color: Option<String>,
+                color_rgb: Option<[u8; 3]>,
+                scale: Option<u8>,
+                pattern: Option<String>,
+                spacing_x: Option<u16>,
+                spacing_y: Option<u16>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<WatermarkBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+
+            let enabled = parsed_body.as_ref().and_then(|b| b.enabled).or_else(|| {
+                qmap.get("enabled")
+                    .and_then(|v| match v.to_ascii_lowercase().as_str() {
+                        "true" | "1" | "yes" | "on" => Some(true),
+                        "false" | "0" | "no" | "off" => Some(false),
+                        _ => None,
+                    })
+            });
+
+            let host_enforced = parsed_body
+                .as_ref()
+                .and_then(|b| b.host_enforced)
+                .or_else(|| {
+                    qmap.get("host_enforced")
+                        .or_else(|| qmap.get("enforce"))
+                        .or_else(|| qmap.get("enforced"))
+                        .and_then(|v| match v.to_ascii_lowercase().as_str() {
+                            "true" | "1" | "yes" | "on" => Some(true),
+                            "false" | "0" | "no" | "off" => Some(false),
+                            _ => None,
+                        })
+                });
+
+            let text_template = parsed_body
+                .as_ref()
+                .and_then(|b| b.text.clone())
+                .or_else(|| qmap.get("text").cloned())
+                .or_else(|| qmap.get("text_template").cloned());
+
+            let opacity = parsed_body
+                .as_ref()
+                .and_then(|b| b.opacity)
+                .or_else(|| qmap.get("opacity").and_then(|v| v.parse::<u8>().ok()));
+
+            let color_rgb = parsed_body.as_ref().and_then(|b| b.color_rgb).or_else(|| {
+                let col_str = parsed_body
+                    .as_ref()
+                    .and_then(|b| b.color.as_deref())
+                    .or_else(|| qmap.get("color").map(String::as_str))?;
+                let s = col_str.trim().trim_start_matches('#');
+                if s.len() == 6 {
+                    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+                    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+                    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+                    Some([r, g, b])
+                } else {
+                    None
+                }
+            });
+
+            let scale = parsed_body
+                .as_ref()
+                .and_then(|b| b.scale)
+                .or_else(|| qmap.get("scale").and_then(|v| v.parse::<u8>().ok()));
+
+            let pattern = parsed_body
+                .as_ref()
+                .and_then(|b| b.pattern.clone())
+                .or_else(|| qmap.get("pattern").cloned());
+
+            let spacing_x = parsed_body
+                .as_ref()
+                .and_then(|b| b.spacing_x)
+                .or_else(|| qmap.get("spacing_x").and_then(|v| v.parse::<u16>().ok()));
+
+            let spacing_y = parsed_body
+                .as_ref()
+                .and_then(|b| b.spacing_y)
+                .or_else(|| qmap.get("spacing_y").and_then(|v| v.parse::<u16>().ok()));
+
+            let update = crate::runtime::ScreenWatermarkUpdate {
+                enabled,
+                host_enforced,
+                text_template,
+                opacity,
+                color_rgb,
+                scale,
+                pattern,
+                spacing_x,
+                spacing_y,
+            };
+
+            match node.screen_set_watermark(update).await {
+                Ok(rep) => json_ok(&rep),
+                Err(tetherly_core::CoreError::InvalidConfig(msg))
+                    if msg.contains("enforced by host") =>
+                {
+                    err(403, &format!("watermark configuration forbidden: {msg}"))
+                }
+                Err(e) => err(400, &format!("invalid watermark configuration: {e}")),
+            }
+        }
+        ("POST", "/api/screen/watermark/enable") => {
+            #[derive(serde::Deserialize)]
+            struct EnableWatermarkBody {
+                #[serde(default, alias = "enforce", alias = "enforced")]
+                host_enforced: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<EnableWatermarkBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let host_enforced = parsed_body
+                .as_ref()
+                .and_then(|b| b.host_enforced)
+                .or_else(|| {
+                    qmap.get("host_enforced")
+                        .or_else(|| qmap.get("enforce"))
+                        .or_else(|| qmap.get("enforced"))
+                        .and_then(|v| match v.to_ascii_lowercase().as_str() {
+                            "true" | "1" | "yes" | "on" => Some(true),
+                            "false" | "0" | "no" | "off" => Some(false),
+                            _ => None,
+                        })
+                })
+                .unwrap_or(false);
+
+            match node.screen_enable_watermark(host_enforced).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(400, &format!("failed to enable watermark: {e}")),
+            }
+        }
+        ("POST", "/api/screen/watermark/disable") => match node.screen_disable_watermark().await {
+            Ok(rep) => json_ok(&rep),
+            Err(tetherly_core::CoreError::InvalidConfig(msg))
+                if msg.contains("enforced by host") =>
+            {
+                err(403, &format!("watermark disable forbidden: {msg}"))
+            }
+            Err(e) => err(400, &format!("failed to disable watermark: {e}")),
+        },
+        // Collaborative whiteboard annotations & transient virtual laser pointer (ADR-105)
+        ("GET", "/api/screen/annotation") => {
+            let rep = node.screen_annotation_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/annotation") => {
+            #[derive(serde::Deserialize, Default)]
+            struct AddAnnotationBody {
+                #[serde(default)]
+                id: Option<u32>,
+                author: Option<String>,
+                kind: Option<String>,
+                points: Option<Vec<(u16, u16)>>,
+                points_str: Option<String>,
+                x: Option<u16>,
+                y: Option<u16>,
+                w: Option<u16>,
+                h: Option<u16>,
+                from: Option<(u16, u16)>,
+                to: Option<(u16, u16)>,
+                from_str: Option<String>,
+                to_str: Option<String>,
+                text: Option<String>,
+                scale: Option<u8>,
+                color: Option<String>,
+                color_rgb: Option<[u8; 3]>,
+                thickness: Option<u8>,
+                alpha: Option<u8>,
+                ttl_ms: Option<u32>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<AddAnnotationBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+
+            let kind_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.kind.clone())
+                .or_else(|| qmap.get("kind").cloned())
+                .unwrap_or_else(|| "stroke".to_string())
+                .to_ascii_lowercase();
+
+            let color_rgb = parsed_body
+                .as_ref()
+                .and_then(|b| b.color_rgb)
+                .or_else(|| {
+                    let col_str = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.color.as_deref())
+                        .or_else(|| qmap.get("color").map(String::as_str))?;
+                    let s = col_str.trim().trim_start_matches('#');
+                    if s.len() == 6 {
+                        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+                        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+                        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+                        Some([r, g, b])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or([255, 0, 0]);
+
+            let thickness = parsed_body
+                .as_ref()
+                .and_then(|b| b.thickness)
+                .or_else(|| qmap.get("thickness").and_then(|v| v.parse::<u8>().ok()))
+                .unwrap_or(3);
+
+            let alpha = parsed_body
+                .as_ref()
+                .and_then(|b| b.alpha)
+                .or_else(|| qmap.get("alpha").and_then(|v| v.parse::<u8>().ok()))
+                .unwrap_or(255);
+
+            let ttl_ms = parsed_body
+                .as_ref()
+                .and_then(|b| b.ttl_ms)
+                .or_else(|| {
+                    qmap.get("ttl_ms")
+                        .or_else(|| qmap.get("ttl"))
+                        .and_then(|v| v.parse::<u32>().ok())
+                })
+                .unwrap_or(0);
+
+            let author = parsed_body
+                .as_ref()
+                .and_then(|b| b.author.clone())
+                .or_else(|| qmap.get("author").cloned())
+                .unwrap_or_default();
+
+            let id = parsed_body
+                .as_ref()
+                .and_then(|b| b.id)
+                .or_else(|| qmap.get("id").and_then(|v| v.parse::<u32>().ok()))
+                .unwrap_or(0);
+
+            let kind = match kind_str.as_str() {
+                "stroke" | "polyline" | "line" => {
+                    let pts = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.points.clone())
+                        .or_else(|| {
+                            let s = parsed_body
+                                .as_ref()
+                                .and_then(|b| b.points_str.as_deref())
+                                .or_else(|| qmap.get("points").map(String::as_str))?;
+                            Some(
+                                s.split(';')
+                                    .filter_map(|p| {
+                                        let mut it = p.split(',');
+                                        let x = it.next()?.trim().parse::<u16>().ok()?;
+                                        let y = it.next()?.trim().parse::<u16>().ok()?;
+                                        Some((x, y))
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .unwrap_or_default();
+                    if pts.is_empty() {
+                        return err(400, "stroke annotation requires non-empty points");
+                    }
+                    tetherly_core::AnnotationKind::Stroke { points: pts }
+                }
+                "rect" | "box" => {
+                    let x = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.x)
+                        .or_else(|| qmap.get("x").and_then(|v| v.parse::<u16>().ok()))
+                        .unwrap_or(0);
+                    let y = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.y)
+                        .or_else(|| qmap.get("y").and_then(|v| v.parse::<u16>().ok()))
+                        .unwrap_or(0);
+                    let w = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.w)
+                        .or_else(|| {
+                            qmap.get("w")
+                                .or_else(|| qmap.get("width"))
+                                .and_then(|v| v.parse::<u16>().ok())
+                        })
+                        .unwrap_or(0);
+                    let h = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.h)
+                        .or_else(|| {
+                            qmap.get("h")
+                                .or_else(|| qmap.get("height"))
+                                .and_then(|v| v.parse::<u16>().ok())
+                        })
+                        .unwrap_or(0);
+                    if w == 0 || h == 0 {
+                        return err(400, "rect annotation requires non-zero width and height");
+                    }
+                    tetherly_core::AnnotationKind::Rect { x, y, w, h }
+                }
+                "arrow" => {
+                    let parse_pt = |s: &str| -> Option<(u16, u16)> {
+                        let mut it = s.split(',');
+                        let x = it.next()?.trim().parse::<u16>().ok()?;
+                        let y = it.next()?.trim().parse::<u16>().ok()?;
+                        Some((x, y))
+                    };
+                    let from = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.from)
+                        .or_else(|| {
+                            let s = parsed_body
+                                .as_ref()
+                                .and_then(|b| b.from_str.as_deref())
+                                .or_else(|| qmap.get("from").map(String::as_str))?;
+                            parse_pt(s)
+                        })
+                        .unwrap_or((0, 0));
+                    let to = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.to)
+                        .or_else(|| {
+                            let s = parsed_body
+                                .as_ref()
+                                .and_then(|b| b.to_str.as_deref())
+                                .or_else(|| qmap.get("to").map(String::as_str))?;
+                            parse_pt(s)
+                        })
+                        .unwrap_or((0, 0));
+                    if from == to {
+                        return err(400, "arrow requires distinct from and to points");
+                    }
+                    tetherly_core::AnnotationKind::Arrow { from, to }
+                }
+                "text" | "note" => {
+                    let text = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.text.clone())
+                        .or_else(|| qmap.get("text").cloned())
+                        .unwrap_or_default();
+                    if text.is_empty() {
+                        return err(400, "text annotation requires non-empty text");
+                    }
+                    let x = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.x)
+                        .or_else(|| qmap.get("x").and_then(|v| v.parse::<u16>().ok()))
+                        .unwrap_or(0);
+                    let y = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.y)
+                        .or_else(|| qmap.get("y").and_then(|v| v.parse::<u16>().ok()))
+                        .unwrap_or(0);
+                    let scale = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.scale)
+                        .or_else(|| qmap.get("scale").and_then(|v| v.parse::<u8>().ok()))
+                        .unwrap_or(1);
+                    tetherly_core::AnnotationKind::Text { x, y, text, scale }
+                }
+                other => return err(400, &format!("unsupported annotation kind: {other}")),
+            };
+
+            let item = tetherly_core::AnnotationItem {
+                id,
+                author,
+                kind,
+                color_rgb,
+                thickness,
+                alpha,
+                ttl_ms,
+                created_at_ms: 0,
+            };
+
+            match node.screen_add_annotation(item).await {
+                Ok(item_id) => {
+                    let rep = node.screen_annotation_report();
+                    json_ok(&serde_json::json!({
+                        "ok": true,
+                        "id": item_id,
+                        "report": rep,
+                    }))
+                }
+                Err(e) if e.to_string().contains("read-only") => {
+                    err(403, &format!("forbidden: {e}"))
+                }
+                Err(e) => err(500, &format!("failed to add annotation: {e}")),
+            }
+        }
+        ("POST", "/api/screen/annotation/clear") | ("DELETE", "/api/screen/annotation") => {
+            match node.screen_clear_annotations().await {
+                Ok(()) => {
+                    let rep = node.screen_annotation_report();
+                    json_ok(&rep)
+                }
+                Err(e) => err(500, &format!("failed to clear annotations: {e}")),
+            }
+        }
+        ("GET", "/api/screen/laser") => {
+            let rep = node.screen_annotation_report();
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "laser_active": rep.laser_active,
+                "laser": rep.laser,
+                "laser_updates_total": rep.laser_updates_total,
+                "timestamp_ms": rep.timestamp_ms,
+            }))
+        }
+        ("POST", "/api/screen/laser") => {
+            #[derive(serde::Deserialize, Default)]
+            struct LaserBody {
+                x: Option<u16>,
+                y: Option<u16>,
+                active: Option<bool>,
+                color: Option<String>,
+                color_rgb: Option<[u8; 3]>,
+                radius: Option<u8>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<LaserBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+
+            let x = parsed_body
+                .as_ref()
+                .and_then(|b| b.x)
+                .or_else(|| qmap.get("x").and_then(|v| v.parse::<u16>().ok()))
+                .unwrap_or(0);
+            let y = parsed_body
+                .as_ref()
+                .and_then(|b| b.y)
+                .or_else(|| qmap.get("y").and_then(|v| v.parse::<u16>().ok()))
+                .unwrap_or(0);
+
+            let active = parsed_body
+                .as_ref()
+                .and_then(|b| b.active)
+                .or_else(|| {
+                    qmap.get("active")
+                        .and_then(|v| match v.to_ascii_lowercase().as_str() {
+                            "true" | "1" | "yes" | "on" => Some(true),
+                            "false" | "0" | "no" | "off" => Some(false),
+                            _ => None,
+                        })
+                })
+                .unwrap_or(true);
+
+            let color_rgb = parsed_body
+                .as_ref()
+                .and_then(|b| b.color_rgb)
+                .or_else(|| {
+                    let col_str = parsed_body
+                        .as_ref()
+                        .and_then(|b| b.color.as_deref())
+                        .or_else(|| qmap.get("color").map(String::as_str))?;
+                    let s = col_str.trim().trim_start_matches('#');
+                    if s.len() == 6 {
+                        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+                        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+                        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+                        Some([r, g, b])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or([255, 30, 30]);
+
+            let radius = parsed_body
+                .as_ref()
+                .and_then(|b| b.radius)
+                .or_else(|| qmap.get("radius").and_then(|v| v.parse::<u8>().ok()))
+                .unwrap_or(12);
+
+            let laser_state = tetherly_core::LaserPointerState {
+                x,
+                y,
+                active,
+                color_rgb,
+                radius,
+            };
+
+            match node.screen_set_laser_pointer(laser_state).await {
+                Ok(()) => {
+                    let rep = node.screen_annotation_report();
+                    json_ok(&serde_json::json!({
+                        "ok": true,
+                        "laser_active": rep.laser_active,
+                        "laser": rep.laser,
+                        "laser_updates_total": rep.laser_updates_total,
+                        "timestamp_ms": rep.timestamp_ms,
+                    }))
+                }
+                Err(e) => err(500, &format!("failed to set laser pointer: {e}")),
+            }
+        }
+        ("POST", "/api/screen/whiteboard/undo") => {
+            #[derive(serde::Deserialize, Default)]
+            struct UndoBody {
+                author: Option<String>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<UndoBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let author = parsed_body
+                .and_then(|b| b.author)
+                .or_else(|| qmap.get("author").cloned());
+            match node.screen_whiteboard_undo(author.as_deref()).await {
+                Ok(undone) => {
+                    let rep = node.screen_annotation_report();
+                    json_ok(&serde_json::json!({
+                        "ok": true,
+                        "undone": undone,
+                        "report": rep,
+                    }))
+                }
+                Err(e) => err(500, &format!("failed to undo whiteboard annotation: {e}")),
+            }
+        }
+        ("POST", "/api/screen/whiteboard/redo") => {
+            #[derive(serde::Deserialize, Default)]
+            struct RedoBody {
+                author: Option<String>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<RedoBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let author = parsed_body
+                .and_then(|b| b.author)
+                .or_else(|| qmap.get("author").cloned());
+            match node.screen_whiteboard_redo(author.as_deref()).await {
+                Ok(redone) => {
+                    let rep = node.screen_annotation_report();
+                    json_ok(&serde_json::json!({
+                        "ok": true,
+                        "redone": redone,
+                        "report": rep,
+                    }))
+                }
+                Err(e) => err(500, &format!("failed to redo whiteboard annotation: {e}")),
+            }
+        }
+        ("GET", "/api/screen/whiteboard/export") => {
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let out_path = qmap.get("out").map(String::as_str);
+            match node.screen_whiteboard_export(out_path) {
+                Ok(snapshot) => {
+                    let rep = node.screen_annotation_report();
+                    json_ok(&serde_json::json!({
+                        "ok": true,
+                        "export": snapshot,
+                        "report": rep,
+                    }))
+                }
+                Err(e) => err(400, &format!("failed to export whiteboard: {e}")),
+            }
+        }
+        ("POST", "/api/screen/whiteboard/import") => {
+            #[derive(serde::Deserialize, Default)]
+            struct ImportBody {
+                snapshot: Option<tetherly_core::WhiteboardSnapshot>,
+                items: Option<Vec<tetherly_core::AnnotationItem>>,
+                file: Option<String>,
+                replace: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<ImportBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let replace = parsed_body
+                .as_ref()
+                .and_then(|b| b.replace)
+                .or_else(|| qmap.get("replace").map(|v| v == "true" || v == "1"))
+                .unwrap_or(false);
+
+            let snapshot_res = if let Some(file_path) = parsed_body
+                .as_ref()
+                .and_then(|b| b.file.as_deref())
+                .or_else(|| qmap.get("file").map(String::as_str))
+            {
+                let path = std::path::Path::new(file_path);
+                if path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return err(400, "path traversal rejected");
+                }
+                match std::fs::read(path) {
+                    Ok(bytes) => {
+                        serde_json::from_slice::<tetherly_core::WhiteboardSnapshot>(&bytes)
+                            .map_err(|e| format!("invalid snapshot file: {e}"))
+                    }
+                    Err(e) => return err(400, &format!("failed to read snapshot file: {e}")),
+                }
+            } else if let Some(snap) = parsed_body.as_ref().and_then(|b| b.snapshot.clone()) {
+                Ok(snap)
+            } else if let Some(items) = parsed_body.as_ref().and_then(|b| b.items.clone()) {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                Ok(tetherly_core::WhiteboardSnapshot {
+                    version: 1,
+                    created_at_ms: now_ms,
+                    session_id: "import".into(),
+                    active_items: items,
+                    total_added_counter: 0,
+                })
+            } else {
+                Err("missing snapshot, items or file".into())
+            };
+
+            match snapshot_res {
+                Ok(snap) => match node.screen_whiteboard_import(snap, replace).await {
+                    Ok(count) => {
+                        let rep = node.screen_annotation_report();
+                        json_ok(&serde_json::json!({
+                            "ok": true,
+                            "imported_count": count,
+                            "report": rep,
+                        }))
+                    }
+                    Err(e) => err(400, &format!("failed to import whiteboard: {e}")),
+                },
+                Err(msg) => err(400, &msg),
+            }
+        }
+        ("GET", "/api/screen/whiteboard/policy") => {
+            let policy = node.screen_whiteboard_get_policy();
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "policy": policy,
+            }))
+        }
+        ("POST", "/api/screen/whiteboard/policy") => {
+            #[derive(serde::Deserialize, Default)]
+            struct PolicyBody {
+                read_only: Option<bool>,
+                allow_peer_clear: Option<bool>,
+                max_items: Option<u16>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<PolicyBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let current = node.screen_whiteboard_get_policy();
+            let read_only = parsed_body
+                .as_ref()
+                .and_then(|b| b.read_only)
+                .or_else(|| qmap.get("read_only").map(|v| v == "true" || v == "1"))
+                .unwrap_or(current.read_only);
+            let allow_peer_clear = parsed_body
+                .as_ref()
+                .and_then(|b| b.allow_peer_clear)
+                .or_else(|| {
+                    qmap.get("allow_peer_clear")
+                        .map(|v| v == "true" || v == "1")
+                })
+                .unwrap_or(current.allow_peer_clear);
+            let max_items = parsed_body
+                .as_ref()
+                .and_then(|b| b.max_items)
+                .or_else(|| qmap.get("max_items").and_then(|v| v.parse::<u16>().ok()))
+                .unwrap_or(current.max_items);
+
+            let updated = tetherly_core::WhiteboardPolicy {
+                read_only,
+                allow_peer_clear,
+                max_items,
+            };
+            match node.screen_whiteboard_set_policy(updated).await {
+                Ok(()) => json_ok(&serde_json::json!({
+                    "ok": true,
+                    "policy": updated,
+                })),
+                Err(e) => err(500, &format!("failed to update whiteboard policy: {e}")),
+            }
+        }
+        ("POST", "/api/screen/whiteboard/clear") | ("DELETE", "/api/screen/whiteboard") => {
+            match node.screen_clear_annotations().await {
+                Ok(()) => {
+                    let rep = node.screen_annotation_report();
+                    json_ok(&rep)
+                }
+                Err(e) => err(500, &format!("failed to clear whiteboard: {e}")),
+            }
+        }
+        // Screen dynamic Region-of-Interest (ROI) viewport cropping & zoom (v2.21 / ADR-107)
+        ("GET", "/api/screen/roi") => {
+            let rep = node.screen_roi_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/roi") => {
+            #[derive(serde::Deserialize, Default)]
+            struct RoiBody {
+                x: Option<u16>,
+                y: Option<u16>,
+                w: Option<u16>,
+                h: Option<u16>,
+                zoom_percent: Option<u16>,
+                zoom: Option<u16>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<RoiBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let x = parsed_body
+                .as_ref()
+                .and_then(|b| b.x)
+                .or_else(|| qmap.get("x").and_then(|v| v.parse::<u16>().ok()))
+                .unwrap_or(0);
+            let y = parsed_body
+                .as_ref()
+                .and_then(|b| b.y)
+                .or_else(|| qmap.get("y").and_then(|v| v.parse::<u16>().ok()))
+                .unwrap_or(0);
+            let w = parsed_body
+                .as_ref()
+                .and_then(|b| b.w)
+                .or_else(|| qmap.get("w").and_then(|v| v.parse::<u16>().ok()))
+                .unwrap_or(0);
+            let h = parsed_body
+                .as_ref()
+                .and_then(|b| b.h)
+                .or_else(|| qmap.get("h").and_then(|v| v.parse::<u16>().ok()))
+                .unwrap_or(0);
+            let zoom = parsed_body
+                .as_ref()
+                .and_then(|b| b.zoom_percent.or(b.zoom))
+                .or_else(|| {
+                    qmap.get("zoom_percent")
+                        .or_else(|| qmap.get("zoom"))
+                        .and_then(|v| v.parse::<u16>().ok())
+                });
+
+            match node.screen_set_roi(x, y, w, h, zoom).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen roi: {e}")),
+            }
+        }
+        ("POST", "/api/screen/roi/reset") | ("DELETE", "/api/screen/roi") => {
+            match node.screen_reset_roi().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to reset screen roi: {e}")),
+            }
+        }
+        ("POST", "/api/screen/roi/zoom") => {
+            #[derive(serde::Deserialize, Default)]
+            struct ZoomBody {
+                zoom_percent: Option<u16>,
+                zoom: Option<u16>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<ZoomBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let zoom = parsed_body
+                .as_ref()
+                .and_then(|b| b.zoom_percent.or(b.zoom))
+                .or_else(|| {
+                    qmap.get("zoom_percent")
+                        .or_else(|| qmap.get("zoom"))
+                        .and_then(|v| v.parse::<u16>().ok())
+                })
+                .unwrap_or(100);
+
+            match node.screen_set_roi_zoom(zoom).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen roi zoom: {e}")),
+            }
+        }
+        // Screen adaptive color depth, grayscale economy & monochrome pipeline (v2.22 / ADR-108)
+        ("GET", "/api/screen/color") => {
+            let rep = node.screen_color_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/color") => {
+            #[derive(serde::Deserialize, Default)]
+            struct ColorBody {
+                mode: Option<String>,
+                threshold: Option<u8>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<ColorBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.as_deref())
+                .or_else(|| qmap.get("mode").map(|s| s.as_str()))
+                .unwrap_or("full");
+            let mode: tetherly_core::ScreenColorMode = match mode_str.parse() {
+                Ok(m) => m,
+                Err(e) => return err(400, &format!("invalid color mode: {e}")),
+            };
+            let threshold = parsed_body
+                .as_ref()
+                .and_then(|b| b.threshold)
+                .or_else(|| qmap.get("threshold").and_then(|v| v.parse::<u8>().ok()));
+
+            match node.screen_set_color_mode(mode, threshold).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen color mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/color/reset") | ("DELETE", "/api/screen/color") => {
+            match node.screen_reset_color_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to reset screen color mode: {e}")),
+            }
+        }
+        // Screen differential delta patch, temporal compression & macroblock dictionary cache pipeline (v2.23 / ADR-109)
+        ("GET", "/api/screen/delta") => {
+            let rep = node.screen_delta_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/delta") => {
+            #[derive(serde::Deserialize, Default)]
+            struct DeltaBody {
+                enabled: Option<bool>,
+                keyframe_interval: Option<u16>,
+                interval: Option<u16>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<DeltaBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let interval = parsed_body
+                .as_ref()
+                .and_then(|b| b.keyframe_interval.or(b.interval))
+                .or_else(|| {
+                    qmap.get("keyframe_interval")
+                        .or_else(|| qmap.get("interval"))
+                        .and_then(|v| v.parse::<u16>().ok())
+                });
+
+            match node.screen_set_delta_mode(enabled, interval).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen delta mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/delta/reset") | ("DELETE", "/api/screen/delta") => {
+            match node.screen_reset_delta_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to reset screen delta mode: {e}")),
+            }
+        }
+        // Screen objective visual quality metric, PSNR/SSIM distortion profiling pipeline (v2.24 / ADR-110)
+        ("GET", "/api/screen/metric") => {
+            let rep = node.screen_quality_metric_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/metric") => {
+            #[derive(serde::Deserialize, Default)]
+            struct MetricBody {
+                enabled: Option<bool>,
+                sample_interval: Option<u8>,
+                interval: Option<u8>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<MetricBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let interval = parsed_body
+                .as_ref()
+                .and_then(|b| b.sample_interval.or(b.interval))
+                .or_else(|| {
+                    qmap.get("sample_interval")
+                        .or_else(|| qmap.get("interval"))
+                        .and_then(|v| v.parse::<u8>().ok())
+                });
+
+            match node.screen_set_quality_metric_mode(enabled, interval).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(
+                    500,
+                    &format!("failed to set screen quality metric mode: {e}"),
+                ),
+            }
+        }
+        ("POST", "/api/screen/metric/reset") | ("DELETE", "/api/screen/metric") => {
+            match node.screen_reset_quality_metric_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(
+                    500,
+                    &format!("failed to reset screen quality metric mode: {e}"),
+                ),
+            }
+        }
+        // Screen streaming autonomous closed-loop QoE adaptation pipeline (v2.25 / ADR-111)
+        ("GET", "/api/screen/qoe") => {
+            let rep = node.screen_qoe_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/qoe") => {
+            #[derive(serde::Deserialize, Default)]
+            struct QoeBody {
+                mode: Option<String>,
+                target_psnr_db: Option<u8>,
+                target_psnr: Option<u8>,
+                target_ssim_pct: Option<u8>,
+                target_ssim: Option<u8>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<QoeBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.clone())
+                .or_else(|| qmap.get("mode").cloned())
+                .unwrap_or_else(|| "balanced".to_string());
+            let mode = match mode_str.parse::<tetherly_core::ScreenQoeMode>() {
+                Ok(m) => m,
+                Err(_) => {
+                    return err(
+                        400,
+                        "invalid qoe mode (expected: off, conservative, balanced, economy)",
+                    )
+                }
+            };
+            let target_psnr_db = parsed_body
+                .as_ref()
+                .and_then(|b| b.target_psnr_db.or(b.target_psnr))
+                .or_else(|| {
+                    qmap.get("target_psnr_db")
+                        .or_else(|| qmap.get("target_psnr"))
+                        .and_then(|v| v.parse::<u8>().ok())
+                });
+            let target_ssim_pct = parsed_body
+                .as_ref()
+                .and_then(|b| b.target_ssim_pct.or(b.target_ssim))
+                .or_else(|| {
+                    qmap.get("target_ssim_pct")
+                        .or_else(|| qmap.get("target_ssim"))
+                        .and_then(|v| v.parse::<u8>().ok())
+                });
+
+            match node
+                .screen_set_qoe_mode(mode, target_psnr_db, target_ssim_pct)
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen qoe mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/qoe/reset") | ("DELETE", "/api/screen/qoe") => {
+            match node.screen_reset_qoe_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to reset screen qoe mode: {e}")),
+            }
+        }
+        // Screen streaming Progressive Intra-Refresh (PIR) anti-burst slice pipeline (v2.26 / ADR-112)
+        ("GET", "/api/screen/pir") => {
+            let rep = node.screen_pir_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/pir") => {
+            #[derive(serde::Deserialize, Default)]
+            struct PirBody {
+                mode: Option<String>,
+                bands: Option<u8>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<PirBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.clone())
+                .or_else(|| qmap.get("mode").cloned())
+                .unwrap_or_else(|| "continuous".to_string());
+            let mode = match mode_str.parse::<tetherly_core::ScreenPirMode>() {
+                Ok(m) => m,
+                Err(_) => {
+                    return err(
+                        400,
+                        "invalid pir mode (expected: disabled, continuous, on-demand)",
+                    )
+                }
+            };
+            let bands = parsed_body
+                .as_ref()
+                .and_then(|b| b.bands)
+                .or_else(|| qmap.get("bands").and_then(|v| v.parse::<u8>().ok()));
+
+            match node.screen_set_pir_mode(mode, bands).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen pir mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/pir/reset") | ("DELETE", "/api/screen/pir") => {
+            match node.screen_reset_pir_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to reset screen pir mode: {e}")),
+            }
+        }
+        // Screen streaming Long-Term Reference (LTR) frame anchoring & recovery pipeline (v2.27 / ADR-113)
+        ("GET", "/api/screen/ltr") => {
+            let rep = node.screen_ltr_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/ltr") => {
+            #[derive(serde::Deserialize, Default)]
+            struct LtrBody {
+                enabled: Option<bool>,
+                auto_interval: Option<u16>,
+                interval: Option<u16>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<LtrBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let interval = parsed_body
+                .as_ref()
+                .and_then(|b| b.auto_interval.or(b.interval))
+                .or_else(|| {
+                    qmap.get("auto_interval")
+                        .or_else(|| qmap.get("interval"))
+                        .and_then(|v| v.parse::<u16>().ok())
+                });
+
+            match node.screen_set_ltr_mode(enabled, interval).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen ltr mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/ltr/anchor") => match node.screen_anchor_ltr().await {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(500, &format!("failed to anchor screen ltr reference: {e}")),
+        },
+        ("POST", "/api/screen/ltr/recover") => match node.screen_request_ltr_recovery().await {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(500, &format!("failed to request screen ltr recovery: {e}")),
+        },
+        ("POST", "/api/screen/ltr/reset") | ("DELETE", "/api/screen/ltr") => {
+            match node.screen_reset_ltr_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to reset screen ltr mode: {e}")),
+            }
+        }
+        // Screen streaming 2-Layer Temporal Scalability (SVC-T) hierarchical reference pipeline (v2.28 / ADR-114)
+        ("GET", "/api/screen/svc") => {
+            let rep = node.screen_svc_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/svc") => {
+            #[derive(serde::Deserialize, Default)]
+            struct SvcBody {
+                mode: Option<String>,
+                drop_t1: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<SvcBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.clone())
+                .or_else(|| qmap.get("mode").cloned())
+                .unwrap_or_else(|| "adaptive".to_string());
+            let mode = tetherly_core::ScreenSvcMode::parse_mode(&mode_str);
+            let drop_t1 = parsed_body
+                .as_ref()
+                .and_then(|b| b.drop_t1)
+                .or_else(|| qmap.get("drop_t1").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(false);
+
+            match node.screen_set_svc_mode(mode, drop_t1).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen svc mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/svc/drop-t1") => {
+            #[derive(serde::Deserialize, Default)]
+            struct DropT1Body {
+                drop_t1: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<DropT1Body> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let drop_t1 = parsed_body
+                .as_ref()
+                .and_then(|b| b.drop_t1)
+                .or_else(|| qmap.get("drop_t1").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+
+            match node.screen_set_svc_drop_t1(drop_t1).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen svc drop-t1: {e}")),
+            }
+        }
+        ("POST", "/api/screen/svc/reset") | ("DELETE", "/api/screen/svc") => {
+            match node.screen_reset_svc_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to reset screen svc mode: {e}")),
+            }
+        }
+        // Screen streaming 2D motion vector estimation & scroll acceleration (v2.29 / ADR-115)
+        ("GET", "/api/screen/motion") => {
+            let rep = node.screen_motion_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/motion") => {
+            #[derive(serde::Deserialize, Default)]
+            struct MotionBody {
+                enabled: Option<bool>,
+                max_displacement: Option<u16>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<MotionBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let max_displacement = parsed_body
+                .as_ref()
+                .and_then(|b| b.max_displacement)
+                .or_else(|| {
+                    qmap.get("max_displacement")
+                        .and_then(|v| v.parse::<u16>().ok())
+                })
+                .unwrap_or(tetherly_core::SCREEN_MOTION_DEFAULT_MAX_DISPLACEMENT);
+
+            match node.screen_set_motion_mode(enabled, max_displacement).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen motion mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/motion/reset") | ("DELETE", "/api/screen/motion") => {
+            match node.screen_reset_motion_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to reset screen motion mode: {e}")),
+            }
+        }
+        // Screen streaming spatial tile-grid decomposition (v2.30 / ADR-116)
+        ("GET", "/api/screen/tile") => {
+            let rep = node.screen_tile_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/tile") => {
+            #[derive(serde::Deserialize, Default)]
+            struct TileBody {
+                enabled: Option<bool>,
+                tile_size: Option<u16>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TileBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let tile_size = parsed_body
+                .as_ref()
+                .and_then(|b| b.tile_size)
+                .or_else(|| qmap.get("tile_size").and_then(|v| v.parse::<u16>().ok()))
+                .unwrap_or(tetherly_core::SCREEN_TILE_DEFAULT_SIZE);
+
+            match node.screen_set_tile_mode(enabled, tile_size).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen tile mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/tile/reset") | ("DELETE", "/api/screen/tile") => {
+            match node.screen_reset_tile_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to reset screen tile mode: {e}")),
+            }
+        }
+        // Screen streaming tile dictionary cache (v2.31 / ADR-117)
+        ("GET", "/api/screen/tile/cache") => {
+            let rep = node.screen_tile_cache_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/tile/cache") => {
+            #[derive(serde::Deserialize, Default)]
+            struct TileCacheBody {
+                enabled: Option<bool>,
+                max_entries: Option<u16>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TileCacheBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let max_entries = parsed_body
+                .as_ref()
+                .and_then(|b| b.max_entries)
+                .or_else(|| qmap.get("max_entries").and_then(|v| v.parse::<u16>().ok()))
+                .unwrap_or(tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES);
+
+            match node.screen_set_tile_cache_mode(enabled, max_entries).await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen tile cache mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/tile/cache/reset") | ("DELETE", "/api/screen/tile/cache") => {
+            match node.screen_reset_tile_cache_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to reset screen tile cache mode: {e}")),
+            }
+        }
+        ("GET", "/api/screen/focus") => {
+            let rep = node.screen_focus_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/focus") => {
+            #[derive(serde::Deserialize, Default)]
+            struct FocusBody {
+                enabled: Option<bool>,
+                mode: Option<String>,
+                radius: Option<u16>,
+                peripheral_skip_ratio: Option<u8>,
+                box_x: Option<u16>,
+                box_y: Option<u16>,
+                box_w: Option<u16>,
+                box_h: Option<u16>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<FocusBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let mode_str = parsed_body
+                .as_ref()
+                .and_then(|b| b.mode.clone())
+                .or_else(|| qmap.get("mode").cloned());
+            let mode = mode_str.and_then(|s| tetherly_core::ScreenFocusMode::from_str_loose(&s));
+            let radius = parsed_body
+                .as_ref()
+                .and_then(|b| b.radius)
+                .or_else(|| qmap.get("radius").and_then(|v| v.parse::<u16>().ok()));
+            let peripheral_skip_ratio = parsed_body
+                .as_ref()
+                .and_then(|b| b.peripheral_skip_ratio)
+                .or_else(|| {
+                    qmap.get("peripheral_skip_ratio")
+                        .and_then(|v| v.parse::<u8>().ok())
+                });
+
+            let bx = parsed_body
+                .as_ref()
+                .and_then(|b| b.box_x)
+                .or_else(|| qmap.get("box_x").and_then(|v| v.parse::<u16>().ok()));
+            let by = parsed_body
+                .as_ref()
+                .and_then(|b| b.box_y)
+                .or_else(|| qmap.get("box_y").and_then(|v| v.parse::<u16>().ok()));
+            let bw = parsed_body
+                .as_ref()
+                .and_then(|b| b.box_w)
+                .or_else(|| qmap.get("box_w").and_then(|v| v.parse::<u16>().ok()));
+            let bh = parsed_body
+                .as_ref()
+                .and_then(|b| b.box_h)
+                .or_else(|| qmap.get("box_h").and_then(|v| v.parse::<u16>().ok()));
+            let box_coords = match (bx, by, bw, bh) {
+                (Some(x), Some(y), Some(w), Some(h)) => Some((x, y, w, h)),
+                _ => None,
+            };
+
+            match node
+                .screen_set_focus_mode(enabled, mode, radius, peripheral_skip_ratio, box_coords)
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen focus mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/focus/reset") | ("DELETE", "/api/screen/focus") => {
+            match node.screen_reset_focus_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to reset screen focus mode: {e}")),
+            }
+        }
+        ("GET", "/api/screen/tile/palette") => {
+            let rep = node.screen_tile_palette_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/tile/palette") => {
+            #[derive(serde::Deserialize, Default)]
+            struct TilePaletteBody {
+                enabled: Option<bool>,
+                max_colors: Option<u8>,
+                enable_rle: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TilePaletteBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let max_colors = parsed_body
+                .as_ref()
+                .and_then(|b| b.max_colors)
+                .or_else(|| qmap.get("max_colors").and_then(|v| v.parse::<u8>().ok()));
+            let enable_rle = parsed_body
+                .as_ref()
+                .and_then(|b| b.enable_rle)
+                .or_else(|| qmap.get("enable_rle").and_then(|v| v.parse::<bool>().ok()));
+
+            match node
+                .screen_set_tile_palette_mode(enabled, max_colors, enable_rle)
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen tile palette mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/tile/palette/reset") | ("DELETE", "/api/screen/tile/palette") => {
+            match node.screen_reset_tile_palette_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(
+                    500,
+                    &format!("failed to reset screen tile palette mode: {e}"),
+                ),
+            }
+        }
+        ("GET", "/api/screen/tile/predict") => {
+            let rep = node.screen_tile_predict_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/tile/predict") => {
+            #[derive(serde::Deserialize, Default)]
+            struct TilePredictBody {
+                enabled: Option<bool>,
+                filter_mode: Option<serde_json::Value>,
+                enable_rct: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TilePredictBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let filter_mode = parsed_body
+                .as_ref()
+                .and_then(|b| b.filter_mode.as_ref())
+                .and_then(|val| {
+                    if let Some(s) = val.as_str() {
+                        tetherly_core::ScreenTilePredictFilter::from_str_loose(s)
+                    } else {
+                        val.as_u64()
+                            .map(|n| tetherly_core::ScreenTilePredictFilter::from_u8(n as u8))
+                    }
+                })
+                .or_else(|| {
+                    qmap.get("filter_mode")
+                        .or_else(|| qmap.get("mode"))
+                        .and_then(|s| tetherly_core::ScreenTilePredictFilter::from_str_loose(s))
+                });
+            let enable_rct = parsed_body.as_ref().and_then(|b| b.enable_rct).or_else(|| {
+                qmap.get("enable_rct")
+                    .or_else(|| qmap.get("rct"))
+                    .and_then(|v| v.parse::<bool>().ok())
+            });
+
+            match node
+                .screen_set_tile_predict_mode(enabled, filter_mode, enable_rct)
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen tile predict mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/tile/predict/reset") | ("DELETE", "/api/screen/tile/predict") => {
+            match node.screen_reset_tile_predict_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(
+                    500,
+                    &format!("failed to reset screen tile predict mode: {e}"),
+                ),
+            }
+        }
+        ("GET", "/api/screen/tile/present") => {
+            let rep = node.screen_tile_present_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/tile/present") => {
+            #[derive(serde::Deserialize, Default)]
+            struct TilePresentBody {
+                enabled: Option<bool>,
+                vsync_mode: Option<serde_json::Value>,
+                double_buffer: Option<bool>,
+                tear_prevention: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TilePresentBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let vsync_mode = parsed_body
+                .as_ref()
+                .and_then(|b| b.vsync_mode.as_ref())
+                .and_then(|val| {
+                    if let Some(s) = val.as_str() {
+                        tetherly_core::ScreenTilePresentVsyncMode::from_str_loose(s)
+                    } else {
+                        val.as_u64()
+                            .map(|n| tetherly_core::ScreenTilePresentVsyncMode::from_u8(n as u8))
+                    }
+                })
+                .or_else(|| {
+                    qmap.get("vsync_mode")
+                        .or_else(|| qmap.get("vsync"))
+                        .or_else(|| qmap.get("mode"))
+                        .and_then(|s| tetherly_core::ScreenTilePresentVsyncMode::from_str_loose(s))
+                });
+            let double_buffer = parsed_body
+                .as_ref()
+                .and_then(|b| b.double_buffer)
+                .or_else(|| {
+                    qmap.get("double_buffer")
+                        .or_else(|| qmap.get("double"))
+                        .and_then(|v| v.parse::<bool>().ok())
+                });
+            let tear_prevention = parsed_body
+                .as_ref()
+                .and_then(|b| b.tear_prevention)
+                .or_else(|| {
+                    qmap.get("tear_prevention")
+                        .or_else(|| qmap.get("anti_tearing"))
+                        .or_else(|| qmap.get("tear"))
+                        .and_then(|v| v.parse::<bool>().ok())
+                });
+
+            match node
+                .screen_set_tile_present_mode(enabled, vsync_mode, double_buffer, tear_prevention)
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen tile present mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/tile/present/reset") | ("DELETE", "/api/screen/tile/present") => {
+            match node.screen_reset_tile_present_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(
+                    500,
+                    &format!("failed to reset screen tile present mode: {e}"),
+                ),
+            }
+        }
+        ("GET", "/api/screen/tile/nack") => {
+            let rep = node.screen_tile_nack_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/tile/nack") => {
+            #[derive(serde::Deserialize, Default)]
+            struct TileNackBody {
+                enabled: Option<bool>,
+                timeout_ms: Option<u16>,
+                max_retries: Option<u8>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TileNackBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let timeout_ms = parsed_body.as_ref().and_then(|b| b.timeout_ms).or_else(|| {
+                qmap.get("timeout_ms")
+                    .or_else(|| qmap.get("timeout"))
+                    .and_then(|v| v.parse::<u16>().ok())
+            });
+            let max_retries = parsed_body
+                .as_ref()
+                .and_then(|b| b.max_retries)
+                .or_else(|| {
+                    qmap.get("max_retries")
+                        .or_else(|| qmap.get("retries"))
+                        .and_then(|v| v.parse::<u8>().ok())
+                });
+
+            match node
+                .screen_set_tile_nack_mode(enabled, timeout_ms, max_retries)
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen tile nack mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/tile/nack/reset") | ("DELETE", "/api/screen/tile/nack") => {
+            match node.screen_reset_tile_nack_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to reset screen tile nack mode: {e}")),
+            }
+        }
+        ("GET", "/api/screen/tile/saliency") => {
+            let rep = node.screen_tile_saliency_report();
+            json_ok(&rep)
+        }
+        ("POST", "/api/screen/tile/saliency") => {
+            #[derive(serde::Deserialize, Default)]
+            struct TileSaliencyBody {
+                enabled: Option<bool>,
+                high_threshold: Option<u8>,
+                low_threshold: Option<u8>,
+                drop_background_on_congestion: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TileSaliencyBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let high_threshold =
+                parsed_body
+                    .as_ref()
+                    .and_then(|b| b.high_threshold)
+                    .or_else(|| {
+                        qmap.get("high_threshold")
+                            .or_else(|| qmap.get("high"))
+                            .and_then(|v| v.parse::<u8>().ok())
+                    });
+            let low_threshold = parsed_body
+                .as_ref()
+                .and_then(|b| b.low_threshold)
+                .or_else(|| {
+                    qmap.get("low_threshold")
+                        .or_else(|| qmap.get("low"))
+                        .and_then(|v| v.parse::<u8>().ok())
+                });
+            let drop_background_on_congestion = parsed_body
+                .as_ref()
+                .and_then(|b| b.drop_background_on_congestion)
+                .or_else(|| {
+                    qmap.get("drop_background_on_congestion")
+                        .or_else(|| qmap.get("drop_background"))
+                        .and_then(|v| v.parse::<bool>().ok())
+                });
+
+            match node
+                .screen_set_tile_saliency_mode(
+                    enabled,
+                    high_threshold,
+                    low_threshold,
+                    drop_background_on_congestion,
+                )
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(
+                    500,
+                    &format!("failed to set screen tile saliency mode: {e}"),
+                ),
+            }
+        }
+        ("POST", "/api/screen/tile/saliency/reset")
+        | ("DELETE", "/api/screen/tile/saliency/reset")
+        | ("DELETE", "/api/screen/tile/saliency") => {
+            match node.screen_reset_tile_saliency_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(
+                    500,
+                    &format!("failed to reset screen tile saliency mode: {e}"),
+                ),
+            }
+        }
+        ("GET", "/api/screen/tile/lod") => json_ok(&node.screen_tile_lod_report()),
+        ("POST", "/api/screen/tile/lod") => {
+            #[derive(serde::Deserialize, Default)]
+            struct TileLodBody {
+                enabled: Option<bool>,
+                max_lod: Option<u8>,
+                auto_lod_on_congestion: Option<bool>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TileLodBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let max_lod = parsed_body.as_ref().and_then(|b| b.max_lod).or_else(|| {
+                qmap.get("max_lod")
+                    .or_else(|| qmap.get("max"))
+                    .or_else(|| qmap.get("lod"))
+                    .and_then(|v| v.parse::<u8>().ok())
+            });
+            let auto_lod_on_congestion = parsed_body
+                .as_ref()
+                .and_then(|b| b.auto_lod_on_congestion)
+                .or_else(|| {
+                    qmap.get("auto_lod_on_congestion")
+                        .or_else(|| qmap.get("auto_lod"))
+                        .or_else(|| qmap.get("auto"))
+                        .and_then(|v| v.parse::<bool>().ok())
+                });
+
+            match node
+                .screen_set_tile_lod_mode(enabled, max_lod, auto_lod_on_congestion)
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen tile lod mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/tile/lod/reset")
+        | ("DELETE", "/api/screen/tile/lod/reset")
+        | ("DELETE", "/api/screen/tile/lod") => match node.screen_reset_tile_lod_mode().await {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(500, &format!("failed to reset screen tile lod mode: {e}")),
+        },
+        ("GET", "/api/screen/tile/batch") | ("GET", "/api/screen/batch") => {
+            json_ok(&node.screen_tile_batch_report())
+        }
+        ("POST", "/api/screen/tile/batch") | ("POST", "/api/screen/batch") => {
+            #[derive(serde::Deserialize, Default)]
+            struct TileBatchBody {
+                enabled: Option<bool>,
+                target_chunk_bytes: Option<u16>,
+                pacing_interval_us: Option<u16>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TileBatchBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let target_chunk_bytes = parsed_body
+                .as_ref()
+                .and_then(|b| b.target_chunk_bytes)
+                .or_else(|| {
+                    qmap.get("target_chunk_bytes")
+                        .or_else(|| qmap.get("chunk_bytes"))
+                        .or_else(|| qmap.get("target"))
+                        .or_else(|| qmap.get("bytes"))
+                        .and_then(|v| v.parse::<u16>().ok())
+                });
+            let pacing_interval_us = parsed_body
+                .as_ref()
+                .and_then(|b| b.pacing_interval_us)
+                .or_else(|| {
+                    qmap.get("pacing_interval_us")
+                        .or_else(|| qmap.get("pacing_us"))
+                        .or_else(|| qmap.get("pacing"))
+                        .or_else(|| qmap.get("interval"))
+                        .and_then(|v| v.parse::<u16>().ok())
+                });
+
+            match node
+                .screen_set_tile_batch_mode(enabled, target_chunk_bytes, pacing_interval_us)
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen tile batch mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/tile/batch/reset")
+        | ("DELETE", "/api/screen/tile/batch/reset")
+        | ("DELETE", "/api/screen/tile/batch")
+        | ("POST", "/api/screen/batch/reset")
+        | ("DELETE", "/api/screen/batch/reset")
+        | ("DELETE", "/api/screen/batch") => match node.screen_reset_tile_batch_mode().await {
+            Ok(rep) => json_ok(&rep),
+            Err(e) => err(500, &format!("failed to reset screen tile batch mode: {e}")),
+        },
+        ("GET", "/api/screen/tile/motion") => json_ok(&node.screen_tile_motion_report()),
+        ("POST", "/api/screen/tile/motion") => {
+            #[derive(serde::Deserialize, Default)]
+            struct TileMotionBody {
+                enabled: Option<bool>,
+                max_displacement: Option<u16>,
+                min_match_ratio: Option<u8>,
+            }
+            let qmap = query_str.map(parse_query_map).unwrap_or_default();
+            let parsed_body: Option<TileMotionBody> = if !body.is_empty() {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+            let enabled = parsed_body
+                .as_ref()
+                .and_then(|b| b.enabled)
+                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
+                .unwrap_or(true);
+            let max_displacement = parsed_body
+                .as_ref()
+                .and_then(|b| b.max_displacement)
+                .or_else(|| {
+                    qmap.get("max_displacement")
+                        .or_else(|| qmap.get("max_disp"))
+                        .or_else(|| qmap.get("displacement"))
+                        .or_else(|| qmap.get("disp"))
+                        .and_then(|v| v.parse::<u16>().ok())
+                });
+            let min_match_ratio = parsed_body
+                .as_ref()
+                .and_then(|b| b.min_match_ratio)
+                .or_else(|| {
+                    qmap.get("min_match_ratio")
+                        .or_else(|| qmap.get("min_ratio"))
+                        .or_else(|| qmap.get("ratio"))
+                        .and_then(|v| v.parse::<u8>().ok())
+                });
+
+            match node
+                .screen_set_tile_motion_mode(enabled, max_displacement, min_match_ratio)
+                .await
+            {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(500, &format!("failed to set screen tile motion mode: {e}")),
+            }
+        }
+        ("POST", "/api/screen/tile/motion/reset")
+        | ("DELETE", "/api/screen/tile/motion/reset")
+        | ("DELETE", "/api/screen/tile/motion") => {
+            match node.screen_reset_tile_motion_mode().await {
+                Ok(rep) => json_ok(&rep),
+                Err(e) => err(
+                    500,
+                    &format!("failed to reset screen tile motion mode: {e}"),
+                ),
             }
         }
         // Local input sharing (controller → controlled). Dialling the 45719
@@ -8752,6 +10751,10 @@ mod tests {
     use crate::sidecar::OverlayConfig;
     use std::sync::Arc;
     use tetherly_core::ports::ManualClock;
+    use tetherly_core::{
+        PixelFormat, ScreenAnnotationReport, ScreenFrame, ScreenRecordingMeta,
+        ScreenRecordingWriter, ScreenRect, ScreenSnapshotReport, ScreenWatermarkReport,
+    };
 
     fn temp_test_node(tag: &str) -> (Node, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
@@ -8781,6 +10784,78 @@ mod tests {
             ancs: None,
             ancs_peripheral: "test".into(),
             screen_source: None,
+            screen_codec: None,
+            screen_codec_h264: false,
+            screen_bitrate_kbps: 4000,
+            screen_bitrate_auto: true,
+            screen_fps: 30,
+            screen_fps_auto: true,
+            screen_scale_pct: 100,
+            screen_scale_auto: true,
+            screen_profile: tetherly_core::ScreenContentProfile::Auto,
+            screen_profile_auto: true,
+            screen_qp_min: tetherly_core::SCREEN_QP_MIN_DEFAULT,
+            screen_qp_max: tetherly_core::SCREEN_QP_MAX_DEFAULT,
+            screen_matrix_mode: tetherly_core::ScreenMatrixMode::Auto,
+            screen_playout_mode: tetherly_core::ScreenPlayoutMode::Adaptive,
+            screen_cursor_mode: tetherly_core::ScreenCursorMode::Decoupled,
+            screen_squelch_mode: tetherly_core::ScreenSquelchMode::Auto,
+            screen_fec_mode: tetherly_core::ScreenFecMode::Auto,
+            screen_pacer_mode: tetherly_core::ScreenPacerMode::Auto,
+            screen_trendline_mode: tetherly_core::ScreenTrendlineMode::Auto,
+            screen_harq_mode: tetherly_core::ScreenHarqMode::Auto,
+            screen_twcc_mode: tetherly_core::ScreenTwccMode::Auto,
+            screen_probe_mode: tetherly_core::ScreenProbeMode::Auto,
+            screen_sync_mode: tetherly_core::ScreenAudioSyncMode::Auto,
+            screen_latency_mode: tetherly_core::ScreenProfilerMode::Auto,
+            screen_tuning_mode: tetherly_core::ScreenTunerMode::Standard,
+            screen_display_id: 0,
+            screen_sink: None,
+            input_sink: None,
+        };
+        let clock = Arc::new(ManualClock::new(5000));
+        let node = Node::start_with_clock(cfg, clock).unwrap();
+        (node, dir)
+    }
+
+    struct EmptyScreenSource;
+    impl tetherly_core::ports::ScreenSource for EmptyScreenSource {
+        fn grab(&self) -> Result<Option<ScreenFrame>, tetherly_core::CoreError> {
+            Ok(None)
+        }
+    }
+
+    fn temp_test_node_with_source(
+        tag: &str,
+        source: Arc<dyn tetherly_core::ports::ScreenSource>,
+    ) -> (Node, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-uihttp-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.clone(),
+            control_port: 0,
+            file_port: 0,
+            input_port: 0,
+            screen_port: 0,
+            ui_port: 0,
+            name: "uihttp-test-node".into(),
+            platform: "test".into(),
+            memory_clip: true,
+            memory_notifier: true,
+            loopback_only: true,
+            advertise: false,
+            reconnect: false,
+            overlay: OverlayConfig::default(),
+            ancs: None,
+            ancs_peripheral: "test".into(),
+            screen_source: Some(source),
             screen_codec: None,
             screen_codec_h264: false,
             screen_bitrate_kbps: 4000,
@@ -10891,6 +12966,2690 @@ mod tests {
         assert_eq!(resp_code, 403);
 
         let _ = container_path;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_playback_endpoints() {
+        let (node, dir) = temp_test_node("screen_playback");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/playback default (idle)
+        let (code, body) = loopback_get(port, "/api/screen/playback").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["state"], "idle");
+        assert_eq!(rep["current_frame"], 0);
+
+        // 2. Synthesize a valid .trec file with 5 frames
+        let trec_path = dir.join("playback_sample.trec");
+        let mut buf = Vec::new();
+        let frame0 = tetherly_core::ScreenFrame {
+            seq: 0,
+            rect: tetherly_core::ScreenRect {
+                x: 0,
+                y: 0,
+                w: 64,
+                h: 48,
+            },
+            format: tetherly_core::PixelFormat::Bgra8,
+            codec_tag: tetherly_core::SCREEN_COMPRESS_NONE,
+            stride: 64 * 4,
+            bytes: vec![0u8; 64 * 48 * 4],
+        };
+        let meta = tetherly_core::ScreenRecordingMeta::from_frame(&frame0, 1000);
+        let mut writer =
+            tetherly_core::ScreenRecordingWriter::new(meta, std::io::Cursor::new(&mut buf))
+                .unwrap();
+        for i in 0..5 {
+            let frame = tetherly_core::ScreenFrame {
+                seq: i,
+                rect: tetherly_core::ScreenRect {
+                    x: 0,
+                    y: 0,
+                    w: 64,
+                    h: 48,
+                },
+                format: tetherly_core::PixelFormat::Bgra8,
+                codec_tag: tetherly_core::SCREEN_COMPRESS_NONE,
+                stride: 64 * 4,
+                bytes: vec![0u8; 64 * 48 * 4],
+            };
+            writer.append(&frame, 1000 + i * 16666).unwrap();
+        }
+        writer.finish().unwrap();
+        std::fs::write(&trec_path, &buf).unwrap();
+
+        // 3. Start playback with non-existent file -> 400
+        let (code, _) = loopback_post(
+            port,
+            "/api/screen/playback/start?path=/definitely/not/here.trec",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 400);
+
+        // 4. Start playback with parent directory traversal -> 400
+        let bad_req = serde_json::json!({ "path": "../escape.trec" });
+        let (code, _) = loopback_post(
+            port,
+            "/api/screen/playback/start",
+            &serde_json::to_vec(&bad_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 400);
+
+        // 5. Start playback without path -> 400
+        let (code, _) = loopback_post(port, "/api/screen/playback/start", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+
+        // 6. Start playback with valid path (using loop=true to keep active for pause/resume)
+        let start_req = serde_json::json!({
+            "path": trec_path.to_str().unwrap(),
+            "speed": 0.0,
+            "loop": true
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/playback/start",
+            &serde_json::to_vec(&start_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["total_frames"], 5);
+
+        // 7. Pause playback
+        let (code, body) = loopback_post(port, "/api/screen/playback/pause", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["state"], "paused");
+
+        // 8. Resume playback
+        let (code, body) = loopback_post(port, "/api/screen/playback/resume", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["state"], "playing");
+
+        // 9. Stop playback
+        let (code, body) = loopback_post(port, "/api/screen/playback/stop", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["state"], "stopped");
+
+        // 10. GET /api/screen/playback after stop shows stopped report
+        let (code, body) = loopback_get(port, "/api/screen/playback").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["state"], "stopped");
+
+        // 11. Host header 403 guard on /api/screen/playback
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/playback HTTP/1.1\r\nHost: evil-attacker-site.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_snapshot_endpoints() {
+        let (node, dir) =
+            temp_test_node_with_source("screen_snapshot", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone(), 0).await.unwrap();
+
+        // 1. Initial snapshot when no frame is available returns 503
+        let (code, body) = loopback_get(port, "/api/screen/snapshot").await.unwrap();
+        assert_eq!(code, 503);
+        assert!(String::from_utf8_lossy(&body).contains("no screen frame available"));
+
+        // 2. Seed a mock frame into node's last frame buffer
+        let frame_w = 32u32;
+        let frame_h = 24u32;
+        let mut raw_pixels = vec![0u8; (frame_w * frame_h * 4) as usize];
+        for (i, p) in raw_pixels.iter_mut().enumerate() {
+            *p = ((i % 251) + 1) as u8;
+        }
+        let frame = ScreenFrame::raw(
+            42,
+            ScreenRect {
+                x: 0,
+                y: 0,
+                w: frame_w as u16,
+                h: frame_h as u16,
+            },
+            PixelFormat::Bgra8,
+            raw_pixels.clone(),
+        )
+        .unwrap();
+        node.set_screen_last_frame_for_test(frame);
+
+        // 3. GET /api/screen/snapshot (default JSON format)
+        let (code, body) = loopback_get(port, "/api/screen/snapshot").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: ScreenSnapshotReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert_eq!(rep.source, "live");
+        assert_eq!(rep.frame_seq, 42);
+        assert!(rep.pts_us > 0);
+        assert_eq!(rep.width, 32);
+        assert_eq!(rep.height, 24);
+        assert_eq!(rep.format, "bmp");
+        assert_eq!(rep.bytes_len, 54 + (32 * 24 * 4));
+        assert!(!rep.privacy_blanked);
+        assert!(rep.data_base64.is_some());
+
+        // 4. GET /api/screen/snapshot?format=bmp returns image/bmp binary stream
+        let (code, body) = loopback_get(port, "/api/screen/snapshot?format=bmp")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(&body[0..2], b"BM");
+        assert_eq!(body.len(), 54 + (32 * 24 * 4));
+
+        // 5. Save live snapshot to safe file on disk
+        let out_img_path = dir.join("test_live_out.bmp");
+        let q_out = format!(
+            "/api/screen/snapshot?out={}",
+            crate::uihttp::urlencode_path(out_img_path.to_str().unwrap())
+        );
+        let (code, body) = loopback_get(port, &q_out).await.unwrap();
+        assert_eq!(code, 200);
+        let rep: ScreenSnapshotReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.path.as_deref(), out_img_path.to_str());
+        assert!(out_img_path.exists());
+        let disk_bytes = std::fs::read(&out_img_path).unwrap();
+        assert_eq!(&disk_bytes[0..2], b"BM");
+        assert_eq!(disk_bytes.len(), 54 + (32 * 24 * 4));
+
+        // 6. Security guard: directory traversal in `out` rejected with 400
+        let (code, body) = loopback_get(port, "/api/screen/snapshot?out=../evil_escape.bmp")
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+        assert!(String::from_utf8_lossy(&body)
+            .to_lowercase()
+            .contains("unsafe"));
+
+        // 7. Privacy mode test (ADR-098 & ADR-103)
+        node.screen_set_privacy_mode(true, false).await.unwrap();
+        let (code, body) = loopback_get(port, "/api/screen/snapshot?format=bmp")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(&body[0..2], b"BM");
+        // All pixel bytes in the BMP payload must be zeroed out
+        for &b in &body[54..] {
+            assert_eq!(b, 0, "privacy mode must blank all snapshot pixels");
+        }
+        let (code, body) = loopback_get(port, "/api/screen/snapshot?format=json")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: ScreenSnapshotReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.privacy_blanked);
+        node.screen_set_privacy_mode(false, false).await.unwrap();
+
+        // 8. Recording snapshot extraction via POST /api/screen/recording/snapshot
+        let rec_file = dir.join("test_recording.trec");
+        {
+            let f0 = ScreenFrame::raw(
+                0,
+                ScreenRect {
+                    x: 0,
+                    y: 0,
+                    w: 64,
+                    h: 48,
+                },
+                PixelFormat::Bgra8,
+                vec![0x11; 64 * 48 * 4],
+            )
+            .unwrap();
+
+            let f1 = ScreenFrame::raw(
+                1,
+                ScreenRect {
+                    x: 0,
+                    y: 0,
+                    w: 64,
+                    h: 48,
+                },
+                PixelFormat::Bgra8,
+                vec![0x77; 64 * 48 * 4],
+            )
+            .unwrap();
+
+            let file = std::fs::File::create(&rec_file).unwrap();
+            let mut writer =
+                ScreenRecordingWriter::new(ScreenRecordingMeta::from_frame(&f0, 2), file).unwrap();
+            writer.append(&f0, 100_000).unwrap();
+            writer.append(&f1, 200_000).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let post_req = serde_json::json!({
+            "path": rec_file.to_str().unwrap(),
+            "frame": 1,
+            "format": "json"
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/recording/snapshot",
+            &serde_json::to_vec(&post_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: ScreenSnapshotReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert_eq!(rep.source, "recording");
+        assert_eq!(rep.frame_seq, 1);
+        assert_eq!(rep.pts_us, 200_000);
+        assert_eq!(rep.width, 64);
+        assert_eq!(rep.height, 48);
+        assert_eq!(rep.bytes_len, 54 + (64 * 48 * 4));
+
+        // 9. Recording snapshot returning BMP binary stream
+        let post_bmp_req = serde_json::json!({
+            "path": rec_file.to_str().unwrap(),
+            "pts_us": 100_000,
+            "format": "bmp"
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/recording/snapshot",
+            &serde_json::to_vec(&post_bmp_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(&body[0..2], b"BM");
+        assert_eq!(body.len(), 54 + (64 * 48 * 4));
+        // Verify frame 0 content (0x11)
+        for &b in &body[54..] {
+            assert_eq!(b, 0x11);
+        }
+
+        // 10. Recording snapshot traversal security guard
+        let post_evil = serde_json::json!({
+            "path": "../secret_file.trec",
+            "frame": 0
+        });
+        let (code, _) = loopback_post(
+            port,
+            "/api/screen/recording/snapshot",
+            &serde_json::to_vec(&post_evil).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 400);
+
+        // 11. Host header 403 guard on /api/screen/snapshot
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/snapshot HTTP/1.1\r\nHost: malicious-attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_watermark_endpoints() {
+        let (node, dir) =
+            temp_test_node_with_source("screen_watermark", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone(), 0).await.unwrap();
+
+        // 1. GET /api/screen/watermark returns defaults
+        let (code, body) = loopback_get(port, "/api/screen/watermark").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: ScreenWatermarkReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert!(!rep.host_enforced);
+        assert_eq!(rep.pattern, "grid");
+        assert_eq!(rep.scale, 1);
+        assert_eq!(rep.opacity, 64);
+
+        // 2. POST /api/screen/watermark/enable
+        let (code, body) = loopback_post(port, "/api/screen/watermark/enable", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: ScreenWatermarkReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert!(!rep.host_enforced);
+
+        // 3. POST /api/screen/watermark/disable
+        let (code, body) = loopback_post(port, "/api/screen/watermark/disable", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: ScreenWatermarkReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 4. POST /api/screen/watermark with custom configuration
+        let custom_cfg = serde_json::json!({
+            "enabled": true,
+            "text": "CONFIDENTIAL-{peer}",
+            "opacity": 128,
+            "color": "#FF8000",
+            "scale": 2,
+            "pattern": "banner"
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/watermark",
+            &serde_json::to_vec(&custom_cfg).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: ScreenWatermarkReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.text_template, "CONFIDENTIAL-{peer}");
+        assert_eq!(rep.opacity, 128);
+        assert_eq!(rep.opacity_pct, 50);
+        assert_eq!(rep.color_hex, "#FF8000");
+        assert_eq!(rep.color_rgb, [255, 128, 0]);
+        assert_eq!(rep.scale, 2);
+        assert_eq!(rep.pattern, "banner");
+
+        // 5. Host-enforced lockdown: when host enforces watermark, peer cannot disable it
+        node.screen_enable_watermark(true).await.unwrap();
+        node.set_screen_peer_watermark_enforced_for_test(true);
+
+        // Attempt disable -> 403 Forbidden
+        let (code, body) = loopback_post(port, "/api/screen/watermark/disable", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 403);
+        assert!(String::from_utf8_lossy(&body).contains("enforced by host"));
+
+        // Attempt disable via config update -> 403 Forbidden
+        let disable_cfg = serde_json::json!({ "enabled": false });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/watermark",
+            &serde_json::to_vec(&disable_cfg).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 403);
+        assert!(String::from_utf8_lossy(&body).contains("enforced by host"));
+
+        // 6. Host header 403 guard on /api/screen/watermark
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/watermark HTTP/1.1\r\nHost: malicious-attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_annotation_and_laser_endpoints() {
+        let (node, dir) =
+            temp_test_node_with_source("screen_annotation", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. Initial GET /api/screen/annotation
+        let (code, body) = loopback_get(port, "/api/screen/annotation").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: ScreenAnnotationReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert_eq!(rep.annotations_count, 0);
+        assert!(!rep.laser_active);
+
+        // 2. POST /api/screen/annotation with stroke
+        let stroke_req = serde_json::json!({
+            "kind": "stroke",
+            "points": [[10, 10], [20, 20], [30, 25]],
+            "color": "#FF0000",
+            "thickness": 4,
+            "ttl_ms": 5000
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/annotation",
+            &serde_json::to_vec(&stroke_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["report"]["annotations_count"], 1);
+
+        // 3. POST /api/screen/annotation with rect
+        let rect_req = serde_json::json!({
+            "kind": "rect",
+            "x": 50,
+            "y": 60,
+            "w": 100,
+            "h": 80,
+            "color": "#00FF00"
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/annotation",
+            &serde_json::to_vec(&rect_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["report"]["annotations_count"], 2);
+
+        // 4. POST /api/screen/laser
+        let laser_req = serde_json::json!({
+            "x": 150,
+            "y": 200,
+            "active": true,
+            "color": "#FF0000",
+            "radius": 14
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/laser",
+            &serde_json::to_vec(&laser_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["laser_active"], true);
+        assert_eq!(resp["laser"]["x"], 150);
+        assert_eq!(resp["laser"]["y"], 200);
+
+        // 5. GET /api/screen/laser
+        let (code, body) = loopback_get(port, "/api/screen/laser").await.unwrap();
+        assert_eq!(code, 200);
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["laser_active"], true);
+
+        // 6. POST /api/screen/annotation/clear
+        let (code, body) = loopback_post(port, "/api/screen/annotation/clear", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: ScreenAnnotationReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.annotations_count, 0);
+
+        // 7. Host header 403 guard on /api/screen/annotation
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/annotation HTTP/1.1\r\nHost: malicious-attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_whiteboard_endpoints() {
+        let (node, dir) = temp_test_node_with_source("screen_wb", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/whiteboard/policy
+        let (code, body) = loopback_get(port, "/api/screen/whiteboard/policy")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["policy"]["read_only"], false);
+        assert_eq!(resp["policy"]["allow_peer_clear"], true);
+
+        // 2. Add annotations for Alice and Bob
+        let req_alice = serde_json::json!({
+            "kind": "stroke",
+            "author": "alice",
+            "points": [[10, 10], [20, 20]],
+            "color": "#FF0000"
+        });
+        let (code, _) = loopback_post(
+            port,
+            "/api/screen/annotation",
+            &serde_json::to_vec(&req_alice).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+
+        let req_bob = serde_json::json!({
+            "kind": "rect",
+            "author": "bob",
+            "x": 30,
+            "y": 30,
+            "w": 40,
+            "h": 40,
+            "color": "#00FF00"
+        });
+        let (code, _) = loopback_post(
+            port,
+            "/api/screen/annotation",
+            &serde_json::to_vec(&req_bob).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+
+        // 3. POST /api/screen/whiteboard/undo?author=alice
+        let (code, body) = loopback_post(port, "/api/screen/whiteboard/undo?author=alice", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["undone"]["author"], "alice");
+        assert_eq!(resp["report"]["annotations_count"], 1);
+        assert_eq!(resp["report"]["redo_count"], 1);
+
+        // 4. POST /api/screen/whiteboard/redo?author=alice
+        let (code, body) = loopback_post(port, "/api/screen/whiteboard/redo?author=alice", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["redone"]["author"], "alice");
+        assert_eq!(resp["report"]["annotations_count"], 2);
+        assert_eq!(resp["report"]["redo_count"], 0);
+
+        // 5. GET /api/screen/whiteboard/export
+        let (code, body) = loopback_get(port, "/api/screen/whiteboard/export")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let export_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(export_resp["ok"], true);
+        let snapshot = export_resp["export"].clone();
+        assert_eq!(snapshot["active_items"].as_array().unwrap().len(), 2);
+
+        // 6. POST /api/screen/whiteboard/clear
+        let (code, _) = loopback_post(port, "/api/screen/whiteboard/clear", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let (code, body) = loopback_get(port, "/api/screen/annotation").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: ScreenAnnotationReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.annotations_count, 0);
+
+        // 7. POST /api/screen/whiteboard/import
+        let import_req = serde_json::json!({
+            "snapshot": snapshot,
+            "replace": true
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/whiteboard/import",
+            &serde_json::to_vec(&import_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["imported_count"], 2);
+
+        // 8. POST /api/screen/whiteboard/policy
+        let pol_req = serde_json::json!({
+            "read_only": true,
+            "allow_peer_clear": false,
+            "max_items": 500
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/whiteboard/policy",
+            &serde_json::to_vec(&pol_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let pol_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(pol_resp["policy"]["read_only"], true);
+        assert_eq!(pol_resp["policy"]["allow_peer_clear"], false);
+        assert_eq!(pol_resp["policy"]["max_items"], 500);
+
+        // 9. Path traversal rejection on export / import
+        let (code, _) = loopback_get(port, "/api/screen/whiteboard/export?out=../escape.json")
+            .await
+            .unwrap();
+        assert_eq!(code, 400);
+
+        // 10. Host header 403 guard on /api/screen/whiteboard/policy
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/whiteboard/policy HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_roi_endpoints() {
+        let (node, dir) = temp_test_node_with_source("screen_roi", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/roi default state
+        let (code, body) = loopback_get(port, "/api/screen/roi").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenRoiReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.active);
+        assert_eq!(rep.zoom_percent, 100);
+
+        // 2. POST /api/screen/roi sets viewport parameters
+        let roi_req = serde_json::json!({
+            "x": 100,
+            "y": 200,
+            "w": 640,
+            "h": 480,
+            "zoom_percent": 150
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/roi",
+            &serde_json::to_vec(&roi_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenRoiReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.active);
+        assert_eq!(rep.x, 100);
+        assert_eq!(rep.y, 200);
+        assert_eq!(rep.w, 640);
+        assert_eq!(rep.h, 480);
+        assert_eq!(rep.zoom_percent, 150);
+
+        // 3. POST /api/screen/roi/zoom adjusts zoom scale
+        let zoom_req = serde_json::json!({
+            "zoom_percent": 250
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/roi/zoom",
+            &serde_json::to_vec(&zoom_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenRoiReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.zoom_percent, 250);
+
+        // 4. Verify /api/screen status telemetry includes ROI state
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.roi_active);
+        assert_eq!(status.roi_x, 100);
+        assert_eq!(status.roi_y, 200);
+        assert_eq!(status.roi_w, 640);
+        assert_eq!(status.roi_h, 480);
+        assert_eq!(status.roi_zoom_percent, 250);
+
+        // 5. POST /api/screen/roi/reset restores full-frame streaming
+        let (code, body) = loopback_post(port, "/api/screen/roi/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenRoiReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.active);
+
+        // 6. DELETE /api/screen/roi also resets
+        let _ = loopback_post(port, "/api/screen/roi?x=50&y=50&w=200&h=200", &[])
+            .await
+            .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/roi").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenRoiReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.active);
+
+        // 7. Security guard: Host header 403 on /api/screen/roi
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/roi HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_color_endpoints() {
+        let (node, dir) = temp_test_node_with_source("screen_color", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/color default state
+        let (code, body) = loopback_get(port, "/api/screen/color").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, tetherly_core::ScreenColorMode::FullColor32);
+        assert_eq!(rep.threshold, 128);
+        assert!(!rep.is_active);
+
+        // 2. POST /api/screen/color sets grayscale mode
+        let gray_req = serde_json::json!({
+            "mode": "grayscale"
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/color",
+            &serde_json::to_vec(&gray_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, tetherly_core::ScreenColorMode::Grayscale8);
+        assert!(rep.is_active);
+
+        // 3. POST /api/screen/color sets monochrome mode with threshold
+        let mono_req = serde_json::json!({
+            "mode": "monochrome",
+            "threshold": 160
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/color",
+            &serde_json::to_vec(&mono_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, tetherly_core::ScreenColorMode::Monochrome1);
+        assert_eq!(rep.threshold, 160);
+        assert!(rep.is_active);
+
+        // 4. Verify /api/screen status telemetry includes color mode telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status.color_mode, "monochrome1");
+        assert_eq!(status.color_threshold, 160);
+        assert!(status.color_updates >= 2);
+
+        // 5. POST /api/screen/color/reset restores full color
+        let (code, body) = loopback_post(port, "/api/screen/color/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, tetherly_core::ScreenColorMode::FullColor32);
+        assert!(!rep.is_active);
+
+        // 6. DELETE /api/screen/color also resets
+        let _ = loopback_post(port, "/api/screen/color?mode=reduced", &[])
+            .await
+            .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/color").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenColorReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, tetherly_core::ScreenColorMode::FullColor32);
+        assert!(!rep.is_active);
+
+        // 7. Security guard: Host header 403 on /api/screen/color
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/color HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_delta_endpoints() {
+        let (node, dir) = temp_test_node_with_source("screen_delta", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/delta default state
+        let (code, body) = loopback_get(port, "/api/screen/delta").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenDeltaReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(rep.keyframe_interval, 60);
+        assert_eq!(rep.saved_bytes, 0);
+
+        // 2. POST /api/screen/delta enables delta mode with keyframe interval
+        let delta_req = serde_json::json!({
+            "enabled": true,
+            "keyframe_interval": 30
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/delta",
+            &serde_json::to_vec(&delta_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenDeltaReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.keyframe_interval, 30);
+
+        // 3. Verify /api/screen status telemetry includes delta telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.delta_enabled);
+        assert_eq!(status.delta_keyframe_interval, 30);
+
+        // 4. POST /api/screen/delta/reset restores default full-frame streaming
+        let (code, body) = loopback_post(port, "/api/screen/delta/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenDeltaReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(rep.keyframe_interval, 60);
+
+        // 5. DELETE /api/screen/delta also resets
+        let _ = loopback_post(port, "/api/screen/delta?enabled=true&interval=45", &[])
+            .await
+            .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/delta").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenDeltaReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 6. Security guard: Host header 403 on /api/screen/delta
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/delta HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_quality_metric_endpoints() {
+        let (node, dir) = temp_test_node_with_source("screen_metric", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/metric default state
+        let (code, body) = loopback_get(port, "/api/screen/metric").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenQualityMetricReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(rep.sample_interval, 10);
+        assert_eq!(rep.evaluated_frames, 0);
+        assert_eq!(rep.avg_psnr_db, 100.0);
+        assert_eq!(rep.avg_ssim, 1.0);
+        assert!(!rep.quality_warning);
+
+        // 2. POST /api/screen/metric enables quality metric mode with sample interval
+        let metric_req = serde_json::json!({
+            "enabled": true,
+            "sample_interval": 5
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/metric",
+            &serde_json::to_vec(&metric_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenQualityMetricReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.sample_interval, 5);
+
+        // 3. Verify /api/screen status telemetry includes quality metric telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.metric_enabled);
+        assert_eq!(status.metric_sample_interval, 5);
+        assert_eq!(status.metric_psnr_db, 100.0);
+        assert_eq!(status.metric_ssim, 1.0);
+
+        // 4. POST /api/screen/metric/reset restores default disabled state
+        let (code, body) = loopback_post(port, "/api/screen/metric/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenQualityMetricReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(rep.sample_interval, 10);
+
+        // 5. DELETE /api/screen/metric also resets
+        let _ = loopback_post(port, "/api/screen/metric?enabled=true&interval=12", &[])
+            .await
+            .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/metric").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenQualityMetricReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 6. Security guard: Host header 403 on /api/screen/metric
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/metric HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_qoe_endpoints() {
+        let (node, dir) = temp_test_node_with_source("screen_qoe", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/qoe default state
+        let (code, body) = loopback_get(port, "/api/screen/qoe").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenQoeReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert_eq!(rep.mode, "off");
+        assert_eq!(rep.target_psnr_db, 30);
+        assert_eq!(rep.target_ssim_pct, 85);
+        assert_eq!(rep.actions_total, 0);
+        assert_eq!(rep.last_action, "hold");
+
+        // 2. POST /api/screen/qoe enables balanced mode with custom targets
+        let qoe_req = serde_json::json!({
+            "mode": "balanced",
+            "target_psnr": 32,
+            "target_ssim": 90
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/qoe",
+            &serde_json::to_vec(&qoe_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenQoeReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, "balanced");
+        assert_eq!(rep.target_psnr_db, 32);
+        assert_eq!(rep.target_ssim_pct, 90);
+
+        // 3. Verify /api/screen status telemetry includes QoE telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.qoe_enabled);
+        assert_eq!(status.qoe_mode, "balanced");
+        assert_eq!(status.qoe_target_psnr_db, 32);
+        assert_eq!(status.qoe_target_ssim_pct, 90);
+        assert_eq!(status.qoe_actions_total, 0);
+        assert_eq!(status.qoe_last_action, "hold");
+
+        // 4. POST /api/screen/qoe with query parameters
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/qoe?mode=conservative&target_psnr=35&target_ssim=92",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenQoeReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, "conservative");
+        assert_eq!(rep.target_psnr_db, 35);
+        assert_eq!(rep.target_ssim_pct, 92);
+
+        // 5. POST /api/screen/qoe/reset restores default disabled state
+        let (code, body) = loopback_post(port, "/api/screen/qoe/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenQoeReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, "off");
+
+        // 6. DELETE /api/screen/qoe also resets
+        let _ = loopback_post(port, "/api/screen/qoe?mode=economy", &[])
+            .await
+            .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/qoe").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenQoeReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, "off");
+
+        // 7. Security guard: Host header 403 on /api/screen/qoe
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/qoe HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_pir_endpoints() {
+        let (node, dir) = temp_test_node_with_source("screen_pir", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/pir default state
+        let (code, body) = loopback_get(port, "/api/screen/pir").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenPirReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert_eq!(rep.mode, "disabled");
+        assert_eq!(rep.bands, tetherly_core::SCREEN_PIR_DEFAULT_BANDS);
+        assert_eq!(rep.sweeps_completed, 0);
+        assert_eq!(rep.slices_sent, 0);
+        assert_eq!(rep.current_band, 0);
+        assert!(!rep.active_sweep);
+
+        // 2. POST /api/screen/pir enables continuous mode with bands = 12
+        let pir_req = serde_json::json!({
+            "mode": "continuous",
+            "bands": 12
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/pir",
+            &serde_json::to_vec(&pir_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenPirReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, "continuous");
+        assert_eq!(rep.bands, 12);
+        assert!(rep.active_sweep);
+
+        // 3. Verify /api/screen status telemetry includes PIR telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.pir_enabled);
+        assert_eq!(status.pir_mode, "continuous");
+        assert_eq!(status.pir_bands, 12);
+        assert_eq!(status.pir_sweeps_completed, 0);
+        assert_eq!(status.pir_slices_sent, 0);
+
+        // 4. POST /api/screen/pir with query parameters
+        let (code, body) = loopback_post(port, "/api/screen/pir?mode=on-demand&bands=16", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenPirReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, "on-demand");
+        assert_eq!(rep.bands, 16);
+        assert!(rep.active_sweep);
+
+        // 5. POST /api/screen/pir/reset restores default disabled state
+        let (code, body) = loopback_post(port, "/api/screen/pir/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenPirReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, "disabled");
+        assert_eq!(rep.bands, tetherly_core::SCREEN_PIR_DEFAULT_BANDS);
+        assert!(!rep.active_sweep);
+
+        // 6. DELETE /api/screen/pir also resets
+        let _ = loopback_post(port, "/api/screen/pir?mode=continuous&bands=4", &[])
+            .await
+            .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/pir").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenPirReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.mode, "disabled");
+
+        // 7. Security guard: Host header 403 on /api/screen/pir
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/pir HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_ltr_endpoints() {
+        let (node, dir) = temp_test_node_with_source("screen_ltr", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/ltr default state
+        let (code, body) = loopback_get(port, "/api/screen/ltr").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(
+            rep.auto_interval,
+            tetherly_core::SCREEN_LTR_DEFAULT_AUTO_INTERVAL
+        );
+        assert_eq!(rep.current_ltr_seq, 0);
+        assert_eq!(rep.anchors_established, 0);
+        assert_eq!(rep.recoveries_requested, 0);
+        assert_eq!(rep.recoveries_completed, 0);
+        assert_eq!(rep.saved_burst_bytes, 0);
+
+        // 2. POST /api/screen/ltr enables LTR with auto_interval = 30
+        let ltr_req = serde_json::json!({
+            "enabled": true,
+            "auto_interval": 30
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/ltr",
+            &serde_json::to_vec(&ltr_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.auto_interval, 30);
+
+        // 3. Verify /api/screen status includes LTR telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.ltr_enabled);
+        assert_eq!(status.ltr_auto_interval, 30);
+        assert_eq!(status.ltr_current_seq, 0);
+        assert_eq!(status.ltr_anchors_established, 0);
+        assert_eq!(status.ltr_recoveries_completed, 0);
+
+        // 4. POST /api/screen/ltr/anchor triggers manual anchoring
+        let (code, body) = loopback_post(port, "/api/screen/ltr/anchor", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.anchors_established, 1);
+        assert_eq!(rep.current_ltr_seq, 1);
+
+        // 5. POST /api/screen/ltr/recover triggers recovery request
+        let (code, body) = loopback_post(port, "/api/screen/ltr/recover", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep.recoveries_requested, 1);
+
+        // 6. POST /api/screen/ltr with query parameters
+        let (code, body) = loopback_post(port, "/api/screen/ltr?enabled=true&interval=45", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.auto_interval, 45);
+
+        // 7. POST /api/screen/ltr/reset restores default disabled state
+        let (code, body) = loopback_post(port, "/api/screen/ltr/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(
+            rep.auto_interval,
+            tetherly_core::SCREEN_LTR_DEFAULT_AUTO_INTERVAL
+        );
+        assert_eq!(rep.current_ltr_seq, 0);
+
+        // 8. DELETE /api/screen/ltr also resets
+        let _ = loopback_post(port, "/api/screen/ltr?enabled=true&interval=20", &[])
+            .await
+            .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/ltr").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenLtrReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 9. Security guard: Host header 403 on /api/screen/ltr
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/ltr HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_svc_endpoints() {
+        let (node, dir) = temp_test_node_with_source("screen_svc", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/svc default state
+        let (code, body) = loopback_get(port, "/api/screen/svc").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(rep.mode, "disabled");
+        assert!(!rep.drop_t1);
+        assert_eq!(rep.t0_frames_sent, 0);
+        assert_eq!(rep.t1_frames_sent, 0);
+        assert_eq!(rep.t1_frames_dropped, 0);
+        assert_eq!(rep.saved_bandwidth_bytes, 0);
+
+        // 2. POST /api/screen/svc enables adaptive SVC
+        let svc_req = serde_json::json!({
+            "mode": "adaptive",
+            "drop_t1": false
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/svc",
+            &serde_json::to_vec(&svc_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.mode, "adaptive");
+        assert!(!rep.drop_t1);
+
+        // 3. Verify /api/screen status includes SVC telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.svc_enabled);
+        assert_eq!(status.svc_mode, "adaptive");
+        assert!(!status.svc_drop_t1);
+        assert_eq!(status.svc_t0_sent, 0);
+        assert_eq!(status.svc_t1_sent, 0);
+        assert_eq!(status.svc_t1_dropped, 0);
+
+        // 4. POST /api/screen/svc/drop-t1 sets drop_t1 flag
+        let drop_req = serde_json::json!({
+            "drop_t1": true
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/svc/drop-t1",
+            &serde_json::to_vec(&drop_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.drop_t1);
+
+        // 5. POST /api/screen/svc with query parameters
+        let (code, body) = loopback_post(port, "/api/screen/svc?mode=base_only&drop_t1=false", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.mode, "base_only");
+
+        // 6. POST /api/screen/svc/reset restores default disabled state
+        let (code, body) = loopback_post(port, "/api/screen/svc/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(rep.mode, "disabled");
+        assert!(!rep.drop_t1);
+
+        // 7. DELETE /api/screen/svc also resets
+        let _ = loopback_post(port, "/api/screen/svc?mode=adaptive&drop_t1=true", &[])
+            .await
+            .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/svc").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenSvcReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 8. Security guard: Host header 403 on /api/screen/svc
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/svc HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_motion_endpoints() {
+        let (node, dir) = temp_test_node_with_source("screen_motion", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/motion default state
+        let (code, body) = loopback_get(port, "/api/screen/motion").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(
+            rep.max_displacement,
+            tetherly_core::SCREEN_MOTION_DEFAULT_MAX_DISPLACEMENT
+        );
+        assert_eq!(rep.motion_frames_sent, 0);
+        assert_eq!(rep.fallback_frames_sent, 0);
+        assert_eq!(rep.saved_bandwidth_bytes, 0);
+
+        // 2. POST /api/screen/motion enables motion estimation
+        let req = serde_json::json!({
+            "enabled": true,
+            "max_displacement": 128
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/motion",
+            &serde_json::to_vec(&req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.max_displacement, 128);
+
+        // 3. Verify /api/screen status includes motion telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.motion_enabled);
+        assert_eq!(status.motion_max_displacement, 128);
+        assert_eq!(status.motion_frames_sent, 0);
+        assert_eq!(status.motion_fallback_frames_sent, 0);
+        assert_eq!(status.motion_saved_bytes, 0);
+
+        // 4. POST /api/screen/motion with query parameters
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/motion?enabled=true&max_displacement=96",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.max_displacement, 96);
+
+        // 5. POST /api/screen/motion/reset restores default state
+        let (code, body) = loopback_post(port, "/api/screen/motion/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(
+            rep.max_displacement,
+            tetherly_core::SCREEN_MOTION_DEFAULT_MAX_DISPLACEMENT
+        );
+
+        // 6. DELETE /api/screen/motion also resets
+        let _ = loopback_post(
+            port,
+            "/api/screen/motion?enabled=true&max_displacement=128",
+            &[],
+        )
+        .await
+        .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/motion").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenMotionReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 7. Security guard: Host header 403 on /api/screen/motion
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/motion HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_tile_endpoints() {
+        let (node, dir) = temp_test_node_with_source("screen_tile", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/tile default state
+        let (code, body) = loopback_get(port, "/api/screen/tile").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(rep.tile_size, tetherly_core::SCREEN_TILE_DEFAULT_SIZE);
+        assert_eq!(rep.grid_frames_sent, 0);
+        assert_eq!(rep.dirty_tiles_sent, 0);
+        assert_eq!(rep.skipped_tiles_count, 0);
+        assert_eq!(rep.saved_bandwidth_bytes, 0);
+
+        // 2. POST /api/screen/tile enables spatial tile mode
+        let req = serde_json::json!({
+            "enabled": true,
+            "tile_size": 128
+        });
+        let (code, body) =
+            loopback_post(port, "/api/screen/tile", &serde_json::to_vec(&req).unwrap())
+                .await
+                .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.tile_size, 128);
+
+        // 3. Verify /api/screen status includes tile telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.tile_enabled);
+        assert_eq!(status.tile_size, 128);
+        assert_eq!(status.tile_frames_sent, 0);
+        assert_eq!(status.dirty_tiles_sent, 0);
+        assert_eq!(status.skipped_tiles_count, 0);
+        assert_eq!(status.tile_saved_bytes, 0);
+
+        // 4. POST /api/screen/tile with query parameters
+        let (code, body) = loopback_post(port, "/api/screen/tile?enabled=true&tile_size=64", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.tile_size, 64);
+
+        // 5. POST /api/screen/tile/reset restores default state
+        let (code, body) = loopback_post(port, "/api/screen/tile/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(rep.tile_size, tetherly_core::SCREEN_TILE_DEFAULT_SIZE);
+
+        // 6. DELETE /api/screen/tile also resets
+        let _ = loopback_post(port, "/api/screen/tile?enabled=true&tile_size=128", &[])
+            .await
+            .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/tile").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 7. Security guard: Host header 403 on /api/screen/tile
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req =
+            "GET /api/screen/tile HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_tile_cache_endpoints() {
+        let (node, dir) =
+            temp_test_node_with_source("screen_tile_cache", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/tile/cache default state
+        let (code, body) = loopback_get(port, "/api/screen/tile/cache").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(
+            rep.max_entries,
+            tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES
+        );
+        assert_eq!(rep.current_entries, 0);
+        assert_eq!(rep.cache_hits, 0);
+        assert_eq!(rep.cache_misses, 0);
+        assert_eq!(rep.hit_ratio_pct, 0.0);
+        assert_eq!(rep.saved_bandwidth_bytes, 0);
+
+        // 2. POST /api/screen/tile/cache enables tile cache mode
+        let req = serde_json::json!({
+            "enabled": true,
+            "max_entries": 1024
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/cache",
+            &serde_json::to_vec(&req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.max_entries, 1024);
+
+        // 3. Verify /api/screen status includes tile cache telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.tile_cache_enabled);
+        assert_eq!(status.tile_cache_max_entries, 1024);
+        assert_eq!(status.tile_cache_entries, 0);
+        assert_eq!(status.tile_cache_hits, 0);
+        assert_eq!(status.tile_cache_misses, 0);
+        assert_eq!(status.tile_cache_saved_bytes, 0);
+
+        // 4. POST /api/screen/tile/cache with query parameters
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/cache?enabled=true&max_entries=256",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.max_entries, 256);
+
+        // 5. POST /api/screen/tile/cache/reset restores default state
+        let (code, body) = loopback_post(port, "/api/screen/tile/cache/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(
+            rep.max_entries,
+            tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES
+        );
+
+        // 6. DELETE /api/screen/tile/cache also resets
+        let _ = loopback_post(
+            port,
+            "/api/screen/tile/cache?enabled=true&max_entries=128",
+            &[],
+        )
+        .await
+        .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/tile/cache")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileCacheReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 7. Security guard: Host header 403 on /api/screen/tile/cache
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/tile/cache HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_focus_endpoints() {
+        let (node, dir) = temp_test_node_with_source("screen_focus", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/focus default state
+        let (code, body) = loopback_get(port, "/api/screen/focus").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(rep.mode, tetherly_core::ScreenFocusMode::Cursor);
+        assert_eq!(rep.radius, tetherly_core::SCREEN_FOCUS_DEFAULT_RADIUS);
+        assert_eq!(
+            rep.peripheral_skip_ratio,
+            tetherly_core::SCREEN_FOCUS_DEFAULT_SKIP_RATIO
+        );
+        assert_eq!(rep.focus_tiles_sent, 0);
+        assert_eq!(rep.peripheral_tiles_sent, 0);
+        assert_eq!(rep.peripheral_tiles_skipped, 0);
+        assert_eq!(rep.saved_bandwidth_bytes, 0);
+
+        // 2. POST /api/screen/focus enables focus with cursor mode
+        let req = serde_json::json!({
+            "enabled": true,
+            "mode": "cursor",
+            "radius": 320,
+            "peripheral_skip_ratio": 3
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/focus",
+            &serde_json::to_vec(&req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.mode, tetherly_core::ScreenFocusMode::Cursor);
+        assert_eq!(rep.radius, 320);
+        assert_eq!(rep.peripheral_skip_ratio, 3);
+
+        // 3. Verify /api/screen status includes focus telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.focus_enabled);
+        assert_eq!(status.focus_mode, "cursor");
+        assert_eq!(status.focus_radius, 320);
+        assert_eq!(status.focus_peripheral_skip_ratio, 3);
+        assert_eq!(status.focus_tiles_sent, 0);
+        assert_eq!(status.peripheral_tiles_sent, 0);
+        assert_eq!(status.peripheral_tiles_skipped, 0);
+        assert_eq!(status.focus_saved_bandwidth_bytes, 0);
+
+        // 4. POST /api/screen/focus with box mode and coordinates
+        let req_box = serde_json::json!({
+            "enabled": true,
+            "mode": "box",
+            "box_x": 100,
+            "box_y": 150,
+            "box_w": 400,
+            "box_h": 300,
+            "peripheral_skip_ratio": 4
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/focus",
+            &serde_json::to_vec(&req_box).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.mode, tetherly_core::ScreenFocusMode::Box);
+        assert_eq!(rep.box_x, 100);
+        assert_eq!(rep.box_y, 150);
+        assert_eq!(rep.box_w, 400);
+        assert_eq!(rep.box_h, 300);
+        assert_eq!(rep.peripheral_skip_ratio, 4);
+
+        // 5. POST /api/screen/focus with query parameters
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/focus?enabled=true&mode=cursor&radius=180&peripheral_skip_ratio=2",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.mode, tetherly_core::ScreenFocusMode::Cursor);
+        assert_eq!(rep.radius, 180);
+        assert_eq!(rep.peripheral_skip_ratio, 2);
+
+        // 6. POST /api/screen/focus/reset restores default state
+        let (code, body) = loopback_post(port, "/api/screen/focus/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(rep.radius, tetherly_core::SCREEN_FOCUS_DEFAULT_RADIUS);
+
+        // 7. DELETE /api/screen/focus also resets
+        let _ = loopback_post(port, "/api/screen/focus?enabled=true&radius=128", &[])
+            .await
+            .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/focus").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenFocusReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 8. Security guard: Host header 403 on /api/screen/focus
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/focus HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_tile_palette_endpoints() {
+        let (node, dir) =
+            temp_test_node_with_source("screen_tile_palette", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/tile/palette default state
+        let (code, body) = loopback_get(port, "/api/screen/tile/palette")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(
+            rep.max_colors,
+            tetherly_core::SCREEN_TILE_PALETTE_DEFAULT_MAX_COLORS
+        );
+        assert!(!rep.enable_rle);
+        assert_eq!(rep.solid_tiles_count, 0);
+        assert_eq!(rep.bilevel_tiles_count, 0);
+        assert_eq!(rep.palette_tiles_count, 0);
+        assert_eq!(rep.truecolor_tiles_count, 0);
+        assert_eq!(rep.saved_bandwidth_bytes, 0);
+
+        // 2. POST /api/screen/tile/palette enables palette mode
+        let req = serde_json::json!({
+            "enabled": true,
+            "max_colors": 8,
+            "enable_rle": true
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/palette",
+            &serde_json::to_vec(&req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.max_colors, 8);
+        assert!(rep.enable_rle);
+
+        // 3. Verify /api/screen status includes tile palette telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.tile_palette_enabled);
+        assert_eq!(status.tile_palette_max_colors, 8);
+        assert!(status.tile_palette_enable_rle);
+        assert_eq!(status.tile_palette_solid_tiles, 0);
+        assert_eq!(status.tile_palette_bilevel_tiles, 0);
+        assert_eq!(status.tile_palette_palette_tiles, 0);
+        assert_eq!(status.tile_palette_truecolor_tiles, 0);
+        assert_eq!(status.tile_palette_saved_bytes, 0);
+
+        // 4. POST /api/screen/tile/palette with query parameters
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/palette?enabled=true&max_colors=12&enable_rle=false",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.max_colors, 12);
+        assert!(!rep.enable_rle);
+
+        // 5. POST /api/screen/tile/palette/reset restores default state
+        let (code, body) = loopback_post(port, "/api/screen/tile/palette/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(
+            rep.max_colors,
+            tetherly_core::SCREEN_TILE_PALETTE_DEFAULT_MAX_COLORS
+        );
+
+        // 6. DELETE /api/screen/tile/palette also resets
+        let _ = loopback_post(
+            port,
+            "/api/screen/tile/palette?enabled=true&max_colors=4",
+            &[],
+        )
+        .await
+        .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/tile/palette")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePaletteReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 7. Security guard: Host header 403 on /api/screen/tile/palette
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/tile/palette HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_tile_predict_endpoints() {
+        let (node, dir) =
+            temp_test_node_with_source("screen_tile_predict", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/tile/predict default state
+        let (code, body) = loopback_get(port, "/api/screen/tile/predict")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(
+            rep.filter_mode,
+            tetherly_core::ScreenTilePredictFilter::Auto
+        );
+        assert!(rep.enable_rct);
+        assert_eq!(rep.predict_tiles_count, 0);
+        assert_eq!(rep.saved_bandwidth_bytes, 0);
+
+        // 2. POST /api/screen/tile/predict enables predict mode
+        let req = serde_json::json!({
+            "enabled": true,
+            "filter_mode": "sub",
+            "enable_rct": false
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/predict",
+            &serde_json::to_vec(&req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.filter_mode, tetherly_core::ScreenTilePredictFilter::Sub);
+        assert!(!rep.enable_rct);
+
+        // 3. Verify /api/screen status includes tile predict telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.tile_predict_enabled);
+        assert_eq!(status.tile_predict_filter_mode, "sub");
+        assert!(!status.tile_predict_enable_rct);
+        assert_eq!(status.tile_predict_tiles_sent, 0);
+        assert_eq!(status.tile_predict_saved_bytes, 0);
+
+        // 4. POST /api/screen/tile/predict with query parameters
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/predict?enabled=true&filter_mode=up&enable_rct=true",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.filter_mode, tetherly_core::ScreenTilePredictFilter::Up);
+        assert!(rep.enable_rct);
+
+        // 5. POST /api/screen/tile/predict/reset restores default state
+        let (code, body) = loopback_post(port, "/api/screen/tile/predict/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(
+            rep.filter_mode,
+            tetherly_core::ScreenTilePredictFilter::Auto
+        );
+        assert!(rep.enable_rct);
+
+        // 6. DELETE /api/screen/tile/predict also resets
+        let _ = loopback_post(
+            port,
+            "/api/screen/tile/predict?enabled=true&filter_mode=paeth",
+            &[],
+        )
+        .await
+        .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/tile/predict")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePredictReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 7. Security guard: Host header 403 on /api/screen/tile/predict
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/tile/predict HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_tile_present_endpoints() {
+        let (node, dir) =
+            temp_test_node_with_source("screen_tile_present", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/tile/present default state
+        let (code, body) = loopback_get(port, "/api/screen/tile/present")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePresentReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(rep.vsync_mode, "off");
+        assert!(rep.double_buffer);
+        assert!(rep.tear_prevention);
+        assert_eq!(rep.committed_transactions, 0);
+        assert_eq!(rep.swapped_frames, 0);
+        assert_eq!(rep.torn_frames_prevented, 0);
+        assert_eq!(rep.avg_swap_latency_us, 0);
+
+        // 2. POST /api/screen/tile/present enables presentation transaction mode
+        let req = serde_json::json!({
+            "enabled": true,
+            "vsync_mode": "vsync60",
+            "double_buffer": true,
+            "tear_prevention": true
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/present",
+            &serde_json::to_vec(&req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePresentReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.vsync_mode, "vsync60");
+        assert!(rep.double_buffer);
+        assert!(rep.tear_prevention);
+
+        // 3. Verify /api/screen status includes tile present telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.tile_present_enabled);
+        assert_eq!(status.tile_present_vsync_mode, "vsync60");
+        assert!(status.tile_present_double_buffer);
+        assert!(status.tile_present_tear_prevention);
+        assert_eq!(status.tile_present_committed_transactions, 0);
+        assert_eq!(status.tile_present_swapped_frames, 0);
+        assert_eq!(status.tile_present_torn_frames_prevented, 0);
+
+        // 4. POST /api/screen/tile/present with query parameters
+        let (code, body) = loopback_post(port, "/api/screen/tile/present?enabled=true&vsync_mode=vsync120&double_buffer=false&tear_prevention=false", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePresentReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.vsync_mode, "vsync120");
+        assert!(!rep.double_buffer);
+        assert!(!rep.tear_prevention);
+
+        // 5. POST /api/screen/tile/present/reset restores default state
+        let (code, body) = loopback_post(port, "/api/screen/tile/present/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePresentReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(rep.vsync_mode, "off");
+        assert!(rep.double_buffer);
+        assert!(rep.tear_prevention);
+
+        // 6. DELETE /api/screen/tile/present also resets
+        let _ = loopback_post(
+            port,
+            "/api/screen/tile/present?enabled=true&vsync_mode=adaptive",
+            &[],
+        )
+        .await
+        .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/tile/present")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTilePresentReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 7. Security guard: Host header 403 on /api/screen/tile/present
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/tile/present HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_tile_nack_endpoints() {
+        let (node, dir) =
+            temp_test_node_with_source("screen_tile_nack", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/tile/nack default state
+        let (code, body) = loopback_get(port, "/api/screen/tile/nack").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileNackReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(rep.timeout_ms, 20);
+        assert_eq!(rep.max_retries, 2);
+        assert_eq!(rep.nack_requests_sent, 0);
+        assert_eq!(rep.tiles_retransmitted, 0);
+        assert_eq!(rep.degraded_commits, 0);
+
+        // 2. POST /api/screen/tile/nack enables tile nack mode
+        let req = serde_json::json!({
+            "enabled": true,
+            "timeout_ms": 30,
+            "max_retries": 3
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/nack",
+            &serde_json::to_vec(&req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileNackReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.timeout_ms, 30);
+        assert_eq!(rep.max_retries, 3);
+
+        // 3. Verify /api/screen status includes tile nack telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.tile_nack_enabled);
+        assert_eq!(status.tile_nack_timeout_ms, 30);
+        assert_eq!(status.tile_nack_max_retries, 3);
+        assert_eq!(status.tile_nack_requests_sent, 0);
+        assert_eq!(status.tile_nack_tiles_retransmitted, 0);
+        assert_eq!(status.tile_nack_degraded_commits, 0);
+
+        // 4. POST /api/screen/tile/nack with query parameters
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/nack?enabled=true&timeout_ms=50&max_retries=5",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileNackReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.timeout_ms, 50);
+        assert_eq!(rep.max_retries, 5);
+
+        // 5. POST /api/screen/tile/nack/reset restores default state
+        let (code, body) = loopback_post(port, "/api/screen/tile/nack/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileNackReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(rep.timeout_ms, 20);
+        assert_eq!(rep.max_retries, 2);
+
+        // 6. DELETE /api/screen/tile/nack also resets
+        let _ = loopback_post(
+            port,
+            "/api/screen/tile/nack?enabled=true&timeout_ms=40",
+            &[],
+        )
+        .await
+        .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/tile/nack")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileNackReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 7. Security guard: Host header 403 on /api/screen/tile/nack
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/tile/nack HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_tile_saliency_endpoints() {
+        let (node, dir) =
+            temp_test_node_with_source("screen_tile_saliency", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/tile/saliency reports default state
+        let (code, body) = loopback_get(port, "/api/screen/tile/saliency")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileSaliencyReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(rep.high_threshold, 120);
+        assert_eq!(rep.low_threshold, 40);
+        assert!(rep.drop_background_on_congestion);
+        assert_eq!(rep.critical_tiles_sent, 0);
+        assert_eq!(rep.normal_tiles_sent, 0);
+        assert_eq!(rep.background_tiles_sent, 0);
+        assert_eq!(rep.background_tiles_skipped, 0);
+
+        // 2. POST /api/screen/tile/saliency enables tile saliency mode
+        let req = serde_json::json!({
+            "enabled": true,
+            "high_threshold": 130,
+            "low_threshold": 50,
+            "drop_background_on_congestion": true
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/saliency",
+            &serde_json::to_vec(&req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileSaliencyReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.high_threshold, 130);
+        assert_eq!(rep.low_threshold, 50);
+        assert!(rep.drop_background_on_congestion);
+
+        // 3. Verify /api/screen status includes tile saliency telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.tile_saliency_enabled);
+        assert_eq!(status.tile_saliency_high_threshold, 130);
+        assert_eq!(status.tile_saliency_low_threshold, 50);
+        assert!(status.tile_saliency_drop_background_on_congestion);
+        assert_eq!(status.tile_saliency_critical_tiles, 0);
+        assert_eq!(status.tile_saliency_normal_tiles, 0);
+        assert_eq!(status.tile_saliency_background_tiles, 0);
+        assert_eq!(status.tile_saliency_background_skipped, 0);
+
+        // 4. POST /api/screen/tile/saliency with query parameters
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/saliency?enabled=true&high_threshold=150&low_threshold=60&drop_background=false",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileSaliencyReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.high_threshold, 150);
+        assert_eq!(rep.low_threshold, 60);
+        assert!(!rep.drop_background_on_congestion);
+
+        // 5. POST /api/screen/tile/saliency/reset restores default state
+        let (code, body) = loopback_post(port, "/api/screen/tile/saliency/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileSaliencyReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(rep.high_threshold, 120);
+        assert_eq!(rep.low_threshold, 40);
+        assert!(rep.drop_background_on_congestion);
+
+        // 6. DELETE /api/screen/tile/saliency also resets
+        let _ = loopback_post(
+            port,
+            "/api/screen/tile/saliency?enabled=true&high_threshold=140",
+            &[],
+        )
+        .await
+        .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/tile/saliency")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileSaliencyReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 7. Security guard: Host header 403 on /api/screen/tile/saliency
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/tile/saliency HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_tile_lod_endpoints() {
+        let (node, dir) =
+            temp_test_node_with_source("screen_tile_lod", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/tile/lod reports default state
+        let (code, body) = loopback_get(port, "/api/screen/tile/lod").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileLodReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(rep.max_lod, 1);
+        assert!(rep.auto_lod_on_congestion);
+        assert_eq!(rep.lod0_tiles_sent, 0);
+        assert_eq!(rep.lod1_tiles_sent, 0);
+        assert_eq!(rep.lod2_tiles_sent, 0);
+        assert_eq!(rep.bytes_saved, 0);
+
+        // 2. POST /api/screen/tile/lod enables tile LoD mode
+        let req = serde_json::json!({
+            "enabled": true,
+            "max_lod": 2,
+            "auto_lod_on_congestion": false
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/lod",
+            &serde_json::to_vec(&req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileLodReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.max_lod, 2);
+        assert!(!rep.auto_lod_on_congestion);
+
+        // 3. Verify /api/screen status includes tile LoD telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.tile_lod_enabled);
+        assert_eq!(status.tile_lod_max_lod, 2);
+        assert!(!status.tile_lod_auto_lod_on_congestion);
+        assert_eq!(status.tile_lod0_tiles, 0);
+        assert_eq!(status.tile_lod1_tiles, 0);
+        assert_eq!(status.tile_lod2_tiles, 0);
+        assert_eq!(status.tile_lod_bytes_saved, 0);
+
+        // 4. POST /api/screen/tile/lod with query parameters
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/lod?enabled=true&max_lod=1&auto_lod=true",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileLodReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.max_lod, 1);
+        assert!(rep.auto_lod_on_congestion);
+
+        // 5. POST /api/screen/tile/lod/reset restores default state
+        let (code, body) = loopback_post(port, "/api/screen/tile/lod/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileLodReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(rep.max_lod, 1);
+        assert!(rep.auto_lod_on_congestion);
+
+        // 6. DELETE /api/screen/tile/lod also resets
+        let _ = loopback_post(port, "/api/screen/tile/lod?enabled=true&max_lod=2", &[])
+            .await
+            .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/tile/lod").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileLodReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 7. Security guard: Host header 403 on /api/screen/tile/lod
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/tile/lod HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_tile_batch_endpoints() {
+        let (node, dir) =
+            temp_test_node_with_source("screen_tile_batch", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/tile/batch reports default state
+        let (code, body) = loopback_get(port, "/api/screen/tile/batch").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileBatchReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(rep.target_chunk_bytes, 1200);
+        assert_eq!(rep.pacing_interval_us, 200);
+        assert_eq!(rep.batches_sent, 0);
+        assert_eq!(rep.chunks_sent, 0);
+        assert_eq!(rep.avg_chunk_bytes, 0);
+        assert_eq!(rep.pacing_pauses, 0);
+
+        // 2. POST /api/screen/tile/batch enables batch mode with JSON body
+        let req = serde_json::json!({
+            "enabled": true,
+            "target_chunk_bytes": 1400,
+            "pacing_interval_us": 100
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/batch",
+            &serde_json::to_vec(&req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileBatchReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.target_chunk_bytes, 1400);
+        assert_eq!(rep.pacing_interval_us, 100);
+
+        // 3. Verify /api/screen status includes tile batch telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.tile_batch_enabled);
+        assert_eq!(status.tile_batch_target_chunk_bytes, 1400);
+        assert_eq!(status.tile_batch_pacing_interval_us, 100);
+        assert_eq!(status.tile_batches_sent, 0);
+        assert_eq!(status.tile_chunks_sent, 0);
+        assert_eq!(status.tile_batch_avg_chunk_bytes, 0);
+        assert_eq!(status.tile_batch_pacing_pauses, 0);
+
+        // 4. POST /api/screen/tile/batch with query parameters
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/batch?enabled=true&chunk_bytes=800&pacing=300",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileBatchReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.target_chunk_bytes, 800);
+        assert_eq!(rep.pacing_interval_us, 300);
+
+        // 5. POST /api/screen/tile/batch/reset restores default state
+        let (code, body) = loopback_post(port, "/api/screen/tile/batch/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileBatchReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(rep.target_chunk_bytes, 1200);
+        assert_eq!(rep.pacing_interval_us, 200);
+
+        // 6. DELETE /api/screen/tile/batch also resets
+        let _ = loopback_post(
+            port,
+            "/api/screen/tile/batch?enabled=true&chunk_bytes=900",
+            &[],
+        )
+        .await
+        .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/tile/batch")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileBatchReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 7. Test alias /api/screen/batch
+        let (code, body) = loopback_get(port, "/api/screen/batch").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileBatchReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 8. Security guard: Host header 403 on /api/screen/tile/batch
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/tile/batch HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_screen_tile_motion_endpoints() {
+        let (node, dir) =
+            temp_test_node_with_source("screen_tile_motion", Arc::new(EmptyScreenSource));
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/screen/tile/motion reports default state
+        let (code, body) = loopback_get(port, "/api/screen/tile/motion").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileMotionReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.ok);
+        assert!(!rep.enabled);
+        assert_eq!(rep.max_displacement, 32);
+        assert_eq!(rep.min_match_ratio, 90);
+        assert_eq!(rep.motion_tiles_sent, 0);
+        assert_eq!(rep.fallback_tiles_sent, 0);
+        assert_eq!(rep.bytes_saved, 0);
+
+        // 2. POST /api/screen/tile/motion enables motion estimation with JSON body
+        let req = serde_json::json!({
+            "enabled": true,
+            "max_displacement": 64,
+            "min_match_ratio": 95
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/motion",
+            &serde_json::to_vec(&req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileMotionReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.max_displacement, 64);
+        assert_eq!(rep.min_match_ratio, 95);
+
+        // 3. Verify /api/screen status includes tile motion telemetry
+        let (code, body) = loopback_get(port, "/api/screen").await.unwrap();
+        assert_eq!(code, 200);
+        let status: crate::runtime::ScreenStatusReport = serde_json::from_slice(&body).unwrap();
+        assert!(status.tile_motion_enabled);
+        assert_eq!(status.tile_motion_max_displacement, 64);
+        assert_eq!(status.tile_motion_min_match_ratio, 95);
+        assert_eq!(status.tile_motion_tiles_sent, 0);
+        assert_eq!(status.tile_motion_fallback_tiles_sent, 0);
+        assert_eq!(status.tile_motion_bytes_saved, 0);
+
+        // 4. POST /api/screen/tile/motion with query parameters
+        let (code, body) = loopback_post(
+            port,
+            "/api/screen/tile/motion?enabled=true&max_disp=48&ratio=85",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileMotionReport = serde_json::from_slice(&body).unwrap();
+        assert!(rep.enabled);
+        assert_eq!(rep.max_displacement, 48);
+        assert_eq!(rep.min_match_ratio, 85);
+
+        // 5. POST /api/screen/tile/motion/reset restores default state
+        let (code, body) = loopback_post(port, "/api/screen/tile/motion/reset", &[])
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileMotionReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+        assert_eq!(rep.max_displacement, 32);
+        assert_eq!(rep.min_match_ratio, 90);
+
+        // 6. DELETE /api/screen/tile/motion also resets
+        let _ = loopback_post(
+            port,
+            "/api/screen/tile/motion?enabled=true&max_disp=50",
+            &[],
+        )
+        .await
+        .unwrap();
+        let (code, body) = loopback_delete(port, "/api/screen/tile/motion")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: tetherly_core::ScreenTileMotionReport = serde_json::from_slice(&body).unwrap();
+        assert!(!rep.enabled);
+
+        // 7. Security guard: Host header 403 on /api/screen/tile/motion
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/screen/tile/motion HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2329,6 +2329,1733 @@ enum ScreenCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Control in-container screen session playback from a recorded TREC container (v2.16 / ADR-102).
+    Playback {
+        #[command(subcommand)]
+        action: Option<ScreenPlaybackSubCmd>,
+        /// Path to the .trec container file to play.
+        #[arg(long)]
+        path: Option<String>,
+        /// Playback speed multiplier (e.g. 1.0 = real-time, 0.0 = zero wait test mode).
+        #[arg(long)]
+        speed: Option<f32>,
+        /// Automatically rewind and loop when end of recording is reached.
+        #[arg(long)]
+        r#loop: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Extract a live static snapshot of the screen stream and optionally save as a standard Top-Down BMP image (v2.17 / ADR-103).
+    Snapshot {
+        /// Optional destination path on the host node filesystem to save the BMP image (e.g. ./snapshot.bmp).
+        #[arg(long)]
+        out: Option<String>,
+        /// Snapshot format: "bmp" (default) or "raw".
+        #[arg(long, default_value = "bmp")]
+        format: String,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Dynamic security watermark and forensic attribution overlay (v2.18 / ADR-104).
+    Watermark {
+        #[command(subcommand)]
+        action: Option<ScreenWatermarkSubCmd>,
+        /// Text template with dynamic placeholders ({peer}, {host}, {time}).
+        #[arg(long)]
+        text: Option<String>,
+        /// Host-enforced lockdown: visitors cannot disable watermark overlays.
+        #[arg(long)]
+        host_enforced: bool,
+        /// Watermark opacity alpha (0..=255, default: 64 / 25%).
+        #[arg(long)]
+        opacity: Option<u8>,
+        /// Watermark text color in hex format (e.g. #DCDCDC, #FF8000).
+        #[arg(long)]
+        color: Option<String>,
+        /// Font scaling multiplier (1 or 2).
+        #[arg(long)]
+        scale: Option<u8>,
+        /// Layout pattern: 'grid' (tiled), 'single' (centered), or 'banner'.
+        #[arg(long)]
+        pattern: Option<String>,
+        /// Horizontal spacing between tiles in pixels (min: 40, default: 240).
+        #[arg(long)]
+        spacing_x: Option<u16>,
+        /// Vertical spacing between tiles in pixels (min: 30, default: 160).
+        #[arg(long)]
+        spacing_y: Option<u16>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Collaborative whiteboard annotation and geometric overlays (v2.19 / ADR-105).
+    Annotate {
+        #[command(subcommand)]
+        action: Option<ScreenAnnotateSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Transient virtual laser pointer spotlight (v2.19 / ADR-105).
+    Laser {
+        /// X pixel coordinate.
+        #[arg(value_name = "X")]
+        x: Option<u16>,
+        /// Y pixel coordinate.
+        #[arg(value_name = "Y")]
+        y: Option<u16>,
+        /// Laser pointer color in hex format (e.g. #FF0000).
+        #[arg(long)]
+        color: Option<String>,
+        /// Laser spotlight radius in pixels (default: 12).
+        #[arg(long)]
+        radius: Option<u8>,
+        /// Turn laser pointer off.
+        #[arg(long)]
+        off: bool,
+        /// Show laser status only.
+        #[arg(long)]
+        status: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Multi-party collaborative shared whiteboard synchronization, chronological undo/redo & snapshot import/export (v2.20 / ADR-106).
+    Whiteboard {
+        #[command(subcommand)]
+        action: Option<ScreenWhiteboardSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Dynamic Region-of-Interest (ROI) viewport cropping, sub-rectangle zoom & pan (v2.21 / ADR-107).
+    Roi {
+        #[command(subcommand)]
+        action: Option<ScreenRoiSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Adaptive color depth, grayscale economy & dynamic monochrome binarization pipeline (v2.22 / ADR-108).
+    Color {
+        #[command(subcommand)]
+        action: Option<ScreenColorSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Dynamic differential delta patch, inter-frame temporal compression & macroblock cache pipeline (v2.23 / ADR-109).
+    Delta {
+        #[command(subcommand)]
+        action: Option<ScreenDeltaSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Real-time objective visual quality metric, PSNR/SSIM distortion profiling & QA pipeline (v2.24 / ADR-110).
+    Metric {
+        #[command(subcommand)]
+        action: Option<ScreenMetricSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Autonomous closed-loop QoE adaptation, perceptual visual quality stream coordination pipeline (v2.25 / ADR-111).
+    Qoe {
+        #[command(subcommand)]
+        action: Option<ScreenQoeSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Progressive Intra-Refresh (PIR), anti-burst band slice smoothing stream pipeline (v2.26 / ADR-112).
+    Pir {
+        #[command(subcommand)]
+        action: Option<ScreenPirSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Long-Term Reference (LTR) frame anchoring, gap recovery, and reference picture selection pipeline (v2.27 / ADR-113).
+    Ltr {
+        #[command(subcommand)]
+        action: Option<ScreenLtrSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// 2-Layer Temporal Scalability (SVC-T) hierarchical reference, leaf-layer degradation, and congestion resilience pipeline (v2.28 / ADR-114).
+    Svc {
+        #[command(subcommand)]
+        action: Option<ScreenSvcSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// 2D Motion Vector Estimation, Displacement Compensation and Scroll Acceleration Pipeline (v2.29 / ADR-115).
+    Motion {
+        #[command(subcommand)]
+        action: Option<ScreenMotionSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Spatial Tile-Grid Decomposition and Independent Asynchronous Tile Streaming Pipeline (v2.30 / ADR-116).
+    Tile {
+        #[command(subcommand)]
+        action: Option<ScreenTileSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Screen Streaming Hash-Based Tile Deduplication & LRU Cache Pipeline (v2.31 / ADR-117).
+    TileCache {
+        #[command(subcommand)]
+        action: Option<ScreenTileCacheSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Screen Streaming Foveated Focus Awareness & Spatial Region-Priority Scheduling Pipeline (v2.32 / ADR-118).
+    Focus {
+        #[command(subcommand)]
+        action: Option<ScreenFocusSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Screen Streaming Tile-Level Adaptive Palette & Hybrid Lossless Compression Pipeline (v2.33 / ADR-119).
+    TilePalette {
+        #[command(subcommand)]
+        action: Option<ScreenTilePaletteSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Screen Streaming Tile-Level Predictive Filter & Reversible Color Transform Pipeline (v2.34 / ADR-120).
+    TilePredict {
+        #[command(subcommand)]
+        action: Option<ScreenTilePredictSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage tile-level predictive filter & reversible color transform pipeline (alias for screen tile predict) (v2.34 / ADR-120).
+    Predict {
+        #[command(subcommand)]
+        action: Option<ScreenTilePredictSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Screen Streaming Tile-Level Atomic Presentation Transaction, Double-Buffered Front-Swap & Anti-Tearing Pipeline (v2.35 / ADR-121).
+    TilePresent {
+        #[command(subcommand)]
+        action: Option<ScreenTilePresentSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage tile-level atomic presentation transaction & anti-tearing pipeline (alias for screen tile present) (v2.35 / ADR-121).
+    Present {
+        #[command(subcommand)]
+        action: Option<ScreenTilePresentSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Screen Streaming Tile Fast Retransmission & Micro-NACK Pipeline (v2.36 / ADR-122).
+    TileNack {
+        #[command(subcommand)]
+        action: Option<ScreenTileNackSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage tile fast retransmission and micro-NACK self-healing pipeline (alias for screen tile nack) (v2.36 / ADR-122).
+    Nack {
+        #[command(subcommand)]
+        action: Option<ScreenTileNackSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Screen Streaming Dynamic Tile Saliency & Priority Scheduling Pipeline (v2.37 / ADR-123).
+    TileSaliency {
+        #[command(subcommand)]
+        action: Option<ScreenTileSaliencySubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage dynamic tile saliency & priority scheduling (alias for screen tile saliency) (v2.37 / ADR-123).
+    Saliency {
+        #[command(subcommand)]
+        action: Option<ScreenTileSaliencySubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Screen Streaming Dynamic Tile Level-of-Detail Downsampling & Progressive Reconstruction Pipeline (v2.38 / ADR-124).
+    TileLod {
+        #[command(subcommand)]
+        action: Option<ScreenTileLodSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Screen Streaming Dynamic Tile Batching, MTU Chunking & Coalesced Pacing Pipeline (v2.39 / ADR-125).
+    TileBatch {
+        #[command(subcommand)]
+        action: Option<ScreenTileBatchSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Screen Streaming Dynamic Tile Local Motion Vector Estimation & Inter-Tile Displacement Compensation Pipeline (v2.40 / ADR-126).
+    TileMotion {
+        #[command(subcommand)]
+        action: Option<ScreenTileMotionSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage dynamic tile batching and MTU chunking pipeline (alias for screen tile batch) (v2.39 / ADR-125).
+    Batch {
+        #[command(subcommand)]
+        action: Option<ScreenTileBatchSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage dynamic tile Level-of-Detail downsampling (alias for screen tile lod) (v2.38 / ADR-124).
+    Lod {
+        #[command(subcommand)]
+        action: Option<ScreenTileLodSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenTileSubCmd {
+    /// Show current screen spatial tile-grid mode and streaming statistics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen spatial tile-grid decomposition mode and tile size.
+    Set {
+        /// Enable spatial tile-grid streaming (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Tile grid dimension size in pixels (32..=256, default 64).
+        #[arg(long)]
+        tile_size: Option<u16>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen spatial tile-grid streaming back to default disabled state and reset metrics.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage tile dictionary cache (status, set, reset) (v2.31 / ADR-117).
+    Cache {
+        #[command(subcommand)]
+        action: Option<ScreenTileCacheSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage foveated focus awareness and spatial priority scheduling (v2.32 / ADR-118).
+    Focus {
+        #[command(subcommand)]
+        action: Option<ScreenFocusSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage tile-level adaptive palette compression (v2.33 / ADR-119).
+    Palette {
+        #[command(subcommand)]
+        action: Option<ScreenTilePaletteSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage tile-level predictive filter & reversible color transform pipeline (v2.34 / ADR-120).
+    Predict {
+        #[command(subcommand)]
+        action: Option<ScreenTilePredictSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage tile presentation transaction and anti-tearing v-sync pipeline (v2.35 / ADR-121).
+    Present {
+        #[command(subcommand)]
+        action: Option<ScreenTilePresentSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage tile fast retransmission and micro-NACK self-healing pipeline (v2.36 / ADR-122).
+    Nack {
+        #[command(subcommand)]
+        action: Option<ScreenTileNackSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage dynamic tile saliency awareness & priority scheduling (v2.37 / ADR-123).
+    Saliency {
+        #[command(subcommand)]
+        action: Option<ScreenTileSaliencySubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage dynamic tile Level-of-Detail downsampling & reconstruction pipeline (v2.38 / ADR-124).
+    Lod {
+        #[command(subcommand)]
+        action: Option<ScreenTileLodSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage dynamic tile batching, MTU chunking and pacing pipeline (v2.39 / ADR-125).
+    Batch {
+        #[command(subcommand)]
+        action: Option<ScreenTileBatchSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manage dynamic tile local motion vector estimation & inter-tile displacement compensation pipeline (v2.40 / ADR-126).
+    Motion {
+        #[command(subcommand)]
+        action: Option<ScreenTileMotionSubCmd>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenTileMotionSubCmd {
+    /// Show current screen dynamic tile local motion vector estimation & displacement compensation status and metrics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen dynamic tile local motion vector estimation, search displacement, and match ratio.
+    Set {
+        /// Enable dynamic tile local motion vector estimation (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Maximum local motion search window displacement in pixels (4..=128, default 32).
+        #[arg(long)]
+        max_displacement: Option<u16>,
+        /// Minimum pixel match ratio threshold percentage (50..=100, default 90).
+        #[arg(long)]
+        min_match_ratio: Option<u8>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen dynamic tile local motion vector estimation configuration back to default and reset metrics.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenTileBatchSubCmd {
+    /// Show current screen dynamic tile batching & MTU chunking status and metrics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen dynamic tile batching, target chunk bytes, and pacing interval.
+    Set {
+        /// Enable dynamic tile batching and MTU chunking (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Target maximum chunk payload bytes (512..=64000, default 1200).
+        #[arg(long)]
+        target_chunk_bytes: Option<u16>,
+        /// Pacing interval in microseconds between chunk transmissions (0..=50000, default 200).
+        #[arg(long)]
+        pacing_interval_us: Option<u16>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen dynamic tile batching configuration back to default and reset metrics.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenTileLodSubCmd {
+    /// Show current screen tile Level-of-Detail downsampling status and metrics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen tile Level-of-Detail downsampling mode and policies.
+    Set {
+        /// Enable tile Level-of-Detail downsampling (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Maximum downsampling LoD level: 1 (Lod1, 32x32) or 2 (Lod2, 16x16).
+        #[arg(long)]
+        max_lod: Option<u8>,
+        /// Automatically downsample low-priority tiles during network congestion (true/false, default true).
+        #[arg(long)]
+        auto_lod: Option<bool>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen tile Level-of-Detail mode to default disabled state and reset metrics.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenTileSaliencySubCmd {
+    /// Show current screen tile saliency awareness & tiered priority scheduling status and metrics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen tile saliency thresholds and congestion dropping policy.
+    Set {
+        /// Enable tile saliency awareness & tiered priority scheduling (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// High saliency threshold for Critical tier (0..=255, default 120).
+        #[arg(long)]
+        high_threshold: Option<u8>,
+        /// Low saliency threshold for Normal tier (0..=255, default 40).
+        #[arg(long)]
+        low_threshold: Option<u8>,
+        /// Drop low-saliency background tiles during network congestion (true/false, default true).
+        #[arg(long)]
+        drop_background: Option<bool>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen tile saliency mode to default disabled state and reset metrics.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenTileNackSubCmd {
+    /// Show current screen tile micro-NACK fast retransmission status and metrics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen tile micro-NACK fast retransmission and self-healing parameters.
+    Set {
+        /// Enable tile micro-NACK fast retransmission (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Retransmission timeout window in milliseconds (default 20ms).
+        #[arg(long)]
+        timeout_ms: Option<u16>,
+        /// Maximum retransmission retries before degraded commit (default 2).
+        #[arg(long)]
+        max_retries: Option<u8>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen tile micro-NACK mode to default disabled state and reset metrics.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenTilePresentSubCmd {
+    /// Show current screen tile presentation transaction, double-buffer & anti-tearing status and metrics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen tile presentation transaction and anti-tearing v-sync mode.
+    Set {
+        /// Enable tile presentation transaction pipeline (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Vertical sync pacing mode (off, vsync60, vsync120, adaptive / 0..=3).
+        #[arg(long)]
+        vsync_mode: Option<String>,
+        /// Enable double-buffered back-staging (true/false).
+        #[arg(long)]
+        double_buffer: Option<bool>,
+        /// Enable anti-tearing multi-tile swap protection (true/false).
+        #[arg(long)]
+        tear_prevention: Option<bool>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen tile presentation mode to default disabled state and reset metrics.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenTilePredictSubCmd {
+    /// Show current screen tile-level predictive filter & RCT status and metrics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen tile-level predictive filter and reversible color transform mode.
+    Set {
+        /// Enable tile-level predictive filter pipeline (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Directional spatial filter mode (none, sub, up, average, paeth, auto / 0..=5).
+        #[arg(long)]
+        filter_mode: Option<String>,
+        /// Enable Reversible Color Transform (RCT) for inter-channel decorrelation (true/false).
+        #[arg(long)]
+        enable_rct: Option<bool>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen tile-level predictive filter & RCT to default disabled state and reset metrics.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenTilePaletteSubCmd {
+    /// Show current screen tile-level adaptive palette compression status and metrics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen tile-level adaptive palette compression mode and parameters.
+    Set {
+        /// Enable tile-level adaptive palette compression (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Maximum distinct colors for palette mode (2..=16, default 16).
+        #[arg(long)]
+        max_colors: Option<u8>,
+        /// Enable run-length encoding for bi-level and palette bitmaps.
+        #[arg(long)]
+        enable_rle: Option<bool>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen tile-level adaptive palette compression to default disabled state and reset metrics.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenFocusSubCmd {
+    /// Show current screen foveated focus mode, radius, decimation ratio, and streaming metrics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen foveated focus awareness mode, radius, and peripheral decimation skip ratio.
+    Set {
+        /// Enable foveated focus scheduling (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Focus tracking mode: 'cursor' (hardware mouse) or 'box' (static rectangle).
+        #[arg(long)]
+        mode: Option<String>,
+        /// Focus zone radius in pixels (64..=2048, default 256).
+        #[arg(long)]
+        radius: Option<u16>,
+        /// Peripheral decimation skip ratio (0..=10, default 2: update every 3 frames).
+        #[arg(long)]
+        skip_ratio: Option<u8>,
+        /// Static focus box X offset (Box mode).
+        #[arg(long)]
+        box_x: Option<u16>,
+        /// Static focus box Y offset (Box mode).
+        #[arg(long)]
+        box_y: Option<u16>,
+        /// Static focus box width (Box mode).
+        #[arg(long)]
+        box_w: Option<u16>,
+        /// Static focus box height (Box mode).
+        #[arg(long)]
+        box_h: Option<u16>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen foveated focus streaming back to default disabled state and reset metrics.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenTileCacheSubCmd {
+    /// Show current screen tile dictionary cache mode, hit ratio, and bandwidth savings.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen tile dictionary cache mode and capacity.
+    Set {
+        /// Enable tile dictionary cache (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Maximum cache dictionary entries (64..=4096, default 512).
+        #[arg(long)]
+        max_entries: Option<u16>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen tile dictionary cache back to default disabled state and purge entries.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenMotionSubCmd {
+    /// Show current screen 2D motion estimation mode and scroll acceleration statistics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen 2D motion estimation mode and maximum displacement search radius.
+    Set {
+        /// Enable motion estimation acceleration (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Maximum displacement search radius in pixels (8..=256, default 64).
+        #[arg(long)]
+        max_displacement: Option<u16>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen 2D motion estimation back to default disabled state and reset metrics.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenSvcSubCmd {
+    /// Show current screen Temporal Scalability (SVC-T) configuration, mode, and frame statistics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen Temporal Scalability (SVC-T) mode and T1 frame drop policy.
+    Set {
+        /// SVC operation mode: disabled, adaptive, or base_only.
+        #[arg(long)]
+        mode: Option<String>,
+        /// Explicitly drop enhancement layer T1 frames (true/false).
+        #[arg(long)]
+        drop_t1: Option<bool>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Toggle or set enhancement layer T1 frame dropping for instantaneous congestion relief.
+    DropT1 {
+        /// Drop T1 frames flag (true/false, default true).
+        #[arg(long)]
+        drop: Option<bool>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen SVC configuration back to default disabled state and reset telemetry.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenLtrSubCmd {
+    /// Show current screen Long-Term Reference (LTR) configuration and metrics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen Long-Term Reference (LTR) mode and auto-anchor interval.
+    Set {
+        /// Enable or disable LTR frame anchoring pipeline (true/false).
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Periodic auto-anchor interval in frames (5..=600, default 60).
+        #[arg(long)]
+        interval: Option<u16>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Manually trigger an explicit golden reference frame anchor snapshot.
+    Anchor {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Trigger an instant LTR differential recovery request against current golden reference.
+    Recover {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen LTR configuration back to default disabled state and purge golden reference canvases.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenPirSubCmd {
+    /// Show current screen Progressive Intra-Refresh (PIR) mode, band count and slice telemetry.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen Progressive Intra-Refresh (PIR) mode and band slices.
+    Set {
+        /// Operating mode (disabled, continuous, on-demand).
+        #[arg(long)]
+        mode: String,
+        /// Number of horizontal band slices (2..=32, default 8).
+        #[arg(long)]
+        bands: Option<u8>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen Progressive Intra-Refresh (PIR) back to default disabled state and clear sweep progress.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenQoeSubCmd {
+    /// Show current screen autonomous QoE closed-loop adaptation mode, targets and action decisions.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen autonomous QoE closed-loop policy mode and target distortion thresholds.
+    Set {
+        /// Policy mode (conservative, balanced, economy, off).
+        #[arg(long)]
+        mode: String,
+        /// Target PSNR threshold in dB (e.g. 30 dB).
+        #[arg(long)]
+        target_psnr: Option<u8>,
+        /// Target SSIM threshold in percentage (e.g. 85 for 0.85).
+        #[arg(long)]
+        target_ssim: Option<u8>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen autonomous QoE closed-loop adaptation back to default disabled state and clear history.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenMetricSubCmd {
+    /// Show current screen quality metric mode, sample interval and PSNR/SSIM telemetry.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen objective quality metric mode and sample interval.
+    Set {
+        /// Enable or disable real-time objective visual quality metric profiling.
+        #[arg(long)]
+        enabled: bool,
+        /// Sampling frame interval for distortion computation (1..120, default 10).
+        #[arg(long)]
+        interval: Option<u8>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen quality metric pipeline back to default disabled state and clear metrics.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenDeltaSubCmd {
+    /// Show current screen delta patch mode, keyframe interval and bandwidth savings telemetry.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure screen differential delta patch mode and keyframe interval.
+    Set {
+        /// Enable or disable dynamic differential delta patch mode.
+        #[arg(long)]
+        enabled: bool,
+        /// Keyframe refresh interval in frames (1..600, default 60).
+        #[arg(long)]
+        interval: Option<u16>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen delta patch pipeline back to default full-frame transmission.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenColorSubCmd {
+    /// Show current screen adaptive color depth mode, threshold and telemetry.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Set screen adaptive color mode and optional binarization threshold.
+    Set {
+        /// Color depth mode: full (32-bit), reduced (16-bit RGB565), grayscale (8-bit), monochrome (1-bit B&W).
+        #[arg(long)]
+        mode: String,
+        /// Optional binarization threshold for monochrome mode (1..254, default 128).
+        #[arg(long)]
+        threshold: Option<u8>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset screen color mode back to native 32-bit full true color.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenRoiSubCmd {
+    /// Show current Screen ROI viewport status, dimensions and zoom scale.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Set dynamic Region-of-Interest viewport bounds and optional zoom scale.
+    Set {
+        /// X coordinate of top-left viewport corner.
+        #[arg(long)]
+        x: u16,
+        /// Y coordinate of top-left viewport corner.
+        #[arg(long)]
+        y: u16,
+        /// Width of viewport in pixels.
+        #[arg(long)]
+        w: u16,
+        /// Height of viewport in pixels.
+        #[arg(long)]
+        h: u16,
+        /// Optional zoom percentage (50%~800%).
+        #[arg(long)]
+        zoom: Option<u16>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Reset Region-of-Interest to full screen capture and streaming.
+    Reset {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Dynamically adjust Region-of-Interest zoom percentage (50%~800%).
+    Zoom {
+        /// Zoom percentage (e.g. 100, 150, 200).
+        percent: u16,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenWhiteboardSubCmd {
+    /// Show current whiteboard status, active item count and policy.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Chronologically undo the most recent whiteboard annotation (optionally targeted by author).
+    Undo {
+        /// Optional author filter (e.g. "alice"). If omitted, undos the globally latest annotation.
+        #[arg(long)]
+        author: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Chronologically redo the most recently undone annotation (optionally targeted by author).
+    Redo {
+        /// Optional author filter (e.g. "alice"). If omitted, redos the globally latest undone item.
+        #[arg(long)]
+        author: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Export active whiteboard annotations to a structured JSON snapshot file or stdout.
+    Export {
+        /// Optional destination file path to save snapshot (.twhiteboard or .json).
+        #[arg(long)]
+        out: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Import whiteboard annotations from a snapshot file.
+    Import {
+        /// Source file path (.twhiteboard or .json).
+        path: String,
+        /// Replace active canvas items instead of appending.
+        #[arg(long)]
+        replace: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Inspect or configure host whiteboard moderation policy (read-only, clear permissions, max items).
+    Policy {
+        /// Set read-only policy for guests/peers (true/false).
+        #[arg(long)]
+        read_only: Option<bool>,
+        /// Allow peers/guests to clear the whiteboard canvas (true/false).
+        #[arg(long)]
+        allow_clear: Option<bool>,
+        /// Maximum number of active whiteboard items allowed.
+        #[arg(long)]
+        max_items: Option<u16>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Clear all active annotations from the whiteboard canvas.
+    Clear {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenAnnotateSubCmd {
+    /// List all active screen whiteboard annotations.
+    List {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Add a new annotation (stroke, rect, arrow, text).
+    Add {
+        #[command(subcommand)]
+        shape: ScreenAnnotateShapeSubCmd,
+    },
+    /// Clear all active screen whiteboard annotations.
+    Clear {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenAnnotateShapeSubCmd {
+    /// Freehand polyline stroke: --points x1,y1;x2,y2;...
+    Stroke {
+        /// Points in x1,y1;x2,y2;... format.
+        #[arg(long)]
+        points: String,
+        /// Author / collaborator identifier (e.g. "alice").
+        #[arg(long)]
+        author: Option<String>,
+        /// Stroke color in hex format (default: #FF0000).
+        #[arg(long)]
+        color: Option<String>,
+        /// Stroke thickness in pixels (default: 3).
+        #[arg(long)]
+        thickness: Option<u8>,
+        /// Alpha opacity (0..=255, default: 255).
+        #[arg(long)]
+        alpha: Option<u8>,
+        /// Auto-fadeout TTL in milliseconds (0: persistent).
+        #[arg(long)]
+        ttl: Option<u32>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Rectangle bounding box: --x <x> --y <y> --w <w> --h <h>
+    Rect {
+        #[arg(long)]
+        x: u16,
+        #[arg(long)]
+        y: u16,
+        #[arg(long)]
+        w: u16,
+        #[arg(long)]
+        h: u16,
+        /// Author / collaborator identifier (e.g. "alice").
+        #[arg(long)]
+        author: Option<String>,
+        /// Box border color in hex format (default: #00FF00).
+        #[arg(long)]
+        color: Option<String>,
+        /// Border thickness in pixels (default: 2).
+        #[arg(long)]
+        thickness: Option<u8>,
+        /// Alpha opacity (0..=255, default: 255).
+        #[arg(long)]
+        alpha: Option<u8>,
+        /// Auto-fadeout TTL in milliseconds (0: persistent).
+        #[arg(long)]
+        ttl: Option<u32>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Guiding arrow pointer: --from x1,y1 --to x2,y2
+    Arrow {
+        /// Origin coordinate in x,y format.
+        #[arg(long)]
+        from: String,
+        /// Arrow target coordinate in x,y format.
+        #[arg(long)]
+        to: String,
+        /// Author / collaborator identifier (e.g. "alice").
+        #[arg(long)]
+        author: Option<String>,
+        /// Arrow color in hex format (default: #FFCC00).
+        #[arg(long)]
+        color: Option<String>,
+        /// Shaft thickness in pixels (default: 3).
+        #[arg(long)]
+        thickness: Option<u8>,
+        /// Alpha opacity (0..=255, default: 255).
+        #[arg(long)]
+        alpha: Option<u8>,
+        /// Auto-fadeout TTL in milliseconds (0: persistent).
+        #[arg(long)]
+        ttl: Option<u32>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Text note overlay: <text> --x <x> --y <y> [--scale 1|2]
+    Text {
+        /// Text message to render.
+        #[arg(value_name = "TEXT")]
+        text: String,
+        #[arg(long)]
+        x: u16,
+        #[arg(long)]
+        y: u16,
+        /// Author / collaborator identifier (e.g. "alice").
+        #[arg(long)]
+        author: Option<String>,
+        /// Text scale factor (1: 8x8 px, 2: 16x16 px, default: 1).
+        #[arg(long)]
+        scale: Option<u8>,
+        /// Text color in hex format (default: #FFFFFF).
+        #[arg(long)]
+        color: Option<String>,
+        /// Alpha opacity (0..=255, default: 255).
+        #[arg(long)]
+        alpha: Option<u8>,
+        /// Auto-fadeout TTL in milliseconds (0: persistent).
+        #[arg(long)]
+        ttl: Option<u32>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenWatermarkSubCmd {
+    /// Show current watermark configuration and telemetry status.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Enable dynamic security watermark overlay.
+    Enable {
+        /// Enforce watermark overlay: visitor cannot disable it.
+        #[arg(long)]
+        host_enforced: bool,
+        /// Text template with placeholders ({peer}, {host}, {time}).
+        #[arg(long)]
+        text: Option<String>,
+        /// Watermark opacity (0..=255).
+        #[arg(long)]
+        opacity: Option<u8>,
+        /// Layout pattern ('grid', 'single', 'banner').
+        #[arg(long)]
+        pattern: Option<String>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Disable dynamic security watermark overlay (blocked if host-enforced).
+    Disable {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Configure watermark parameters (text, opacity, color, scale, pattern, spacing).
+    Set {
+        /// Text template with placeholders ({peer}, {host}, {time}).
+        #[arg(long)]
+        text: Option<String>,
+        /// Watermark opacity alpha (0..=255).
+        #[arg(long)]
+        opacity: Option<u8>,
+        /// Watermark hex color (e.g. #FF8000).
+        #[arg(long)]
+        color: Option<String>,
+        /// Font scaling multiplier (1 or 2).
+        #[arg(long)]
+        scale: Option<u8>,
+        /// Layout pattern ('grid', 'single', 'banner').
+        #[arg(long)]
+        pattern: Option<String>,
+        /// Horizontal tile spacing in pixels.
+        #[arg(long)]
+        spacing_x: Option<u16>,
+        /// Vertical tile spacing in pixels.
+        #[arg(long)]
+        spacing_y: Option<u16>,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScreenPlaybackSubCmd {
+    /// Start in-container playback from a recorded TREC container.
+    Start {
+        /// Path to the .trec container file to play.
+        path: String,
+        /// Playback speed multiplier (default: 1.0, 0.0 for max test throughput).
+        #[arg(long)]
+        speed: Option<f32>,
+        /// Loop continuously when reaching the end of the recording.
+        #[arg(long)]
+        r#loop: bool,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Pause the active playback session.
+    Pause {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Resume the paused playback session.
+    Resume {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Stop the active playback session.
+    Stop {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Show current playback status and statistics.
+    Status {
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2370,6 +4097,26 @@ enum ScreenRecordingSubCmd {
         /// Max frame summaries to return (1-512).
         #[arg(long, default_value_t = 32)]
         limit: usize,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
+    /// Seek and extract a single frame from a recorded TREC container as a standard Top-Down BMP image (v2.17 / ADR-103).
+    Snapshot {
+        /// Path to the recorded .trec container file.
+        path: String,
+        /// Frame sequence number to extract (e.g. 0, 1, 10). If omitted, extracts by pts or first frame.
+        #[arg(long)]
+        frame: Option<u64>,
+        /// Microsecond PTS timestamp to seek to (e.g. 1000000 for 1s).
+        #[arg(long)]
+        pts: Option<u64>,
+        /// Optional destination path on the host node filesystem to save the BMP image (e.g. ./frame.bmp).
+        #[arg(long)]
+        out: Option<String>,
         /// Output raw JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -6717,6 +8464,328 @@ async fn main() -> Result<()> {
                             rep.recording_active, rep.recording_frames, rep.peer_recording
                         );
                     }
+                    if rep.playback_active || rep.playback_state != "idle" {
+                        println!(
+                            "  Playback:     state: {} (frame: {})",
+                            rep.playback_state, rep.playback_frame
+                        );
+                    }
+                    if rep.snapshot_count > 0 {
+                        println!("  Snapshots:    {}", rep.snapshot_count);
+                    }
+                    if rep.watermark_enabled || rep.watermark_enforced || rep.watermark_frames > 0 {
+                        println!(
+                            "  Watermark:    enabled: {} · host_enforced: {} · frames: {}",
+                            rep.watermark_enabled, rep.watermark_enforced, rep.watermark_frames
+                        );
+                    }
+                    if rep.annotations_count > 0
+                        || rep.laser_active
+                        || rep.annotations_total > 0
+                        || rep.laser_updates_total > 0
+                        || rep.whiteboard_undo_count > 0
+                        || rep.whiteboard_redo_count > 0
+                    {
+                        println!(
+                            "  Annotations:  active: {} · total_added: {} · laser_active: {} · laser_updates: {}",
+                            rep.annotations_count, rep.annotations_total, rep.laser_active, rep.laser_updates_total
+                        );
+                        if rep.whiteboard_undo_count > 0
+                            || rep.whiteboard_redo_count > 0
+                            || rep.whiteboard_read_only
+                            || rep.whiteboard_max_items != 1000
+                        {
+                            println!(
+                                "  Whiteboard:   undo_events: {} · redo_events: {} [read_only: {}, max: {}]",
+                                rep.whiteboard_undo_count,
+                                rep.whiteboard_redo_count,
+                                rep.whiteboard_read_only,
+                                rep.whiteboard_max_items
+                            );
+                        }
+                    }
+                    if rep.roi_active || rep.roi_zoom_percent != 100 || rep.roi_updates > 0 {
+                        if rep.roi_active {
+                            println!(
+                                "  ROI Viewport: active [x: {}, y: {}, {}x{}, zoom: {}%, updates: {}]",
+                                rep.roi_x, rep.roi_y, rep.roi_w, rep.roi_h, rep.roi_zoom_percent, rep.roi_updates
+                            );
+                        } else {
+                            println!(
+                                "  ROI Viewport: inactive (full-screen) [zoom: {}%, updates: {}]",
+                                rep.roi_zoom_percent, rep.roi_updates
+                            );
+                        }
+                    }
+                    if rep.color_mode != "full_color32" || rep.color_updates > 0 {
+                        println!(
+                            "  Color Depth:  mode: {} · threshold: {} · updates: {}",
+                            rep.color_mode, rep.color_threshold, rep.color_updates
+                        );
+                    }
+                    if rep.delta_enabled || rep.delta_frames_sent > 0 || rep.delta_saved_bytes > 0 {
+                        println!(
+                            "  Delta Patch:  enabled: {} · interval: {} · delta_sent: {} · keyframes: {} · saved: {} B",
+                            rep.delta_enabled, rep.delta_keyframe_interval, rep.delta_frames_sent, rep.delta_keyframes_sent, rep.delta_saved_bytes
+                        );
+                    }
+                    if rep.metric_enabled || rep.metric_evaluated_frames > 0 {
+                        let warn_str = if rep.metric_quality_warning {
+                            " [QUALITY WARNING]"
+                        } else {
+                            ""
+                        };
+                        println!(
+                            "  Visual Metric:enabled: {} · interval: {} · evaluated: {} · psnr: {:.2} dB · ssim: {:.4}{warn_str}",
+                            rep.metric_enabled, rep.metric_sample_interval, rep.metric_evaluated_frames,
+                            rep.metric_psnr_db, rep.metric_ssim
+                        );
+                    }
+                    if rep.qoe_enabled || rep.qoe_actions_total > 0 || rep.qoe_mode != "off" {
+                        println!(
+                            "  QoE Closed-Loop: mode: {} · target: {} dB / {}% · actions: {} · last: {}",
+                            rep.qoe_mode, rep.qoe_target_psnr_db, rep.qoe_target_ssim_pct, rep.qoe_actions_total, rep.qoe_last_action
+                        );
+                    }
+                    if rep.pir_enabled
+                        || rep.pir_sweeps_completed > 0
+                        || rep.pir_slices_sent > 0
+                        || rep.pir_mode != "disabled"
+                    {
+                        println!(
+                            "  PIR Anti-Burst: mode: {} · bands: {} · sweeps: {} · slices_sent: {}",
+                            rep.pir_mode,
+                            rep.pir_bands,
+                            rep.pir_sweeps_completed,
+                            rep.pir_slices_sent
+                        );
+                    }
+                    if rep.ltr_enabled
+                        || rep.ltr_anchors_established > 0
+                        || rep.ltr_recoveries_completed > 0
+                    {
+                        println!(
+                            "  LTR Recovery:   status: {} · auto_interval: {} · anchor_seq: #{} · anchors: {} · recoveries: {}",
+                            if rep.ltr_enabled { "enabled" } else { "disabled" },
+                            rep.ltr_auto_interval,
+                            rep.ltr_current_seq,
+                            rep.ltr_anchors_established,
+                            rep.ltr_recoveries_completed
+                        );
+                    }
+                    if rep.svc_enabled
+                        || rep.svc_t0_sent > 0
+                        || rep.svc_t1_sent > 0
+                        || rep.svc_t1_dropped > 0
+                        || rep.svc_mode != "disabled"
+                    {
+                        println!(
+                            "  SVC-T Stream:   status: {} · mode: {} · drop_t1: {} · T0: {} · T1: {} · dropped: {}",
+                            if rep.svc_enabled { "enabled" } else { "disabled" },
+                            rep.svc_mode,
+                            rep.svc_drop_t1,
+                            rep.svc_t0_sent,
+                            rep.svc_t1_sent,
+                            rep.svc_t1_dropped
+                        );
+                    }
+                    if rep.motion_enabled
+                        || rep.motion_frames_sent > 0
+                        || rep.motion_fallback_frames_sent > 0
+                        || rep.motion_saved_bytes > 0
+                    {
+                        println!(
+                            "  Motion Scroll:  status: {} · max_disp: {}px · motion_frames: {} · fallback: {} · saved: {}B",
+                            if rep.motion_enabled { "enabled" } else { "disabled" },
+                            rep.motion_max_displacement,
+                            rep.motion_frames_sent,
+                            rep.motion_fallback_frames_sent,
+                            rep.motion_saved_bytes
+                        );
+                    }
+                    if rep.tile_enabled
+                        || rep.tile_frames_sent > 0
+                        || rep.dirty_tiles_sent > 0
+                        || rep.tile_saved_bytes > 0
+                    {
+                        println!(
+                            "  Spatial Tile-Grid: status: {} · tile_size: {}px · grid_frames: {} · dirty_tiles: {} · skipped: {} · saved: {}B",
+                            if rep.tile_enabled { "enabled" } else { "disabled" },
+                            rep.tile_size,
+                            rep.tile_frames_sent,
+                            rep.dirty_tiles_sent,
+                            rep.skipped_tiles_count,
+                            rep.tile_saved_bytes
+                        );
+                    }
+                    if rep.tile_cache_enabled
+                        || rep.tile_cache_entries > 0
+                        || rep.tile_cache_hits > 0
+                        || rep.tile_cache_misses > 0
+                        || rep.tile_cache_saved_bytes > 0
+                    {
+                        let total_lookups = rep.tile_cache_hits + rep.tile_cache_misses;
+                        let hit_pct = if total_lookups > 0 {
+                            (rep.tile_cache_hits as f64 / total_lookups as f64) * 100.0
+                        } else {
+                            0.0
+                        };
+                        println!(
+                            "  Tile Dictionary:  status: {} · entries: {} · hits: {} · misses: {} · hit_ratio: {:.1}% · saved: {}B",
+                            if rep.tile_cache_enabled { "enabled" } else { "disabled" },
+                            rep.tile_cache_entries,
+                            rep.tile_cache_hits,
+                            rep.tile_cache_misses,
+                            hit_pct,
+                            rep.tile_cache_saved_bytes
+                        );
+                    }
+                    if rep.focus_enabled
+                        || rep.focus_tiles_sent > 0
+                        || rep.peripheral_tiles_sent > 0
+                        || rep.peripheral_tiles_skipped > 0
+                        || rep.focus_saved_bandwidth_bytes > 0
+                    {
+                        println!(
+                            "  Foveated Focus:   status: {} · mode: {} · radius: {}px · skip_ratio: {} · focus_tiles: {} · peripheral_sent: {} · peripheral_skipped: {} · saved: {}B",
+                            if rep.focus_enabled { "enabled" } else { "disabled" },
+                            rep.focus_mode,
+                            rep.focus_radius,
+                            rep.focus_peripheral_skip_ratio,
+                            rep.focus_tiles_sent,
+                            rep.peripheral_tiles_sent,
+                            rep.peripheral_tiles_skipped,
+                            rep.focus_saved_bandwidth_bytes
+                        );
+                    }
+                    if rep.tile_palette_enabled
+                        || rep.tile_palette_solid_tiles > 0
+                        || rep.tile_palette_bilevel_tiles > 0
+                        || rep.tile_palette_palette_tiles > 0
+                        || rep.tile_palette_truecolor_tiles > 0
+                        || rep.tile_palette_saved_bytes > 0
+                    {
+                        println!(
+                            "  Tile Palette:     status: {} · max_colors: {} · solid: {} · bilevel: {} · palette: {} · truecolor: {} · saved: {}B",
+                            if rep.tile_palette_enabled { "enabled" } else { "disabled" },
+                            rep.tile_palette_max_colors,
+                            rep.tile_palette_solid_tiles,
+                            rep.tile_palette_bilevel_tiles,
+                            rep.tile_palette_palette_tiles,
+                            rep.tile_palette_truecolor_tiles,
+                            rep.tile_palette_saved_bytes
+                        );
+                    }
+                    if rep.tile_predict_enabled
+                        || rep.tile_predict_tiles_sent > 0
+                        || rep.tile_predict_saved_bytes > 0
+                    {
+                        println!(
+                            "  Tile Predict:     status: {} · filter: {} · rct: {} · predict_tiles: {} · saved: {}B",
+                            if rep.tile_predict_enabled { "enabled" } else { "disabled" },
+                            rep.tile_predict_filter_mode,
+                            rep.tile_predict_enable_rct,
+                            rep.tile_predict_tiles_sent,
+                            rep.tile_predict_saved_bytes
+                        );
+                    }
+                    if rep.tile_present_enabled
+                        || rep.tile_present_committed_transactions > 0
+                        || rep.tile_present_swapped_frames > 0
+                    {
+                        println!(
+                            "  Tile Present:     status: {} · vsync: {} · double_buf: {} · anti_tear: {} · committed_tx: {} · swapped: {} · torn_prevented: {} · avg_latency: {}µs",
+                            if rep.tile_present_enabled { "enabled" } else { "disabled" },
+                            rep.tile_present_vsync_mode,
+                            rep.tile_present_double_buffer,
+                            rep.tile_present_tear_prevention,
+                            rep.tile_present_committed_transactions,
+                            rep.tile_present_swapped_frames,
+                            rep.tile_present_torn_frames_prevented,
+                            rep.tile_present_avg_swap_latency_us
+                        );
+                    }
+                    if rep.tile_nack_enabled
+                        || rep.tile_nack_requests_sent > 0
+                        || rep.tile_nack_tiles_retransmitted > 0
+                        || rep.tile_nack_degraded_commits > 0
+                    {
+                        println!(
+                            "  Tile Micro-NACK:  status: {} · timeout: {}ms · max_retries: {} · nack_sent: {} · retransmitted: {} · degraded: {}",
+                            if rep.tile_nack_enabled { "enabled" } else { "disabled" },
+                            rep.tile_nack_timeout_ms,
+                            rep.tile_nack_max_retries,
+                            rep.tile_nack_requests_sent,
+                            rep.tile_nack_tiles_retransmitted,
+                            rep.tile_nack_degraded_commits
+                        );
+                    }
+                    if rep.tile_saliency_enabled
+                        || rep.tile_saliency_critical_tiles > 0
+                        || rep.tile_saliency_normal_tiles > 0
+                        || rep.tile_saliency_background_tiles > 0
+                        || rep.tile_saliency_background_skipped > 0
+                    {
+                        println!(
+                            "  Tile Saliency:    status: {} · high_thresh: {} · low_thresh: {} · drop_bg_congest: {} · critical: {} · normal: {} · background: {} · bg_skipped: {}",
+                            if rep.tile_saliency_enabled { "enabled" } else { "disabled" },
+                            rep.tile_saliency_high_threshold,
+                            rep.tile_saliency_low_threshold,
+                            rep.tile_saliency_drop_background_on_congestion,
+                            rep.tile_saliency_critical_tiles,
+                            rep.tile_saliency_normal_tiles,
+                            rep.tile_saliency_background_tiles,
+                            rep.tile_saliency_background_skipped
+                        );
+                    }
+                    if rep.tile_lod_enabled
+                        || rep.tile_lod0_tiles > 0
+                        || rep.tile_lod1_tiles > 0
+                        || rep.tile_lod2_tiles > 0
+                        || rep.tile_lod_bytes_saved > 0
+                    {
+                        println!(
+                            "  Tile LoD Downsample: status: {} · max_lod: Lod{} · auto_lod_congest: {} · lod0: {} · lod1: {} · lod2: {} · bytes_saved: {} B",
+                            if rep.tile_lod_enabled { "enabled" } else { "disabled" },
+                            rep.tile_lod_max_lod,
+                            rep.tile_lod_auto_lod_on_congestion,
+                            rep.tile_lod0_tiles,
+                            rep.tile_lod1_tiles,
+                            rep.tile_lod2_tiles,
+                            rep.tile_lod_bytes_saved
+                        );
+                    }
+                    if rep.tile_batch_enabled
+                        || rep.tile_batches_sent > 0
+                        || rep.tile_chunks_sent > 0
+                        || rep.tile_batch_pacing_pauses > 0
+                    {
+                        println!(
+                            "  Tile Batching:    status: {} · target_chunk: {} B · pacing: {} µs · batches: {} · chunks: {} · avg_chunk: {} B · pauses: {}",
+                            if rep.tile_batch_enabled { "enabled" } else { "disabled" },
+                            rep.tile_batch_target_chunk_bytes,
+                            rep.tile_batch_pacing_interval_us,
+                            rep.tile_batches_sent,
+                            rep.tile_chunks_sent,
+                            rep.tile_batch_avg_chunk_bytes,
+                            rep.tile_batch_pacing_pauses
+                        );
+                    }
+                    if rep.tile_motion_enabled
+                        || rep.tile_motion_tiles_sent > 0
+                        || rep.tile_motion_fallback_tiles_sent > 0
+                        || rep.tile_motion_bytes_saved > 0
+                    {
+                        println!(
+                            "  Tile Motion Est:  status: {} · max_disp: {} px · min_match: {}% · motion_tiles: {} · fallback_tiles: {} · bytes_saved: {} B",
+                            if rep.tile_motion_enabled { "enabled" } else { "disabled" },
+                            rep.tile_motion_max_displacement,
+                            rep.tile_motion_min_match_ratio,
+                            rep.tile_motion_tiles_sent,
+                            rep.tile_motion_fallback_tiles_sent,
+                            rep.tile_motion_bytes_saved
+                        );
+                    }
                 }
             }
             ScreenCmd::Bitrate {
@@ -8065,6 +10134,55 @@ async fn main() -> Result<()> {
                         }
                         return Ok(());
                     }
+                    Some(ScreenRecordingSubCmd::Snapshot {
+                        path,
+                        frame,
+                        pts,
+                        out,
+                        json: j,
+                        ui_port: p,
+                    }) => {
+                        let mut body_map = serde_json::Map::new();
+                        body_map.insert("path".into(), serde_json::json!(path));
+                        if let Some(f) = frame {
+                            body_map.insert("frame".into(), serde_json::json!(f));
+                        }
+                        if let Some(pt) = pts {
+                            body_map.insert("pts_us".into(), serde_json::json!(pt));
+                        }
+                        if let Some(o) = out {
+                            body_map.insert("out".into(), serde_json::json!(o));
+                        }
+                        body_map.insert("format".into(), serde_json::json!("bmp"));
+                        let payload = serde_json::Value::Object(body_map);
+                        let bytes = serde_json::to_vec(&payload)?;
+                        let (code, resp) = tetherly_node::loopback_post(
+                            p,
+                            "/api/screen/recording/snapshot",
+                            &bytes,
+                        )
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{p} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "recording frame snapshot failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if j || json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            print_screen_snapshot_report(&rep);
+                        }
+                        return Ok(());
+                    }
                     None => (None, out, json, ui_port),
                 };
 
@@ -8152,6 +10270,2881 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+            }
+            ScreenCmd::Playback {
+                action,
+                path,
+                speed,
+                r#loop,
+                json,
+                ui_port,
+            } => {
+                let (action, path_opt, speed_opt, loop_opt, is_json, port) = match action {
+                    Some(ScreenPlaybackSubCmd::Start {
+                        path: p,
+                        speed: s,
+                        r#loop: l,
+                        json: j,
+                        ui_port: port,
+                    }) => (
+                        Some("start"),
+                        Some(p),
+                        s.or(speed),
+                        Some(l || r#loop),
+                        j || json,
+                        port,
+                    ),
+                    Some(ScreenPlaybackSubCmd::Pause {
+                        json: j,
+                        ui_port: port,
+                    }) => (Some("pause"), None, None, None, j || json, port),
+                    Some(ScreenPlaybackSubCmd::Resume {
+                        json: j,
+                        ui_port: port,
+                    }) => (Some("resume"), None, None, None, j || json, port),
+                    Some(ScreenPlaybackSubCmd::Stop {
+                        json: j,
+                        ui_port: port,
+                    }) => (Some("stop"), None, None, None, j || json, port),
+                    Some(ScreenPlaybackSubCmd::Status {
+                        json: j,
+                        ui_port: port,
+                    }) => (None, None, None, None, j || json, port),
+                    None => {
+                        if let Some(p) = path {
+                            (Some("start"), Some(p), speed, Some(r#loop), json, ui_port)
+                        } else {
+                            (None, None, None, None, json, ui_port)
+                        }
+                    }
+                };
+
+                match action {
+                    Some("start") => {
+                        let Some(p) = path_opt else {
+                            anyhow::bail!(
+                                "playback start requires a container path; e.g. `screen playback start <path>`"
+                            );
+                        };
+                        let mut body_map = serde_json::Map::new();
+                        body_map.insert("path".into(), serde_json::json!(p));
+                        if let Some(s) = speed_opt {
+                            body_map.insert("speed".into(), serde_json::json!(s));
+                        }
+                        if let Some(l) = loop_opt {
+                            body_map.insert("loop".into(), serde_json::json!(l));
+                        }
+                        let body = serde_json::to_vec(&body_map)?;
+                        let (code, resp) =
+                            tetherly_node::loopback_post(port, "/api/screen/playback/start", &body)
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen playback start failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Screen session in-container playback started.");
+                            print_screen_playback_report(&rep);
+                        }
+                    }
+                    Some("pause") => {
+                        let (code, resp) =
+                            tetherly_node::loopback_post(port, "/api/screen/playback/pause", &[])
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen playback pause failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Screen session playback paused.");
+                            print_screen_playback_report(&rep);
+                        }
+                    }
+                    Some("resume") => {
+                        let (code, resp) =
+                            tetherly_node::loopback_post(port, "/api/screen/playback/resume", &[])
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen playback resume failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Screen session playback resumed.");
+                            print_screen_playback_report(&rep);
+                        }
+                    }
+                    Some("stop") => {
+                        let (code, resp) =
+                            tetherly_node::loopback_post(port, "/api/screen/playback/stop", &[])
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen playback stop failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Screen session playback stopped.");
+                            print_screen_playback_report(&rep);
+                        }
+                    }
+                    _ => {
+                        let (code, resp) =
+                            tetherly_node::loopback_get(port, "/api/screen/playback")
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen playback query failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            print_screen_playback_report(&rep);
+                        }
+                    }
+                }
+            }
+            ScreenCmd::Snapshot {
+                out,
+                format,
+                json,
+                ui_port,
+            } => {
+                let query = match (&out, format.as_str()) {
+                    (Some(o), f) => format!("?format={f}&out={}", urlencode_path(o)),
+                    (None, f) => format!("?format={f}"),
+                };
+                let uri = format!("/api/screen/snapshot{query}");
+                let (code, resp) =
+                    tetherly_node::loopback_get(ui_port, &uri)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                if code != 200 {
+                    anyhow::bail!(
+                        "screen snapshot failed (HTTP {code}): {}",
+                        String::from_utf8_lossy(&resp)
+                    );
+                }
+                if json {
+                    println!("{}", String::from_utf8_lossy(&resp).trim());
+                } else {
+                    let rep: serde_json::Value = serde_json::from_slice(&resp)
+                        .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                    print_screen_snapshot_report(&rep);
+                }
+            }
+            ScreenCmd::Watermark {
+                action,
+                text,
+                host_enforced,
+                opacity,
+                color,
+                scale,
+                pattern,
+                spacing_x,
+                spacing_y,
+                json,
+                ui_port,
+            } => match action {
+                Some(ScreenWatermarkSubCmd::Status { json, ui_port }) => {
+                    let (code, resp) =
+                        tetherly_node::loopback_get(ui_port, "/api/screen/watermark")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen watermark query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_watermark_report(&rep);
+                    }
+                }
+                Some(ScreenWatermarkSubCmd::Enable {
+                    host_enforced,
+                    text,
+                    opacity,
+                    pattern,
+                    json,
+                    ui_port,
+                }) => {
+                    let mut payload = serde_json::Map::new();
+                    payload.insert("enabled".to_string(), serde_json::json!(true));
+                    if host_enforced {
+                        payload.insert("host_enforced".to_string(), serde_json::json!(true));
+                    }
+                    if let Some(t) = text {
+                        payload.insert("text".to_string(), serde_json::json!(t));
+                    }
+                    if let Some(o) = opacity {
+                        payload.insert("opacity".to_string(), serde_json::json!(o));
+                    }
+                    if let Some(p) = pattern {
+                        payload.insert("pattern".to_string(), serde_json::json!(p));
+                    }
+                    let bytes = serde_json::to_vec(&payload)?;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(ui_port, "/api/screen/watermark", &bytes)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen watermark enable failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen security watermark enabled.");
+                        print_screen_watermark_report(&rep);
+                    }
+                }
+                Some(ScreenWatermarkSubCmd::Disable { json, ui_port }) => {
+                    let (code, resp) = tetherly_node::loopback_post(
+                        ui_port,
+                        "/api/screen/watermark/disable",
+                        b"{}",
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen watermark disable failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen security watermark disabled.");
+                        print_screen_watermark_report(&rep);
+                    }
+                }
+                Some(ScreenWatermarkSubCmd::Set {
+                    text,
+                    opacity,
+                    color,
+                    scale,
+                    pattern,
+                    spacing_x,
+                    spacing_y,
+                    json,
+                    ui_port,
+                }) => {
+                    let mut payload = serde_json::Map::new();
+                    if let Some(t) = text {
+                        payload.insert("text".to_string(), serde_json::json!(t));
+                    }
+                    if let Some(o) = opacity {
+                        payload.insert("opacity".to_string(), serde_json::json!(o));
+                    }
+                    if let Some(c) = color {
+                        payload.insert("color".to_string(), serde_json::json!(c));
+                    }
+                    if let Some(s) = scale {
+                        payload.insert("scale".to_string(), serde_json::json!(s));
+                    }
+                    if let Some(p) = pattern {
+                        payload.insert("pattern".to_string(), serde_json::json!(p));
+                    }
+                    if let Some(sx) = spacing_x {
+                        payload.insert("spacing_x".to_string(), serde_json::json!(sx));
+                    }
+                    if let Some(sy) = spacing_y {
+                        payload.insert("spacing_y".to_string(), serde_json::json!(sy));
+                    }
+                    let bytes = serde_json::to_vec(&payload)?;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(ui_port, "/api/screen/watermark", &bytes)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen watermark configuration failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen security watermark configuration updated.");
+                        print_screen_watermark_report(&rep);
+                    }
+                }
+                None => {
+                    let has_flags = text.is_some()
+                        || host_enforced
+                        || opacity.is_some()
+                        || color.is_some()
+                        || scale.is_some()
+                        || pattern.is_some()
+                        || spacing_x.is_some()
+                        || spacing_y.is_some();
+                    if has_flags {
+                        let mut payload = serde_json::Map::new();
+                        if host_enforced {
+                            payload.insert("host_enforced".to_string(), serde_json::json!(true));
+                            payload.insert("enabled".to_string(), serde_json::json!(true));
+                        }
+                        if let Some(t) = text {
+                            payload.insert("text".to_string(), serde_json::json!(t));
+                        }
+                        if let Some(o) = opacity {
+                            payload.insert("opacity".to_string(), serde_json::json!(o));
+                        }
+                        if let Some(c) = color {
+                            payload.insert("color".to_string(), serde_json::json!(c));
+                        }
+                        if let Some(s) = scale {
+                            payload.insert("scale".to_string(), serde_json::json!(s));
+                        }
+                        if let Some(p) = pattern {
+                            payload.insert("pattern".to_string(), serde_json::json!(p));
+                        }
+                        if let Some(sx) = spacing_x {
+                            payload.insert("spacing_x".to_string(), serde_json::json!(sx));
+                        }
+                        if let Some(sy) = spacing_y {
+                            payload.insert("spacing_y".to_string(), serde_json::json!(sy));
+                        }
+                        let bytes = serde_json::to_vec(&payload)?;
+                        let (code, resp) =
+                            tetherly_node::loopback_post(ui_port, "/api/screen/watermark", &bytes)
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen watermark configuration failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            print_screen_watermark_report(&rep);
+                        }
+                    } else {
+                        let (code, resp) =
+                            tetherly_node::loopback_get(ui_port, "/api/screen/watermark")
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen watermark query failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            print_screen_watermark_report(&rep);
+                        }
+                    }
+                }
+            },
+            ScreenCmd::Annotate {
+                action,
+                json,
+                ui_port,
+            } => match action {
+                Some(ScreenAnnotateSubCmd::List {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let is_json = j || json;
+                    let port = if p != 45716 { p } else { ui_port };
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/annotation")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen annotation query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_annotation_report(&rep);
+                    }
+                }
+                Some(ScreenAnnotateSubCmd::Clear {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let is_json = j || json;
+                    let port = if p != 45716 { p } else { ui_port };
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/annotation/clear", b"{}")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen annotation clear failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("All collaborative whiteboard annotations cleared.");
+                        print_screen_annotation_report(&rep);
+                    }
+                }
+                Some(ScreenAnnotateSubCmd::Add { shape }) => {
+                    let mut payload = serde_json::Map::new();
+                    let (is_json, port) = match shape {
+                        ScreenAnnotateShapeSubCmd::Stroke {
+                            points,
+                            author,
+                            color,
+                            thickness,
+                            alpha,
+                            ttl,
+                            json: j,
+                            ui_port: p,
+                        } => {
+                            payload.insert("kind".to_string(), serde_json::json!("stroke"));
+                            payload.insert("points_str".to_string(), serde_json::json!(points));
+                            if let Some(a) = author {
+                                payload.insert("author".to_string(), serde_json::json!(a));
+                            }
+                            if let Some(c) = color {
+                                payload.insert("color".to_string(), serde_json::json!(c));
+                            }
+                            if let Some(t) = thickness {
+                                payload.insert("thickness".to_string(), serde_json::json!(t));
+                            }
+                            if let Some(a) = alpha {
+                                payload.insert("alpha".to_string(), serde_json::json!(a));
+                            }
+                            if let Some(ms) = ttl {
+                                payload.insert("ttl_ms".to_string(), serde_json::json!(ms));
+                            }
+                            (j || json, if p != 45716 { p } else { ui_port })
+                        }
+                        ScreenAnnotateShapeSubCmd::Rect {
+                            x,
+                            y,
+                            w,
+                            h,
+                            author,
+                            color,
+                            thickness,
+                            alpha,
+                            ttl,
+                            json: j,
+                            ui_port: p,
+                        } => {
+                            payload.insert("kind".to_string(), serde_json::json!("rect"));
+                            payload.insert("x".to_string(), serde_json::json!(x));
+                            payload.insert("y".to_string(), serde_json::json!(y));
+                            payload.insert("w".to_string(), serde_json::json!(w));
+                            payload.insert("h".to_string(), serde_json::json!(h));
+                            if let Some(a) = author {
+                                payload.insert("author".to_string(), serde_json::json!(a));
+                            }
+                            if let Some(c) = color {
+                                payload.insert("color".to_string(), serde_json::json!(c));
+                            }
+                            if let Some(t) = thickness {
+                                payload.insert("thickness".to_string(), serde_json::json!(t));
+                            }
+                            if let Some(a) = alpha {
+                                payload.insert("alpha".to_string(), serde_json::json!(a));
+                            }
+                            if let Some(ms) = ttl {
+                                payload.insert("ttl_ms".to_string(), serde_json::json!(ms));
+                            }
+                            (j || json, if p != 45716 { p } else { ui_port })
+                        }
+                        ScreenAnnotateShapeSubCmd::Arrow {
+                            from,
+                            to,
+                            author,
+                            color,
+                            thickness,
+                            alpha,
+                            ttl,
+                            json: j,
+                            ui_port: p,
+                        } => {
+                            payload.insert("kind".to_string(), serde_json::json!("arrow"));
+                            payload.insert("from_str".to_string(), serde_json::json!(from));
+                            payload.insert("to_str".to_string(), serde_json::json!(to));
+                            if let Some(a) = author {
+                                payload.insert("author".to_string(), serde_json::json!(a));
+                            }
+                            if let Some(c) = color {
+                                payload.insert("color".to_string(), serde_json::json!(c));
+                            }
+                            if let Some(t) = thickness {
+                                payload.insert("thickness".to_string(), serde_json::json!(t));
+                            }
+                            if let Some(a) = alpha {
+                                payload.insert("alpha".to_string(), serde_json::json!(a));
+                            }
+                            if let Some(ms) = ttl {
+                                payload.insert("ttl_ms".to_string(), serde_json::json!(ms));
+                            }
+                            (j || json, if p != 45716 { p } else { ui_port })
+                        }
+                        ScreenAnnotateShapeSubCmd::Text {
+                            text,
+                            x,
+                            y,
+                            author,
+                            scale,
+                            color,
+                            alpha,
+                            ttl,
+                            json: j,
+                            ui_port: p,
+                        } => {
+                            payload.insert("kind".to_string(), serde_json::json!("text"));
+                            payload.insert("text".to_string(), serde_json::json!(text));
+                            payload.insert("x".to_string(), serde_json::json!(x));
+                            payload.insert("y".to_string(), serde_json::json!(y));
+                            if let Some(a) = author {
+                                payload.insert("author".to_string(), serde_json::json!(a));
+                            }
+                            if let Some(s) = scale {
+                                payload.insert("scale".to_string(), serde_json::json!(s));
+                            }
+                            if let Some(c) = color {
+                                payload.insert("color".to_string(), serde_json::json!(c));
+                            }
+                            if let Some(a) = alpha {
+                                payload.insert("alpha".to_string(), serde_json::json!(a));
+                            }
+                            if let Some(ms) = ttl {
+                                payload.insert("ttl_ms".to_string(), serde_json::json!(ms));
+                            }
+                            (j || json, if p != 45716 { p } else { ui_port })
+                        }
+                    };
+                    let bytes = serde_json::to_vec(&payload)?;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/annotation", &bytes)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen annotation add failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        let id = rep.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                        println!("Collaborative annotation added (#{id}).");
+                        if let Some(r) = rep.get("report") {
+                            print_screen_annotation_report(r);
+                        }
+                    }
+                }
+                None => {
+                    let (code, resp) =
+                        tetherly_node::loopback_get(ui_port, "/api/screen/annotation")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen annotation query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_annotation_report(&rep);
+                    }
+                }
+            },
+            ScreenCmd::Laser {
+                x,
+                y,
+                color,
+                radius,
+                off,
+                status,
+                json,
+                ui_port,
+            } => {
+                if status
+                    || (x.is_none() && y.is_none() && !off && color.is_none() && radius.is_none())
+                {
+                    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/laser")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen laser query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        let active = rep
+                            .get("laser_active")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let updates = rep
+                            .get("laser_updates_total")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        println!("Screen Transient Virtual Laser Pointer (ADR-105):");
+                        println!(
+                            "  Laser State:          {}",
+                            if active { "ACTIVE" } else { "OFF / IDLE" }
+                        );
+                        println!("  Laser Updates Total:  {updates}");
+                        if let Some(l) = rep.get("laser").filter(|v| !v.is_null()) {
+                            let lx = l.get("x").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let ly = l.get("y").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let lr = l.get("radius").and_then(|v| v.as_u64()).unwrap_or(12);
+                            let col = l.get("color_rgb").and_then(|v| v.as_array());
+                            let col_str = if let Some(c) = col {
+                                if c.len() == 3 {
+                                    format!(
+                                        "#{:02X}{:02X}{:02X}",
+                                        c[0].as_u64().unwrap_or(0),
+                                        c[1].as_u64().unwrap_or(0),
+                                        c[2].as_u64().unwrap_or(0)
+                                    )
+                                } else {
+                                    "#FF0000".to_string()
+                                }
+                            } else {
+                                "#FF0000".to_string()
+                            };
+                            println!("  Spot Position:        ({lx}, {ly}) [radius: {lr}px, color: {col_str}]");
+                        }
+                    }
+                } else {
+                    let mut payload = serde_json::Map::new();
+                    if off {
+                        payload.insert("active".to_string(), serde_json::json!(false));
+                    } else {
+                        payload.insert("active".to_string(), serde_json::json!(true));
+                    }
+                    if let Some(px) = x {
+                        payload.insert("x".to_string(), serde_json::json!(px));
+                    }
+                    if let Some(py) = y {
+                        payload.insert("y".to_string(), serde_json::json!(py));
+                    }
+                    if let Some(c) = color {
+                        payload.insert("color".to_string(), serde_json::json!(c));
+                    }
+                    if let Some(r) = radius {
+                        payload.insert("radius".to_string(), serde_json::json!(r));
+                    }
+                    let bytes = serde_json::to_vec(&payload)?;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(ui_port, "/api/screen/laser", &bytes)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen laser update failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        let active = rep
+                            .get("laser_active")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if active {
+                            println!("Laser pointer activated / updated.");
+                        } else {
+                            println!("Laser pointer deactivated / turned off.");
+                        }
+                    }
+                }
+            }
+            ScreenCmd::Whiteboard {
+                action,
+                json,
+                ui_port,
+            } => match action {
+                Some(ScreenWhiteboardSubCmd::Status {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/annotation")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "whiteboard status query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_whiteboard_report(&rep);
+                    }
+                }
+                Some(ScreenWhiteboardSubCmd::Undo {
+                    author,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let uri = if let Some(ref a) = author {
+                        format!("/api/screen/whiteboard/undo?author={}", urlencode_path(a))
+                    } else {
+                        "/api/screen/whiteboard/undo".to_string()
+                    };
+                    let (code, resp) = tetherly_node::loopback_post(port, &uri, b"{}")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "whiteboard undo failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        if rep.get("undone").map(|v| v.is_null()).unwrap_or(true) {
+                            println!("No active whiteboard annotations available to undo.");
+                        } else {
+                            let undone = &rep["undone"];
+                            let id = undone.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let auth = undone
+                                .get("author")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("anon");
+                            println!("Whiteboard annotation #{id} (author: {auth}) undone.");
+                        }
+                        if let Some(r) = rep.get("report") {
+                            print_screen_whiteboard_report(r);
+                        }
+                    }
+                }
+                Some(ScreenWhiteboardSubCmd::Redo {
+                    author,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let uri = if let Some(ref a) = author {
+                        format!("/api/screen/whiteboard/redo?author={}", urlencode_path(a))
+                    } else {
+                        "/api/screen/whiteboard/redo".to_string()
+                    };
+                    let (code, resp) = tetherly_node::loopback_post(port, &uri, b"{}")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "whiteboard redo failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        if rep.get("redone").map(|v| v.is_null()).unwrap_or(true) {
+                            println!("No undone whiteboard annotations available to redo.");
+                        } else {
+                            let redone = &rep["redone"];
+                            let id = redone.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let auth = redone
+                                .get("author")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("anon");
+                            println!("Whiteboard annotation #{id} (author: {auth}) redone.");
+                        }
+                        if let Some(r) = rep.get("report") {
+                            print_screen_whiteboard_report(r);
+                        }
+                    }
+                }
+                Some(ScreenWhiteboardSubCmd::Export {
+                    out,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let uri = if let Some(ref o) = out {
+                        format!("/api/screen/whiteboard/export?out={}", urlencode_path(o))
+                    } else {
+                        "/api/screen/whiteboard/export".to_string()
+                    };
+                    let (code, resp) =
+                        tetherly_node::loopback_get(port, &uri).await.map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "whiteboard export failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        let items = rep["export"]["active_items"]
+                            .as_array()
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        if let Some(ref dest) = out {
+                            println!(
+                                "Whiteboard vector snapshot successfully exported ({items} items) to: {dest}"
+                            );
+                        } else {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&rep["export"]).unwrap_or_default()
+                            );
+                        }
+                    }
+                }
+                Some(ScreenWhiteboardSubCmd::Import {
+                    path,
+                    replace,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let p_obj = std::path::Path::new(&path);
+                    if p_obj
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                    {
+                        anyhow::bail!("path traversal rejected");
+                    }
+                    let raw_content = std::fs::read(&path).map_err(|e| {
+                        anyhow::anyhow!("failed to read snapshot file '{path}': {e}")
+                    })?;
+                    let snapshot: serde_json::Value = serde_json::from_slice(&raw_content)
+                        .map_err(|e| anyhow::anyhow!("invalid JSON snapshot '{path}': {e}"))?;
+                    let payload = serde_json::json!({
+                        "snapshot": snapshot,
+                        "replace": replace
+                    });
+                    let bytes = serde_json::to_vec(&payload)?;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/whiteboard/import", &bytes)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "whiteboard import failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        let count = rep
+                            .get("imported_count")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        println!(
+                            "Imported {count} whiteboard annotations from '{path}' (replace: {replace})."
+                        );
+                        if let Some(r) = rep.get("report") {
+                            print_screen_whiteboard_report(r);
+                        }
+                    }
+                }
+                Some(ScreenWhiteboardSubCmd::Policy {
+                    read_only,
+                    allow_clear,
+                    max_items,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    if read_only.is_none() && allow_clear.is_none() && max_items.is_none() {
+                        let (code, resp) =
+                            tetherly_node::loopback_get(port, "/api/screen/whiteboard/policy")
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "whiteboard policy query failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Screen Whiteboard Policy (ADR-106):");
+                            if let Some(pol) = rep.get("policy") {
+                                println!(
+                                    "  Read Only:          {}",
+                                    pol.get("read_only")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false)
+                                );
+                                println!(
+                                    "  Allow Peer Clear:   {}",
+                                    pol.get("allow_peer_clear")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(true)
+                                );
+                                println!(
+                                    "  Max Items:          {}",
+                                    pol.get("max_items")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(1000)
+                                );
+                            }
+                        }
+                    } else {
+                        let mut payload = serde_json::Map::new();
+                        if let Some(ro) = read_only {
+                            payload.insert("read_only".to_string(), serde_json::json!(ro));
+                        }
+                        if let Some(ac) = allow_clear {
+                            payload.insert("allow_peer_clear".to_string(), serde_json::json!(ac));
+                        }
+                        if let Some(mi) = max_items {
+                            payload.insert("max_items".to_string(), serde_json::json!(mi));
+                        }
+                        let bytes = serde_json::to_vec(&payload)?;
+                        let (code, resp) = tetherly_node::loopback_post(
+                            port,
+                            "/api/screen/whiteboard/policy",
+                            &bytes,
+                        )
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "whiteboard policy update failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Whiteboard policy updated successfully.");
+                            if let Some(pol) = rep.get("policy") {
+                                println!(
+                                    "  Read Only:          {}",
+                                    pol.get("read_only")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false)
+                                );
+                                println!(
+                                    "  Allow Peer Clear:   {}",
+                                    pol.get("allow_peer_clear")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(true)
+                                );
+                                println!(
+                                    "  Max Items:          {}",
+                                    pol.get("max_items")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(1000)
+                                );
+                            }
+                        }
+                    }
+                }
+                Some(ScreenWhiteboardSubCmd::Clear {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/whiteboard/clear", b"{}")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "whiteboard clear failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Whiteboard canvas cleared.");
+                        print_screen_whiteboard_report(&rep);
+                    }
+                }
+                None => {
+                    let (code, resp) =
+                        tetherly_node::loopback_get(ui_port, "/api/screen/annotation")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "whiteboard query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_whiteboard_report(&rep);
+                    }
+                }
+            },
+            ScreenCmd::Roi {
+                action,
+                json,
+                ui_port,
+            } => match action {
+                Some(ScreenRoiSubCmd::Status {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/roi")
+                        .await
+                        .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen roi status failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_roi_report(&rep);
+                    }
+                }
+                Some(ScreenRoiSubCmd::Set {
+                    x,
+                    y,
+                    w,
+                    h,
+                    zoom,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let payload = serde_json::json!({
+                        "x": x,
+                        "y": y,
+                        "w": w,
+                        "h": h,
+                        "zoom_percent": zoom,
+                    });
+                    let (code, resp) = tetherly_node::loopback_post(
+                        port,
+                        "/api/screen/roi",
+                        &serde_json::to_vec(&payload)?,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen roi set failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen ROI viewport updated successfully.");
+                        print_screen_roi_report(&rep);
+                    }
+                }
+                Some(ScreenRoiSubCmd::Reset {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/roi/reset", b"{}")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen roi reset failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen ROI viewport reset to full frame.");
+                        print_screen_roi_report(&rep);
+                    }
+                }
+                Some(ScreenRoiSubCmd::Zoom {
+                    percent,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let payload = serde_json::json!({
+                        "zoom_percent": percent,
+                    });
+                    let (code, resp) = tetherly_node::loopback_post(
+                        port,
+                        "/api/screen/roi/zoom",
+                        &serde_json::to_vec(&payload)?,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen roi zoom failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen ROI zoom scale updated successfully.");
+                        print_screen_roi_report(&rep);
+                    }
+                }
+                None => {
+                    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/roi")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen roi query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_roi_report(&rep);
+                    }
+                }
+            },
+            ScreenCmd::Color {
+                action,
+                json,
+                ui_port,
+            } => match action {
+                Some(ScreenColorSubCmd::Status {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/color")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen color query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_color_report(&rep);
+                    }
+                }
+                Some(ScreenColorSubCmd::Set {
+                    mode,
+                    threshold,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let payload = serde_json::json!({
+                        "mode": mode,
+                        "threshold": threshold,
+                    });
+                    let (code, resp) = tetherly_node::loopback_post(
+                        port,
+                        "/api/screen/color",
+                        &serde_json::to_vec(&payload)?,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen color set failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen color mode set successfully.");
+                        print_screen_color_report(&rep);
+                    }
+                }
+                Some(ScreenColorSubCmd::Reset {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/color/reset", b"{}")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen color reset failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen color mode reset to full color (32-bit true color).");
+                        print_screen_color_report(&rep);
+                    }
+                }
+                None => {
+                    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/color")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen color query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_color_report(&rep);
+                    }
+                }
+            },
+            ScreenCmd::Delta {
+                action,
+                json,
+                ui_port,
+            } => match action {
+                Some(ScreenDeltaSubCmd::Status {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/delta")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen delta query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_delta_report(&rep);
+                    }
+                }
+                Some(ScreenDeltaSubCmd::Set {
+                    enabled,
+                    interval,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let payload = serde_json::json!({
+                        "enabled": enabled,
+                        "keyframe_interval": interval,
+                    });
+                    let (code, resp) = tetherly_node::loopback_post(
+                        port,
+                        "/api/screen/delta",
+                        &serde_json::to_vec(&payload)?,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen delta set failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen delta mode configured successfully.");
+                        print_screen_delta_report(&rep);
+                    }
+                }
+                Some(ScreenDeltaSubCmd::Reset {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/delta/reset", b"{}")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen delta reset failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen delta mode reset to default full-frame transmission.");
+                        print_screen_delta_report(&rep);
+                    }
+                }
+                None => {
+                    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/delta")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen delta query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_delta_report(&rep);
+                    }
+                }
+            },
+            ScreenCmd::Metric {
+                action,
+                json,
+                ui_port,
+            } => match action {
+                Some(ScreenMetricSubCmd::Status {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/metric")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen metric query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_quality_metric_report(&rep);
+                    }
+                }
+                Some(ScreenMetricSubCmd::Set {
+                    enabled,
+                    interval,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let payload = serde_json::json!({
+                        "enabled": enabled,
+                        "sample_interval": interval,
+                    });
+                    let (code, resp) = tetherly_node::loopback_post(
+                        port,
+                        "/api/screen/metric",
+                        &serde_json::to_vec(&payload)?,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen metric set failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen quality metric mode configured successfully.");
+                        print_screen_quality_metric_report(&rep);
+                    }
+                }
+                Some(ScreenMetricSubCmd::Reset {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/metric/reset", b"{}")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen metric reset failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen quality metric mode reset to default disabled state.");
+                        print_screen_quality_metric_report(&rep);
+                    }
+                }
+                None => {
+                    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/metric")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen metric query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_quality_metric_report(&rep);
+                    }
+                }
+            },
+            ScreenCmd::Qoe {
+                action,
+                json,
+                ui_port,
+            } => match action {
+                Some(ScreenQoeSubCmd::Status {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/qoe")
+                        .await
+                        .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen qoe query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_qoe_report(&rep);
+                    }
+                }
+                Some(ScreenQoeSubCmd::Set {
+                    mode,
+                    target_psnr,
+                    target_ssim,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let payload = serde_json::json!({
+                        "mode": mode,
+                        "target_psnr": target_psnr,
+                        "target_ssim": target_ssim,
+                    });
+                    let (code, resp) = tetherly_node::loopback_post(
+                        port,
+                        "/api/screen/qoe",
+                        &serde_json::to_vec(&payload)?,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen qoe set failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen autonomous closed-loop QoE mode configured successfully.");
+                        print_screen_qoe_report(&rep);
+                    }
+                }
+                Some(ScreenQoeSubCmd::Reset {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/qoe/reset", b"{}")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen qoe reset failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen autonomous closed-loop QoE mode reset to default disabled state.");
+                        print_screen_qoe_report(&rep);
+                    }
+                }
+                None => {
+                    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/qoe")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen qoe query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_qoe_report(&rep);
+                    }
+                }
+            },
+            ScreenCmd::Pir {
+                action,
+                json,
+                ui_port,
+            } => {
+                match action {
+                    Some(ScreenPirSubCmd::Status {
+                        json: j,
+                        ui_port: p,
+                    }) => {
+                        let port = if p != 45716 { p } else { ui_port };
+                        let is_json = j || json;
+                        let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/pir")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen pir query failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            print_screen_pir_report(&rep);
+                        }
+                    }
+                    Some(ScreenPirSubCmd::Set {
+                        mode,
+                        bands,
+                        json: j,
+                        ui_port: p,
+                    }) => {
+                        let port = if p != 45716 { p } else { ui_port };
+                        let is_json = j || json;
+                        let payload = serde_json::json!({
+                            "mode": mode,
+                            "bands": bands,
+                        });
+                        let (code, resp) = tetherly_node::loopback_post(
+                            port,
+                            "/api/screen/pir",
+                            &serde_json::to_vec(&payload)?,
+                        )
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen pir set failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Screen Progressive Intra-Refresh (PIR) mode configured successfully.");
+                            print_screen_pir_report(&rep);
+                        }
+                    }
+                    Some(ScreenPirSubCmd::Reset {
+                        json: j,
+                        ui_port: p,
+                    }) => {
+                        let port = if p != 45716 { p } else { ui_port };
+                        let is_json = j || json;
+                        let (code, resp) =
+                            tetherly_node::loopback_post(port, "/api/screen/pir/reset", b"{}")
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen pir reset failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Screen Progressive Intra-Refresh (PIR) reset to default disabled state.");
+                            print_screen_pir_report(&rep);
+                        }
+                    }
+                    None => {
+                        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/pir")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen pir query failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            print_screen_pir_report(&rep);
+                        }
+                    }
+                }
+            }
+            ScreenCmd::Ltr {
+                action,
+                json,
+                ui_port,
+            } => match action {
+                Some(ScreenLtrSubCmd::Status {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/ltr")
+                        .await
+                        .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen ltr query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_ltr_report(&rep);
+                    }
+                }
+                Some(ScreenLtrSubCmd::Set {
+                    enabled,
+                    interval,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let payload = serde_json::json!({
+                        "enabled": enabled.unwrap_or(true),
+                        "auto_interval": interval,
+                    });
+                    let (code, resp) = tetherly_node::loopback_post(
+                        port,
+                        "/api/screen/ltr",
+                        &serde_json::to_vec(&payload)?,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen ltr set failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen Long-Term Reference (LTR) mode configured successfully.");
+                        print_screen_ltr_report(&rep);
+                    }
+                }
+                Some(ScreenLtrSubCmd::Anchor {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/ltr/anchor", b"{}")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen ltr anchor failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!(
+                            "Screen Long-Term Reference (LTR) golden anchor snapshot captured."
+                        );
+                        print_screen_ltr_report(&rep);
+                    }
+                }
+                Some(ScreenLtrSubCmd::Recover {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/ltr/recover", b"{}")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen ltr recovery request failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen Long-Term Reference (LTR) differential recovery request dispatched.");
+                        print_screen_ltr_report(&rep);
+                    }
+                }
+                Some(ScreenLtrSubCmd::Reset {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/ltr/reset", b"{}")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen ltr reset failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!(
+                            "Screen Long-Term Reference (LTR) reset to default disabled state."
+                        );
+                        print_screen_ltr_report(&rep);
+                    }
+                }
+                None => {
+                    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/ltr")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                     start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen ltr query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_ltr_report(&rep);
+                    }
+                }
+            },
+            ScreenCmd::Svc {
+                action,
+                json,
+                ui_port,
+            } => {
+                match action {
+                    None => {
+                        let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/svc")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen svc query failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            print_screen_svc_report(&rep);
+                        }
+                    }
+                    Some(ScreenSvcSubCmd::Status {
+                        json: j,
+                        ui_port: p,
+                    }) => {
+                        let port = if p != 45716 { p } else { ui_port };
+                        let is_json = j || json;
+                        let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/svc")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen svc query failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            print_screen_svc_report(&rep);
+                        }
+                    }
+                    Some(ScreenSvcSubCmd::Set {
+                        mode,
+                        drop_t1,
+                        json: j,
+                        ui_port: p,
+                    }) => {
+                        let port = if p != 45716 { p } else { ui_port };
+                        let is_json = j || json;
+                        let mut payload = serde_json::Map::new();
+                        if let Some(m) = mode {
+                            payload.insert("mode".to_string(), serde_json::Value::String(m));
+                        }
+                        if let Some(d) = drop_t1 {
+                            payload.insert("drop_t1".to_string(), serde_json::Value::Bool(d));
+                        }
+                        let bytes = serde_json::to_vec(&payload)?;
+                        let (code, resp) =
+                            tetherly_node::loopback_post(port, "/api/screen/svc", &bytes)
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen svc set failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Screen Temporal Scalability (SVC-T) configuration updated.");
+                            print_screen_svc_report(&rep);
+                        }
+                    }
+                    Some(ScreenSvcSubCmd::DropT1 {
+                        drop,
+                        json: j,
+                        ui_port: p,
+                    }) => {
+                        let port = if p != 45716 { p } else { ui_port };
+                        let is_json = j || json;
+                        let payload = serde_json::json!({
+                            "drop_t1": drop.unwrap_or(true)
+                        });
+                        let bytes = serde_json::to_vec(&payload)?;
+                        let (code, resp) =
+                            tetherly_node::loopback_post(port, "/api/screen/svc/drop-t1", &bytes)
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen svc drop-t1 failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Screen Temporal Scalability (SVC-T) T1 drop policy updated.");
+                            print_screen_svc_report(&rep);
+                        }
+                    }
+                    Some(ScreenSvcSubCmd::Reset {
+                        json: j,
+                        ui_port: p,
+                    }) => {
+                        let port = if p != 45716 { p } else { ui_port };
+                        let is_json = j || json;
+                        let (code, resp) =
+                            tetherly_node::loopback_post(port, "/api/screen/svc/reset", b"{}")
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                    )
+                                })?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "screen svc reset failed (HTTP {code}): {}",
+                                String::from_utf8_lossy(&resp)
+                            );
+                        }
+                        if is_json {
+                            println!("{}", String::from_utf8_lossy(&resp).trim());
+                        } else {
+                            let rep: serde_json::Value = serde_json::from_slice(&resp)
+                                .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                            println!("Screen Temporal Scalability (SVC-T) reset to default disabled state.");
+                            print_screen_svc_report(&rep);
+                        }
+                    }
+                }
+            }
+            ScreenCmd::Motion {
+                action,
+                json,
+                ui_port,
+            } => match action {
+                None => {
+                    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/motion")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen motion query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_motion_report(&rep);
+                    }
+                }
+                Some(ScreenMotionSubCmd::Status {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/motion")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen motion query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_motion_report(&rep);
+                    }
+                }
+                Some(ScreenMotionSubCmd::Set {
+                    enabled,
+                    max_displacement,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let mut payload = serde_json::Map::new();
+                    if let Some(en) = enabled {
+                        payload.insert("enabled".to_string(), serde_json::Value::Bool(en));
+                    }
+                    if let Some(d) = max_displacement {
+                        payload.insert(
+                            "max_displacement".to_string(),
+                            serde_json::Value::Number(serde_json::Number::from(d)),
+                        );
+                    }
+                    let bytes = serde_json::to_vec(&payload)?;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/motion", &bytes)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen motion set failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen 2D motion estimation mode updated.");
+                        print_screen_motion_report(&rep);
+                    }
+                }
+                Some(ScreenMotionSubCmd::Reset {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/motion/reset", b"{}")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen motion reset failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen 2D motion estimation reset to default disabled state.");
+                        print_screen_motion_report(&rep);
+                    }
+                }
+            },
+            ScreenCmd::Tile {
+                action,
+                json,
+                ui_port,
+            } => match action {
+                None => {
+                    let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen tile query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_tile_report(&rep);
+                    }
+                }
+                Some(ScreenTileSubCmd::Status {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile")
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                            )
+                        })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen tile query failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        print_screen_tile_report(&rep);
+                    }
+                }
+                Some(ScreenTileSubCmd::Set {
+                    enabled,
+                    tile_size,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let mut payload = serde_json::Map::new();
+                    if let Some(en) = enabled {
+                        payload.insert("enabled".to_string(), serde_json::Value::Bool(en));
+                    }
+                    if let Some(ts) = tile_size {
+                        payload.insert(
+                            "tile_size".to_string(),
+                            serde_json::Value::Number(serde_json::Number::from(ts)),
+                        );
+                    }
+                    let bytes = serde_json::to_vec(&payload)?;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/tile", &bytes)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                             start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen tile set failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen spatial tile-grid mode updated.");
+                        print_screen_tile_report(&rep);
+                    }
+                }
+                Some(ScreenTileSubCmd::Reset {
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    let port = if p != 45716 { p } else { ui_port };
+                    let is_json = j || json;
+                    let (code, resp) =
+                        tetherly_node::loopback_post(port, "/api/screen/tile/reset", b"{}")
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "no running node reachable on 127.0.0.1:{port} ({e}); \
+                                 start one with `tetherly --data-dir <dir> run` first"
+                                )
+                            })?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "screen tile reset failed (HTTP {code}): {}",
+                            String::from_utf8_lossy(&resp)
+                        );
+                    }
+                    if is_json {
+                        println!("{}", String::from_utf8_lossy(&resp).trim());
+                    } else {
+                        let rep: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                        println!("Screen spatial tile-grid reset to default disabled state.");
+                        print_screen_tile_report(&rep);
+                    }
+                }
+                Some(ScreenTileSubCmd::Cache {
+                    action: sub,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    execute_screen_tile_cache_cmd(
+                        sub,
+                        json || j,
+                        if p != 45716 { p } else { ui_port },
+                    )
+                    .await?;
+                }
+                Some(ScreenTileSubCmd::Focus {
+                    action: sub,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    execute_screen_focus_cmd(sub, json || j, if p != 45716 { p } else { ui_port })
+                        .await?;
+                }
+                Some(ScreenTileSubCmd::Palette {
+                    action: sub,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    execute_screen_tile_palette_cmd(
+                        sub,
+                        json || j,
+                        if p != 45716 { p } else { ui_port },
+                    )
+                    .await?;
+                }
+                Some(ScreenTileSubCmd::Predict {
+                    action: sub,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    execute_screen_tile_predict_cmd(
+                        sub,
+                        json || j,
+                        if p != 45716 { p } else { ui_port },
+                    )
+                    .await?;
+                }
+                Some(ScreenTileSubCmd::Present {
+                    action: sub,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    execute_screen_tile_present_cmd(
+                        sub,
+                        json || j,
+                        if p != 45716 { p } else { ui_port },
+                    )
+                    .await?;
+                }
+                Some(ScreenTileSubCmd::Nack {
+                    action: sub,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    execute_screen_tile_nack_cmd(
+                        sub,
+                        json || j,
+                        if p != 45716 { p } else { ui_port },
+                    )
+                    .await?;
+                }
+                Some(ScreenTileSubCmd::Saliency {
+                    action: sub,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    execute_screen_tile_saliency_cmd(
+                        sub,
+                        json || j,
+                        if p != 45716 { p } else { ui_port },
+                    )
+                    .await?;
+                }
+                Some(ScreenTileSubCmd::Lod {
+                    action: sub,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    execute_screen_tile_lod_cmd(
+                        sub,
+                        json || j,
+                        if p != 45716 { p } else { ui_port },
+                    )
+                    .await?;
+                }
+                Some(ScreenTileSubCmd::Batch {
+                    action: sub,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    execute_screen_tile_batch_cmd(
+                        sub,
+                        json || j,
+                        if p != 45716 { p } else { ui_port },
+                    )
+                    .await?;
+                }
+                Some(ScreenTileSubCmd::Motion {
+                    action: sub,
+                    json: j,
+                    ui_port: p,
+                }) => {
+                    execute_screen_tile_motion_cmd(
+                        sub,
+                        json || j,
+                        if p != 45716 { p } else { ui_port },
+                    )
+                    .await?;
+                }
+            },
+            ScreenCmd::TileCache {
+                action,
+                json,
+                ui_port,
+            } => {
+                execute_screen_tile_cache_cmd(action, json, ui_port).await?;
+            }
+            ScreenCmd::Focus {
+                action,
+                json,
+                ui_port,
+            } => {
+                execute_screen_focus_cmd(action, json, ui_port).await?;
+            }
+            ScreenCmd::TilePalette {
+                action,
+                json,
+                ui_port,
+            } => {
+                execute_screen_tile_palette_cmd(action, json, ui_port).await?;
+            }
+            ScreenCmd::TilePredict {
+                action,
+                json,
+                ui_port,
+            }
+            | ScreenCmd::Predict {
+                action,
+                json,
+                ui_port,
+            } => {
+                execute_screen_tile_predict_cmd(action, json, ui_port).await?;
+            }
+            ScreenCmd::TilePresent {
+                action,
+                json,
+                ui_port,
+            }
+            | ScreenCmd::Present {
+                action,
+                json,
+                ui_port,
+            } => {
+                execute_screen_tile_present_cmd(action, json, ui_port).await?;
+            }
+            ScreenCmd::TileNack {
+                action,
+                json,
+                ui_port,
+            }
+            | ScreenCmd::Nack {
+                action,
+                json,
+                ui_port,
+            } => {
+                execute_screen_tile_nack_cmd(action, json, ui_port).await?;
+            }
+            ScreenCmd::TileSaliency {
+                action,
+                json,
+                ui_port,
+            }
+            | ScreenCmd::Saliency {
+                action,
+                json,
+                ui_port,
+            } => {
+                execute_screen_tile_saliency_cmd(action, json, ui_port).await?;
+            }
+            ScreenCmd::TileLod {
+                action,
+                json,
+                ui_port,
+            }
+            | ScreenCmd::Lod {
+                action,
+                json,
+                ui_port,
+            } => {
+                execute_screen_tile_lod_cmd(action, json, ui_port).await?;
+            }
+            ScreenCmd::TileBatch {
+                action,
+                json,
+                ui_port,
+            }
+            | ScreenCmd::Batch {
+                action,
+                json,
+                ui_port,
+            } => {
+                execute_screen_tile_batch_cmd(action, json, ui_port).await?;
+            }
+            ScreenCmd::TileMotion {
+                action,
+                json,
+                ui_port,
+            } => {
+                execute_screen_tile_motion_cmd(action, json, ui_port).await?;
             }
         },
         Cmd::Input { action } => match action {
@@ -19794,6 +24787,49 @@ fn print_screen_recording_report(rep: &serde_json::Value) {
     }
 }
 
+fn print_screen_playback_report(rep: &serde_json::Value) {
+    println!("Screen Session Playback (TREC Engine, ADR-102):");
+    let state = rep.get("state").and_then(|v| v.as_str()).unwrap_or("idle");
+    let path = rep.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let speed = rep.get("speed").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let loop_enabled = rep
+        .get("loop_enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let current_frame = rep
+        .get("current_frame")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let total_frames = rep
+        .get("total_frames")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let elapsed_ms = rep.get("elapsed_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+    let duration_ms = rep.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+    let width = rep.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+    let height = rep.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+    let format = rep
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let codec = rep.get("codec").and_then(|v| v.as_str()).unwrap_or("raw");
+
+    println!("  State:                {state}");
+    if !path.is_empty() {
+        println!("  Container Path:       {path}");
+    }
+    println!(
+        "  Progress:             frame {current_frame} / {total_frames} ({elapsed_ms} ms / {duration_ms} ms)"
+    );
+    println!("  Speed:                {speed:.1}x · Loop: {loop_enabled}");
+    if width > 0 && height > 0 {
+        println!("  Resolution:           {width}x{height} ({format}, {codec})");
+    }
+    if state == "idle" {
+        println!("  (No active playback session; use `screen playback start <path>` to play a .trec recording)");
+    }
+}
+
 fn print_screen_recording_replay(rep: &serde_json::Value) {
     println!("TREC Container Replay Inspection (ADR-101):");
     let path = rep.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -19827,6 +24863,2527 @@ fn print_screen_recording_replay(rep: &serde_json::Value) {
             let pts = r.get("pts_us").and_then(|v| v.as_u64()).unwrap_or(0);
             let len = r.get("len").and_then(|v| v.as_u64()).unwrap_or(0);
             println!("    frame #{seq} pts={pts}us len={len}");
+        }
+    }
+}
+
+fn print_screen_snapshot_report(rep: &serde_json::Value) {
+    println!("Screen Snapshot (Zero-Dependency BMP Pipeline, ADR-103):");
+    let ok = rep.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let source = rep
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let seq = rep.get("frame_seq").and_then(|v| v.as_u64()).unwrap_or(0);
+    let pts = rep.get("pts_us").and_then(|v| v.as_u64()).unwrap_or(0);
+    let width = rep.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+    let height = rep.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+    let format = rep.get("format").and_then(|v| v.as_str()).unwrap_or("bmp");
+    let bytes_len = rep.get("bytes_len").and_then(|v| v.as_u64()).unwrap_or(0);
+    let blanked = rep
+        .get("privacy_blanked")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let watermarked = rep
+        .get("watermarked")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let path = rep.get("path").and_then(|v| v.as_str());
+
+    println!(
+        "  Status:               {}",
+        if ok { "ok" } else { "failed" }
+    );
+    println!("  Source:               {source}");
+    println!("  Frame Seq:            #{seq}");
+    println!(
+        "  PTS:                  {pts} us ({:.2} s)",
+        pts as f64 / 1_000_000.0
+    );
+    println!("  Resolution:           {width}x{height}");
+    println!("  Format:               {format}");
+    println!("  Payload Size:         {bytes_len} bytes");
+    println!(
+        "  Privacy Blanked:      {}",
+        if blanked { "yes (blackout mask)" } else { "no" }
+    );
+    println!(
+        "  Watermarked:          {}",
+        if watermarked {
+            "yes (forensic attribution overlay)"
+        } else {
+            "no"
+        }
+    );
+    if let Some(p) = path {
+        println!("  Saved To:             {p}");
+    }
+}
+
+fn print_screen_watermark_report(rep: &serde_json::Value) {
+    println!("Screen Dynamic Security Watermark (Zero-Dependency Font Pipeline, ADR-104):");
+    let ok = rep.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let enabled = rep
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let host_enforced = rep
+        .get("host_enforced")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let text_template = rep
+        .get("text_template")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let rendered_text = rep
+        .get("rendered_text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let opacity = rep.get("opacity").and_then(|v| v.as_u64()).unwrap_or(64);
+    let opacity_pct = rep
+        .get("opacity_pct")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(25);
+    let color_hex = rep
+        .get("color_hex")
+        .and_then(|v| v.as_str())
+        .unwrap_or("#DCDCDC");
+    let scale = rep.get("scale").and_then(|v| v.as_u64()).unwrap_or(1);
+    let pattern = rep
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .unwrap_or("grid");
+    let spacing_x = rep.get("spacing_x").and_then(|v| v.as_u64()).unwrap_or(240);
+    let spacing_y = rep.get("spacing_y").and_then(|v| v.as_u64()).unwrap_or(160);
+    let frames_watermarked = rep
+        .get("frames_watermarked")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    println!(
+        "  Status:               {}",
+        if ok { "ok" } else { "failed" }
+    );
+    println!(
+        "  Enabled:              {}",
+        if enabled { "yes" } else { "no" }
+    );
+    println!(
+        "  Host Enforced:        {}",
+        if host_enforced {
+            "yes (visitor lockdown)"
+        } else {
+            "no"
+        }
+    );
+    println!("  Text Template:        {text_template}");
+    if !rendered_text.is_empty() {
+        println!("  Rendered Sample:      {rendered_text}");
+    }
+    println!("  Opacity:              {opacity} ({opacity_pct}%)");
+    println!("  Color:                {color_hex}");
+    println!(
+        "  Font Scale:           {scale}x (glyph: {}x{})",
+        8 * scale,
+        8 * scale
+    );
+    println!("  Layout Pattern:       {pattern}");
+    println!("  Tile Spacing:         {spacing_x}x{spacing_y} px");
+    println!("  Frames Watermarked:   {frames_watermarked}");
+}
+
+fn print_screen_annotation_report(rep: &serde_json::Value) {
+    println!("Screen Collaborative Annotations & Whiteboard Overlay (ADR-105):");
+    let ok = rep.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let count = rep
+        .get("annotations_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let laser_active = rep
+        .get("laser_active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let total_added = rep
+        .get("total_annotations_added")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let laser_updates = rep
+        .get("laser_updates_total")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    println!(
+        "  Status:               {}",
+        if ok { "ok" } else { "failed" }
+    );
+    println!("  Active Annotations:   {count}");
+    println!("  Total Added:          {total_added}");
+    println!(
+        "  Laser Pointer:        {}",
+        if laser_active { "ACTIVE" } else { "idle/off" }
+    );
+    println!("  Laser Updates:        {laser_updates}");
+    if let Some(laser) = rep.get("laser").filter(|v| !v.is_null()) {
+        if let (Some(x), Some(y)) = (
+            laser.get("x").and_then(|v| v.as_u64()),
+            laser.get("y").and_then(|v| v.as_u64()),
+        ) {
+            let r = laser.get("radius").and_then(|v| v.as_u64()).unwrap_or(12);
+            println!("  Laser Position:       ({x}, {y}) [radius: {r}px]");
+        }
+    }
+    if let Some(arr) = rep.get("annotations").and_then(|v| v.as_array()) {
+        if !arr.is_empty() {
+            println!("  Active Items:");
+            for (i, item) in arr.iter().enumerate() {
+                let id = item.get("id").and_then(|v| v.as_u64()).unwrap_or(i as u64);
+                let kind_desc = if let Some(k) = item.get("kind") {
+                    if let Some(s) = k.get("stroke") {
+                        let pts = s
+                            .get("points")
+                            .and_then(|p| p.as_array())
+                            .map(|p| p.len())
+                            .unwrap_or(0);
+                        format!("stroke ({pts} points)")
+                    } else if let Some(r) = k.get("rect") {
+                        format!(
+                            "rect (at {},{}, {}x{})",
+                            r.get("x").unwrap_or(&serde_json::json!(0)),
+                            r.get("y").unwrap_or(&serde_json::json!(0)),
+                            r.get("w").unwrap_or(&serde_json::json!(0)),
+                            r.get("h").unwrap_or(&serde_json::json!(0))
+                        )
+                    } else if let Some(a) = k.get("arrow") {
+                        format!(
+                            "arrow ({:?} -> {:?})",
+                            a.get("from").unwrap_or(&serde_json::json!([0, 0])),
+                            a.get("to").unwrap_or(&serde_json::json!([0, 0]))
+                        )
+                    } else if let Some(t) = k.get("text") {
+                        format!(
+                            "text: \"{}\"",
+                            t.get("text").and_then(|x| x.as_str()).unwrap_or("")
+                        )
+                    } else {
+                        "custom".to_string()
+                    }
+                } else {
+                    "unknown".to_string()
+                };
+                let ttl = item.get("ttl_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                let ttl_str = if ttl == 0 {
+                    "persistent".to_string()
+                } else {
+                    format!("{ttl}ms TTL")
+                };
+                println!("    #{id}: {kind_desc} [{ttl_str}]");
+            }
+        }
+    }
+}
+
+fn print_screen_whiteboard_report(rep: &serde_json::Value) {
+    println!("Screen Collaborative Whiteboard Status (v2.20 / ADR-106):");
+    let count = rep
+        .get("annotations_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let redo_count = rep.get("redo_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total_added = rep
+        .get("total_annotations_added")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    println!("  Active Items:         {count}");
+    println!("  Redo Stack:           {redo_count}");
+    println!("  Total Added:          {total_added}");
+    if let Some(pol) = rep.get("whiteboard_policy") {
+        let ro = pol
+            .get("read_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let pc = pol
+            .get("allow_peer_clear")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let max_items = pol
+            .get("max_items")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1000);
+        println!("  Whiteboard Policy:");
+        println!("    Read Only:          {ro}");
+        println!("    Allow Peer Clear:   {pc}");
+        println!("    Max Items:          {max_items}");
+    }
+    if let Some(arr) = rep.get("annotations").and_then(|v| v.as_array()) {
+        if !arr.is_empty() {
+            println!("  Active Annotations:");
+            for (i, item) in arr.iter().enumerate() {
+                let id = item.get("id").and_then(|v| v.as_u64()).unwrap_or(i as u64);
+                let author = item
+                    .get("author")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("anon");
+                let kind_desc = if let Some(k) = item.get("kind") {
+                    if let Some(s) = k.get("stroke") {
+                        let pts = s
+                            .get("points")
+                            .and_then(|p| p.as_array())
+                            .map(|p| p.len())
+                            .unwrap_or(0);
+                        format!("stroke ({pts} points)")
+                    } else if let Some(r) = k.get("rect") {
+                        format!(
+                            "rect (at {},{}, {}x{})",
+                            r.get("x").unwrap_or(&serde_json::json!(0)),
+                            r.get("y").unwrap_or(&serde_json::json!(0)),
+                            r.get("w").unwrap_or(&serde_json::json!(0)),
+                            r.get("h").unwrap_or(&serde_json::json!(0))
+                        )
+                    } else if let Some(a) = k.get("arrow") {
+                        format!(
+                            "arrow ({:?} -> {:?})",
+                            a.get("from").unwrap_or(&serde_json::json!([0, 0])),
+                            a.get("to").unwrap_or(&serde_json::json!([0, 0]))
+                        )
+                    } else if let Some(t) = k.get("text") {
+                        format!(
+                            "text: \"{}\"",
+                            t.get("text").and_then(|x| x.as_str()).unwrap_or("")
+                        )
+                    } else {
+                        "custom".to_string()
+                    }
+                } else {
+                    "item".to_string()
+                };
+                println!("    #{id} [{author}]: {kind_desc}");
+            }
+        }
+    }
+}
+
+fn print_screen_roi_report(rep: &serde_json::Value) {
+    println!("Screen Dynamic Region-of-Interest (ROI) Status (v2.21 / ADR-107):");
+    let active = rep.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+    let state_str = if active {
+        "active (sub-viewport cropped)"
+    } else {
+        "inactive (full-frame streaming)"
+    };
+    println!("  Status:        {state_str}");
+    if active {
+        let x = rep.get("x").and_then(|v| v.as_u64()).unwrap_or(0);
+        let y = rep.get("y").and_then(|v| v.as_u64()).unwrap_or(0);
+        let w = rep.get("w").and_then(|v| v.as_u64()).unwrap_or(0);
+        let h = rep.get("h").and_then(|v| v.as_u64()).unwrap_or(0);
+        println!("  Viewport:      x: {x}, y: {y}, {w}x{h}");
+    }
+    let zoom = rep
+        .get("zoom_percent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100);
+    println!("  Zoom Scale:    {zoom}% ({:.1}x)", zoom as f64 / 100.0);
+    let eff_w = rep.get("effective_w").and_then(|v| v.as_u64()).unwrap_or(0);
+    let eff_h = rep.get("effective_h").and_then(|v| v.as_u64()).unwrap_or(0);
+    let src_w = rep.get("source_w").and_then(|v| v.as_u64()).unwrap_or(0);
+    let src_h = rep.get("source_h").and_then(|v| v.as_u64()).unwrap_or(0);
+    println!("  Resolution:    effective: {eff_w}x{eff_h} · source: {src_w}x{src_h}");
+    let updates = rep
+        .get("update_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    println!("  Total Updates: {updates}");
+}
+
+fn print_screen_color_report(rep: &serde_json::Value) {
+    println!("Screen Adaptive Color Depth Pipeline (v2.22 / ADR-108):");
+    let mode = rep
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("full_color32");
+    let active = rep
+        .get("is_active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mode_desc = match mode {
+        "full_color32" => "full_color32 (32-bit uncompressed true color BGRA8/RGBA8)",
+        "reduced_color16" => "reduced_color16 (16-bit RGB565 high-bit replenishment)",
+        "grayscale8" => "grayscale8 (8-bit Rec.601 luminance economy mode)",
+        "monochrome1" => "monochrome1 (1-bit high-contrast black & white binarization)",
+        other => other,
+    };
+    println!("  Mode:          {mode_desc}");
+    let active_str = if active {
+        "active (color transformation applied)"
+    } else {
+        "inactive (native full color)"
+    };
+    println!("  Status:        {active_str}");
+    let threshold = rep.get("threshold").and_then(|v| v.as_u64()).unwrap_or(128);
+    println!("  Threshold:     {threshold} (active in monochrome1 mode)");
+    let updates = rep
+        .get("update_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    println!("  Total Updates: {updates}");
+}
+
+fn print_screen_delta_report(rep: &serde_json::Value) {
+    println!("Screen Differential Delta Patch & Temporal Compression (v2.23 / ADR-109):");
+    let enabled = rep
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let interval = rep
+        .get("keyframe_interval")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60);
+    let status_str = if enabled {
+        "enabled (macroblock differential dirty sub-rectangle)"
+    } else {
+        "disabled (full frame transmission)"
+    };
+    println!("  Status:             {status_str}");
+    println!("  Keyframe Interval:  {interval} frames");
+    let delta_sent = rep
+        .get("delta_frames_sent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let keyframes_sent = rep
+        .get("keyframes_sent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let delta_recv = rep
+        .get("delta_frames_received")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let keyframes_recv = rep
+        .get("keyframes_received")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let saved_bytes = rep.get("saved_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+    println!("  Sent:               delta frames: {delta_sent} · keyframes: {keyframes_sent}");
+    println!("  Received:           delta frames: {delta_recv} · keyframes: {keyframes_recv}");
+    println!(
+        "  Bandwidth Saved:    {saved_bytes} B ({:.2} KB)",
+        saved_bytes as f64 / 1024.0
+    );
+}
+
+fn print_screen_quality_metric_report(rep: &serde_json::Value) {
+    println!("Screen Objective Visual Quality Metric Pipeline (v2.24 / ADR-110):");
+    let enabled = rep
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let interval = rep
+        .get("sample_interval")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10);
+    let status_str = if enabled {
+        "enabled (real-time MSE/PSNR/SSIM distortion profiling)"
+    } else {
+        "disabled"
+    };
+    println!("  Status:             {status_str}");
+    println!("  Sample Interval:    every {interval} frames");
+    let evaluated = rep
+        .get("evaluated_frames")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let avg_mse = rep.get("avg_mse").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let avg_psnr = rep
+        .get("avg_psnr_db")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let avg_ssim = rep.get("avg_ssim").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let last_psnr = rep
+        .get("last_psnr_db")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let last_ssim = rep.get("last_ssim").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let warning = rep
+        .get("quality_warning")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let warn_str = if warning {
+        " [WARNING: PSNR < 30.0 dB or SSIM < 0.85]"
+    } else {
+        " [OK]"
+    };
+    println!("  Evaluated Frames:   {evaluated}");
+    println!("  Average MSE:        {avg_mse:.4}");
+    println!("  Average PSNR:       {avg_psnr:.2} dB");
+    println!("  Average SSIM:       {avg_ssim:.4}");
+    println!("  Last Frame PSNR:    {last_psnr:.2} dB");
+    println!("  Last Frame SSIM:    {last_ssim:.4}");
+    println!("  Quality Health:    {warn_str}");
+}
+
+fn print_screen_qoe_report(rep: &serde_json::Value) {
+    println!("Screen Autonomous Closed-Loop QoE Adaptation Pipeline (v2.25 / ADR-111):");
+    let mode = rep.get("mode").and_then(|v| v.as_str()).unwrap_or("off");
+    let target_psnr = rep
+        .get("target_psnr_db")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30);
+    let target_ssim = rep
+        .get("target_ssim_pct")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(85);
+    let in_cooldown = rep
+        .get("in_cooldown")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let actions_total = rep
+        .get("actions_total")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let last_action = rep
+        .get("last_action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("hold");
+    let last_reason = rep
+        .get("last_action_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
+    let active_boosts = rep
+        .get("active_boosts")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let status_str = match mode {
+        "conservative" => "Conservative (Fidelity prioritized, PSNR >= 34 dB / SSIM >= 0.90)",
+        "balanced" => "Balanced (Adaptive stability, PSNR >= 30 dB / SSIM >= 0.85)",
+        "economy" => "Economy (Bandwidth preservation, PSNR >= 26 dB / SSIM >= 0.78)",
+        _ => "Off (Closed-loop adaptation disabled)",
+    };
+    println!("  Policy Mode:        {status_str}");
+    println!("  Target PSNR:        {target_psnr} dB");
+    println!(
+        "  Target SSIM:        {target_ssim}% ({:.2})",
+        target_ssim as f64 / 100.0
+    );
+    println!("  Actions Total:      {actions_total}");
+    println!("  Last Action:        {last_action}");
+    println!("  Action Reason:      {last_reason}");
+    println!("  In Cooldown:        {in_cooldown}");
+    println!("  Active Boosts:      {active_boosts}");
+}
+
+fn print_screen_pir_report(rep: &serde_json::Value) {
+    println!("Screen Progressive Intra-Refresh (PIR) Anti-Burst Slice Pipeline (v2.26 / ADR-112):");
+    let mode = rep
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("disabled");
+    let bands = rep.get("bands").and_then(|v| v.as_u64()).unwrap_or(8);
+    let sweeps_completed = rep
+        .get("sweeps_completed")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let slices_sent = rep.get("slices_sent").and_then(|v| v.as_u64()).unwrap_or(0);
+    let current_band = rep
+        .get("current_band")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let active_sweep = rep
+        .get("active_sweep")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let status_str = match mode {
+        "continuous" => {
+            "Continuous (Rolling band slices refresh 1 band per frame, zero I-frame burst)"
+        }
+        "on-demand" | "ondemand" => {
+            "On-Demand (Triggered N-frame progressive sweep on loss/QoE request)"
+        }
+        _ => "Disabled (Traditional full keyframe refresh)",
+    };
+    println!("  Operating Mode:     {status_str}");
+    println!("  Band Slices (N):    {bands}");
+    println!("  Sweeps Completed:   {sweeps_completed}");
+    println!("  Slices Sent:        {slices_sent}");
+    println!("  Current Band Index: {current_band} / {bands}");
+    println!("  Active Sweep:       {active_sweep}");
+}
+
+fn print_screen_ltr_report(rep: &serde_json::Value) {
+    println!("Screen Long-Term Reference (LTR) Frame Anchoring & Gap Recovery Pipeline (v2.27 / ADR-113):");
+    let enabled = rep
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let auto_interval = rep
+        .get("auto_interval")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60);
+    let current_ltr_seq = rep
+        .get("current_ltr_seq")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let anchors_established = rep
+        .get("anchors_established")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let recoveries_requested = rep
+        .get("recoveries_requested")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let recoveries_completed = rep
+        .get("recoveries_completed")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let saved_burst_bytes = rep
+        .get("saved_burst_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let status_str = if enabled {
+        format!("Enabled (Golden reference anchor auto-refresh every {auto_interval} frames)")
+    } else {
+        "Disabled (Traditional IDR keyframe burst on packet loss)".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  Auto-Anchor Interval:  {auto_interval} frames");
+    println!("  Current LTR Anchor:    Seq #{current_ltr_seq}");
+    println!("  Anchors Established:   {anchors_established}");
+    println!("  Recoveries Dispatched: {recoveries_requested}");
+    println!("  Recoveries Completed:  {recoveries_completed}");
+    println!("  Saved Burst Traffic:   {saved_burst_bytes} bytes");
+}
+
+fn print_screen_svc_report(rep: &serde_json::Value) {
+    println!(
+        "Screen 2-Layer Temporal Scalability (SVC-T) Hierarchical Pipeline (v2.28 / ADR-114):"
+    );
+    let enabled = rep
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mode = rep
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("disabled");
+    let drop_t1 = rep
+        .get("drop_t1")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let t0_frames_sent = rep
+        .get("t0_frames_sent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let t1_frames_sent = rep
+        .get("t1_frames_sent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let t1_frames_dropped = rep
+        .get("t1_frames_dropped")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let saved_bandwidth_bytes = rep
+        .get("saved_bandwidth_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let status_str = if enabled {
+        format!("Enabled (mode: {mode}, drop_t1: {drop_t1})")
+    } else {
+        "Disabled (Flat delta prediction chain)".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  Operational Mode:      {mode}");
+    println!("  Drop T1 Active:        {drop_t1}");
+    println!("  T0 Base Frames Sent:   {t0_frames_sent}");
+    println!("  T1 Enh. Frames Sent:   {t1_frames_sent}");
+    println!("  T1 Frames Dropped:     {t1_frames_dropped}");
+    println!("  Saved Bandwidth:       {saved_bandwidth_bytes} bytes");
+}
+
+fn print_screen_motion_report(rep: &serde_json::Value) {
+    println!(
+        "Screen 2D Motion Vector Estimation & Scroll Acceleration Pipeline (v2.29 / ADR-115):"
+    );
+    let enabled = rep
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let max_displacement = rep
+        .get("max_displacement")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(64);
+    let motion_frames_sent = rep
+        .get("motion_frames_sent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let fallback_frames_sent = rep
+        .get("fallback_frames_sent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let saved_bandwidth_bytes = rep
+        .get("saved_bandwidth_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let status_str = if enabled {
+        format!("Enabled (max_displacement: {max_displacement}px)")
+    } else {
+        "Disabled".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  Search Radius:         {max_displacement} px");
+    println!("  Motion Frames Sent:    {motion_frames_sent}");
+    println!("  Fallback Frames Sent:  {fallback_frames_sent}");
+    println!("  Saved Bandwidth:       {saved_bandwidth_bytes} bytes");
+}
+
+fn print_screen_tile_report(rep: &serde_json::Value) {
+    println!("Screen Spatial Tile-Grid Decomposition & Streaming Pipeline (v2.30 / ADR-116):");
+    let enabled = rep
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let tile_size = rep.get("tile_size").and_then(|v| v.as_u64()).unwrap_or(64);
+    let grid_frames_sent = rep
+        .get("grid_frames_sent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let dirty_tiles_sent = rep
+        .get("dirty_tiles_sent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let skipped_tiles_count = rep
+        .get("skipped_tiles_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let saved_bandwidth_bytes = rep
+        .get("saved_bandwidth_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let status_str = if enabled {
+        format!("Enabled (tile_size: {tile_size}px)")
+    } else {
+        "Disabled".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  Tile Size:             {tile_size} px");
+    println!("  Grid Frames Sent:      {grid_frames_sent}");
+    println!("  Dirty Tiles Sent:      {dirty_tiles_sent}");
+    println!("  Skipped Tiles Count:   {skipped_tiles_count}");
+    println!("  Saved Bandwidth:       {saved_bandwidth_bytes} bytes");
+}
+
+fn print_screen_tile_cache_report(rep: &serde_json::Value) {
+    println!("Screen Hash-Based Tile Deduplication & LRU Cache Pipeline (v2.31 / ADR-117):");
+    let enabled = rep
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let max_entries = rep
+        .get("max_entries")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(512);
+    let current_entries = rep
+        .get("current_entries")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_hits = rep.get("cache_hits").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cache_misses = rep
+        .get("cache_misses")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let hit_ratio_pct = rep
+        .get("hit_ratio_pct")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let saved_bandwidth_bytes = rep
+        .get("saved_bandwidth_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let status_str = if enabled {
+        format!("Enabled (max_entries: {max_entries})")
+    } else {
+        "Disabled".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  Cache Dictionary Cap:  {max_entries} slots");
+    println!("  Active Cache Entries:  {current_entries} entries");
+    println!("  Tile Cache Hits:       {cache_hits}");
+    println!("  Tile Cache Misses:     {cache_misses}");
+    println!("  Cache Hit Ratio:       {hit_ratio_pct:.2}%");
+    println!("  Saved Bandwidth:       {saved_bandwidth_bytes} bytes");
+}
+
+async fn execute_screen_tile_cache_cmd(
+    action: Option<ScreenTileCacheSubCmd>,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    match action {
+        None => {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/cache")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile cache query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let rep: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                print_screen_tile_cache_report(&rep);
+            }
+        }
+        Some(ScreenTileCacheSubCmd::Status {
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/cache")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile cache query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if effective_json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let rep: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                print_screen_tile_cache_report(&rep);
+            }
+        }
+        Some(ScreenTileCacheSubCmd::Set {
+            enabled,
+            max_entries,
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let mut payload = serde_json::Map::new();
+            if let Some(en) = enabled {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(en));
+            }
+            if let Some(me) = max_entries {
+                payload.insert(
+                    "max_entries".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(me)),
+                );
+            }
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/tile/cache", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile cache set failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if effective_json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let rep: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                print_screen_tile_cache_report(&rep);
+            }
+        }
+        Some(ScreenTileCacheSubCmd::Reset {
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/cache/reset", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile cache reset failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            if effective_json {
+                println!("{}", String::from_utf8_lossy(&resp).trim());
+            } else {
+                let rep: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+                print_screen_tile_cache_report(&rep);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_screen_focus_report(rep: &serde_json::Value) {
+    println!("Screen Foveated Focus Awareness & Spatial Priority Scheduling (v2.32 / ADR-118):");
+    let enabled = rep
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mode = rep.get("mode").and_then(|v| v.as_str()).unwrap_or("cursor");
+    let radius = rep.get("radius").and_then(|v| v.as_u64()).unwrap_or(256);
+    let skip_ratio = rep
+        .get("peripheral_skip_ratio")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2);
+    let box_x = rep.get("box_x").and_then(|v| v.as_u64()).unwrap_or(0);
+    let box_y = rep.get("box_y").and_then(|v| v.as_u64()).unwrap_or(0);
+    let box_w = rep.get("box_w").and_then(|v| v.as_u64()).unwrap_or(512);
+    let box_h = rep.get("box_h").and_then(|v| v.as_u64()).unwrap_or(512);
+    let focus_tiles_sent = rep
+        .get("focus_tiles_sent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let peripheral_tiles_sent = rep
+        .get("peripheral_tiles_sent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let peripheral_tiles_skipped = rep
+        .get("peripheral_tiles_skipped")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let saved_bandwidth_bytes = rep
+        .get("saved_bandwidth_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let status_str = if enabled {
+        format!("Enabled (mode: {mode}, radius: {radius}px, skip_ratio: {skip_ratio})")
+    } else {
+        "Disabled".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  Focus Tracking Mode:   {mode}");
+    println!("  Focus Zone Radius:     {radius} px");
+    println!(
+        "  Peripheral Skip Ratio: {skip_ratio} (cadence: every {} frames)",
+        skip_ratio + 1
+    );
+    if mode == "box" {
+        println!(
+            "  Static Focus Box:      ({box_x}, {box_y}) [{}x{}]",
+            box_w, box_h
+        );
+    }
+    println!("  Focus Tiles Sent:      {focus_tiles_sent}");
+    println!("  Peripheral Tiles Sent: {peripheral_tiles_sent}");
+    println!("  Peripheral Skipped:    {peripheral_tiles_skipped}");
+    println!("  Saved Bandwidth:       {saved_bandwidth_bytes} bytes");
+}
+
+async fn execute_screen_focus_cmd(
+    action: Option<ScreenFocusSubCmd>,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    match action {
+        None => {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/focus")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen focus query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_focus_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenFocusSubCmd::Status {
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/focus")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen focus query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_focus_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenFocusSubCmd::Set {
+            enabled,
+            mode,
+            radius,
+            skip_ratio,
+            box_x,
+            box_y,
+            box_w,
+            box_h,
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let mut payload = serde_json::Map::new();
+            if let Some(en) = enabled {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(en));
+            }
+            if let Some(m) = mode {
+                payload.insert("mode".to_string(), serde_json::Value::String(m));
+            }
+            if let Some(r) = radius {
+                payload.insert(
+                    "radius".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(r)),
+                );
+            }
+            if let Some(s) = skip_ratio {
+                payload.insert(
+                    "peripheral_skip_ratio".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(s)),
+                );
+            }
+            if let Some(bx) = box_x {
+                payload.insert(
+                    "box_x".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(bx)),
+                );
+            }
+            if let Some(by) = box_y {
+                payload.insert(
+                    "box_y".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(by)),
+                );
+            }
+            if let Some(bw) = box_w {
+                payload.insert(
+                    "box_w".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(bw)),
+                );
+            }
+            if let Some(bh) = box_h {
+                payload.insert(
+                    "box_h".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(bh)),
+                );
+            }
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/focus", &bytes)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen focus set failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_focus_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenFocusSubCmd::Reset {
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/focus/reset", b"{}")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen focus reset failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_focus_report(&rep);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_screen_tile_palette_report(rep: &serde_json::Value) {
+    println!("Screen Tile-Level Adaptive Palette & Hybrid Lossless Compression (v2.33 / ADR-119):");
+    let enabled = rep
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let max_colors = rep.get("max_colors").and_then(|v| v.as_u64()).unwrap_or(16);
+    let enable_rle = rep
+        .get("enable_rle")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let solid_tiles = rep
+        .get("solid_tiles_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let bilevel_tiles = rep
+        .get("bilevel_tiles_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let palette_tiles = rep
+        .get("palette_tiles_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let truecolor_tiles = rep
+        .get("truecolor_tiles_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let saved_bytes = rep
+        .get("saved_bandwidth_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let status_str = if enabled {
+        format!("Enabled (max_colors: {max_colors}, rle: {enable_rle})")
+    } else {
+        "Disabled".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  Max Palette Colors:    {max_colors} (2..=16)");
+    println!(
+        "  Run-Length Encoding:   {}",
+        if enable_rle { "Enabled" } else { "Disabled" }
+    );
+    println!("  Solid Tiles (K=1):     {solid_tiles} (5 bytes/tile, 99.97% saving)");
+    println!("  Bi-Level Tiles (K=2):  {bilevel_tiles} (521 bytes/tile, 96.8% saving)");
+    println!("  Indexed Palette Tiles: {palette_tiles} (nibble-packed, 87%+ saving)");
+    println!("  TrueColor Fallback:    {truecolor_tiles} (Zstd / raw)");
+    println!("  Saved Bandwidth:       {saved_bytes} bytes");
+}
+
+async fn execute_screen_tile_palette_cmd(
+    action: Option<ScreenTilePaletteSubCmd>,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    match action {
+        None => {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/palette")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile palette query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_palette_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTilePaletteSubCmd::Status {
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/palette")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile palette query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_palette_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTilePaletteSubCmd::Set {
+            enabled,
+            max_colors,
+            enable_rle,
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let mut payload = serde_json::Map::new();
+            if let Some(en) = enabled {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(en));
+            } else {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(true));
+            }
+            if let Some(mc) = max_colors {
+                payload.insert("max_colors".to_string(), serde_json::json!(mc));
+            }
+            if let Some(r) = enable_rle {
+                payload.insert("enable_rle".to_string(), serde_json::Value::Bool(r));
+            }
+            let bytes = serde_json::to_vec(&payload)?;
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/palette", &bytes)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile palette set failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_palette_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTilePaletteSubCmd::Reset {
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/palette/reset", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile palette reset failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_palette_report(&rep);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_screen_tile_predict_report(rep: &serde_json::Value) {
+    println!("Screen Tile-Level Predictive Filter & Reversible Color Transform (v2.34 / ADR-120):");
+    let enabled = rep
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let filter_mode = rep
+        .get("filter_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
+    let enable_rct = rep
+        .get("enable_rct")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let predict_tiles = rep
+        .get("predict_tiles_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let saved_bytes = rep
+        .get("saved_bandwidth_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let status_str = if enabled {
+        format!("Enabled (filter: {filter_mode}, rct: {enable_rct})")
+    } else {
+        "Disabled (default)".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  Spatial Filter Mode:   {filter_mode} (None, Sub, Up, Average, Paeth, Auto)");
+    println!(
+        "  Reversible Color (RCT):{}",
+        if enable_rct {
+            "Enabled (Y=G, U=R-G, V=B-G, A=A)"
+        } else {
+            "Disabled"
+        }
+    );
+    println!("  Predict-Filtered Tiles:{predict_tiles} (TILE_SUBCODEC_PREDICT_ZSTD)");
+    println!("  Saved Bandwidth:       {saved_bytes} bytes");
+}
+
+async fn execute_screen_tile_predict_cmd(
+    action: Option<ScreenTilePredictSubCmd>,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    match action {
+        None => {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/predict")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile predict query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_predict_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTilePredictSubCmd::Status {
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/predict")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile predict query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_predict_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTilePredictSubCmd::Set {
+            enabled,
+            filter_mode,
+            enable_rct,
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let effective_json = json || j;
+            let mut payload = serde_json::Map::new();
+            if let Some(en) = enabled {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(en));
+            } else {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(true));
+            }
+            if let Some(fm) = filter_mode {
+                payload.insert("filter_mode".to_string(), serde_json::Value::String(fm));
+            }
+            if let Some(rct) = enable_rct {
+                payload.insert("enable_rct".to_string(), serde_json::Value::Bool(rct));
+            }
+            let body = serde_json::to_vec(&payload)?;
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/predict", &body)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile predict set failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_predict_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTilePredictSubCmd::Reset {
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/predict/reset", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile predict reset failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_predict_report(&rep);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_screen_tile_present_report(v: &serde_json::Value) {
+    let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+    let vsync_mode = v
+        .get("vsync_mode")
+        .and_then(|x| x.as_str())
+        .unwrap_or("off");
+    let double_buffer = v
+        .get("double_buffer")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true);
+    let tear_prevention = v
+        .get("tear_prevention")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true);
+    let committed_tx = v
+        .get("committed_transactions")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let swapped = v
+        .get("swapped_frames")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let torn_prevented = v
+        .get("torn_frames_prevented")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let avg_latency = v
+        .get("avg_swap_latency_us")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+
+    println!("Screen Tile Presentation Transaction Report:");
+    let status_str = if enabled {
+        "Enabled (Double-Buffered Staged Atomic Swap)".to_string()
+    } else {
+        "Disabled (default)".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  V-Sync Pacing Mode:    {vsync_mode} (Off, Vsync60, Vsync120, Adaptive)");
+    println!(
+        "  Double Buffer Staging: {}",
+        if double_buffer { "Enabled" } else { "Disabled" }
+    );
+    println!(
+        "  Anti-Tearing Guard:    {}",
+        if tear_prevention {
+            "Enabled"
+        } else {
+            "Disabled"
+        }
+    );
+    println!("  Committed Transactions:{committed_tx}");
+    println!("  Swapped Front Frames:  {swapped}");
+    println!("  Torn Frames Prevented: {torn_prevented}");
+    println!("  Avg Front-Swap Latency:{avg_latency} µs");
+}
+
+async fn execute_screen_tile_present_cmd(
+    action: Option<ScreenTilePresentSubCmd>,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    match action {
+        None => {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/present")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile present query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_present_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTilePresentSubCmd::Status {
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/present")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile present query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_present_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTilePresentSubCmd::Set {
+            enabled,
+            vsync_mode,
+            double_buffer,
+            tear_prevention,
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let effective_json = json || j;
+            let mut payload = serde_json::Map::new();
+            if let Some(en) = enabled {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(en));
+            } else {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(true));
+            }
+            if let Some(vm) = vsync_mode {
+                payload.insert("vsync_mode".to_string(), serde_json::Value::String(vm));
+            }
+            if let Some(db) = double_buffer {
+                payload.insert("double_buffer".to_string(), serde_json::Value::Bool(db));
+            }
+            if let Some(tp) = tear_prevention {
+                payload.insert("tear_prevention".to_string(), serde_json::Value::Bool(tp));
+            }
+            let body = serde_json::to_vec(&payload)?;
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/present", &body)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile present set failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_present_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTilePresentSubCmd::Reset {
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/present/reset", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile present reset failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_present_report(&rep);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_screen_tile_nack_report(v: &serde_json::Value) {
+    let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+    let timeout_ms = v.get("timeout_ms").and_then(|x| x.as_u64()).unwrap_or(20);
+    let max_retries = v.get("max_retries").and_then(|x| x.as_u64()).unwrap_or(2);
+    let nack_requests_sent = v
+        .get("nack_requests_sent")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let tiles_retransmitted = v
+        .get("tiles_retransmitted")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let degraded_commits = v
+        .get("degraded_commits")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+
+    println!("Screen Tile Micro-NACK Fast Retransmission Report:");
+    let status_str = if enabled {
+        "Enabled (Semantic Micro-NACK & Ring Buffer Replay)".to_string()
+    } else {
+        "Disabled (default)".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  Timeout Window:        {timeout_ms} ms");
+    println!("  Max Retries:           {max_retries}");
+    println!("  Micro-NACK Requests:   {nack_requests_sent}");
+    println!("  Tiles Retransmitted:   {tiles_retransmitted}");
+    println!("  Degraded Commits:      {degraded_commits}");
+}
+
+async fn execute_screen_tile_nack_cmd(
+    action: Option<ScreenTileNackSubCmd>,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    match action {
+        None => {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/nack")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile nack query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_nack_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileNackSubCmd::Status {
+            json: j,
+            ui_port: p,
+        }) => {
+            let effective_json = json || j;
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/nack")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile nack query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_nack_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileNackSubCmd::Set {
+            enabled,
+            timeout_ms,
+            max_retries,
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let effective_json = json || j;
+            let mut payload = serde_json::Map::new();
+            if let Some(en) = enabled {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(en));
+            } else {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(true));
+            }
+            if let Some(t) = timeout_ms {
+                payload.insert(
+                    "timeout_ms".to_string(),
+                    serde_json::Value::Number(t.into()),
+                );
+            }
+            if let Some(r) = max_retries {
+                payload.insert(
+                    "max_retries".to_string(),
+                    serde_json::Value::Number(r.into()),
+                );
+            }
+            let body = serde_json::to_vec(&payload)?;
+            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/tile/nack", &body)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile nack set failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_nack_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileNackSubCmd::Reset {
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let effective_json = json || j;
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/nack/reset", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile nack reset failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_nack_report(&rep);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_screen_tile_saliency_report(v: &serde_json::Value) {
+    let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+    let high = v
+        .get("high_threshold")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(120);
+    let low = v
+        .get("low_threshold")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(40);
+    let drop_bg = v
+        .get("drop_background_on_congestion")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true);
+    let critical_tiles = v
+        .get("critical_tiles_sent")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let normal_tiles = v
+        .get("normal_tiles_sent")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let background_tiles = v
+        .get("background_tiles_sent")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let bg_skipped = v
+        .get("background_tiles_skipped")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+
+    println!("Screen Tile Saliency & Priority Scheduling Report (ADR-123):");
+    let status_str = if enabled {
+        "Enabled (Spatial Gradient Energy & Focus Weighted)".to_string()
+    } else {
+        "Disabled (default)".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  High Threshold:        {high} (Critical tier: score >= {high})");
+    println!("  Low Threshold:         {low} (Normal tier: {low} <= score < {high}; Background: score < {low})");
+    println!("  Drop BG on Congestion: {drop_bg}");
+    println!("  Critical Tiles Sent:   {critical_tiles}");
+    println!("  Normal Tiles Sent:     {normal_tiles}");
+    println!("  Background Tiles Sent: {background_tiles}");
+    println!("  Background Skipped:    {bg_skipped}");
+}
+
+async fn execute_screen_tile_saliency_cmd(
+    action: Option<ScreenTileSaliencySubCmd>,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    match action {
+        None => {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/saliency")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile saliency query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_saliency_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileSaliencySubCmd::Status {
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/saliency")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile saliency query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json || j {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_saliency_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileSaliencySubCmd::Set {
+            enabled,
+            high_threshold,
+            low_threshold,
+            drop_background,
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let effective_json = json || j;
+            let mut payload = serde_json::Map::new();
+            if let Some(en) = enabled {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(en));
+            }
+            if let Some(h) = high_threshold {
+                payload.insert(
+                    "high_threshold".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(h)),
+                );
+            }
+            if let Some(l) = low_threshold {
+                payload.insert(
+                    "low_threshold".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(l)),
+                );
+            }
+            if let Some(d) = drop_background {
+                payload.insert(
+                    "drop_background_on_congestion".to_string(),
+                    serde_json::Value::Bool(d),
+                );
+            }
+            let body = serde_json::to_vec(&payload)?;
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/saliency", &body)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                     start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile saliency set failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_saliency_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileSaliencySubCmd::Reset {
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let effective_json = json || j;
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/saliency/reset", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile saliency reset failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_saliency_report(&rep);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_screen_tile_lod_report(v: &serde_json::Value) {
+    let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+    let max_lod = v.get("max_lod").and_then(|x| x.as_u64()).unwrap_or(1);
+    let auto_lod = v
+        .get("auto_lod_on_congestion")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true);
+    let lod0 = v
+        .get("lod0_tiles_sent")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let lod1 = v
+        .get("lod1_tiles_sent")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let lod2 = v
+        .get("lod2_tiles_sent")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let bytes_saved = v.get("bytes_saved").and_then(|x| x.as_u64()).unwrap_or(0);
+
+    println!("Screen Tile Level-of-Detail (LoD) Downsampling Report (ADR-124):");
+    let status_str = if enabled {
+        "Enabled (Dynamic Box-Filter Downsampling & Bilinear Reconstruction)".to_string()
+    } else {
+        "Disabled (default)".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  Max LoD Level:         Lod{max_lod} (Lod1: 32x32, Lod2: 16x16)");
+    println!("  Auto LoD on Congest:   {auto_lod}");
+    println!("  Lod0 Tiles (64x64):    {lod0}");
+    println!("  Lod1 Tiles (32x32):    {lod1}");
+    println!("  Lod2 Tiles (16x16):    {lod2}");
+    println!("  Bandwidth Bytes Saved: {bytes_saved} B");
+}
+
+async fn execute_screen_tile_lod_cmd(
+    action: Option<ScreenTileLodSubCmd>,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    match action {
+        None => {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/lod")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile lod query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_lod_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileLodSubCmd::Status {
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/lod")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile lod query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json || j {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_lod_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileLodSubCmd::Set {
+            enabled,
+            max_lod,
+            auto_lod,
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let effective_json = json || j;
+            let mut payload = serde_json::Map::new();
+            if let Some(en) = enabled {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(en));
+            }
+            if let Some(m) = max_lod {
+                payload.insert("max_lod".to_string(), serde_json::Value::from(m));
+            }
+            if let Some(a) = auto_lod {
+                payload.insert(
+                    "auto_lod_on_congestion".to_string(),
+                    serde_json::Value::Bool(a),
+                );
+            }
+            let body = serde_json::to_vec(&payload)?;
+            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/tile/lod", &body)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile lod set failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_lod_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileLodSubCmd::Reset {
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let effective_json = json || j;
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/lod/reset", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile lod reset failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_lod_report(&rep);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_screen_tile_batch_report(v: &serde_json::Value) {
+    let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+    let target_chunk_bytes = v
+        .get("target_chunk_bytes")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(1200);
+    let pacing_interval_us = v
+        .get("pacing_interval_us")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(200);
+    let batches_sent = v.get("batches_sent").and_then(|x| x.as_u64()).unwrap_or(0);
+    let chunks_sent = v.get("chunks_sent").and_then(|x| x.as_u64()).unwrap_or(0);
+    let avg_chunk_bytes = v
+        .get("avg_chunk_bytes")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let pacing_pauses = v.get("pacing_pauses").and_then(|x| x.as_u64()).unwrap_or(0);
+
+    println!("Screen Tile Dynamic MTU Batching & Pacing Report (ADR-125):");
+    let status_str = if enabled {
+        "Enabled (Dynamic MTU Chunking & Coalesced Pacing)".to_string()
+    } else {
+        "Disabled (default)".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  Target Chunk Bytes:    {target_chunk_bytes} B (512..=64000)");
+    println!("  Pacing Interval:       {pacing_interval_us} µs");
+    println!("  Batches Sent:          {batches_sent}");
+    println!("  Chunks Sent:           {chunks_sent}");
+    println!("  Avg Chunk Bytes:       {avg_chunk_bytes} B");
+    println!("  Pacing Pauses:         {pacing_pauses}");
+}
+
+async fn execute_screen_tile_batch_cmd(
+    action: Option<ScreenTileBatchSubCmd>,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    match action {
+        None => {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/batch")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile batch query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_batch_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileBatchSubCmd::Status {
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/batch")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile batch query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json || j {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_batch_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileBatchSubCmd::Set {
+            enabled,
+            target_chunk_bytes,
+            pacing_interval_us,
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let effective_json = json || j;
+            let mut payload = serde_json::Map::new();
+            if let Some(en) = enabled {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(en));
+            }
+            if let Some(b) = target_chunk_bytes {
+                payload.insert("target_chunk_bytes".to_string(), serde_json::Value::from(b));
+            }
+            if let Some(us) = pacing_interval_us {
+                payload.insert(
+                    "pacing_interval_us".to_string(),
+                    serde_json::Value::from(us),
+                );
+            }
+            let body = serde_json::to_vec(&payload)?;
+            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/tile/batch", &body)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile batch set failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_batch_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileBatchSubCmd::Reset {
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let effective_json = json || j;
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/batch/reset", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile batch reset failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_batch_report(&rep);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_screen_tile_motion_report(v: &serde_json::Value) {
+    let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+    let max_displacement = v
+        .get("max_displacement")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(32);
+    let min_match_ratio = v
+        .get("min_match_ratio")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(90);
+    let motion_tiles_sent = v
+        .get("motion_tiles_sent")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let fallback_tiles_sent = v
+        .get("fallback_tiles_sent")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let bytes_saved = v.get("bytes_saved").and_then(|x| x.as_u64()).unwrap_or(0);
+
+    println!("Screen Tile Dynamic Local Motion Vector Estimation & Displacement Compensation Report (ADR-126):");
+    let status_str = if enabled {
+        "Enabled (Local Motion Vector Search & Cross-Frame Displacement Blit)".to_string()
+    } else {
+        "Disabled (default)".to_string()
+    };
+    println!("  Pipeline Status:       {status_str}");
+    println!("  Max Displacement:      {max_displacement} px (4..=128)");
+    println!("  Min Match Ratio:       {min_match_ratio}% (0.50..=1.00)");
+    println!("  Motion Tiles Sent:     {motion_tiles_sent}");
+    println!("  Fallback Tiles Sent:   {fallback_tiles_sent}");
+    println!("  Bytes Saved:           {bytes_saved} B");
+}
+
+async fn execute_screen_tile_motion_cmd(
+    action: Option<ScreenTileMotionSubCmd>,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    match action {
+        None => {
+            let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/tile/motion")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile motion query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_motion_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileMotionSubCmd::Status {
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let (code, resp) = tetherly_node::loopback_get(port, "/api/screen/tile/motion")
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile motion query failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if json || j {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_motion_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileMotionSubCmd::Set {
+            enabled,
+            max_displacement,
+            min_match_ratio,
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let effective_json = json || j;
+            let mut payload = serde_json::Map::new();
+            if let Some(en) = enabled {
+                payload.insert("enabled".to_string(), serde_json::Value::Bool(en));
+            }
+            if let Some(d) = max_displacement {
+                payload.insert("max_displacement".to_string(), serde_json::Value::from(d));
+            }
+            if let Some(r) = min_match_ratio {
+                payload.insert("min_match_ratio".to_string(), serde_json::Value::from(r));
+            }
+            let body = serde_json::to_vec(&payload)?;
+            let (code, resp) = tetherly_node::loopback_post(port, "/api/screen/tile/motion", &body)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                    )
+                })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile motion set failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_motion_report(&rep);
+            }
+            Ok(())
+        }
+        Some(ScreenTileMotionSubCmd::Reset {
+            json: j,
+            ui_port: p,
+        }) => {
+            let port = if p != 45716 { p } else { ui_port };
+            let effective_json = json || j;
+            let (code, resp) =
+                tetherly_node::loopback_post(port, "/api/screen/tile/motion/reset", b"{}")
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "no running node reachable on 127.0.0.1:{port} ({e}); \
+                         start one with `tetherly --data-dir <dir> run` first"
+                        )
+                    })?;
+            if code != 200 {
+                anyhow::bail!(
+                    "screen tile motion reset failed (HTTP {code}): {}",
+                    String::from_utf8_lossy(&resp)
+                );
+            }
+            let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+            if effective_json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_screen_tile_motion_report(&rep);
+            }
+            Ok(())
         }
     }
 }
