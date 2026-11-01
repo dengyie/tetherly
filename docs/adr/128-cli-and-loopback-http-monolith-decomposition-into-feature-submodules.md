@@ -65,7 +65,8 @@
    - 后续新增命令只需在 `cli.rs` 加变体 + `dispatch.rs` 加 arm + `cmd_x.rs` 加处理器。
 
 4. **遗留**：
-   - 全部历史巨型单文件已清零（`screen.rs`/`runtime.rs`/`bin/tetherly.rs`/`uihttp.rs`）；剩余大文件（`bin/tetherly/cli_screen.rs` 2228 行、`cmd_screen_tile.rs` 2177 行、`cmd_core.rs` 1738 行、`api_files.rs` 1115 行）已处于可维护范围，不再需要机械拆分。
+   - 全部历史巨型单文件已清零（`screen.rs`/`runtime.rs`/`bin/tetherly.rs`/`uihttp.rs`）；剩余大文件（`bin/tetherly/cli_screen.rs` 2228 行、`cmd_screen_tile.rs` 2177 行、`cmd_core.rs` 1738 行、`api_files.rs` 1115 行）已处于可维护范围，不再需要机械拆分；
+   - （**已由 ADR-129 于 v2.43 / v0.1.65 清偿**）当时 `bins/tetherly-cli/src/main.rs`（27903 行）仍是全仓库最后一处超过两万行的巨型单文件。
 
 ---
 

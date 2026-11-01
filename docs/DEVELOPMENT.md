@@ -3,12 +3,36 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | **Tetherly** |
-| 文档版本 | **2.42** |
+| 文档版本 | **2.43** |
 | 日期 | 2026-11-01 |
-| 状态 | **v2.42 CLI 与回环 HTTP 巨型单文件模块化分解（CLI & Loopback HTTP Monolith Decomposition into Feature Submodules, ADR-128）**——纯工程债重构，零行为变更，两阶段收尾：(1) **阶段一 `crates/tetherly-node/src/uihttp.rs`**：15655 行单文件拆为 6557 行模块根 + 28 个子模块（26 个 `api_*` REST 域 + `dto` + `util`：`api_action`/`api_ancs`/`api_audio`/`api_audit`/`api_bench`/`api_camera`/`api_clip`/`api_core`/`api_display`/`api_files`/`api_focus`/`api_handoff`/`api_input`/`api_locate`/`api_media`/`api_messages`/`api_mic`/`api_notify`/`api_peers`/`api_power`/`api_screen_analysis`/`api_screen_overlay`/`api_screen_quality`/`api_screen_session`/`api_screen_tile`/`api_topology` + `dto` + `util`），根保留 HTTP/SSE/快照主循环与 `INDEX`（`include_str!`）等共性，子模块各含端点 Handler 与 DTO，crate 外私有、公共路径不变；(2) **阶段二 `crates/tetherly-node/src/bin/tetherly.rs`**：27402 行单文件拆为 85 行 `main.rs` crate 根 + 37 个子模块（共 38 文件 28860 行）——5 个 `cli*` clap 表面（`cli`/`cli_tools`/`cli_screen`/`cli_device`/`cli_ops`，69 个 `Cmd` 变体 + 60 余个子命令枚举 + 59 个 `ScreenCmd` 变体）、`dispatch`（68 条 arm 派发表保留原位、一处可读可 grep）、`cmd_screen`（`ScreenCmd` 二级派发器）、29 个 `cmd_*` 处理器与 `util` 助手，共 293 个 `pub(crate)` 顶项 = 67 个顶层 arm 处理器 + 2 个派发器 + 53 个 `ScreenCmd` 处理器 + 171 个自由函数原样迁移；因 bin crate 根的 `mod x;` 按 crate 根规则解析，crate 根迁至 `src/bin/tetherly/main.rs` 并同步 `Cargo.toml` 的 `[[bin]] path`；(3) **等价性验证（词法 token 流多重集比对，剔除注释、`use`、`mod` 声明与可见性修饰符）**：阶段一缺失 **0** token；阶段二缺失 **6** token，仅为 6 对 or-pattern 别名（`TilePredict|Predict`、`TilePresent|Present`、`TileNack|Nack`、`TileSaliency|Saliency`、`TileLod|Lod`、`TileBatch|Batch`）合并所致的 `|`，6 对别名各由同一处理器承担、对应 token 全等；多余 token 全为脚手架（Handler 签名、120 个 `Ok(())` 收尾、`mod::fn` 限定调用、导入与空行）；多行字符串字面量行续行缩进随 `cargo fmt` 重排，值不变（行续行被吞掉的缩进不属于字符串值，比对时先规范化）；`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`（653 项全通过）三闸全绿，Workspace 版本发布为 `0.1.64`。**上一轮 v2.41 状态（原文保留）**：v2.41 屏幕串流与节点运行时巨型单文件模块化分解（ADR-127，`screen.rs` 25611→88 行根 + 35 子模块，`runtime.rs` 33423→2941 行根 + 30 子模块，v0.1.63）。**上上轮 v2.40 状态（原文保留）**：v2.40 屏幕串流动态空间瓦片局部运动矢量估计与跨帧位移复用流水线（ADR-126，`TILE_SUBCODEC_MOTION=7`、5 字节位移报文、压缩比 3276:1、带宽省 99.9%、Tag 71~73、`/api/screen/tile/motion*`、双端 CLI 全同构、`m5_50` 全绿、v0.1.62）。 |
+| 状态 | **v2.43 tetherly-cli 巨型单文件模块化分解（tetherly-cli Monolith Decomposition into Feature Submodules, ADR-129，三阶段收尾）**——纯工程债重构，零行为变更；ADR-128 已清空 `tetherly-node` 侧两处巨型单文件，本轮收口最后一处：`bins/tetherly-cli/src/main.rs` 由 **27903 行**拆为 **113 行 crate 根 + 36 个子模块（37 文件 29256 行）**：(1) **CLI 表面 5 个模块**——`cli.rs`（847 行，`Cli` + `Cmd` 树）、`cli_tools.rs`（1027 行）、`cli_screen.rs`（2228 行，`ScreenCmd` 与全部 `screen` 子枚举）、`cli_device.rs`（1072 行）、`cli_ops.rs`（580 行），68 个子命令枚举（69 个 `Cmd` 变体 + 59 个 `ScreenCmd` 变体）逐字迁移，仅加 `pub(crate)`；(2) **`dispatch.rs`（418 行）**——`match cli.cmd { … }` **68 条 arm 全部保留原位**，每臂 body 换为一行模块限定调用 `{ mod::handler(args...).await?; }`（限定是必需：arm 绑定名 `action`/`alias`/`tag`/`group` 与同名处理器冲突会触发 `E0618`）；(3) **`cmd_screen.rs`（70 行）**——`Cmd::Screen` 委派到 `screen(action: ScreenCmd)` 二级派发器，59 个 `ScreenCmd` 变体全覆盖（6 对 or-pattern 别名 `TilePredict|Predict`、`TilePresent|Present`、`TileNack|Nack`、`TileSaliency|Saliency`、`TileLod|Lod`、`TileBatch|Batch` 各拆两行、指向同一处理器）；(4) **29 个 `cmd_*.rs` + `util.rs`**——120 个 arm 处理器（67 顶层 + 53 `ScreenCmd`）与 178 个自由函数原样迁入，共 **300 个 `pub(crate)` 函数**（2 派发器 + 120 处理器 + 178 助手），与 node 侧 `bin/tetherly` 逐 arm 同构（唯一差异：`Run` 变体被 `Listen` 取代）；**crate 根约束与 node 侧不同**：`src/main.rs` 本身就是 crate 根，子模块必须平铺在 `bins/tetherly-cli/src/`（不能折叠进 `src/cli/`），`Cargo.toml` 无需改动；(5) **等价性验证（词法 token 流多重集比对，剔除注释、`use`、`mod` 声明与可见性修饰符，并把 `match Cli::parse().cmd` 与 `let cli = Cli::parse(); match cli.cmd` 视为同一构造）**：缺失 **6** token，仅 6 对 or-pattern 别名合并产生的 `|`（别名对共享同一处理器、对应 token 全等）；多余 6890 全为脚手架（`pub(crate)`/`async fn` 签名、`Ok(())` 收尾、`mod::fn` 限定调用与导入）；`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`（653 项全通过）三闸全绿；**冒烟以递归遍历 clap 命令树为准**：拆前/拆后二进制各遍历 **545 条命令路径**（顶层 + 全部子命令 + `screen` 子子命令及别名）的 `--help` stdout 与退出码，**差异 0**；全仓库历史巨型单文件至此**彻底清零**；Workspace 版本发布为 `0.1.65`。**上轮 v2.42 状态（原文保留）**：v2.42 CLI 与回环 HTTP 巨型单文件模块化分解（CLI & Loopback HTTP Monolith Decomposition into Feature Submodules, ADR-128）**——纯工程债重构，零行为变更，两阶段收尾：(1) **阶段一 `crates/tetherly-node/src/uihttp.rs`**：15655 行单文件拆为 6557 行模块根 + 28 个子模块（26 个 `api_*` REST 域 + `dto` + `util`：`api_action`/`api_ancs`/`api_audio`/`api_audit`/`api_bench`/`api_camera`/`api_clip`/`api_core`/`api_display`/`api_files`/`api_focus`/`api_handoff`/`api_input`/`api_locate`/`api_media`/`api_messages`/`api_mic`/`api_notify`/`api_peers`/`api_power`/`api_screen_analysis`/`api_screen_overlay`/`api_screen_quality`/`api_screen_session`/`api_screen_tile`/`api_topology` + `dto` + `util`），根保留 HTTP/SSE/快照主循环与 `INDEX`（`include_str!`）等共性，子模块各含端点 Handler 与 DTO，crate 外私有、公共路径不变；(2) **阶段二 `crates/tetherly-node/src/bin/tetherly.rs`**：27402 行单文件拆为 85 行 `main.rs` crate 根 + 37 个子模块（共 38 文件 28860 行）——5 个 `cli*` clap 表面（`cli`/`cli_tools`/`cli_screen`/`cli_device`/`cli_ops`，69 个 `Cmd` 变体 + 60 余个子命令枚举 + 59 个 `ScreenCmd` 变体）、`dispatch`（68 条 arm 派发表保留原位、一处可读可 grep）、`cmd_screen`（`ScreenCmd` 二级派发器）、29 个 `cmd_*` 处理器与 `util` 助手，共 293 个 `pub(crate)` 顶项 = 67 个顶层 arm 处理器 + 2 个派发器 + 53 个 `ScreenCmd` 处理器 + 171 个自由函数原样迁移；因 bin crate 根的 `mod x;` 按 crate 根规则解析，crate 根迁至 `src/bin/tetherly/main.rs` 并同步 `Cargo.toml` 的 `[[bin]] path`；(3) **等价性验证（词法 token 流多重集比对，剔除注释、`use`、`mod` 声明与可见性修饰符）**：阶段一缺失 **0** token；阶段二缺失 **6** token，仅为 6 对 or-pattern 别名（`TilePredict|Predict`、`TilePresent|Present`、`TileNack|Nack`、`TileSaliency|Saliency`、`TileLod|Lod`、`TileBatch|Batch`）合并所致的 `|`，6 对别名各由同一处理器承担、对应 token 全等；多余 token 全为脚手架（Handler 签名、120 个 `Ok(())` 收尾、`mod::fn` 限定调用、导入与空行）；多行字符串字面量行续行缩进随 `cargo fmt` 重排，值不变（行续行被吞掉的缩进不属于字符串值，比对时先规范化）；`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`（653 项全通过）三闸全绿，Workspace 版本发布为 `0.1.64`。**上一轮 v2.41 状态（原文保留）**：v2.41 屏幕串流与节点运行时巨型单文件模块化分解（ADR-127，`screen.rs` 25611→88 行根 + 35 子模块，`runtime.rs` 33423→2941 行根 + 30 子模块，v0.1.63）。**上上轮 v2.40 状态（原文保留）**：v2.40 屏幕串流动态空间瓦片局部运动矢量估计与跨帧位移复用流水线（ADR-126，`TILE_SUBCODEC_MOTION=7`、5 字节位移报文、压缩比 3276:1、带宽省 99.9%、Tag 71~73、`/api/screen/tile/motion*`、双端 CLI 全同构、`m5_50` 全绿、v0.1.62）。 |
 | crate / 二进制 | `tetherly-core`、`tetherly-crypto`、`tetherly-net`、`tetherly-node`（`tetherly` 二进制）、`tetherly-cli`、`tetherly-android`（`libtetherly_android.so` + `android_probe`） |
 
 本文是实现合同。与代码冲突时改文档或改代码，必须一致。旧名 InterLink 作废。
+
+**2.43 相对 2.42(tetherly-cli 巨型单文件模块化分解 ADR-129)**
+
+- **动机与问题背景**:
+  1. ADR-127 拆解了 `tetherly-core/src/screen.rs`（25611 行）与 `tetherly-node/src/runtime.rs`（33423 行），ADR-128 拆解了 `tetherly-node/src/bin/tetherly.rs`（27402 行）与 `tetherly-node/src/uihttp.rs`（15655 行）；`bins/tetherly-cli/src/main.rs`（**27903 行**）是剩余唯一超过两万行的单文件，症状与前几批一致：编辑器索引与增量编译退化、评审 diff 噪声、`git blame`/二分定位失效、并行开发高频冲突、`cargo fmt` 无关 diff；
+  2. 该文件与 node 侧 `bin/tetherly.rs` 是**逐 arm 同构的孪生**：同一套 clap 派生表面（69 个 `Cmd` 变体、59 个 `ScreenCmd` 变体、68 条派发 arm）、同一批自由函数名（node 的 171 个助手全部存在，另有 7 个 loopback/会话助手），唯一结构差异是顶层 "再起一个节点" 的变体在 node 侧叫 `Run`、此处叫 `Listen`；
+  3. **crate 根约束与 node 侧不同**：`src/main.rs` **就是** crate 根，`mod cli;` 只解析到同级 `src/cli.rs`，因此子模块必须平铺在 `bins/tetherly-cli/src/`，`Cargo.toml` 无需改动。
+- **决定与落地（纯重构，零行为变更）**:
+  1. **模块根 + 平铺子模块（37 文件 29256 行）**：
+     - `main.rs`（113 行）保留 SPDX/`//!` 头、原 `use` 块逐字不变、`mod` 声明、`pub(crate) use cli::*;`、`use dispatch::dispatch;`、`struct SseStream` + `impl SseStream::next_event`（loopback SSE 助手依赖的类型，原样内联在根）、`#[tokio::main] async fn main()`（SIGPIPE 处理、`tracing_subscriber` 初始化、`TETHERLY_INSECURE_LOG` 告警全部原样）；
+     - `cli*.rs`（5 个，共 5754 行）：`Cli`/`Cmd`（69 变体）与 68 个子命令枚举、59 个 `ScreenCmd` 变体原样迁移，顶层枚举与字段改 `pub(crate)`；
+     - `dispatch.rs`（418 行）：`pub(crate) async fn dispatch(cli: Cli) -> Result<()>`，`match cli.cmd { … }` **68 条 arm 保留原位**，每臂 body 换为一行模块限定调用（**限定必需**：arm 绑定名 `action`/`alias`/`tag`/`group` 与同名处理器冲突会触发 `E0618`）；
+     - `cmd_screen.rs`（70 行）：`Cmd::Screen` 委派到 `screen(action: ScreenCmd)` 二级派发器，59 个变体全覆盖（6 对 or-pattern 别名各拆两行、指向同一处理器）；
+     - `cmd_*.rs`（29 个）+ `util.rs`：120 个 arm 处理器（67 顶层 + 53 `ScreenCmd`）与 178 个自由函数原样迁入，未用形参加 `_` 前缀，末尾补 `Ok(())`（除非已是 `return`/`exit`/`panic!`）；
+     - 共 **300 个 `pub(crate)` 函数** = 2 个派发器 + 120 个处理器 + 178 个助手，与 node 侧逐 arm 同构；
+  2. **跨模块助手导入最小化重建**：`cmd_*.rs` 只 `use super::*;` 引根；跨模块调用（`urlencode_path`/`loopback_post`/`now_ms` 等）由后处理按"该模块确实调用了该名称"（剔除注释、字符串/字符字面量与 `#[…]` 属性组后按 `(?<![\w.])name\s*\(` 判定）生成 `use super::<mod>::{…};`；助手导出只取函数，避免把 CLI 类型名误判为调用；
+  3. **等价性验证**：词法 token 流多重集比对（剔除注释、`use`、`mod` 声明与可见性修饰符）——缺失 **6**，仅为 6 对 or-pattern 别名合并的 `|`（别名对共享同一处理器、对应 token 全等）；多余 6890 全为脚手架（`pub(crate)`/`async fn` 签名、`Ok(())` 收尾、`mod::fn` 限定调用、`use super::<mod>::{…}` 导入、`mod` 声明与空行）；CLI 特有变换已声明并在比对前归一：原 `match Cli::parse().cmd {` 变为 `let cli = Cli::parse(); … match cli.cmd {`（`dispatch(cli)` 需要 `Cli` 值）；多行字符串字面量的行续行缩进随 `cargo fmt` 重排但值不变；
+  4. **验收三闸全绿**：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`（653 项通过 / 0 失败）。
+- **结果**:
+  - 最大单文件从 27903 行降至 2228 行（`cli_screen.rs`）；`main.rs` 113 行、`dispatch.rs` 418 行、`cli.rs` 847 行、`cmd_screen.rs` 70 行；
+  - **行为冒烟强于逐条手测**：拆前/拆后二进制各自递归解析 `--help` 的 `Commands:` 段并逐路径执行，覆盖 **545 条 clap 命令路径**（顶层 + 全部子命令 + `screen` 全部子子命令与 `Predict`/`Present` 等别名），stdout 与退出码**差异 0**；
+  - clap 命令树、参数、帮助文本、校验语义、日志与遥测全部不变；`tetherly-cli` 为独立二进制 crate，无库 API 承诺；
+  - 全仓库历史巨型单文件**彻底清零**（`screen.rs`/`runtime.rs`/`bin/tetherly.rs`/`uihttp.rs`/`bins/tetherly-cli/src/main.rs` 五处全部落地）；
+  - Workspace 版本发布为 `0.1.65`。
 
 **2.42 相对 2.41(CLI 与回环 HTTP 巨型单文件模块化分解 ADR-128)**
 
@@ -30,6 +54,7 @@
   - 最大单文件从 27402 行降至 2228 行（`bin/tetherly/cli_screen.rs`）；`uihttp` 根 6557 行、最大子模块 `dto.rs` 1227 行；历史巨型单文件全部清零；
   - CLI 树、REST 端点、校验语义、日志与遥测全部不变；冒烟 `tetherly --help`、`tetherly screen --help`、`tetherly screen predict --help`、`tetherly --data-dir <d> identity` 与拆前一致；
   - Workspace 版本发布为 `0.1.64`。
+- **遗留工程债（不在本次范围，已由 v2.43 / ADR-129 清偿）**: `bins/tetherly-cli/src/main.rs`（27903 行，node bin 的逐 arm 孪生）当时仍为全仓库最后一处巨型单文件。
 
 **2.41 相对 2.40(屏幕串流与节点运行时巨型单文件模块化分解 ADR-127)**
 
@@ -51,6 +76,7 @@
   - 线协议、REST 端点、CLI 输出、遥测字段、运行时语义全部不变；
   - Workspace 版本发布为 `0.1.63`。
 - **遗留工程债（不在本次范围，已由 v2.42 / ADR-128 清偿）**: `crates/tetherly-node/src/bin/tetherly.rs`（27402 行）与 `crates/tetherly-node/src/uihttp.rs`（15655 行）当时仍为巨型单文件。
+- **遗留工程债（不在本次范围，已由 v2.43 / ADR-129 清偿）**: `bins/tetherly-cli/src/main.rs`（27903 行）当时仍为巨型单文件。
 
 **2.40 相对 2.39(屏幕串流动态空间瓦片局部运动矢量估计与跨帧位移复用流水线 ADR-126 与双端 CLI 全同构)**
 
