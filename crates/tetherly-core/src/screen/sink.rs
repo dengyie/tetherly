@@ -24,6 +24,16 @@ pub struct ScreenAssembler {
     pub(super) body: Vec<u8>,
     pub(super) mask: Vec<bool>,
     pub(super) accepted: usize,
+    /// Highest frame seq already handed back by [`push`](Self::push).
+    ///
+    /// A fragment of a delivered frame is a straggler: selective-NACK recovery
+    /// retransmits a shard that the receiver asked for, and the original can
+    /// arrive first, so the copy lands *after* its frame completed. Without this
+    /// watermark that copy starts a fresh reassembly of the old frame, which
+    /// then reports the missing sibling shard as a NACK — and the peer answers
+    /// by echoing the whole stale frame. Reassembling a delivered frame can only
+    /// resurrect old pixels, so stragglers are dropped here instead.
+    pub(super) delivered_seq: u64,
 }
 
 impl ScreenAssembler {
@@ -79,8 +89,12 @@ impl ScreenAssembler {
         if frame.payload.starts_with(&SCREEN_MAGIC) {
             // A whole frame supersedes any half-assembled fragment stream; drop
             // the stale fragments so a later fragment cannot resurrect them.
+            // A whole frame carries its own seq, so it also advances the
+            // delivered watermark: fragments of it that follow are stragglers.
             self.reset();
-            return ScreenFrame::from_frame(frame).map(Some);
+            let decoded = ScreenFrame::from_frame(frame)?;
+            self.delivered_seq = self.delivered_seq.max(decoded.seq);
+            return Ok(Some(decoded));
         }
         if !frame.payload.starts_with(&SCREEN_FRAG_MAGIC) {
             return Err(CoreError::ScreenFragment);
@@ -94,6 +108,15 @@ impl ScreenAssembler {
         let count = u32::from_be_bytes(p[12..16].try_into().unwrap()) as usize;
         let seq = u64::from_be_bytes(p[16..24].try_into().unwrap());
         let chunk = &p[SCREEN_FRAG_HEADER..];
+
+        // A fragment of a frame that already completed is a straggler (a
+        // retransmitted shard that arrived after the original, or a duplicate
+        // the reorder window let through). Reassembling it would resurrect a
+        // stale frame, so it is dropped as soon as its seq is known — before
+        // the buffers above are touched.
+        if self.delivered_seq != 0 && seq <= self.delivered_seq {
+            return Ok(None);
+        }
 
         // Every fragment must be under the inner budget and the whole stream
         // under SCREEN_PAYLOAD_MAX; a lying count is refused, not allocated.
@@ -109,11 +132,20 @@ impl ScreenAssembler {
             return Err(CoreError::ScreenFragment);
         }
 
-        // A new stream supersedes an incomplete older one.
+        // A new stream supersedes an incomplete older one; a fragment whose seq
+        // is *older* than the stream in flight belongs to a frame the peer
+        // abandoned, so it must not restart that stream and discard the newer
+        // reassembly in progress.
         if seq != self.seq && !self.mask.is_empty() {
+            if seq < self.seq {
+                return Ok(None);
+            }
             self.reset();
         }
         if self.mask.is_empty() || self.total != total || self.count != count {
+            // A straggler for a delivered seq would otherwise reallocate here;
+            // the watermark check above took care of it, so this branch only
+            // ever starts a genuinely newer stream.
             self.seq = seq;
             self.total = total;
             self.count = count;
@@ -143,10 +175,16 @@ impl ScreenAssembler {
             return Ok(None);
         }
         let frame = ScreenFrame::decode_payload(&self.body)?;
+        // Remember what was delivered *before* the stream state is dropped, so
+        // a retransmitted shard for this seq cannot start it over.
+        self.delivered_seq = self.delivered_seq.max(frame.seq);
         self.reset();
         Ok(Some(frame))
     }
 
+    /// Clear the stream in progress. The `delivered_seq` watermark survives:
+    /// it is a property of the session, not of one frame, and forgetting it is
+    /// exactly what let a straggling fragment resurrect a completed frame.
     pub fn reset(&mut self) {
         self.seq = 0;
         self.total = 0;
@@ -154,6 +192,11 @@ impl ScreenAssembler {
         self.body = Vec::new();
         self.mask = Vec::new();
         self.accepted = 0;
+    }
+
+    /// Highest frame seq already handed back by [`push`](Self::push).
+    pub fn delivered_seq(&self) -> u64 {
+        self.delivered_seq
     }
 }
 

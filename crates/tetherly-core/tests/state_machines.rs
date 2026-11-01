@@ -587,6 +587,62 @@ fn screen_assembler_refuses_an_incomplete_stream() {
     assert_eq!(a.push(&small.to_frame().unwrap()).unwrap(), Some(small));
 }
 
+/// Regression: a selective-NACK shard can arrive *after* its frame already
+/// completed (the original beat the retransmission). Re-arming the reassembly
+/// for that seq made the assembler report the missing sibling shard as a fresh
+/// NACK, and the peer answered by echoing the whole stale frame — which the
+/// node then decoded as if it were new. A delivered seq is now inert.
+#[test]
+fn screen_assembler_ignores_stragglers_of_a_delivered_frame() {
+    let big_rect = ScreenRect::new(0, 0, 256, 256).unwrap();
+    let big = ScreenFrame::raw(9, big_rect, PixelFormat::Bgra8, vec![4u8; 256 * 256 * 4]).unwrap();
+    let frames = big.to_frames().unwrap();
+    assert!(frames.len() > 1, "a full-screen frame must fragment");
+
+    let mut a = ScreenAssembler::new();
+    let mut got = None;
+    for f in &frames {
+        if let Some(done) = a.push(f).unwrap() {
+            got = Some(done);
+        }
+    }
+    assert_eq!(got.as_ref(), Some(&big));
+    assert_eq!(a.delivered_seq(), 9);
+
+    // The retransmitted shard lands after the frame completed.
+    assert_eq!(a.push(&frames[0]).unwrap(), None);
+    assert!(!a.is_incomplete(), "a straggler must not re-open the frame");
+    assert!(
+        a.generate_nack(10_000).is_none(),
+        "a delivered frame must never be NACKed again"
+    );
+}
+
+/// Regression: a fragment older than the stream in flight must not restart it.
+/// Doing so threw away the newer reassembly and then NACKed the old frame.
+#[test]
+fn screen_assembler_does_not_restart_a_newer_stream_with_an_older_fragment() {
+    let rect = ScreenRect::new(0, 0, 256, 256).unwrap();
+    let newer = ScreenFrame::raw(9, rect, PixelFormat::Bgra8, vec![4u8; 256 * 256 * 4]).unwrap();
+    let older = ScreenFrame::raw(5, rect, PixelFormat::Bgra8, vec![7u8; 256 * 256 * 4]).unwrap();
+    let newer_frames = newer.to_frames().unwrap();
+    let older_frames = older.to_frames().unwrap();
+    assert!(newer_frames.len() > 1 && older_frames.len() > 1);
+
+    let mut a = ScreenAssembler::new();
+    assert_eq!(a.push(&newer_frames[0]).unwrap(), None);
+    // A straggler of the abandoned older frame arrives mid-stream.
+    assert_eq!(a.push(&older_frames[0]).unwrap(), None);
+    assert_eq!(a.seq(), newer.seq, "the newer stream must survive");
+    let mut got = None;
+    for f in &newer_frames[1..] {
+        if let Some(done) = a.push(f).unwrap() {
+            got = Some(done);
+        }
+    }
+    assert_eq!(got.as_ref(), Some(&newer));
+}
+
 // --------------------------------------------------------------- ANCS ingress
 
 /// Build an 8-byte Notification Source value (added event unless told otherwise).

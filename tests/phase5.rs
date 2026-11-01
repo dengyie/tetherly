@@ -122,6 +122,40 @@ async fn wait_screen_port(node: &Node, peer: &tetherly_core::DeviceId, timeout: 
     }
 }
 
+/// Longer than one frame interval at the test config's `screen_fps` (30 →
+/// 33.3 ms). `screen_send_frame` refuses a send that lands inside the pacer
+/// interval, so a test that stages a change and then sends must wait past that
+/// bound — the old 25 ms sleeps were under it and only passed when the code in
+/// between happened to be slow enough.
+const PACER_SETTLE: Duration = Duration::from_millis(40);
+
+/// Wait until the *host* has consumed the visitor's `Start` and reports
+/// `streaming`.
+///
+/// `POST /api/screen/start` answers 200 when the visitor has queued the control
+/// message; the host enters `Streaming` only when its screen channel task reads
+/// it and the local consent gate is already open. Sending a frame before that
+/// transition is refused by design (`screen_send_frame` → `Ok(false)`), so a
+/// test that asserts on the very next send has to wait for the state it is
+/// asserting about rather than sleep a guessed interval.
+async fn wait_host_streaming(host_ui: u16) {
+    let start = std::time::Instant::now();
+    loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let report: tetherly_node::ScreenStatusReport = serde_json::from_slice(&b).unwrap();
+        if report.state == "streaming" {
+            return;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!("host never reached streaming state: {}", report.state);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn wait_input_port(node: &Node, peer: &tetherly_core::DeviceId, timeout: Duration) {
     let start = std::time::Instant::now();
     loop {
@@ -1443,10 +1477,11 @@ async fn m5_7_screen_dynamic_fps_pacing_and_telemetry() {
     host.screen_set_fps(60);
     assert_eq!(host.screen_fps(), 60);
 
-    // Wait slightly more than 1 frame interval (25ms) and send next frames
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    // Past one frame interval at the new 60 FPS pacing, so both sends land in
+    // a fresh slot.
+    tokio::time::sleep(PACER_SETTLE).await;
     assert!(host.screen_send_frame().await.unwrap());
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     assert!(host.screen_send_frame().await.unwrap());
 
     // 6. Verify frames arrive at visitor sink
@@ -1993,14 +2028,33 @@ async fn m5_10_screen_4d_matrix_coordinator() {
     let sink = visitor.screen_sink_snapshot();
     assert_eq!(sink.presented(), vec![1, 2, 3, 4]);
 
-    // 6. Verify matrix report telemetry reflects active session
-    let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/matrix")
-        .await
-        .unwrap();
-    assert_eq!(c, 200);
-    let final_rep: tetherly_node::ScreenMatrixReport = serde_json::from_slice(&b).unwrap();
-    assert!(final_rep.ok);
-    assert_eq!(final_rep.mode, "auto");
+    // 6. Verify matrix report telemetry reflects active session.
+    //
+    // `health` is assessed from the *sender's* view (`in_flight > 0` or a slow
+    // RTT reads as "warning"), while the loop above only waits for the
+    // *receiver* to present. Presentation does not mean the ack for the last
+    // frame has come back yet, so a single-shot `health == "healthy"` here is
+    // asserting a value that legitimately lags by one round trip — and on a
+    // loaded runner that round trip is long enough to lose the race. The
+    // coordinator's contract is that health returns to "healthy" once the
+    // burst is acknowledged, so wait for that instead of sampling once.
+    let deadline = std::time::Instant::now();
+    let final_rep: tetherly_node::ScreenMatrixReport = loop {
+        let (c, b) = tetherly_node::loopback_get(host_ui, "/api/screen/matrix")
+            .await
+            .unwrap();
+        assert_eq!(c, 200);
+        let rep: tetherly_node::ScreenMatrixReport = serde_json::from_slice(&b).unwrap();
+        assert!(rep.ok);
+        assert_eq!(rep.mode, "auto");
+        if rep.health == "healthy" {
+            break rep;
+        }
+        if deadline.elapsed() > Duration::from_secs(3) {
+            panic!("matrix health never returned to healthy: {}", rep.health);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(final_rep.health, "healthy");
 
     host.shutdown();
@@ -7186,7 +7240,7 @@ async fn m5_36_screen_progressive_intra_refresh_pipeline() {
 
     // 5. Host pushes frames; with bands = 4, 4 frames complete 1 full sweep
     for i in 0..6 {
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(PACER_SETTLE).await;
         let prev = visitor.screen_sink_snapshot().count();
         assert!(host.screen_send_frame().await.unwrap());
         let wait_frame = std::time::Instant::now();
@@ -7436,7 +7490,7 @@ async fn m5_37_screen_ltr_long_term_reference_pipeline() {
 
     // 5. Host pushes intermediate frames with damaged region
     for i in 0..3 {
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(PACER_SETTLE).await;
         source.update_rect(10 + i * 2, 10 + i * 2, 16, 16, [0x80, 0x10, 0x40, 0xff]);
         let prev = visitor.screen_sink_snapshot().count();
         assert!(host.screen_send_frame().await.unwrap());
@@ -7737,7 +7791,7 @@ async fn m5_38_screen_temporal_scalability_svc_pipeline() {
     }
 
     // Frame 1: Enhancement Layer T1 (seq 1 % 2 == 1)
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(10, 10, 16, 16, [0x11, 0x22, 0x33, 0xff]);
     let prev1 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap());
@@ -7753,7 +7807,7 @@ async fn m5_38_screen_temporal_scalability_svc_pipeline() {
     }
 
     // Frame 2: Base Layer T0 (seq 2 % 2 == 0)
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(12, 12, 16, 16, [0x44, 0x55, 0x66, 0xff]);
     let prev2 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap());
@@ -7769,7 +7823,7 @@ async fn m5_38_screen_temporal_scalability_svc_pipeline() {
     }
 
     // Frame 3: Enhancement Layer T1 (seq 3 % 2 == 1)
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(14, 14, 16, 16, [0x77, 0x88, 0x99, 0xff]);
     let prev3 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap());
@@ -7835,7 +7889,7 @@ async fn m5_38_screen_temporal_scalability_svc_pipeline() {
     }
 
     // Host pushes Frame 4 (Base Layer T0: seq 4 % 2 == 0) -> MUST be sent and received
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(16, 16, 16, 16, [0xaa, 0xbb, 0xcc, 0xff]);
     let prev4 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap());
@@ -7851,7 +7905,7 @@ async fn m5_38_screen_temporal_scalability_svc_pipeline() {
     }
 
     // Host pushes Frame 5 (Enhancement Layer T1: seq 5 % 2 == 1) -> MUST be dropped at sender!
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(18, 18, 16, 16, [0xdd, 0xee, 0xff, 0xff]);
     let sent_f5 = host.screen_send_frame().await.unwrap();
     assert!(
@@ -7908,7 +7962,7 @@ async fn m5_38_screen_temporal_scalability_svc_pipeline() {
     }
 
     // Host pushes Frame 6 (T0) and Frame 7 (T1) -> Both must be sent now
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(20, 20, 16, 16, [0x12, 0x34, 0x56, 0xff]);
     let prev6 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap());
@@ -7923,7 +7977,7 @@ async fn m5_38_screen_temporal_scalability_svc_pipeline() {
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
 
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(22, 22, 16, 16, [0x78, 0x9a, 0xbc, 0xff]);
     let prev7 = visitor.screen_sink_snapshot().count();
     let sent_f7 = host.screen_send_frame().await.unwrap();
@@ -8123,7 +8177,7 @@ async fn m5_39_screen_motion_vector_estimation_and_scroll_acceleration_pipeline(
     }
 
     // 4. Upward scroll: dy = -8 (scroll up 8 pixels, newly exposed bottom 8 rows)
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.scroll_vertical(-8, [0xFE, 0xDC, 0xBA, 0xFF]);
     let prev_count = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap());
@@ -8165,7 +8219,7 @@ async fn m5_39_screen_motion_vector_estimation_and_scroll_acceleration_pipeline(
     );
 
     // 5. Downward scroll: dy = 8 (scroll down 8 pixels, newly exposed top 8 rows)
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.scroll_vertical(8, [0x12, 0x34, 0x56, 0xFF]);
     let prev_count2 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap());
@@ -8207,7 +8261,7 @@ async fn m5_39_screen_motion_vector_estimation_and_scroll_acceleration_pipeline(
     );
 
     // 6. Non-scroll edit: fallback to standard differential/keyframe pipeline
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(16, 16, 8, 8, [0x99, 0x88, 0x77, 0xFF]);
     let prev_count3 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap());
@@ -8429,7 +8483,7 @@ async fn m5_40_screen_spatial_tile_grid_decomposition_and_streaming_pipeline() {
 
     // 4. Disjoint discrete micro-updates: modify top-left (Tile 0) and bottom-right (Tile 15)
     // In a 128x128 screen with tile_size = 32, there are (128/32)*(128/32) = 16 tiles total.
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(2, 2, 4, 4, [0xAA, 0xBB, 0xCC, 0xFF]);
     source.update_rect(120, 120, 4, 4, [0x11, 0x22, 0x33, 0xFF]);
     let prev_count = visitor.screen_sink_snapshot().count();
@@ -8476,7 +8530,7 @@ async fn m5_40_screen_spatial_tile_grid_decomposition_and_streaming_pipeline() {
     );
 
     // 5. Another discrete update: single tile update at Tile 5 (x=36, y=36, w=4, h=4)
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(36, 36, 4, 4, [0x55, 0x66, 0x77, 0xFF]);
     let prev_count2 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap());
@@ -8732,7 +8786,7 @@ async fn m5_41_screen_tile_cache_deduplication_and_streaming_pipeline() {
 
     // 5. First Frame: Cache Miss & Dynamic Learning
     // Update Tile 0 (x=0..32, y=0..32) with a distinctive block pattern
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(0, 0, 32, 32, [0x11, 0x22, 0x33, 0xFF]);
     let prev_count1 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap());
@@ -8775,7 +8829,7 @@ async fn m5_41_screen_tile_cache_deduplication_and_streaming_pipeline() {
 
     // 6. Second Frame: Spatial Translation (Window Movement Simulation) -> Cache Hit!
     // Move the exact same 32x32 block from Tile 0 to Tile 15 (x=96..128, y=96..128), and reset Tile 0 to dark gray
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(0, 0, 32, 32, [0x05, 0x05, 0x05, 0xFF]);
     source.update_rect(96, 96, 32, 32, [0x11, 0x22, 0x33, 0xFF]);
     let prev_count2 = visitor.screen_sink_snapshot().count();
@@ -8819,7 +8873,7 @@ async fn m5_41_screen_tile_cache_deduplication_and_streaming_pipeline() {
 
     // 7. Third Frame: Intra-Frame Spatial Pattern Repetition (Multi-Tile Deduplication)
     // Simultaneously update Tile 1 (x=32..64, y=0..32) and Tile 2 (x=64..96, y=0..32) with identical pixels
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(32, 0, 32, 32, [0x77, 0x88, 0x99, 0xFF]);
     source.update_rect(64, 0, 32, 32, [0x77, 0x88, 0x99, 0xFF]);
     let prev_count3 = visitor.screen_sink_snapshot().count();
@@ -9087,7 +9141,7 @@ async fn m5_42_screen_foveated_focus_priority_scheduling_pipeline() {
 
     // 6. Frame 1 (seq = 1, seq % 3 != 0): Focus vs Peripheral Spatial Priority
     // Update Focus zone (Tile 0, x=0..32, y=0..32) and Peripheral zone (Tile 15, x=96..128, y=96..128)
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(0, 0, 32, 32, [0xAA, 0xBB, 0xCC, 0xFF]);
     source.update_rect(96, 96, 32, 32, [0x11, 0x22, 0x33, 0xFF]);
     let prev_count1 = visitor.screen_sink_snapshot().count();
@@ -9146,7 +9200,7 @@ async fn m5_42_screen_foveated_focus_priority_scheduling_pipeline() {
     );
 
     // 7. Frame 2 (seq = 2, seq % 3 != 0): Peripheral tile remains skipped
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     assert!(host.screen_send_frame().await.unwrap());
     // Give time for frame processing
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -9163,7 +9217,7 @@ async fn m5_42_screen_foveated_focus_priority_scheduling_pipeline() {
     );
 
     // 8. Frame 3 (seq = 3, seq % 3 == 0): Cadence tick! Peripheral tile is transmitted!
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     let prev_count3 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap());
 
@@ -9466,7 +9520,7 @@ async fn m5_43_screen_tile_palette_adaptive_compression_pipeline() {
 
     // 6. Frame 1 (Solid Color Tile, K=1):
     // Update Tile 0 (x=0..64, y=0..64) with solid blue
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect(0, 0, 64, 64, [0x00, 0x00, 0xFF, 0xFF]);
     let prev_count1 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap());
@@ -9510,7 +9564,7 @@ async fn m5_43_screen_tile_palette_adaptive_compression_pipeline() {
 
     // 7. Frame 2 (Bi-Level Tile, K=2):
     // Update Tile 1 (x=64..128, y=0..64) with alternating black and white pattern
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(64, 0, 64, 64, |col, row| {
         if (col + row) % 2 == 0 {
             [0x00, 0x00, 0x00, 0xFF]
@@ -9559,7 +9613,7 @@ async fn m5_43_screen_tile_palette_adaptive_compression_pipeline() {
 
     // 8. Frame 3 (16-Color Indexed Palette Tile, 3 <= K <= 16):
     // Update Tile 2 (x=0..64, y=64..128) with 4-color syntax highlighting blocks
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(0, 64, 64, 64, |col, row| {
         let colors = [
             [0xFF, 0x00, 0x00, 0xFF],
@@ -9610,7 +9664,7 @@ async fn m5_43_screen_tile_palette_adaptive_compression_pipeline() {
 
     // 9. Frame 4 (TrueColor Fallback, K > 16):
     // Update Tile 3 (x=64..128, y=64..128) with gradient (> 16 colors)
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(64, 64, 64, 64, |col, row| {
         [
             ((col * 4) & 0xFF) as u8,
@@ -9752,6 +9806,7 @@ async fn m5_44_screen_tile_predictive_compression_pipeline() {
     .await
     .unwrap();
     assert_eq!(c, 200);
+    wait_host_streaming(host_ui).await;
 
     // Initial status report telemetry check: Predict should be disabled
     let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/predict")
@@ -9854,7 +9909,7 @@ async fn m5_44_screen_tile_predictive_compression_pipeline() {
 
     // 4. Frame 1 (Horizontal Continuous Gradient Tile, K > 16):
     // Update Tile 0 (x=0..64, y=0..64) with smooth horizontal gradient
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(0, 0, 64, 64, |col, row| {
         let base_r = (col * 3) as u8;
         let base_g = (col * 3 + (row % 4)) as u8;
@@ -9902,7 +9957,7 @@ async fn m5_44_screen_tile_predictive_compression_pipeline() {
 
     // 5. Frame 2 (Vertical Continuous Gradient Tile, K > 16):
     // Update Tile 1 (x=64..128, y=0..64) with vertical linear gradient
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(64, 0, 64, 64, |_col, row| {
         let base_r = (row * 3 + 20) as u8;
         let base_g = (row * 3 + 25) as u8;
@@ -9950,7 +10005,7 @@ async fn m5_44_screen_tile_predictive_compression_pipeline() {
 
     // 6. Frame 3 (Two-Dimensional Smooth Surface with Paeth / Diagonal Gradient):
     // Update Tile 2 (x=0..64, y=64..128)
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(0, 64, 64, 64, |col, row| {
         let v = ((col + row) * 2) as u8;
         [v, v.wrapping_add(10), v.wrapping_add(20), 0xFF]
@@ -10083,6 +10138,7 @@ async fn m5_45_screen_tile_presentation_transaction_pipeline() {
     .await
     .unwrap();
     assert_eq!(c, 200);
+    wait_host_streaming(host_ui).await;
 
     // Initial status report telemetry check: Present should be disabled
     let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/present")
@@ -10183,7 +10239,7 @@ async fn m5_45_screen_tile_presentation_transaction_pipeline() {
 
     // 4. Frame 1 (Multi-Tile Update: Tile 0 [0..64, 0..64] and Tile 3 [64..128, 64..128]):
     // Two dirty tiles in a single frame to verify atomic staging, anti-tearing guard and front-swap
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(0, 0, 64, 64, |col, row| {
         let r = (col * 3 + 10) as u8;
         let g = (row * 3 + 20) as u8;
@@ -10243,7 +10299,7 @@ async fn m5_45_screen_tile_presentation_transaction_pipeline() {
     );
 
     // 5. Frame 2 (Another Multi-Tile Update: Tile 1 [64..128, 0..64] and Tile 2 [0..64, 64..128]):
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(64, 0, 64, 64, |col, row| {
         let r = (col * 2 + 80) as u8;
         let g = 210u8;
@@ -10390,6 +10446,7 @@ async fn m5_46_screen_tile_nack_recovery_pipeline() {
     .await
     .unwrap();
     assert_eq!(c, 200);
+    wait_host_streaming(host_ui).await;
 
     // Initial status report telemetry check: Tile NACK should be disabled by default
     let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/nack")
@@ -10474,7 +10531,7 @@ async fn m5_46_screen_tile_nack_recovery_pipeline() {
 
     // 4. Send multi-tile update frame (Frame 1):
     // Updates Tile 0 (0..64, 0..64) and Tile 3 (64..128, 64..128)
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(0, 0, 64, 64, |col, row| {
         let r = (col * 3 + 15) as u8;
         let g = (row * 3 + 25) as u8;
@@ -10631,6 +10688,7 @@ async fn m5_47_screen_tile_saliency_tiering_pipeline() {
     .await
     .unwrap();
     assert_eq!(c, 200);
+    wait_host_streaming(host_ui).await;
 
     // Initial status report check: Tile Saliency should be disabled by default
     let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/saliency")
@@ -10751,7 +10809,7 @@ async fn m5_47_screen_tile_saliency_tiering_pipeline() {
     // 4. Send multi-tier dirty tiles frame (Frame 1):
     // Updates Tile 0 (0..64, 0..64) with high contrast alternating pattern -> Critical
     // Updates Tile 3 (64..128, 64..128) with flat smooth pattern -> Background
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(0, 0, 64, 64, |col, row| {
         if (col / 4 + row / 4) % 2 == 0 {
             [255, 255, 255, 0xFF]
@@ -10973,6 +11031,7 @@ async fn m5_48_screen_tile_lod_pipeline() {
     .await
     .unwrap();
     assert_eq!(c, 200);
+    wait_host_streaming(host_ui).await;
 
     // Initial status report check: Tile LoD should be disabled by default
     let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/lod")
@@ -11105,7 +11164,7 @@ async fn m5_48_screen_tile_lod_pipeline() {
     // 5. Send multi-tier dirty tiles frame without congestion (Frame 1):
     // Updates Tile 0 (0..64, 0..64) with high contrast alternating pattern -> Critical
     // Updates Tile 3 (64..128, 64..128) with flat smooth pattern -> Background
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(0, 0, 64, 64, |col, row| {
         if (col / 4 + row / 4) % 2 == 0 {
             [255, 255, 255, 0xFF]
@@ -11319,6 +11378,7 @@ async fn m5_49_screen_tile_batching_pipeline() {
     .await
     .unwrap();
     assert_eq!(c, 200);
+    wait_host_streaming(host_ui).await;
 
     // Initial status report check: Tile Batching should be disabled by default
     let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/batch")
@@ -11440,7 +11500,7 @@ async fn m5_49_screen_tile_batching_pipeline() {
     // Tile (1, 0): (64..128, 0..64)
     // Tile (0, 1): (0..64, 64..128)
     // Tile (1, 1): (64..128, 64..128)
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(0, 0, 64, 64, |col, row| {
         if (col / 4 + row / 4) % 2 == 0 {
             [220, 50, 50, 0xFF]
@@ -11618,6 +11678,7 @@ async fn m5_50_screen_tile_motion_vector_pipeline() {
     .await
     .unwrap();
     assert_eq!(c, 200);
+    wait_host_streaming(host_ui).await;
 
     // Initial status report check: Tile Motion Estimation should be disabled by default
     let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/tile/motion")
@@ -11735,7 +11796,7 @@ async fn m5_50_screen_tile_motion_vector_pipeline() {
     // In reference canvas, pattern was P(x, y).
     // With dy = 10, ref_y = tile_y - dy = 64 - 10 = 54.
     // Now we set tile (0, 1) to P(col, 54 + row).
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     source.update_rect_with(0, 64, 64, 64, |col, row| {
         let x = col;
         let y = 54 + row;

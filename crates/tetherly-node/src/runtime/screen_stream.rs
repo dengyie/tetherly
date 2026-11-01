@@ -1770,6 +1770,24 @@ impl Node {
                                         *node.shared.screen_rx_stats.lock().expect("screen rx") =
                                             receiver.stats();
                                     }
+                                    // Ordering gate: a frame no newer than the last
+                                    // accepted one is a stale duplicate (a NACK
+                                    // retransmission racing the original, a whole
+                                    // keyframe replayed by recovery). It must not
+                                    // reach *any* decoder below: the canvas is the
+                                    // reference picture for tile and delta frames,
+                                    // so rebuilding it from an older frame rewinds
+                                    // it and every following delta then decodes on
+                                    // the wrong base — a permanently corrupt view.
+                                    // `apply` still records the drop, but nothing
+                                    // is decoded, applied to the canvas or pushed
+                                    // to playout.
+                                    if sf.seq <= receiver.last_seq() {
+                                        let _ = receiver.apply(&sf);
+                                        *node.shared.screen_rx_stats.lock().expect("screen rx") =
+                                            receiver.stats();
+                                        continue;
+                                    }
                                     let codec_tag = sf.codec_tag;
                                     // Decode by the frame's wire tag:
                                     // zstd (1) or H.264 (3, ADR-079).
