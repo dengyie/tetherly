@@ -18,6 +18,42 @@ const INDEX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/
 const MAX_HEADER: usize = 16 * 1024;
 const MAX_BODY: usize = 2 * 1024 * 1024;
 
+// ---- feature submodules (v0.1.64 / ADR-128) ----
+mod api_action;
+mod api_ancs;
+mod api_audio;
+mod api_audit;
+mod api_bench;
+mod api_camera;
+mod api_clip;
+mod api_core;
+mod api_display;
+mod api_files;
+mod api_focus;
+mod api_handoff;
+mod api_input;
+mod api_locate;
+mod api_media;
+mod api_messages;
+mod api_mic;
+mod api_notify;
+mod api_peers;
+mod api_power;
+mod api_screen_analysis;
+mod api_screen_overlay;
+mod api_screen_quality;
+mod api_screen_session;
+mod api_screen_tile;
+mod api_topology;
+mod dto;
+mod util;
+
+// Re-exported so every handler module can reach the DTOs and helpers with a
+// plain `use super::*;`.
+use dto::*;
+pub use util::urlencode_path;
+use util::*;
+
 /// Bind the loopback UI and serve it in the background, returning the port
 /// actually bound (a `0` request resolves to an ephemeral one). Binding
 /// synchronously means a taken port is a hard error the caller can report,
@@ -424,1278 +460,8 @@ pub async fn loopback_events_connect(port: u16) -> std::io::Result<SseStream> {
     Ok(SseStream { lines })
 }
 
-#[derive(Serialize)]
-struct Snapshot {
-    device_id: String,
-    name: String,
-    platform: String,
-    pin_active: bool,
-    lan_only: bool,
-    overlay_present: bool,
-    overlay_source: String,
-    overlay_peers: usize,
-    candidates: Vec<crate::events::CandidateViewDto>,
-    /// Inbound quick replies awaiting hand-off. No text is included.
-    replies: Vec<crate::events::ReplyViewDto>,
-    peers: Vec<PeerView>,
-    trusted: Vec<TrustedPeerView>,
-    files: Vec<FileSnap>,
-    transfers: Vec<crate::runtime::ActiveTransfer>,
-    transfer_stats: crate::runtime::TransferStats,
-    /// "off" when no BLE transport is attached, else the ingress state.
-    ancs_state: String,
-    /// Allowlisted app ids, so the wizard can show what may be opened.
-    open_apps: Vec<String>,
-    /// Remote-screen channel state (idle/requested/allowed/streaming).
-    screen_state: String,
-    /// Screen counters for the local UI. Never carries pixels.
-    screen: ScreenSnap,
-    /// Input channel state: whether 45719 is dialled and where the seat is.
-    input_channel: bool,
-    input_seat: String,
-    /// Every local address and why it is or is not in the LAN listen set. Lets
-    /// the UI explain "nothing found" without the user reading logs.
-    lan: Vec<crate::lan::IfaceReport>,
-    /// Aggregate network traffic and protocol telemetry report.
-    traffic: crate::telemetry::TrafficReport,
-    /// Total audit entries recorded in ring buffer.
-    audit_count: usize,
-    /// Total unread direct messages in ring buffer.
-    unread_messages_count: usize,
-    /// Total resource handoff entries in inbox.
-    handoff_inbox_count: usize,
-    /// Current handoff action policy string.
-    handoff_action: String,
-    /// Local media playback state if present.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    media_state: Option<tetherly_core::MediaStateFrame>,
-    /// Media ingress control mode string.
-    media_mode: String,
-    /// Local battery state if present.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    battery_state: Option<tetherly_core::BatteryStateFrame>,
-    /// Low battery threshold percentage.
-    battery_low_threshold: u8,
-    /// Focus status report if present.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    focus_status: Option<crate::runtime::FocusStatusReport>,
-    /// Spatial topology layout report if present.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    topology_layout: Option<crate::runtime::TopologyLayoutReport>,
-    /// Spatial audio routing status report if present.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    audio_routing_status: Option<crate::runtime::AudioRoutingStatusReport>,
-    /// Virtual camera status report if present.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    camera_status: Option<crate::runtime::CameraStatusReport>,
-}
-
-#[derive(Serialize)]
-struct ScreenSnap {
-    state: String,
-    sent: u64,
-    received: u64,
-    dropped: u64,
-    bytes: u64,
-    refused: u64,
-    /// p95 host-side frame interval in microseconds. Null until measurable.
-    p95_frame_interval_us: Option<u64>,
-    acked: u64,
-    in_flight: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rtt_latest_us: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rtt_p95_us: Option<u64>,
-    is_congested: bool,
-}
-
-#[derive(Serialize)]
-struct PeerView {
-    device_id: String,
-    name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    alias: Option<String>,
-    platform: String,
-    device_type: String,
-    #[serde(default)]
-    tags: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    group: Option<String>,
-    path: String,
-    caps: Vec<String>,
-    features: Vec<String>,
-    file_port: Option<u16>,
-    input_port: Option<u16>,
-    screen_port: Option<u16>,
-    rtt_ms: Option<u64>,
-    last_seen_ms: u64,
-}
-
-#[derive(Serialize)]
-pub struct TrustedPeerView {
-    pub device_id: String,
-    pub alias: String,
-    pub device_type: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
-    pub paired_at: u64,
-    pub revoked: bool,
-    pub online: bool,
-}
-
-#[derive(Serialize)]
-struct FileSnap {
-    transfer_id: String,
-    source: String,
-    name: String,
-    size: u64,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct ProfileUpdateBody {
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    device_id: Option<String>,
-    #[serde(default)]
-    device_type: Option<String>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
-    #[serde(default)]
-    group: Option<Option<String>>,
-    #[serde(default)]
-    notes: Option<Option<String>>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct PeerTagBody {
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    device_id: Option<String>,
-    #[serde(default)]
-    tag: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct PeerGroupBody {
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    device_id: Option<String>,
-    #[serde(default)]
-    group: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct DialBody {
-    #[serde(default)]
-    addr: Option<String>,
-    #[serde(default)]
-    peer: Option<String>,
-    pin: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct NotifyBody {
-    title: String,
-    body: String,
-    #[serde(default = "default_notify_app")]
-    app_id: String,
-    peer: Option<String>,
-}
-
-fn default_notify_app() -> String {
-    "com.example.sms".into()
-}
-
-/// Wall clock for a locally originated push. The node clock is the handshake
-/// clock; a notify timestamp only has to be monotone enough for the peer's TTL.
-fn node_clock_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-#[derive(serde::Deserialize)]
-struct IdBody {
-    id: String,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-struct FileDecisionBody {
-    id: Option<String>,
-    peer: Option<String>,
-    all: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-struct AutoAcceptBody {
-    enabled: Option<bool>,
-    auto_accept_trusted: Option<bool>,
-    #[serde(default)]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    max_file_size: Option<u64>,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-struct NotifyDismissBody {
-    id: Option<String>,
-    peer: Option<String>,
-    app_id: Option<String>,
-    all: Option<bool>,
-}
-
-#[derive(serde::Deserialize)]
-struct UnpairBody {
-    device_id: String,
-}
-
-#[derive(serde::Deserialize)]
-struct ReplyBody {
-    id: String,
-    text: String,
-}
-
-#[derive(serde::Deserialize)]
-struct OpenRuleBody {
-    app_id: String,
-    #[serde(default = "default_open_url")]
-    url: String,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct OpenRuleRemoveBody {
-    #[serde(default)]
-    app_id: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct StorageCleanBody {
-    #[serde(default)]
-    orphaned_only: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct InboxDeleteBody {
-    #[serde(default)]
-    name: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct InboxClearBody {
-    #[serde(default)]
-    before_secs: Option<u64>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct InboxOpenBody {
-    #[serde(default)]
-    name: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct NotifyConfigUpdateBody {
-    banners_enabled: Option<bool>,
-    dnd_mode: Option<crate::runtime::DndMode>,
-    sound_enabled: Option<bool>,
-    mask_otp: Option<bool>,
-    allow_otp_in_dnd: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct NotifyTestBody {
-    title: Option<String>,
-    body: Option<String>,
-}
-
-fn default_open_url() -> String {
-    "tetherly://open".to_string()
-}
-
-#[derive(serde::Deserialize)]
-struct SendFileBody {
-    path: Option<String>,
-    #[serde(default, alias = "data")]
-    data_base64: Option<String>,
-    peer: Option<String>,
-    #[serde(default, alias = "filename")]
-    name: Option<String>,
-    #[serde(default)]
-    tag: Option<String>,
-    #[serde(default)]
-    group: Option<String>,
-    #[serde(default)]
-    device_type: Option<String>,
-    #[serde(default)]
-    r#type: Option<String>,
-    #[serde(default)]
-    all: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct ClipSyncBody {
-    peer: Option<String>,
-    text: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct ClipPolicyBody {
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
-    sensitive_guard: Option<bool>,
-    #[serde(default)]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    max_payload_bytes: Option<usize>,
-    #[serde(default)]
-    auto_clear_timeout_secs: Option<u64>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct HandoffSendBody {
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    url: String,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default, alias = "auto_open_requested")]
-    auto_open: Option<bool>,
-    #[serde(default)]
-    tag: Option<String>,
-    #[serde(default)]
-    group: Option<String>,
-    #[serde(default)]
-    device_type: Option<String>,
-    #[serde(default)]
-    r#type: Option<String>,
-    #[serde(default)]
-    all: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct HandoffInboxActionBody {
-    #[serde(default)]
-    id: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct HandoffPolicyBody {
-    #[serde(default)]
-    action: Option<String>,
-    #[serde(default)]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    max_inbox_entries: Option<usize>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct MediaCommandBody {
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    target: Option<String>,
-    #[serde(default)]
-    command: Option<String>,
-    #[serde(default)]
-    action: Option<String>,
-    #[serde(default)]
-    volume: Option<u8>,
-    #[serde(default, alias = "volume_percent")]
-    volume_percent: Option<u8>,
-    #[serde(default)]
-    offset_ms: Option<i64>,
-    #[serde(default)]
-    target_player: Option<String>,
-    #[serde(default)]
-    tag: Option<String>,
-    #[serde(default)]
-    group: Option<String>,
-    #[serde(default)]
-    device_type: Option<String>,
-    #[serde(default)]
-    r#type: Option<String>,
-    #[serde(default)]
-    all: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct MediaStateUpdateBody {
-    #[serde(default)]
-    player_id: Option<String>,
-    #[serde(default)]
-    state: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    artist: Option<String>,
-    #[serde(default)]
-    album: Option<String>,
-    #[serde(default, alias = "position", alias = "pos")]
-    position_ms: Option<u64>,
-    #[serde(default, alias = "duration", alias = "dur")]
-    duration_ms: Option<u64>,
-    #[serde(default, alias = "volume", alias = "vol")]
-    volume_percent: Option<u8>,
-    #[serde(default)]
-    muted: Option<bool>,
-    #[serde(default)]
-    can_play: Option<bool>,
-    #[serde(default)]
-    can_pause: Option<bool>,
-    #[serde(default)]
-    can_go_next: Option<bool>,
-    #[serde(default)]
-    can_go_previous: Option<bool>,
-    #[serde(default)]
-    can_seek: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct MediaPolicyBody {
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    max_volume_limit: Option<u8>,
-    #[serde(default)]
-    allow_seek: Option<bool>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct BatteryStateUpdateBody {
-    #[serde(default, alias = "level", alias = "battery_percent", alias = "percent")]
-    battery_level: Option<u8>,
-    #[serde(default, alias = "charging")]
-    is_charging: Option<bool>,
-    #[serde(default, alias = "source", alias = "source_type")]
-    power_source: Option<String>,
-    #[serde(default, alias = "saver", alias = "low_power_mode")]
-    battery_saver: Option<bool>,
-    #[serde(default, alias = "health")]
-    health_percent: Option<u8>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct BatteryPolicyBody {
-    #[serde(default, alias = "low_threshold", alias = "low")]
-    low_battery_threshold: Option<u8>,
-    #[serde(default, alias = "critical_threshold", alias = "critical")]
-    critical_battery_threshold: Option<u8>,
-    #[serde(default, alias = "alert")]
-    alert_on_low_battery: Option<bool>,
-    #[serde(default, alias = "throttle", alias = "auto_throttle")]
-    auto_throttle_on_battery_saver: Option<bool>,
-    #[serde(default)]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct LocateRingBody {
-    #[serde(default, alias = "target")]
-    peer: Option<String>,
-    #[serde(default, alias = "duration")]
-    duration_secs: Option<u32>,
-    #[serde(default)]
-    pattern: Option<String>,
-    #[serde(default)]
-    override_silent: Option<bool>,
-    #[serde(default)]
-    message: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct LocateStopBody {
-    #[serde(default, alias = "target")]
-    peer: Option<String>,
-    #[serde(default, alias = "id")]
-    request_id: Option<String>,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct LocatePolicyBody {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    allow_override_silent: Option<bool>,
-    #[serde(default, alias = "max_duration")]
-    max_duration_secs: Option<u32>,
-    #[serde(default)]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct ActionLocalBody {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    icon: Option<String>,
-    #[serde(default)]
-    command: Option<String>,
-    #[serde(default)]
-    args: Option<Vec<String>>,
-    #[serde(default, alias = "timeout")]
-    timeout_secs: Option<u32>,
-    #[serde(default)]
-    enabled: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct ActionTriggerBody {
-    #[serde(default, alias = "target")]
-    peer: Option<String>,
-    #[serde(default, alias = "id")]
-    action_id: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct ActionPolicyBody {
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default, alias = "timeout", alias = "max_timeout")]
-    max_timeout_secs: Option<u32>,
-    #[serde(default)]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default, alias = "expose")]
-    expose_action_list: Option<bool>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct FocusSetBody {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default, alias = "duration", alias = "duration_minutes")]
-    duration_mins: Option<u32>,
-    #[serde(default)]
-    reason: Option<String>,
-    #[serde(default)]
-    broadcast: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct FocusPolicyBody {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    default_mode: Option<String>,
-    #[serde(default, alias = "mirror")]
-    mirror_inbound_focus: Option<bool>,
-    #[serde(default, alias = "breakthrough")]
-    allow_emergency_breakthrough: Option<bool>,
-    #[serde(default, alias = "quiet_hours")]
-    quiet_hours_enabled: Option<bool>,
-    #[serde(default, alias = "start_minute")]
-    quiet_hours_start_minute: Option<u16>,
-    #[serde(default, alias = "end_minute")]
-    quiet_hours_end_minute: Option<u16>,
-    #[serde(default, alias = "start")]
-    quiet_hours_start: Option<String>,
-    #[serde(default, alias = "end")]
-    quiet_hours_end: Option<String>,
-    #[serde(default)]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(default)]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct TopologyLinkBody {
-    #[serde(default)]
-    edge: Option<String>,
-    #[serde(default, alias = "peer_id", alias = "device_id", alias = "target")]
-    peer: Option<String>,
-    #[serde(default)]
-    peer_edge: Option<String>,
-    #[serde(default)]
-    offset: Option<i32>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct TopologyUnlinkBody {
-    #[serde(default)]
-    edge: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct TopologyConfigBody {
-    #[serde(default, alias = "resistance")]
-    resistance_px: Option<u32>,
-    #[serde(default, alias = "delay")]
-    delay_ms: Option<u32>,
-    #[serde(default, alias = "corner_lock", alias = "corner_lock_size")]
-    corner_lock_size_px: Option<u32>,
-    #[serde(default, alias = "wrap")]
-    wrap_around: Option<bool>,
-    #[serde(default)]
-    width: Option<u32>,
-    #[serde(default)]
-    height: Option<u32>,
-    #[serde(default, alias = "scale")]
-    scale_factor: Option<f32>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct TopologyPolicyBody {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default, alias = "allow_inbound")]
-    allow_inbound_control: Option<bool>,
-    #[serde(default, alias = "auto_link")]
-    auto_link_paired_peers: Option<bool>,
-    #[serde(default, alias = "group", alias = "groups")]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default, alias = "tag", alias = "tags")]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(
-        default,
-        alias = "type",
-        alias = "types",
-        alias = "device_type",
-        alias = "device_types"
-    )]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct InputTunnelAttachBody {
-    #[serde(default, alias = "peer_id", alias = "device_id", alias = "target")]
-    peer: Option<String>,
-    #[serde(default)]
-    edge: Option<String>,
-    #[serde(default)]
-    x: Option<i32>,
-    #[serde(default)]
-    y: Option<i32>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct InputTunnelReleaseBody {
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct InputTunnelPolicyBody {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default, alias = "allow_inbound")]
-    allow_inbound_control: Option<bool>,
-    #[serde(default, alias = "keyboard")]
-    allow_keyboard: Option<bool>,
-    #[serde(default, alias = "mouse")]
-    allow_mouse: Option<bool>,
-    #[serde(default, alias = "hotkey", alias = "hotkey_release")]
-    hotkey_release_enabled: Option<bool>,
-    #[serde(default, alias = "timeout", alias = "idle_timeout")]
-    idle_timeout_secs: Option<u32>,
-    #[serde(default, alias = "group", alias = "groups")]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default, alias = "tag", alias = "tags")]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(
-        default,
-        alias = "type",
-        alias = "types",
-        alias = "device_type",
-        alias = "device_types"
-    )]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct VirtualDisplayAttachBody {
-    #[serde(default, alias = "peer_id", alias = "device_id", alias = "target")]
-    peer: Option<String>,
-    #[serde(default, alias = "assigned_edge")]
-    edge: Option<String>,
-    #[serde(default)]
-    width: Option<u32>,
-    #[serde(default)]
-    height: Option<u32>,
-    #[serde(default, alias = "target_fps", alias = "refresh_rate")]
-    fps: Option<u32>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct VirtualDisplayDetachBody {
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct VirtualDisplayPolicyBody {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default, alias = "host", alias = "allow_host")]
-    allow_hosting: Option<bool>,
-    #[serde(default, alias = "extend", alias = "allow_extend")]
-    allow_remote_extend: Option<bool>,
-    #[serde(default, alias = "max_width")]
-    max_resolution_width: Option<u32>,
-    #[serde(default, alias = "max_height")]
-    max_resolution_height: Option<u32>,
-    #[serde(default)]
-    max_fps: Option<u32>,
-    #[serde(default, alias = "timeout", alias = "idle_timeout")]
-    idle_timeout_secs: Option<u32>,
-    #[serde(default, alias = "group", alias = "groups")]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default, alias = "tag", alias = "tags")]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(
-        default,
-        alias = "type",
-        alias = "types",
-        alias = "device_type",
-        alias = "device_types"
-    )]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default, Clone, Copy)]
-struct AudioSpatialPositionReq {
-    #[serde(default)]
-    x: Option<f32>,
-    #[serde(default)]
-    y: Option<f32>,
-    #[serde(default)]
-    z: Option<f32>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct AudioRoutingAttachBody {
-    #[serde(default, alias = "peer_id", alias = "device_id", alias = "target")]
-    peer: Option<String>,
-    #[serde(default, alias = "channel_layout")]
-    layout: Option<String>,
-    #[serde(default)]
-    sample_rate: Option<u32>,
-    #[serde(default)]
-    channels: Option<u8>,
-    #[serde(default, alias = "x")]
-    spatial_x: Option<f32>,
-    #[serde(default, alias = "y")]
-    spatial_y: Option<f32>,
-    #[serde(default, alias = "z")]
-    spatial_z: Option<f32>,
-    #[serde(default)]
-    spatial_position: Option<AudioSpatialPositionReq>,
-    #[serde(default, alias = "gain", alias = "volume")]
-    volume_gain: Option<f32>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct AudioRoutingDetachBody {
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct AudioRoutingPolicyBody {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default, alias = "sink", alias = "allow_sink")]
-    allow_inbound_sink: Option<bool>,
-    #[serde(default, alias = "routing", alias = "allow_outbound")]
-    allow_outbound_routing: Option<bool>,
-    #[serde(default, alias = "max_volume", alias = "volume_limit")]
-    max_volume_limit: Option<u8>,
-    #[serde(
-        default,
-        alias = "spatial",
-        alias = "allow_spatial",
-        alias = "spatial_rendering_enabled"
-    )]
-    allow_spatial_rendering: Option<bool>,
-    #[serde(default, alias = "timeout", alias = "idle_timeout")]
-    idle_timeout_secs: Option<u32>,
-    #[serde(default, alias = "group", alias = "groups")]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default, alias = "tag", alias = "tags")]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(
-        default,
-        alias = "type",
-        alias = "types",
-        alias = "device_type",
-        alias = "device_types"
-    )]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct CameraAttachBody {
-    #[serde(default, alias = "peer_id", alias = "device_id", alias = "target")]
-    peer: Option<String>,
-    #[serde(default, alias = "lens")]
-    lens_id: Option<String>,
-    #[serde(default)]
-    width: Option<u32>,
-    #[serde(default)]
-    height: Option<u32>,
-    #[serde(default, alias = "target_fps")]
-    fps: Option<u32>,
-    #[serde(default)]
-    codec: Option<String>,
-    #[serde(default, alias = "torch")]
-    flashlight: Option<bool>,
-    #[serde(default, alias = "zoom_ratio")]
-    zoom: Option<f32>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct CameraDetachBody {
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct CameraPolicyBody {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default, alias = "inbound", alias = "allow_inbound")]
-    allow_inbound_stream: Option<bool>,
-    #[serde(default, alias = "capture", alias = "allow_capture")]
-    allow_remote_capture: Option<bool>,
-    #[serde(default, alias = "max_width")]
-    max_resolution_width: Option<u32>,
-    #[serde(default, alias = "max_height")]
-    max_resolution_height: Option<u32>,
-    #[serde(default, alias = "fps")]
-    max_fps: Option<u32>,
-    #[serde(default, alias = "privacy_shutter", alias = "enforce_privacy_shutter")]
-    enforce_privacy_shutter_indicator: Option<bool>,
-    #[serde(default, alias = "timeout", alias = "idle_timeout")]
-    idle_timeout_secs: Option<u32>,
-    #[serde(default, alias = "group", alias = "groups")]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default, alias = "tag", alias = "tags")]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(
-        default,
-        alias = "type",
-        alias = "types",
-        alias = "device_type",
-        alias = "device_types"
-    )]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct MicAttachBody {
-    #[serde(default, alias = "peer_id", alias = "device_id", alias = "target")]
-    peer: Option<String>,
-    #[serde(default, alias = "mic")]
-    mic_id: Option<String>,
-    #[serde(default, alias = "session_mode")]
-    mode: Option<String>,
-    #[serde(default)]
-    codec: Option<String>,
-    #[serde(default, alias = "rate")]
-    sample_rate: Option<u32>,
-    #[serde(default)]
-    channels: Option<u32>,
-    #[serde(default)]
-    gain: Option<f32>,
-    #[serde(default)]
-    muted: Option<bool>,
-    #[serde(default, alias = "ns")]
-    noise_suppression: Option<bool>,
-    #[serde(default, alias = "aec")]
-    echo_cancellation: Option<bool>,
-    #[serde(default, alias = "agc")]
-    auto_gain: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct MicDetachBody {
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct MicPolicyBody {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default, alias = "inbound", alias = "allow_inbound")]
-    allow_inbound_stream: Option<bool>,
-    #[serde(default, alias = "capture", alias = "allow_capture")]
-    allow_remote_capture: Option<bool>,
-    #[serde(default, alias = "intercom", alias = "ptt")]
-    allow_intercom: Option<bool>,
-    #[serde(default, alias = "max_rate")]
-    max_sample_rate: Option<u32>,
-    #[serde(default, alias = "max_duration")]
-    max_session_duration_secs: Option<u32>,
-    #[serde(default, alias = "privacy_indicator", alias = "enforce_privacy")]
-    enforce_privacy_indicator: Option<bool>,
-    #[serde(default, alias = "start_muted")]
-    default_muted: Option<bool>,
-    #[serde(default, alias = "timeout", alias = "idle_timeout")]
-    idle_timeout_secs: Option<u32>,
-    #[serde(default, alias = "group", alias = "groups")]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default, alias = "tag", alias = "tags")]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(
-        default,
-        alias = "type",
-        alias = "types",
-        alias = "device_type",
-        alias = "device_types"
-    )]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct BenchStartBody {
-    #[serde(default, alias = "peer_id", alias = "device_id", alias = "target")]
-    peer: Option<String>,
-    #[serde(default, alias = "dir")]
-    direction: Option<String>,
-    #[serde(default, alias = "duration", alias = "secs")]
-    duration_secs: Option<u32>,
-    #[serde(default, alias = "chunk")]
-    chunk_size: Option<u32>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct BenchPolicyBody {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default, alias = "inbound", alias = "allow_inbound")]
-    allow_inbound_bench: Option<bool>,
-    #[serde(default, alias = "duration", alias = "max_duration")]
-    max_duration_secs: Option<u32>,
-    #[serde(default, alias = "bandwidth", alias = "max_bandwidth")]
-    max_bandwidth_mbps: Option<u32>,
-    #[serde(default, alias = "group", alias = "groups")]
-    allowed_groups: Option<Vec<String>>,
-    #[serde(default, alias = "tag", alias = "tags")]
-    allowed_tags: Option<Vec<String>>,
-    #[serde(
-        default,
-        alias = "type",
-        alias = "types",
-        alias = "device_type",
-        alias = "device_types"
-    )]
-    allowed_types: Option<Vec<String>>,
-    #[serde(default)]
-    clear_filters: Option<bool>,
-}
-
-fn parse_hh_mm(s: &str) -> Option<u16> {
-    let parts: Vec<&str> = s.trim().split(':').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let h: u16 = parts[0].trim().parse().ok()?;
-    let m: u16 = parts[1].trim().parse().ok()?;
-    if h < 24 && m < 60 {
-        Some(h * 60 + m)
-    } else {
-        None
-    }
-}
-
-#[derive(serde::Deserialize, Default)]
-struct AuditQueryBody {
-    #[serde(default)]
-    category: Option<String>,
-    #[serde(default)]
-    severity: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    since: Option<u64>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct PeerTargetBody {
-    peer: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct PeerConnectBody {
-    #[serde(default)]
-    device_id: Option<String>,
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    addr: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct PeerDisconnectBody {
-    #[serde(default)]
-    device_id: Option<String>,
-    #[serde(default)]
-    peer: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct PeerBlockBody {
-    #[serde(default)]
-    device_id: Option<String>,
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct PeerUnblockBody {
-    #[serde(default)]
-    device_id: Option<String>,
-    #[serde(default)]
-    peer: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct TransfersQueryBody {
-    id: Option<String>,
-    active: Option<bool>,
-    terminal: Option<bool>,
-    direction: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct PeerAliasBody {
-    #[serde(default)]
-    device_id: Option<String>,
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    alias: String,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct ConfigUpdateBody {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    advertise: Option<bool>,
-    #[serde(default)]
-    reconnect: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct RouteAddBody {
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    device_id: Option<String>,
-    #[serde(default)]
-    addr: String,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct PeerLinkProbeBody {
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    device_id: Option<String>,
-    #[serde(default)]
-    count: Option<usize>,
-    #[serde(default)]
-    interval_ms: Option<u64>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct HeartbeatConfigBody {
-    #[serde(default)]
-    interval_secs: Option<u64>,
-    #[serde(default)]
-    deadline_secs: Option<u64>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct MessageSendBody {
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    tag: Option<String>,
-    #[serde(default)]
-    group: Option<String>,
-    #[serde(default)]
-    device_type: Option<String>,
-    #[serde(default)]
-    r#type: Option<String>,
-    #[serde(default)]
-    all: Option<bool>,
-    #[serde(default)]
-    text: String,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct MessageQueryBody {
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    unread_only: Option<bool>,
-    #[serde(default)]
-    mark_read: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct MessageClearBody {
-    #[serde(default)]
-    peer: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct OutboxQueryBody {
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct OutboxClearBody {
-    #[serde(default)]
-    peer: Option<String>,
-    #[serde(default)]
-    status: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct OutboxResendBody {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    transfer_id: Option<String>,
-}
-
-fn percent_decode(s: &str) -> String {
-    let mut bytes = Vec::with_capacity(s.len());
-    let mut iter = s.as_bytes().iter().copied();
-    while let Some(b) = iter.next() {
-        if b == b'%' {
-            let h1 = iter.next();
-            let h2 = iter.next();
-            if let (Some(c1), Some(c2)) = (h1, h2) {
-                let hex_str = [c1, c2];
-                if let Ok(val) = std::str::from_utf8(&hex_str)
-                    .map_err(|_| ())
-                    .and_then(|h| u8::from_str_radix(h, 16).map_err(|_| ()))
-                {
-                    bytes.push(val);
-                    continue;
-                }
-            }
-        } else if b == b'+' {
-            bytes.push(b' ');
-            continue;
-        }
-        bytes.push(b);
-    }
-    String::from_utf8_lossy(&bytes).to_string()
-}
-
-pub fn urlencode_path(p: &str) -> String {
-    let mut out = String::with_capacity(p.len());
-    for b in p.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b'~' => {
-                out.push(b as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
-}
-
-fn parse_query_map(q: &str) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    for pair in q.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = pair.split_once('=') {
-            map.insert(percent_decode(k), percent_decode(v));
-        } else {
-            map.insert(percent_decode(pair), String::new());
-        }
-    }
-    map
-}
+// Generated router: every arm pattern stays here so the (method, path) table
+// remains greppable in one place, while the bodies live in feature modules.
 
 async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse {
     let (path_only, query_str) = match path.split_once('?') {
@@ -1704,6880 +470,835 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
     };
     match (method, path_only) {
         ("GET", "/") | ("GET", "/index.html") => {
-            UiResponse::new(200, "text/html; charset=utf-8", INDEX.as_bytes().to_vec())
+            api_core::get_index(method, query_str, body, node).await
         }
-        ("GET", "/api/state") => json_ok(&snapshot(node).await),
-        ("GET", "/api/config") => json_ok(&node.config_report()),
+        ("GET", "/api/state") => api_core::get_state(method, query_str, body, node).await,
+        ("GET", "/api/config") => api_core::get_config(method, query_str, body, node).await,
         ("POST", "/api/config") | ("PUT", "/api/config") => {
-            match serde_json::from_slice::<ConfigUpdateBody>(body) {
-                Ok(d) => {
-                    if d.name.is_none() && d.advertise.is_none() && d.reconnect.is_none() {
-                        return err(400, "no configuration fields to update");
-                    }
-                    match node.update_config(d.name.as_deref(), d.advertise, d.reconnect) {
-                        Ok(report) => json_ok(&report),
-                        Err(e) => err(400, &e.to_string()),
-                    }
-                }
-                Err(_) => err(400, "bad json"),
-            }
+            api_core::post_config(method, query_str, body, node).await
         }
-        ("GET", "/api/pin") => json_ok(&node.pin_report()),
-        ("POST", "/api/pin") => match node.generate_pin() {
-            Ok(pin) => {
-                let rep = node.pin_report();
-                json_ok(&serde_json::json!({
-                    "ok": true,
-                    "pin": pin,
-                    "expires_in_secs": rep.expires_in_secs,
-                    "ttl_secs": rep.ttl_secs
-                }))
-            }
-            Err(e) => err(400, &e.to_string()),
-        },
+        ("GET", "/api/pin") => api_core::get_pin(method, query_str, body, node).await,
+        ("POST", "/api/pin") => api_core::post_pin(method, query_str, body, node).await,
         ("POST", "/api/pin/clear") | ("DELETE", "/api/pin") => {
-            let cleared = node.clear_pin();
-            json_ok(&serde_json::json!({ "ok": true, "cleared": cleared }))
+            api_core::post_pin_clear(method, query_str, body, node).await
         }
-        ("POST", "/api/dial") => match serde_json::from_slice::<DialBody>(body) {
-            Ok(d) => {
-                if let Some(p) = d.pin {
-                    match tetherly_core::pin::parse_pin(&p) {
-                        Ok(digits) => node.set_pin(digits),
-                        Err(e) => return err(400, &e.to_string()),
-                    }
-                }
-                let target = d
-                    .addr
-                    .as_deref()
-                    .or(d.peer.as_deref())
-                    .filter(|s| !s.trim().is_empty());
-                let target = match target {
-                    Some(t) => t,
-                    None => return err(400, "missing addr or peer"),
-                };
-                match node.dial_peer(target).await {
-                    Ok(resolved_addr) => json_ok(&serde_json::json!({
-                        "ok": true,
-                        "addr": resolved_addr.to_string(),
-                    })),
-                    Err(e) => err(400, &e.to_string()),
-                }
-            }
-            Err(_) => err(400, "bad json"),
-        },
-        ("POST", "/api/peers/unpair") => match serde_json::from_slice::<UnpairBody>(body) {
-            Ok(d) => match node.resolve_peer(&d.device_id) {
-                Ok(id) => {
-                    let removed = node.unpair(&id).await;
-                    json_ok(&serde_json::json!({
-                        "ok": true,
-                        "device_id": id.as_str(),
-                        "unpaired": removed
-                    }))
-                }
-                Err(e) => err(400, &e.to_string()),
-            },
-            Err(_) => err(400, "bad json"),
-        },
+        ("POST", "/api/dial") => api_core::post_dial(method, query_str, body, node).await,
+        ("POST", "/api/peers/unpair") => {
+            api_peers::post_peers_unpair(method, query_str, body, node).await
+        }
         ("POST", "/api/peers/connect") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<PeerConnectBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<PeerConnectBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => {
-                        return err(400, "bad json, expected { peer: string, addr?: string }")
-                    }
-                }
-            };
-            let target_query = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone().or_else(|| b.device_id.clone()))
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("device_id").cloned())
-                .unwrap_or_default();
-            let direct_addr = parsed_body
-                .as_ref()
-                .and_then(|b| b.addr.clone())
-                .or_else(|| qmap.get("addr").cloned());
-
-            if target_query.trim().is_empty() {
-                return err(400, "peer identifier required (peer or device_id)");
-            }
-            match node
-                .connect_peer(target_query.trim(), direct_addr.as_deref())
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
-                    err(404, &format!("peer not found: {e}"))
-                }
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_peers::post_peers_connect(method, query_str, body, node).await
         }
         ("POST", "/api/peers/disconnect") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<PeerDisconnectBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<PeerDisconnectBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected { peer: string }"),
-                }
-            };
-            let target_query = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone().or_else(|| b.device_id.clone()))
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("device_id").cloned())
-                .unwrap_or_default();
-
-            if target_query.trim().is_empty() {
-                return err(400, "peer identifier required (peer or device_id)");
-            }
-            match node.disconnect_peer(target_query.trim()).await {
-                Ok(rep) => json_ok(&rep),
-                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
-                    err(404, &format!("peer not found: {e}"))
-                }
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_peers::post_peers_disconnect(method, query_str, body, node).await
         }
         ("GET", "/api/peers/blocked") | ("GET", "/api/blocked") => {
-            json_ok(&node.blocked_peers_report())
+            api_peers::get_peers_blocked(method, query_str, body, node).await
         }
         ("POST", "/api/peers/block") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<PeerBlockBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<PeerBlockBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => {
-                        return err(400, "bad json, expected { peer: string, reason?: string }")
-                    }
-                }
-            };
-            let target_query = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone().or_else(|| b.device_id.clone()))
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("device_id").cloned())
-                .unwrap_or_default();
-            let reason = parsed_body
-                .as_ref()
-                .and_then(|b| b.reason.clone())
-                .or_else(|| qmap.get("reason").cloned());
-
-            if target_query.trim().is_empty() {
-                return err(400, "peer identifier required");
-            }
-            match node
-                .block_peer(target_query.trim(), reason.as_deref())
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
-                    err(404, &format!("peer not found: {e}"))
-                }
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_peers::post_peers_block(method, query_str, body, node).await
         }
         ("POST", "/api/peers/unblock")
         | ("DELETE", "/api/peers/block")
         | ("DELETE", "/api/peers/blocked") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<PeerUnblockBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<PeerUnblockBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected { peer: string }"),
-                }
-            };
-            let target_query = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone().or_else(|| b.device_id.clone()))
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("device_id").cloned())
-                .unwrap_or_default();
-
-            if target_query.trim().is_empty() {
-                return err(400, "peer identifier required");
-            }
-            match node.unblock_peer(target_query.trim()).await {
-                Ok(rep) => json_ok(&rep),
-                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
-                    err(404, &format!("peer not found: {e}"))
-                }
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_peers::post_peers_unblock(method, query_str, body, node).await
         }
         ("POST", "/api/peers/alias") | ("PUT", "/api/peers/alias") => {
-            match serde_json::from_slice::<PeerAliasBody>(body) {
-                Ok(d) => {
-                    let target_query = d.device_id.or(d.peer).unwrap_or_default();
-                    if target_query.trim().is_empty() {
-                        return err(400, "missing device_id or peer query");
-                    }
-                    let id = match node.resolve_peer(&target_query) {
-                        Ok(id) => id,
-                        Err(tetherly_core::CoreError::PeerNotFound(_)) => {
-                            return err(404, "peer not found in trust store");
-                        }
-                        Err(e) => return err(400, &e.to_string()),
-                    };
-                    match node.set_peer_alias(&id, &d.alias) {
-                        Ok(true) => json_ok(&serde_json::json!({
-                            "ok": true,
-                            "device_id": id.as_str(),
-                            "alias": d.alias.trim()
-                        })),
-                        Ok(false) => err(404, "peer not found in trust store"),
-                        Err(e) => err(400, &e.to_string()),
-                    }
-                }
-                Err(_) => err(400, "bad json"),
-            }
+            api_peers::post_peers_alias(method, query_str, body, node).await
         }
         ("POST", "/api/peers/ping") => {
-            let d: PeerTargetBody = if body.is_empty() {
-                PeerTargetBody::default()
-            } else {
-                match serde_json::from_slice::<PeerTargetBody>(body) {
-                    Ok(v) => v,
-                    Err(_) => return err(400, "bad json"),
-                }
-            };
-            let mut peers = node.live_peers();
-            peers.sort_by_key(|p| p.device_id.to_string());
-            let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
-                Some(raw) => match node.resolve_peer(raw) {
-                    Ok(id) => {
-                        if peers.iter().any(|p| p.device_id == id) {
-                            id
-                        } else {
-                            return err(400, "peer is not connected");
-                        }
-                    }
-                    Err(e) => return err(400, &format!("bad peer id: {e}")),
-                },
-                None => match peers.len() {
-                    0 => return err(400, "no connected peer"),
-                    1 => peers[0].device_id.clone(),
-                    _ => return err(400, "multiple peers connected; pass peer (tdev_…)"),
-                },
-            };
-            match node.ping_peer(&target).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_peers::post_peers_ping(method, query_str, body, node).await
         }
-        ("GET", "/api/peers/link") | ("GET", "/api/link") => json_ok(&node.link_quality_report()),
+        ("GET", "/api/peers/link") | ("GET", "/api/link") => {
+            api_peers::get_peers_link(method, query_str, body, node).await
+        }
         ("POST", "/api/peers/link/probe") | ("POST", "/api/link/probe") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<PeerLinkProbeBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<PeerLinkProbeBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json"),
-                }
-            };
-            let target_query = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone().or_else(|| b.device_id.clone()))
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("device_id").cloned())
-                .unwrap_or_default();
-            let count = parsed_body
-                .as_ref()
-                .and_then(|b| b.count)
-                .or_else(|| qmap.get("count").and_then(|s| s.parse().ok()))
-                .unwrap_or(5);
-            let interval_ms = parsed_body
-                .as_ref()
-                .and_then(|b| b.interval_ms)
-                .or_else(|| qmap.get("interval_ms").and_then(|s| s.parse().ok()))
-                .unwrap_or(100);
-
-            let mut peers = node.live_peers();
-            peers.sort_by_key(|p| p.device_id.to_string());
-            let target = match target_query.as_str().trim() {
-                s if !s.is_empty() => match node.resolve_peer(s) {
-                    Ok(id) => {
-                        if peers.iter().any(|p| p.device_id == id) {
-                            id
-                        } else {
-                            return err(400, "peer is not connected");
-                        }
-                    }
-                    Err(e) => return err(400, &format!("bad peer id: {e}")),
-                },
-                _ => match peers.len() {
-                    0 => return err(400, "no connected peer"),
-                    1 => peers[0].device_id.clone(),
-                    _ => return err(400, "multiple peers connected; pass peer (tdev_…)"),
-                },
-            };
-            match node
-                .probe_peer_link(target.as_str(), count, interval_ms)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_peers::post_peers_link_probe(method, query_str, body, node).await
         }
         ("GET", "/api/peers/heartbeat") | ("GET", "/api/heartbeat") => {
-            json_ok(&node.heartbeat_config())
+            api_peers::get_peers_heartbeat(method, query_str, body, node).await
         }
         ("POST", "/api/peers/heartbeat")
         | ("POST", "/api/heartbeat")
         | ("PUT", "/api/peers/heartbeat")
         | ("PUT", "/api/heartbeat") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<HeartbeatConfigBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<HeartbeatConfigBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json"),
-                }
-            };
-            let interval_secs = parsed_body
-                .as_ref()
-                .and_then(|b| b.interval_secs)
-                .or_else(|| qmap.get("interval_secs").and_then(|s| s.parse().ok()));
-            let deadline_secs = parsed_body
-                .as_ref()
-                .and_then(|b| b.deadline_secs)
-                .or_else(|| qmap.get("deadline_secs").and_then(|s| s.parse().ok()));
-            if interval_secs.is_none() && deadline_secs.is_none() {
-                return err(400, "interval_secs or deadline_secs required");
-            }
-            match node.update_heartbeat_config(interval_secs, deadline_secs) {
-                Ok(cfg) => json_ok(&cfg),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_peers::post_peers_heartbeat(method, query_str, body, node).await
         }
-        ("GET", "/api/peers") => {
-            let live = node.live_peers();
-            let trusted = node.trusted();
-            let live_ids: std::collections::HashSet<tetherly_core::DeviceId> =
-                live.iter().map(|p| p.device_id.clone()).collect();
-            let trusted_map: std::collections::HashMap<tetherly_core::DeviceId, String> = trusted
-                .iter()
-                .map(|tp| (tp.device_id.clone(), tp.alias.clone()))
-                .collect();
-
-            let live_dtos: Vec<serde_json::Value> = live
-                .into_iter()
-                .map(|p| {
-                    let path_str = match p.path {
-                        tetherly_core::PathKind::Lan => "lan",
-                        tetherly_core::PathKind::Overlay => "overlay",
-                    };
-                    let alias_opt = trusted_map.get(&p.device_id).cloned();
-                    let features = crate::runtime::extract_features(&p.caps);
-                    let profile = node.peer_profile(&p.device_id);
-                    serde_json::json!({
-                        "device_id": p.device_id.to_string(),
-                        "name": p.name,
-                        "alias": alias_opt,
-                        "platform": p.platform,
-                        "device_type": profile.device_type.as_str(),
-                        "tags": profile.tags,
-                        "group": profile.group,
-                        "addr": p.addr.to_string(),
-                        "path": path_str,
-                        "file_port": p.file_port,
-                        "input_port": p.input_port,
-                        "screen_port": p.screen_port,
-                        "caps": p.caps,
-                        "features": features,
-                        "online": true,
-                        "rtt_ms": p.rtt_ms,
-                        "last_seen_ms": p.last_seen_ms,
-                    })
-                })
-                .collect();
-
-            let trusted_dtos: Vec<serde_json::Value> = trusted
-                .into_iter()
-                .map(|tp| {
-                    let online = live_ids.contains(&tp.device_id);
-                    let profile = node.peer_profile(&tp.device_id);
-                    serde_json::json!({
-                        "device_id": tp.device_id.to_string(),
-                        "alias": tp.alias,
-                        "device_type": profile.device_type.as_str(),
-                        "tags": profile.tags,
-                        "group": profile.group,
-                        "paired_at": tp.paired_at,
-                        "revoked": tp.revoked,
-                        "online": online,
-                    })
-                })
-                .collect();
-
-            json_ok(&serde_json::json!({
-                "ok": true,
-                "self_id": node.identity().device_id().to_string(),
-                "live_count": live_dtos.len(),
-                "trusted_count": trusted_dtos.len(),
-                "live": live_dtos,
-                "trusted": trusted_dtos,
-            }))
-        }
+        ("GET", "/api/peers") => api_peers::get_peers(method, query_str, body, node).await,
         ("GET", "/api/peers/profiles") | ("GET", "/api/profiles") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let tag = qmap.get("tag").map(|s| s.as_str());
-            let group = qmap.get("group").map(|s| s.as_str());
-            let dev_type = qmap
-                .get("type")
-                .and_then(|t| t.parse::<crate::store::DeviceType>().ok());
-            json_ok(&node.peer_profiles(tag, group, dev_type))
+            api_peers::get_peers_profiles(method, query_str, body, node).await
         }
         ("GET", "/api/peers/profile") | ("GET", "/api/profile") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let target = qmap
-                .get("peer")
-                .or_else(|| qmap.get("id"))
-                .or_else(|| qmap.get("device_id"))
-                .map(|s| s.as_str())
-                .unwrap_or_default();
-            if target.trim().is_empty() {
-                return err(400, "peer parameter required");
-            }
-            match node.resolve_peer(target.trim()) {
-                Ok(id) => json_ok(&node.peer_profile(&id)),
-                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
-                    err(404, &format!("peer not found: {e}"))
-                }
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_peers::get_peers_profile(method, query_str, body, node).await
         }
         ("POST", "/api/peers/profile")
         | ("POST", "/api/profile")
         | ("PUT", "/api/peers/profile")
-        | ("PUT", "/api/profile") => match serde_json::from_slice::<ProfileUpdateBody>(body) {
-            Ok(d) => {
-                let target = d.peer.or(d.device_id).filter(|s| !s.trim().is_empty());
-                let target = match target {
-                    Some(t) => t,
-                    None => return err(400, "missing peer or device_id"),
-                };
-                let dev_type = match d.device_type {
-                    Some(ref s) => match s.parse::<crate::store::DeviceType>() {
-                        Ok(dt) => Some(dt),
-                        Err(e) => return err(400, &e),
-                    },
-                    None => None,
-                };
-                match node.update_peer_profile(&target, dev_type, d.tags, d.group, d.notes) {
-                    Ok(rep) => json_ok(&rep),
-                    Err(tetherly_core::CoreError::PeerNotFound(e)) => {
-                        err(404, &format!("peer not found: {e}"))
-                    }
-                    Err(e) => err(400, &e.to_string()),
-                }
-            }
-            Err(_) => err(400, "bad json"),
-        },
+        | ("PUT", "/api/profile") => {
+            api_peers::post_peers_profile(method, query_str, body, node).await
+        }
         ("POST", "/api/peers/tags/add") | ("POST", "/api/tags/add") => {
-            match serde_json::from_slice::<PeerTagBody>(body) {
-                Ok(d) => {
-                    let target = d.peer.or(d.device_id).filter(|s| !s.trim().is_empty());
-                    let target = match target {
-                        Some(t) => t,
-                        None => return err(400, "missing peer or device_id"),
-                    };
-                    let tag = match d.tag.filter(|s| !s.trim().is_empty()) {
-                        Some(t) => t,
-                        None => return err(400, "tag required"),
-                    };
-                    match node.add_peer_tag(&target, &tag) {
-                        Ok(rep) => json_ok(&rep),
-                        Err(tetherly_core::CoreError::PeerNotFound(e)) => {
-                            err(404, &format!("peer not found: {e}"))
-                        }
-                        Err(e) => err(400, &e.to_string()),
-                    }
-                }
-                Err(_) => err(400, "bad json"),
-            }
+            api_peers::post_peers_tags_add(method, query_str, body, node).await
         }
         ("POST", "/api/peers/tags/remove")
         | ("POST", "/api/tags/remove")
         | ("DELETE", "/api/peers/tags") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<PeerTagBody> = if body.is_empty() {
-                None
-            } else {
-                serde_json::from_slice::<PeerTagBody>(body).ok()
-            };
-            let target = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone().or_else(|| b.device_id.clone()))
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("device_id").cloned())
-                .filter(|s| !s.trim().is_empty());
-            let target = match target {
-                Some(t) => t,
-                None => return err(400, "missing peer or device_id"),
-            };
-            let tag = parsed_body
-                .and_then(|b| b.tag)
-                .or_else(|| qmap.get("tag").cloned())
-                .filter(|s| !s.trim().is_empty());
-            let tag = match tag {
-                Some(t) => t,
-                None => return err(400, "tag required"),
-            };
-            match node.remove_peer_tag(&target, &tag) {
-                Ok(rep) => json_ok(&rep),
-                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
-                    err(404, &format!("peer not found: {e}"))
-                }
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_peers::post_peers_tags_remove(method, query_str, body, node).await
         }
         ("POST", "/api/peers/group")
         | ("POST", "/api/group")
         | ("PUT", "/api/peers/group")
-        | ("PUT", "/api/group") => match serde_json::from_slice::<PeerGroupBody>(body) {
-            Ok(d) => {
-                let target = d.peer.or(d.device_id).filter(|s| !s.trim().is_empty());
-                let target = match target {
-                    Some(t) => t,
-                    None => return err(400, "missing peer or device_id"),
-                };
-                match node.set_peer_group(&target, d.group.as_deref()) {
-                    Ok(rep) => json_ok(&rep),
-                    Err(tetherly_core::CoreError::PeerNotFound(e)) => {
-                        err(404, &format!("peer not found: {e}"))
-                    }
-                    Err(e) => err(400, &e.to_string()),
-                }
-            }
-            Err(_) => err(400, "bad json"),
-        },
+        | ("PUT", "/api/group") => api_peers::post_peers_group(method, query_str, body, node).await,
         ("GET", "/api/discovery") | ("GET", "/api/peers/discovered") => {
-            json_ok(&node.discovered_peers())
+            api_peers::get_discovery(method, query_str, body, node).await
         }
         ("POST", "/api/discovery/rescan") | ("POST", "/api/peers/discover") => {
-            json_ok(&node.rescan_discovery())
+            api_peers::post_discovery_rescan(method, query_str, body, node).await
         }
-        ("GET", "/api/caps") => json_ok(&node.local_caps_report()),
+        ("GET", "/api/caps") => api_core::get_caps(method, query_str, body, node).await,
         ("POST", "/api/caps") | ("PUT", "/api/caps") => {
-            #[derive(serde::Deserialize, Default)]
-            struct CapsUpdateBody {
-                #[serde(default)]
-                enable: Vec<String>,
-                #[serde(default)]
-                disable: Vec<String>,
-            }
-            match serde_json::from_slice::<CapsUpdateBody>(body) {
-                Ok(b) => {
-                    if b.enable.is_empty() && b.disable.is_empty() {
-                        return err(400, "no capability changes specified");
-                    }
-                    match node.update_local_caps(&b.enable, &b.disable).await {
-                        Ok(rep) => json_ok(&rep),
-                        Err(e) => err(400, &e.to_string()),
-                    }
-                }
-                Err(_) => err(
-                    400,
-                    "bad json, expected { enable?: string[], disable?: string[] }",
-                ),
-            }
+            api_core::post_caps(method, query_str, body, node).await
         }
         ("GET", "/api/peers/caps") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let target_peer = qmap
-                .get("peer")
-                .or_else(|| qmap.get("device_id"))
-                .map(|s| s.as_str());
-            match node.peers_caps_report(target_peer) {
-                Ok(rep) => json_ok(&rep),
-                Err(tetherly_core::CoreError::PeerNotFound(e)) => {
-                    err(404, &format!("peer not found: {e}"))
-                }
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_peers::get_peers_caps(method, query_str, body, node).await
         }
-        ("GET", "/api/routes") => json_ok(&node.routes_report()),
+        ("GET", "/api/routes") => api_core::get_routes(method, query_str, body, node).await,
         ("POST", "/api/routes") | ("PUT", "/api/routes") => {
-            match serde_json::from_slice::<RouteAddBody>(body) {
-                Ok(d) => {
-                    let peer = d.peer.or(d.device_id).unwrap_or_default();
-                    if peer.trim().is_empty() {
-                        return err(400, "peer or device_id must be specified");
-                    }
-                    if d.addr.trim().is_empty() {
-                        return err(400, "addr must be specified");
-                    }
-                    match node.add_route(&peer, &d.addr) {
-                        Ok(rep) => json_ok(&rep),
-                        Err(e) => err(400, &e.to_string()),
-                    }
-                }
-                Err(_) => err(400, "bad json, expected { peer: string, addr: string }"),
-            }
+            api_core::post_routes(method, query_str, body, node).await
         }
         ("DELETE", "/api/routes")
         | ("POST", "/api/routes/remove")
         | ("POST", "/api/routes/delete") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let peer_from_query = qmap.get("peer").or_else(|| qmap.get("device_id")).cloned();
-            let peer = if let Some(p) = peer_from_query {
-                p
-            } else if !body.is_empty() {
-                #[derive(serde::Deserialize, Default)]
-                struct RouteDelBody {
-                    #[serde(default)]
-                    peer: Option<String>,
-                    #[serde(default)]
-                    device_id: Option<String>,
-                }
-                match serde_json::from_slice::<RouteDelBody>(body) {
-                    Ok(d) => d.peer.or(d.device_id).unwrap_or_default(),
-                    Err(_) => return err(400, "bad json, expected { peer: string }"),
-                }
-            } else {
-                String::new()
-            };
-            if peer.trim().is_empty() {
-                return err(400, "peer or device_id must be specified via query or body");
-            }
-            match node.remove_route(&peer) {
-                Ok(rep) => json_ok(&rep),
-                Err(tetherly_core::CoreError::PeerNotFound(msg)) => err(404, &msg),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_core::delete_routes(method, query_str, body, node).await
         }
-        ("GET", "/api/net") => json_ok(&node.network_report_dto()),
+        ("GET", "/api/net") => api_core::get_net(method, query_str, body, node).await,
         ("POST", "/api/net/refresh") | ("POST", "/api/net/probe") => {
-            let rep = node.refresh_network().await;
-            json_ok(&rep)
+            api_core::post_net_refresh(method, query_str, body, node).await
         }
-        ("GET", "/api/metrics") | ("GET", "/api/traffic") => json_ok(&node.traffic_report()),
+        ("GET", "/api/metrics") | ("GET", "/api/traffic") => {
+            api_core::get_metrics(method, query_str, body, node).await
+        }
         ("POST", "/api/metrics/reset") | ("POST", "/api/traffic/reset") => {
-            node.reset_traffic_metrics();
-            json_ok(&serde_json::json!({
-                "ok": true,
-                "reset": true,
-                "timestamp_ms": node_clock_ms()
-            }))
+            api_core::post_metrics_reset(method, query_str, body, node).await
         }
-        ("GET", "/api/clip/policy") => json_ok(&node.clipboard_policy_report()),
+        ("GET", "/api/clip/policy") => {
+            api_clip::get_clip_policy(method, query_str, body, node).await
+        }
         ("POST", "/api/clip/policy") | ("PUT", "/api/clip/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<ClipPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<ClipPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected clipboard policy fields"),
-                }
-            };
-            let mut policy = node.clipboard_policy();
-
-            if let Some(ref b) = parsed_body {
-                if let Some(ref m) = b.mode {
-                    match m.parse::<tetherly_core::ClipSyncMode>() {
-                        Ok(mode) => policy.mode = mode,
-                        Err(e) => return err(400, &format!("invalid clip sync mode '{m}': {e}")),
-                    }
-                }
-                if let Some(sg) = b.sensitive_guard {
-                    policy.sensitive_guard = sg;
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if let Some(bytes) = b.max_payload_bytes {
-                    policy.max_payload_bytes = bytes;
-                }
-                if let Some(secs) = b.auto_clear_timeout_secs {
-                    policy.auto_clear_timeout_secs = if secs == 0 { None } else { Some(secs) };
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(m_str) = qmap.get("mode") {
-                match m_str.parse::<tetherly_core::ClipSyncMode>() {
-                    Ok(mode) => policy.mode = mode,
-                    Err(e) => return err(400, &format!("invalid clip sync mode '{m_str}': {e}")),
-                }
-            }
-            if let Some(sg_str) = qmap.get("sensitive_guard") {
-                policy.sensitive_guard = sg_str == "true" || sg_str == "1";
-            }
-            if let Some(grp_str) = qmap.get("group").or_else(|| qmap.get("groups")) {
-                policy.allowed_groups = grp_str
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-            }
-            if let Some(tag_str) = qmap.get("tag").or_else(|| qmap.get("tags")) {
-                policy.allowed_tags = tag_str
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-            }
-            if let Some(type_str) = qmap.get("type").or_else(|| qmap.get("types")) {
-                let mut dtypes = Vec::new();
-                for t in type_str.split(',') {
-                    let trimmed = t.trim();
-                    if !trimmed.is_empty() {
-                        match trimmed.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => {
-                                return err(400, &format!("invalid device type '{trimmed}': {e}"))
-                            }
-                        }
-                    }
-                }
-                policy.allowed_types = dtypes;
-            }
-            if let Some(sz_str) = qmap
-                .get("max_payload_bytes")
-                .or_else(|| qmap.get("max_bytes"))
-            {
-                if let Ok(sz) = sz_str.parse::<usize>() {
-                    policy.max_payload_bytes = sz;
-                }
-            }
-            if let Some(ac_str) = qmap
-                .get("auto_clear_timeout_secs")
-                .or_else(|| qmap.get("auto_clear"))
-            {
-                if let Ok(secs) = ac_str.parse::<u64>() {
-                    policy.auto_clear_timeout_secs = if secs == 0 { None } else { Some(secs) };
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_clipboard_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &e.to_string()),
-            }
+            api_clip::post_clip_policy(method, query_str, body, node).await
         }
-        ("POST", "/api/clip/auto-sync/poll") => match node.poll_clipboard_auto_sync().await {
-            Ok(dispatched_peers) => {
-                let rep = node.clipboard_policy_report();
-                json_ok(&serde_json::json!({
-                    "ok": true,
-                    "dispatched_peers": dispatched_peers,
-                    "policy": rep.policy,
-                    "stats": {
-                        "auto_synced_out_count": rep.auto_synced_out_count,
-                        "auto_synced_in_count": rep.auto_synced_in_count,
-                        "sensitive_blocked_count": rep.sensitive_blocked_count,
-                    }
-                }))
-            }
-            Err(e) => err(500, &e.to_string()),
-        },
-        ("GET", "/api/clip/status") => match node.clipboard_status() {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(500, &e.to_string()),
-        },
+        ("POST", "/api/clip/auto-sync/poll") => {
+            api_clip::post_clip_auto_sync_poll(method, query_str, body, node).await
+        }
+        ("GET", "/api/clip/status") => {
+            api_clip::get_clip_status(method, query_str, body, node).await
+        }
         ("GET", "/api/clip/history") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let limit = qmap.get("limit").and_then(|s| s.parse::<usize>().ok());
-            json_ok(&node.clipboard_history(limit))
+            api_clip::get_clip_history(method, query_str, body, node).await
         }
-        ("POST", "/api/clip/clear") | ("DELETE", "/api/clip") => match node.clear_clipboard() {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(500, &e.to_string()),
-        },
-        ("GET", "/api/clip") => match node.get_clipboard_text() {
-            Ok(Some(text)) => {
-                let hash = tetherly_core::hex_sha256(text.as_bytes());
-                let bytes = text.len();
-                json_ok(&serde_json::json!({
-                    "ok": true,
-                    "has_text": true,
-                    "bytes": bytes,
-                    "hash": hash,
-                    "text": text,
-                    "clipboard_available": true,
-                }))
-            }
-            Ok(None) => json_ok(&serde_json::json!({
-                "ok": true,
-                "has_text": false,
-                "bytes": 0,
-                "hash": null,
-                "text": null,
-                "clipboard_available": true,
-            })),
-            // A host with no display server has no clipboard to read: report
-            // the absence (v1.87 status semantics) instead of answering 500.
-            Err(e) => json_ok(&serde_json::json!({
-                "ok": true,
-                "has_text": false,
-                "bytes": 0,
-                "hash": null,
-                "text": null,
-                "clipboard_available": false,
-                "reason": e.to_string(),
-            })),
-        },
-        ("POST", "/api/clip/sync") => {
-            let d: ClipSyncBody = if body.is_empty() {
-                ClipSyncBody::default()
-            } else {
-                match serde_json::from_slice::<ClipSyncBody>(body) {
-                    Ok(v) => v,
-                    Err(_) => return err(400, "bad json"),
-                }
-            };
-            let mut peers = node.live_peers();
-            peers.sort_by_key(|p| p.device_id.to_string());
-            let target_peer = match d.peer.as_deref().filter(|s| !s.is_empty()) {
-                Some(raw) => match node.resolve_peer(raw) {
-                    Ok(id) => {
-                        if peers.iter().any(|p| p.device_id == id) {
-                            Some(id)
-                        } else {
-                            return err(400, "peer is not connected");
-                        }
-                    }
-                    Err(e) => return err(400, &format!("bad peer id: {e}")),
-                },
-                None => None,
-            };
-
-            if let Some(text) = d.text {
-                if text.len() > tetherly_core::CLIP_TEXT_MAX {
-                    return err(400, "clipboard text exceeds 1 MiB limit");
-                }
-                let hash = tetherly_core::hex_sha256(text.as_bytes());
-                let bytes = text.len();
-                match node.send_clipboard_text(&text, target_peer.as_ref()).await {
-                    Ok(sent_count) => json_ok(&serde_json::json!({
-                        "ok": true,
-                        "bytes": bytes,
-                        "hash": hash,
-                        "sent_peers": sent_count,
-                    })),
-                    Err(e) => err(400, &e.to_string()),
-                }
-            } else {
-                let cur = match node.get_clipboard_text() {
-                    Ok(Some(t)) => t,
-                    Ok(None) => return err(400, "local clipboard is empty"),
-                    Err(e) => return err(400, &e.to_string()),
-                };
-                if cur.len() > tetherly_core::CLIP_TEXT_MAX {
-                    return err(400, "clipboard text exceeds 1 MiB limit");
-                }
-                let hash = tetherly_core::hex_sha256(cur.as_bytes());
-                let bytes = cur.len();
-                match node.send_clipboard_to(target_peer.as_ref()).await {
-                    Ok(sent_count) => json_ok(&serde_json::json!({
-                        "ok": true,
-                        "bytes": bytes,
-                        "hash": hash,
-                        "sent_peers": sent_count,
-                    })),
-                    Err(e) => err(400, &e.to_string()),
-                }
-            }
+        ("POST", "/api/clip/clear") | ("DELETE", "/api/clip") => {
+            api_clip::post_clip_clear(method, query_str, body, node).await
         }
-        // Deliver a notify.push on the live Noise session. Only this process
-        // holds the session, so a second binary cannot do it. One live peer is
-        // implied; more than one needs an explicit `peer`. The body is delivered
-        // and never logged.
-        ("POST", "/api/notify") => match serde_json::from_slice::<NotifyBody>(body) {
-            Ok(d) => {
-                let mut peers = node.live_peers();
-                peers.sort_by_key(|p| p.device_id.to_string());
-                let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
-                    Some(raw) => match node.resolve_peer(raw) {
-                        Ok(id) => {
-                            if peers.iter().any(|p| p.device_id == id) {
-                                id
-                            } else {
-                                return err(400, "peer is not connected");
-                            }
-                        }
-                        Err(e) => return err(400, &format!("bad peer id: {e}")),
-                    },
-                    None => match peers.len() {
-                        0 => return err(400, "no connected peer"),
-                        1 => peers[0].device_id.clone(),
-                        _ => return err(400, "multiple peers connected; pass peer (tdev_…)"),
-                    },
-                };
-                let push = tetherly_core::NotifyPush {
-                    uid: format!("local-{}", node_clock_ms()),
-                    app_id: d.app_id,
-                    app_name: "tetherly".into(),
-                    title: d.title,
-                    body: d.body,
-                    ts: node_clock_ms(),
-                    actions: vec!["copy".into()],
-                }
-                .truncate();
-                match node.send_notify(&target, push).await {
-                    Ok(()) => json_ok(&serde_json::json!({ "ok": true, "peer": target.as_str() })),
-                    Err(e) => err(400, &e.to_string()),
-                }
-            }
-            Err(_) => err(400, "bad json"),
-        },
+        ("GET", "/api/clip") => api_clip::get_clip(method, query_str, body, node).await,
+        ("POST", "/api/clip/sync") => api_clip::post_clip_sync(method, query_str, body, node).await,
+        ("POST", "/api/notify") => api_notify::post_notify(method, query_str, body, node).await,
         ("GET", "/api/notify/candidates") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let peer = qmap.get("peer").map(String::as_str);
-            let app_id = qmap.get("app_id").map(String::as_str);
-            let has_otp = qmap.get("has_otp").and_then(|v| v.parse::<bool>().ok());
-
-            match node.candidates_filtered(peer, app_id, has_otp) {
-                Ok(list) => json_ok(&serde_json::json!({
-                    "ok": true,
-                    "candidates": list,
-                })),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_notify::get_notify_candidates(method, query_str, body, node).await
         }
         ("GET", "/api/notify/replies") => {
-            let replies: Vec<crate::events::ReplyViewDto> = node
-                .reply_views()
-                .into_iter()
-                .map(crate::events::ReplyViewDto::from)
-                .collect();
-            json_ok(&serde_json::json!({
-                "ok": true,
-                "replies": replies,
-            }))
+            api_notify::get_notify_replies(method, query_str, body, node).await
         }
-        ("POST", "/api/otp/get") => match serde_json::from_slice::<IdBody>(body) {
-            Ok(d) => match node.get_candidate_otp(&d.id) {
-                Ok(otp) => json_ok(&serde_json::json!({
-                    "ok": true,
-                    "id": d.id,
-                    "otp": otp,
-                })),
-                Err(e) => err(400, &e.to_string()),
-            },
-            Err(_) => err(400, "bad json"),
-        },
-        ("POST", "/api/copy") => match serde_json::from_slice::<IdBody>(body) {
-            Ok(d) => match node.copy_candidate(&d.id).await {
-                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
-                Err(e) => err(400, &e.to_string()),
-            },
-            Err(_) => err(400, "bad json"),
-        },
-        ("POST", "/api/insert") => match serde_json::from_slice::<IdBody>(body) {
-            Ok(d) => match node.insert_candidate(&d.id) {
-                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
-                Err(e) => err(400, &e.to_string()),
-            },
-            Err(_) => err(400, "bad json"),
-        },
-        ("POST", "/api/dismiss") => match serde_json::from_slice::<IdBody>(body) {
-            Ok(d) => match node.dismiss_candidate_sync(&d.id).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            },
-            Err(_) => err(400, "bad json, expected { id: string }"),
-        },
+        ("POST", "/api/otp/get") => api_notify::post_otp_get(method, query_str, body, node).await,
+        ("POST", "/api/copy") => api_notify::post_copy(method, query_str, body, node).await,
+        ("POST", "/api/insert") => api_notify::post_insert(method, query_str, body, node).await,
+        ("POST", "/api/dismiss") => api_notify::post_dismiss(method, query_str, body, node).await,
         ("POST", "/api/notify/dismiss") | ("DELETE", "/api/notify/candidates") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<NotifyDismissBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<NotifyDismissBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => {
-                        return err(
-                            400,
-                            "bad json, expected { id?: string, peer?: string, app_id?: string, all?: bool }",
-                        )
-                    }
-                }
-            };
-
-            let id = parsed_body
-                .as_ref()
-                .and_then(|b| b.id.clone())
-                .or_else(|| qmap.get("id").cloned());
-            let peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").cloned());
-            let app_id = parsed_body
-                .as_ref()
-                .and_then(|b| b.app_id.clone())
-                .or_else(|| qmap.get("app_id").cloned());
-            let all = parsed_body
-                .as_ref()
-                .and_then(|b| b.all)
-                .or_else(|| qmap.get("all").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(false);
-
-            if all || peer.is_some() || app_id.is_some() {
-                let filter = crate::DismissFilter {
-                    id,
-                    peer,
-                    app_id,
-                    all: Some(all),
-                };
-                match node.dismiss_candidates(&filter).await {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(400, &e.to_string()),
-                }
-            } else if let Some(target_id) = id.filter(|s| !s.trim().is_empty()) {
-                match node.dismiss_candidate_sync(&target_id).await {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(400, &e.to_string()),
-                }
-            } else {
-                err(
-                    400,
-                    "dismiss target required: provide id, peer, app_id, or all: true",
-                )
-            }
+            api_notify::post_notify_dismiss(method, query_str, body, node).await
         }
-        ("POST", "/api/open") => match serde_json::from_slice::<IdBody>(body) {
-            Ok(d) => {
-                let op = node.opener();
-                match node.open_candidate(&d.id, op.as_ref()) {
-                    Ok(url) => json_ok(&serde_json::json!({ "ok": true, "url": url })),
-                    Err(e) => err(400, &e.to_string()),
-                }
-            }
-            Err(_) => err(400, "bad json"),
-        },
-        // Quick reply typed on the desktop, sent back to the phone that owns
-        // the notification. The text is the user's own; it is delivered, never
-        // executed, and never logged.
-        ("POST", "/api/reply") => match serde_json::from_slice::<ReplyBody>(body) {
-            Ok(d) => match node.reply_to_candidate(&d.id, &d.text).await {
-                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
-                Err(e) => err(400, &e.to_string()),
-            },
-            Err(_) => err(400, "bad json"),
-        },
-        // Hand a previously received reply to the local OS path exactly once.
-        ("POST", "/api/reply/take") => match serde_json::from_slice::<IdBody>(body) {
-            Ok(d) => match node.take_reply(&d.id) {
-                Some((view, text)) => json_ok(&serde_json::json!({
-                    "ok": true,
-                    "id": d.id,
-                    "uid": view.uid,
-                    "app_id": view.app_id,
-                    "text": text,
-                })),
-                None => err(400, "unknown reply"),
-            },
-            Err(_) => err(400, "bad json"),
-        },
+        ("POST", "/api/open") => api_notify::post_open(method, query_str, body, node).await,
+        ("POST", "/api/reply") => api_notify::post_reply(method, query_str, body, node).await,
+        ("POST", "/api/reply/take") => {
+            api_notify::post_reply_take(method, query_str, body, node).await
+        }
         ("GET", "/api/notify/config") | ("GET", "/api/notify/banner") => {
-            json_ok(&node.notify_config_report())
+            api_notify::get_notify_config(method, query_str, body, node).await
         }
         ("POST", "/api/notify/config") | ("POST", "/api/notify/banner") => {
-            let mut cfg = node.notify_config();
-            if let Some(q) = query_str {
-                let map = parse_query_map(q);
-                if let Some(b) = map.get("banners").or_else(|| map.get("banners_enabled")) {
-                    cfg.banners_enabled = b == "true" || b == "1";
-                }
-                if let Some(d) = map.get("dnd").or_else(|| map.get("dnd_mode")) {
-                    match d.as_str() {
-                        "all" => cfg.dnd_mode = crate::runtime::DndMode::All,
-                        "silent" => cfg.dnd_mode = crate::runtime::DndMode::Silent,
-                        "off" => cfg.dnd_mode = crate::runtime::DndMode::Off,
-                        _ => {}
-                    }
-                }
-                if let Some(s) = map.get("sound").or_else(|| map.get("sound_enabled")) {
-                    cfg.sound_enabled = s == "true" || s == "1";
-                }
-                if let Some(m) = map.get("mask_otp") {
-                    cfg.mask_otp = m == "true" || m == "1";
-                }
-                if let Some(a) = map.get("allow_otp_in_dnd") {
-                    cfg.allow_otp_in_dnd = a == "true" || a == "1";
-                }
-            }
-
-            if !body.is_empty() {
-                match serde_json::from_slice::<NotifyConfigUpdateBody>(body) {
-                    Ok(up) => {
-                        if let Some(b) = up.banners_enabled {
-                            cfg.banners_enabled = b;
-                        }
-                        if let Some(d) = up.dnd_mode {
-                            cfg.dnd_mode = d;
-                        }
-                        if let Some(s) = up.sound_enabled {
-                            cfg.sound_enabled = s;
-                        }
-                        if let Some(m) = up.mask_otp {
-                            cfg.mask_otp = m;
-                        }
-                        if let Some(a) = up.allow_otp_in_dnd {
-                            cfg.allow_otp_in_dnd = a;
-                        }
-                    }
-                    Err(_) => return err(400, "bad json for notify config"),
-                }
-            }
-
-            let rep = node.update_notify_config(cfg);
-            json_ok(&rep)
+            api_notify::post_notify_config(method, query_str, body, node).await
         }
         ("POST", "/api/notify/test") => {
-            let mut q_title: Option<String> = None;
-            let mut q_body: Option<String> = None;
-            if let Some(q) = query_str {
-                let map = parse_query_map(q);
-                q_title = map.get("title").cloned();
-                q_body = map.get("body").or_else(|| map.get("message")).cloned();
-            }
-
-            let (title, body_text) = if !body.is_empty() {
-                match serde_json::from_slice::<NotifyTestBody>(body) {
-                    Ok(b) => (b.title.or(q_title), b.body.or(q_body)),
-                    Err(_) => (q_title, q_body),
-                }
-            } else {
-                (q_title, q_body)
-            };
-
-            match node.test_notification_banner(title.as_deref(), body_text.as_deref()) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_notify::post_notify_test(method, query_str, body, node).await
         }
         ("GET", "/api/file/transfers")
         | ("GET", "/api/transfers")
         | ("POST", "/api/file/transfers")
         | ("POST", "/api/transfers") => {
-            let mut q_id: Option<String> = None;
-            let mut q_active: Option<bool> = None;
-            let mut q_terminal: Option<bool> = None;
-            let mut q_direction: Option<String> = None;
-
-            if let Some(q) = query_str {
-                let map = parse_query_map(q);
-                if let Some(id) = map.get("id").or_else(|| map.get("transfer_id")) {
-                    q_id = Some(id.clone());
-                }
-                if let Some(a) = map.get("active") {
-                    q_active = Some(a == "true" || a == "1");
-                }
-                if let Some(t) = map.get("terminal") {
-                    q_terminal = Some(t == "true" || t == "1");
-                }
-                if let Some(d) = map.get("direction") {
-                    q_direction = Some(d.clone());
-                }
-            }
-
-            if method == "POST" && !body.is_empty() {
-                match serde_json::from_slice::<TransfersQueryBody>(body) {
-                    Ok(b) => {
-                        if b.id.is_some() {
-                            q_id = b.id;
-                        }
-                        if b.active.is_some() {
-                            q_active = b.active;
-                        }
-                        if b.terminal.is_some() {
-                            q_terminal = b.terminal;
-                        }
-                        if b.direction.is_some() {
-                            q_direction = b.direction;
-                        }
-                    }
-                    Err(_) => return err(400, "bad json"),
-                }
-            }
-
-            if let Some(id) = q_id.as_deref().filter(|s| !s.is_empty()) {
-                match node.transfer_by_id(id) {
-                    Some(t) => json_ok(&t),
-                    None => err(404, "transfer not found"),
-                }
-            } else {
-                let mut rep = node.transfers_report();
-                if let Some(true) = q_active {
-                    rep.transfers.retain(|t| {
-                        t.phase == crate::runtime::TransferPhase::Transferring
-                            || t.phase == crate::runtime::TransferPhase::Verifying
-                    });
-                } else if let Some(true) = q_terminal {
-                    rep.transfers.retain(|t| {
-                        t.phase == crate::runtime::TransferPhase::Completed
-                            || t.phase == crate::runtime::TransferPhase::Failed
-                    });
-                }
-                if let Some(dir) = q_direction.as_deref() {
-                    let dir_lower = dir.to_ascii_lowercase();
-                    if dir_lower == "in" || dir_lower == "inbound" {
-                        rep.transfers
-                            .retain(|t| t.direction == crate::runtime::TransferDirection::Inbound);
-                    } else if dir_lower == "out" || dir_lower == "outbound" {
-                        rep.transfers
-                            .retain(|t| t.direction == crate::runtime::TransferDirection::Outbound);
-                    }
-                }
-                rep.total_count = rep.transfers.len();
-                rep.active_count = rep
-                    .transfers
-                    .iter()
-                    .filter(|t| {
-                        t.phase == crate::runtime::TransferPhase::Transferring
-                            || t.phase == crate::runtime::TransferPhase::Verifying
-                    })
-                    .count();
-                rep.terminal_count = rep.total_count.saturating_sub(rep.active_count);
-                json_ok(&rep)
-            }
+            api_files::get_file_transfers(method, query_str, body, node).await
         }
         ("GET", "/api/file/offers") | ("GET", "/api/offers") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let q_id = qmap
-                .get("id")
-                .or_else(|| qmap.get("transfer_id"))
-                .map(String::as_str);
-            let q_peer = qmap
-                .get("peer")
-                .or_else(|| qmap.get("device_id"))
-                .map(String::as_str);
-            match node.file_offers(q_id, q_peer) {
-                Ok(rep) => {
-                    if q_id.is_some() {
-                        if let Some(first) = rep.offers.first() {
-                            json_ok(first)
-                        } else {
-                            err(404, "transfer offer not found")
-                        }
-                    } else {
-                        json_ok(&rep)
-                    }
-                }
-                Err(tetherly_core::CoreError::UnknownTransfer) => {
-                    err(404, "transfer offer not found")
-                }
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_files::get_file_offers(method, query_str, body, node).await
         }
         ("POST", "/api/file/accept") | ("POST", "/api/accept") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<FileDecisionBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<FileDecisionBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => {
-                        return err(
-                            400,
-                            "bad json, expected { id?: string, all?: bool, peer?: string }",
-                        )
-                    }
-                }
-            };
-            let is_all = parsed_body.as_ref().and_then(|b| b.all).unwrap_or(false)
-                || qmap
-                    .get("all")
-                    .and_then(|v| v.parse::<bool>().ok())
-                    .unwrap_or(false);
-            let target_peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").or_else(|| qmap.get("device_id")).cloned());
-            let target_id = parsed_body
-                .as_ref()
-                .and_then(|b| b.id.clone())
-                .or_else(|| qmap.get("id").or_else(|| qmap.get("transfer_id")).cloned());
-
-            if is_all || (target_id.is_none() && target_peer.is_some()) {
-                match node.batch_accept_files(target_peer.as_deref()).await {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(400, &e.to_string()),
-                }
-            } else if let Some(id) = target_id {
-                match node.user_accept_file_reported(&id).await {
-                    Ok(rep) => json_ok(&rep),
-                    Err(tetherly_core::CoreError::UnknownTransfer) => {
-                        err(404, "transfer offer not found")
-                    }
-                    Err(e) => err(400, &e.to_string()),
-                }
-            } else {
-                err(400, "missing required 'id', 'all', or 'peer' parameter")
-            }
+            api_files::post_file_accept(method, query_str, body, node).await
         }
         ("POST", "/api/file/reject") | ("POST", "/api/reject") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<FileDecisionBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<FileDecisionBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => {
-                        return err(
-                            400,
-                            "bad json, expected { id?: string, all?: bool, peer?: string }",
-                        )
-                    }
-                }
-            };
-            let is_all = parsed_body.as_ref().and_then(|b| b.all).unwrap_or(false)
-                || qmap
-                    .get("all")
-                    .and_then(|v| v.parse::<bool>().ok())
-                    .unwrap_or(false);
-            let target_peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").or_else(|| qmap.get("device_id")).cloned());
-            let target_id = parsed_body
-                .as_ref()
-                .and_then(|b| b.id.clone())
-                .or_else(|| qmap.get("id").or_else(|| qmap.get("transfer_id")).cloned());
-
-            if is_all || (target_id.is_none() && target_peer.is_some()) {
-                match node.batch_reject_files(target_peer.as_deref()).await {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(400, &e.to_string()),
-                }
-            } else if let Some(id) = target_id {
-                match node.user_reject_file_reported(&id).await {
-                    Ok(rep) => json_ok(&rep),
-                    Err(tetherly_core::CoreError::UnknownTransfer) => {
-                        err(404, "transfer offer not found")
-                    }
-                    Err(e) => err(400, &e.to_string()),
-                }
-            } else {
-                err(400, "missing required 'id', 'all', or 'peer' parameter")
-            }
+            api_files::post_file_reject(method, query_str, body, node).await
         }
         ("GET", "/api/file/auto-accept/policy") | ("GET", "/api/auto-accept/policy") => {
-            json_ok(&node.auto_accept_policy_report())
+            api_files::get_file_auto_accept_policy(method, query_str, body, node).await
         }
         ("POST", "/api/file/auto-accept/policy")
         | ("PUT", "/api/file/auto-accept/policy")
         | ("POST", "/api/auto-accept/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<AutoAcceptBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<AutoAcceptBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected auto-accept policy fields"),
-                }
-            };
-            let mut policy = node.auto_accept_policy();
-            if let Some(ref b) = parsed_body {
-                if let Some(en) = b.enabled.or(b.auto_accept_trusted) {
-                    policy.enabled = en;
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if let Some(sz) = b.max_file_size {
-                    policy.max_file_size = Some(sz);
-                }
-            }
-            if let Some(en_str) = qmap
-                .get("enabled")
-                .or_else(|| qmap.get("auto_accept_trusted"))
-            {
-                if let Ok(en) = en_str.parse::<bool>() {
-                    policy.enabled = en;
-                }
-            }
-            if let Some(g) = qmap.get("group") {
-                if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
-                    policy.allowed_groups.push(g.clone());
-                }
-            }
-            if let Some(t) = qmap.get("tag") {
-                if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
-                    policy.allowed_tags.push(t.clone());
-                }
-            }
-            if let Some(sz_str) = qmap.get("max_size").or_else(|| qmap.get("max_file_size")) {
-                if let Ok(sz) = sz_str.parse::<u64>() {
-                    policy.max_file_size = Some(sz);
-                }
-            }
-            match node.set_auto_accept_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_files::post_file_auto_accept_policy(method, query_str, body, node).await
         }
         ("GET", "/api/file/auto-accept") | ("GET", "/api/auto-accept") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            if qmap
-                .get("policy")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                json_ok(&node.auto_accept_policy_report())
-            } else {
-                json_ok(&node.auto_accept_status())
-            }
+            api_files::get_file_auto_accept(method, query_str, body, node).await
         }
         ("POST", "/api/file/auto-accept")
         | ("PUT", "/api/file/auto-accept")
         | ("POST", "/api/auto-accept") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<AutoAcceptBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<AutoAcceptBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected { enabled?: bool }"),
-                }
-            };
-            let has_policy_fields = parsed_body
-                .as_ref()
-                .map(|b| {
-                    b.allowed_groups.is_some()
-                        || b.allowed_tags.is_some()
-                        || b.allowed_types.is_some()
-                        || b.max_file_size.is_some()
-                })
-                .unwrap_or(false)
-                || qmap.contains_key("group")
-                || qmap.contains_key("tag")
-                || qmap.contains_key("max_size");
-
-            if has_policy_fields {
-                let mut policy = node.auto_accept_policy();
-                if let Some(ref b) = parsed_body {
-                    if let Some(en) = b.enabled.or(b.auto_accept_trusted) {
-                        policy.enabled = en;
-                    }
-                    if let Some(ref grps) = b.allowed_groups {
-                        policy.allowed_groups = grps.clone();
-                    }
-                    if let Some(ref tags) = b.allowed_tags {
-                        policy.allowed_tags = tags.clone();
-                    }
-                    if let Some(ref types) = b.allowed_types {
-                        let mut dtypes = Vec::new();
-                        for t in types {
-                            match t.parse::<crate::store::DeviceType>() {
-                                Ok(dt) => dtypes.push(dt),
-                                Err(e) => {
-                                    return err(400, &format!("invalid device type '{t}': {e}"))
-                                }
-                            }
-                        }
-                        policy.allowed_types = dtypes;
-                    }
-                    if let Some(sz) = b.max_file_size {
-                        policy.max_file_size = Some(sz);
-                    }
-                }
-                if let Some(en_str) = qmap
-                    .get("enabled")
-                    .or_else(|| qmap.get("auto_accept_trusted"))
-                {
-                    if let Ok(en) = en_str.parse::<bool>() {
-                        policy.enabled = en;
-                    }
-                }
-                if let Some(g) = qmap.get("group") {
-                    if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
-                        policy.allowed_groups.push(g.clone());
-                    }
-                }
-                if let Some(t) = qmap.get("tag") {
-                    if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
-                        policy.allowed_tags.push(t.clone());
-                    }
-                }
-                if let Some(sz_str) = qmap.get("max_size").or_else(|| qmap.get("max_file_size")) {
-                    if let Ok(sz) = sz_str.parse::<u64>() {
-                        policy.max_file_size = Some(sz);
-                    }
-                }
-                match node.set_auto_accept_policy(policy) {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(400, &e.to_string()),
-                }
-            } else {
-                let enabled = parsed_body
-                    .and_then(|b| b.enabled.or(b.auto_accept_trusted))
-                    .or_else(|| {
-                        qmap.get("enabled")
-                            .or_else(|| qmap.get("auto_accept_trusted"))
-                            .and_then(|v| v.parse::<bool>().ok())
-                    })
-                    .unwrap_or(true);
-                json_ok(&node.set_auto_accept(enabled))
-            }
+            api_files::post_file_auto_accept(method, query_str, body, node).await
         }
-        ("POST", "/api/file/cancel") => match serde_json::from_slice::<IdBody>(body) {
-            Ok(d) => match node.cancel_transfer(&d.id).await {
-                Ok(()) => json_ok(&serde_json::json!({ "ok": true, "transfer_id": d.id })),
-                Err(e) => err(400, &e.to_string()),
-            },
-            Err(_) => err(400, "bad json"),
-        },
+        ("POST", "/api/file/cancel") => {
+            api_files::post_file_cancel(method, query_str, body, node).await
+        }
         ("POST", "/api/file/clear") => {
-            let cleared = node.clear_terminal_transfers();
-            json_ok(&serde_json::json!({ "ok": true, "cleared": cleared }))
+            api_files::post_file_clear(method, query_str, body, node).await
         }
         ("POST", "/api/file/send-multi") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let d: SendFileBody = if body.is_empty() {
-                SendFileBody {
-                    path: qmap.get("path").cloned(),
-                    data_base64: None,
-                    peer: qmap.get("peer").cloned(),
-                    name: qmap.get("name").cloned(),
-                    tag: qmap.get("tag").cloned(),
-                    group: qmap.get("group").cloned(),
-                    device_type: qmap
-                        .get("type")
-                        .or_else(|| qmap.get("device_type"))
-                        .cloned(),
-                    r#type: None,
-                    all: qmap.get("all").map(|s| s == "true" || s == "1"),
-                }
-            } else {
-                match serde_json::from_slice::<SendFileBody>(body) {
-                    Ok(b) => b,
-                    Err(_) => return err(400, "bad json, expected SendFileBody"),
-                }
-            };
-            let is_all = d.all.unwrap_or(false)
-                || qmap
-                    .get("all")
-                    .map(|s| s == "true" || s == "1")
-                    .unwrap_or(false)
-                || qmap.contains_key("all");
-            let tag = d
-                .tag
-                .as_deref()
-                .or_else(|| qmap.get("tag").map(String::as_str));
-            let group = d
-                .group
-                .as_deref()
-                .or_else(|| qmap.get("group").map(String::as_str));
-            let dev_type = d
-                .device_type
-                .as_deref()
-                .or(d.r#type.as_deref())
-                .or_else(|| {
-                    qmap.get("type")
-                        .or_else(|| qmap.get("device_type"))
-                        .map(String::as_str)
-                });
-            let peer = d
-                .peer
-                .as_deref()
-                .or_else(|| qmap.get("peer").map(String::as_str));
-
-            let selector = match crate::store::TargetSelector::from_query(
-                peer, tag, group, dev_type, is_all,
-            ) {
-                Ok(s) => s,
-                Err(e) => return err(400, &e),
-            };
-
-            if let Some(b64) = d.data_base64 {
-                use base64::Engine;
-                let bytes = match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
-                    Ok(b) => b,
-                    Err(_) => return err(400, "bad base64 in data_base64"),
-                };
-                let filename = d.name.as_deref().unwrap_or("uploaded_file");
-                match node
-                    .offer_and_send_bytes_multi(&selector, filename, &bytes)
-                    .await
-                {
-                    Ok(report) => return json_ok(&report),
-                    Err(e) => return err(400, &e.to_string()),
-                }
-            }
-
-            let path_opt = d
-                .path
-                .as_deref()
-                .or_else(|| qmap.get("path").map(String::as_str));
-            let Some(path_str) = path_opt else {
-                return err(400, "missing required 'path' or 'data_base64' parameter");
-            };
-            let p = std::path::Path::new(path_str);
-            if !p.is_file() {
-                return err(400, "file not found or not a regular file");
-            }
-
-            let name_opt = d
-                .name
-                .as_deref()
-                .or_else(|| qmap.get("name").map(String::as_str));
-            match node.offer_and_send_file_multi(&selector, p, name_opt).await {
-                Ok(report) => json_ok(&report),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_files::post_file_send_multi(method, query_str, body, node).await
         }
-        ("POST", "/api/file/send") => match serde_json::from_slice::<SendFileBody>(body) {
-            Ok(d) => {
-                let qmap = query_str.map(parse_query_map).unwrap_or_default();
-                let is_all = d.all.unwrap_or(false)
-                    || qmap
-                        .get("all")
-                        .map(|s| s == "true" || s == "1")
-                        .unwrap_or(false)
-                    || qmap.contains_key("all");
-                let tag = d
-                    .tag
-                    .as_deref()
-                    .or_else(|| qmap.get("tag").map(String::as_str));
-                let group = d
-                    .group
-                    .as_deref()
-                    .or_else(|| qmap.get("group").map(String::as_str));
-                let dev_type = d
-                    .device_type
-                    .as_deref()
-                    .or(d.r#type.as_deref())
-                    .or_else(|| {
-                        qmap.get("type")
-                            .or_else(|| qmap.get("device_type"))
-                            .map(String::as_str)
-                    });
-
-                if is_all || tag.is_some() || group.is_some() || dev_type.is_some() {
-                    let peer = d
-                        .peer
-                        .as_deref()
-                        .or_else(|| qmap.get("peer").map(String::as_str));
-                    let selector = match crate::store::TargetSelector::from_query(
-                        peer, tag, group, dev_type, is_all,
-                    ) {
-                        Ok(s) => s,
-                        Err(e) => return err(400, &e),
-                    };
-                    if let Some(b64) = d.data_base64 {
-                        use base64::Engine;
-                        let bytes = match base64::engine::general_purpose::STANDARD
-                            .decode(b64.as_bytes())
-                        {
-                            Ok(b) => b,
-                            Err(_) => return err(400, "bad base64 in data_base64"),
-                        };
-                        let filename = d.name.as_deref().unwrap_or("uploaded_file");
-                        match node
-                            .offer_and_send_bytes_multi(&selector, filename, &bytes)
-                            .await
-                        {
-                            Ok(report) => return json_ok(&report),
-                            Err(e) => return err(400, &e.to_string()),
-                        }
-                    }
-                    let path_opt = d
-                        .path
-                        .as_deref()
-                        .or_else(|| qmap.get("path").map(String::as_str));
-                    let Some(path_str) = path_opt else {
-                        return err(400, "missing required 'path' or 'data_base64' parameter for targeted dispatch");
-                    };
-                    let p = std::path::Path::new(path_str);
-                    if !p.is_file() {
-                        return err(400, "file not found or not a regular file");
-                    }
-                    let name_opt = d
-                        .name
-                        .as_deref()
-                        .or_else(|| qmap.get("name").map(String::as_str));
-                    match node.offer_and_send_file_multi(&selector, p, name_opt).await {
-                        Ok(report) => return json_ok(&report),
-                        Err(e) => return err(400, &e.to_string()),
-                    }
-                }
-
-                let mut peers = node.live_peers();
-                peers.sort_by_key(|p| p.device_id.to_string());
-                let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
-                    Some(raw) => match node.resolve_peer(raw) {
-                        Ok(id) => {
-                            if peers.iter().any(|p| p.device_id == id) {
-                                id
-                            } else {
-                                return err(400, "peer is not connected");
-                            }
-                        }
-                        Err(e) => return err(400, &format!("bad peer id: {e}")),
-                    },
-                    None => match peers.len() {
-                        0 => return err(400, "no connected peer"),
-                        1 => peers[0].device_id.clone(),
-                        _ => return err(400, "multiple peers connected; pass peer (tdev_…)"),
-                    },
-                };
-
-                if let Some(ref path_str) = d.path {
-                    let p = std::path::Path::new(path_str);
-                    if !p.is_file() {
-                        return err(400, "file not found or not a regular file");
-                    }
-                    let meta = match std::fs::metadata(p) {
-                        Ok(m) => m,
-                        Err(e) => return err(400, &format!("cannot read file metadata: {e}")),
-                    };
-                    if meta.len() > tetherly_core::FILE_MAX {
-                        return err(400, "file exceeds FILE_MAX (64 GiB)");
-                    }
-                    let size = meta.len();
-                    match node
-                        .offer_and_send_file(&target, p, d.name.as_deref())
-                        .await
-                    {
-                        Ok(transfer_id) => {
-                            let fname = d.name.clone().unwrap_or_else(|| {
-                                p.file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("file.bin")
-                                    .to_string()
-                            });
-                            let safe_name = match tetherly_core::sanitize_file_name(&fname) {
-                                Ok(n) => n,
-                                Err(e) => return err(400, &format!("invalid file name: {e}")),
-                            };
-                            json_ok(&serde_json::json!({
-                                "ok": true,
-                                "transfer_id": transfer_id,
-                                "name": safe_name,
-                                "size": size,
-                                "peer": target.as_str(),
-                            }))
-                        }
-                        Err(e) => err(400, &e.to_string()),
-                    }
-                } else if let Some(ref b64) = d.data_base64 {
-                    use base64::Engine;
-                    let decoded =
-                        match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
-                            Ok(b) => b,
-                            Err(e) => return err(400, &format!("invalid base64: {e}")),
-                        };
-                    if decoded.len() as u64 > tetherly_core::FILE_MAX {
-                        return err(400, "file exceeds FILE_MAX (64 GiB)");
-                    }
-                    let fname = d.name.clone().unwrap_or_else(|| "upload.bin".to_string());
-                    let safe_name = match tetherly_core::sanitize_file_name(&fname) {
-                        Ok(n) => n,
-                        Err(e) => return err(400, &format!("invalid file name: {e}")),
-                    };
-                    let digest = tetherly_core::hex_sha256(&decoded);
-                    let size = decoded.len() as u64;
-                    match node
-                        .offer_and_send_bytes(&target, &safe_name, &decoded, false)
-                        .await
-                    {
-                        Ok(transfer_id) => json_ok(&serde_json::json!({
-                            "ok": true,
-                            "transfer_id": transfer_id,
-                            "name": safe_name,
-                            "size": size,
-                            "sha256": digest,
-                            "peer": target.as_str(),
-                        })),
-                        Err(e) => err(400, &e.to_string()),
-                    }
-                } else {
-                    err(400, "either path or data_base64 must be provided")
-                }
-            }
-            Err(_) => err(400, "bad json"),
-        },
+        ("POST", "/api/file/send") => {
+            api_files::post_file_send(method, query_str, body, node).await
+        }
         ("POST", "/api/file/send-batch") | ("POST", "/api/file/batch") => {
-            match serde_json::from_slice::<crate::runtime::BatchSendRequest>(body) {
-                Ok(d) => {
-                    let mut peers = node.live_peers();
-                    peers.sort_by_key(|p| p.device_id.to_string());
-                    let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
-                        Some(raw) => match node.resolve_peer(raw) {
-                            Ok(id) => {
-                                if peers.iter().any(|p| p.device_id == id) {
-                                    id
-                                } else {
-                                    return err(400, "peer is not connected");
-                                }
-                            }
-                            Err(e) => return err(400, &format!("bad peer id: {e}")),
-                        },
-                        None => match peers.len() {
-                            0 => return err(400, "no connected peer"),
-                            1 => peers[0].device_id.clone(),
-                            _ => return err(400, "multiple peers connected; pass peer (tdev_…)"),
-                        },
-                    };
-
-                    let mut all_items = d.items;
-                    for p in d.paths {
-                        all_items.push(crate::runtime::BatchSendItem {
-                            path: Some(p),
-                            name: None,
-                            data_base64: None,
-                        });
-                    }
-                    if all_items.is_empty() {
-                        return err(400, "no files specified in paths or items");
-                    }
-                    match node.send_batch_items(&target, all_items).await {
-                        Ok(rep) => json_ok(&rep),
-                        Err(e) => err(400, &e.to_string()),
-                    }
-                }
-                Err(_) => err(
-                    400,
-                    "bad json, expected { peer?: string, paths?: string[], items?: [] }",
-                ),
-            }
+            api_files::post_file_send_batch(method, query_str, body, node).await
         }
         ("GET", "/api/file/resume") | ("GET", "/api/storage/resume") => {
-            let rep = node.resume_markers_report();
-            json_ok(&rep)
+            api_files::get_file_resume(method, query_str, body, node).await
         }
-        ("GET", "/api/ancs") => {
-            let rep = node.ancs_report();
-            json_ok(&rep)
+        ("GET", "/api/ancs") => api_ancs::get_ancs(method, query_str, body, node).await,
+        ("POST", "/api/ancs/connect") => {
+            api_ancs::post_ancs_connect(method, query_str, body, node).await
         }
-        // Step 1 of the phone wizard: the user connected the iPhone in the OS
-        // Bluetooth settings, so we only have to subscribe to ANCS here.
-        ("POST", "/api/ancs/connect") => match node.ancs_connect_reported() {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(400, &e.to_string()),
-        },
         ("POST", "/api/ancs/disconnect") => {
-            let rep = node.ancs_disconnect_reported();
-            json_ok(&rep)
+            api_ancs::post_ancs_disconnect(method, query_str, body, node).await
         }
         ("POST", "/api/ancs/allow") | ("POST", "/api/ancs/rules/add") => {
-            match serde_json::from_slice::<OpenRuleBody>(body) {
-                Ok(d) => match node.add_open_rule_reported(tetherly_core::OpenRule {
-                    app_id: d.app_id,
-                    url: d.url,
-                }) {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(400, &e.to_string()),
-                },
-                Err(_) => err(400, "bad json, expected { app_id: string, url?: string }"),
-            }
+            api_ancs::post_ancs_allow(method, query_str, body, node).await
         }
         ("DELETE", "/api/ancs/allow")
         | ("POST", "/api/ancs/rules/remove")
         | ("DELETE", "/api/ancs/rules") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let app_id = qmap.get("app_id").cloned().or_else(|| {
-                if !body.is_empty() {
-                    serde_json::from_slice::<OpenRuleRemoveBody>(body)
-                        .ok()
-                        .and_then(|b| b.app_id)
-                } else {
-                    None
-                }
-            });
-            if let Some(app_id) = app_id.filter(|s| !s.trim().is_empty()) {
-                let rep = node.remove_open_rule_reported(&app_id);
-                json_ok(&rep)
-            } else {
-                err(400, "missing required 'app_id' in query or body")
-            }
+            api_ancs::delete_ancs_allow(method, query_str, body, node).await
         }
         ("POST", "/api/ancs/rules/clear") | ("DELETE", "/api/ancs/rules/clear") => {
-            let rep = node.clear_open_rules_reported();
-            json_ok(&rep)
+            api_ancs::post_ancs_rules_clear(method, query_str, body, node).await
         }
-        ("GET", "/api/storage") => {
-            let rep = node.storage_report();
-            json_ok(&rep)
-        }
+        ("GET", "/api/storage") => api_files::get_storage(method, query_str, body, node).await,
         ("POST", "/api/storage/clean") => {
-            let orphaned_only = if body.is_empty() {
-                true
-            } else {
-                match serde_json::from_slice::<StorageCleanBody>(body) {
-                    Ok(d) => d.orphaned_only.unwrap_or(true),
-                    Err(_) => return err(400, "bad json"),
-                }
-            };
-            let rep = node.clean_storage(orphaned_only);
-            json_ok(&rep)
+            api_files::post_storage_clean(method, query_str, body, node).await
         }
         ("GET", "/api/file/inbox") | ("GET", "/api/inbox") => {
-            let mut search: Option<String> = None;
-            let mut limit: Option<usize> = None;
-            if let Some(q) = query_str {
-                let map = parse_query_map(q);
-                if let Some(s) = map.get("search").or_else(|| map.get("q")) {
-                    search = Some(s.clone());
-                }
-                if let Some(l) = map.get("limit").and_then(|s| s.parse::<usize>().ok()) {
-                    limit = Some(l);
-                }
-            }
-            let rep = node.inbox_report(search.as_deref(), limit);
-            json_ok(&rep)
+            api_files::get_file_inbox(method, query_str, body, node).await
         }
         ("POST", "/api/file/inbox/delete") | ("DELETE", "/api/file/inbox") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let name = qmap.get("name").cloned().or_else(|| {
-                if !body.is_empty() {
-                    serde_json::from_slice::<InboxDeleteBody>(body)
-                        .ok()
-                        .and_then(|b| b.name)
-                } else {
-                    None
-                }
-            });
-            if let Some(name) = name.filter(|s| !s.trim().is_empty()) {
-                match node.delete_inbox_file(&name) {
-                    Ok(rep) => json_ok(&rep),
-                    Err(tetherly_core::CoreError::File(ref msg)) if msg.contains("not found") => {
-                        err(404, "file not found in inbox")
-                    }
-                    Err(e) => err(400, &e.to_string()),
-                }
-            } else {
-                err(400, "missing required 'name' in query or body")
-            }
+            api_files::post_file_inbox_delete(method, query_str, body, node).await
         }
         ("POST", "/api/file/inbox/clear") | ("DELETE", "/api/file/inbox/all") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let before_secs = qmap
-                .get("before_secs")
-                .and_then(|s| s.parse::<u64>().ok())
-                .or_else(|| {
-                    if !body.is_empty() {
-                        serde_json::from_slice::<InboxClearBody>(body)
-                            .ok()
-                            .and_then(|b| b.before_secs)
-                    } else {
-                        None
-                    }
-                });
-            match node.clear_inbox(before_secs) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_files::post_file_inbox_clear(method, query_str, body, node).await
         }
         ("GET", "/api/file/inbox/download") | ("GET", "/api/inbox/download") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let name = qmap
-                .get("name")
-                .or_else(|| qmap.get("file"))
-                .map(|s| s.trim());
-            match name {
-                Some(n) if !n.is_empty() => match node.read_inbox_file(n) {
-                    Ok((clean_name, mime, bytes)) => UiResponse::new(200, mime, bytes).with_header(
-                        "Content-Disposition",
-                        format!("attachment; filename=\"{clean_name}\""),
-                    ),
-                    Err(tetherly_core::CoreError::UnsafeFileName) => err(400, "unsafe file name"),
-                    Err(tetherly_core::CoreError::File(ref msg)) if msg.contains("not found") => {
-                        err(404, "file not found in inbox")
-                    }
-                    Err(tetherly_core::CoreError::FileTooLarge(sz)) => {
-                        err(413, &format!("file too large ({sz} bytes)"))
-                    }
-                    Err(e) => err(400, &e.to_string()),
-                },
-                _ => err(400, "missing required 'name' query parameter"),
-            }
+            api_files::get_file_inbox_download(method, query_str, body, node).await
         }
         ("GET", "/api/file/inbox/raw") | ("GET", "/api/inbox/raw") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let name = qmap
-                .get("name")
-                .or_else(|| qmap.get("file"))
-                .map(|s| s.trim());
-            match name {
-                Some(n) if !n.is_empty() => match node.read_inbox_file(n) {
-                    Ok((clean_name, mime, bytes)) => UiResponse::new(200, mime, bytes).with_header(
-                        "Content-Disposition",
-                        format!("inline; filename=\"{clean_name}\""),
-                    ),
-                    Err(tetherly_core::CoreError::UnsafeFileName) => err(400, "unsafe file name"),
-                    Err(tetherly_core::CoreError::File(ref msg)) if msg.contains("not found") => {
-                        err(404, "file not found in inbox")
-                    }
-                    Err(tetherly_core::CoreError::FileTooLarge(sz)) => {
-                        err(413, &format!("file too large ({sz} bytes)"))
-                    }
-                    Err(e) => err(400, &e.to_string()),
-                },
-                _ => err(400, "missing required 'name' query parameter"),
-            }
+            api_files::get_file_inbox_raw(method, query_str, body, node).await
         }
         ("POST", "/api/file/inbox/open") | ("POST", "/api/inbox/open") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let name = qmap.get("name").cloned().or_else(|| {
-                if !body.is_empty() {
-                    serde_json::from_slice::<InboxOpenBody>(body)
-                        .ok()
-                        .and_then(|b| b.name)
-                } else {
-                    None
-                }
-            });
-            let op = node.opener();
-            match node.open_inbox_file(name.as_deref(), op.as_ref()) {
-                Ok(rep) => json_ok(&rep),
-                Err(tetherly_core::CoreError::UnsafeFileName) => err(400, "unsafe file name"),
-                Err(tetherly_core::CoreError::File(ref msg)) if msg.contains("not found") => {
-                    err(404, "file not found in inbox")
-                }
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_files::post_file_inbox_open(method, query_str, body, node).await
         }
         ("GET", "/api/file/outbox")
         | ("GET", "/api/outbox")
         | ("POST", "/api/file/outbox/query")
         | ("POST", "/api/outbox/query") => {
-            let mut q_peer: Option<String> = None;
-            let mut q_status: Option<OutboxStatus> = None;
-            let mut q_limit: Option<usize> = None;
-
-            if let Some(q) = query_str {
-                let map = parse_query_map(q);
-                if let Some(p) = map
-                    .get("peer")
-                    .or_else(|| map.get("to"))
-                    .or_else(|| map.get("target"))
-                {
-                    q_peer = Some(p.clone());
-                }
-                if let Some(s) = map.get("status") {
-                    match s.parse::<OutboxStatus>() {
-                        Ok(st) => q_status = Some(st),
-                        Err(e) => return err(400, &e),
-                    }
-                }
-                if let Some(l) = map.get("limit").and_then(|s| s.parse::<usize>().ok()) {
-                    q_limit = Some(l);
-                }
-            }
-
-            if !body.is_empty() {
-                match serde_json::from_slice::<OutboxQueryBody>(body) {
-                    Ok(b) => {
-                        if b.peer.is_some() {
-                            q_peer = b.peer;
-                        }
-                        if let Some(ref st_str) = b.status {
-                            match st_str.parse::<OutboxStatus>() {
-                                Ok(st) => q_status = Some(st),
-                                Err(e) => return err(400, &e),
-                            }
-                        }
-                        if b.limit.is_some() {
-                            q_limit = b.limit;
-                        }
-                    }
-                    Err(_) => return err(400, "bad json"),
-                }
-            }
-
-            match node.outbox_history(q_peer.as_deref(), q_status, q_limit) {
-                Ok(report) => json_ok(&report),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_files::get_file_outbox(method, query_str, body, node).await
         }
         ("POST", "/api/file/outbox/clear")
         | ("POST", "/api/outbox/clear")
         | ("DELETE", "/api/file/outbox")
         | ("DELETE", "/api/outbox") => {
-            let mut q_peer: Option<String> = None;
-            let mut q_status: Option<OutboxStatus> = None;
-
-            if let Some(q) = query_str {
-                let map = parse_query_map(q);
-                if let Some(p) = map
-                    .get("peer")
-                    .or_else(|| map.get("to"))
-                    .or_else(|| map.get("target"))
-                {
-                    q_peer = Some(p.clone());
-                }
-                if let Some(s) = map.get("status") {
-                    match s.parse::<OutboxStatus>() {
-                        Ok(st) => q_status = Some(st),
-                        Err(e) => return err(400, &e),
-                    }
-                }
-            }
-
-            if !body.is_empty() {
-                match serde_json::from_slice::<OutboxClearBody>(body) {
-                    Ok(b) => {
-                        if b.peer.is_some() {
-                            q_peer = b.peer;
-                        }
-                        if let Some(ref st_str) = b.status {
-                            match st_str.parse::<OutboxStatus>() {
-                                Ok(st) => q_status = Some(st),
-                                Err(e) => return err(400, &e),
-                            }
-                        }
-                    }
-                    Err(_) => return err(400, "bad json"),
-                }
-            }
-
-            match node.clear_outbox(q_peer.as_deref(), q_status) {
-                Ok(report) => json_ok(&report),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_files::post_file_outbox_clear(method, query_str, body, node).await
         }
         ("POST", "/api/file/outbox/resend") | ("POST", "/api/outbox/resend") => {
-            let mut target_id: Option<String> = None;
-            if let Some(q) = query_str {
-                let map = parse_query_map(q);
-                if let Some(id) = map.get("id").or_else(|| map.get("transfer_id")) {
-                    target_id = Some(id.clone());
-                }
-            }
-
-            if !body.is_empty() {
-                match serde_json::from_slice::<OutboxResendBody>(body) {
-                    Ok(b) => {
-                        if b.id.is_some() {
-                            target_id = b.id;
-                        } else if b.transfer_id.is_some() {
-                            target_id = b.transfer_id;
-                        }
-                    }
-                    Err(_) => return err(400, "bad json"),
-                }
-            }
-
-            let Some(id) = target_id else {
-                return err(400, "missing required transfer or outbox id");
-            };
-
-            match node.resend_outbox_file(&id).await {
-                Ok(report) => json_ok(&report),
-                Err(tetherly_core::CoreError::UnknownTransfer) => {
-                    err(404, "outbox entry not found")
-                }
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_files::post_file_outbox_resend(method, query_str, body, node).await
         }
-        ("GET", "/api/health") => {
-            let rep = node.health_report();
-            json_ok(&rep)
-        }
+        ("GET", "/api/health") => api_core::get_health(method, query_str, body, node).await,
         ("GET", "/api/sys") | ("GET", "/api/system") | ("GET", "/api/process") => {
-            match node.system_report() {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &e.to_string()),
-            }
+            api_core::get_sys(method, query_str, body, node).await
         }
         ("POST", "/api/daemon/shutdown") | ("POST", "/api/daemon/stop") => {
-            let n = node.clone_handle();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                n.shutdown();
-            });
-            json_ok(&serde_json::json!({
-                "ok": true,
-                "status": "shutting_down",
-                "message": "node shutdown initiated"
-            }))
+            api_core::post_daemon_shutdown(method, query_str, body, node).await
         }
-        // Remote screen: consent is local and explicit. `allow` is the only
-        // gate into streaming; nothing a peer sends can flip it.
         ("GET", "/api/screen") => {
-            let rep = node.screen_status_report().await;
-            json_ok(&rep)
+            api_screen_session::get_screen(method, query_str, body, node).await
         }
         ("POST", "/api/screen/allow") => {
-            let rep = node.screen_allow_reported();
-            json_ok(&rep)
+            api_screen_session::post_screen_allow(method, query_str, body, node).await
         }
         ("POST", "/api/screen/revoke") => {
-            let rep = node.screen_revoke_reported();
-            json_ok(&rep)
+            api_screen_session::post_screen_revoke(method, query_str, body, node).await
         }
         ("POST", "/api/screen/start") => {
-            let target_opt = if !body.is_empty() {
-                match serde_json::from_slice::<PeerTargetBody>(body) {
-                    Ok(b) => b.peer,
-                    Err(_) => return err(400, "bad json"),
-                }
-            } else {
-                None
-            };
-            match node.screen_start_reported(target_opt.as_deref()).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_screen_session::post_screen_start(method, query_str, body, node).await
         }
-        ("POST", "/api/screen/stop") => match node.screen_stop_reported().await {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(400, &e.to_string()),
-        },
-        ("POST", "/api/screen/keyframe") => match node.screen_keyframe_request_reported().await {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(400, &e.to_string()),
-        },
+        ("POST", "/api/screen/stop") => {
+            api_screen_session::post_screen_stop(method, query_str, body, node).await
+        }
+        ("POST", "/api/screen/keyframe") => {
+            api_screen_session::post_screen_keyframe(method, query_str, body, node).await
+        }
         ("GET", "/api/screen/bitrate") => {
-            let rep = node.screen_bitrate_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_bitrate(method, query_str, body, node).await
         }
         ("POST", "/api/screen/bitrate") => {
-            #[derive(serde::Deserialize)]
-            struct BitrateReq {
-                #[serde(default)]
-                kbps: Option<u32>,
-                #[serde(default)]
-                bps: Option<u32>,
-            }
-            let req: BitrateReq = if !body.is_empty() {
-                match serde_json::from_slice(body) {
-                    Ok(b) => b,
-                    Err(_) => return err(400, "bad json"),
-                }
-            } else {
-                return err(400, "missing bitrate parameter (kbps or bps)");
-            };
-            let kbps = req.kbps.or_else(|| req.bps.map(|b| b / 1000)).unwrap_or(0);
-            if kbps == 0 {
-                return err(400, "bitrate must be greater than 0");
-            }
-            let rep = node.screen_set_bitrate_reported(kbps);
-            json_ok(&rep)
+            api_screen_quality::post_screen_bitrate(method, query_str, body, node).await
         }
         ("GET", "/api/screen/fps") => {
-            let rep = node.screen_fps_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_fps(method, query_str, body, node).await
         }
         ("POST", "/api/screen/fps") => {
-            #[derive(serde::Deserialize)]
-            struct FpsReq {
-                #[serde(default)]
-                fps: Option<u32>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<FpsReq> = if !body.is_empty() {
-                match serde_json::from_slice(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected { fps: number }"),
-                }
-            } else {
-                None
-            };
-            let fps_val = parsed_body
-                .and_then(|b| b.fps)
-                .or_else(|| qmap.get("fps").and_then(|v| v.parse::<u32>().ok()));
-            let fps = match fps_val {
-                Some(f) => f,
-                None => return err(400, "missing fps parameter"),
-            };
-            let rep = node.screen_set_fps_reported(fps);
-            json_ok(&rep)
+            api_screen_quality::post_screen_fps(method, query_str, body, node).await
         }
         ("GET", "/api/screen/scale") => {
-            let rep = node.screen_scale_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_scale(method, query_str, body, node).await
         }
         ("POST", "/api/screen/scale") => {
-            #[derive(serde::Deserialize)]
-            struct ScaleReq {
-                #[serde(default)]
-                scale_pct: Option<u32>,
-                #[serde(default)]
-                scale: Option<u32>,
-                #[serde(default)]
-                pct: Option<u32>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<ScaleReq> = if !body.is_empty() {
-                match serde_json::from_slice(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected { scale_pct: number }"),
-                }
-            } else {
-                None
-            };
-            let scale_val = parsed_body
-                .and_then(|b| b.scale_pct.or(b.scale).or(b.pct))
-                .or_else(|| {
-                    qmap.get("scale_pct")
-                        .or_else(|| qmap.get("scale"))
-                        .or_else(|| qmap.get("pct"))
-                        .and_then(|v| v.parse::<u32>().ok())
-                });
-            let scale = match scale_val {
-                Some(s) => s,
-                None => return err(400, "missing scale parameter (scale_pct or scale or pct)"),
-            };
-            let rep = node.screen_set_scale_reported(scale);
-            json_ok(&rep)
+            api_screen_quality::post_screen_scale(method, query_str, body, node).await
         }
         ("GET", "/api/screen/profile") => {
-            let rep = node.screen_profile_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_profile(method, query_str, body, node).await
         }
         ("POST", "/api/screen/profile") => {
-            #[derive(serde::Deserialize)]
-            struct ProfileReq {
-                #[serde(default)]
-                profile: Option<String>,
-                #[serde(default)]
-                min_qp: Option<u8>,
-                #[serde(default)]
-                max_qp: Option<u8>,
-                #[serde(default)]
-                qp: Option<u8>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<ProfileReq> = if !body.is_empty() {
-                match serde_json::from_slice(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(
-                        400,
-                        "bad json, expected { profile?: string, min_qp?: number, max_qp?: number }",
-                    ),
-                }
-            } else {
-                None
-            };
-            let profile_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.profile.clone())
-                .or_else(|| qmap.get("profile").cloned())
-                .or_else(|| qmap.get("mode").cloned());
-            let min_qp = parsed_body
-                .as_ref()
-                .and_then(|b| b.min_qp)
-                .or_else(|| qmap.get("min_qp").and_then(|v| v.parse::<u8>().ok()));
-            let max_qp = parsed_body
-                .as_ref()
-                .and_then(|b| b.max_qp)
-                .or_else(|| qmap.get("max_qp").and_then(|v| v.parse::<u8>().ok()));
-            let single_qp = parsed_body
-                .as_ref()
-                .and_then(|b| b.qp)
-                .or_else(|| qmap.get("qp").and_then(|v| v.parse::<u8>().ok()));
-
-            if let Some(prof_str) = profile_str {
-                match prof_str.parse::<tetherly_core::ScreenContentProfile>() {
-                    Ok(p) => {
-                        node.screen_set_profile(p);
-                    }
-                    Err(_) => return err(400, "invalid profile: expected text, motion, or auto"),
-                }
-            }
-            if let Some(qp) = single_qp {
-                node.screen_set_qp_range(qp, qp);
-            } else if min_qp.is_some() || max_qp.is_some() {
-                let current_range = node.screen_qp_range();
-                let new_min = min_qp.unwrap_or(current_range.0);
-                let new_max = max_qp.unwrap_or(current_range.1);
-                node.screen_set_qp_range(new_min, new_max);
-            }
-            let rep = node.screen_profile_report();
-            json_ok(&rep)
+            api_screen_quality::post_screen_profile(method, query_str, body, node).await
         }
         ("GET", "/api/screen/matrix") => {
-            let rep = node.screen_matrix_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_matrix(method, query_str, body, node).await
         }
         ("POST", "/api/screen/matrix") => {
-            #[derive(serde::Deserialize)]
-            struct MatrixReq {
-                #[serde(default)]
-                mode: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<MatrixReq> = if !body.is_empty() {
-                match serde_json::from_slice(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected { mode?: string }"),
-                }
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone())
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("matrix_mode").cloned());
-
-            if let Some(m_str) = mode_str {
-                match tetherly_core::ScreenMatrixMode::from_str_loose(&m_str) {
-                    Some(mode) => {
-                        let rep = node.screen_set_matrix_mode(mode);
-                        json_ok(&rep)
-                    }
-                    None => err(
-                        400,
-                        "invalid matrix mode: expected auto, conservative, or manual",
-                    ),
-                }
-            } else {
-                let rep = node.screen_matrix_report();
-                json_ok(&rep)
-            }
+            api_screen_quality::post_screen_matrix(method, query_str, body, node).await
         }
-        // Playout buffer & adaptive jitter dejitterizer (v2.01 / ADR-087).
         ("GET", "/api/screen/playout") => {
-            let rep = node.screen_playout_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_playout(method, query_str, body, node).await
         }
         ("POST", "/api/screen/playout") => {
-            #[derive(serde::Deserialize)]
-            struct PlayoutBody {
-                mode: Option<String>,
-                playout_mode: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<PlayoutBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone().or_else(|| b.playout_mode.clone()))
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("playout_mode").cloned());
-
-            if let Some(m_str) = mode_str {
-                match tetherly_core::ScreenPlayoutMode::parse(&m_str) {
-                    Some(mode) => {
-                        let rep = node.screen_set_playout_mode(mode);
-                        json_ok(&rep)
-                    }
-                    None => err(
-                        400,
-                        "invalid playout mode: expected adaptive, zerolatency, or smooth",
-                    ),
-                }
-            } else {
-                let rep = node.screen_playout_report();
-                json_ok(&rep)
-            }
+            api_screen_quality::post_screen_playout(method, query_str, body, node).await
         }
-        // Hardware cursor decoupling (v2.02 / ADR-088).
         ("GET", "/api/screen/cursor") => {
-            let rep = node.screen_cursor_report();
-            json_ok(&rep)
+            api_screen_analysis::get_screen_cursor(method, query_str, body, node).await
         }
         ("POST", "/api/screen/cursor") => {
-            #[derive(serde::Deserialize)]
-            struct CursorBody {
-                mode: Option<String>,
-                cursor_mode: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<CursorBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone().or_else(|| b.cursor_mode.clone()))
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("cursor_mode").cloned());
-
-            if let Some(m_str) = mode_str {
-                match tetherly_core::ScreenCursorMode::parse(&m_str) {
-                    Some(mode) => {
-                        let rep = node.screen_set_cursor_mode(mode);
-                        json_ok(&rep)
-                    }
-                    None => err(
-                        400,
-                        "invalid cursor mode: expected decoupled, embedded, or hidden",
-                    ),
-                }
-            } else {
-                let rep = node.screen_cursor_report();
-                json_ok(&rep)
-            }
+            api_screen_analysis::post_screen_cursor(method, query_str, body, node).await
         }
-        // Dirty-rect detection and static frame adaptive squelch (v2.03 / ADR-089).
         ("GET", "/api/screen/squelch") => {
-            let rep = node.screen_squelch_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_squelch(method, query_str, body, node).await
         }
         ("POST", "/api/screen/squelch") => {
-            #[derive(serde::Deserialize)]
-            struct SquelchBody {
-                mode: Option<String>,
-                squelch_mode: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<SquelchBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone().or_else(|| b.squelch_mode.clone()))
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("squelch_mode").cloned());
-
-            if let Some(m_str) = mode_str {
-                match tetherly_core::ScreenSquelchMode::from_str_loose(&m_str) {
-                    Some(mode) => {
-                        let rep = node.screen_set_squelch_mode(mode);
-                        json_ok(&rep)
-                    }
-                    None => err(
-                        400,
-                        "invalid squelch mode: expected auto, aggressive, or disabled",
-                    ),
-                }
-            } else {
-                let rep = node.screen_squelch_report();
-                json_ok(&rep)
-            }
+            api_screen_quality::post_screen_squelch(method, query_str, body, node).await
         }
-        // Forward error correction and adaptive redundancy protection (v2.04 / ADR-090).
         ("GET", "/api/screen/fec") => {
-            let rep = node.screen_fec_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_fec(method, query_str, body, node).await
         }
         ("POST", "/api/screen/fec") => {
-            #[derive(serde::Deserialize)]
-            struct FecBody {
-                mode: Option<String>,
-                fec_mode: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<FecBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone().or_else(|| b.fec_mode.clone()))
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("fec_mode").cloned());
-
-            if let Some(m_str) = mode_str {
-                match m_str.parse::<tetherly_core::ScreenFecMode>() {
-                    Ok(mode) => {
-                        let rep = node.screen_set_fec_mode(mode);
-                        json_ok(&rep)
-                    }
-                    Err(_) => err(
-                        400,
-                        "invalid fec mode: expected auto, conservative, aggressive, or disabled",
-                    ),
-                }
-            } else {
-                let rep = node.screen_fec_report();
-                json_ok(&rep)
-            }
+            api_screen_quality::post_screen_fec(method, query_str, body, node).await
         }
-        // Microsecond packet pacing and burst shaper (v2.05 / ADR-091).
         ("GET", "/api/screen/pacer") => {
-            let rep = node.screen_pacer_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_pacer(method, query_str, body, node).await
         }
         ("POST", "/api/screen/pacer") => {
-            #[derive(serde::Deserialize)]
-            struct PacerBody {
-                mode: Option<String>,
-                pacer_mode: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<PacerBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone().or_else(|| b.pacer_mode.clone()))
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("pacer_mode").cloned());
-
-            if let Some(m_str) = mode_str {
-                match m_str.parse::<tetherly_core::ScreenPacerMode>() {
-                    Ok(mode) => {
-                        let rep = node.screen_set_pacer_mode(mode);
-                        json_ok(&rep)
-                    }
-                    Err(_) => err(
-                        400,
-                        "invalid pacer mode: expected auto, aggressive, or disabled",
-                    ),
-                }
-            } else {
-                let rep = node.screen_pacer_report();
-                json_ok(&rep)
-            }
+            api_screen_quality::post_screen_pacer(method, query_str, body, node).await
         }
-        // Delay-based congestion controller & trendline filter (v2.06 / ADR-092).
         ("GET", "/api/screen/trendline") => {
-            let rep = node.screen_trendline_report();
-            json_ok(&rep)
+            api_screen_analysis::get_screen_trendline(method, query_str, body, node).await
         }
         ("POST", "/api/screen/trendline") => {
-            #[derive(serde::Deserialize)]
-            struct TrendlineBody {
-                mode: Option<String>,
-                trendline_mode: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TrendlineBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone().or_else(|| b.trendline_mode.clone()))
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("trendline_mode").cloned());
-
-            if let Some(m_str) = mode_str {
-                match m_str.parse::<tetherly_core::ScreenTrendlineMode>() {
-                    Ok(mode) => {
-                        let rep = node.screen_set_trendline_mode(mode);
-                        json_ok(&rep)
-                    }
-                    Err(_) => err(
-                        400,
-                        "invalid trendline mode: expected auto, aggressive, conservative, or disabled",
-                    ),
-                }
-            } else {
-                let rep = node.screen_trendline_report();
-                json_ok(&rep)
-            }
+            api_screen_analysis::post_screen_trendline(method, query_str, body, node).await
         }
-        // Screen selective NACK & Hybrid ARQ (HARQ) pipeline (v2.07 / ADR-093).
         ("GET", "/api/screen/harq") => {
-            let rep = node.screen_harq_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_harq(method, query_str, body, node).await
         }
         ("POST", "/api/screen/harq") => {
-            #[derive(serde::Deserialize)]
-            struct HarqBody {
-                mode: Option<String>,
-                harq_mode: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<HarqBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone().or_else(|| b.harq_mode.clone()))
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("harq_mode").cloned());
-
-            if let Some(m_str) = mode_str {
-                match m_str.parse::<tetherly_core::ScreenHarqMode>() {
-                    Ok(mode) => {
-                        let rep = node.screen_set_harq_mode(mode);
-                        json_ok(&rep)
-                    }
-                    Err(_) => err(
-                        400,
-                        "invalid harq mode: expected auto, aggressive, conservative, or disabled",
-                    ),
-                }
-            } else {
-                let rep = node.screen_harq_report();
-                json_ok(&rep)
-            }
+            api_screen_quality::post_screen_harq(method, query_str, body, node).await
         }
-        // Screen transport-wide congestion control (TWCC) pipeline (v2.08 / ADR-094).
         ("GET", "/api/screen/twcc") => {
-            let rep = node.screen_twcc_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_twcc(method, query_str, body, node).await
         }
         ("POST", "/api/screen/twcc") => {
-            #[derive(serde::Deserialize)]
-            struct TwccBody {
-                mode: Option<String>,
-                twcc_mode: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TwccBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone().or_else(|| b.twcc_mode.clone()))
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("twcc_mode").cloned());
-
-            if let Some(m_str) = mode_str {
-                match m_str.parse::<tetherly_core::ScreenTwccMode>() {
-                    Ok(mode) => {
-                        let rep = node.screen_set_twcc_mode(mode);
-                        json_ok(&rep)
-                    }
-                    Err(_) => err(
-                        400,
-                        "invalid twcc mode: expected auto, aggressive, conservative, or disabled",
-                    ),
-                }
-            } else {
-                let rep = node.screen_twcc_report();
-                json_ok(&rep)
-            }
+            api_screen_quality::post_screen_twcc(method, query_str, body, node).await
         }
-        // Screen active bandwidth probing & fast ramp-up pipeline (v2.09 / ADR-095).
         ("GET", "/api/screen/probe") => {
-            let rep = node.screen_probe_report();
-            json_ok(&rep)
+            api_screen_analysis::get_screen_probe(method, query_str, body, node).await
         }
         ("POST", "/api/screen/probe") => {
-            #[derive(serde::Deserialize)]
-            struct ProbeBody {
-                mode: Option<String>,
-                probe_mode: Option<String>,
-                target_bps: Option<u32>,
-                trigger: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<ProbeBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone().or_else(|| b.probe_mode.clone()))
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("probe_mode").cloned());
-
-            let trigger_flag = parsed_body
-                .as_ref()
-                .and_then(|b| b.trigger)
-                .or_else(|| qmap.get("trigger").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(false);
-
-            let target_bps = parsed_body
-                .as_ref()
-                .and_then(|b| b.target_bps)
-                .or_else(|| qmap.get("target_bps").and_then(|v| v.parse::<u32>().ok()));
-
-            if let Some(m_str) = mode_str {
-                match m_str.parse::<tetherly_core::ScreenProbeMode>() {
-                    Ok(mode) => {
-                        let _ = node.screen_set_probe_mode(mode);
-                    }
-                    Err(_) => {
-                        return err(
-                            400,
-                            "invalid probe mode: expected auto, aggressive, conservative, or disabled",
-                        );
-                    }
-                }
-            }
-
-            if trigger_flag || target_bps.is_some() {
-                match node.trigger_screen_probe(target_bps).await {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(500, &format!("failed to trigger screen probe: {e}")),
-                }
-            } else {
-                let rep = node.screen_probe_report();
-                json_ok(&rep)
-            }
+            api_screen_analysis::post_screen_probe(method, query_str, body, node).await
         }
         ("POST", "/api/screen/probe/trigger") => {
-            #[derive(serde::Deserialize)]
-            struct TriggerBody {
-                target_bps: Option<u32>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TriggerBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let target_bps = parsed_body
-                .as_ref()
-                .and_then(|b| b.target_bps)
-                .or_else(|| qmap.get("target_bps").and_then(|v| v.parse::<u32>().ok()));
-            match node.trigger_screen_probe(target_bps).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to trigger screen probe: {e}")),
-            }
+            api_screen_analysis::post_screen_probe_trigger(method, query_str, body, node).await
         }
-        // Screen audio-video playout lip-sync & clock synchronization pipeline (v2.10 / ADR-096).
         ("GET", "/api/screen/sync") => {
-            let rep = node.screen_sync_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_sync(method, query_str, body, node).await
         }
         ("POST", "/api/screen/sync") => {
-            #[derive(serde::Deserialize)]
-            struct SyncBody {
-                mode: Option<String>,
-                sync_mode: Option<String>,
-                trigger: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<SyncBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone().or_else(|| b.sync_mode.clone()))
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("sync_mode").cloned());
-
-            let trigger_flag = parsed_body
-                .as_ref()
-                .and_then(|b| b.trigger)
-                .or_else(|| qmap.get("trigger").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(false);
-
-            if let Some(m_str) = mode_str {
-                match m_str.parse::<tetherly_core::ScreenAudioSyncMode>() {
-                    Ok(mode) => {
-                        let _ = node.screen_set_sync_mode(mode);
-                    }
-                    Err(_) => {
-                        return err(
-                            400,
-                            "invalid sync mode: expected auto, strict, loose, or disabled",
-                        );
-                    }
-                }
-            }
-
-            if trigger_flag {
-                match node.trigger_screen_sync().await {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(500, &format!("failed to trigger screen sync beacon: {e}")),
-                }
-            } else {
-                let rep = node.screen_sync_report();
-                json_ok(&rep)
-            }
+            api_screen_quality::post_screen_sync(method, query_str, body, node).await
         }
-        ("POST", "/api/screen/sync/trigger") => match node.trigger_screen_sync().await {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(500, &format!("failed to trigger screen sync beacon: {e}")),
-        },
-        // Screen multi-display & virtual display stream multiplexing pipeline (v2.11 / ADR-097).
+        ("POST", "/api/screen/sync/trigger") => {
+            api_screen_quality::post_screen_sync_trigger(method, query_str, body, node).await
+        }
         ("GET", "/api/screen/displays") => {
-            let rep = node.screen_display_report();
-            json_ok(&rep)
+            api_screen_session::get_screen_displays(method, query_str, body, node).await
         }
         ("POST", "/api/screen/switch") => {
-            #[derive(serde::Deserialize)]
-            struct SwitchBody {
-                display_id: Option<u8>,
-                display: Option<u8>,
-                id: Option<u8>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<SwitchBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let display_id_opt = parsed_body
-                .as_ref()
-                .and_then(|b| b.display_id.or(b.display).or(b.id))
-                .or_else(|| {
-                    qmap.get("display_id")
-                        .or_else(|| qmap.get("display"))
-                        .or_else(|| qmap.get("id"))
-                        .and_then(|v| v.parse::<u8>().ok())
-                });
-
-            let Some(display_id) = display_id_opt else {
-                return err(
-                    400,
-                    "missing required field: display_id (expected integer 0-255)",
-                );
-            };
-
-            match node.screen_switch_display(display_id).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => {
-                    let status = match &e {
-                        tetherly_core::CoreError::ScreenRefused(_) => 404,
-                        _ => 400,
-                    };
-                    err(status, &format!("failed to switch display: {e}"))
-                }
-            }
+            api_screen_session::post_screen_switch(method, query_str, body, node).await
         }
-        // Screen privacy mode, display blanking & host input lockout pipeline (v2.12 / ADR-098).
         ("GET", "/api/screen/privacy") => {
-            let rep = node.screen_privacy_report();
-            json_ok(&rep)
+            api_screen_analysis::get_screen_privacy(method, query_str, body, node).await
         }
         ("POST", "/api/screen/privacy") => {
-            #[derive(serde::Deserialize)]
-            struct PrivacyBody {
-                enabled: Option<bool>,
-                lock_input: Option<bool>,
-                lock: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<PrivacyBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled_opt = parsed_body.as_ref().and_then(|b| b.enabled).or_else(|| {
-                qmap.get("enabled")
-                    .and_then(|v| match v.to_ascii_lowercase().as_str() {
-                        "true" | "1" | "yes" | "on" => Some(true),
-                        "false" | "0" | "no" | "off" => Some(false),
-                        _ => None,
-                    })
-            });
-
-            let Some(enabled) = enabled_opt else {
-                return err(
-                    400,
-                    "missing required field: enabled (expected boolean true/false)",
-                );
-            };
-
-            let lock_input = parsed_body
-                .as_ref()
-                .and_then(|b| b.lock_input.or(b.lock))
-                .or_else(|| {
-                    qmap.get("lock_input")
-                        .or_else(|| qmap.get("lock"))
-                        .and_then(|v| match v.to_ascii_lowercase().as_str() {
-                            "true" | "1" | "yes" | "on" => Some(true),
-                            "false" | "0" | "no" | "off" => Some(false),
-                            _ => None,
-                        })
-                })
-                .unwrap_or(false);
-
-            match node.screen_set_privacy_mode(enabled, lock_input).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(
-                    500,
-                    &format!("failed to configure screen privacy mode: {e}"),
-                ),
-            }
+            api_screen_analysis::post_screen_privacy(method, query_str, body, node).await
         }
         ("POST", "/api/screen/privacy/enable") => {
-            #[derive(serde::Deserialize)]
-            struct EnableBody {
-                lock_input: Option<bool>,
-                lock: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<EnableBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let lock_input = parsed_body
-                .as_ref()
-                .and_then(|b| b.lock_input.or(b.lock))
-                .or_else(|| {
-                    qmap.get("lock_input")
-                        .or_else(|| qmap.get("lock"))
-                        .and_then(|v| match v.to_ascii_lowercase().as_str() {
-                            "true" | "1" | "yes" | "on" => Some(true),
-                            "false" | "0" | "no" | "off" => Some(false),
-                            _ => None,
-                        })
-                })
-                .unwrap_or(false);
-
-            match node.screen_set_privacy_mode(true, lock_input).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to enable screen privacy mode: {e}")),
-            }
+            api_screen_analysis::post_screen_privacy_enable(method, query_str, body, node).await
         }
         ("POST", "/api/screen/privacy/disable") => {
-            match node.screen_set_privacy_mode(false, false).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to disable screen privacy mode: {e}")),
-            }
+            api_screen_analysis::post_screen_privacy_disable(method, query_str, body, node).await
         }
-        // Microsecond end-to-end latency profiler & performance telemetry (ADR-099).
         ("GET", "/api/screen/latency") => {
-            let rep = node.screen_latency_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_latency(method, query_str, body, node).await
         }
         ("POST", "/api/screen/latency") => {
-            #[derive(serde::Deserialize)]
-            struct LatencyBody {
-                mode: Option<String>,
-                profiler_mode: Option<String>,
-                reset: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<LatencyBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone().or_else(|| b.profiler_mode.clone()))
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("profiler_mode").cloned());
-
-            let reset_flag = parsed_body
-                .as_ref()
-                .and_then(|b| b.reset)
-                .or_else(|| qmap.get("reset").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(false);
-
-            if let Some(m_str) = mode_str {
-                match m_str.parse::<tetherly_core::ScreenProfilerMode>() {
-                    Ok(mode) => {
-                        let _ = node.screen_set_latency_mode(mode);
-                    }
-                    Err(_) => {
-                        return err(
-                            400,
-                            "invalid latency profiler mode: expected auto, detailed, or disabled",
-                        );
-                    }
-                }
-            }
-
-            if reset_flag {
-                match node.screen_reset_latency().await {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(500, &format!("failed to reset latency profiler: {e}")),
-                }
-            } else {
-                json_ok(&node.screen_latency_report())
-            }
+            api_screen_quality::post_screen_latency(method, query_str, body, node).await
         }
-        ("POST", "/api/screen/latency/reset") => match node.screen_reset_latency().await {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(500, &format!("failed to reset latency profiler: {e}")),
-        },
+        ("POST", "/api/screen/latency/reset") => {
+            api_screen_quality::post_screen_latency_reset(method, query_str, body, node).await
+        }
         ("GET", "/api/screen/tuning") => {
-            let rep = node.screen_tuning_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_tuning(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tuning") => {
-            #[derive(serde::Deserialize)]
-            struct TuningBody {
-                mode: Option<String>,
-                tuner_mode: Option<String>,
-                reset: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TuningBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone().or_else(|| b.tuner_mode.clone()))
-                .or_else(|| qmap.get("mode").cloned())
-                .or_else(|| qmap.get("tuner_mode").cloned());
-
-            let reset_flag = parsed_body
-                .as_ref()
-                .and_then(|b| b.reset)
-                .or_else(|| qmap.get("reset").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(false);
-
-            if let Some(m_str) = mode_str {
-                match m_str.parse::<tetherly_core::ScreenTunerMode>() {
-                    Ok(mode) => {
-                        let _ = node.screen_set_tuning_mode(mode).await;
-                    }
-                    Err(_) => {
-                        return err(
-                            400,
-                            "invalid tuning mode: expected disabled, standard, or aggressive",
-                        );
-                    }
-                }
-            }
-
-            if reset_flag {
-                match node.screen_reset_tuning().await {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(500, &format!("failed to reset autonomous tuning: {e}")),
-                }
-            } else {
-                json_ok(&node.screen_tuning_report())
-            }
+            api_screen_quality::post_screen_tuning(method, query_str, body, node).await
         }
-        ("POST", "/api/screen/tuning/reset") => match node.screen_reset_tuning().await {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(500, &format!("failed to reset autonomous tuning: {e}")),
-        },
+        ("POST", "/api/screen/tuning/reset") => {
+            api_screen_quality::post_screen_tuning_reset(method, query_str, body, node).await
+        }
         ("POST", "/api/screen/recording/start") => {
-            #[derive(serde::Deserialize)]
-            struct RecordingStartBody {
-                path: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<RecordingStartBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let path_opt = parsed_body
-                .as_ref()
-                .and_then(|b| b.path.clone())
-                .or_else(|| qmap.get("path").cloned());
-            match node.screen_start_recording(path_opt).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &format!("failed to start screen recording: {e}")),
-            }
+            api_screen_session::post_screen_recording_start(method, query_str, body, node).await
         }
-        ("POST", "/api/screen/recording/stop") => match node.screen_stop_recording().await {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(500, &format!("failed to stop screen recording: {e}")),
-        },
+        ("POST", "/api/screen/recording/stop") => {
+            api_screen_session::post_screen_recording_stop(method, query_str, body, node).await
+        }
         ("GET", "/api/screen/recording") => {
-            let rep = node.screen_recording_report();
-            json_ok(&rep)
+            api_screen_session::get_screen_recording(method, query_str, body, node).await
         }
         ("GET", "/api/screen/recording/replay") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let Some(path) = qmap.get("path").cloned() else {
-                return err(400, "recording replay requires a ?path= parameter");
-            };
-            let limit = qmap
-                .get("limit")
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(32);
-            match node.screen_recording_replay(path, limit) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &format!("recording replay failed: {e}")),
-            }
+            api_screen_session::get_screen_recording_replay(method, query_str, body, node).await
         }
         ("POST", "/api/screen/playback/start") => {
-            #[derive(serde::Deserialize)]
-            struct PlaybackStartBody {
-                path: Option<String>,
-                speed: Option<f32>,
-                #[serde(rename = "loop")]
-                loop_enabled: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<PlaybackStartBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let path_opt = parsed_body
-                .as_ref()
-                .and_then(|b| b.path.clone())
-                .or_else(|| qmap.get("path").cloned());
-            let speed_opt = parsed_body
-                .as_ref()
-                .and_then(|b| b.speed)
-                .or_else(|| qmap.get("speed").and_then(|v| v.parse::<f32>().ok()));
-            let loop_opt = parsed_body
-                .as_ref()
-                .and_then(|b| b.loop_enabled)
-                .or_else(|| qmap.get("loop").and_then(|v| v.parse::<bool>().ok()));
-
-            let Some(path) = path_opt else {
-                return err(400, "playback requires a path parameter or JSON body");
-            };
-
-            match node.screen_playback_start(path, speed_opt, loop_opt).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &format!("failed to start screen playback: {e}")),
-            }
+            api_screen_session::post_screen_playback_start(method, query_str, body, node).await
         }
-        ("POST", "/api/screen/playback/pause") => match node.screen_playback_pause() {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(400, &format!("failed to pause screen playback: {e}")),
-        },
-        ("POST", "/api/screen/playback/resume") => match node.screen_playback_resume() {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(400, &format!("failed to resume screen playback: {e}")),
-        },
-        ("POST", "/api/screen/playback/stop") => match node.screen_playback_stop() {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(500, &format!("failed to stop screen playback: {e}")),
-        },
+        ("POST", "/api/screen/playback/pause") => {
+            api_screen_session::post_screen_playback_pause(method, query_str, body, node).await
+        }
+        ("POST", "/api/screen/playback/resume") => {
+            api_screen_session::post_screen_playback_resume(method, query_str, body, node).await
+        }
+        ("POST", "/api/screen/playback/stop") => {
+            api_screen_session::post_screen_playback_stop(method, query_str, body, node).await
+        }
         ("GET", "/api/screen/playback") => {
-            let rep = node.screen_playback_report();
-            json_ok(&rep)
+            api_screen_session::get_screen_playback(method, query_str, body, node).await
         }
         ("GET", "/api/screen/snapshot") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let format_param = qmap
-                .get("format")
-                .cloned()
-                .unwrap_or_else(|| "json".to_string());
-            let out_param = qmap.get("out").cloned();
-
-            if format_param.eq_ignore_ascii_case("bmp") {
-                match node.screen_snapshot_data(Some("bmp".to_string()), out_param) {
-                    Ok((bmp_bytes, _rep)) => UiResponse::new(200, "image/bmp", bmp_bytes),
-                    Err(tetherly_core::CoreError::ScreenRefused(msg))
-                        if msg.contains("no screen frame available") =>
-                    {
-                        err(503, &format!("screen snapshot failed: {msg}"))
-                    }
-                    Err(e) => err(400, &format!("screen snapshot failed: {e}")),
-                }
-            } else {
-                match node.screen_snapshot(Some(format_param), out_param) {
-                    Ok(rep) => json_ok(&rep),
-                    Err(tetherly_core::CoreError::ScreenRefused(msg))
-                        if msg.contains("no screen frame available") =>
-                    {
-                        err(503, &format!("screen snapshot failed: {msg}"))
-                    }
-                    Err(e) => err(400, &format!("screen snapshot failed: {e}")),
-                }
-            }
+            api_screen_session::get_screen_snapshot(method, query_str, body, node).await
         }
         ("POST", "/api/screen/recording/snapshot") | ("GET", "/api/screen/recording/snapshot") => {
-            #[derive(serde::Deserialize)]
-            struct RecordingSnapshotBody {
-                path: Option<String>,
-                frame: Option<u64>,
-                pts: Option<u64>,
-                pts_us: Option<u64>,
-                out: Option<String>,
-                format: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<RecordingSnapshotBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let path_opt = parsed_body
-                .as_ref()
-                .and_then(|b| b.path.clone())
-                .or_else(|| qmap.get("path").cloned());
-            let frame_opt = parsed_body
-                .as_ref()
-                .and_then(|b| b.frame)
-                .or_else(|| qmap.get("frame").and_then(|v| v.parse::<u64>().ok()));
-            let pts_opt = parsed_body
-                .as_ref()
-                .and_then(|b| b.pts.or(b.pts_us))
-                .or_else(|| {
-                    qmap.get("pts")
-                        .or_else(|| qmap.get("pts_us"))
-                        .and_then(|v| v.parse::<u64>().ok())
-                });
-            let out_opt = parsed_body
-                .as_ref()
-                .and_then(|b| b.out.clone())
-                .or_else(|| qmap.get("out").cloned());
-            let format_opt = parsed_body
-                .as_ref()
-                .and_then(|b| b.format.clone())
-                .or_else(|| qmap.get("format").cloned());
-
-            let Some(path) = path_opt else {
-                return err(
-                    400,
-                    "recording snapshot requires a path parameter or JSON body",
-                );
-            };
-
-            let is_bmp_direct = format_opt
-                .as_deref()
-                .map(|f| f.eq_ignore_ascii_case("bmp"))
-                .unwrap_or(false);
-
-            if is_bmp_direct {
-                match node.screen_recording_snapshot_data(&path, frame_opt, pts_opt, out_opt) {
-                    Ok((bmp_bytes, _rep)) => UiResponse::new(200, "image/bmp", bmp_bytes),
-                    Err(e) => err(400, &format!("screen recording snapshot failed: {e}")),
-                }
-            } else {
-                match node.screen_recording_snapshot(&path, frame_opt, pts_opt, out_opt) {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(400, &format!("screen recording snapshot failed: {e}")),
-                }
-            }
+            api_screen_session::post_screen_recording_snapshot(method, query_str, body, node).await
         }
         ("GET", "/api/screen/watermark") => {
-            let rep = node.screen_watermark_report();
-            json_ok(&rep)
+            api_screen_overlay::get_screen_watermark(method, query_str, body, node).await
         }
         ("POST", "/api/screen/watermark") => {
-            #[derive(serde::Deserialize, Default)]
-            struct WatermarkBody {
-                enabled: Option<bool>,
-                #[serde(default, alias = "enforce", alias = "enforced")]
-                host_enforced: Option<bool>,
-                #[serde(default, alias = "text_template", alias = "template")]
-                text: Option<String>,
-                opacity: Option<u8>,
-                color: Option<String>,
-                color_rgb: Option<[u8; 3]>,
-                scale: Option<u8>,
-                pattern: Option<String>,
-                spacing_x: Option<u16>,
-                spacing_y: Option<u16>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<WatermarkBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-
-            let enabled = parsed_body.as_ref().and_then(|b| b.enabled).or_else(|| {
-                qmap.get("enabled")
-                    .and_then(|v| match v.to_ascii_lowercase().as_str() {
-                        "true" | "1" | "yes" | "on" => Some(true),
-                        "false" | "0" | "no" | "off" => Some(false),
-                        _ => None,
-                    })
-            });
-
-            let host_enforced = parsed_body
-                .as_ref()
-                .and_then(|b| b.host_enforced)
-                .or_else(|| {
-                    qmap.get("host_enforced")
-                        .or_else(|| qmap.get("enforce"))
-                        .or_else(|| qmap.get("enforced"))
-                        .and_then(|v| match v.to_ascii_lowercase().as_str() {
-                            "true" | "1" | "yes" | "on" => Some(true),
-                            "false" | "0" | "no" | "off" => Some(false),
-                            _ => None,
-                        })
-                });
-
-            let text_template = parsed_body
-                .as_ref()
-                .and_then(|b| b.text.clone())
-                .or_else(|| qmap.get("text").cloned())
-                .or_else(|| qmap.get("text_template").cloned());
-
-            let opacity = parsed_body
-                .as_ref()
-                .and_then(|b| b.opacity)
-                .or_else(|| qmap.get("opacity").and_then(|v| v.parse::<u8>().ok()));
-
-            let color_rgb = parsed_body.as_ref().and_then(|b| b.color_rgb).or_else(|| {
-                let col_str = parsed_body
-                    .as_ref()
-                    .and_then(|b| b.color.as_deref())
-                    .or_else(|| qmap.get("color").map(String::as_str))?;
-                let s = col_str.trim().trim_start_matches('#');
-                if s.len() == 6 {
-                    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-                    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-                    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-                    Some([r, g, b])
-                } else {
-                    None
-                }
-            });
-
-            let scale = parsed_body
-                .as_ref()
-                .and_then(|b| b.scale)
-                .or_else(|| qmap.get("scale").and_then(|v| v.parse::<u8>().ok()));
-
-            let pattern = parsed_body
-                .as_ref()
-                .and_then(|b| b.pattern.clone())
-                .or_else(|| qmap.get("pattern").cloned());
-
-            let spacing_x = parsed_body
-                .as_ref()
-                .and_then(|b| b.spacing_x)
-                .or_else(|| qmap.get("spacing_x").and_then(|v| v.parse::<u16>().ok()));
-
-            let spacing_y = parsed_body
-                .as_ref()
-                .and_then(|b| b.spacing_y)
-                .or_else(|| qmap.get("spacing_y").and_then(|v| v.parse::<u16>().ok()));
-
-            let update = crate::runtime::ScreenWatermarkUpdate {
-                enabled,
-                host_enforced,
-                text_template,
-                opacity,
-                color_rgb,
-                scale,
-                pattern,
-                spacing_x,
-                spacing_y,
-            };
-
-            match node.screen_set_watermark(update).await {
-                Ok(rep) => json_ok(&rep),
-                Err(tetherly_core::CoreError::InvalidConfig(msg))
-                    if msg.contains("enforced by host") =>
-                {
-                    err(403, &format!("watermark configuration forbidden: {msg}"))
-                }
-                Err(e) => err(400, &format!("invalid watermark configuration: {e}")),
-            }
+            api_screen_overlay::post_screen_watermark(method, query_str, body, node).await
         }
         ("POST", "/api/screen/watermark/enable") => {
-            #[derive(serde::Deserialize)]
-            struct EnableWatermarkBody {
-                #[serde(default, alias = "enforce", alias = "enforced")]
-                host_enforced: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<EnableWatermarkBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let host_enforced = parsed_body
-                .as_ref()
-                .and_then(|b| b.host_enforced)
-                .or_else(|| {
-                    qmap.get("host_enforced")
-                        .or_else(|| qmap.get("enforce"))
-                        .or_else(|| qmap.get("enforced"))
-                        .and_then(|v| match v.to_ascii_lowercase().as_str() {
-                            "true" | "1" | "yes" | "on" => Some(true),
-                            "false" | "0" | "no" | "off" => Some(false),
-                            _ => None,
-                        })
-                })
-                .unwrap_or(false);
-
-            match node.screen_enable_watermark(host_enforced).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &format!("failed to enable watermark: {e}")),
-            }
+            api_screen_overlay::post_screen_watermark_enable(method, query_str, body, node).await
         }
-        ("POST", "/api/screen/watermark/disable") => match node.screen_disable_watermark().await {
-            Ok(rep) => json_ok(&rep),
-            Err(tetherly_core::CoreError::InvalidConfig(msg))
-                if msg.contains("enforced by host") =>
-            {
-                err(403, &format!("watermark disable forbidden: {msg}"))
-            }
-            Err(e) => err(400, &format!("failed to disable watermark: {e}")),
-        },
-        // Collaborative whiteboard annotations & transient virtual laser pointer (ADR-105)
+        ("POST", "/api/screen/watermark/disable") => {
+            api_screen_overlay::post_screen_watermark_disable(method, query_str, body, node).await
+        }
         ("GET", "/api/screen/annotation") => {
-            let rep = node.screen_annotation_report();
-            json_ok(&rep)
+            api_screen_overlay::get_screen_annotation(method, query_str, body, node).await
         }
         ("POST", "/api/screen/annotation") => {
-            #[derive(serde::Deserialize, Default)]
-            struct AddAnnotationBody {
-                #[serde(default)]
-                id: Option<u32>,
-                author: Option<String>,
-                kind: Option<String>,
-                points: Option<Vec<(u16, u16)>>,
-                points_str: Option<String>,
-                x: Option<u16>,
-                y: Option<u16>,
-                w: Option<u16>,
-                h: Option<u16>,
-                from: Option<(u16, u16)>,
-                to: Option<(u16, u16)>,
-                from_str: Option<String>,
-                to_str: Option<String>,
-                text: Option<String>,
-                scale: Option<u8>,
-                color: Option<String>,
-                color_rgb: Option<[u8; 3]>,
-                thickness: Option<u8>,
-                alpha: Option<u8>,
-                ttl_ms: Option<u32>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<AddAnnotationBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-
-            let kind_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.kind.clone())
-                .or_else(|| qmap.get("kind").cloned())
-                .unwrap_or_else(|| "stroke".to_string())
-                .to_ascii_lowercase();
-
-            let color_rgb = parsed_body
-                .as_ref()
-                .and_then(|b| b.color_rgb)
-                .or_else(|| {
-                    let col_str = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.color.as_deref())
-                        .or_else(|| qmap.get("color").map(String::as_str))?;
-                    let s = col_str.trim().trim_start_matches('#');
-                    if s.len() == 6 {
-                        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-                        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-                        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-                        Some([r, g, b])
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or([255, 0, 0]);
-
-            let thickness = parsed_body
-                .as_ref()
-                .and_then(|b| b.thickness)
-                .or_else(|| qmap.get("thickness").and_then(|v| v.parse::<u8>().ok()))
-                .unwrap_or(3);
-
-            let alpha = parsed_body
-                .as_ref()
-                .and_then(|b| b.alpha)
-                .or_else(|| qmap.get("alpha").and_then(|v| v.parse::<u8>().ok()))
-                .unwrap_or(255);
-
-            let ttl_ms = parsed_body
-                .as_ref()
-                .and_then(|b| b.ttl_ms)
-                .or_else(|| {
-                    qmap.get("ttl_ms")
-                        .or_else(|| qmap.get("ttl"))
-                        .and_then(|v| v.parse::<u32>().ok())
-                })
-                .unwrap_or(0);
-
-            let author = parsed_body
-                .as_ref()
-                .and_then(|b| b.author.clone())
-                .or_else(|| qmap.get("author").cloned())
-                .unwrap_or_default();
-
-            let id = parsed_body
-                .as_ref()
-                .and_then(|b| b.id)
-                .or_else(|| qmap.get("id").and_then(|v| v.parse::<u32>().ok()))
-                .unwrap_or(0);
-
-            let kind = match kind_str.as_str() {
-                "stroke" | "polyline" | "line" => {
-                    let pts = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.points.clone())
-                        .or_else(|| {
-                            let s = parsed_body
-                                .as_ref()
-                                .and_then(|b| b.points_str.as_deref())
-                                .or_else(|| qmap.get("points").map(String::as_str))?;
-                            Some(
-                                s.split(';')
-                                    .filter_map(|p| {
-                                        let mut it = p.split(',');
-                                        let x = it.next()?.trim().parse::<u16>().ok()?;
-                                        let y = it.next()?.trim().parse::<u16>().ok()?;
-                                        Some((x, y))
-                                    })
-                                    .collect(),
-                            )
-                        })
-                        .unwrap_or_default();
-                    if pts.is_empty() {
-                        return err(400, "stroke annotation requires non-empty points");
-                    }
-                    tetherly_core::AnnotationKind::Stroke { points: pts }
-                }
-                "rect" | "box" => {
-                    let x = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.x)
-                        .or_else(|| qmap.get("x").and_then(|v| v.parse::<u16>().ok()))
-                        .unwrap_or(0);
-                    let y = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.y)
-                        .or_else(|| qmap.get("y").and_then(|v| v.parse::<u16>().ok()))
-                        .unwrap_or(0);
-                    let w = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.w)
-                        .or_else(|| {
-                            qmap.get("w")
-                                .or_else(|| qmap.get("width"))
-                                .and_then(|v| v.parse::<u16>().ok())
-                        })
-                        .unwrap_or(0);
-                    let h = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.h)
-                        .or_else(|| {
-                            qmap.get("h")
-                                .or_else(|| qmap.get("height"))
-                                .and_then(|v| v.parse::<u16>().ok())
-                        })
-                        .unwrap_or(0);
-                    if w == 0 || h == 0 {
-                        return err(400, "rect annotation requires non-zero width and height");
-                    }
-                    tetherly_core::AnnotationKind::Rect { x, y, w, h }
-                }
-                "arrow" => {
-                    let parse_pt = |s: &str| -> Option<(u16, u16)> {
-                        let mut it = s.split(',');
-                        let x = it.next()?.trim().parse::<u16>().ok()?;
-                        let y = it.next()?.trim().parse::<u16>().ok()?;
-                        Some((x, y))
-                    };
-                    let from = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.from)
-                        .or_else(|| {
-                            let s = parsed_body
-                                .as_ref()
-                                .and_then(|b| b.from_str.as_deref())
-                                .or_else(|| qmap.get("from").map(String::as_str))?;
-                            parse_pt(s)
-                        })
-                        .unwrap_or((0, 0));
-                    let to = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.to)
-                        .or_else(|| {
-                            let s = parsed_body
-                                .as_ref()
-                                .and_then(|b| b.to_str.as_deref())
-                                .or_else(|| qmap.get("to").map(String::as_str))?;
-                            parse_pt(s)
-                        })
-                        .unwrap_or((0, 0));
-                    if from == to {
-                        return err(400, "arrow requires distinct from and to points");
-                    }
-                    tetherly_core::AnnotationKind::Arrow { from, to }
-                }
-                "text" | "note" => {
-                    let text = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.text.clone())
-                        .or_else(|| qmap.get("text").cloned())
-                        .unwrap_or_default();
-                    if text.is_empty() {
-                        return err(400, "text annotation requires non-empty text");
-                    }
-                    let x = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.x)
-                        .or_else(|| qmap.get("x").and_then(|v| v.parse::<u16>().ok()))
-                        .unwrap_or(0);
-                    let y = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.y)
-                        .or_else(|| qmap.get("y").and_then(|v| v.parse::<u16>().ok()))
-                        .unwrap_or(0);
-                    let scale = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.scale)
-                        .or_else(|| qmap.get("scale").and_then(|v| v.parse::<u8>().ok()))
-                        .unwrap_or(1);
-                    tetherly_core::AnnotationKind::Text { x, y, text, scale }
-                }
-                other => return err(400, &format!("unsupported annotation kind: {other}")),
-            };
-
-            let item = tetherly_core::AnnotationItem {
-                id,
-                author,
-                kind,
-                color_rgb,
-                thickness,
-                alpha,
-                ttl_ms,
-                created_at_ms: 0,
-            };
-
-            match node.screen_add_annotation(item).await {
-                Ok(item_id) => {
-                    let rep = node.screen_annotation_report();
-                    json_ok(&serde_json::json!({
-                        "ok": true,
-                        "id": item_id,
-                        "report": rep,
-                    }))
-                }
-                Err(e) if e.to_string().contains("read-only") => {
-                    err(403, &format!("forbidden: {e}"))
-                }
-                Err(e) => err(500, &format!("failed to add annotation: {e}")),
-            }
+            api_screen_overlay::post_screen_annotation(method, query_str, body, node).await
         }
         ("POST", "/api/screen/annotation/clear") | ("DELETE", "/api/screen/annotation") => {
-            match node.screen_clear_annotations().await {
-                Ok(()) => {
-                    let rep = node.screen_annotation_report();
-                    json_ok(&rep)
-                }
-                Err(e) => err(500, &format!("failed to clear annotations: {e}")),
-            }
+            api_screen_overlay::post_screen_annotation_clear(method, query_str, body, node).await
         }
         ("GET", "/api/screen/laser") => {
-            let rep = node.screen_annotation_report();
-            json_ok(&serde_json::json!({
-                "ok": true,
-                "laser_active": rep.laser_active,
-                "laser": rep.laser,
-                "laser_updates_total": rep.laser_updates_total,
-                "timestamp_ms": rep.timestamp_ms,
-            }))
+            api_screen_overlay::get_screen_laser(method, query_str, body, node).await
         }
         ("POST", "/api/screen/laser") => {
-            #[derive(serde::Deserialize, Default)]
-            struct LaserBody {
-                x: Option<u16>,
-                y: Option<u16>,
-                active: Option<bool>,
-                color: Option<String>,
-                color_rgb: Option<[u8; 3]>,
-                radius: Option<u8>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<LaserBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-
-            let x = parsed_body
-                .as_ref()
-                .and_then(|b| b.x)
-                .or_else(|| qmap.get("x").and_then(|v| v.parse::<u16>().ok()))
-                .unwrap_or(0);
-            let y = parsed_body
-                .as_ref()
-                .and_then(|b| b.y)
-                .or_else(|| qmap.get("y").and_then(|v| v.parse::<u16>().ok()))
-                .unwrap_or(0);
-
-            let active = parsed_body
-                .as_ref()
-                .and_then(|b| b.active)
-                .or_else(|| {
-                    qmap.get("active")
-                        .and_then(|v| match v.to_ascii_lowercase().as_str() {
-                            "true" | "1" | "yes" | "on" => Some(true),
-                            "false" | "0" | "no" | "off" => Some(false),
-                            _ => None,
-                        })
-                })
-                .unwrap_or(true);
-
-            let color_rgb = parsed_body
-                .as_ref()
-                .and_then(|b| b.color_rgb)
-                .or_else(|| {
-                    let col_str = parsed_body
-                        .as_ref()
-                        .and_then(|b| b.color.as_deref())
-                        .or_else(|| qmap.get("color").map(String::as_str))?;
-                    let s = col_str.trim().trim_start_matches('#');
-                    if s.len() == 6 {
-                        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-                        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-                        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-                        Some([r, g, b])
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or([255, 30, 30]);
-
-            let radius = parsed_body
-                .as_ref()
-                .and_then(|b| b.radius)
-                .or_else(|| qmap.get("radius").and_then(|v| v.parse::<u8>().ok()))
-                .unwrap_or(12);
-
-            let laser_state = tetherly_core::LaserPointerState {
-                x,
-                y,
-                active,
-                color_rgb,
-                radius,
-            };
-
-            match node.screen_set_laser_pointer(laser_state).await {
-                Ok(()) => {
-                    let rep = node.screen_annotation_report();
-                    json_ok(&serde_json::json!({
-                        "ok": true,
-                        "laser_active": rep.laser_active,
-                        "laser": rep.laser,
-                        "laser_updates_total": rep.laser_updates_total,
-                        "timestamp_ms": rep.timestamp_ms,
-                    }))
-                }
-                Err(e) => err(500, &format!("failed to set laser pointer: {e}")),
-            }
+            api_screen_overlay::post_screen_laser(method, query_str, body, node).await
         }
         ("POST", "/api/screen/whiteboard/undo") => {
-            #[derive(serde::Deserialize, Default)]
-            struct UndoBody {
-                author: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<UndoBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let author = parsed_body
-                .and_then(|b| b.author)
-                .or_else(|| qmap.get("author").cloned());
-            match node.screen_whiteboard_undo(author.as_deref()).await {
-                Ok(undone) => {
-                    let rep = node.screen_annotation_report();
-                    json_ok(&serde_json::json!({
-                        "ok": true,
-                        "undone": undone,
-                        "report": rep,
-                    }))
-                }
-                Err(e) => err(500, &format!("failed to undo whiteboard annotation: {e}")),
-            }
+            api_screen_overlay::post_screen_whiteboard_undo(method, query_str, body, node).await
         }
         ("POST", "/api/screen/whiteboard/redo") => {
-            #[derive(serde::Deserialize, Default)]
-            struct RedoBody {
-                author: Option<String>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<RedoBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let author = parsed_body
-                .and_then(|b| b.author)
-                .or_else(|| qmap.get("author").cloned());
-            match node.screen_whiteboard_redo(author.as_deref()).await {
-                Ok(redone) => {
-                    let rep = node.screen_annotation_report();
-                    json_ok(&serde_json::json!({
-                        "ok": true,
-                        "redone": redone,
-                        "report": rep,
-                    }))
-                }
-                Err(e) => err(500, &format!("failed to redo whiteboard annotation: {e}")),
-            }
+            api_screen_overlay::post_screen_whiteboard_redo(method, query_str, body, node).await
         }
         ("GET", "/api/screen/whiteboard/export") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let out_path = qmap.get("out").map(String::as_str);
-            match node.screen_whiteboard_export(out_path) {
-                Ok(snapshot) => {
-                    let rep = node.screen_annotation_report();
-                    json_ok(&serde_json::json!({
-                        "ok": true,
-                        "export": snapshot,
-                        "report": rep,
-                    }))
-                }
-                Err(e) => err(400, &format!("failed to export whiteboard: {e}")),
-            }
+            api_screen_overlay::get_screen_whiteboard_export(method, query_str, body, node).await
         }
         ("POST", "/api/screen/whiteboard/import") => {
-            #[derive(serde::Deserialize, Default)]
-            struct ImportBody {
-                snapshot: Option<tetherly_core::WhiteboardSnapshot>,
-                items: Option<Vec<tetherly_core::AnnotationItem>>,
-                file: Option<String>,
-                replace: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<ImportBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let replace = parsed_body
-                .as_ref()
-                .and_then(|b| b.replace)
-                .or_else(|| qmap.get("replace").map(|v| v == "true" || v == "1"))
-                .unwrap_or(false);
-
-            let snapshot_res = if let Some(file_path) = parsed_body
-                .as_ref()
-                .and_then(|b| b.file.as_deref())
-                .or_else(|| qmap.get("file").map(String::as_str))
-            {
-                let path = std::path::Path::new(file_path);
-                if path
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-                {
-                    return err(400, "path traversal rejected");
-                }
-                match std::fs::read(path) {
-                    Ok(bytes) => {
-                        serde_json::from_slice::<tetherly_core::WhiteboardSnapshot>(&bytes)
-                            .map_err(|e| format!("invalid snapshot file: {e}"))
-                    }
-                    Err(e) => return err(400, &format!("failed to read snapshot file: {e}")),
-                }
-            } else if let Some(snap) = parsed_body.as_ref().and_then(|b| b.snapshot.clone()) {
-                Ok(snap)
-            } else if let Some(items) = parsed_body.as_ref().and_then(|b| b.items.clone()) {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                Ok(tetherly_core::WhiteboardSnapshot {
-                    version: 1,
-                    created_at_ms: now_ms,
-                    session_id: "import".into(),
-                    active_items: items,
-                    total_added_counter: 0,
-                })
-            } else {
-                Err("missing snapshot, items or file".into())
-            };
-
-            match snapshot_res {
-                Ok(snap) => match node.screen_whiteboard_import(snap, replace).await {
-                    Ok(count) => {
-                        let rep = node.screen_annotation_report();
-                        json_ok(&serde_json::json!({
-                            "ok": true,
-                            "imported_count": count,
-                            "report": rep,
-                        }))
-                    }
-                    Err(e) => err(400, &format!("failed to import whiteboard: {e}")),
-                },
-                Err(msg) => err(400, &msg),
-            }
+            api_screen_overlay::post_screen_whiteboard_import(method, query_str, body, node).await
         }
         ("GET", "/api/screen/whiteboard/policy") => {
-            let policy = node.screen_whiteboard_get_policy();
-            json_ok(&serde_json::json!({
-                "ok": true,
-                "policy": policy,
-            }))
+            api_screen_overlay::get_screen_whiteboard_policy(method, query_str, body, node).await
         }
         ("POST", "/api/screen/whiteboard/policy") => {
-            #[derive(serde::Deserialize, Default)]
-            struct PolicyBody {
-                read_only: Option<bool>,
-                allow_peer_clear: Option<bool>,
-                max_items: Option<u16>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<PolicyBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let current = node.screen_whiteboard_get_policy();
-            let read_only = parsed_body
-                .as_ref()
-                .and_then(|b| b.read_only)
-                .or_else(|| qmap.get("read_only").map(|v| v == "true" || v == "1"))
-                .unwrap_or(current.read_only);
-            let allow_peer_clear = parsed_body
-                .as_ref()
-                .and_then(|b| b.allow_peer_clear)
-                .or_else(|| {
-                    qmap.get("allow_peer_clear")
-                        .map(|v| v == "true" || v == "1")
-                })
-                .unwrap_or(current.allow_peer_clear);
-            let max_items = parsed_body
-                .as_ref()
-                .and_then(|b| b.max_items)
-                .or_else(|| qmap.get("max_items").and_then(|v| v.parse::<u16>().ok()))
-                .unwrap_or(current.max_items);
-
-            let updated = tetherly_core::WhiteboardPolicy {
-                read_only,
-                allow_peer_clear,
-                max_items,
-            };
-            match node.screen_whiteboard_set_policy(updated).await {
-                Ok(()) => json_ok(&serde_json::json!({
-                    "ok": true,
-                    "policy": updated,
-                })),
-                Err(e) => err(500, &format!("failed to update whiteboard policy: {e}")),
-            }
+            api_screen_overlay::post_screen_whiteboard_policy(method, query_str, body, node).await
         }
         ("POST", "/api/screen/whiteboard/clear") | ("DELETE", "/api/screen/whiteboard") => {
-            match node.screen_clear_annotations().await {
-                Ok(()) => {
-                    let rep = node.screen_annotation_report();
-                    json_ok(&rep)
-                }
-                Err(e) => err(500, &format!("failed to clear whiteboard: {e}")),
-            }
+            api_screen_overlay::post_screen_whiteboard_clear(method, query_str, body, node).await
         }
-        // Screen dynamic Region-of-Interest (ROI) viewport cropping & zoom (v2.21 / ADR-107)
         ("GET", "/api/screen/roi") => {
-            let rep = node.screen_roi_report();
-            json_ok(&rep)
+            api_screen_analysis::get_screen_roi(method, query_str, body, node).await
         }
         ("POST", "/api/screen/roi") => {
-            #[derive(serde::Deserialize, Default)]
-            struct RoiBody {
-                x: Option<u16>,
-                y: Option<u16>,
-                w: Option<u16>,
-                h: Option<u16>,
-                zoom_percent: Option<u16>,
-                zoom: Option<u16>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<RoiBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let x = parsed_body
-                .as_ref()
-                .and_then(|b| b.x)
-                .or_else(|| qmap.get("x").and_then(|v| v.parse::<u16>().ok()))
-                .unwrap_or(0);
-            let y = parsed_body
-                .as_ref()
-                .and_then(|b| b.y)
-                .or_else(|| qmap.get("y").and_then(|v| v.parse::<u16>().ok()))
-                .unwrap_or(0);
-            let w = parsed_body
-                .as_ref()
-                .and_then(|b| b.w)
-                .or_else(|| qmap.get("w").and_then(|v| v.parse::<u16>().ok()))
-                .unwrap_or(0);
-            let h = parsed_body
-                .as_ref()
-                .and_then(|b| b.h)
-                .or_else(|| qmap.get("h").and_then(|v| v.parse::<u16>().ok()))
-                .unwrap_or(0);
-            let zoom = parsed_body
-                .as_ref()
-                .and_then(|b| b.zoom_percent.or(b.zoom))
-                .or_else(|| {
-                    qmap.get("zoom_percent")
-                        .or_else(|| qmap.get("zoom"))
-                        .and_then(|v| v.parse::<u16>().ok())
-                });
-
-            match node.screen_set_roi(x, y, w, h, zoom).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen roi: {e}")),
-            }
+            api_screen_analysis::post_screen_roi(method, query_str, body, node).await
         }
         ("POST", "/api/screen/roi/reset") | ("DELETE", "/api/screen/roi") => {
-            match node.screen_reset_roi().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to reset screen roi: {e}")),
-            }
+            api_screen_analysis::post_screen_roi_reset(method, query_str, body, node).await
         }
         ("POST", "/api/screen/roi/zoom") => {
-            #[derive(serde::Deserialize, Default)]
-            struct ZoomBody {
-                zoom_percent: Option<u16>,
-                zoom: Option<u16>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<ZoomBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let zoom = parsed_body
-                .as_ref()
-                .and_then(|b| b.zoom_percent.or(b.zoom))
-                .or_else(|| {
-                    qmap.get("zoom_percent")
-                        .or_else(|| qmap.get("zoom"))
-                        .and_then(|v| v.parse::<u16>().ok())
-                })
-                .unwrap_or(100);
-
-            match node.screen_set_roi_zoom(zoom).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen roi zoom: {e}")),
-            }
+            api_screen_analysis::post_screen_roi_zoom(method, query_str, body, node).await
         }
-        // Screen adaptive color depth, grayscale economy & monochrome pipeline (v2.22 / ADR-108)
         ("GET", "/api/screen/color") => {
-            let rep = node.screen_color_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_color(method, query_str, body, node).await
         }
         ("POST", "/api/screen/color") => {
-            #[derive(serde::Deserialize, Default)]
-            struct ColorBody {
-                mode: Option<String>,
-                threshold: Option<u8>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<ColorBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.as_deref())
-                .or_else(|| qmap.get("mode").map(|s| s.as_str()))
-                .unwrap_or("full");
-            let mode: tetherly_core::ScreenColorMode = match mode_str.parse() {
-                Ok(m) => m,
-                Err(e) => return err(400, &format!("invalid color mode: {e}")),
-            };
-            let threshold = parsed_body
-                .as_ref()
-                .and_then(|b| b.threshold)
-                .or_else(|| qmap.get("threshold").and_then(|v| v.parse::<u8>().ok()));
-
-            match node.screen_set_color_mode(mode, threshold).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen color mode: {e}")),
-            }
+            api_screen_quality::post_screen_color(method, query_str, body, node).await
         }
         ("POST", "/api/screen/color/reset") | ("DELETE", "/api/screen/color") => {
-            match node.screen_reset_color_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to reset screen color mode: {e}")),
-            }
+            api_screen_quality::post_screen_color_reset(method, query_str, body, node).await
         }
-        // Screen differential delta patch, temporal compression & macroblock dictionary cache pipeline (v2.23 / ADR-109)
         ("GET", "/api/screen/delta") => {
-            let rep = node.screen_delta_report();
-            json_ok(&rep)
+            api_screen_quality::get_screen_delta(method, query_str, body, node).await
         }
         ("POST", "/api/screen/delta") => {
-            #[derive(serde::Deserialize, Default)]
-            struct DeltaBody {
-                enabled: Option<bool>,
-                keyframe_interval: Option<u16>,
-                interval: Option<u16>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<DeltaBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let interval = parsed_body
-                .as_ref()
-                .and_then(|b| b.keyframe_interval.or(b.interval))
-                .or_else(|| {
-                    qmap.get("keyframe_interval")
-                        .or_else(|| qmap.get("interval"))
-                        .and_then(|v| v.parse::<u16>().ok())
-                });
-
-            match node.screen_set_delta_mode(enabled, interval).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen delta mode: {e}")),
-            }
+            api_screen_quality::post_screen_delta(method, query_str, body, node).await
         }
         ("POST", "/api/screen/delta/reset") | ("DELETE", "/api/screen/delta") => {
-            match node.screen_reset_delta_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to reset screen delta mode: {e}")),
-            }
+            api_screen_quality::post_screen_delta_reset(method, query_str, body, node).await
         }
-        // Screen objective visual quality metric, PSNR/SSIM distortion profiling pipeline (v2.24 / ADR-110)
         ("GET", "/api/screen/metric") => {
-            let rep = node.screen_quality_metric_report();
-            json_ok(&rep)
+            api_screen_analysis::get_screen_metric(method, query_str, body, node).await
         }
         ("POST", "/api/screen/metric") => {
-            #[derive(serde::Deserialize, Default)]
-            struct MetricBody {
-                enabled: Option<bool>,
-                sample_interval: Option<u8>,
-                interval: Option<u8>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<MetricBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let interval = parsed_body
-                .as_ref()
-                .and_then(|b| b.sample_interval.or(b.interval))
-                .or_else(|| {
-                    qmap.get("sample_interval")
-                        .or_else(|| qmap.get("interval"))
-                        .and_then(|v| v.parse::<u8>().ok())
-                });
-
-            match node.screen_set_quality_metric_mode(enabled, interval).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(
-                    500,
-                    &format!("failed to set screen quality metric mode: {e}"),
-                ),
-            }
+            api_screen_analysis::post_screen_metric(method, query_str, body, node).await
         }
         ("POST", "/api/screen/metric/reset") | ("DELETE", "/api/screen/metric") => {
-            match node.screen_reset_quality_metric_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(
-                    500,
-                    &format!("failed to reset screen quality metric mode: {e}"),
-                ),
-            }
+            api_screen_analysis::post_screen_metric_reset(method, query_str, body, node).await
         }
-        // Screen streaming autonomous closed-loop QoE adaptation pipeline (v2.25 / ADR-111)
         ("GET", "/api/screen/qoe") => {
-            let rep = node.screen_qoe_report();
-            json_ok(&rep)
+            api_screen_analysis::get_screen_qoe(method, query_str, body, node).await
         }
         ("POST", "/api/screen/qoe") => {
-            #[derive(serde::Deserialize, Default)]
-            struct QoeBody {
-                mode: Option<String>,
-                target_psnr_db: Option<u8>,
-                target_psnr: Option<u8>,
-                target_ssim_pct: Option<u8>,
-                target_ssim: Option<u8>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<QoeBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone())
-                .or_else(|| qmap.get("mode").cloned())
-                .unwrap_or_else(|| "balanced".to_string());
-            let mode = match mode_str.parse::<tetherly_core::ScreenQoeMode>() {
-                Ok(m) => m,
-                Err(_) => {
-                    return err(
-                        400,
-                        "invalid qoe mode (expected: off, conservative, balanced, economy)",
-                    )
-                }
-            };
-            let target_psnr_db = parsed_body
-                .as_ref()
-                .and_then(|b| b.target_psnr_db.or(b.target_psnr))
-                .or_else(|| {
-                    qmap.get("target_psnr_db")
-                        .or_else(|| qmap.get("target_psnr"))
-                        .and_then(|v| v.parse::<u8>().ok())
-                });
-            let target_ssim_pct = parsed_body
-                .as_ref()
-                .and_then(|b| b.target_ssim_pct.or(b.target_ssim))
-                .or_else(|| {
-                    qmap.get("target_ssim_pct")
-                        .or_else(|| qmap.get("target_ssim"))
-                        .and_then(|v| v.parse::<u8>().ok())
-                });
-
-            match node
-                .screen_set_qoe_mode(mode, target_psnr_db, target_ssim_pct)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen qoe mode: {e}")),
-            }
+            api_screen_analysis::post_screen_qoe(method, query_str, body, node).await
         }
         ("POST", "/api/screen/qoe/reset") | ("DELETE", "/api/screen/qoe") => {
-            match node.screen_reset_qoe_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to reset screen qoe mode: {e}")),
-            }
+            api_screen_analysis::post_screen_qoe_reset(method, query_str, body, node).await
         }
-        // Screen streaming Progressive Intra-Refresh (PIR) anti-burst slice pipeline (v2.26 / ADR-112)
         ("GET", "/api/screen/pir") => {
-            let rep = node.screen_pir_report();
-            json_ok(&rep)
+            api_screen_analysis::get_screen_pir(method, query_str, body, node).await
         }
         ("POST", "/api/screen/pir") => {
-            #[derive(serde::Deserialize, Default)]
-            struct PirBody {
-                mode: Option<String>,
-                bands: Option<u8>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<PirBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone())
-                .or_else(|| qmap.get("mode").cloned())
-                .unwrap_or_else(|| "continuous".to_string());
-            let mode = match mode_str.parse::<tetherly_core::ScreenPirMode>() {
-                Ok(m) => m,
-                Err(_) => {
-                    return err(
-                        400,
-                        "invalid pir mode (expected: disabled, continuous, on-demand)",
-                    )
-                }
-            };
-            let bands = parsed_body
-                .as_ref()
-                .and_then(|b| b.bands)
-                .or_else(|| qmap.get("bands").and_then(|v| v.parse::<u8>().ok()));
-
-            match node.screen_set_pir_mode(mode, bands).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen pir mode: {e}")),
-            }
+            api_screen_analysis::post_screen_pir(method, query_str, body, node).await
         }
         ("POST", "/api/screen/pir/reset") | ("DELETE", "/api/screen/pir") => {
-            match node.screen_reset_pir_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to reset screen pir mode: {e}")),
-            }
+            api_screen_analysis::post_screen_pir_reset(method, query_str, body, node).await
         }
-        // Screen streaming Long-Term Reference (LTR) frame anchoring & recovery pipeline (v2.27 / ADR-113)
         ("GET", "/api/screen/ltr") => {
-            let rep = node.screen_ltr_report();
-            json_ok(&rep)
+            api_screen_session::get_screen_ltr(method, query_str, body, node).await
         }
         ("POST", "/api/screen/ltr") => {
-            #[derive(serde::Deserialize, Default)]
-            struct LtrBody {
-                enabled: Option<bool>,
-                auto_interval: Option<u16>,
-                interval: Option<u16>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<LtrBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let interval = parsed_body
-                .as_ref()
-                .and_then(|b| b.auto_interval.or(b.interval))
-                .or_else(|| {
-                    qmap.get("auto_interval")
-                        .or_else(|| qmap.get("interval"))
-                        .and_then(|v| v.parse::<u16>().ok())
-                });
-
-            match node.screen_set_ltr_mode(enabled, interval).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen ltr mode: {e}")),
-            }
+            api_screen_session::post_screen_ltr(method, query_str, body, node).await
         }
-        ("POST", "/api/screen/ltr/anchor") => match node.screen_anchor_ltr().await {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(500, &format!("failed to anchor screen ltr reference: {e}")),
-        },
-        ("POST", "/api/screen/ltr/recover") => match node.screen_request_ltr_recovery().await {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(500, &format!("failed to request screen ltr recovery: {e}")),
-        },
+        ("POST", "/api/screen/ltr/anchor") => {
+            api_screen_session::post_screen_ltr_anchor(method, query_str, body, node).await
+        }
+        ("POST", "/api/screen/ltr/recover") => {
+            api_screen_session::post_screen_ltr_recover(method, query_str, body, node).await
+        }
         ("POST", "/api/screen/ltr/reset") | ("DELETE", "/api/screen/ltr") => {
-            match node.screen_reset_ltr_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to reset screen ltr mode: {e}")),
-            }
+            api_screen_session::post_screen_ltr_reset(method, query_str, body, node).await
         }
-        // Screen streaming 2-Layer Temporal Scalability (SVC-T) hierarchical reference pipeline (v2.28 / ADR-114)
         ("GET", "/api/screen/svc") => {
-            let rep = node.screen_svc_report();
-            json_ok(&rep)
+            api_screen_session::get_screen_svc(method, query_str, body, node).await
         }
         ("POST", "/api/screen/svc") => {
-            #[derive(serde::Deserialize, Default)]
-            struct SvcBody {
-                mode: Option<String>,
-                drop_t1: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<SvcBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone())
-                .or_else(|| qmap.get("mode").cloned())
-                .unwrap_or_else(|| "adaptive".to_string());
-            let mode = tetherly_core::ScreenSvcMode::parse_mode(&mode_str);
-            let drop_t1 = parsed_body
-                .as_ref()
-                .and_then(|b| b.drop_t1)
-                .or_else(|| qmap.get("drop_t1").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(false);
-
-            match node.screen_set_svc_mode(mode, drop_t1).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen svc mode: {e}")),
-            }
+            api_screen_session::post_screen_svc(method, query_str, body, node).await
         }
         ("POST", "/api/screen/svc/drop-t1") => {
-            #[derive(serde::Deserialize, Default)]
-            struct DropT1Body {
-                drop_t1: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<DropT1Body> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let drop_t1 = parsed_body
-                .as_ref()
-                .and_then(|b| b.drop_t1)
-                .or_else(|| qmap.get("drop_t1").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-
-            match node.screen_set_svc_drop_t1(drop_t1).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen svc drop-t1: {e}")),
-            }
+            api_screen_session::post_screen_svc_drop_t1(method, query_str, body, node).await
         }
         ("POST", "/api/screen/svc/reset") | ("DELETE", "/api/screen/svc") => {
-            match node.screen_reset_svc_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to reset screen svc mode: {e}")),
-            }
+            api_screen_session::post_screen_svc_reset(method, query_str, body, node).await
         }
-        // Screen streaming 2D motion vector estimation & scroll acceleration (v2.29 / ADR-115)
         ("GET", "/api/screen/motion") => {
-            let rep = node.screen_motion_report();
-            json_ok(&rep)
+            api_screen_analysis::get_screen_motion(method, query_str, body, node).await
         }
         ("POST", "/api/screen/motion") => {
-            #[derive(serde::Deserialize, Default)]
-            struct MotionBody {
-                enabled: Option<bool>,
-                max_displacement: Option<u16>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<MotionBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let max_displacement = parsed_body
-                .as_ref()
-                .and_then(|b| b.max_displacement)
-                .or_else(|| {
-                    qmap.get("max_displacement")
-                        .and_then(|v| v.parse::<u16>().ok())
-                })
-                .unwrap_or(tetherly_core::SCREEN_MOTION_DEFAULT_MAX_DISPLACEMENT);
-
-            match node.screen_set_motion_mode(enabled, max_displacement).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen motion mode: {e}")),
-            }
+            api_screen_analysis::post_screen_motion(method, query_str, body, node).await
         }
         ("POST", "/api/screen/motion/reset") | ("DELETE", "/api/screen/motion") => {
-            match node.screen_reset_motion_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to reset screen motion mode: {e}")),
-            }
+            api_screen_analysis::post_screen_motion_reset(method, query_str, body, node).await
         }
-        // Screen streaming spatial tile-grid decomposition (v2.30 / ADR-116)
         ("GET", "/api/screen/tile") => {
-            let rep = node.screen_tile_report();
-            json_ok(&rep)
+            api_screen_tile::get_screen_tile(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile") => {
-            #[derive(serde::Deserialize, Default)]
-            struct TileBody {
-                enabled: Option<bool>,
-                tile_size: Option<u16>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TileBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let tile_size = parsed_body
-                .as_ref()
-                .and_then(|b| b.tile_size)
-                .or_else(|| qmap.get("tile_size").and_then(|v| v.parse::<u16>().ok()))
-                .unwrap_or(tetherly_core::SCREEN_TILE_DEFAULT_SIZE);
-
-            match node.screen_set_tile_mode(enabled, tile_size).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen tile mode: {e}")),
-            }
+            api_screen_tile::post_screen_tile(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/reset") | ("DELETE", "/api/screen/tile") => {
-            match node.screen_reset_tile_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to reset screen tile mode: {e}")),
-            }
+            api_screen_tile::post_screen_tile_reset(method, query_str, body, node).await
         }
-        // Screen streaming tile dictionary cache (v2.31 / ADR-117)
         ("GET", "/api/screen/tile/cache") => {
-            let rep = node.screen_tile_cache_report();
-            json_ok(&rep)
+            api_screen_tile::get_screen_tile_cache(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/cache") => {
-            #[derive(serde::Deserialize, Default)]
-            struct TileCacheBody {
-                enabled: Option<bool>,
-                max_entries: Option<u16>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TileCacheBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let max_entries = parsed_body
-                .as_ref()
-                .and_then(|b| b.max_entries)
-                .or_else(|| qmap.get("max_entries").and_then(|v| v.parse::<u16>().ok()))
-                .unwrap_or(tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES);
-
-            match node.screen_set_tile_cache_mode(enabled, max_entries).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen tile cache mode: {e}")),
-            }
+            api_screen_tile::post_screen_tile_cache(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/cache/reset") | ("DELETE", "/api/screen/tile/cache") => {
-            match node.screen_reset_tile_cache_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to reset screen tile cache mode: {e}")),
-            }
+            api_screen_tile::post_screen_tile_cache_reset(method, query_str, body, node).await
         }
         ("GET", "/api/screen/focus") => {
-            let rep = node.screen_focus_report();
-            json_ok(&rep)
+            api_screen_analysis::get_screen_focus(method, query_str, body, node).await
         }
         ("POST", "/api/screen/focus") => {
-            #[derive(serde::Deserialize, Default)]
-            struct FocusBody {
-                enabled: Option<bool>,
-                mode: Option<String>,
-                radius: Option<u16>,
-                peripheral_skip_ratio: Option<u8>,
-                box_x: Option<u16>,
-                box_y: Option<u16>,
-                box_w: Option<u16>,
-                box_h: Option<u16>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<FocusBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone())
-                .or_else(|| qmap.get("mode").cloned());
-            let mode = mode_str.and_then(|s| tetherly_core::ScreenFocusMode::from_str_loose(&s));
-            let radius = parsed_body
-                .as_ref()
-                .and_then(|b| b.radius)
-                .or_else(|| qmap.get("radius").and_then(|v| v.parse::<u16>().ok()));
-            let peripheral_skip_ratio = parsed_body
-                .as_ref()
-                .and_then(|b| b.peripheral_skip_ratio)
-                .or_else(|| {
-                    qmap.get("peripheral_skip_ratio")
-                        .and_then(|v| v.parse::<u8>().ok())
-                });
-
-            let bx = parsed_body
-                .as_ref()
-                .and_then(|b| b.box_x)
-                .or_else(|| qmap.get("box_x").and_then(|v| v.parse::<u16>().ok()));
-            let by = parsed_body
-                .as_ref()
-                .and_then(|b| b.box_y)
-                .or_else(|| qmap.get("box_y").and_then(|v| v.parse::<u16>().ok()));
-            let bw = parsed_body
-                .as_ref()
-                .and_then(|b| b.box_w)
-                .or_else(|| qmap.get("box_w").and_then(|v| v.parse::<u16>().ok()));
-            let bh = parsed_body
-                .as_ref()
-                .and_then(|b| b.box_h)
-                .or_else(|| qmap.get("box_h").and_then(|v| v.parse::<u16>().ok()));
-            let box_coords = match (bx, by, bw, bh) {
-                (Some(x), Some(y), Some(w), Some(h)) => Some((x, y, w, h)),
-                _ => None,
-            };
-
-            match node
-                .screen_set_focus_mode(enabled, mode, radius, peripheral_skip_ratio, box_coords)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen focus mode: {e}")),
-            }
+            api_screen_analysis::post_screen_focus(method, query_str, body, node).await
         }
         ("POST", "/api/screen/focus/reset") | ("DELETE", "/api/screen/focus") => {
-            match node.screen_reset_focus_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to reset screen focus mode: {e}")),
-            }
+            api_screen_analysis::post_screen_focus_reset(method, query_str, body, node).await
         }
         ("GET", "/api/screen/tile/palette") => {
-            let rep = node.screen_tile_palette_report();
-            json_ok(&rep)
+            api_screen_tile::get_screen_tile_palette(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/palette") => {
-            #[derive(serde::Deserialize, Default)]
-            struct TilePaletteBody {
-                enabled: Option<bool>,
-                max_colors: Option<u8>,
-                enable_rle: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TilePaletteBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let max_colors = parsed_body
-                .as_ref()
-                .and_then(|b| b.max_colors)
-                .or_else(|| qmap.get("max_colors").and_then(|v| v.parse::<u8>().ok()));
-            let enable_rle = parsed_body
-                .as_ref()
-                .and_then(|b| b.enable_rle)
-                .or_else(|| qmap.get("enable_rle").and_then(|v| v.parse::<bool>().ok()));
-
-            match node
-                .screen_set_tile_palette_mode(enabled, max_colors, enable_rle)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen tile palette mode: {e}")),
-            }
+            api_screen_tile::post_screen_tile_palette(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/palette/reset") | ("DELETE", "/api/screen/tile/palette") => {
-            match node.screen_reset_tile_palette_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(
-                    500,
-                    &format!("failed to reset screen tile palette mode: {e}"),
-                ),
-            }
+            api_screen_tile::post_screen_tile_palette_reset(method, query_str, body, node).await
         }
         ("GET", "/api/screen/tile/predict") => {
-            let rep = node.screen_tile_predict_report();
-            json_ok(&rep)
+            api_screen_tile::get_screen_tile_predict(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/predict") => {
-            #[derive(serde::Deserialize, Default)]
-            struct TilePredictBody {
-                enabled: Option<bool>,
-                filter_mode: Option<serde_json::Value>,
-                enable_rct: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TilePredictBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let filter_mode = parsed_body
-                .as_ref()
-                .and_then(|b| b.filter_mode.as_ref())
-                .and_then(|val| {
-                    if let Some(s) = val.as_str() {
-                        tetherly_core::ScreenTilePredictFilter::from_str_loose(s)
-                    } else {
-                        val.as_u64()
-                            .map(|n| tetherly_core::ScreenTilePredictFilter::from_u8(n as u8))
-                    }
-                })
-                .or_else(|| {
-                    qmap.get("filter_mode")
-                        .or_else(|| qmap.get("mode"))
-                        .and_then(|s| tetherly_core::ScreenTilePredictFilter::from_str_loose(s))
-                });
-            let enable_rct = parsed_body.as_ref().and_then(|b| b.enable_rct).or_else(|| {
-                qmap.get("enable_rct")
-                    .or_else(|| qmap.get("rct"))
-                    .and_then(|v| v.parse::<bool>().ok())
-            });
-
-            match node
-                .screen_set_tile_predict_mode(enabled, filter_mode, enable_rct)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen tile predict mode: {e}")),
-            }
+            api_screen_tile::post_screen_tile_predict(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/predict/reset") | ("DELETE", "/api/screen/tile/predict") => {
-            match node.screen_reset_tile_predict_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(
-                    500,
-                    &format!("failed to reset screen tile predict mode: {e}"),
-                ),
-            }
+            api_screen_tile::post_screen_tile_predict_reset(method, query_str, body, node).await
         }
         ("GET", "/api/screen/tile/present") => {
-            let rep = node.screen_tile_present_report();
-            json_ok(&rep)
+            api_screen_tile::get_screen_tile_present(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/present") => {
-            #[derive(serde::Deserialize, Default)]
-            struct TilePresentBody {
-                enabled: Option<bool>,
-                vsync_mode: Option<serde_json::Value>,
-                double_buffer: Option<bool>,
-                tear_prevention: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TilePresentBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let vsync_mode = parsed_body
-                .as_ref()
-                .and_then(|b| b.vsync_mode.as_ref())
-                .and_then(|val| {
-                    if let Some(s) = val.as_str() {
-                        tetherly_core::ScreenTilePresentVsyncMode::from_str_loose(s)
-                    } else {
-                        val.as_u64()
-                            .map(|n| tetherly_core::ScreenTilePresentVsyncMode::from_u8(n as u8))
-                    }
-                })
-                .or_else(|| {
-                    qmap.get("vsync_mode")
-                        .or_else(|| qmap.get("vsync"))
-                        .or_else(|| qmap.get("mode"))
-                        .and_then(|s| tetherly_core::ScreenTilePresentVsyncMode::from_str_loose(s))
-                });
-            let double_buffer = parsed_body
-                .as_ref()
-                .and_then(|b| b.double_buffer)
-                .or_else(|| {
-                    qmap.get("double_buffer")
-                        .or_else(|| qmap.get("double"))
-                        .and_then(|v| v.parse::<bool>().ok())
-                });
-            let tear_prevention = parsed_body
-                .as_ref()
-                .and_then(|b| b.tear_prevention)
-                .or_else(|| {
-                    qmap.get("tear_prevention")
-                        .or_else(|| qmap.get("anti_tearing"))
-                        .or_else(|| qmap.get("tear"))
-                        .and_then(|v| v.parse::<bool>().ok())
-                });
-
-            match node
-                .screen_set_tile_present_mode(enabled, vsync_mode, double_buffer, tear_prevention)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen tile present mode: {e}")),
-            }
+            api_screen_tile::post_screen_tile_present(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/present/reset") | ("DELETE", "/api/screen/tile/present") => {
-            match node.screen_reset_tile_present_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(
-                    500,
-                    &format!("failed to reset screen tile present mode: {e}"),
-                ),
-            }
+            api_screen_tile::post_screen_tile_present_reset(method, query_str, body, node).await
         }
         ("GET", "/api/screen/tile/nack") => {
-            let rep = node.screen_tile_nack_report();
-            json_ok(&rep)
+            api_screen_tile::get_screen_tile_nack(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/nack") => {
-            #[derive(serde::Deserialize, Default)]
-            struct TileNackBody {
-                enabled: Option<bool>,
-                timeout_ms: Option<u16>,
-                max_retries: Option<u8>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TileNackBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let timeout_ms = parsed_body.as_ref().and_then(|b| b.timeout_ms).or_else(|| {
-                qmap.get("timeout_ms")
-                    .or_else(|| qmap.get("timeout"))
-                    .and_then(|v| v.parse::<u16>().ok())
-            });
-            let max_retries = parsed_body
-                .as_ref()
-                .and_then(|b| b.max_retries)
-                .or_else(|| {
-                    qmap.get("max_retries")
-                        .or_else(|| qmap.get("retries"))
-                        .and_then(|v| v.parse::<u8>().ok())
-                });
-
-            match node
-                .screen_set_tile_nack_mode(enabled, timeout_ms, max_retries)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen tile nack mode: {e}")),
-            }
+            api_screen_tile::post_screen_tile_nack(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/nack/reset") | ("DELETE", "/api/screen/tile/nack") => {
-            match node.screen_reset_tile_nack_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to reset screen tile nack mode: {e}")),
-            }
+            api_screen_tile::post_screen_tile_nack_reset(method, query_str, body, node).await
         }
         ("GET", "/api/screen/tile/saliency") => {
-            let rep = node.screen_tile_saliency_report();
-            json_ok(&rep)
+            api_screen_tile::get_screen_tile_saliency(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/saliency") => {
-            #[derive(serde::Deserialize, Default)]
-            struct TileSaliencyBody {
-                enabled: Option<bool>,
-                high_threshold: Option<u8>,
-                low_threshold: Option<u8>,
-                drop_background_on_congestion: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TileSaliencyBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let high_threshold =
-                parsed_body
-                    .as_ref()
-                    .and_then(|b| b.high_threshold)
-                    .or_else(|| {
-                        qmap.get("high_threshold")
-                            .or_else(|| qmap.get("high"))
-                            .and_then(|v| v.parse::<u8>().ok())
-                    });
-            let low_threshold = parsed_body
-                .as_ref()
-                .and_then(|b| b.low_threshold)
-                .or_else(|| {
-                    qmap.get("low_threshold")
-                        .or_else(|| qmap.get("low"))
-                        .and_then(|v| v.parse::<u8>().ok())
-                });
-            let drop_background_on_congestion = parsed_body
-                .as_ref()
-                .and_then(|b| b.drop_background_on_congestion)
-                .or_else(|| {
-                    qmap.get("drop_background_on_congestion")
-                        .or_else(|| qmap.get("drop_background"))
-                        .and_then(|v| v.parse::<bool>().ok())
-                });
-
-            match node
-                .screen_set_tile_saliency_mode(
-                    enabled,
-                    high_threshold,
-                    low_threshold,
-                    drop_background_on_congestion,
-                )
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(
-                    500,
-                    &format!("failed to set screen tile saliency mode: {e}"),
-                ),
-            }
+            api_screen_tile::post_screen_tile_saliency(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/saliency/reset")
         | ("DELETE", "/api/screen/tile/saliency/reset")
         | ("DELETE", "/api/screen/tile/saliency") => {
-            match node.screen_reset_tile_saliency_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(
-                    500,
-                    &format!("failed to reset screen tile saliency mode: {e}"),
-                ),
-            }
+            api_screen_tile::post_screen_tile_saliency_reset(method, query_str, body, node).await
         }
-        ("GET", "/api/screen/tile/lod") => json_ok(&node.screen_tile_lod_report()),
+        ("GET", "/api/screen/tile/lod") => {
+            api_screen_tile::get_screen_tile_lod(method, query_str, body, node).await
+        }
         ("POST", "/api/screen/tile/lod") => {
-            #[derive(serde::Deserialize, Default)]
-            struct TileLodBody {
-                enabled: Option<bool>,
-                max_lod: Option<u8>,
-                auto_lod_on_congestion: Option<bool>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TileLodBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let max_lod = parsed_body.as_ref().and_then(|b| b.max_lod).or_else(|| {
-                qmap.get("max_lod")
-                    .or_else(|| qmap.get("max"))
-                    .or_else(|| qmap.get("lod"))
-                    .and_then(|v| v.parse::<u8>().ok())
-            });
-            let auto_lod_on_congestion = parsed_body
-                .as_ref()
-                .and_then(|b| b.auto_lod_on_congestion)
-                .or_else(|| {
-                    qmap.get("auto_lod_on_congestion")
-                        .or_else(|| qmap.get("auto_lod"))
-                        .or_else(|| qmap.get("auto"))
-                        .and_then(|v| v.parse::<bool>().ok())
-                });
-
-            match node
-                .screen_set_tile_lod_mode(enabled, max_lod, auto_lod_on_congestion)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen tile lod mode: {e}")),
-            }
+            api_screen_tile::post_screen_tile_lod(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/lod/reset")
         | ("DELETE", "/api/screen/tile/lod/reset")
-        | ("DELETE", "/api/screen/tile/lod") => match node.screen_reset_tile_lod_mode().await {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(500, &format!("failed to reset screen tile lod mode: {e}")),
-        },
+        | ("DELETE", "/api/screen/tile/lod") => {
+            api_screen_tile::post_screen_tile_lod_reset(method, query_str, body, node).await
+        }
         ("GET", "/api/screen/tile/batch") | ("GET", "/api/screen/batch") => {
-            json_ok(&node.screen_tile_batch_report())
+            api_screen_tile::get_screen_tile_batch(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/batch") | ("POST", "/api/screen/batch") => {
-            #[derive(serde::Deserialize, Default)]
-            struct TileBatchBody {
-                enabled: Option<bool>,
-                target_chunk_bytes: Option<u16>,
-                pacing_interval_us: Option<u16>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TileBatchBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let target_chunk_bytes = parsed_body
-                .as_ref()
-                .and_then(|b| b.target_chunk_bytes)
-                .or_else(|| {
-                    qmap.get("target_chunk_bytes")
-                        .or_else(|| qmap.get("chunk_bytes"))
-                        .or_else(|| qmap.get("target"))
-                        .or_else(|| qmap.get("bytes"))
-                        .and_then(|v| v.parse::<u16>().ok())
-                });
-            let pacing_interval_us = parsed_body
-                .as_ref()
-                .and_then(|b| b.pacing_interval_us)
-                .or_else(|| {
-                    qmap.get("pacing_interval_us")
-                        .or_else(|| qmap.get("pacing_us"))
-                        .or_else(|| qmap.get("pacing"))
-                        .or_else(|| qmap.get("interval"))
-                        .and_then(|v| v.parse::<u16>().ok())
-                });
-
-            match node
-                .screen_set_tile_batch_mode(enabled, target_chunk_bytes, pacing_interval_us)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen tile batch mode: {e}")),
-            }
+            api_screen_tile::post_screen_tile_batch(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/batch/reset")
         | ("DELETE", "/api/screen/tile/batch/reset")
         | ("DELETE", "/api/screen/tile/batch")
         | ("POST", "/api/screen/batch/reset")
         | ("DELETE", "/api/screen/batch/reset")
-        | ("DELETE", "/api/screen/batch") => match node.screen_reset_tile_batch_mode().await {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(500, &format!("failed to reset screen tile batch mode: {e}")),
-        },
-        ("GET", "/api/screen/tile/motion") => json_ok(&node.screen_tile_motion_report()),
+        | ("DELETE", "/api/screen/batch") => {
+            api_screen_tile::post_screen_tile_batch_reset(method, query_str, body, node).await
+        }
+        ("GET", "/api/screen/tile/motion") => {
+            api_screen_tile::get_screen_tile_motion(method, query_str, body, node).await
+        }
         ("POST", "/api/screen/tile/motion") => {
-            #[derive(serde::Deserialize, Default)]
-            struct TileMotionBody {
-                enabled: Option<bool>,
-                max_displacement: Option<u16>,
-                min_match_ratio: Option<u8>,
-            }
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TileMotionBody> = if !body.is_empty() {
-                serde_json::from_slice(body).ok()
-            } else {
-                None
-            };
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|v| v.parse::<bool>().ok()))
-                .unwrap_or(true);
-            let max_displacement = parsed_body
-                .as_ref()
-                .and_then(|b| b.max_displacement)
-                .or_else(|| {
-                    qmap.get("max_displacement")
-                        .or_else(|| qmap.get("max_disp"))
-                        .or_else(|| qmap.get("displacement"))
-                        .or_else(|| qmap.get("disp"))
-                        .and_then(|v| v.parse::<u16>().ok())
-                });
-            let min_match_ratio = parsed_body
-                .as_ref()
-                .and_then(|b| b.min_match_ratio)
-                .or_else(|| {
-                    qmap.get("min_match_ratio")
-                        .or_else(|| qmap.get("min_ratio"))
-                        .or_else(|| qmap.get("ratio"))
-                        .and_then(|v| v.parse::<u8>().ok())
-                });
-
-            match node
-                .screen_set_tile_motion_mode(enabled, max_displacement, min_match_ratio)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(500, &format!("failed to set screen tile motion mode: {e}")),
-            }
+            api_screen_tile::post_screen_tile_motion(method, query_str, body, node).await
         }
         ("POST", "/api/screen/tile/motion/reset")
         | ("DELETE", "/api/screen/tile/motion/reset")
         | ("DELETE", "/api/screen/tile/motion") => {
-            match node.screen_reset_tile_motion_mode().await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(
-                    500,
-                    &format!("failed to reset screen tile motion mode: {e}"),
-                ),
-            }
+            api_screen_tile::post_screen_tile_motion_reset(method, query_str, body, node).await
         }
-        // Local input sharing (controller → controlled). Dialling the 45719
-        // channel is what lets `drive_input*` actually deliver; the established
-        // capture hooks are inert until then.
-        ("GET", "/api/input") => {
-            let rep = node.input_status_report().await;
-            json_ok(&rep)
-        }
+        ("GET", "/api/input") => api_input::get_input(method, query_str, body, node).await,
         ("POST", "/api/input/start") => {
-            let target_opt = if !body.is_empty() {
-                match serde_json::from_slice::<PeerTargetBody>(body) {
-                    Ok(b) => b.peer,
-                    Err(_) => return err(400, "bad json"),
-                }
-            } else {
-                None
-            };
-            match node.input_start_reported(target_opt.as_deref()).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_input::post_input_start(method, query_str, body, node).await
         }
-        ("POST", "/api/input/stop") => match node.input_stop_reported().await {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(400, &e.to_string()),
-        },
+        ("POST", "/api/input/stop") => {
+            api_input::post_input_stop(method, query_str, body, node).await
+        }
         ("GET", "/api/input/tunnel") | ("GET", "/api/input/tunnel/status") => {
-            json_ok(&node.input_tunnel_status())
+            api_input::get_input_tunnel(method, query_str, body, node).await
         }
         ("POST", "/api/input/tunnel/attach") | ("PUT", "/api/input/tunnel/attach") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<InputTunnelAttachBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<InputTunnelAttachBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected InputTunnelAttachBody"),
-                }
-            };
-
-            let peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("peer_id").cloned())
-                .or_else(|| qmap.get("target").cloned());
-            let peer = match peer {
-                Some(p) if !p.trim().is_empty() => p,
-                _ => return err(400, "missing 'peer' parameter"),
-            };
-
-            let edge_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.edge.clone())
-                .or_else(|| qmap.get("edge").cloned());
-            let edge = match edge_str {
-                Some(s) => match s.parse::<DisplayEdge>() {
-                    Ok(e) => Some(e),
-                    Err(e) => return err(400, &format!("invalid edge '{s}': {e}")),
-                },
-                None => None,
-            };
-
-            let x = parsed_body
-                .as_ref()
-                .and_then(|b| b.x)
-                .or_else(|| qmap.get("x").and_then(|s| s.parse::<i32>().ok()));
-
-            let y = parsed_body
-                .as_ref()
-                .and_then(|b| b.y)
-                .or_else(|| qmap.get("y").and_then(|s| s.parse::<i32>().ok()));
-
-            match node.input_tunnel_attach(&peer, edge, x, y).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_input::post_input_tunnel_attach(method, query_str, body, node).await
         }
         ("POST", "/api/input/tunnel/release") | ("PUT", "/api/input/tunnel/release") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<InputTunnelReleaseBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<InputTunnelReleaseBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected InputTunnelReleaseBody"),
-                }
-            };
-
-            let reason = parsed_body
-                .as_ref()
-                .and_then(|b| b.reason.clone())
-                .or_else(|| qmap.get("reason").cloned());
-
-            match node.input_tunnel_release(reason.as_deref()).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_input::post_input_tunnel_release(method, query_str, body, node).await
         }
-        ("GET", "/api/input/policy") => json_ok(&node.input_policy_report()),
+        ("GET", "/api/input/policy") => {
+            api_input::get_input_policy(method, query_str, body, node).await
+        }
         ("POST", "/api/input/policy") | ("PUT", "/api/input/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<InputTunnelPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<InputTunnelPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected InputTunnelPolicyBody"),
-                }
-            };
-
-            let mut policy = node.input_policy();
-            if let Some(ref b) = parsed_body {
-                if let Some(en) = b.enabled {
-                    policy.enabled = en;
-                }
-                if let Some(inbound) = b.allow_inbound_control {
-                    policy.allow_inbound_control = inbound;
-                }
-                if let Some(kb) = b.allow_keyboard {
-                    policy.allow_keyboard = kb;
-                }
-                if let Some(mouse) = b.allow_mouse {
-                    policy.allow_mouse = mouse;
-                }
-                if let Some(hk) = b.hotkey_release_enabled {
-                    policy.hotkey_release_enabled = hk;
-                }
-                if let Some(to) = b.idle_timeout_secs {
-                    policy.idle_timeout_secs = to;
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(en) = qmap.get("enable").or_else(|| qmap.get("enabled")) {
-                if let Ok(b) = en.parse::<bool>() {
-                    policy.enabled = b;
-                }
-            }
-            if let Some(inbound) = qmap
-                .get("allow_inbound")
-                .or_else(|| qmap.get("allow_inbound_control"))
-            {
-                if let Ok(b) = inbound.parse::<bool>() {
-                    policy.allow_inbound_control = b;
-                }
-            }
-            if let Some(kb) = qmap.get("keyboard").or_else(|| qmap.get("allow_keyboard")) {
-                if let Ok(b) = kb.parse::<bool>() {
-                    policy.allow_keyboard = b;
-                }
-            }
-            if let Some(mouse) = qmap.get("mouse").or_else(|| qmap.get("allow_mouse")) {
-                if let Ok(b) = mouse.parse::<bool>() {
-                    policy.allow_mouse = b;
-                }
-            }
-            if let Some(hk) = qmap
-                .get("hotkey")
-                .or_else(|| qmap.get("hotkey_release_enabled"))
-            {
-                if let Ok(b) = hk.parse::<bool>() {
-                    policy.hotkey_release_enabled = b;
-                }
-            }
-            if let Some(to) = qmap
-                .get("timeout")
-                .or_else(|| qmap.get("idle_timeout_secs"))
-            {
-                if let Ok(secs) = to.parse::<u32>() {
-                    policy.idle_timeout_secs = secs;
-                }
-            }
-            if let Some(grp) = qmap.get("group").or_else(|| qmap.get("allowed_group")) {
-                if !policy.allowed_groups.contains(grp) {
-                    policy.allowed_groups.push(grp.clone());
-                }
-            }
-            if let Some(tag) = qmap.get("tag").or_else(|| qmap.get("allowed_tag")) {
-                if !policy.allowed_tags.contains(tag) {
-                    policy.allowed_tags.push(tag.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_input_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_input::post_input_policy(method, query_str, body, node).await
         }
         ("GET", "/api/display/virtual") | ("GET", "/api/display/virtual/status") => {
-            json_ok(&node.virtual_display_status())
+            api_display::get_display_virtual(method, query_str, body, node).await
         }
         ("POST", "/api/display/virtual/attach") | ("PUT", "/api/display/virtual/attach") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<VirtualDisplayAttachBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<VirtualDisplayAttachBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected VirtualDisplayAttachBody"),
-                }
-            };
-
-            let peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("peer_id").cloned())
-                .or_else(|| qmap.get("target").cloned());
-            let peer = match peer {
-                Some(p) if !p.trim().is_empty() => p,
-                _ => return err(400, "missing 'peer' parameter"),
-            };
-
-            let edge_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.edge.clone())
-                .or_else(|| qmap.get("edge").cloned());
-            let edge = match edge_str {
-                Some(s) => match s.parse::<DisplayEdge>() {
-                    Ok(e) => Some(e),
-                    Err(e) => return err(400, &format!("invalid edge '{s}': {e}")),
-                },
-                None => None,
-            };
-
-            let width = parsed_body
-                .as_ref()
-                .and_then(|b| b.width)
-                .or_else(|| qmap.get("width").and_then(|s| s.parse::<u32>().ok()));
-
-            let height = parsed_body
-                .as_ref()
-                .and_then(|b| b.height)
-                .or_else(|| qmap.get("height").and_then(|s| s.parse::<u32>().ok()));
-
-            let fps = parsed_body.as_ref().and_then(|b| b.fps).or_else(|| {
-                qmap.get("fps")
-                    .or_else(|| qmap.get("target_fps"))
-                    .and_then(|s| s.parse::<u32>().ok())
-            });
-
-            match node
-                .virtual_display_attach(&peer, edge, width, height, fps)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_display::post_display_virtual_attach(method, query_str, body, node).await
         }
         ("POST", "/api/display/virtual/detach") | ("PUT", "/api/display/virtual/detach") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<VirtualDisplayDetachBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<VirtualDisplayDetachBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected VirtualDisplayDetachBody"),
-                }
-            };
-
-            let reason = parsed_body
-                .as_ref()
-                .and_then(|b| b.reason.clone())
-                .or_else(|| qmap.get("reason").cloned());
-
-            match node.virtual_display_detach(reason.as_deref()).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_display::post_display_virtual_detach(method, query_str, body, node).await
         }
-        ("GET", "/api/display/virtual/policy") => json_ok(&node.virtual_display_policy_report()),
+        ("GET", "/api/display/virtual/policy") => {
+            api_display::get_display_virtual_policy(method, query_str, body, node).await
+        }
         ("POST", "/api/display/virtual/policy") | ("PUT", "/api/display/virtual/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<VirtualDisplayPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<VirtualDisplayPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected VirtualDisplayPolicyBody"),
-                }
-            };
-
-            let mut policy = node.virtual_display_policy();
-            if let Some(ref b) = parsed_body {
-                if let Some(en) = b.enabled {
-                    policy.enabled = en;
-                }
-                if let Some(hosting) = b.allow_hosting {
-                    policy.allow_hosting = hosting;
-                }
-                if let Some(extend) = b.allow_remote_extend {
-                    policy.allow_remote_extend = extend;
-                }
-                if let Some(w) = b.max_resolution_width {
-                    policy.max_resolution_width = w;
-                }
-                if let Some(h) = b.max_resolution_height {
-                    policy.max_resolution_height = h;
-                }
-                if let Some(fps) = b.max_fps {
-                    policy.max_fps = fps;
-                }
-                if let Some(to) = b.idle_timeout_secs {
-                    policy.idle_timeout_secs = to;
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(en) = qmap.get("enable").or_else(|| qmap.get("enabled")) {
-                if let Ok(b) = en.parse::<bool>() {
-                    policy.enabled = b;
-                }
-            }
-            if let Some(h) = qmap
-                .get("allow_host")
-                .or_else(|| qmap.get("allow_hosting"))
-                .or_else(|| qmap.get("hosting"))
-            {
-                if let Ok(b) = h.parse::<bool>() {
-                    policy.allow_hosting = b;
-                }
-            }
-            if let Some(ext) = qmap
-                .get("allow_extend")
-                .or_else(|| qmap.get("allow_remote_extend"))
-                .or_else(|| qmap.get("remote_extend"))
-            {
-                if let Ok(b) = ext.parse::<bool>() {
-                    policy.allow_remote_extend = b;
-                }
-            }
-            if let Some(mw) = qmap
-                .get("max_width")
-                .or_else(|| qmap.get("max_resolution_width"))
-            {
-                if let Ok(w) = mw.parse::<u32>() {
-                    policy.max_resolution_width = w;
-                }
-            }
-            if let Some(mh) = qmap
-                .get("max_height")
-                .or_else(|| qmap.get("max_resolution_height"))
-            {
-                if let Ok(h) = mh.parse::<u32>() {
-                    policy.max_resolution_height = h;
-                }
-            }
-            if let Some(fps) = qmap.get("max_fps").or_else(|| qmap.get("fps")) {
-                if let Ok(f) = fps.parse::<u32>() {
-                    policy.max_fps = f;
-                }
-            }
-            if let Some(to) = qmap
-                .get("timeout")
-                .or_else(|| qmap.get("idle_timeout_secs"))
-            {
-                if let Ok(secs) = to.parse::<u32>() {
-                    policy.idle_timeout_secs = secs;
-                }
-            }
-            if let Some(grp) = qmap.get("group").or_else(|| qmap.get("allowed_group")) {
-                if !policy.allowed_groups.contains(grp) {
-                    policy.allowed_groups.push(grp.clone());
-                }
-            }
-            if let Some(tag) = qmap.get("tag").or_else(|| qmap.get("allowed_tag")) {
-                if !policy.allowed_tags.contains(tag) {
-                    policy.allowed_tags.push(tag.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_virtual_display_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_display::post_display_virtual_policy(method, query_str, body, node).await
         }
         ("GET", "/api/audio/routing") | ("GET", "/api/audio/routing/status") => {
-            json_ok(&node.audio_routing_status())
+            api_audio::get_audio_routing(method, query_str, body, node).await
         }
         ("POST", "/api/audio/routing/attach") | ("PUT", "/api/audio/routing/attach") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<AudioRoutingAttachBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<AudioRoutingAttachBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected AudioRoutingAttachBody"),
-                }
-            };
-
-            let peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("peer_id").cloned())
-                .or_else(|| qmap.get("target").cloned());
-            let peer = match peer {
-                Some(p) if !p.trim().is_empty() => p,
-                _ => return err(400, "missing 'peer' parameter"),
-            };
-
-            let layout = parsed_body
-                .as_ref()
-                .and_then(|b| b.layout.as_deref())
-                .or_else(|| qmap.get("layout").map(String::as_str))
-                .map(AudioChannelLayout::from_str_lenient);
-
-            let sample_rate = parsed_body
-                .as_ref()
-                .and_then(|b| b.sample_rate)
-                .or_else(|| qmap.get("sample_rate").and_then(|s| s.parse::<u32>().ok()));
-
-            let channels = parsed_body
-                .as_ref()
-                .and_then(|b| b.channels)
-                .or_else(|| qmap.get("channels").and_then(|s| s.parse::<u8>().ok()));
-
-            let spatial_x = parsed_body
-                .as_ref()
-                .and_then(|b| b.spatial_x.or_else(|| b.spatial_position.and_then(|p| p.x)))
-                .or_else(|| {
-                    qmap.get("x")
-                        .or_else(|| qmap.get("spatial_x"))
-                        .and_then(|s| s.parse::<f32>().ok())
-                });
-
-            let spatial_y = parsed_body
-                .as_ref()
-                .and_then(|b| b.spatial_y.or_else(|| b.spatial_position.and_then(|p| p.y)))
-                .or_else(|| {
-                    qmap.get("y")
-                        .or_else(|| qmap.get("spatial_y"))
-                        .and_then(|s| s.parse::<f32>().ok())
-                });
-
-            let spatial_z = parsed_body
-                .as_ref()
-                .and_then(|b| b.spatial_z.or_else(|| b.spatial_position.and_then(|p| p.z)))
-                .or_else(|| {
-                    qmap.get("z")
-                        .or_else(|| qmap.get("spatial_z"))
-                        .and_then(|s| s.parse::<f32>().ok())
-                });
-
-            let volume_gain = parsed_body
-                .as_ref()
-                .and_then(|b| b.volume_gain)
-                .or_else(|| {
-                    qmap.get("gain")
-                        .or_else(|| qmap.get("volume"))
-                        .or_else(|| qmap.get("volume_gain"))
-                        .and_then(|s| s.parse::<f32>().ok())
-                });
-
-            match node
-                .audio_routing_attach(
-                    &peer,
-                    layout,
-                    sample_rate,
-                    channels,
-                    spatial_x,
-                    spatial_y,
-                    spatial_z,
-                    volume_gain,
-                )
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_audio::post_audio_routing_attach(method, query_str, body, node).await
         }
         ("POST", "/api/audio/routing/detach") | ("PUT", "/api/audio/routing/detach") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<AudioRoutingDetachBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<AudioRoutingDetachBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected AudioRoutingDetachBody"),
-                }
-            };
-
-            let reason = parsed_body
-                .as_ref()
-                .and_then(|b| b.reason.clone())
-                .or_else(|| qmap.get("reason").cloned());
-
-            match node.audio_routing_detach(reason.as_deref()).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_audio::post_audio_routing_detach(method, query_str, body, node).await
         }
-        ("GET", "/api/audio/routing/policy") => json_ok(&node.audio_routing_policy_report()),
+        ("GET", "/api/audio/routing/policy") => {
+            api_audio::get_audio_routing_policy(method, query_str, body, node).await
+        }
         ("POST", "/api/audio/routing/policy") | ("PUT", "/api/audio/routing/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<AudioRoutingPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<AudioRoutingPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected AudioRoutingPolicyBody"),
-                }
-            };
-
-            let mut policy = node.audio_routing_policy();
-            if let Some(ref b) = parsed_body {
-                if let Some(en) = b.enabled {
-                    policy.enabled = en;
-                }
-                if let Some(sink) = b.allow_inbound_sink {
-                    policy.allow_inbound_sink = sink;
-                }
-                if let Some(outbound) = b.allow_outbound_routing {
-                    policy.allow_outbound_routing = outbound;
-                }
-                if let Some(max_vol) = b.max_volume_limit {
-                    policy.max_volume_limit = max_vol.min(100);
-                }
-                if let Some(spatial) = b.allow_spatial_rendering {
-                    policy.allow_spatial_rendering = spatial;
-                }
-                if let Some(timeout) = b.idle_timeout_secs {
-                    policy.idle_timeout_secs = timeout;
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(en) = qmap.get("enabled").or_else(|| qmap.get("enable")) {
-                if let Ok(b) = en.parse::<bool>() {
-                    policy.enabled = b;
-                }
-            }
-            if let Some(sink) = qmap
-                .get("allow_inbound_sink")
-                .or_else(|| qmap.get("allow_sink"))
-                .or_else(|| qmap.get("sink"))
-            {
-                if let Ok(b) = sink.parse::<bool>() {
-                    policy.allow_inbound_sink = b;
-                }
-            }
-            if let Some(outbound) = qmap
-                .get("allow_outbound_routing")
-                .or_else(|| qmap.get("allow_outbound"))
-                .or_else(|| qmap.get("routing"))
-            {
-                if let Ok(b) = outbound.parse::<bool>() {
-                    policy.allow_outbound_routing = b;
-                }
-            }
-            if let Some(mv) = qmap
-                .get("max_volume_limit")
-                .or_else(|| qmap.get("max_volume"))
-                .or_else(|| qmap.get("volume_limit"))
-            {
-                if let Ok(v) = mv.parse::<u8>() {
-                    policy.max_volume_limit = v.min(100);
-                }
-            }
-            if let Some(sp) = qmap
-                .get("allow_spatial_rendering")
-                .or_else(|| qmap.get("allow_spatial"))
-                .or_else(|| qmap.get("spatial"))
-            {
-                if let Ok(b) = sp.parse::<bool>() {
-                    policy.allow_spatial_rendering = b;
-                }
-            }
-            if let Some(to) = qmap
-                .get("idle_timeout_secs")
-                .or_else(|| qmap.get("timeout"))
-                .or_else(|| qmap.get("idle_timeout"))
-            {
-                if let Ok(v) = to.parse::<u32>() {
-                    policy.idle_timeout_secs = v;
-                }
-            }
-            if let Some(grp) = qmap.get("group").or_else(|| qmap.get("allowed_group")) {
-                if !policy.allowed_groups.contains(grp) {
-                    policy.allowed_groups.push(grp.clone());
-                }
-            }
-            if let Some(tag) = qmap.get("tag").or_else(|| qmap.get("allowed_tag")) {
-                if !policy.allowed_tags.contains(tag) {
-                    policy.allowed_tags.push(tag.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_audio_routing_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_audio::post_audio_routing_policy(method, query_str, body, node).await
         }
-        ("GET", "/api/camera") | ("GET", "/api/camera/status") => json_ok(&node.camera_status()),
+        ("GET", "/api/camera") | ("GET", "/api/camera/status") => {
+            api_camera::get_camera(method, query_str, body, node).await
+        }
         ("POST", "/api/camera/attach") | ("PUT", "/api/camera/attach") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<CameraAttachBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<CameraAttachBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected CameraAttachBody"),
-                }
-            };
-
-            let peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("peer_id").cloned())
-                .or_else(|| qmap.get("target").cloned());
-            let peer = match peer {
-                Some(p) if !p.trim().is_empty() => p,
-                _ => return err(400, "missing 'peer' parameter"),
-            };
-
-            let lens_id = parsed_body
-                .as_ref()
-                .and_then(|b| b.lens_id.clone())
-                .or_else(|| qmap.get("lens_id").cloned())
-                .or_else(|| qmap.get("lens").cloned());
-
-            let width = parsed_body
-                .as_ref()
-                .and_then(|b| b.width)
-                .or_else(|| qmap.get("width").and_then(|s| s.parse::<u32>().ok()));
-
-            let height = parsed_body
-                .as_ref()
-                .and_then(|b| b.height)
-                .or_else(|| qmap.get("height").and_then(|s| s.parse::<u32>().ok()));
-
-            let fps = parsed_body.as_ref().and_then(|b| b.fps).or_else(|| {
-                qmap.get("target_fps")
-                    .or_else(|| qmap.get("fps"))
-                    .and_then(|s| s.parse::<u32>().ok())
-            });
-
-            let codec = parsed_body
-                .as_ref()
-                .and_then(|b| b.codec.clone())
-                .or_else(|| qmap.get("codec").cloned())
-                .and_then(|c| match c.to_ascii_lowercase().as_str() {
-                    "mjpeg" => Some(CameraCodec::Mjpeg),
-                    "zstd_rgb" | "zstd-rgb" | "zstd" => Some(CameraCodec::ZstdRgb),
-                    "raw_nv12" | "raw-nv12" | "nv12" => Some(CameraCodec::RawNv12),
-                    "h264_light" | "h264-light" | "h264" => Some(CameraCodec::H264Light),
-                    _ => None,
-                });
-
-            let flashlight = parsed_body.as_ref().and_then(|b| b.flashlight).or_else(|| {
-                qmap.get("flashlight")
-                    .or_else(|| qmap.get("torch"))
-                    .or_else(|| qmap.get("flashlight_on"))
-                    .and_then(|s| s.parse::<bool>().ok())
-            });
-
-            let zoom = parsed_body.as_ref().and_then(|b| b.zoom).or_else(|| {
-                qmap.get("zoom")
-                    .or_else(|| qmap.get("zoom_ratio"))
-                    .and_then(|s| s.parse::<f32>().ok())
-            });
-
-            match node
-                .camera_attach(
-                    &peer,
-                    lens_id.as_deref(),
-                    width,
-                    height,
-                    fps,
-                    codec,
-                    flashlight,
-                    zoom,
-                )
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_camera::post_camera_attach(method, query_str, body, node).await
         }
         ("POST", "/api/camera/detach") | ("PUT", "/api/camera/detach") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<CameraDetachBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<CameraDetachBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected CameraDetachBody"),
-                }
-            };
-
-            let reason = parsed_body
-                .as_ref()
-                .and_then(|b| b.reason.clone())
-                .or_else(|| qmap.get("reason").cloned());
-
-            match node.camera_detach(reason.as_deref()).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_camera::post_camera_detach(method, query_str, body, node).await
         }
-        ("GET", "/api/camera/policy") => json_ok(&node.camera_policy_report()),
+        ("GET", "/api/camera/policy") => {
+            api_camera::get_camera_policy(method, query_str, body, node).await
+        }
         ("POST", "/api/camera/policy") | ("PUT", "/api/camera/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<CameraPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<CameraPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected CameraPolicyBody"),
-                }
-            };
-
-            let mut policy = node.camera_policy();
-            if let Some(ref b) = parsed_body {
-                if let Some(en) = b.enabled {
-                    policy.enabled = en;
-                }
-                if let Some(inbound) = b.allow_inbound_stream {
-                    policy.allow_inbound_stream = inbound;
-                }
-                if let Some(capture) = b.allow_remote_capture {
-                    policy.allow_remote_capture = capture;
-                }
-                if let Some(w) = b.max_resolution_width {
-                    policy.max_resolution_width = w;
-                }
-                if let Some(h) = b.max_resolution_height {
-                    policy.max_resolution_height = h;
-                }
-                if let Some(fps) = b.max_fps {
-                    policy.max_fps = fps;
-                }
-                if let Some(shutter) = b.enforce_privacy_shutter_indicator {
-                    policy.enforce_privacy_shutter_indicator = shutter;
-                }
-                if let Some(to) = b.idle_timeout_secs {
-                    policy.idle_timeout_secs = to;
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(en) = qmap.get("enabled").or_else(|| qmap.get("enable")) {
-                if let Ok(b) = en.parse::<bool>() {
-                    policy.enabled = b;
-                }
-            }
-            if let Some(inbound) = qmap
-                .get("allow_inbound_stream")
-                .or_else(|| qmap.get("allow_inbound"))
-                .or_else(|| qmap.get("inbound"))
-            {
-                if let Ok(b) = inbound.parse::<bool>() {
-                    policy.allow_inbound_stream = b;
-                }
-            }
-            if let Some(capture) = qmap
-                .get("allow_remote_capture")
-                .or_else(|| qmap.get("allow_capture"))
-                .or_else(|| qmap.get("capture"))
-            {
-                if let Ok(b) = capture.parse::<bool>() {
-                    policy.allow_remote_capture = b;
-                }
-            }
-            if let Some(w_str) = qmap
-                .get("max_resolution_width")
-                .or_else(|| qmap.get("max_width"))
-            {
-                if let Ok(w) = w_str.parse::<u32>() {
-                    policy.max_resolution_width = w;
-                }
-            }
-            if let Some(h_str) = qmap
-                .get("max_resolution_height")
-                .or_else(|| qmap.get("max_height"))
-            {
-                if let Ok(h) = h_str.parse::<u32>() {
-                    policy.max_resolution_height = h;
-                }
-            }
-            if let Some(fps_str) = qmap.get("max_fps").or_else(|| qmap.get("fps")) {
-                if let Ok(f) = fps_str.parse::<u32>() {
-                    policy.max_fps = f;
-                }
-            }
-            if let Some(shutter_str) = qmap
-                .get("enforce_privacy_shutter_indicator")
-                .or_else(|| qmap.get("privacy_shutter"))
-                .or_else(|| qmap.get("shutter"))
-            {
-                if let Ok(b) = shutter_str.parse::<bool>() {
-                    policy.enforce_privacy_shutter_indicator = b;
-                }
-            }
-            if let Some(to) = qmap
-                .get("idle_timeout_secs")
-                .or_else(|| qmap.get("timeout"))
-                .or_else(|| qmap.get("idle_timeout"))
-            {
-                if let Ok(v) = to.parse::<u32>() {
-                    policy.idle_timeout_secs = v;
-                }
-            }
-            if let Some(grp) = qmap.get("group").or_else(|| qmap.get("allowed_group")) {
-                if !policy.allowed_groups.contains(grp) {
-                    policy.allowed_groups.push(grp.clone());
-                }
-            }
-            if let Some(tag) = qmap.get("tag").or_else(|| qmap.get("allowed_tag")) {
-                if !policy.allowed_tags.contains(tag) {
-                    policy.allowed_tags.push(tag.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_camera_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_camera::post_camera_policy(method, query_str, body, node).await
         }
         ("GET", "/api/mic") | ("GET", "/api/mic/status") | ("GET", "/api/microphone") => {
-            json_ok(&node.microphone_status())
+            api_mic::get_mic(method, query_str, body, node).await
         }
         ("POST", "/api/mic/attach")
         | ("PUT", "/api/mic/attach")
         | ("POST", "/api/microphone/attach")
         | ("PUT", "/api/microphone/attach") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<MicAttachBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<MicAttachBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected MicAttachBody"),
-                }
-            };
-
-            let peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("peer_id").cloned())
-                .or_else(|| qmap.get("target").cloned());
-            let peer = match peer {
-                Some(p) if !p.trim().is_empty() => p,
-                _ => return err(400, "missing 'peer' parameter"),
-            };
-
-            let mic_id = parsed_body
-                .as_ref()
-                .and_then(|b| b.mic_id.clone())
-                .or_else(|| qmap.get("mic_id").cloned())
-                .or_else(|| qmap.get("mic").cloned());
-
-            let mode = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone())
-                .or_else(|| qmap.get("mode").cloned())
-                .map(|m| tetherly_core::MicMode::from_str_lenient(&m))
-                .unwrap_or(tetherly_core::MicMode::VirtualMic);
-
-            let codec = parsed_body
-                .as_ref()
-                .and_then(|b| b.codec.clone())
-                .or_else(|| qmap.get("codec").cloned())
-                .map(|c| match c.to_ascii_lowercase().as_str() {
-                    "pcm16" | "pcm" | "raw" => MicCodec::Pcm16,
-                    "aac_light" | "aac-light" | "aac" => MicCodec::AacLight,
-                    _ => MicCodec::Opus,
-                });
-
-            let sample_rate = parsed_body
-                .as_ref()
-                .and_then(|b| b.sample_rate)
-                .or_else(|| qmap.get("sample_rate").and_then(|s| s.parse::<u32>().ok()));
-
-            let channels = parsed_body
-                .as_ref()
-                .and_then(|b| b.channels)
-                .or_else(|| qmap.get("channels").and_then(|s| s.parse::<u32>().ok()));
-
-            let gain = parsed_body
-                .as_ref()
-                .and_then(|b| b.gain)
-                .or_else(|| qmap.get("gain").and_then(|s| s.parse::<f32>().ok()));
-
-            let muted = parsed_body
-                .as_ref()
-                .and_then(|b| b.muted)
-                .or_else(|| qmap.get("muted").and_then(|s| s.parse::<bool>().ok()));
-
-            let noise_suppression = parsed_body
-                .as_ref()
-                .and_then(|b| b.noise_suppression)
-                .or_else(|| {
-                    qmap.get("noise_suppression")
-                        .or_else(|| qmap.get("ns"))
-                        .and_then(|s| s.parse::<bool>().ok())
-                });
-
-            let echo_cancellation = parsed_body
-                .as_ref()
-                .and_then(|b| b.echo_cancellation)
-                .or_else(|| {
-                    qmap.get("echo_cancellation")
-                        .or_else(|| qmap.get("aec"))
-                        .and_then(|s| s.parse::<bool>().ok())
-                });
-
-            let auto_gain = parsed_body.as_ref().and_then(|b| b.auto_gain).or_else(|| {
-                qmap.get("auto_gain")
-                    .or_else(|| qmap.get("agc"))
-                    .and_then(|s| s.parse::<bool>().ok())
-            });
-
-            match node
-                .mic_attach(
-                    &peer,
-                    mic_id.as_deref(),
-                    mode,
-                    codec,
-                    sample_rate,
-                    channels,
-                    gain,
-                    muted,
-                    noise_suppression,
-                    echo_cancellation,
-                    auto_gain,
-                )
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_mic::post_mic_attach(method, query_str, body, node).await
         }
         ("POST", "/api/mic/detach")
         | ("PUT", "/api/mic/detach")
         | ("POST", "/api/microphone/detach")
         | ("PUT", "/api/microphone/detach") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<MicDetachBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<MicDetachBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected MicDetachBody"),
-                }
-            };
-
-            let reason = parsed_body
-                .as_ref()
-                .and_then(|b| b.reason.clone())
-                .or_else(|| qmap.get("reason").cloned());
-
-            match node.mic_detach(reason.as_deref()).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_mic::post_mic_detach(method, query_str, body, node).await
         }
         ("GET", "/api/mic/policy") | ("GET", "/api/microphone/policy") => {
-            json_ok(&node.microphone_policy_report())
+            api_mic::get_mic_policy(method, query_str, body, node).await
         }
         ("POST", "/api/mic/policy")
         | ("PUT", "/api/mic/policy")
         | ("POST", "/api/microphone/policy")
         | ("PUT", "/api/microphone/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<MicPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<MicPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected MicPolicyBody"),
-                }
-            };
-
-            let mut policy = node.microphone_policy();
-            if let Some(ref b) = parsed_body {
-                if let Some(en) = b.enabled {
-                    policy.enabled = en;
-                }
-                if let Some(inbound) = b.allow_inbound_stream {
-                    policy.allow_inbound_stream = inbound;
-                }
-                if let Some(capture) = b.allow_remote_capture {
-                    policy.allow_remote_capture = capture;
-                }
-                if let Some(ic) = b.allow_intercom {
-                    policy.allow_intercom = ic;
-                }
-                if let Some(r) = b.max_sample_rate {
-                    policy.max_sample_rate = r;
-                }
-                if let Some(d) = b.max_session_duration_secs {
-                    policy.max_session_duration_secs = d;
-                }
-                if let Some(p) = b.enforce_privacy_indicator {
-                    policy.enforce_privacy_indicator = p;
-                }
-                if let Some(m) = b.default_muted {
-                    policy.default_muted = m;
-                }
-                if let Some(to) = b.idle_timeout_secs {
-                    policy.idle_timeout_secs = to;
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(en) = qmap.get("enabled").or_else(|| qmap.get("enable")) {
-                if let Ok(b) = en.parse::<bool>() {
-                    policy.enabled = b;
-                }
-            }
-            if let Some(inbound) = qmap
-                .get("allow_inbound_stream")
-                .or_else(|| qmap.get("allow_inbound"))
-                .or_else(|| qmap.get("inbound"))
-            {
-                if let Ok(b) = inbound.parse::<bool>() {
-                    policy.allow_inbound_stream = b;
-                }
-            }
-            if let Some(capture) = qmap
-                .get("allow_remote_capture")
-                .or_else(|| qmap.get("allow_capture"))
-                .or_else(|| qmap.get("capture"))
-            {
-                if let Ok(b) = capture.parse::<bool>() {
-                    policy.allow_remote_capture = b;
-                }
-            }
-            if let Some(ic) = qmap
-                .get("allow_intercom")
-                .or_else(|| qmap.get("intercom"))
-                .or_else(|| qmap.get("ptt"))
-            {
-                if let Ok(b) = ic.parse::<bool>() {
-                    policy.allow_intercom = b;
-                }
-            }
-            if let Some(r_str) = qmap.get("max_sample_rate").or_else(|| qmap.get("max_rate")) {
-                if let Ok(r) = r_str.parse::<u32>() {
-                    policy.max_sample_rate = r;
-                }
-            }
-            if let Some(d_str) = qmap
-                .get("max_session_duration_secs")
-                .or_else(|| qmap.get("max_duration"))
-            {
-                if let Ok(d) = d_str.parse::<u32>() {
-                    policy.max_session_duration_secs = d;
-                }
-            }
-            if let Some(p_str) = qmap
-                .get("enforce_privacy_indicator")
-                .or_else(|| qmap.get("privacy_indicator"))
-                .or_else(|| qmap.get("privacy"))
-            {
-                if let Ok(b) = p_str.parse::<bool>() {
-                    policy.enforce_privacy_indicator = b;
-                }
-            }
-            if let Some(m_str) = qmap
-                .get("default_muted")
-                .or_else(|| qmap.get("start_muted"))
-            {
-                if let Ok(b) = m_str.parse::<bool>() {
-                    policy.default_muted = b;
-                }
-            }
-            if let Some(to) = qmap
-                .get("idle_timeout_secs")
-                .or_else(|| qmap.get("timeout"))
-                .or_else(|| qmap.get("idle_timeout"))
-            {
-                if let Ok(v) = to.parse::<u32>() {
-                    policy.idle_timeout_secs = v;
-                }
-            }
-            if let Some(grp) = qmap.get("group").or_else(|| qmap.get("allowed_group")) {
-                if !policy.allowed_groups.contains(grp) {
-                    policy.allowed_groups.push(grp.clone());
-                }
-            }
-            if let Some(tag) = qmap.get("tag").or_else(|| qmap.get("allowed_tag")) {
-                if !policy.allowed_tags.contains(tag) {
-                    policy.allowed_tags.push(tag.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_microphone_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_mic::post_mic_policy(method, query_str, body, node).await
         }
-        ("GET", "/api/bench") | ("GET", "/api/bench/status") => json_ok(&node.bench_status()),
+        ("GET", "/api/bench") | ("GET", "/api/bench/status") => {
+            api_bench::get_bench(method, query_str, body, node).await
+        }
         ("POST", "/api/bench/start") | ("PUT", "/api/bench/start") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<BenchStartBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<BenchStartBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected BenchStartBody"),
-                }
-            };
-
-            let peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("peer_id").cloned())
-                .or_else(|| qmap.get("target").cloned());
-            let peer = match peer {
-                Some(p) if !p.trim().is_empty() => p,
-                _ => return err(400, "missing 'peer' parameter"),
-            };
-
-            let direction = parsed_body
-                .as_ref()
-                .and_then(|b| b.direction.clone())
-                .or_else(|| qmap.get("direction").cloned())
-                .or_else(|| qmap.get("dir").cloned())
-                .map(|d| tetherly_core::BenchDirection::from_str_lenient(&d))
-                .unwrap_or(tetherly_core::BenchDirection::Push);
-
-            let duration_secs = parsed_body
-                .as_ref()
-                .and_then(|b| b.duration_secs)
-                .or_else(|| {
-                    qmap.get("duration_secs")
-                        .and_then(|s| s.parse::<u32>().ok())
-                });
-
-            let chunk_size = parsed_body
-                .as_ref()
-                .and_then(|b| b.chunk_size)
-                .or_else(|| qmap.get("chunk_size").and_then(|s| s.parse::<u32>().ok()));
-
-            match node
-                .bench_start(&peer, direction, duration_secs, chunk_size)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_bench::post_bench_start(method, query_str, body, node).await
         }
-        ("POST", "/api/bench/stop") | ("PUT", "/api/bench/stop") => match node.bench_stop().await {
-            Ok(rep) => json_ok(&rep),
-            Err(e) => err(400, &e.to_string()),
-        },
+        ("POST", "/api/bench/stop") | ("PUT", "/api/bench/stop") => {
+            api_bench::post_bench_stop(method, query_str, body, node).await
+        }
         ("GET", "/api/recommendation") | ("GET", "/api/recommendations") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            if let Some(peer) = qmap
-                .get("peer")
-                .or_else(|| qmap.get("peer_id"))
-                .or_else(|| qmap.get("target"))
-                .filter(|p| !p.trim().is_empty())
-            {
-                match node.streaming_recommendation(peer) {
-                    Ok(rep) => json_ok(&rep),
-                    Err(e) => err(400, &e.to_string()),
-                }
-            } else {
-                json_ok(&node.recommendation_status())
-            }
+            api_bench::get_recommendation(method, query_str, body, node).await
         }
-        ("GET", "/api/bench/policy") => json_ok(&node.bench_policy_report()),
+        ("GET", "/api/bench/policy") => {
+            api_bench::get_bench_policy(method, query_str, body, node).await
+        }
         ("POST", "/api/bench/policy") | ("PUT", "/api/bench/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<BenchPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<BenchPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected BenchPolicyBody"),
-                }
-            };
-
-            let mut policy = node.bench_policy();
-            if let Some(ref b) = parsed_body {
-                if let Some(en) = b.enabled {
-                    policy.enabled = en;
-                }
-                if let Some(inbound) = b.allow_inbound_bench {
-                    policy.allow_inbound_bench = inbound;
-                }
-                if let Some(d) = b.max_duration_secs {
-                    policy.max_duration_secs = d;
-                }
-                if let Some(bw) = b.max_bandwidth_mbps {
-                    policy.max_bandwidth_mbps = bw;
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(en) = qmap.get("enabled").or_else(|| qmap.get("enable")) {
-                if let Ok(b) = en.parse::<bool>() {
-                    policy.enabled = b;
-                }
-            }
-            if let Some(inbound) = qmap
-                .get("allow_inbound_bench")
-                .or_else(|| qmap.get("allow_inbound"))
-                .or_else(|| qmap.get("inbound"))
-            {
-                if let Ok(b) = inbound.parse::<bool>() {
-                    policy.allow_inbound_bench = b;
-                }
-            }
-            if let Some(d_str) = qmap
-                .get("max_duration_secs")
-                .or_else(|| qmap.get("max_duration"))
-            {
-                if let Ok(d) = d_str.parse::<u32>() {
-                    policy.max_duration_secs = d;
-                }
-            }
-            if let Some(bw_str) = qmap
-                .get("max_bandwidth_mbps")
-                .or_else(|| qmap.get("max_bandwidth"))
-            {
-                if let Ok(bw) = bw_str.parse::<u32>() {
-                    policy.max_bandwidth_mbps = bw;
-                }
-            }
-            if let Some(grp) = qmap.get("group").or_else(|| qmap.get("allowed_group")) {
-                if !policy.allowed_groups.contains(grp) {
-                    policy.allowed_groups.push(grp.clone());
-                }
-            }
-            if let Some(tag) = qmap.get("tag").or_else(|| qmap.get("allowed_tag")) {
-                if !policy.allowed_tags.contains(tag) {
-                    policy.allowed_tags.push(tag.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_bench_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_bench::post_bench_policy(method, query_str, body, node).await
         }
         ("GET", "/api/audit")
         | ("GET", "/api/security/audit")
         | ("GET", "/api/audit/logs")
-        | ("POST", "/api/audit/query") => {
-            let mut q_cat: Option<String> = None;
-            let mut q_sev: Option<String> = None;
-            let mut q_lim: Option<usize> = None;
-            let mut q_since: Option<u64> = None;
-
-            if let Some(q) = query_str {
-                let map = parse_query_map(q);
-                if let Some(c) = map.get("category").or_else(|| map.get("cat")) {
-                    q_cat = Some(c.clone());
-                }
-                if let Some(s) = map.get("severity").or_else(|| map.get("sev")) {
-                    q_sev = Some(s.clone());
-                }
-                if let Some(l) = map.get("limit").and_then(|s| s.parse::<usize>().ok()) {
-                    q_lim = Some(l);
-                }
-                if let Some(since) = map
-                    .get("since")
-                    .or_else(|| map.get("since_ms"))
-                    .and_then(|s| s.parse::<u64>().ok())
-                {
-                    q_since = Some(since);
-                }
-            }
-
-            if !body.is_empty() {
-                match serde_json::from_slice::<AuditQueryBody>(body) {
-                    Ok(b) => {
-                        if b.category.is_some() {
-                            q_cat = b.category;
-                        }
-                        if b.severity.is_some() {
-                            q_sev = b.severity;
-                        }
-                        if b.limit.is_some() {
-                            q_lim = b.limit;
-                        }
-                        if b.since.is_some() {
-                            q_since = b.since;
-                        }
-                    }
-                    Err(_) => return err(400, "bad json"),
-                }
-            }
-
-            let cat = match q_cat.as_deref().filter(|s| !s.trim().is_empty()) {
-                Some(c) => match c.parse::<crate::runtime::AuditCategory>() {
-                    Ok(cat) => Some(cat),
-                    Err(e) => return err(400, &e),
-                },
-                None => None,
-            };
-
-            let sev = match q_sev.as_deref().filter(|s| !s.trim().is_empty()) {
-                Some(s) => match s.parse::<crate::runtime::AuditSeverity>() {
-                    Ok(sev) => Some(sev),
-                    Err(e) => return err(400, &e),
-                },
-                None => None,
-            };
-
-            let report = node.audit_report(cat, sev, q_lim, q_since);
-            json_ok(&report)
-        }
+        | ("POST", "/api/audit/query") => api_audit::get_audit(method, query_str, body, node).await,
         ("POST", "/api/audit/clear") | ("DELETE", "/api/audit") | ("DELETE", "/api/audit/logs") => {
-            let report = node.clear_audit_log();
-            json_ok(&report)
+            api_audit::post_audit_clear(method, query_str, body, node).await
         }
         ("POST", "/api/message/send-multi")
         | ("POST", "/api/msg/send-multi")
         | ("POST", "/api/messages/send-multi") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let req: MessageSendBody = if body.is_empty() {
-                MessageSendBody {
-                    peer: qmap.get("peer").cloned(),
-                    tag: qmap.get("tag").cloned(),
-                    group: qmap.get("group").cloned(),
-                    device_type: qmap
-                        .get("type")
-                        .or_else(|| qmap.get("device_type"))
-                        .cloned(),
-                    r#type: None,
-                    all: qmap.get("all").map(|s| s == "true" || s == "1"),
-                    text: qmap.get("text").cloned().unwrap_or_default(),
-                }
-            } else {
-                match serde_json::from_slice::<MessageSendBody>(body) {
-                    Ok(b) => b,
-                    Err(_) => return err(400, "bad json"),
-                }
-            };
-            let text = if !req.text.trim().is_empty() {
-                req.text.trim()
-            } else if let Some(t) = qmap.get("text") {
-                t.trim()
-            } else {
-                return err(400, "message text cannot be empty");
-            };
-
-            let is_all = req.all.unwrap_or(false)
-                || qmap
-                    .get("all")
-                    .map(|s| s == "true" || s == "1")
-                    .unwrap_or(false)
-                || qmap.contains_key("all");
-            let tag = req
-                .tag
-                .as_deref()
-                .or_else(|| qmap.get("tag").map(String::as_str));
-            let group = req
-                .group
-                .as_deref()
-                .or_else(|| qmap.get("group").map(String::as_str));
-            let dev_type = req
-                .device_type
-                .as_deref()
-                .or(req.r#type.as_deref())
-                .or_else(|| {
-                    qmap.get("type")
-                        .or_else(|| qmap.get("device_type"))
-                        .map(String::as_str)
-                });
-            let peer = req
-                .peer
-                .as_deref()
-                .or_else(|| qmap.get("peer").map(String::as_str));
-
-            let selector = match crate::store::TargetSelector::from_query(
-                peer, tag, group, dev_type, is_all,
-            ) {
-                Ok(s) => s,
-                Err(e) => return err(400, &e),
-            };
-
-            match node.send_message_multi(&selector, text).await {
-                Ok(report) => json_ok(&report),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_messages::post_message_send_multi(method, query_str, body, node).await
         }
         ("POST", "/api/message/send")
         | ("POST", "/api/msg/send")
         | ("POST", "/api/messages/send") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let req: MessageSendBody = match serde_json::from_slice(body) {
-                Ok(b) => b,
-                Err(_) => return err(400, "bad json"),
-            };
-            let is_all = req.all.unwrap_or(false)
-                || qmap
-                    .get("all")
-                    .map(|s| s == "true" || s == "1")
-                    .unwrap_or(false)
-                || qmap.contains_key("all");
-            let tag = req
-                .tag
-                .as_deref()
-                .or_else(|| qmap.get("tag").map(String::as_str));
-            let group = req
-                .group
-                .as_deref()
-                .or_else(|| qmap.get("group").map(String::as_str));
-            let dev_type = req
-                .device_type
-                .as_deref()
-                .or(req.r#type.as_deref())
-                .or_else(|| {
-                    qmap.get("type")
-                        .or_else(|| qmap.get("device_type"))
-                        .map(String::as_str)
-                });
-
-            if is_all || tag.is_some() || group.is_some() || dev_type.is_some() {
-                let peer = req
-                    .peer
-                    .as_deref()
-                    .or_else(|| qmap.get("peer").map(String::as_str));
-                let selector = match crate::store::TargetSelector::from_query(
-                    peer, tag, group, dev_type, is_all,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => return err(400, &e),
-                };
-                match node.send_message_multi(&selector, &req.text).await {
-                    Ok(report) => return json_ok(&report),
-                    Err(e) => return err(400, &e.to_string()),
-                }
-            }
-
-            match node
-                .send_message_to_peer(req.peer.as_deref().unwrap_or(""), &req.text)
-                .await
-            {
-                Ok(report) => json_ok(&report),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_messages::post_message_send(method, query_str, body, node).await
         }
         ("GET", "/api/message/history")
         | ("GET", "/api/message/list")
@@ -8588,55 +1309,7 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
         | ("GET", "/api/msg")
         | ("POST", "/api/message/query")
         | ("POST", "/api/msg/query") => {
-            let mut q_peer: Option<String> = None;
-            let mut q_limit: Option<usize> = None;
-            let mut q_unread_only = false;
-            let mut q_mark_read = false;
-
-            if let Some(q) = query_str {
-                let map = parse_query_map(q);
-                if let Some(p) = map
-                    .get("peer")
-                    .or_else(|| map.get("to"))
-                    .or_else(|| map.get("target"))
-                {
-                    q_peer = Some(p.clone());
-                }
-                if let Some(l) = map.get("limit").and_then(|s| s.parse::<usize>().ok()) {
-                    q_limit = Some(l);
-                }
-                if let Some(u) = map.get("unread_only").or_else(|| map.get("unread")) {
-                    q_unread_only = u == "true" || u == "1";
-                }
-                if let Some(m) = map.get("mark_read").or_else(|| map.get("read")) {
-                    q_mark_read = m == "true" || m == "1";
-                }
-            }
-
-            if !body.is_empty() {
-                match serde_json::from_slice::<MessageQueryBody>(body) {
-                    Ok(b) => {
-                        if b.peer.is_some() {
-                            q_peer = b.peer;
-                        }
-                        if b.limit.is_some() {
-                            q_limit = b.limit;
-                        }
-                        if let Some(u) = b.unread_only {
-                            q_unread_only = u;
-                        }
-                        if let Some(m) = b.mark_read {
-                            q_mark_read = m;
-                        }
-                    }
-                    Err(_) => return err(400, "bad json"),
-                }
-            }
-
-            match node.message_history(q_peer.as_deref(), q_limit, q_unread_only, q_mark_read) {
-                Ok(report) => json_ok(&report),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_messages::get_message_history(method, query_str, body, node).await
         }
         ("POST", "/api/message/clear")
         | ("POST", "/api/messages/clear")
@@ -8644,1947 +1317,176 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
         | ("DELETE", "/api/message")
         | ("DELETE", "/api/messages")
         | ("DELETE", "/api/msg") => {
-            let mut q_peer: Option<String> = None;
-            if let Some(q) = query_str {
-                let map = parse_query_map(q);
-                if let Some(p) = map
-                    .get("peer")
-                    .or_else(|| map.get("to"))
-                    .or_else(|| map.get("target"))
-                {
-                    q_peer = Some(p.clone());
-                }
-            }
-            if !body.is_empty() {
-                if let Ok(b) = serde_json::from_slice::<MessageClearBody>(body) {
-                    if b.peer.is_some() {
-                        q_peer = b.peer;
-                    }
-                }
-            }
-            match node.clear_messages(q_peer.as_deref()) {
-                Ok(report) => json_ok(&report),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_messages::post_message_clear(method, query_str, body, node).await
         }
-        // Cross-device Resource & URL Handoff endpoints (v1.72 / ADR-065)
         ("POST", "/api/handoff/send-multi") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let req: HandoffSendBody = if body.is_empty() {
-                HandoffSendBody {
-                    peer: qmap.get("peer").cloned(),
-                    url: qmap.get("url").cloned().unwrap_or_default(),
-                    title: qmap.get("title").cloned(),
-                    auto_open: qmap.get("auto_open").map(|s| s == "true" || s == "1"),
-                    tag: qmap.get("tag").cloned(),
-                    group: qmap.get("group").cloned(),
-                    device_type: qmap
-                        .get("type")
-                        .or_else(|| qmap.get("device_type"))
-                        .cloned(),
-                    r#type: None,
-                    all: qmap.get("all").map(|s| s == "true" || s == "1"),
-                }
-            } else {
-                match serde_json::from_slice::<HandoffSendBody>(body) {
-                    Ok(b) => b,
-                    Err(_) => return err(400, "bad json, expected HandoffSendBody"),
-                }
-            };
-            let url = if !req.url.trim().is_empty() {
-                req.url.trim()
-            } else if let Some(u) = qmap.get("url") {
-                u.trim()
-            } else {
-                return err(400, "url cannot be empty");
-            };
-            let is_all = req.all.unwrap_or(false)
-                || qmap
-                    .get("all")
-                    .map(|s| s == "true" || s == "1")
-                    .unwrap_or(false)
-                || qmap.contains_key("all");
-            let tag = req
-                .tag
-                .as_deref()
-                .or_else(|| qmap.get("tag").map(String::as_str));
-            let group = req
-                .group
-                .as_deref()
-                .or_else(|| qmap.get("group").map(String::as_str));
-            let dev_type = req
-                .device_type
-                .as_deref()
-                .or(req.r#type.as_deref())
-                .or_else(|| {
-                    qmap.get("type")
-                        .or_else(|| qmap.get("device_type"))
-                        .map(String::as_str)
-                });
-            let peer = req
-                .peer
-                .as_deref()
-                .or_else(|| qmap.get("peer").map(String::as_str));
-            let auto_open = req.auto_open.unwrap_or(false)
-                || qmap
-                    .get("auto_open")
-                    .map(|s| s == "true" || s == "1")
-                    .unwrap_or(false);
-            let title = req
-                .title
-                .as_deref()
-                .or_else(|| qmap.get("title").map(String::as_str));
-
-            let selector = match crate::store::TargetSelector::from_query(
-                peer, tag, group, dev_type, is_all,
-            ) {
-                Ok(s) => s,
-                Err(e) => return err(400, &e),
-            };
-
-            match node
-                .handoff_send_multi(&selector, url, title, auto_open)
-                .await
-            {
-                Ok(report) => json_ok(&report),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_handoff::post_handoff_send_multi(method, query_str, body, node).await
         }
         ("POST", "/api/handoff/send") | ("POST", "/api/handoff") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let req: HandoffSendBody = if body.is_empty() {
-                HandoffSendBody {
-                    peer: qmap.get("peer").cloned(),
-                    url: qmap.get("url").cloned().unwrap_or_default(),
-                    title: qmap.get("title").cloned(),
-                    auto_open: qmap.get("auto_open").map(|s| s == "true" || s == "1"),
-                    tag: qmap.get("tag").cloned(),
-                    group: qmap.get("group").cloned(),
-                    device_type: qmap
-                        .get("type")
-                        .or_else(|| qmap.get("device_type"))
-                        .cloned(),
-                    r#type: None,
-                    all: qmap.get("all").map(|s| s == "true" || s == "1"),
-                }
-            } else {
-                match serde_json::from_slice::<HandoffSendBody>(body) {
-                    Ok(b) => b,
-                    Err(_) => return err(400, "bad json, expected HandoffSendBody"),
-                }
-            };
-            let url = if !req.url.trim().is_empty() {
-                req.url.trim()
-            } else if let Some(u) = qmap.get("url") {
-                u.trim()
-            } else {
-                return err(400, "url cannot be empty");
-            };
-            let is_all = req.all.unwrap_or(false)
-                || qmap
-                    .get("all")
-                    .map(|s| s == "true" || s == "1")
-                    .unwrap_or(false)
-                || qmap.contains_key("all");
-            let tag = req
-                .tag
-                .as_deref()
-                .or_else(|| qmap.get("tag").map(String::as_str));
-            let group = req
-                .group
-                .as_deref()
-                .or_else(|| qmap.get("group").map(String::as_str));
-            let dev_type = req
-                .device_type
-                .as_deref()
-                .or(req.r#type.as_deref())
-                .or_else(|| {
-                    qmap.get("type")
-                        .or_else(|| qmap.get("device_type"))
-                        .map(String::as_str)
-                });
-            let auto_open = req.auto_open.unwrap_or(false)
-                || qmap
-                    .get("auto_open")
-                    .map(|s| s == "true" || s == "1")
-                    .unwrap_or(false);
-            let title = req
-                .title
-                .as_deref()
-                .or_else(|| qmap.get("title").map(String::as_str));
-
-            if is_all || tag.is_some() || group.is_some() || dev_type.is_some() {
-                let peer = req
-                    .peer
-                    .as_deref()
-                    .or_else(|| qmap.get("peer").map(String::as_str));
-                let selector = match crate::store::TargetSelector::from_query(
-                    peer, tag, group, dev_type, is_all,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => return err(400, &e),
-                };
-                match node
-                    .handoff_send_multi(&selector, url, title, auto_open)
-                    .await
-                {
-                    Ok(report) => return json_ok(&report),
-                    Err(e) => return err(400, &e.to_string()),
-                }
-            }
-
-            let target_peer = req
-                .peer
-                .as_deref()
-                .or_else(|| qmap.get("peer").map(String::as_str))
-                .unwrap_or("");
-            match node.handoff_send(target_peer, url, title, auto_open).await {
-                Ok(res) => json_ok(&res),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_handoff::post_handoff_send(method, query_str, body, node).await
         }
         ("GET", "/api/handoff/inbox") | ("GET", "/api/handoff") | ("GET", "/api/handoff/list") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let status_filter = qmap
-                .get("status")
-                .and_then(|s| s.parse::<tetherly_core::HandoffStatus>().ok());
-            let list = node.handoff_inbox_list(status_filter);
-            json_ok(&serde_json::json!({
-                "ok": true,
-                "total": list.len(),
-                "inbox": list,
-                "entries": list,
-            }))
+            api_handoff::get_handoff_inbox(method, query_str, body, node).await
         }
         ("POST", "/api/handoff/inbox/open") | ("POST", "/api/handoff/open") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let target_id = qmap.get("id").cloned().or_else(|| {
-                if !body.is_empty() {
-                    serde_json::from_slice::<HandoffInboxActionBody>(body)
-                        .ok()
-                        .and_then(|b| b.id)
-                } else {
-                    None
-                }
-            });
-            let Some(id) = target_id else {
-                return err(400, "missing required 'id' parameter");
-            };
-            match node.handoff_inbox_open(&id) {
-                Ok(entry) => json_ok(&serde_json::json!({
-                    "ok": true,
-                    "id": entry.id,
-                    "url": entry.url,
-                    "status": entry.status.as_str(),
-                    "opened_ms": entry.opened_ms,
-                    "entry": entry,
-                })),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_handoff::post_handoff_inbox_open(method, query_str, body, node).await
         }
         ("POST", "/api/handoff/inbox/dismiss") | ("POST", "/api/handoff/dismiss") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let target_id = qmap.get("id").cloned().or_else(|| {
-                if !body.is_empty() {
-                    serde_json::from_slice::<HandoffInboxActionBody>(body)
-                        .ok()
-                        .and_then(|b| b.id)
-                } else {
-                    None
-                }
-            });
-            let Some(id) = target_id else {
-                return err(400, "missing required 'id' parameter");
-            };
-            match node.handoff_inbox_dismiss(&id) {
-                Ok(entry) => json_ok(&serde_json::json!({
-                    "ok": true,
-                    "id": entry.id,
-                    "status": entry.status.as_str(),
-                    "entry": entry,
-                })),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_handoff::post_handoff_inbox_dismiss(method, query_str, body, node).await
         }
         ("POST", "/api/handoff/inbox/clear")
         | ("DELETE", "/api/handoff/inbox")
-        | ("DELETE", "/api/handoff") => match node.handoff_inbox_clear() {
-            Ok(cleared) => json_ok(&serde_json::json!({
-                "ok": true,
-                "cleared": cleared,
-            })),
-            Err(e) => err(400, &e.to_string()),
-        },
-        ("GET", "/api/handoff/policy") => json_ok(&node.handoff_policy_report()),
+        | ("DELETE", "/api/handoff") => {
+            api_handoff::post_handoff_inbox_clear(method, query_str, body, node).await
+        }
+        ("GET", "/api/handoff/policy") => {
+            api_handoff::get_handoff_policy(method, query_str, body, node).await
+        }
         ("POST", "/api/handoff/policy") | ("PUT", "/api/handoff/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<HandoffPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<HandoffPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected handoff policy fields"),
-                }
-            };
-            let mut policy = node.handoff_policy();
-
-            if let Some(ref b) = parsed_body {
-                if let Some(ref a) = b.action {
-                    match a.parse::<tetherly_core::HandoffAction>() {
-                        Ok(act) => policy.action = act,
-                        Err(e) => return err(400, &format!("invalid handoff action '{a}': {e}")),
-                    }
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if let Some(max_entries) = b.max_inbox_entries {
-                    policy.max_inbox_entries = max_entries;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(act_str) = qmap.get("action") {
-                match act_str.parse::<tetherly_core::HandoffAction>() {
-                    Ok(act) => policy.action = act,
-                    Err(e) => return err(400, &format!("invalid handoff action '{act_str}': {e}")),
-                }
-            }
-            if let Some(g) = qmap.get("group") {
-                if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
-                    policy.allowed_groups.push(g.clone());
-                }
-            }
-            if let Some(t) = qmap.get("tag") {
-                if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
-                    policy.allowed_tags.push(t.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if let Some(max_str) = qmap
-                .get("max_inbox_entries")
-                .or_else(|| qmap.get("max_entries"))
-            {
-                if let Ok(m) = max_str.parse::<usize>() {
-                    policy.max_inbox_entries = m;
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_handoff_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_handoff::post_handoff_policy(method, query_str, body, node).await
         }
         ("POST", "/api/media/command")
         | ("POST", "/api/media/cmd")
         | ("POST", "/api/media/send") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let req: MediaCommandBody = if body.is_empty() {
-                MediaCommandBody {
-                    peer: qmap.get("peer").cloned(),
-                    target: qmap.get("target").cloned(),
-                    command: qmap.get("command").or_else(|| qmap.get("cmd")).cloned(),
-                    action: qmap.get("action").cloned(),
-                    volume: qmap
-                        .get("volume")
-                        .or_else(|| qmap.get("volume_percent"))
-                        .and_then(|v| v.parse::<u8>().ok()),
-                    volume_percent: None,
-                    offset_ms: qmap
-                        .get("offset_ms")
-                        .or_else(|| qmap.get("offset"))
-                        .and_then(|v| v.parse::<i64>().ok()),
-                    target_player: qmap
-                        .get("target_player")
-                        .or_else(|| qmap.get("player"))
-                        .cloned(),
-                    tag: qmap.get("tag").cloned(),
-                    group: qmap.get("group").cloned(),
-                    device_type: qmap
-                        .get("type")
-                        .or_else(|| qmap.get("device_type"))
-                        .cloned(),
-                    r#type: None,
-                    all: qmap.get("all").map(|s| s == "true" || s == "1"),
-                }
-            } else {
-                match serde_json::from_slice::<MediaCommandBody>(body) {
-                    Ok(b) => b,
-                    Err(_) => return err(400, "bad json, expected MediaCommandBody"),
-                }
-            };
-
-            let cmd_str = req
-                .command
-                .or(req.action)
-                .or_else(|| {
-                    qmap.get("command")
-                        .or_else(|| qmap.get("cmd"))
-                        .or_else(|| qmap.get("action"))
-                        .cloned()
-                })
-                .unwrap_or_default();
-            let cmd_str = cmd_str.trim().to_ascii_lowercase();
-            if cmd_str.is_empty() {
-                return err(400, "missing required 'command' or 'action'");
-            }
-
-            let command = match cmd_str.as_str() {
-                "play" => MediaCommand::Play,
-                "pause" => MediaCommand::Pause,
-                "play_pause" | "playpause" | "toggle" => MediaCommand::PlayPause,
-                "stop" => MediaCommand::Stop,
-                "next" => MediaCommand::Next,
-                "prev" | "previous" => MediaCommand::Previous,
-                "seek" => {
-                    let offset = req
-                        .offset_ms
-                        .or_else(|| {
-                            qmap.get("offset_ms")
-                                .or_else(|| qmap.get("offset"))
-                                .and_then(|s| s.parse::<i64>().ok())
-                        })
-                        .unwrap_or(0);
-                    MediaCommand::Seek { offset_ms: offset }
-                }
-                "volume" | "set_volume" => {
-                    let vol = req
-                        .volume
-                        .or(req.volume_percent)
-                        .or_else(|| {
-                            qmap.get("volume")
-                                .or_else(|| qmap.get("volume_percent"))
-                                .and_then(|s| s.parse::<u8>().ok())
-                        })
-                        .unwrap_or(0);
-                    MediaCommand::SetVolume {
-                        volume_percent: vol,
-                    }
-                }
-                "toggle_mute" | "mute" => MediaCommand::ToggleMute,
-                other => return err(400, &format!("unsupported media command: '{other}'")),
-            };
-
-            let target_player = req.target_player.or_else(|| {
-                qmap.get("target_player")
-                    .or_else(|| qmap.get("player"))
-                    .cloned()
-            });
-
-            let is_all = req.all.unwrap_or(false)
-                || qmap
-                    .get("all")
-                    .map(|s| s == "true" || s == "1")
-                    .unwrap_or(false)
-                || qmap.contains_key("all");
-            let tag = req
-                .tag
-                .as_deref()
-                .or_else(|| qmap.get("tag").map(String::as_str));
-            let group = req
-                .group
-                .as_deref()
-                .or_else(|| qmap.get("group").map(String::as_str));
-            let dev_type = req
-                .device_type
-                .as_deref()
-                .or(req.r#type.as_deref())
-                .or_else(|| {
-                    qmap.get("type")
-                        .or_else(|| qmap.get("device_type"))
-                        .map(String::as_str)
-                });
-            let peer = req.peer.as_deref().or(req.target.as_deref()).or_else(|| {
-                qmap.get("peer")
-                    .or_else(|| qmap.get("target"))
-                    .map(String::as_str)
-            });
-
-            if is_all || tag.is_some() || group.is_some() || dev_type.is_some() {
-                let selector = match crate::store::TargetSelector::from_query(
-                    peer, tag, group, dev_type, is_all,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => return err(400, &e),
-                };
-                match node
-                    .media_send_command_multi(&selector, command, target_player)
-                    .await
-                {
-                    Ok(report) => return json_ok(&report),
-                    Err(e) => return err(400, &e.to_string()),
-                }
-            }
-
-            let target_peer = peer.unwrap_or("");
-            match node
-                .media_send_command(target_peer, command, target_player)
-                .await
-            {
-                Ok(res) => json_ok(&res),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_media::post_media_command(method, query_str, body, node).await
         }
         ("GET", "/api/media/state") | ("GET", "/api/media/status") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let peer = qmap
-                .get("peer")
-                .or_else(|| qmap.get("target"))
-                .map(String::as_str);
-            match node.media_get_state(peer) {
-                Ok(report) => json_ok(&report),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_media::get_media_state(method, query_str, body, node).await
         }
         ("POST", "/api/media/state") | ("PUT", "/api/media/state") => {
-            let parsed_body = match serde_json::from_slice::<MediaStateUpdateBody>(body) {
-                Ok(b) => b,
-                Err(_) => return err(400, "bad json, expected MediaStateUpdateBody"),
-            };
-            let mut current = match node.media_get_state(None) {
-                Ok(rep) => rep.state.unwrap_or_default(),
-                Err(e) => return err(400, &e.to_string()),
-            };
-
-            if let Some(pid) = parsed_body.player_id {
-                current.player_id = pid;
-            }
-            if let Some(ref st_str) = parsed_body.state {
-                match st_str.parse::<PlaybackState>() {
-                    Ok(ps) => current.state = ps,
-                    Err(e) => return err(400, &e),
-                }
-            }
-            if let Some(title) = parsed_body.title {
-                current.title = title;
-            }
-            if let Some(artist) = parsed_body.artist {
-                current.artist = artist;
-            }
-            if let Some(album) = parsed_body.album {
-                current.album = album;
-            }
-            if let Some(pos) = parsed_body.position_ms {
-                current.position_ms = pos;
-            }
-            if let Some(dur) = parsed_body.duration_ms {
-                current.duration_ms = dur;
-            }
-            if let Some(vol) = parsed_body.volume_percent {
-                current.volume_percent = vol;
-            }
-            if let Some(muted) = parsed_body.muted {
-                current.muted = muted;
-            }
-            if let Some(cp) = parsed_body.can_play {
-                current.can_play = cp;
-            }
-            if let Some(cp) = parsed_body.can_pause {
-                current.can_pause = cp;
-            }
-            if let Some(cgn) = parsed_body.can_go_next {
-                current.can_go_next = cgn;
-            }
-            if let Some(cgp) = parsed_body.can_go_previous {
-                current.can_go_previous = cgp;
-            }
-            if let Some(cs) = parsed_body.can_seek {
-                current.can_seek = cs;
-            }
-
-            match node.media_update_local_state(current) {
-                Ok(st) => json_ok(&serde_json::json!({
-                    "ok": true,
-                    "state": st,
-                })),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_media::post_media_state(method, query_str, body, node).await
         }
-        ("GET", "/api/media/policy") => json_ok(&node.media_policy_report()),
+        ("GET", "/api/media/policy") => {
+            api_media::get_media_policy(method, query_str, body, node).await
+        }
         ("POST", "/api/media/policy") | ("PUT", "/api/media/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<MediaPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<MediaPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected MediaPolicyBody"),
-                }
-            };
-            let mut policy = node.media_policy();
-
-            if let Some(ref b) = parsed_body {
-                if let Some(ref m) = b.mode {
-                    match m.parse::<tetherly_core::MediaControlMode>() {
-                        Ok(mode) => policy.mode = mode,
-                        Err(e) => {
-                            return err(400, &format!("invalid media control mode '{m}': {e}"))
-                        }
-                    }
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if let Some(limit) = b.max_volume_limit {
-                    policy.max_volume_limit = limit.min(100);
-                }
-                if let Some(seek) = b.allow_seek {
-                    policy.allow_seek = seek;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(m_str) = qmap.get("mode") {
-                match m_str.parse::<tetherly_core::MediaControlMode>() {
-                    Ok(mode) => policy.mode = mode,
-                    Err(e) => {
-                        return err(400, &format!("invalid media control mode '{m_str}': {e}"))
-                    }
-                }
-            }
-            if let Some(g) = qmap.get("group") {
-                if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
-                    policy.allowed_groups.push(g.clone());
-                }
-            }
-            if let Some(t) = qmap.get("tag") {
-                if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
-                    policy.allowed_tags.push(t.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if let Some(lim_str) = qmap
-                .get("max_volume_limit")
-                .or_else(|| qmap.get("max_volume"))
-            {
-                if let Ok(l) = lim_str.parse::<u8>() {
-                    policy.max_volume_limit = l.min(100);
-                }
-            }
-            if let Some(seek_str) = qmap.get("allow_seek") {
-                if let Ok(s) = seek_str.parse::<bool>() {
-                    policy.allow_seek = s;
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_media_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_media::post_media_policy(method, query_str, body, node).await
         }
         ("GET", "/api/battery/state")
         | ("GET", "/api/battery/status")
         | ("GET", "/api/power/state")
         | ("GET", "/api/power/status") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let peer = qmap
-                .get("peer")
-                .or_else(|| qmap.get("target"))
-                .map(String::as_str);
-            match node.battery_get_state(peer) {
-                Ok(report) => json_ok(&report),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_power::get_battery_state(method, query_str, body, node).await
         }
         ("POST", "/api/battery/state")
         | ("PUT", "/api/battery/state")
         | ("POST", "/api/power/state")
         | ("PUT", "/api/power/state") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<BatteryStateUpdateBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<BatteryStateUpdateBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected BatteryStateUpdateBody"),
-                }
-            };
-            let mut current = match node.battery_get_state(None) {
-                Ok(rep) => rep.state.unwrap_or_default(),
-                Err(e) => return err(400, &e.to_string()),
-            };
-
-            if let Some(ref b) = parsed_body {
-                if let Some(lvl) = b.battery_level {
-                    current.battery_level = lvl.min(100);
-                }
-                if let Some(chg) = b.is_charging {
-                    current.is_charging = chg;
-                }
-                if let Some(ref src_str) = b.power_source {
-                    match src_str.parse::<PowerSource>() {
-                        Ok(ps) => current.power_source = ps,
-                        Err(e) => return err(400, &e),
-                    }
-                }
-                if let Some(saver) = b.battery_saver {
-                    current.battery_saver = saver;
-                }
-                if let Some(hp) = b.health_percent {
-                    current.health_percent = Some(hp.min(100));
-                }
-            }
-
-            if let Some(lvl_str) = qmap
-                .get("level")
-                .or_else(|| qmap.get("battery_level"))
-                .or_else(|| qmap.get("percent"))
-            {
-                if let Ok(lvl) = lvl_str.parse::<u8>() {
-                    current.battery_level = lvl.min(100);
-                }
-            }
-            if let Some(chg_str) = qmap.get("charging").or_else(|| qmap.get("is_charging")) {
-                if let Ok(chg) = chg_str.parse::<bool>() {
-                    current.is_charging = chg;
-                }
-            }
-            if let Some(src_str) = qmap.get("source").or_else(|| qmap.get("power_source")) {
-                match src_str.parse::<PowerSource>() {
-                    Ok(ps) => current.power_source = ps,
-                    Err(e) => return err(400, &e),
-                }
-            }
-            if let Some(saver_str) = qmap.get("saver").or_else(|| qmap.get("battery_saver")) {
-                if let Ok(saver) = saver_str.parse::<bool>() {
-                    current.battery_saver = saver;
-                }
-            }
-            if let Some(health_str) = qmap.get("health").or_else(|| qmap.get("health_percent")) {
-                if let Ok(hp) = health_str.parse::<u8>() {
-                    current.health_percent = Some(hp.min(100));
-                }
-            }
-
-            match node.battery_update_local_state(current).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_power::post_battery_state(method, query_str, body, node).await
         }
         ("GET", "/api/battery/policy") | ("GET", "/api/power/policy") => {
-            json_ok(&node.battery_policy_report())
+            api_power::get_battery_policy(method, query_str, body, node).await
         }
         ("POST", "/api/battery/policy")
         | ("PUT", "/api/battery/policy")
         | ("POST", "/api/power/policy")
         | ("PUT", "/api/power/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<BatteryPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<BatteryPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected BatteryPolicyBody"),
-                }
-            };
-            let mut policy = node.battery_policy();
-
-            if let Some(ref b) = parsed_body {
-                if let Some(low) = b.low_battery_threshold {
-                    policy.low_battery_threshold = low.min(100);
-                }
-                if let Some(crit) = b.critical_battery_threshold {
-                    policy.critical_battery_threshold = crit.min(100);
-                }
-                if let Some(alert) = b.alert_on_low_battery {
-                    policy.alert_on_low_battery = alert;
-                }
-                if let Some(throttle) = b.auto_throttle_on_battery_saver {
-                    policy.auto_throttle_on_battery_saver = throttle;
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(low_str) = qmap
-                .get("low_battery_threshold")
-                .or_else(|| qmap.get("low_threshold"))
-                .or_else(|| qmap.get("low"))
-            {
-                if let Ok(l) = low_str.parse::<u8>() {
-                    policy.low_battery_threshold = l.min(100);
-                }
-            }
-            if let Some(crit_str) = qmap
-                .get("critical_battery_threshold")
-                .or_else(|| qmap.get("critical_threshold"))
-                .or_else(|| qmap.get("critical"))
-            {
-                if let Ok(c) = crit_str.parse::<u8>() {
-                    policy.critical_battery_threshold = c.min(100);
-                }
-            }
-            if let Some(alert_str) = qmap
-                .get("alert_on_low_battery")
-                .or_else(|| qmap.get("alert"))
-            {
-                if let Ok(a) = alert_str.parse::<bool>() {
-                    policy.alert_on_low_battery = a;
-                }
-            }
-            if let Some(throttle_str) = qmap
-                .get("auto_throttle_on_battery_saver")
-                .or_else(|| qmap.get("throttle"))
-            {
-                if let Ok(t) = throttle_str.parse::<bool>() {
-                    policy.auto_throttle_on_battery_saver = t;
-                }
-            }
-            if let Some(g) = qmap.get("group") {
-                if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
-                    policy.allowed_groups.push(g.clone());
-                }
-            }
-            if let Some(t) = qmap.get("tag") {
-                if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
-                    policy.allowed_tags.push(t.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_battery_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_power::post_battery_policy(method, query_str, body, node).await
         }
         ("GET", "/api/locate/status")
         | ("GET", "/api/locate/state")
         | ("GET", "/api/find/status")
-        | ("GET", "/api/find/state") => json_ok(&node.locate_status()),
+        | ("GET", "/api/find/state") => {
+            api_locate::get_locate_status(method, query_str, body, node).await
+        }
         ("POST", "/api/locate/ring")
         | ("PUT", "/api/locate/ring")
         | ("POST", "/api/find/ring")
         | ("PUT", "/api/find/ring") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<LocateRingBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<LocateRingBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected LocateRingBody"),
-                }
-            };
-
-            let peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("target").cloned());
-
-            let Some(peer_target) = peer.filter(|p| !p.trim().is_empty()) else {
-                return err(400, "missing target peer (specify 'peer' or 'target')");
-            };
-
-            let duration_secs = parsed_body
-                .as_ref()
-                .and_then(|b| b.duration_secs)
-                .or_else(|| {
-                    qmap.get("duration")
-                        .or_else(|| qmap.get("duration_secs"))
-                        .and_then(|s| s.parse::<u32>().ok())
-                });
-
-            let pattern_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.pattern.as_deref())
-                .or_else(|| qmap.get("pattern").map(|s| s.as_str()));
-
-            let pattern = match pattern_str {
-                Some(p) => match p.parse::<tetherly_core::LocatePattern>() {
-                    Ok(pat) => Some(pat),
-                    Err(e) => return err(400, &format!("invalid locate pattern: {e}")),
-                },
-                None => None,
-            };
-
-            let override_silent = parsed_body
-                .as_ref()
-                .and_then(|b| b.override_silent)
-                .or_else(|| {
-                    qmap.get("override_silent")
-                        .or_else(|| qmap.get("override"))
-                        .and_then(|s| s.parse::<bool>().ok())
-                });
-
-            let message = parsed_body
-                .as_ref()
-                .and_then(|b| b.message.clone())
-                .or_else(|| qmap.get("message").cloned());
-
-            match node
-                .locate_ring(
-                    &peer_target,
-                    duration_secs,
-                    pattern,
-                    override_silent,
-                    message,
-                )
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_locate::post_locate_ring(method, query_str, body, node).await
         }
         ("POST", "/api/locate/stop")
         | ("PUT", "/api/locate/stop")
         | ("POST", "/api/find/stop")
         | ("PUT", "/api/find/stop") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<LocateStopBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<LocateStopBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected LocateStopBody"),
-                }
-            };
-
-            let peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("target").cloned());
-
-            let request_id = parsed_body
-                .as_ref()
-                .and_then(|b| b.request_id.clone())
-                .or_else(|| qmap.get("id").cloned())
-                .or_else(|| qmap.get("request_id").cloned());
-
-            let reason = parsed_body
-                .as_ref()
-                .and_then(|b| b.reason.clone())
-                .or_else(|| qmap.get("reason").cloned());
-
-            match node.locate_stop(peer.as_deref(), request_id, reason).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_locate::post_locate_stop(method, query_str, body, node).await
         }
         ("GET", "/api/locate/policy") | ("GET", "/api/find/policy") => {
-            json_ok(&node.locator_policy_report())
+            api_locate::get_locate_policy(method, query_str, body, node).await
         }
         ("POST", "/api/locate/policy")
         | ("PUT", "/api/locate/policy")
         | ("POST", "/api/find/policy")
         | ("PUT", "/api/find/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<LocatePolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<LocatePolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected LocatePolicyBody"),
-                }
-            };
-
-            let mut policy = node.locator_policy();
-
-            if let Some(ref b) = parsed_body {
-                if let Some(enabled) = b.enabled {
-                    policy.enabled = enabled;
-                }
-                if let Some(override_silent) = b.allow_override_silent {
-                    policy.allow_override_silent = override_silent;
-                }
-                if let Some(max_dur) = b.max_duration_secs {
-                    policy.max_duration_secs = max_dur.clamp(1, 60);
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(en_str) = qmap.get("enabled") {
-                if let Ok(en) = en_str.parse::<bool>() {
-                    policy.enabled = en;
-                }
-            }
-            if let Some(ov_str) = qmap
-                .get("allow_override_silent")
-                .or_else(|| qmap.get("override_silent"))
-                .or_else(|| qmap.get("override"))
-            {
-                if let Ok(ov) = ov_str.parse::<bool>() {
-                    policy.allow_override_silent = ov;
-                }
-            }
-            if let Some(max_dur_str) = qmap
-                .get("max_duration_secs")
-                .or_else(|| qmap.get("max_duration"))
-            {
-                if let Ok(md) = max_dur_str.parse::<u32>() {
-                    policy.max_duration_secs = md.clamp(1, 60);
-                }
-            }
-            if let Some(g) = qmap.get("group") {
-                if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
-                    policy.allowed_groups.push(g.clone());
-                }
-            }
-            if let Some(t) = qmap.get("tag") {
-                if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
-                    policy.allowed_tags.push(t.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_locator_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_locate::post_locate_policy(method, query_str, body, node).await
         }
-        ("GET", "/api/action/local") => json_ok(&node.local_action_report()),
+        ("GET", "/api/action/local") => {
+            api_action::get_action_local(method, query_str, body, node).await
+        }
         ("POST", "/api/action/local") | ("PUT", "/api/action/local") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<ActionLocalBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<ActionLocalBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected ActionLocalBody"),
-                }
-            };
-
-            let id = parsed_body
-                .as_ref()
-                .and_then(|b| b.id.clone())
-                .or_else(|| qmap.get("id").cloned());
-            let Some(action_id) = id.filter(|s| !s.trim().is_empty()) else {
-                return err(400, "missing 'id' for action");
-            };
-
-            let name = parsed_body
-                .as_ref()
-                .and_then(|b| b.name.clone())
-                .or_else(|| qmap.get("name").cloned())
-                .unwrap_or_else(|| action_id.clone());
-
-            let description = parsed_body
-                .as_ref()
-                .and_then(|b| b.description.clone())
-                .or_else(|| {
-                    qmap.get("description")
-                        .or_else(|| qmap.get("desc"))
-                        .cloned()
-                });
-
-            let icon = parsed_body
-                .as_ref()
-                .and_then(|b| b.icon.clone())
-                .or_else(|| qmap.get("icon").cloned());
-
-            let command = parsed_body
-                .as_ref()
-                .and_then(|b| b.command.clone())
-                .or_else(|| qmap.get("command").or_else(|| qmap.get("cmd")).cloned());
-            let Some(cmd) = command.filter(|s| !s.trim().is_empty()) else {
-                return err(400, "missing 'command' for action");
-            };
-
-            let args = parsed_body
-                .as_ref()
-                .and_then(|b| b.args.clone())
-                .or_else(|| {
-                    qmap.get("args").map(|s| {
-                        s.split(',')
-                            .map(|arg| arg.trim().to_string())
-                            .filter(|arg| !arg.is_empty())
-                            .collect()
-                    })
-                })
-                .unwrap_or_default();
-
-            let timeout_secs = parsed_body
-                .as_ref()
-                .and_then(|b| b.timeout_secs)
-                .or_else(|| {
-                    qmap.get("timeout_secs")
-                        .or_else(|| qmap.get("timeout"))
-                        .and_then(|s| s.parse::<u32>().ok())
-                })
-                .unwrap_or(10);
-
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|s| s.parse::<bool>().ok()))
-                .unwrap_or(true);
-
-            let def = LocalActionDefinition {
-                id: action_id,
-                name,
-                description,
-                icon,
-                command: cmd,
-                args,
-                timeout_secs,
-                enabled,
-            };
-
-            match node.add_local_action(def) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_action::post_action_local(method, query_str, body, node).await
         }
         ("DELETE", "/api/action/local") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<ActionLocalBody> = if body.is_empty() {
-                None
-            } else {
-                serde_json::from_slice::<ActionLocalBody>(body).ok()
-            };
-
-            let id = parsed_body
-                .as_ref()
-                .and_then(|b| b.id.clone())
-                .or_else(|| qmap.get("id").cloned());
-            let Some(action_id) = id.filter(|s| !s.trim().is_empty()) else {
-                return err(400, "missing 'id' for action to delete");
-            };
-
-            match node.remove_local_action(&action_id) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_action::delete_action_local(method, query_str, body, node).await
         }
         ("GET", "/api/action/remote") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let peer = qmap.get("peer").or_else(|| qmap.get("target"));
-            let Some(peer_target) = peer.filter(|p| !p.trim().is_empty()) else {
-                return err(400, "missing target peer (specify 'peer' or 'target')");
-            };
-            match node.remote_actions(peer_target) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_action::get_action_remote(method, query_str, body, node).await
         }
         ("POST", "/api/action/remote/refresh") | ("PUT", "/api/action/remote/refresh") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<ActionTriggerBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<ActionTriggerBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected ActionTriggerBody"),
-                }
-            };
-            let peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("target").cloned());
-            let Some(peer_target) = peer.filter(|p| !p.trim().is_empty()) else {
-                return err(400, "missing target peer (specify 'peer' or 'target')");
-            };
-            match node.query_remote_actions(&peer_target).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_action::post_action_remote_refresh(method, query_str, body, node).await
         }
         ("POST", "/api/action/trigger")
         | ("PUT", "/api/action/trigger")
         | ("POST", "/api/action/run")
         | ("PUT", "/api/action/run") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<ActionTriggerBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<ActionTriggerBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected ActionTriggerBody"),
-                }
-            };
-
-            let peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("target").cloned());
-            let Some(peer_target) = peer.filter(|p| !p.trim().is_empty()) else {
-                return err(400, "missing target peer (specify 'peer' or 'target')");
-            };
-
-            let action_id = parsed_body
-                .as_ref()
-                .and_then(|b| b.action_id.clone())
-                .or_else(|| qmap.get("action_id").cloned())
-                .or_else(|| qmap.get("id").cloned());
-            let Some(act_id) = action_id.filter(|s| !s.trim().is_empty()) else {
-                return err(400, "missing 'action_id' (or 'id')");
-            };
-
-            match node.trigger_remote_action(&peer_target, &act_id).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_action::post_action_trigger(method, query_str, body, node).await
         }
-        ("GET", "/api/action/history") => json_ok(&node.action_history()),
-        ("GET", "/api/action/policy") => json_ok(&node.action_policy_report()),
+        ("GET", "/api/action/history") => {
+            api_action::get_action_history(method, query_str, body, node).await
+        }
+        ("GET", "/api/action/policy") => {
+            api_action::get_action_policy(method, query_str, body, node).await
+        }
         ("POST", "/api/action/policy") | ("PUT", "/api/action/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<ActionPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<ActionPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected ActionPolicyBody"),
-                }
-            };
-
-            let mut policy = node.action_policy();
-            if let Some(ref b) = parsed_body {
-                if let Some(ref m_str) = b.mode {
-                    match m_str.parse::<ActionAccessMode>() {
-                        Ok(m) => policy.mode = m,
-                        Err(e) => return err(400, &format!("invalid action mode: {e}")),
-                    }
-                }
-                if let Some(timeout) = b.max_timeout_secs {
-                    policy.max_timeout_secs = ActionValidator::clamp_timeout(timeout);
-                }
-                if let Some(exp) = b.expose_action_list {
-                    policy.expose_action_list = exp;
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(m_str) = qmap.get("mode") {
-                match m_str.parse::<ActionAccessMode>() {
-                    Ok(m) => policy.mode = m,
-                    Err(e) => return err(400, &format!("invalid action mode: {e}")),
-                }
-            }
-            if let Some(t_str) = qmap.get("timeout").or_else(|| qmap.get("max_timeout_secs")) {
-                if let Ok(t) = t_str.parse::<u32>() {
-                    policy.max_timeout_secs = ActionValidator::clamp_timeout(t);
-                }
-            }
-            if let Some(exp_str) = qmap
-                .get("expose")
-                .or_else(|| qmap.get("expose_action_list"))
-            {
-                if let Ok(exp) = exp_str.parse::<bool>() {
-                    policy.expose_action_list = exp;
-                }
-            }
-            if let Some(g) = qmap.get("group") {
-                if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
-                    policy.allowed_groups.push(g.clone());
-                }
-            }
-            if let Some(t) = qmap.get("tag") {
-                if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
-                    policy.allowed_tags.push(t.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_action_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_action::post_action_policy(method, query_str, body, node).await
         }
-        ("GET", "/api/focus/state") => json_ok(&node.focus_status()),
+        ("GET", "/api/focus/state") => {
+            api_focus::get_focus_state(method, query_str, body, node).await
+        }
         ("POST", "/api/focus/state") | ("PUT", "/api/focus/state") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<FocusSetBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<FocusSetBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected FocusSetBody"),
-                }
-            };
-
-            let enabled = parsed_body
-                .as_ref()
-                .and_then(|b| b.enabled)
-                .or_else(|| qmap.get("enabled").and_then(|s| s.parse::<bool>().ok()))
-                .unwrap_or(true);
-
-            let mode_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.mode.clone())
-                .or_else(|| qmap.get("mode").cloned());
-            let mode = if let Some(ref m_str) = mode_str {
-                match m_str.parse::<tetherly_core::FocusMode>() {
-                    Ok(m) => Some(m),
-                    Err(e) => return err(400, &format!("invalid focus mode '{m_str}': {e}")),
-                }
-            } else {
-                None
-            };
-
-            let duration_mins = parsed_body
-                .as_ref()
-                .and_then(|b| b.duration_mins)
-                .or_else(|| {
-                    qmap.get("duration_mins")
-                        .or_else(|| qmap.get("duration"))
-                        .and_then(|s| s.parse::<u32>().ok())
-                });
-
-            let reason = parsed_body
-                .as_ref()
-                .and_then(|b| b.reason.clone())
-                .or_else(|| qmap.get("reason").cloned());
-
-            let broadcast = parsed_body
-                .as_ref()
-                .and_then(|b| b.broadcast)
-                .or_else(|| qmap.get("broadcast").and_then(|s| s.parse::<bool>().ok()))
-                .unwrap_or(true);
-
-            match node
-                .set_focus_state(enabled, mode, duration_mins, reason, broadcast)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_focus::post_focus_state(method, query_str, body, node).await
         }
-        ("GET", "/api/focus/peers") => json_ok(&node.peer_focus_states()),
+        ("GET", "/api/focus/peers") => {
+            api_focus::get_focus_peers(method, query_str, body, node).await
+        }
         ("POST", "/api/focus/sync") | ("PUT", "/api/focus/sync") => {
-            match node.request_peers_focus_sync().await {
-                Ok(sent) => json_ok(&serde_json::json!({
-                    "ok": true,
-                    "sync_requests_sent": sent,
-                    "message": "focus sync request dispatched to peers"
-                })),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_focus::post_focus_sync(method, query_str, body, node).await
         }
-        ("GET", "/api/focus/policy") => json_ok(&node.focus_policy_report()),
+        ("GET", "/api/focus/policy") => {
+            api_focus::get_focus_policy(method, query_str, body, node).await
+        }
         ("POST", "/api/focus/policy") | ("PUT", "/api/focus/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<FocusPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<FocusPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected FocusPolicyBody"),
-                }
-            };
-
-            let mut policy = node.focus_policy();
-            if let Some(ref b) = parsed_body {
-                if let Some(en) = b.enabled {
-                    policy.enabled = en;
-                }
-                if let Some(ref m_str) = b.default_mode {
-                    match m_str.parse::<tetherly_core::FocusMode>() {
-                        Ok(m) => policy.default_mode = m,
-                        Err(e) => {
-                            return err(400, &format!("invalid default focus mode '{m_str}': {e}"))
-                        }
-                    }
-                }
-                if let Some(m) = b.mirror_inbound_focus {
-                    policy.mirror_inbound_focus = m;
-                }
-                if let Some(brk) = b.allow_emergency_breakthrough {
-                    policy.allow_emergency_breakthrough = brk;
-                }
-                if let Some(qh) = b.quiet_hours_enabled {
-                    policy.quiet_hours_enabled = qh;
-                }
-                if let Some(ref s_str) = b.quiet_hours_start {
-                    if let Some(start_min) = parse_hh_mm(s_str) {
-                        policy.quiet_hours_start_minute = start_min;
-                    } else {
-                        return err(400, "invalid quiet_hours_start format (expected HH:MM)");
-                    }
-                } else if let Some(s_min) = b.quiet_hours_start_minute {
-                    policy.quiet_hours_start_minute = s_min % 1440;
-                }
-                if let Some(ref e_str) = b.quiet_hours_end {
-                    if let Some(end_min) = parse_hh_mm(e_str) {
-                        policy.quiet_hours_end_minute = end_min;
-                    } else {
-                        return err(400, "invalid quiet_hours_end format (expected HH:MM)");
-                    }
-                } else if let Some(e_min) = b.quiet_hours_end_minute {
-                    policy.quiet_hours_end_minute = e_min % 1440;
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            // Also support query params for quick CLI / curl access
-            if let Some(en) = qmap.get("enabled").or_else(|| qmap.get("enable")) {
-                if let Ok(b) = en.parse::<bool>() {
-                    policy.enabled = b;
-                }
-            }
-            if let Some(m_str) = qmap.get("default_mode").or_else(|| qmap.get("mode")) {
-                match m_str.parse::<tetherly_core::FocusMode>() {
-                    Ok(m) => policy.default_mode = m,
-                    Err(e) => {
-                        return err(400, &format!("invalid default focus mode '{m_str}': {e}"))
-                    }
-                }
-            }
-            if let Some(m) = qmap
-                .get("mirror")
-                .or_else(|| qmap.get("mirror_inbound_focus"))
-            {
-                if let Ok(b) = m.parse::<bool>() {
-                    policy.mirror_inbound_focus = b;
-                }
-            }
-            if let Some(b) = qmap
-                .get("breakthrough")
-                .or_else(|| qmap.get("allow_emergency_breakthrough"))
-            {
-                if let Ok(v) = b.parse::<bool>() {
-                    policy.allow_emergency_breakthrough = v;
-                }
-            }
-            if let Some(qh) = qmap
-                .get("quiet_hours")
-                .or_else(|| qmap.get("quiet_hours_enabled"))
-            {
-                if let Ok(b) = qh.parse::<bool>() {
-                    policy.quiet_hours_enabled = b;
-                }
-            }
-            if let Some(s_str) = qmap.get("start").or_else(|| qmap.get("quiet_hours_start")) {
-                if let Some(start_min) = parse_hh_mm(s_str) {
-                    policy.quiet_hours_start_minute = start_min;
-                } else if let Ok(min) = s_str.parse::<u16>() {
-                    policy.quiet_hours_start_minute = min % 1440;
-                }
-            }
-            if let Some(e_str) = qmap.get("end").or_else(|| qmap.get("quiet_hours_end")) {
-                if let Some(end_min) = parse_hh_mm(e_str) {
-                    policy.quiet_hours_end_minute = end_min;
-                } else if let Ok(min) = e_str.parse::<u16>() {
-                    policy.quiet_hours_end_minute = min % 1440;
-                }
-            }
-            if let Some(g) = qmap.get("group") {
-                if !g.trim().is_empty() && !policy.allowed_groups.contains(g) {
-                    policy.allowed_groups.push(g.clone());
-                }
-            }
-            if let Some(t) = qmap.get("tag") {
-                if !t.trim().is_empty() && !policy.allowed_tags.contains(t) {
-                    policy.allowed_tags.push(t.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_focus_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_focus::post_focus_policy(method, query_str, body, node).await
         }
-        ("GET", "/api/topology/layout") => json_ok(&node.topology_layout()),
+        ("GET", "/api/topology/layout") => {
+            api_topology::get_topology_layout(method, query_str, body, node).await
+        }
         ("POST", "/api/topology/link") | ("PUT", "/api/topology/link") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TopologyLinkBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<TopologyLinkBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected TopologyLinkBody"),
-                }
-            };
-
-            let edge_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.edge.clone())
-                .or_else(|| qmap.get("edge").cloned());
-            let edge = match edge_str {
-                Some(s) => match s.parse::<DisplayEdge>() {
-                    Ok(e) => e,
-                    Err(e) => return err(400, &format!("invalid edge '{s}': {e}")),
-                },
-                None => return err(400, "missing 'edge' parameter"),
-            };
-
-            let peer = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer.clone())
-                .or_else(|| qmap.get("peer").cloned())
-                .or_else(|| qmap.get("peer_id").cloned())
-                .or_else(|| qmap.get("target").cloned());
-            let peer = match peer {
-                Some(p) if !p.trim().is_empty() => p,
-                _ => return err(400, "missing 'peer' parameter"),
-            };
-
-            let peer_edge_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.peer_edge.clone())
-                .or_else(|| qmap.get("peer_edge").cloned());
-            let peer_edge = match peer_edge_str {
-                Some(s) => match s.parse::<DisplayEdge>() {
-                    Ok(e) => Some(e),
-                    Err(e) => return err(400, &format!("invalid peer_edge '{s}': {e}")),
-                },
-                None => None,
-            };
-
-            let offset = parsed_body
-                .as_ref()
-                .and_then(|b| b.offset)
-                .or_else(|| qmap.get("offset").and_then(|s| s.parse::<i32>().ok()));
-
-            match node
-                .topology_link_neighbor(edge, &peer, peer_edge, offset)
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_topology::post_topology_link(method, query_str, body, node).await
         }
         ("POST", "/api/topology/unlink")
         | ("DELETE", "/api/topology/link")
         | ("DELETE", "/api/topology/unlink") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TopologyUnlinkBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<TopologyUnlinkBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected TopologyUnlinkBody"),
-                }
-            };
-
-            let edge_str = parsed_body
-                .as_ref()
-                .and_then(|b| b.edge.clone())
-                .or_else(|| qmap.get("edge").cloned());
-            let edge = match edge_str {
-                Some(s) => match s.parse::<DisplayEdge>() {
-                    Ok(e) => e,
-                    Err(e) => return err(400, &format!("invalid edge '{s}': {e}")),
-                },
-                None => return err(400, "missing 'edge' parameter"),
-            };
-
-            match node.topology_unlink_neighbor(edge).await {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_topology::post_topology_unlink(method, query_str, body, node).await
         }
         ("POST", "/api/topology/config") | ("PUT", "/api/topology/config") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TopologyConfigBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<TopologyConfigBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected TopologyConfigBody"),
-                }
-            };
-
-            let resistance_px = parsed_body
-                .as_ref()
-                .and_then(|b| b.resistance_px)
-                .or_else(|| {
-                    qmap.get("resistance_px")
-                        .or_else(|| qmap.get("resistance"))
-                        .and_then(|s| s.parse::<u32>().ok())
-                });
-
-            let delay_ms = parsed_body.as_ref().and_then(|b| b.delay_ms).or_else(|| {
-                qmap.get("delay_ms")
-                    .or_else(|| qmap.get("delay"))
-                    .and_then(|s| s.parse::<u32>().ok())
-            });
-
-            let corner_lock_size_px = parsed_body
-                .as_ref()
-                .and_then(|b| b.corner_lock_size_px)
-                .or_else(|| {
-                    qmap.get("corner_lock_size_px")
-                        .or_else(|| qmap.get("corner_lock"))
-                        .and_then(|s| s.parse::<u32>().ok())
-                });
-
-            let wrap_around = parsed_body
-                .as_ref()
-                .and_then(|b| b.wrap_around)
-                .or_else(|| {
-                    qmap.get("wrap_around")
-                        .or_else(|| qmap.get("wrap"))
-                        .and_then(|s| s.parse::<bool>().ok())
-                });
-
-            let width = parsed_body
-                .as_ref()
-                .and_then(|b| b.width)
-                .or_else(|| qmap.get("width").and_then(|s| s.parse::<u32>().ok()));
-
-            let height = parsed_body
-                .as_ref()
-                .and_then(|b| b.height)
-                .or_else(|| qmap.get("height").and_then(|s| s.parse::<u32>().ok()));
-
-            let scale_factor = parsed_body
-                .as_ref()
-                .and_then(|b| b.scale_factor)
-                .or_else(|| {
-                    qmap.get("scale_factor")
-                        .or_else(|| qmap.get("scale"))
-                        .and_then(|s| s.parse::<f32>().ok())
-                });
-
-            match node
-                .topology_update_config(
-                    resistance_px,
-                    delay_ms,
-                    corner_lock_size_px,
-                    wrap_around,
-                    width,
-                    height,
-                    scale_factor,
-                )
-                .await
-            {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_topology::post_topology_config(method, query_str, body, node).await
         }
-        ("GET", "/api/topology/peers") => json_ok(&node.topology_peers()),
+        ("GET", "/api/topology/peers") => {
+            api_topology::get_topology_peers(method, query_str, body, node).await
+        }
         ("POST", "/api/topology/sync") | ("PUT", "/api/topology/sync") => {
-            let sync_res = node.topology_request_sync().await;
-            let bc_res = node.topology_broadcast_state().await;
-            match (sync_res, bc_res) {
-                (Ok(sent), Ok(bc)) => json_ok(&serde_json::json!({
-                    "ok": true,
-                    "sync_requests_sent": sent,
-                    "broadcasts_sent": bc,
-                    "broadcast_count": bc,
-                    "message": "topology sync requested and local state broadcast"
-                })),
-                (Err(e), _) | (_, Err(e)) => err(400, &e.to_string()),
-            }
+            api_topology::post_topology_sync(method, query_str, body, node).await
         }
-        ("GET", "/api/topology/policy") => json_ok(&node.topology_policy_report()),
+        ("GET", "/api/topology/policy") => {
+            api_topology::get_topology_policy(method, query_str, body, node).await
+        }
         ("POST", "/api/topology/policy") | ("PUT", "/api/topology/policy") => {
-            let qmap = query_str.map(parse_query_map).unwrap_or_default();
-            let parsed_body: Option<TopologyPolicyBody> = if body.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<TopologyPolicyBody>(body) {
-                    Ok(b) => Some(b),
-                    Err(_) => return err(400, "bad json, expected TopologyPolicyBody"),
-                }
-            };
-
-            let mut policy = node.topology_policy();
-            if let Some(ref b) = parsed_body {
-                if let Some(en) = b.enabled {
-                    policy.enabled = en;
-                }
-                if let Some(inbound) = b.allow_inbound_control {
-                    policy.allow_inbound_control = inbound;
-                }
-                if let Some(auto) = b.auto_link_paired_peers {
-                    policy.auto_link_paired_peers = auto;
-                }
-                if let Some(ref grps) = b.allowed_groups {
-                    policy.allowed_groups = grps.clone();
-                }
-                if let Some(ref tags) = b.allowed_tags {
-                    policy.allowed_tags = tags.clone();
-                }
-                if let Some(ref types) = b.allowed_types {
-                    let mut dtypes = Vec::new();
-                    for t in types {
-                        match t.parse::<crate::store::DeviceType>() {
-                            Ok(dt) => dtypes.push(dt),
-                            Err(e) => return err(400, &format!("invalid device type '{t}': {e}")),
-                        }
-                    }
-                    policy.allowed_types = dtypes;
-                }
-                if b.clear_filters == Some(true) {
-                    policy.allowed_groups.clear();
-                    policy.allowed_tags.clear();
-                    policy.allowed_types.clear();
-                }
-            }
-
-            if let Some(en) = qmap.get("enabled").or_else(|| qmap.get("enable")) {
-                if let Ok(b) = en.parse::<bool>() {
-                    policy.enabled = b;
-                }
-            }
-            if let Some(inbound) = qmap
-                .get("allow_inbound")
-                .or_else(|| qmap.get("allow_inbound_control"))
-            {
-                if let Ok(b) = inbound.parse::<bool>() {
-                    policy.allow_inbound_control = b;
-                }
-            }
-            if let Some(auto) = qmap
-                .get("auto_link")
-                .or_else(|| qmap.get("auto_link_paired_peers"))
-            {
-                if let Ok(b) = auto.parse::<bool>() {
-                    policy.auto_link_paired_peers = b;
-                }
-            }
-            if let Some(grp) = qmap.get("group").or_else(|| qmap.get("allowed_group")) {
-                if !policy.allowed_groups.contains(grp) {
-                    policy.allowed_groups.push(grp.clone());
-                }
-            }
-            if let Some(tag) = qmap.get("tag").or_else(|| qmap.get("allowed_tag")) {
-                if !policy.allowed_tags.contains(tag) {
-                    policy.allowed_tags.push(tag.clone());
-                }
-            }
-            if let Some(dt_str) = qmap.get("type").or_else(|| qmap.get("device_type")) {
-                match dt_str.parse::<crate::store::DeviceType>() {
-                    Ok(dt) => {
-                        if !policy.allowed_types.contains(&dt) {
-                            policy.allowed_types.push(dt);
-                        }
-                    }
-                    Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
-                }
-            }
-            if qmap
-                .get("clear_filters")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false)
-            {
-                policy.allowed_groups.clear();
-                policy.allowed_tags.clear();
-                policy.allowed_types.clear();
-            }
-
-            match node.set_topology_policy(policy) {
-                Ok(rep) => json_ok(&rep),
-                Err(e) => err(400, &e.to_string()),
-            }
+            api_topology::post_topology_policy(method, query_str, body, node).await
         }
-        (_, "/api/events" | "/api/events/stream") => err(405, "method not allowed"),
+        (_, "/api/events" | "/api/events/stream") => {
+            api_core::any_events(method, query_str, body, node).await
+        }
         _ => UiResponse::new(404, "text/plain; charset=utf-8", b"not found".to_vec()),
     }
 }

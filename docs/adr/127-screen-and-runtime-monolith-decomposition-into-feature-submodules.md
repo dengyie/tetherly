@@ -73,7 +73,7 @@
    - `git blame` 与二分定位恢复可用；`cargo fmt` 不再产生跨域无关 diff。
 
 4. **遗留**：
-   - `crates/tetherly-node/src/bin/tetherly.rs`（27402 行）与 `crates/tetherly-node/src/uihttp.rs`（15655 行）仍为巨型单文件，属后续工程债，本次不处理；
+   - `crates/tetherly-node/src/bin/tetherly.rs`（27402 行）与 `crates/tetherly-node/src/uihttp.rs`（15655 行）当时仍为巨型单文件，属后续工程债，本次不处理（**已由 ADR-128 于 v2.42 / v0.1.64 清偿**）；
    - `crates/tetherly-node/src/screen.rs`（2379 行）为节点侧屏幕辅助模块，与本次分解的 `tetherly-core` 屏幕协议模块不同，未纳入本次范围。
 
 ---

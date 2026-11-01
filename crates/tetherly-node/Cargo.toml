@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "tetherly"
-path = "src/bin/tetherly.rs"
+path = "src/bin/tetherly/main.rs"
 
 # Hyphenated on purpose: the daemon resolves the viewer via
 # current_exe's sibling `tetherly-viewer` and the release workflow stages
