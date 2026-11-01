@@ -5,7 +5,6 @@ use super::util::{loopback_events_connect, loopback_get, loopback_post};
 use super::*;
 
 /// `tetherly-cli mic` -- Mic arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn mic(action: MicCmd) -> Result<()> {
     match action {
         MicCmd::Status { json, ui_port } => {

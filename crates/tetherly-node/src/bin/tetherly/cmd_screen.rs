@@ -3,7 +3,6 @@
 
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen(action: ScreenCmd) -> Result<()> {
     match action {
         ScreenCmd::Allow { json, ui_port } => {

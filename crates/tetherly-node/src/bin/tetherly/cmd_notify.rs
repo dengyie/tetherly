@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Desktop notifications, OTP candidates, banners and reply inbox.
 
+use super::util::now_ms;
 use super::*;
 
 /// `tetherly notify` -- Notify arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn notify(
     title: String,
     body: String,
@@ -41,7 +41,6 @@ pub(crate) async fn notify(
 }
 
 /// `tetherly candidates` -- Candidates arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn candidates(
     peer: Option<String>,
     app_id: Option<String>,
@@ -89,10 +88,7 @@ pub(crate) async fn candidates(
                     "{:<32} {:<24} {:<6} {:<10} TITLE",
                     "ID", "APP", "OTP", "EXPIRES"
                 );
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
+                let now = now_ms();
                 for item in items {
                     let id = item.get("id").and_then(|s| s.as_str()).unwrap_or("-");
                     let app = item.get("app_id").and_then(|s| s.as_str()).unwrap_or("-");
@@ -102,7 +98,7 @@ pub(crate) async fn candidates(
                         .unwrap_or(false);
                     let exp = item.get("expires_ms").and_then(|n| n.as_u64()).unwrap_or(0);
                     let title = item.get("title").and_then(|s| s.as_str()).unwrap_or("");
-                    let rem_sec = exp.saturating_sub(now_ms) / 1000;
+                    let rem_sec = exp.saturating_sub(now) / 1000;
                     println!(
                         "{:<32} {:<24} {:<6} {:<10} {}",
                         id,
@@ -120,7 +116,6 @@ pub(crate) async fn candidates(
 }
 
 /// `tetherly otp` -- Otp arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn otp(id: String, copy: bool, ui_port: u16) -> Result<()> {
     let payload = serde_json::json!({ "id": id });
     let bytes = serde_json::to_vec(&payload)?;
@@ -168,7 +163,6 @@ pub(crate) async fn otp(id: String, copy: bool, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly dismiss` -- Dismiss arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn dismiss(
     id: Option<String>,
     peer: Option<String>,
@@ -228,7 +222,6 @@ pub(crate) async fn dismiss(
 }
 
 /// `tetherly reply` -- Reply arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn reply(id: String, text: String, ui_port: u16) -> Result<()> {
     let payload = serde_json::json!({ "id": id, "text": text });
     let bytes = serde_json::to_vec(&payload)?;
@@ -251,7 +244,6 @@ pub(crate) async fn reply(id: String, text: String, ui_port: u16) -> Result<()> 
 }
 
 /// `tetherly replies` -- Replies arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn replies(json: bool, ui_port: u16) -> Result<()> {
     let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/notify/replies")
         .await
@@ -290,7 +282,6 @@ pub(crate) async fn replies(json: bool, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly take reply` -- TakeReply arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn take_reply(id: String, ui_port: u16) -> Result<()> {
     let payload = serde_json::json!({ "id": id });
     let bytes = serde_json::to_vec(&payload)?;
@@ -318,7 +309,6 @@ pub(crate) async fn take_reply(id: String, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly banner` -- Banner arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn banner(action: BannerCmd) -> Result<()> {
     match action {
         BannerCmd::Config {

@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly audio` -- Audio arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn audio(action: AudioCmd) -> Result<()> {
     match action {
         AudioCmd::Routing { action } => match action {

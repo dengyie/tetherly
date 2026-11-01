@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly mic` -- Mic arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn mic(action: MicCmd) -> Result<()> {
     match action {
         MicCmd::Status { json, ui_port } => {

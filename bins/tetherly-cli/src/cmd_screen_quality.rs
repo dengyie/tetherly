@@ -5,7 +5,6 @@ use super::util::{loopback_get, loopback_post};
 use super::*;
 
 /// `tetherly-cli screen bitrate` -- Bitrate arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_bitrate(kbps: Option<u32>, json: bool, ui_port: u16) -> Result<()> {
     let (code, resp) = match kbps {
         Some(k) => {
@@ -64,7 +63,6 @@ pub(crate) async fn screen_bitrate(kbps: Option<u32>, json: bool, ui_port: u16) 
 }
 
 /// `tetherly-cli screen fps` -- Fps arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_fps(fps: Option<u32>, json: bool, ui_port: u16) -> Result<()> {
     let (code, resp) = match fps {
         Some(f) => {
@@ -130,7 +128,6 @@ pub(crate) async fn screen_fps(fps: Option<u32>, json: bool, ui_port: u16) -> Re
 }
 
 /// `tetherly-cli screen scale` -- Scale arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_scale(scale: Option<u32>, json: bool, ui_port: u16) -> Result<()> {
     let (code, resp) = match scale {
         Some(s) => {
@@ -190,7 +187,6 @@ pub(crate) async fn screen_scale(scale: Option<u32>, json: bool, ui_port: u16) -
 }
 
 /// `tetherly-cli screen profile` -- Profile arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_profile(
     profile: Option<String>,
     min_qp: Option<u8>,
@@ -274,7 +270,6 @@ pub(crate) async fn screen_profile(
 }
 
 /// `tetherly-cli screen matrix` -- Matrix arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_matrix(mode: Option<String>, json: bool, ui_port: u16) -> Result<()> {
     let has_update = mode.is_some();
     let (code, resp) = if has_update {
@@ -354,7 +349,6 @@ pub(crate) async fn screen_matrix(mode: Option<String>, json: bool, ui_port: u16
 }
 
 /// `tetherly-cli screen playout` -- Playout arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_playout(mode: Option<String>, json: bool, ui_port: u16) -> Result<()> {
     let has_update = mode.is_some();
     let (code, resp) = if has_update {
@@ -448,7 +442,6 @@ pub(crate) async fn screen_playout(mode: Option<String>, json: bool, ui_port: u1
 }
 
 /// `tetherly-cli screen cursor` -- Cursor arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_cursor(mode: Option<String>, json: bool, ui_port: u16) -> Result<()> {
     let has_update = mode.is_some();
     let (code, resp) = if has_update {
@@ -515,7 +508,6 @@ pub(crate) async fn screen_cursor(mode: Option<String>, json: bool, ui_port: u16
 }
 
 /// `tetherly-cli screen squelch` -- Squelch arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_squelch(mode: Option<String>, json: bool, ui_port: u16) -> Result<()> {
     let has_update = mode.is_some();
     let (code, resp) = if has_update {
@@ -592,7 +584,6 @@ pub(crate) async fn screen_squelch(mode: Option<String>, json: bool, ui_port: u1
 }
 
 /// `tetherly-cli screen fec` -- Fec arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_fec(mode: Option<String>, json: bool, ui_port: u16) -> Result<()> {
     let has_update = mode.is_some();
     let (code, resp) = if has_update {
@@ -674,7 +665,6 @@ pub(crate) async fn screen_fec(mode: Option<String>, json: bool, ui_port: u16) -
 }
 
 /// `tetherly-cli screen pacer` -- Pacer arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_pacer(mode: Option<String>, json: bool, ui_port: u16) -> Result<()> {
     let has_update = mode.is_some();
     let (code, resp) = if has_update {
@@ -728,7 +718,6 @@ pub(crate) async fn screen_pacer(mode: Option<String>, json: bool, ui_port: u16)
 }
 
 /// `tetherly-cli screen trendline` -- Trendline arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_trendline(mode: Option<String>, json: bool, ui_port: u16) -> Result<()> {
     let has_update = mode.is_some();
     let (code, resp) = if has_update {
@@ -795,7 +784,6 @@ pub(crate) async fn screen_trendline(mode: Option<String>, json: bool, ui_port: 
 }
 
 /// `tetherly-cli screen harq` -- Harq arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_harq(mode: Option<String>, json: bool, ui_port: u16) -> Result<()> {
     let has_update = mode.is_some();
     let (code, resp) = if has_update {
@@ -869,7 +857,6 @@ pub(crate) async fn screen_harq(mode: Option<String>, json: bool, ui_port: u16) 
 }
 
 /// `tetherly-cli screen twcc` -- Twcc arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_twcc(mode: Option<String>, json: bool, ui_port: u16) -> Result<()> {
     let has_update = mode.is_some();
     let (code, resp) = if has_update {
@@ -959,7 +946,6 @@ pub(crate) async fn screen_twcc(mode: Option<String>, json: bool, ui_port: u16) 
 }
 
 /// `tetherly-cli screen probe` -- Probe arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_probe(
     mode: Option<String>,
     target_kbps: Option<u32>,
@@ -1045,7 +1031,6 @@ pub(crate) async fn screen_probe(
 }
 
 /// `tetherly-cli screen sync` -- Sync arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_sync(
     mode: Option<String>,
     trigger: bool,

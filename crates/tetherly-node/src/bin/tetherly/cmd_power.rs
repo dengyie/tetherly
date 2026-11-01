@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly power` -- Power arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn power(action: PowerCmd) -> Result<()> {
     match action {
         PowerCmd::Status {

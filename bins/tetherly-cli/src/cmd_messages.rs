@@ -2,7 +2,7 @@
 //! Peer text message send/history/clear/watch.
 
 use super::cmd_core::print_event;
-use super::util::{loopback_events_connect, loopback_get, loopback_post};
+use super::util::{loopback_events_connect, loopback_get, loopback_post, now_ms};
 use super::*;
 
 /// `tetherly-cli message` -- Message arm of the top-level dispatch.
@@ -357,16 +357,13 @@ pub(crate) fn print_message_history_report(val: &serde_json::Value) {
         "ID", "DIR", "TIME", "PEER", "READ", "CONTENT"
     );
     println!("  {}", "-".repeat(100));
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now = now_ms();
     for m in messages {
         let id = m["id"].as_str().unwrap_or("-");
         let dir = m["direction"].as_str().unwrap_or("in");
         let ts = m["timestamp_ms"].as_u64().unwrap_or(0);
-        let ago_str = if now_ms >= ts {
-            let diff_s = (now_ms - ts) / 1000;
+        let ago_str = if now >= ts {
+            let diff_s = (now - ts) / 1000;
             format!("{diff_s}s ago")
         } else {
             "just now".to_string()

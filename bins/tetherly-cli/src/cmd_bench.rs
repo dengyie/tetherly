@@ -5,7 +5,6 @@ use super::util::{format_bytes, loopback_events_connect, loopback_get, loopback_
 use super::*;
 
 /// `tetherly-cli bench` -- Bench arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn bench(action: BenchCmd) -> Result<()> {
     match action {
         BenchCmd::Status { json, ui_port } => {
@@ -60,7 +59,6 @@ pub(crate) async fn bench(action: BenchCmd) -> Result<()> {
 }
 
 /// `tetherly-cli recommend` -- Recommend arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn recommend(peer: Option<String>, json: bool, ui_port: u16) -> Result<()> {
     do_recommend(ui_port, peer.as_deref(), json).await?;
     Ok(())

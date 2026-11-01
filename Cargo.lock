@@ -2147,7 +2147,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly"
-version = "0.1.65"
+version = "0.1.66"
 dependencies = [
  "base64",
  "serde_json",
@@ -2162,7 +2162,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-android"
-version = "0.1.65"
+version = "0.1.66"
 dependencies = [
  "jni",
  "serde_json",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-cli"
-version = "0.1.65"
+version = "0.1.66"
 dependencies = [
  "anyhow",
  "clap",
@@ -2186,6 +2186,7 @@ dependencies = [
  "serde_json",
  "tetherly-core",
  "tetherly-crypto",
+ "tetherly-loopback",
  "tetherly-net",
  "tokio",
  "tracing",
@@ -2194,7 +2195,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-core"
-version = "0.1.65"
+version = "0.1.66"
 dependencies = [
  "base64",
  "data-encoding",
@@ -2208,7 +2209,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-crypto"
-version = "0.1.65"
+version = "0.1.66"
 dependencies = [
  "argon2",
  "base64",
@@ -2227,8 +2228,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tetherly-loopback"
+version = "0.1.66"
+dependencies = [
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "tetherly-net"
-version = "0.1.65"
+version = "0.1.66"
 dependencies = [
  "mdns-sd",
  "proptest",
@@ -2244,7 +2253,7 @@ dependencies = [
 
 [[package]]
 name = "tetherly-node"
-version = "0.1.65"
+version = "0.1.66"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2269,6 +2278,7 @@ dependencies = [
  "serde_json",
  "tetherly-core",
  "tetherly-crypto",
+ "tetherly-loopback",
  "tetherly-net",
  "thiserror 2.0.21",
  "tokio",

@@ -5,7 +5,6 @@ use super::util::{loopback_events_connect, loopback_get, loopback_post};
 use super::*;
 
 /// `tetherly-cli audio` -- Audio arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn audio(action: AudioCmd) -> Result<()> {
     match action {
         AudioCmd::Routing { action } => match action {

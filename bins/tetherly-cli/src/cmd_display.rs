@@ -5,7 +5,6 @@ use super::util::{loopback_events_connect, loopback_get, loopback_post};
 use super::*;
 
 /// `tetherly-cli display` -- Display arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn display(action: DisplayCmd) -> Result<()> {
     match action {
         DisplayCmd::Virtual { action } => match action {

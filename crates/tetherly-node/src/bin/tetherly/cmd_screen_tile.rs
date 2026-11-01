@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly screen tile` -- Tile arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_tile(
     action: Option<ScreenTileSubCmd>,
     json: bool,
@@ -217,7 +216,6 @@ pub(crate) async fn screen_tile(
 }
 
 /// `tetherly screen tile cache` -- TileCache arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_tile_cache(
     action: Option<ScreenTileCacheSubCmd>,
     json: bool,
@@ -228,7 +226,6 @@ pub(crate) async fn screen_tile_cache(
 }
 
 /// `tetherly screen focus` -- Focus arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_focus(
     action: Option<ScreenFocusSubCmd>,
     json: bool,
@@ -239,7 +236,6 @@ pub(crate) async fn screen_focus(
 }
 
 /// `tetherly screen tile palette` -- TilePalette arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_tile_palette(
     action: Option<ScreenTilePaletteSubCmd>,
     json: bool,
@@ -250,7 +246,6 @@ pub(crate) async fn screen_tile_palette(
 }
 
 /// `tetherly screen tile predict` -- TilePredict arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_tile_predict(
     action: Option<ScreenTilePredictSubCmd>,
     json: bool,
@@ -261,7 +256,6 @@ pub(crate) async fn screen_tile_predict(
 }
 
 /// `tetherly screen tile present` -- TilePresent arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_tile_present(
     action: Option<ScreenTilePresentSubCmd>,
     json: bool,
@@ -272,7 +266,6 @@ pub(crate) async fn screen_tile_present(
 }
 
 /// `tetherly screen tile nack` -- TileNack arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_tile_nack(
     action: Option<ScreenTileNackSubCmd>,
     json: bool,
@@ -283,7 +276,6 @@ pub(crate) async fn screen_tile_nack(
 }
 
 /// `tetherly screen tile saliency` -- TileSaliency arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_tile_saliency(
     action: Option<ScreenTileSaliencySubCmd>,
     json: bool,
@@ -294,7 +286,6 @@ pub(crate) async fn screen_tile_saliency(
 }
 
 /// `tetherly screen tile lod` -- TileLod arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_tile_lod(
     action: Option<ScreenTileLodSubCmd>,
     json: bool,
@@ -305,7 +296,6 @@ pub(crate) async fn screen_tile_lod(
 }
 
 /// `tetherly screen tile batch` -- TileBatch arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_tile_batch(
     action: Option<ScreenTileBatchSubCmd>,
     json: bool,
@@ -316,7 +306,6 @@ pub(crate) async fn screen_tile_batch(
 }
 
 /// `tetherly screen tile motion` -- TileMotion arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_tile_motion(
     action: Option<ScreenTileMotionSubCmd>,
     json: bool,

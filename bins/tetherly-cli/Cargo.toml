@@ -15,6 +15,7 @@ path = "src/main.rs"
 tetherly-core.workspace = true
 tetherly-crypto.workspace = true
 tetherly-net.workspace = true
+tetherly-loopback.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

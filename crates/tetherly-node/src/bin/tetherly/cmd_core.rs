@@ -5,7 +5,6 @@ use super::util::{format_bytes, format_speed, format_uptime};
 use super::*;
 
 /// `tetherly identity` -- Identity arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn identity(cfg: NodeConfig) -> Result<()> {
     let node = Node::start(cfg)?;
     println!("{}", node.identity().device_id());
@@ -13,7 +12,6 @@ pub(crate) async fn identity(cfg: NodeConfig) -> Result<()> {
 }
 
 /// `tetherly pin` -- Pin arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn pin(status: bool, clear: bool, json: bool, ui_port: u16) -> Result<()> {
     if clear {
         let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/pin/clear", b"{}")
@@ -424,7 +422,6 @@ pub(crate) async fn run(
 }
 
 /// `tetherly dial` -- Dial arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn dial(
     addr: Option<SocketAddr>,
     peer: Option<String>,
@@ -463,7 +460,6 @@ pub(crate) async fn dial(
 }
 
 /// `tetherly discover` -- Discover arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn discover(rescan: bool, json: bool, ui_port: u16) -> Result<()> {
     if rescan {
         let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/discovery/rescan", b"{}")
@@ -530,7 +526,6 @@ pub(crate) async fn discover(rescan: bool, json: bool, ui_port: u16) -> Result<(
 }
 
 /// `tetherly status` -- Status arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn status(watch: bool, interval: u64, json: bool, ui_port: u16) -> Result<()> {
     loop {
         let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/state")
@@ -566,7 +561,6 @@ pub(crate) async fn status(watch: bool, interval: u64, json: bool, ui_port: u16)
 }
 
 /// `tetherly sys` -- Sys arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn sys(watch: bool, interval: u64, json: bool, ui_port: u16) -> Result<()> {
     loop {
         let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/sys")
@@ -602,7 +596,6 @@ pub(crate) async fn sys(watch: bool, interval: u64, json: bool, ui_port: u16) ->
 }
 
 /// `tetherly health` -- Health arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn health(json: bool, ui_port: u16) -> Result<()> {
     let t0 = std::time::Instant::now();
     let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/health")
@@ -648,7 +641,6 @@ pub(crate) async fn health(json: bool, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly config` -- Config arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn config(
     name: Option<String>,
     advertise: Option<bool>,
@@ -744,7 +736,6 @@ pub(crate) async fn config(
 }
 
 /// `tetherly stop` -- Stop arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stop(ui_port: u16) -> Result<()> {
     let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/daemon/shutdown", b"")
         .await
@@ -765,7 +756,6 @@ pub(crate) async fn stop(ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly events` -- Events arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn events(
     count: usize,
     timeout_secs: u64,
@@ -827,14 +817,12 @@ pub(crate) async fn events(
 }
 
 /// `tetherly metrics` -- Metrics arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn metrics(reset: bool, json: bool, ui_port: u16) -> Result<()> {
     handle_traffic_cmd(reset, json, ui_port).await?;
     Ok(())
 }
 
 /// `tetherly caps` -- Caps arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn caps(
     peer: Option<String>,
     enable: Option<String>,

@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly ancs` -- Ancs arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn ancs(action: AncsCmd) -> Result<()> {
     match action {
         AncsCmd::Status { json, ui_port } => {

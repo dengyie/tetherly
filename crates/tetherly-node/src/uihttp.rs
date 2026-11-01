@@ -10,9 +10,17 @@ use tetherly_core::{
     ActionValidator, AudioChannelLayout, CameraCodec, DisplayEdge, MediaCommand, MicCodec,
     PlaybackState, PowerSource,
 };
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
+
+// The loopback HTTP/SSE client used to be defined here and, separately, in
+// `tetherly-cli`. It now lives in `tetherly-loopback` so both binaries share one
+// implementation (and one timeout policy); re-exported so the existing
+// `tetherly_node::loopback_*` call sites and the router tests are unchanged.
+#[cfg(test)]
+use tetherly_loopback::parse_http_response;
+pub use tetherly_loopback::{loopback_delete, loopback_get, loopback_post, loopback_put};
 
 const INDEX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/index.html"));
 const MAX_HEADER: usize = 16 * 1024;
@@ -252,83 +260,40 @@ async fn write_http(
     write_http_response(stream, &resp).await
 }
 
-/// Binary-safe parser for raw HTTP responses.
-fn parse_http_response(buf: &[u8]) -> (u16, Vec<u8>) {
-    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n");
-    let (head_bytes, body_bytes) = match header_end {
-        Some(pos) => (&buf[..pos], &buf[pos + 4..]),
-        None => (buf, &[][..]),
-    };
-    let head_text = String::from_utf8_lossy(head_bytes);
-    let code = head_text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .unwrap_or(0);
-    (code, body_bytes.to_vec())
+/// An active Server-Sent Events stream connected to a loopback UI endpoint.
+///
+/// A thin typed facade over [`tetherly_loopback::SseStream`]: the transport and
+/// its deadlines live in the shared crate, while decoding into this crate's
+/// [`UiEvent`](crate::events::UiEvent) has to stay here because that type does.
+pub struct SseStream(tetherly_loopback::SseStream);
+
+impl SseStream {
+    /// Read the next event data string from the stream.
+    /// Comments (lines starting with ':') and blank separator lines are skipped.
+    /// Returns `Ok(Some(data))` when a `data: ...` event arrives,
+    /// `Ok(None)` when the stream is closed, or `Err` on I/O error (including
+    /// the shared client's idle deadline).
+    pub async fn next_event(&mut self) -> std::io::Result<Option<String>> {
+        self.0.next_event().await
+    }
+
+    /// Read the next typed `UiEvent` from the stream, skipping frames that do
+    /// not decode.
+    pub async fn next_ui_event(&mut self) -> std::io::Result<Option<crate::events::UiEvent>> {
+        while let Some(raw) = self.next_event().await? {
+            if let Ok(ev) = serde_json::from_str::<crate::events::UiEvent>(&raw) {
+                return Ok(Some(ev));
+            }
+        }
+        Ok(None)
+    }
 }
 
-/// POST a small JSON body to a node's own loopback UI API and return the HTTP
-/// status with the response body. The CLI uses this so `tetherly pin` arms the
-/// *running* daemon: a freshly started process would print a code no listener
-/// can honour. Loopback only, and the response body is the sole place a PIN is
-/// ever surfaced (never logged).
-pub async fn loopback_post(port: u16, path: &str, body: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect(addr).await?;
-    let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes()).await?;
-    stream.write_all(body).await?;
-    stream.flush().await?;
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await?;
-    Ok(parse_http_response(&buf))
-}
-
-/// PUT a JSON payload to a node's loopback UI API and return the HTTP status
-/// with the response body.
-pub async fn loopback_put(port: u16, path: &str, body: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect(addr).await?;
-    let head = format!(
-        "PUT {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes()).await?;
-    stream.write_all(body).await?;
-    stream.flush().await?;
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await?;
-    Ok(parse_http_response(&buf))
-}
-
-/// GET a path from a node's loopback UI API and return the HTTP status with
-/// the response body.
-pub async fn loopback_get(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect(addr).await?;
-    let head = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-    stream.write_all(head.as_bytes()).await?;
-    stream.flush().await?;
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await?;
-    Ok(parse_http_response(&buf))
-}
-
-/// DELETE a path from a node's loopback UI API and return the HTTP status with
-/// the response body.
-pub async fn loopback_delete(port: u16, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect(addr).await?;
-    let head = format!("DELETE {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-    stream.write_all(head.as_bytes()).await?;
-    stream.flush().await?;
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await?;
-    Ok(parse_http_response(&buf))
+/// Connect to a node's loopback UI API and initiate an SSE stream on `/api/events`.
+pub async fn loopback_events_connect(port: u16) -> std::io::Result<SseStream> {
+    tetherly_loopback::loopback_events_connect(port)
+        .await
+        .map(SseStream)
 }
 
 async fn handle_sse(stream: &mut TcpStream, node: &Node) -> std::io::Result<()> {
@@ -395,69 +360,6 @@ async fn handle_sse(stream: &mut TcpStream, node: &Node) -> std::io::Result<()> 
         }
     }
     Ok(())
-}
-
-/// An active Server-Sent Events stream connected to a loopback UI endpoint.
-pub struct SseStream {
-    lines: Lines<BufReader<TcpStream>>,
-}
-
-impl SseStream {
-    /// Read the next event data string from the stream.
-    /// Comments (lines starting with ':') and blank separator lines are skipped.
-    /// Returns `Ok(Some(data))` when a `data: ...` event arrives,
-    /// `Ok(None)` when the stream is closed, or `Err` on I/O error.
-    pub async fn next_event(&mut self) -> std::io::Result<Option<String>> {
-        while let Some(line) = self.lines.next_line().await? {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with(':') {
-                continue;
-            }
-            if let Some(payload) = trimmed.strip_prefix("data:") {
-                return Ok(Some(payload.trim().to_string()));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Read the next typed `UiEvent` from the stream.
-    pub async fn next_ui_event(&mut self) -> std::io::Result<Option<crate::events::UiEvent>> {
-        while let Some(raw) = self.next_event().await? {
-            if let Ok(ev) = serde_json::from_str::<crate::events::UiEvent>(&raw) {
-                return Ok(Some(ev));
-            }
-        }
-        Ok(None)
-    }
-}
-
-/// Connect to a node's loopback UI API and initiate an SSE stream on `/api/events`.
-pub async fn loopback_events_connect(port: u16) -> std::io::Result<SseStream> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect(addr).await?;
-    let req = "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n\r\n";
-    stream.write_all(req.as_bytes()).await?;
-    stream.flush().await?;
-
-    let mut lines = BufReader::new(stream).lines();
-    let status_line = lines.next_line().await?.unwrap_or_default();
-    if !status_line.contains("200") {
-        return Err(std::io::Error::other(format!(
-            "SSE HTTP handshake failed: {status_line}"
-        )));
-    }
-    while let Some(header) = lines.next_line().await? {
-        if header.trim().is_empty() {
-            break;
-        }
-    }
-    while let Some(line) = lines.next_line().await? {
-        let trimmed = line.trim();
-        if trimmed.starts_with(':') {
-            break;
-        }
-    }
-    Ok(SseStream { lines })
 }
 
 // Generated router: every arm pattern stays here so the (method, path) table

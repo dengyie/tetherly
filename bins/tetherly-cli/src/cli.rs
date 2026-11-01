@@ -522,9 +522,6 @@ pub(crate) enum Cmd {
         /// Watch mode: continuously stream live audit events
         #[arg(long, short)]
         watch: bool,
-        /// Refresh interval in seconds for --watch (default: 1)
-        #[arg(long, default_value_t = 1)]
-        interval: u64,
         /// Clear and purge all entries from the audit log
         #[arg(long)]
         clear: bool,
@@ -844,4 +841,118 @@ pub(crate) enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser};
+
+    use super::*;
+
+    /// A clap tree this wide costs far more stack to build and `debug_assert` in
+    /// a debug build than libtest's 2 MiB per-test default. Walk it on a thread
+    /// we size ourselves, so the guard does not depend on whoever runs the suite
+    /// exporting `RUST_MIN_STACK`.
+    fn with_deep_stack<F: FnOnce() + Send + 'static>(f: F) {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(f)
+            .expect("spawn clap-tree walker")
+            .join()
+            .expect("clap-tree walker panicked");
+    }
+
+    fn root() -> clap::Command {
+        Cli::command()
+    }
+
+    /// Every command path under `cmd`, in depth-first order (without `cmd` itself).
+    /// Aliases count as their own paths: `screen tile predict` and
+    /// `screen tile predict-alias` both have to resolve.
+    fn collect_paths(cmd: &clap::Command, prefix: &[String], out: &mut Vec<Vec<String>>) {
+        for sub in cmd.get_subcommands() {
+            let mut path = prefix.to_vec();
+            path.push(sub.get_name().to_string());
+            out.push(path.clone());
+            collect_paths(sub, &path, out);
+            for alias in sub.get_all_aliases() {
+                let mut alias_path = prefix.to_vec();
+                alias_path.push(alias.to_string());
+                out.push(alias_path);
+            }
+        }
+    }
+
+    fn has_long_flag(cmd: &clap::Command, long: &str) -> bool {
+        cmd.get_arguments().any(|a| a.get_long() == Some(long))
+    }
+
+    #[test]
+    fn command_tree_satisfies_clap_invariants() {
+        with_deep_stack(|| root().debug_assert());
+    }
+
+    #[test]
+    fn every_command_path_resolves_help() {
+        with_deep_stack(|| {
+            let mut paths = Vec::new();
+            collect_paths(&root(), &[], &mut paths);
+            // A tree that silently lost a subtree would still pass every check
+            // below; the count is what makes that visible. v0.1.66 has 457
+            // canonical paths plus 28 aliases = 485 — a floor, not an equality,
+            // so adding a command stays cheap.
+            assert!(
+                paths.len() >= 450,
+                "expected the full command tree, found only {} paths",
+                paths.len()
+            );
+
+            for path in &paths {
+                let mut argv = vec!["tetherly-cli".to_string()];
+                argv.extend(path.iter().cloned());
+                argv.push("--help".to_string());
+                let err = match root().try_get_matches_from(&argv) {
+                    Ok(_) => panic!("`{}` accepted --help as a value", path.join(" ")),
+                    Err(err) => err,
+                };
+                assert_eq!(
+                    err.kind(),
+                    clap::error::ErrorKind::DisplayHelp,
+                    "`{} --help` did not render help: {err}",
+                    path.join(" ")
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn watch_interval_only_exists_where_it_is_honoured() {
+        with_deep_stack(|| {
+            let root = root();
+            // `status`/`sys` poll on this interval (cmd_core), so the flag must
+            // stay; `audit --watch` is push-based, so it must not be accepted
+            // and then quietly ignored.
+            for name in ["status", "sys"] {
+                let cmd = root.find_subcommand(name).expect(name);
+                assert!(has_long_flag(cmd, "interval"), "{name} lost --interval");
+            }
+            let audit = root.find_subcommand("audit").expect("audit");
+            assert!(
+                !has_long_flag(audit, "interval"),
+                "audit re-grew a --interval it never reads"
+            );
+
+            let err = match Cli::try_parse_from([
+                "tetherly-cli",
+                "audit",
+                "--watch",
+                "--interval",
+                "1",
+            ]) {
+                Ok(_) => panic!("audit --watch --interval was accepted but is never read"),
+                Err(err) => err,
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        });
+    }
 }

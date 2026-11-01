@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly clip` -- Clip arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn clip(action: ClipCmd) -> Result<()> {
     match action {
         ClipCmd::Status { json, ui_port } => {

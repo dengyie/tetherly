@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly focus` -- Focus arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn focus(action: FocusCmd) -> Result<()> {
     match action {
         FocusCmd::On {

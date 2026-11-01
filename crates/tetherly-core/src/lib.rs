@@ -39,6 +39,7 @@ pub mod replay;
 pub mod screen;
 pub mod screen_font;
 pub mod session;
+pub mod text;
 pub mod topology;
 pub mod virtual_display;
 pub mod wire;
@@ -138,9 +139,9 @@ pub use overlay::{
 };
 pub use persist::{TrustFile, TrustedPeerDto};
 pub use ports::{
-    Clip, Clock, Insertor, ManualClock, MemoryTrustStore, NotificationPayload, NotificationUrgency,
-    Notifier, Opener, PhoneNotification, Rng, ScreenCodec, ScreenSink, ScreenSource, SystemClock,
-    TrustStore, TrustedPeer,
+    now_ms, now_secs, Clip, Clock, Insertor, ManualClock, MemoryTrustStore, NotificationPayload,
+    NotificationUrgency, Notifier, Opener, PhoneNotification, Rng, ScreenCodec, ScreenSink,
+    ScreenSource, SystemClock, TrustStore, TrustedPeer,
 };
 pub use recommend::{
     recommend_streaming_params, AudioTier, CameraTier, DisplayTier, MicTier,
@@ -257,6 +258,10 @@ pub use screen::{
 };
 pub use session::{
     backoff_delay, commit_trust, dispose_hello, ConnState, HelloDisposition, LockoutTable, PIN_TTL,
+};
+pub use text::{
+    encode_path, encode_query_value, format_bytes, format_speed, format_timestamp_ago,
+    format_uptime,
 };
 pub use topology::{
     map_edge_exit_to_entry, DisplayEdge, DisplayRect, EdgeCrossingConfig, EdgeNeighbor,

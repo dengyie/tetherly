@@ -4,7 +4,7 @@
 use super::cmd_core::print_event;
 use super::util::{
     format_bytes, format_speed, format_timestamp_ago, loopback_events_connect, loopback_get,
-    loopback_post, url_encode,
+    loopback_post, now_ms, now_secs, url_encode,
 };
 use super::*;
 
@@ -275,7 +275,6 @@ pub(crate) async fn send(
 }
 
 /// `tetherly-cli resume` -- Resume arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resume(json: bool, ui_port: u16) -> Result<()> {
     let (code, resp) = loopback_get(ui_port, "/api/file/resume")
         .await
@@ -350,7 +349,6 @@ pub(crate) async fn resume(json: bool, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly-cli cancel` -- Cancel arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn cancel(id: String, ui_port: u16) -> Result<()> {
     let body = serde_json::to_vec(&serde_json::json!({ "id": id }))?;
     let (code, resp) = loopback_post(ui_port, "/api/file/cancel", &body)
@@ -372,7 +370,6 @@ pub(crate) async fn cancel(id: String, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly-cli transfers` -- Transfers arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn transfers(
     id: Option<String>,
     active: bool,
@@ -386,7 +383,6 @@ pub(crate) async fn transfers(
 }
 
 /// `tetherly-cli clear transfers` -- ClearTransfers arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn clear_transfers(ui_port: u16) -> Result<()> {
     let (code, resp) = loopback_post(ui_port, "/api/file/clear", b"{}")
         .await
@@ -410,7 +406,6 @@ pub(crate) async fn clear_transfers(ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly-cli offers` -- Offers arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn offers(
     peer: Option<String>,
     id: Option<String>,
@@ -422,7 +417,6 @@ pub(crate) async fn offers(
 }
 
 /// `tetherly-cli accept` -- Accept arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn accept(
     id: Option<String>,
     all: bool,
@@ -435,7 +429,6 @@ pub(crate) async fn accept(
 }
 
 /// `tetherly-cli reject` -- Reject arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn reject(
     id: Option<String>,
     all: bool,
@@ -476,7 +469,6 @@ pub(crate) async fn auto_accept(
 }
 
 /// `tetherly-cli storage` -- Storage arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn storage(action: StorageCmd) -> Result<()> {
     match action {
         StorageCmd::Status { json, ui_port } => {
@@ -560,7 +552,6 @@ pub(crate) async fn storage(action: StorageCmd) -> Result<()> {
 }
 
 /// `tetherly-cli inbox` -- Inbox arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn inbox(action: InboxCmd) -> Result<()> {
     match action {
         InboxCmd::List {
@@ -621,7 +612,7 @@ pub(crate) async fn inbox(action: InboxCmd) -> Result<()> {
                         let size = f["size"].as_u64().unwrap_or(0);
                         let mod_secs = f["modified_at_secs"].as_u64().unwrap_or(0);
                         let is_safe = f["is_safe"].as_bool().unwrap_or(false);
-                        let mod_str = format_timestamp_ago(mod_secs);
+                        let mod_str = format_timestamp_ago(mod_secs, now_secs());
                         let safe_str = if is_safe { "yes" } else { "no" };
                         let name_display = if name.len() > 30 {
                             format!("{}...", &name[..27])
@@ -975,10 +966,7 @@ pub(crate) fn print_outbox_report(val: &serde_json::Value) {
         "ID", "FILENAME", "SIZE", "PEER", "STATUS", "SPEED", "STARTED"
     );
     println!("  {}", "-".repeat(110));
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now = now_ms();
     for e in entries {
         let id = e["id"].as_str().unwrap_or("-");
         let filename = e["filename"].as_str().unwrap_or("-");
@@ -994,8 +982,8 @@ pub(crate) fn print_outbox_report(val: &serde_json::Value) {
             "-".to_string()
         };
         let ts = e["started_ms"].as_u64().unwrap_or(0);
-        let ago_str = if now_ms >= ts {
-            let diff_s = (now_ms - ts) / 1000;
+        let ago_str = if now >= ts {
+            let diff_s = (now - ts) / 1000;
             format!("{diff_s}s ago")
         } else {
             "just now".to_string()

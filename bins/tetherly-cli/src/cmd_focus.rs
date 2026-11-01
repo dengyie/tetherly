@@ -5,7 +5,6 @@ use super::util::{loopback_events_connect, loopback_get, loopback_post};
 use super::*;
 
 /// `tetherly-cli focus` -- Focus arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn focus(action: FocusCmd) -> Result<()> {
     match action {
         FocusCmd::On {

@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly topology` -- Topology arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn topology(action: TopologyCmd) -> Result<()> {
     match action {
         TopologyCmd::Show { json, ui_port } => {

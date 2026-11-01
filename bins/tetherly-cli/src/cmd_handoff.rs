@@ -5,7 +5,6 @@ use super::util::{loopback_delete, loopback_events_connect, loopback_get, loopba
 use super::*;
 
 /// `tetherly-cli handoff` -- Handoff arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handoff(action: HandoffCmd) -> Result<()> {
     match action {
         HandoffCmd::Send {

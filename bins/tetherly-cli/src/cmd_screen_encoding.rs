@@ -5,7 +5,6 @@ use super::util::{loopback_get, loopback_post};
 use super::*;
 
 /// `tetherly-cli screen delta` -- Delta arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_delta(
     action: Option<ScreenDeltaSubCmd>,
     json: bool,
@@ -131,7 +130,6 @@ pub(crate) async fn screen_delta(
 }
 
 /// `tetherly-cli screen metric` -- Metric arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_metric(
     action: Option<ScreenMetricSubCmd>,
     json: bool,
@@ -259,7 +257,6 @@ pub(crate) async fn screen_metric(
 }
 
 /// `tetherly-cli screen qoe` -- Qoe arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_qoe(
     action: Option<ScreenQoeSubCmd>,
     json: bool,
@@ -387,7 +384,6 @@ pub(crate) async fn screen_qoe(
 }
 
 /// `tetherly-cli screen pir` -- Pir arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_pir(
     action: Option<ScreenPirSubCmd>,
     json: bool,
@@ -513,7 +509,6 @@ pub(crate) async fn screen_pir(
 }
 
 /// `tetherly-cli screen ltr` -- Ltr arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_ltr(
     action: Option<ScreenLtrSubCmd>,
     json: bool,
@@ -699,7 +694,6 @@ pub(crate) async fn screen_ltr(
 }
 
 /// `tetherly-cli screen svc` -- Svc arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_svc(
     action: Option<ScreenSvcSubCmd>,
     json: bool,
@@ -859,7 +853,6 @@ pub(crate) async fn screen_svc(
 }
 
 /// `tetherly-cli screen motion` -- Motion arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_motion(
     action: Option<ScreenMotionSubCmd>,
     json: bool,

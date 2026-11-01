@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly handoff` -- Handoff arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handoff(action: HandoffCmd) -> Result<()> {
     match action {
         HandoffCmd::Send {

@@ -33,6 +33,19 @@ impl Clock for SystemClock {
     }
 }
 
+/// Milliseconds since the Unix epoch, from the system clock.
+///
+/// The single place the binaries read wall-clock time for display purposes;
+/// anything that needs a controllable clock should take a [`Clock`] instead.
+pub fn now_ms() -> u64 {
+    SystemClock.unix_ms()
+}
+
+/// Whole seconds since the Unix epoch, from the system clock.
+pub fn now_secs() -> u64 {
+    now_ms() / 1000
+}
+
 /// Injectable clock for production tests and lockout/TTL checks.
 #[derive(Clone, Debug)]
 pub struct ManualClock {

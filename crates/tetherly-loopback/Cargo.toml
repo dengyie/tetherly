@@ -1,0 +1,12 @@
+[package]
+name = "tetherly-loopback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Bounded-timeout HTTP/SSE client for a node's own loopback UI API"
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+tokio.workspace = true

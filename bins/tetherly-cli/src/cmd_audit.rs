@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Security audit trail list/clear/watch.
 
-use super::util::{loopback_events_connect, loopback_get, loopback_post};
+use super::util::{loopback_events_connect, loopback_get, loopback_post, now_ms};
 use super::*;
 
 /// `tetherly-cli audit` -- Audit arm of the top-level dispatch.
@@ -13,13 +13,12 @@ pub(crate) async fn audit(
     limit: Option<usize>,
     since: Option<u64>,
     watch: bool,
-    interval: u64,
     clear: bool,
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
     handle_audit_cmd(
-        action, category, severity, limit, since, watch, interval, clear, json, ui_port,
+        action, category, severity, limit, since, watch, clear, json, ui_port,
     )
     .await?;
     Ok(())
@@ -33,7 +32,6 @@ pub(crate) async fn handle_audit_cmd(
     default_lim: Option<usize>,
     default_since: Option<u64>,
     default_watch: bool,
-    default_interval: u64,
     default_clear: bool,
     default_json: bool,
     default_ui_port: u16,
@@ -42,15 +40,8 @@ pub(crate) async fn handle_audit_cmd(
         return handle_audit_clear(default_json, default_ui_port).await;
     }
     if default_watch {
-        return handle_audit_watch(
-            default_cat,
-            default_sev,
-            0,
-            default_interval,
-            default_json,
-            default_ui_port,
-        )
-        .await;
+        return handle_audit_watch(default_cat, default_sev, 0, default_json, default_ui_port)
+            .await;
     }
     match action {
         None => {
@@ -108,7 +99,7 @@ pub(crate) async fn handle_audit_cmd(
             } else {
                 default_ui_port
             };
-            handle_audit_watch(cat, sev, count, default_interval, j, port).await
+            handle_audit_watch(cat, sev, count, j, port).await
         }
     }
 }
@@ -193,7 +184,6 @@ pub(crate) async fn handle_audit_watch(
     category: Option<String>,
     severity: Option<String>,
     count: usize,
-    _interval: u64,
     json: bool,
     ui_port: u16,
 ) -> Result<()> {
@@ -295,15 +285,12 @@ pub(crate) fn print_audit_report(val: &serde_json::Value) {
         "ID", "TIME", "SEV", "CATEGORY", "ACTION", "TARGET", "SUMMARY", "STATUS"
     );
     println!("  {}", "-".repeat(115));
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now = now_ms();
     for e in entries {
         let id = e["id"].as_u64().unwrap_or(0);
         let ts = e["timestamp_ms"].as_u64().unwrap_or(0);
-        let ago_str = if now_ms >= ts {
-            let diff_s = (now_ms - ts) / 1000;
+        let ago_str = if now >= ts {
+            let diff_s = (now - ts) / 1000;
             format!("{diff_s}s ago")
         } else {
             "just now".to_string()

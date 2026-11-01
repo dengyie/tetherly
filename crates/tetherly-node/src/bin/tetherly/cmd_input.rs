@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly input` -- Input arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn input(action: InputCmd) -> Result<()> {
     match action {
         InputCmd::Start {

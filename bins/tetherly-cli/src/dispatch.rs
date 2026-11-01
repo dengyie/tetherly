@@ -278,13 +278,12 @@ pub(crate) async fn dispatch(cli: Cli) -> Result<()> {
             limit,
             since,
             watch,
-            interval,
             clear,
             json,
             ui_port,
         } => {
             cmd_audit::audit(
-                action, category, severity, limit, since, watch, interval, clear, json, ui_port,
+                action, category, severity, limit, since, watch, clear, json, ui_port,
             )
             .await?;
         }

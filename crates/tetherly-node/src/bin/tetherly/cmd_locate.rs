@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly locate` -- Locate arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn locate(action: LocateCmd) -> Result<()> {
     match action {
         LocateCmd::Ring {

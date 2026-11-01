@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly media` -- Media arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn media(action: MediaCmd) -> Result<()> {
     match action {
         MediaCmd::Play {

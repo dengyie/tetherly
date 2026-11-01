@@ -650,9 +650,6 @@ pub(crate) enum Cmd {
         /// Watch mode: continuously stream live audit events
         #[arg(long, short)]
         watch: bool,
-        /// Refresh interval in seconds for --watch (default: 1)
-        #[arg(long, default_value_t = 1)]
-        interval: u64,
         /// Clear and purge all entries from the audit log
         #[arg(long)]
         clear: bool,

@@ -5,7 +5,6 @@ use super::util::url_encode;
 use super::*;
 
 /// `tetherly action` -- Action arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn action(action: ActionCmd) -> Result<()> {
     match action {
         ActionCmd::Local { sub } => match sub {

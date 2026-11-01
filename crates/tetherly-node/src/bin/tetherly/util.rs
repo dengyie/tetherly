@@ -1,86 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Formatting and URL-encoding helpers shared by the CLI printers.
+//! Re-exports of the formatting helpers this binary prints with.
+//!
+//! The bodies used to live here and, in a second copy, in `tetherly-cli` — so a
+//! fix to one printer silently left the other stale. They now live in
+//! `tetherly-core::text`; this module keeps the `super::util::{...}` import
+//! shape the handler modules already use.
 
-pub(crate) fn format_uptime(secs: u64) -> String {
-    let days = secs / 86400;
-    let hours = (secs % 86400) / 3600;
-    let minutes = (secs % 3600) / 60;
-    let s = secs % 60;
-    if days > 0 {
-        format!("{days}d {hours}h {minutes}m {s}s")
-    } else if hours > 0 {
-        format!("{hours}h {minutes}m {s}s")
-    } else if minutes > 0 {
-        format!("{minutes}m {s}s")
-    } else {
-        format!("{s}s")
-    }
-}
-
-pub(crate) fn format_timestamp_ago(secs: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    if secs == 0 {
-        return "-".to_string();
-    }
-    if now >= secs {
-        let diff = now - secs;
-        if diff < 60 {
-            format!("{diff}s ago")
-        } else if diff < 3600 {
-            format!("{}m ago", diff / 60)
-        } else if diff < 86400 {
-            format!("{}h ago", diff / 3600)
-        } else {
-            format!("{}d ago", diff / 86400)
-        }
-    } else {
-        format!("in {}s", secs - now)
-    }
-}
-
-pub(crate) fn url_encode(input: &str) -> String {
-    let mut out = String::new();
-    for b in input.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{:02X}", b));
-        }
-    }
-    out
-}
-
-pub(crate) fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if bytes >= GB {
-        format!("{:.2} GiB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MiB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KiB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-pub(crate) fn format_speed(bps: u64) -> String {
-    format!("{}/s", format_bytes(bps))
-}
-
-pub(crate) fn urlencode_path(p: &str) -> String {
-    let mut out = String::with_capacity(p.len());
-    for b in p.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b'~' => {
-                out.push(b as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
-}
+pub(crate) use tetherly_core::text::{
+    encode_path as urlencode_path, encode_query_value as url_encode, format_bytes, format_speed,
+    format_timestamp_ago, format_uptime,
+};
+pub(crate) use tetherly_core::{now_ms, now_secs};

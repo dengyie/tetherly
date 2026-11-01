@@ -8,13 +8,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tetherly_core::pin::parse_pin;
 use tetherly_core::session::LockoutTable;
-use tetherly_core::{Clock, SystemClock, TcpLimiter};
+use tetherly_core::{SystemClock, TcpLimiter};
 use tetherly_crypto::Identity;
 use tetherly_net::session::{
     accept_session, serve_pong_once, SessionConfig, CONTROL_PORT, HANDSHAKE_TIMEOUT,
 };
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 // ---- CLI surface (v0.1.65 / ADR-129) ----
@@ -62,27 +61,6 @@ mod cmd_topology;
 mod dispatch;
 mod util;
 use dispatch::dispatch;
-
-// ---- SSE stream shared by the loopback event helpers (util module) ----
-
-struct SseStream {
-    lines: tokio::io::Lines<tokio::io::BufReader<TcpStream>>,
-}
-
-impl SseStream {
-    async fn next_event(&mut self) -> std::io::Result<Option<String>> {
-        while let Some(line) = self.lines.next_line().await? {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with(':') {
-                continue;
-            }
-            if let Some(payload) = trimmed.strip_prefix("data:") {
-                return Ok(Some(payload.trim().to_string()));
-            }
-        }
-        Ok(None)
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {

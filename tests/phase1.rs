@@ -6169,7 +6169,7 @@ async fn inbox_file_download_raw_preview_and_native_open_via_loopback_api() {
     ];
     for evil in evil_payloads {
         // Download traversal check -> 400 Bad Request
-        let encoded_evil = tetherly_cli_test_url_encode(evil);
+        let encoded_evil = tetherly_core::text::encode_query_value(evil);
         let (c_dl_evil, _) = tetherly_node::loopback_get(
             ui_port,
             &format!("/api/file/inbox/download?name={encoded_evil}"),
@@ -10247,7 +10247,7 @@ async fn action_predefined_quick_actions_local_execution_and_governance_via_loop
     // 5. Host requests Peer's advertised actions
     let refresh_path = format!(
         "/api/action/remote/refresh?peer={}",
-        tetherly_cli_test_url_encode(&peer_id.to_string())
+        tetherly_core::text::encode_query_value(&peer_id.to_string())
     );
     let (code_ref, _) = tetherly_node::loopback_post(host_ui, &refresh_path, &[])
         .await
@@ -10257,7 +10257,7 @@ async fn action_predefined_quick_actions_local_execution_and_governance_via_loop
     // 6. Wait for Host to receive and cache Peer's advertised actions
     let remote_path = format!(
         "/api/action/remote?peer={}",
-        tetherly_cli_test_url_encode(&peer_id.to_string())
+        tetherly_core::text::encode_query_value(&peer_id.to_string())
     );
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut found_advertised_action = false;
@@ -12642,21 +12642,6 @@ async fn link_bench_throughput_and_governance_via_loopback_api() {
     // 12. Clean Shutdown
     host.shutdown();
     peer.shutdown();
-}
-
-fn tetherly_cli_test_url_encode(s: &str) -> String {
-    let mut res = String::new();
-    for b in s.as_bytes() {
-        match *b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                res.push(*b as char);
-            }
-            byte => {
-                res.push_str(&format!("%{byte:02X}"));
-            }
-        }
-    }
-    res
 }
 
 mod tracing_capture {

@@ -6,16 +6,17 @@
 
 ## 当前状态
 
-五个 crate + 两个二进制(`tetherly` 桌面节点、`android_probe` 真机探针)。无 GUI(本机 UI 是 loopback HTTP);ANCS BLE 接收栈三平台齐备(Windows WinRT / macOS CoreBluetooth / Linux BlueZ,真机 Manual-required);屏幕串流默认 zstd 无损,H.264 有损可经 `--screen-codec h264` + 线上协商启用(ADR-079);EasyTier 仅侧车。
+六个 crate + 三个二进制(`tetherly` 桌面节点、`tetherly-cli` 命令行客户端、`android_probe` 真机探针)。无 GUI(本机 UI 是 loopback HTTP);ANCS BLE 接收栈三平台齐备(Windows WinRT / macOS CoreBluetooth / Linux BlueZ,真机 Manual-required);屏幕串流默认 zstd 无损,H.264 有损可经 `--screen-codec h264` + 线上协商启用(ADR-079);EasyTier 仅侧车。
 
 | crate | 职责 |
 |---|---|
 | `tetherly-core` | OTP、帧、Hello、状态机、去重、白名单 |
 | `tetherly-crypto` | Ed25519 + X25519、Argon2id、SPAKE2、PairBind、Noise IK |
 | `tetherly-net` | TCP Hello / SPAKE2 / Noise;可选 LAN mDNS |
+| `tetherly-loopback` | 本机回环 HTTP/SSE 客户端(强制 connect/request/SSE 超时) |
 | `tetherly-node` | LAN 节点、落盘、hubs、本机 HTTP UI;产出 `tetherly` 二进制 |
 | `tetherly-android` | 真身份 + Noise 会话 → `libtetherly_android.so` + `android_probe` |
-| `tetherly-cli` | Phase 0 配对夹具(`listen` / `dial` / `pin` / `identity`),不进生产路径 |
+| `tetherly-cli` | 完整命令行客户端:457 条命令经回环 UI API 操作`正在运行的节点` |
 
 ```text
 # 终端 A:起节点(控制 45717,本机 UI 127.0.0.1:45716)

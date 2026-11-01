@@ -6,7 +6,6 @@ use super::util::{loopback_get, loopback_post, urlencode_path};
 use super::*;
 
 /// `tetherly-cli screen latency` -- Latency arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_latency(
     action: Option<ScreenLatencySubCmd>,
     mode: Option<String>,
@@ -112,7 +111,6 @@ pub(crate) async fn screen_latency(
 }
 
 /// `tetherly-cli screen tuning` -- Tuning arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_tuning(
     action: Option<ScreenTuningSubCmd>,
     mode: Option<String>,
@@ -218,7 +216,6 @@ pub(crate) async fn screen_tuning(
 }
 
 /// `tetherly-cli screen recording` -- Recording arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_recording(
     action: Option<ScreenRecordingSubCmd>,
     out: Option<String>,
@@ -397,7 +394,6 @@ pub(crate) async fn screen_recording(
 }
 
 /// `tetherly-cli screen playback` -- Playback arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_playback(
     action: Option<ScreenPlaybackSubCmd>,
     path: Option<String>,

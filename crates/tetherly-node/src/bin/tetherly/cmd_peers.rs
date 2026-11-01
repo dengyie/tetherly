@@ -5,7 +5,6 @@ use super::util::format_uptime;
 use super::*;
 
 /// `tetherly unpair` -- Unpair arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn unpair(device_id: String, ui_port: u16) -> Result<()> {
     let payload = serde_json::json!({ "device_id": device_id });
     let bytes = serde_json::to_vec(&payload)?;
@@ -35,7 +34,6 @@ pub(crate) async fn unpair(device_id: String, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly peers` -- Peers arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn peers(
     trusted: bool,
     ping: bool,
@@ -152,7 +150,6 @@ pub(crate) async fn peers(
 }
 
 /// `tetherly alias` -- Alias arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn alias(peer: String, alias: String, ui_port: u16) -> Result<()> {
     let payload = serde_json::json!({
         "peer": peer,
@@ -182,14 +179,12 @@ pub(crate) async fn alias(peer: String, alias: String, ui_port: u16) -> Result<(
 }
 
 /// `tetherly routes` -- Routes arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn routes(json: bool, ui_port: u16) -> Result<()> {
     print_routes_list(ui_port, json).await?;
     Ok(())
 }
 
 /// `tetherly route` -- Route arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn route(action: RouteCmd) -> Result<()> {
     match action {
         RouteCmd::List { json, ui_port } => {
@@ -264,7 +259,6 @@ pub(crate) async fn route(action: RouteCmd) -> Result<()> {
 }
 
 /// `tetherly net` -- Net arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn net(refresh: bool, interfaces: bool, json: bool, ui_port: u16) -> Result<()> {
     if refresh {
         let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/net/refresh", b"{}")
@@ -388,14 +382,12 @@ pub(crate) async fn net(refresh: bool, interfaces: bool, json: bool, ui_port: u1
 }
 
 /// `tetherly link` -- Link arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn link(action: Option<LinkCmd>, json: bool, ui_port: u16) -> Result<()> {
     handle_link_cmd(action, json, ui_port).await?;
     Ok(())
 }
 
 /// `tetherly ping` -- Ping arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn ping(peer: Option<String>, count: u32, json: bool, ui_port: u16) -> Result<()> {
     if peer.is_some() {
         return do_peer_ping(ui_port, peer, count, json).await;
@@ -450,7 +442,6 @@ pub(crate) async fn ping(peer: Option<String>, count: u32, json: bool, ui_port: 
 }
 
 /// `tetherly connect` -- Connect arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn connect(
     peer: String,
     addr: Option<String>,
@@ -502,7 +493,6 @@ pub(crate) async fn connect(
 }
 
 /// `tetherly disconnect` -- Disconnect arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn disconnect(peer: String, json: bool, ui_port: u16) -> Result<()> {
     let payload = serde_json::json!({ "peer": peer });
     let bytes = serde_json::to_vec(&payload)?;
@@ -542,7 +532,6 @@ pub(crate) async fn disconnect(peer: String, json: bool, ui_port: u16) -> Result
 }
 
 /// `tetherly block` -- Block arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn block(
     peer: String,
     reason: Option<String>,
@@ -600,7 +589,6 @@ pub(crate) async fn block(
 }
 
 /// `tetherly unblock` -- Unblock arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn unblock(peer: String, json: bool, ui_port: u16) -> Result<()> {
     let payload = serde_json::json!({ "peer": peer });
     let bytes = serde_json::to_vec(&payload)?;
@@ -633,7 +621,6 @@ pub(crate) async fn unblock(peer: String, json: bool, ui_port: u16) -> Result<()
 }
 
 /// `tetherly blocked` -- Blocked arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn blocked(json: bool, ui_port: u16) -> Result<()> {
     let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/peers/blocked")
         .await

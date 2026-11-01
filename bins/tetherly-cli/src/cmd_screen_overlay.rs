@@ -5,7 +5,6 @@ use super::util::{loopback_get, loopback_post, urlencode_path};
 use super::*;
 
 /// `tetherly-cli screen privacy` -- Privacy arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_privacy(
     action: Option<ScreenPrivacySubCmd>,
     enable: bool,
@@ -385,7 +384,6 @@ pub(crate) async fn screen_watermark(
 }
 
 /// `tetherly-cli screen annotate` -- Annotate arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_annotate(
     action: Option<ScreenAnnotateSubCmd>,
     json: bool,
@@ -636,7 +634,6 @@ pub(crate) async fn screen_annotate(
 }
 
 /// `tetherly-cli screen whiteboard` -- Whiteboard arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_whiteboard(
     action: Option<ScreenWhiteboardSubCmd>,
     json: bool,
@@ -1024,7 +1021,6 @@ pub(crate) async fn screen_whiteboard(
 }
 
 /// `tetherly-cli screen roi` -- Roi arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_roi(
     action: Option<ScreenRoiSubCmd>,
     json: bool,
@@ -1190,7 +1186,6 @@ pub(crate) async fn screen_roi(
 }
 
 /// `tetherly-cli screen color` -- Color arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_color(
     action: Option<ScreenColorSubCmd>,
     json: bool,

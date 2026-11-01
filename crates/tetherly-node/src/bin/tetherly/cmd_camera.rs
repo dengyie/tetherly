@@ -4,7 +4,6 @@
 use super::*;
 
 /// `tetherly camera` -- Camera arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn camera(action: CameraCmd) -> Result<()> {
     match action {
         CameraCmd::Stream { action } => match action {

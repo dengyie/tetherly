@@ -5,7 +5,6 @@ use super::util::urlencode_path;
 use super::*;
 
 /// `tetherly screen allow` -- Allow arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_allow(json: bool, ui_port: u16) -> Result<()> {
     let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/screen/allow", b"{}")
         .await
@@ -35,7 +34,6 @@ pub(crate) async fn screen_allow(json: bool, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly screen revoke` -- Revoke arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_revoke(json: bool, ui_port: u16) -> Result<()> {
     let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/screen/revoke", b"{}")
         .await
@@ -65,7 +63,6 @@ pub(crate) async fn screen_revoke(json: bool, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly screen start` -- Start arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_start(peer: Option<String>, json: bool, ui_port: u16) -> Result<()> {
     let payload = serde_json::json!({ "peer": peer });
     let bytes = serde_json::to_vec(&payload)?;
@@ -98,7 +95,6 @@ pub(crate) async fn screen_start(peer: Option<String>, json: bool, ui_port: u16)
 }
 
 /// `tetherly screen stop` -- Stop arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_stop(json: bool, ui_port: u16) -> Result<()> {
     let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/screen/stop", b"{}")
         .await
@@ -125,7 +121,6 @@ pub(crate) async fn screen_stop(json: bool, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly screen keyframe` -- Keyframe arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_keyframe(json: bool, ui_port: u16) -> Result<()> {
     let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/screen/keyframe", b"")
         .await
@@ -156,7 +151,6 @@ pub(crate) async fn screen_keyframe(json: bool, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly screen status` -- Status arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
     let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen")
         .await
@@ -698,7 +692,6 @@ pub(crate) async fn screen_status(json: bool, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly screen displays` -- Displays arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_displays(json: bool, ui_port: u16) -> Result<()> {
     let (code, resp) = tetherly_node::loopback_get(ui_port, "/api/screen/displays")
         .await
@@ -750,7 +743,6 @@ pub(crate) async fn screen_displays(json: bool, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly screen switch` -- Switch arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_switch(display_id: u8, json: bool, ui_port: u16) -> Result<()> {
     let req = serde_json::json!({ "display_id": display_id });
     let body = serde_json::to_vec(&req)?;
@@ -782,7 +774,6 @@ pub(crate) async fn screen_switch(display_id: u8, json: bool, ui_port: u16) -> R
 }
 
 /// `tetherly screen snapshot` -- Snapshot arm of the screen dispatcher.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn screen_snapshot(
     out: Option<String>,
     format: String,

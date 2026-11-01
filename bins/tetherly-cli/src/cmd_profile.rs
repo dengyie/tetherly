@@ -5,7 +5,6 @@ use super::util::{loopback_get, loopback_post};
 use super::*;
 
 /// `tetherly-cli profile` -- Profile arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn profile(
     action: Option<ProfileCmd>,
     tag: Option<String>,
@@ -53,7 +52,6 @@ pub(crate) async fn profile(
 }
 
 /// `tetherly-cli tag` -- Tag arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn tag(action: TagCmd) -> Result<()> {
     match action {
         TagCmd::Add {
@@ -77,7 +75,6 @@ pub(crate) async fn tag(action: TagCmd) -> Result<()> {
 }
 
 /// `tetherly-cli group` -- Group arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn group(action: GroupCmd) -> Result<()> {
     match action {
         GroupCmd::Set {

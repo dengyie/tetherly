@@ -8,7 +8,6 @@ use super::util::{
 use super::*;
 
 /// `tetherly-cli identity` -- Identity arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn identity() -> Result<()> {
     let id = Identity::generate().context("identity")?;
     println!("{}", id.device_id());
@@ -16,7 +15,6 @@ pub(crate) async fn identity() -> Result<()> {
 }
 
 /// `tetherly-cli pin` -- Pin arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn pin(status: bool, clear: bool, json: bool, ui_port: u16) -> Result<()> {
     if clear {
         let (code, resp) = loopback_post(ui_port, "/api/pin/clear", b"{}")
@@ -112,7 +110,6 @@ pub(crate) async fn pin(status: bool, clear: bool, json: bool, ui_port: u16) -> 
 }
 
 /// `tetherly-cli listen` -- Listen arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn listen(port: u16, pin: String, name: String) -> Result<()> {
     let pin = parse_pin(&pin)?;
     let identity = Identity::generate()?;
@@ -127,7 +124,6 @@ pub(crate) async fn listen(port: u16, pin: String, name: String) -> Result<()> {
 }
 
 /// `tetherly-cli dial` -- Dial arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn dial(
     addr: Option<SocketAddr>,
     peer: Option<String>,
@@ -166,7 +162,6 @@ pub(crate) async fn dial(
 }
 
 /// `tetherly-cli discover` -- Discover arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn discover(rescan: bool, json: bool, ui_port: u16) -> Result<()> {
     if rescan {
         let (code, resp) = loopback_post(ui_port, "/api/discovery/rescan", b"{}")
@@ -250,7 +245,6 @@ pub(crate) async fn discover(rescan: bool, json: bool, ui_port: u16) -> Result<(
 }
 
 /// `tetherly-cli status` -- Status arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn status(watch: bool, interval: u64, json: bool, ui_port: u16) -> Result<()> {
     loop {
         let (code, resp) = loopback_get(ui_port, "/api/state").await.map_err(|e| {
@@ -284,7 +278,6 @@ pub(crate) async fn status(watch: bool, interval: u64, json: bool, ui_port: u16)
 }
 
 /// `tetherly-cli health` -- Health arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn health(json: bool, ui_port: u16) -> Result<()> {
     let t0 = std::time::Instant::now();
     let (code, resp) = loopback_get(ui_port, "/api/health").await.map_err(|e| {
@@ -344,7 +337,6 @@ pub(crate) async fn health(json: bool, ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly-cli sys` -- Sys arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn sys(watch: bool, interval: u64, json: bool, ui_port: u16) -> Result<()> {
     loop {
         let (code, resp) = loopback_get(ui_port, "/api/sys").await.map_err(|e| {
@@ -378,7 +370,6 @@ pub(crate) async fn sys(watch: bool, interval: u64, json: bool, ui_port: u16) ->
 }
 
 /// `tetherly-cli config` -- Config arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn config(
     name: Option<String>,
     advertise: Option<bool>,
@@ -490,7 +481,6 @@ pub(crate) async fn config(
 }
 
 /// `tetherly-cli stop` -- Stop arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stop(ui_port: u16) -> Result<()> {
     let (code, resp) = loopback_post(ui_port, "/api/daemon/shutdown", b"")
         .await
@@ -511,7 +501,6 @@ pub(crate) async fn stop(ui_port: u16) -> Result<()> {
 }
 
 /// `tetherly-cli events` -- Events arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn events(
     count: usize,
     timeout_secs: u64,
@@ -571,14 +560,12 @@ pub(crate) async fn events(
 }
 
 /// `tetherly-cli metrics` -- Metrics arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn metrics(reset: bool, json: bool, ui_port: u16) -> Result<()> {
     handle_traffic_cmd(reset, json, ui_port).await?;
     Ok(())
 }
 
 /// `tetherly-cli caps` -- Caps arm of the top-level dispatch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn caps(
     peer: Option<String>,
     enable: Option<String>,
