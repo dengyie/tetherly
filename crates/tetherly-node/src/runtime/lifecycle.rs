@@ -1880,6 +1880,12 @@ fn cleanup_stale_old_binaries() {
 }
 
 fn cleanup_old_binaries_in(parent: &std::path::Path, stem: &str, cutoff: std::time::SystemTime) {
+    // Filesystems with coarse mtime granularity (whole-second ext4/overlayfs
+    // mounts) can report a file created *after* `cutoff` with a truncated
+    // mtime that compares *before* it. Grade "recent" with a small slack so
+    // the rollback path is never deleted over a timestamp rounding artifact
+    // (and so minor wall-clock skew between processes cannot brick rollback).
+    const RECENT_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
     if let Ok(entries) = std::fs::read_dir(parent) {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -1895,7 +1901,7 @@ fn cleanup_old_binaries_in(parent: &std::path::Path, stem: &str, cutoff: std::ti
             let recent = entry
                 .metadata()
                 .and_then(|m| m.modified())
-                .map(|t| t >= cutoff)
+                .map(|t| t + RECENT_SLACK >= cutoff)
                 .unwrap_or(true);
             if recent {
                 continue;
