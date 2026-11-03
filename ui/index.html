@@ -91,6 +91,39 @@
   <div class="id" id="who">connecting…</div>
 </header>
 <main>
+  <section id="deskflow-roaming-banner" style="grid-column: 1 / -1; background: linear-gradient(135deg, #101923 0%, #162436 100%); border: 1px solid #2d4560; border-radius: 10px; padding: 16px; margin-bottom: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.25);">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px">
+      <div style="display:flex; align-items:center; gap:12px">
+        <div style="font-size:28px">⇄</div>
+        <div>
+          <div style="display:flex; align-items:center; gap:8px">
+            <span style="font-size:16px; font-weight:700; color:#fff">Deskflow 屏幕拓扑与无界漫游看板</span>
+            <span id="roam-status-badge" class="badge completed" style="background:#1f4037; color:#3ecf8e">漫游状态: 就绪</span>
+            <span id="roam-seat-badge" class="badge" style="background:#1c2d42; color:#3d9cf0">光标席位: 本机 (Local)</span>
+          </div>
+          <div id="roam-desc" style="font-size:12px; color:var(--muted); margin-top:2px">
+            Mac ↔ Windows 跨端无缝漫游 · 鼠标推至屏幕边缘即可穿越 · 键盘自动映射 (Cmd ↔ Ctrl)
+          </div>
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <button id="quick-roam-attach" type="button" style="background:#2563eb; color:#fff; border:none; border-radius:6px; padding:6px 14px; font-weight:600; cursor:pointer">
+          🚀 激活漫游通道 (Top 边缘)
+        </button>
+        <button id="quick-roam-release" class="bad ghost" type="button" style="padding:6px 12px; font-size:12px; cursor:pointer">
+          🏠 释放回本机
+        </button>
+        <button id="quick-roam-toggle-keymap" class="ghost" type="button" style="padding:6px 12px; font-size:12px; cursor:pointer">
+          ⌨️ 键位: mac_to_windows
+        </button>
+      </div>
+    </div>
+    <div style="display:flex; justify-content:space-between; align-items:center; background:#0d141d; border:1px solid #1e2c3d; border-radius:8px; padding:10px 16px; margin-top:12px; font-size:12px; flex-wrap:wrap; gap:8px">
+      <div><strong>🖥️ 拓扑几何:</strong> Windows 位于 Mac 顶部 (接触边缘: Top ↔ Bottom)</div>
+      <div><strong>⚡ 数据传输:</strong> TCP 端口 45719 (<span id="roam-channel-indicator" style="color:var(--ok)">已联通</span>)</div>
+      <div><strong>🔒 隐私防护:</strong> 纯硬件扫描码 · 本地光标锁边防漂移 · 退出 Deskflow 零干扰</div>
+    </div>
+  </section>
   <div>
     <section>
       <div style="display:flex;justify-content:space-between;align-items:center">
@@ -1400,6 +1433,10 @@
             </select>
           </div>
           <div>
+            <label style="color:var(--muted);display:block;margin-bottom:2px">滚轮速度倍率 (Wheel Speed):</label>
+            <input id="input-policy-wheel-speed" type="number" step="0.1" min="0.1" max="10.0" placeholder="1.0" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px"/>
+          </div>
+          <div>
             <label style="color:var(--muted);display:block;margin-bottom:2px">系统快捷键 (System Hotkeys):</label>
             <select id="input-policy-hotkeys" style="width:100%;padding:4px 8px;font-size:12px;background:#0d1218;color:var(--text);border:1px solid var(--line);border-radius:4px">
               <option value="true">允许全局穿透 (Allow Hotkeys)</option>
@@ -1441,6 +1478,8 @@
                 <div style="display:flex;gap:6px;align-items:center">
                   <span id="input-status-badge" class="badge" style="font-size:11px">隧道未激活</span>
                   <span id="input-role-badge" class="badge" style="font-size:11px">席位: 本地 (Local)</span>
+                  <span id="input-ax-badge" class="badge bad" style="display:none;font-size:11px">辅助功能: 未授权</span>
+                  <button id="input-open-ax-btn" class="ghost" type="button" style="display:none;padding:2px 8px;font-size:11px;background:#e6a23c;color:#000;font-weight:600;border:none;border-radius:4px;cursor:pointer">🔒 打开系统设置一键授权</button>
                 </div>
                 <div id="input-session-info" style="font-size:12px;color:var(--muted);margin-top:2px">外设就绪，支持随时向已配对对端发起远程虚拟输入控制。</div>
               </div>
@@ -6257,6 +6296,31 @@ async function updateInputTunnel() {
       $("input-status-badge").className = active ? "badge completed" : "badge";
     }
 
+    const isCtrl = active && sess && sess.role === "controller";
+    if ($("roam-status-badge")) {
+      $("roam-status-badge").textContent = active ? "漫游状态: 激活联通" : "漫游状态: 就绪待命";
+      $("roam-status-badge").className = active ? "badge completed" : "badge";
+      $("roam-status-badge").style.background = active ? "#1f4037" : "#1c2d42";
+      $("roam-status-badge").style.color = active ? "#3ecf8e" : "#8b9aab";
+    }
+
+    if ($("roam-seat-badge")) {
+      $("roam-seat-badge").textContent = isCtrl ? "席位: Windows 远端 (Remote)" : "席位: Mac 本机 (Local)";
+      $("roam-seat-badge").style.color = isCtrl ? "#3ecf8e" : "#3d9cf0";
+      $("roam-seat-badge").style.background = isCtrl ? "rgba(62, 207, 142, 0.2)" : "rgba(61, 156, 240, 0.2)";
+    }
+
+      if ($("roam-channel-indicator")) {
+        $("roam-channel-indicator").textContent = active ? "已联通 (45719 数据流)" : "就绪 (45719 监听中)";
+        $("roam-channel-indicator").style.color = active ? "var(--ok)" : "var(--muted)";
+      }
+
+      if (sess && sess.peer && $("roam-desc")) {
+        $("roam-desc").textContent = `Mac ↔ ${sess.peer} 跨端漫游中 · 鼠标推至屏幕顶部即可穿越 · 键盘自动映射 (Cmd ↔ Ctrl)`;
+      } else if ($("roam-desc")) {
+        $("roam-desc").textContent = "Mac ↔ Windows 跨端无缝漫游 · 鼠标推至屏幕边缘即可穿越 · 键盘自动映射 (Cmd ↔ Ctrl)";
+      }
+
     if ($("input-role-badge")) {
       if (active && sess) {
         const isCtrl = sess.role === "controller";
@@ -6285,6 +6349,19 @@ async function updateInputTunnel() {
       $("input-active-peer").textContent = active && sess ? `当前对端: ${sess.peer}` : "当前对端: 无";
     }
 
+    if ($("input-ax-badge") && rep.accessibility_trusted !== undefined) {
+      const axTrusted = !!rep.accessibility_trusted;
+      $("input-ax-badge").style.display = axTrusted ? "none" : "inline-block";
+      $("input-ax-badge").textContent = axTrusted ? "辅助功能: 已授权" : "辅助功能: 未授权 (无法全局捕获)";
+      $("input-ax-badge").className = axTrusted ? "badge completed" : "badge bad";
+      if ($("input-open-ax-btn")) {
+        $("input-open-ax-btn").style.display = axTrusted ? "none" : "inline-block";
+      }
+      if (!axTrusted && $("roam-desc")) {
+        $("roam-desc").textContent = "⚠️ Mac 辅助功能权限未授权，全局鼠标/键盘穿透未就绪。请点击下方【打开系统设置一键授权】。";
+      }
+    }
+
     if (rep.policy) {
       updateInputPolicyUI(rep.policy);
     }
@@ -6311,13 +6388,15 @@ function updateInputPolicyUI(p) {
   const hotkey = p.forward_hotkeys !== false;
   const timeout = p.idle_timeout_secs || 300;
 
+  const wheelSpeed = (typeof p.wheel_speed === "number" && p.wheel_speed > 0) ? p.wheel_speed : 1.0;
+
   if ($("input-policy-badge")) {
     $("input-policy-badge").textContent = en ? "Policy: Active" : "Policy: Disabled";
     $("input-policy-badge").className = en ? "badge completed" : "badge";
   }
 
   if ($("input-policy-indicator")) {
-    $("input-policy-indicator").textContent = `外设隧道: ${en ? "启用" : "禁用"} · ${inbound ? "允许入站" : "禁止入站"} · 键[${kb ? "开" : "关"}] 鼠[${mouse ? "开" : "关"}] 快捷键[${hotkey ? "开" : "关"}] · 超时 ${timeout}s`;
+    $("input-policy-indicator").textContent = `外设隧道: ${en ? "启用" : "禁用"} · ${inbound ? "允许入站" : "禁止入站"} · 键[${kb ? "开" : "关"}] 鼠[${mouse ? "开" : "关"}] 滚轮[${wheelSpeed}x] 快捷键[${hotkey ? "开" : "关"}] · 超时 ${timeout}s`;
   }
 
   if ($("input-policy-enabled") && document.activeElement !== $("input-policy-enabled")) {
@@ -6331,6 +6410,9 @@ function updateInputPolicyUI(p) {
   }
   if ($("input-policy-mouse") && document.activeElement !== $("input-policy-mouse")) {
     $("input-policy-mouse").value = mouse ? "true" : "false";
+  }
+  if ($("input-policy-wheel-speed") && document.activeElement !== $("input-policy-wheel-speed")) {
+    $("input-policy-wheel-speed").value = wheelSpeed;
   }
   if ($("input-policy-hotkeys") && document.activeElement !== $("input-policy-hotkeys")) {
     $("input-policy-hotkeys").value = hotkey ? "true" : "false";
@@ -6346,6 +6428,11 @@ function updateInputPolicyUI(p) {
   }
   if ($("input-policy-types") && document.activeElement !== $("input-policy-types")) {
     $("input-policy-types").value = (p.allowed_types || []).join(", ");
+  }
+  if ($("quick-roam-toggle-keymap")) {
+    const km = p.keymap || "mac_to_windows";
+    $("quick-roam-toggle-keymap").dataset.current = km;
+    $("quick-roam-toggle-keymap").textContent = km === "mac_to_windows" ? "⌨️ 键位: mac_to_windows" : `⌨️ 键位: ${km}`;
   }
 }
 
@@ -6364,6 +6451,7 @@ if (inputPolicySaveBtn) {
     const inbound = $("input-policy-inbound") ? $("input-policy-inbound").value === "true" : undefined;
     const kb = $("input-policy-keyboard") ? $("input-policy-keyboard").value === "true" : undefined;
     const mouse = $("input-policy-mouse") ? $("input-policy-mouse").value === "true" : undefined;
+    const wsVal = $("input-policy-wheel-speed") && $("input-policy-wheel-speed").value ? parseFloat($("input-policy-wheel-speed").value) : undefined;
     const hotkey = $("input-policy-hotkeys") ? $("input-policy-hotkeys").value === "true" : undefined;
     const timeout = $("input-policy-timeout") && $("input-policy-timeout").value ? parseInt($("input-policy-timeout").value, 10) : undefined;
     const grpsVal = $("input-policy-groups") ? $("input-policy-groups").value.trim() : "";
@@ -6376,6 +6464,7 @@ if (inputPolicySaveBtn) {
     if (inbound !== undefined) payload.allow_inbound_control = inbound;
     if (kb !== undefined) payload.forward_keyboard = kb;
     if (mouse !== undefined) payload.forward_mouse = mouse;
+    if (wsVal !== undefined && !isNaN(wsVal) && wsVal > 0) payload.wheel_speed = wsVal;
     if (hotkey !== undefined) payload.forward_hotkeys = hotkey;
     if (timeout !== undefined) payload.idle_timeout_secs = timeout;
     if (grpsVal) payload.allowed_groups = grpsVal.split(",").map(s => s.trim()).filter(Boolean);
@@ -6419,6 +6508,18 @@ if (refreshInputTunnelBtn) {
   refreshInputTunnelBtn.onclick = () => {
     updateInputTunnel();
     updateInputPolicy();
+  };
+}
+
+const inputOpenAxBtn = $("input-open-ax-btn");
+if (inputOpenAxBtn) {
+  inputOpenAxBtn.onclick = async () => {
+    try {
+      await api("/api/input/accessibility/open", {});
+      setTimeout(updateInputTunnel, 1500);
+    } catch (e) {
+      console.warn("open accessibility failed", e);
+    }
   };
 }
 
@@ -6476,6 +6577,62 @@ if (inputReleaseBtn) {
       }
     } catch (e) {
       if (msg) msg.textContent = "请求异常: " + e.message;
+    }
+  };
+}
+
+const quickRoamAttach = $("quick-roam-attach");
+if (quickRoamAttach) {
+  quickRoamAttach.onclick = async () => {
+    let peer = $("input-attach-peer-select") ? $("input-attach-peer-select").value.trim() : "";
+    if (!peer && $("sendpeer")) {
+      peer = $("sendpeer").value.trim();
+    }
+    if (!peer) {
+      alert("请先等待局域网对端在线或在下方输入控制面板中选择目标对端！");
+      return;
+    }
+    try {
+      const rep = await api("/api/input/tunnel/attach", { peer, edge: "top" });
+      if (rep && rep.ok) {
+        updateInputTunnel();
+      } else {
+        alert("激活漫游失败: " + (rep ? rep.error : "未知错误"));
+      }
+    } catch (e) {
+      alert("请求异常: " + e.message);
+    }
+  };
+}
+
+const quickRoamRelease = $("quick-roam-release");
+if (quickRoamRelease) {
+  quickRoamRelease.onclick = async () => {
+    try {
+      const rep = await api("/api/input/tunnel/release", { reason: "quick_roam_release" });
+      if (rep && rep.ok) {
+        updateInputTunnel();
+      }
+    } catch (e) {
+      alert("释放异常: " + e.message);
+    }
+  };
+}
+
+const quickRoamToggleKeymap = $("quick-roam-toggle-keymap");
+if (quickRoamToggleKeymap) {
+  quickRoamToggleKeymap.onclick = async () => {
+    try {
+      const current = quickRoamToggleKeymap.dataset.current || "mac_to_windows";
+      const next = current === "mac_to_windows" ? "none" : "mac_to_windows";
+      const rep = await api("/api/input/policy", { keymap: next });
+      if (rep && rep.ok) {
+        quickRoamToggleKeymap.dataset.current = next;
+        quickRoamToggleKeymap.textContent = next === "mac_to_windows" ? "⌨️ 键位: mac_to_windows" : "⌨️ 键位: 原生直通 (none)";
+        updateInputPolicy();
+      }
+    } catch (e) {
+      alert("切换键位映射失败: " + e.message);
     }
   };
 }

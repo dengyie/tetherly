@@ -557,6 +557,12 @@ pub enum UiEvent {
         allowed_groups: Vec<String>,
         allowed_tags: Vec<String>,
         allowed_types: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keymap: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge: Option<String>,
+        #[serde(default = "crate::store::default_wheel_speed")]
+        wheel_speed: f64,
         timestamp_ms: u64,
     },
     VirtualDisplaySessionStarted {
@@ -1358,6 +1364,9 @@ impl UiEvent {
         allowed_groups: Vec<String>,
         allowed_tags: Vec<String>,
         allowed_types: Vec<String>,
+        keymap: Option<String>,
+        edge: Option<String>,
+        wheel_speed: f64,
         timestamp_ms: u64,
     ) -> Self {
         UiEvent::InputTunnelPolicyChanged {
@@ -1370,6 +1379,9 @@ impl UiEvent {
             allowed_groups,
             allowed_tags,
             allowed_types,
+            keymap,
+            edge,
+            wheel_speed,
             timestamp_ms,
         }
     }

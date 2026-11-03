@@ -44,6 +44,7 @@ impl Node {
         cfg: NodeConfig,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, crate::store::NodeStoreError> {
+        cleanup_stale_old_binaries();
         let identity = crate::cred::load_or_create_identity(&cfg.data_dir)?;
         let trust = load_trust(&cfg.data_dir)?;
         let (events, _) = broadcast::channel(64);
@@ -208,7 +209,9 @@ impl Node {
             pin: Mutex::new(None),
             events,
             sessions: AsyncMutex::new(HashMap::new()),
-            input_out: AsyncMutex::new(None),
+            input_out: Mutex::new(None),
+            input_reconnect_deadline: Mutex::new(None),
+            input_buffered_frames: Mutex::new(VecDeque::with_capacity(64)),
             live: Mutex::new(HashMap::new()),
             ping_waiters: Mutex::new(HashMap::new()),
             pending_out: Mutex::new(HashMap::new()),
@@ -225,6 +228,8 @@ impl Node {
             input_real_sink,
             input_engine: Mutex::new(InputServer::new(1, 1)),
             input_peer: Mutex::new(None),
+            input_capture_active: AtomicBool::new(false),
+            input_hook_control: Mutex::new(None),
             screen_out: AsyncMutex::new(None),
             screen_peer: Mutex::new(None),
             screen_engine: Mutex::new({
@@ -772,208 +777,314 @@ impl Node {
             .clear();
     }
 
-    pub(super) async fn attach(&self, mut sess: ActiveSession) {
-        let peer_id = sess.peer_id.clone();
-        let name = sess.peer_hello.name.clone();
-        let platform = sess.peer_hello.platform.clone();
-        let addr = sess.peer_addr;
-        let incoming = path_kind(addr, &self.shared.cfg.overlay.cidrs);
-        {
-            let live = self.shared.live.lock().expect("live");
-            if let Some(cur) = live.get(&peer_id) {
-                if cur.path == PathKind::Lan && incoming == PathKind::Overlay {
-                    debug!(peer = %peer_id, %addr, "keep LAN; drop overlay attach");
-                    return;
-                }
-            }
-        }
-        {
-            let mut live = self.shared.live.lock().expect("live");
-            live.insert(
-                peer_id.clone(),
-                LivePeer {
-                    device_id: peer_id.clone(),
-                    name: name.clone(),
-                    platform: platform.clone(),
-                    addr,
-                    handshake_hash: *sess.handshake_hash(),
-                    file_port: None,
-                    input_port: None,
-                    screen_port: None,
-                    caps: Vec::new(),
-                    path: incoming,
-                    rtt_ms: None,
-                    last_seen_ms: self.shared.clock.unix_ms(),
-                },
-            );
-        }
-        self.emit(peer_up(&peer_id, &name, &platform));
-        match incoming {
-            PathKind::Lan => info!(peer = %peer_id, %addr, "path lan"),
-            PathKind::Overlay => info!(peer = %peer_id, %addr, "path overlay"),
-        }
-        let (tx, mut rx) = mpsc::channel::<InnerFrame>(SESSION_QUEUE_DEPTH);
-        {
-            self.shared
-                .sessions
-                .lock()
-                .await
-                .insert(peer_id.clone(), tx.clone());
-        }
-        let file_port = self.file_port();
-        let input_port = self.input_port();
-        let screen_port = self.screen_port();
-        let mut initial_caps: Vec<String> = {
-            let local = self.shared.local_caps.lock().expect("local_caps");
-            let mut list: Vec<String> = local.iter().cloned().collect();
-            list.sort();
-            list
-        };
-        initial_caps.push(format!("fileport={file_port}"));
-        initial_caps.push(format!("inputport={input_port}"));
+    pub fn restart_daemon(
+        &self,
+        replacement_path: Option<&str>,
+        delay_ms: Option<u64>,
+    ) -> Result<crate::uihttp::DaemonRestartReport, String> {
+        let old_pid = std::process::id();
+        let current_exe = std::env::current_exe()
+            .map_err(|e| format!("cannot determine current executable path: {e}"))?;
 
-        initial_caps.push("screencodecs=zstd,h264".to_string());
-        initial_caps.push(format!("screenport={screen_port}"));
-        let caps = CapsUpdate { caps: initial_caps };
-        if let Ok(frame) = caps.to_frame() {
-            let _ = tx.try_send(frame);
-        }
+        let action = if let Some(rep) = replacement_path {
+            let rep_path = std::path::PathBuf::from(rep);
+            if !rep_path.exists() {
+                return Err(format!("replacement binary not found at {:?}", rep_path));
+            }
+
+            // On Windows, running binaries are write-locked, but NTFS allows renaming a running binary.
+            // On Unix/macOS, we can rename/unlink and copy.
+            #[cfg(windows)]
+            {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let old_backup = current_exe.with_extension(format!("exe.old.{timestamp}"));
+                std::fs::rename(&current_exe, &old_backup).map_err(|e| {
+                    format!("failed to rename current running binary to {old_backup:?}: {e}")
+                })?;
+                std::fs::copy(&rep_path, &current_exe).map_err(|e| {
+                    format!("failed to place replacement binary at {current_exe:?}: {e}")
+                })?;
+            }
+
+            #[cfg(unix)]
+            {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let old_backup = current_exe.with_extension(format!("old.{timestamp}"));
+                let _ = std::fs::rename(&current_exe, &old_backup);
+                std::fs::copy(&rep_path, &current_exe).map_err(|e| {
+                    format!("failed to copy replacement binary to {current_exe:?}: {e}")
+                })?;
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &current_exe,
+                        std::fs::Permissions::from_mode(0o755),
+                    );
+                }
+            }
+
+            format!("replaced_and_restarted (from {})", rep_path.display())
+        } else {
+            "restarted".to_string()
+        };
+
+        let mut cmd = std::process::Command::new(&current_exe);
+        cmd.args(std::env::args_os().skip(1));
+        cmd.stdin(std::process::Stdio::null());
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to spawn new daemon process {:?}: {e}", current_exe))?;
+        let new_pid = child.id();
+
         let node = self.clone_handle();
-        let clock = self.shared.clock.clone();
-        let mut stop = self.shared.shutdown.subscribe();
-        let sess_addr = addr;
-        // Keepalive: a ping every heartbeat keeps the NAT mapping warm and, more
-        // importantly, gives the peer something to answer, so `Liveness` can tell
-        // a merely-quiet session from a dead one. The task ends when the session
-        // task drops its receiver (try_send then reports Closed) or on shutdown.
-        let keep_tx = tx.clone();
-        let keep_clock = clock.clone();
-        let mut keep_stop = self.shared.shutdown.subscribe();
-        let keep_node = self.clone_handle();
-        let keep_peer = peer_id.clone();
+        let wait_ms = delay_ms.unwrap_or(50);
         tokio::spawn(async move {
-            loop {
-                let interval_secs = keep_node
-                    .shared
-                    .heartbeat_config
-                    .lock()
-                    .expect("heartbeat")
-                    .interval_secs
-                    .max(1);
-                tokio::select! {
-                    _ = keep_stop.changed() => {
-                        if *keep_stop.borrow() {
-                            break;
-                        }
-                    }
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {
-                        let now_ms = keep_clock.unix_ms();
-                        match keep_tx.try_send(ping(now_ms)) {
-                            Ok(()) => {
-                                let mut trackers =
-                                    keep_node.shared.link_trackers.lock().expect("link_trackers");
-                                trackers
-                                    .entry(keep_peer.clone())
-                                    .or_insert_with(|| PeerLinkTracker::new(now_ms))
-                                    .record_ping_sent(now_ms);
-                            }
-                            // A full queue is backpressure, not a dead peer.
-                            Err(mpsc::error::TrySendError::Full(_)) => {}
-                            Err(mpsc::error::TrySendError::Closed(_)) => break,
-                        }
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            node.shutdown();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            std::process::exit(0);
+        });
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        Ok(crate::uihttp::DaemonRestartReport {
+            ok: true,
+            action,
+            old_pid,
+            new_pid,
+            message: format!(
+                "daemon spawned successfully with PID {new_pid}; terminating parent PID {old_pid}"
+            ),
+            timestamp_ms: now_ms,
+        })
+    }
+
+    pub(super) fn attach<'a>(
+        &'a self,
+        mut sess: ActiveSession,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let peer_id = sess.peer_id.clone();
+            let name = sess.peer_hello.name.clone();
+            let platform = sess.peer_hello.platform.clone();
+            let addr = sess.peer_addr;
+            let incoming = path_kind(addr, &self.shared.cfg.overlay.cidrs);
+            {
+                let live = self.shared.live.lock().expect("live");
+                if let Some(cur) = live.get(&peer_id) {
+                    if cur.path == PathKind::Lan && incoming == PathKind::Overlay {
+                        debug!(peer = %peer_id, %addr, "keep LAN; drop overlay attach");
+                        return;
                     }
                 }
             }
-        });
-        self.shared.telemetry.record_session_established();
-        tokio::spawn(async move {
-            let hb = node.shared.heartbeat_config.lock().expect("hb").clone();
-            let mut live = Liveness::with(
-                std::time::Duration::from_secs(hb.interval_secs.max(1)),
-                std::time::Duration::from_secs(hb.deadline_secs.max(hb.interval_secs)),
-                clock.unix_ms(),
-            );
-            loop {
-                let current_deadline = node
-                    .shared
-                    .heartbeat_config
+            {
+                let mut live = self.shared.live.lock().expect("live");
+                live.insert(
+                    peer_id.clone(),
+                    LivePeer {
+                        device_id: peer_id.clone(),
+                        name: name.clone(),
+                        platform: platform.clone(),
+                        addr,
+                        handshake_hash: *sess.handshake_hash(),
+                        file_port: None,
+                        input_port: None,
+                        screen_port: None,
+                        caps: Vec::new(),
+                        path: incoming,
+                        rtt_ms: None,
+                        last_seen_ms: self.shared.clock.unix_ms(),
+                    },
+                );
+            }
+            self.emit(peer_up(&peer_id, &name, &platform));
+            match incoming {
+                PathKind::Lan => info!(peer = %peer_id, %addr, "path lan"),
+                PathKind::Overlay => info!(peer = %peer_id, %addr, "path overlay"),
+            }
+            let (tx, mut rx) = mpsc::channel::<InnerFrame>(SESSION_QUEUE_DEPTH);
+            {
+                self.shared
+                    .sessions
                     .lock()
-                    .expect("hb")
-                    .deadline_secs
-                    .max(1);
-                if live.deadline().as_secs() != current_deadline {
-                    live.set_deadline(std::time::Duration::from_secs(current_deadline));
-                }
-                tokio::select! {
-                    _ = stop.changed() => {
-                        if *stop.borrow() {
-                            break;
-                        }
-                    }
-                    outbound = rx.recv() => {
-                        match outbound {
-                            Some(frame) => {
-                                if live.is_expired(clock.unix_ms()) {
-                                    warn!(peer = %peer_id, "session liveness lost");
-                                    break;
-                                }
-                                let frame_len = (frame.payload.len() + 12) as u64;
-                                let frame_ty = frame.ty;
-                                if let Err(e) = sess.send_bounded(frame).await {
-                                    warn!(%e, "send");
-                                    break;
-                                }
-                                node.shared.telemetry.record_control_tx(frame_len, frame_ty);
-                            }
-                            None => break,
-                        }
-                    }
-                    inbound = sess.recv_event() => {
-                        match inbound {
-                            Ok(ev) => {
-                                live.on_inbound(clock.unix_ms());
-                                {
-                                    let mut live_map = node.shared.live.lock().expect("live");
-                                    if let Some(p) = live_map.get_mut(&peer_id) {
-                                        p.last_seen_ms = clock.unix_ms();
-                                    }
-                                }
-                                if let Err(e) = node.handle_event(&peer_id, ev, &mut sess).await {
-                                    warn!(%e, "event");
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                debug!(%e, "recv end");
+                    .await
+                    .insert(peer_id.clone(), tx.clone());
+            }
+            let file_port = self.file_port();
+            let input_port = self.input_port();
+            let screen_port = self.screen_port();
+            let mut initial_caps: Vec<String> = {
+                let local = self.shared.local_caps.lock().expect("local_caps");
+                let mut list: Vec<String> = local.iter().cloned().collect();
+                list.sort();
+                list
+            };
+            initial_caps.push(format!("fileport={file_port}"));
+            initial_caps.push(format!("inputport={input_port}"));
+
+            initial_caps.push("screencodecs=zstd,h264".to_string());
+            initial_caps.push(format!("screenport={screen_port}"));
+            let my_lan_ips = crate::lan::lan_ips()
+                .into_iter()
+                .filter(|ip| !ip.is_loopback())
+                .map(|ip| ip.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            if !my_lan_ips.is_empty() {
+                initial_caps.push(format!("lanips={my_lan_ips}"));
+            }
+            let caps = CapsUpdate { caps: initial_caps };
+            if let Ok(frame) = caps.to_frame() {
+                let _ = tx.try_send(frame);
+            }
+            let node = self.clone_handle();
+            let clock = self.shared.clock.clone();
+            let mut stop = self.shared.shutdown.subscribe();
+            let sess_addr = addr;
+            // Keepalive: a ping every heartbeat keeps the NAT mapping warm and, more
+            // importantly, gives the peer something to answer, so `Liveness` can tell
+            // a merely-quiet session from a dead one. The task ends when the session
+            // task drops its receiver (try_send then reports Closed) or on shutdown.
+            let keep_tx = tx.clone();
+            let keep_clock = clock.clone();
+            let mut keep_stop = self.shared.shutdown.subscribe();
+            let keep_node = self.clone_handle();
+            let keep_peer = peer_id.clone();
+            tokio::spawn(async move {
+                loop {
+                    let interval_secs = keep_node
+                        .shared
+                        .heartbeat_config
+                        .lock()
+                        .expect("heartbeat")
+                        .interval_secs
+                        .max(1);
+                    tokio::select! {
+                        _ = keep_stop.changed() => {
+                            if *keep_stop.borrow() {
                                 break;
                             }
                         }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {
+                            let now_ms = keep_clock.unix_ms();
+                            match keep_tx.try_send(ping(now_ms)) {
+                                Ok(()) => {
+                                    let mut trackers =
+                                        keep_node.shared.link_trackers.lock().expect("link_trackers");
+                                    trackers
+                                        .entry(keep_peer.clone())
+                                        .or_insert_with(|| PeerLinkTracker::new(now_ms))
+                                        .record_ping_sent(now_ms);
+                                }
+                                // A full queue is backpressure, not a dead peer.
+                                Err(mpsc::error::TrySendError::Full(_)) => {}
+                                Err(mpsc::error::TrySendError::Closed(_)) => break,
+                            }
+                        }
                     }
                 }
-            }
-            node.shared.telemetry.record_session_closed();
-            let still_mine = node
-                .shared
-                .live
-                .lock()
-                .expect("live")
-                .get(&peer_id)
-                .map(|p| p.addr)
-                == Some(sess_addr);
-            if still_mine {
-                node.shared.sessions.lock().await.remove(&peer_id);
-                node.shared.live.lock().expect("live").remove(&peer_id);
-                node.shared
-                    .ping_waiters
+            });
+            self.shared.telemetry.record_session_established();
+            tokio::spawn(async move {
+                let hb = node.shared.heartbeat_config.lock().expect("hb").clone();
+                let mut live = Liveness::with(
+                    std::time::Duration::from_secs(hb.interval_secs.max(1)),
+                    std::time::Duration::from_secs(hb.deadline_secs.max(hb.interval_secs)),
+                    clock.unix_ms(),
+                );
+                loop {
+                    let current_deadline = node
+                        .shared
+                        .heartbeat_config
+                        .lock()
+                        .expect("hb")
+                        .deadline_secs
+                        .max(1);
+                    if live.deadline().as_secs() != current_deadline {
+                        live.set_deadline(std::time::Duration::from_secs(current_deadline));
+                    }
+                    tokio::select! {
+                        _ = stop.changed() => {
+                            if *stop.borrow() {
+                                break;
+                            }
+                        }
+                        outbound = rx.recv() => {
+                            match outbound {
+                                Some(frame) => {
+                                    if live.is_expired(clock.unix_ms()) {
+                                        warn!(peer = %peer_id, "session liveness lost");
+                                        break;
+                                    }
+                                    let frame_len = (frame.payload.len() + 12) as u64;
+                                    let frame_ty = frame.ty;
+                                    if let Err(e) = sess.send_bounded(frame).await {
+                                        warn!(%e, "send");
+                                        break;
+                                    }
+                                    node.shared.telemetry.record_control_tx(frame_len, frame_ty);
+                                }
+                                None => break,
+                            }
+                        }
+                        inbound = sess.recv_event() => {
+                            match inbound {
+                                Ok(ev) => {
+                                    live.on_inbound(clock.unix_ms());
+                                    {
+                                        let mut live_map = node.shared.live.lock().expect("live");
+                                        if let Some(p) = live_map.get_mut(&peer_id) {
+                                            p.last_seen_ms = clock.unix_ms();
+                                        }
+                                    }
+                                    if let Err(e) = node.handle_event(&peer_id, ev, &mut sess).await {
+                                        warn!(%e, "event");
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    debug!(%e, "recv end");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                node.shared.telemetry.record_session_closed();
+                let still_mine = node
+                    .shared
+                    .live
                     .lock()
-                    .expect("ping_waiters")
-                    .remove(&peer_id);
-                *node.shared.input_seat.lock().expect("seat") = None;
-                node.emit(UiEvent::PeerDown {
-                    device_id: peer_id.to_string(),
-                });
-            }
-        });
+                    .expect("live")
+                    .get(&peer_id)
+                    .map(|p| p.addr)
+                    == Some(sess_addr);
+                if still_mine {
+                    node.shared.sessions.lock().await.remove(&peer_id);
+                    node.shared.live.lock().expect("live").remove(&peer_id);
+                    node.shared
+                        .ping_waiters
+                        .lock()
+                        .expect("ping_waiters")
+                        .remove(&peer_id);
+                    *node.shared.input_seat.lock().expect("seat") = None;
+                    node.emit(UiEvent::PeerDown {
+                        device_id: peer_id.to_string(),
+                    });
+                }
+            });
+        })
     }
 
     pub(super) async fn handle_event(
@@ -1412,9 +1523,60 @@ impl Node {
                 }
                 self.emit(UiEvent::PeerCapsChanged {
                     device_id: peer.to_string(),
-                    caps: update.caps,
+                    caps: update.caps.clone(),
                     features,
                 });
+                if let Some(lan_ips_str) =
+                    update.caps.iter().find_map(|c| c.strip_prefix("lanips="))
+                {
+                    let is_overlay = {
+                        self.shared
+                            .live
+                            .lock()
+                            .expect("live")
+                            .get(peer)
+                            .map(|p| p.path == PathKind::Overlay)
+                            .unwrap_or(false)
+                    };
+                    if is_overlay {
+                        let ips: Vec<String> = lan_ips_str
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        let node = self.clone_handle();
+                        let peer_cloned = peer.clone();
+                        tokio::spawn(async move {
+                            for ip_str in ips {
+                                if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                                    let target_addr =
+                                        SocketAddr::new(ip, tetherly_net::CONTROL_PORT);
+                                    if let Ok(Ok(stream)) = tokio::time::timeout(
+                                        std::time::Duration::from_millis(200),
+                                        tokio::net::TcpStream::connect(target_addr),
+                                    )
+                                    .await
+                                    {
+                                        let _ = stream.set_nodelay(true);
+                                        info!(peer = %peer_cloned, %target_addr, "lan probe succeeded; promoting from overlay to direct lan");
+                                        let mut cfg = node.session_config_inner(true);
+                                        cfg.pin = None;
+                                        if let Ok(sess) =
+                                            tetherly_net::dial_session(stream, target_addr, &cfg)
+                                                .await
+                                        {
+                                            node.attach(sess).await;
+                                            if node.input_channel_open().await {
+                                                let _ = node.open_input(&peer_cloned).await;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
             }
             SessionEvent::ResourceHandoff(h) => {
                 self.receive_resource_handoff(peer, h);
@@ -1577,5 +1739,76 @@ impl Node {
         if let Ok(mut engine) = self.shared.screen_engine.lock() {
             engine.set_congested_override(forced);
         }
+    }
+}
+
+fn cleanup_stale_old_binaries() {
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.contains(".exe.old") || name_str.contains(".old.") {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_daemon_restart_report_dto() {
+        let rep = crate::uihttp::DaemonRestartReport {
+            ok: true,
+            action: "restarted".into(),
+            old_pid: 1234,
+            new_pid: 5678,
+            message: "daemon spawned".into(),
+            timestamp_ms: 100000,
+        };
+        let json = serde_json::to_string(&rep).unwrap();
+        let decoded: crate::uihttp::DaemonRestartReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, rep);
+    }
+
+    #[test]
+    fn test_cleanup_stale_old_binaries() {
+        let tmp = std::env::temp_dir().join(format!(
+            "tetherly_test_cleanup_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        let old1 = tmp.join("tetherly.exe.old.12345");
+        let old2 = tmp.join("tetherly.old.67890");
+        let keep = tmp.join("tetherly.exe");
+        std::fs::write(&old1, b"old1").unwrap();
+        std::fs::write(&old2, b"old2").unwrap();
+        std::fs::write(&keep, b"keep").unwrap();
+
+        assert!(old1.exists());
+        assert!(old2.exists());
+        assert!(keep.exists());
+
+        if let Ok(entries) = std::fs::read_dir(&tmp) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.contains(".exe.old") || name_str.contains(".old.") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+
+        assert!(!old1.exists());
+        assert!(!old2.exists());
+        assert!(keep.exists());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -375,6 +375,8 @@ pub(crate) async fn run(
         }
         None => (None, None),
     };
+    let ui_port = cfg.ui_port;
+    let device_name = cfg.name.clone();
     let node = Node::start(cfg)?;
     info!(device_id = %node.identity().device_id(), "run");
     info!("ui http://127.0.0.1:45716");
@@ -390,6 +392,81 @@ pub(crate) async fn run(
     if let Err(e) = node.spawn_input_capture() {
         info!(%e, "input capture unavailable (key/mouse sharing stays off)");
     }
+    // Background watcher: hot-arms input capture and auto-reconnects input data channel
+    // for seamless, zero-disruption Deskflow-style cross-screen roaming.
+    let link_watcher = node.clone_handle();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            // 1. Ensure input capture hooks are armed if accessibility permission is granted
+            if !link_watcher.is_input_capture_active()
+                && tetherly_node::platform::is_accessibility_trusted()
+            {
+                let status = link_watcher.input_tunnel_status();
+                let policy = link_watcher.input_policy();
+                if status.active || policy.edge.is_some() {
+                    let _ = link_watcher.ensure_input_capture();
+                }
+            }
+
+            // 2. Auto-reconnect input data channel if edge or tunnel is active and channel is closed
+            let policy = link_watcher.input_policy();
+            let status = link_watcher.input_tunnel_status();
+            if (status.active || policy.edge.is_some()) && !link_watcher.input_channel_open().await
+            {
+                let target_peer = status
+                    .session
+                    .as_ref()
+                    .map(|s| s.peer_id.clone())
+                    .or_else(|| {
+                        let edge_opt = policy
+                            .edge
+                            .as_deref()
+                            .and_then(|e| e.parse::<tetherly_core::DisplayEdge>().ok());
+                        let layout = link_watcher.topology_layout();
+                        edge_opt
+                            .and_then(|edge| layout.neighbors.get(&edge).map(|n| n.peer_id.clone()))
+                    })
+                    .or_else(|| {
+                        let peers = link_watcher.live_peers();
+                        if peers.len() == 1 {
+                            Some(peers[0].device_id.to_string())
+                        } else {
+                            None
+                        }
+                    });
+
+                if let Some(ref peer_str) = target_peer {
+                    if let Ok(peer_id) = link_watcher.resolve_peer(peer_str) {
+                        let peers = link_watcher.live_peers();
+                        if peers.iter().any(|p| p.device_id == peer_id) {
+                            if let Err(e) = link_watcher.open_input(&peer_id).await {
+                                tracing::debug!(%peer_id, %e, "input channel auto-reconnect retry");
+                            } else {
+                                tracing::info!(%peer_id, "input channel auto-reconnected successfully");
+                                if !status.active {
+                                    let edge_opt = policy
+                                        .edge
+                                        .as_deref()
+                                        .and_then(|e| e.parse::<tetherly_core::DisplayEdge>().ok());
+                                    let _ = link_watcher
+                                        .input_tunnel_attach(
+                                            &peer_id.to_string(),
+                                            edge_opt,
+                                            None,
+                                            None,
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
     // Frame pump: grab + encode + send while a visitor is streaming.
     // Idle ticks are cheap (Ok(false)). Source errors are recoverable
     // (adb respawns on the next grab, DXGI retries): log and back off
@@ -417,6 +494,9 @@ pub(crate) async fn run(
             }
         }
     });
+    // Spawn cross-platform desktop system tray presence (Mac status bar / Windows notification area)
+    let _tray = tetherly_node::platform::tray::spawn_tray(ui_port, device_name);
+
     node.run().await?;
     Ok(())
 }
@@ -752,6 +832,44 @@ pub(crate) async fn stop(ui_port: u16) -> Result<()> {
         );
     }
     println!("Node daemon shutdown initiated (HTTP 200).");
+    Ok(())
+}
+
+/// `tetherly restart` -- Restart arm of the top-level dispatch.
+pub(crate) async fn restart(
+    replacement: Option<String>,
+    delay_ms: u64,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    let payload = serde_json::json!({
+        "replacement_path": replacement,
+        "delay_ms": delay_ms,
+    });
+    let body = serde_json::to_vec(&payload)?;
+    let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/daemon/restart", &body)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        anyhow::bail!(
+            "node restart failed (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&resp));
+    } else {
+        let rep: tetherly_node::DaemonRestartReport = serde_json::from_slice(&resp)?;
+        println!(
+            "Node daemon restart initiated: old PID {} -> new PID {} ({})",
+            rep.old_pid, rep.new_pid, rep.action
+        );
+    }
     Ok(())
 }
 

@@ -59,6 +59,7 @@ mod util;
 // Re-exported so every handler module can reach the DTOs and helpers with a
 // plain `use super::*;`.
 use dto::*;
+pub use dto::{DaemonRestartBody, DaemonRestartReport};
 pub use util::urlencode_path;
 use util::*;
 
@@ -68,7 +69,17 @@ use util::*;
 /// rather than a `warn!` that leaves the UI silently absent.
 pub async fn bind_and_spawn(node: Node, port: u16) -> std::io::Result<u16> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = TcpListener::bind(addr).await?;
+    let mut attempts = 0;
+    let listener = loop {
+        match TcpListener::bind(addr).await {
+            Ok(l) => break l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && port != 0 && attempts < 20 => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    };
     let bound = listener.local_addr()?.port();
     info!(port = bound, "ui listening (loopback only)");
     tokio::spawn(async move {
@@ -642,6 +653,9 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
         ("POST", "/api/daemon/shutdown") | ("POST", "/api/daemon/stop") => {
             api_core::post_daemon_shutdown(method, query_str, body, node).await
         }
+        ("POST", "/api/daemon/restart") | ("POST", "/api/restart") => {
+            api_core::post_daemon_restart(method, query_str, body, node).await
+        }
         ("GET", "/api/screen") => {
             api_screen_session::get_screen(method, query_str, body, node).await
         }
@@ -1097,6 +1111,12 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
         }
         ("POST", "/api/input/policy") | ("PUT", "/api/input/policy") => {
             api_input::post_input_policy(method, query_str, body, node).await
+        }
+        ("POST", "/api/input/accessibility/open") => {
+            api_input::post_input_accessibility_open(method, query_str, body, node).await
+        }
+        ("POST", "/api/input/ensure") => {
+            api_input::post_input_ensure(method, query_str, body, node).await
         }
         ("GET", "/api/display/virtual") | ("GET", "/api/display/virtual/status") => {
             api_display::get_display_virtual(method, query_str, body, node).await

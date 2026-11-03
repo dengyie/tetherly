@@ -744,6 +744,18 @@ pub(super) struct InputTunnelPolicyBody {
         alias = "device_types"
     )]
     pub(super) allowed_types: Option<Vec<String>>,
+    #[serde(default, alias = "key_map", alias = "keymapping")]
+    pub(super) keymap: Option<String>,
+    #[serde(default, alias = "screen_edge", alias = "roaming_edge")]
+    pub(super) edge: Option<String>,
+    #[serde(
+        default,
+        alias = "wheel",
+        alias = "scroll_speed",
+        alias = "wheel_speed_y",
+        alias = "scroll"
+    )]
+    pub(super) wheel_speed: Option<f64>,
     #[serde(default)]
     pub(super) clear_filters: Option<bool>,
 }
@@ -1224,4 +1236,22 @@ pub(super) struct OutboxResendBody {
     pub(super) id: Option<String>,
     #[serde(default)]
     pub(super) transfer_id: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default, Debug, Clone)]
+pub struct DaemonRestartBody {
+    #[serde(default, alias = "replacement", alias = "new_binary")]
+    pub replacement_path: Option<String>,
+    #[serde(default, alias = "delay")]
+    pub delay_ms: Option<u64>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DaemonRestartReport {
+    pub ok: bool,
+    pub action: String,
+    pub old_pid: u32,
+    pub new_pid: u32,
+    pub message: String,
+    pub timestamp_ms: u64,
 }

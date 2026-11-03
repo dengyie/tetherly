@@ -67,6 +67,7 @@ pub const TYPE_BENCH_REQUEST: u16 = 0x0225;
 pub const TYPE_BENCH_ACCEPT: u16 = 0x0226;
 pub const TYPE_BENCH_DATA: u16 = 0x0227;
 pub const TYPE_BENCH_REPORT: u16 = 0x0228;
+pub const TYPE_INPUT_TUNNEL_SUSPEND: u16 = 0x0229;
 pub const TYPE_FILE_OFFER: u16 = 0x0301;
 pub const TYPE_FILE_ACCEPT: u16 = 0x0302;
 pub const TYPE_FILE_REJECT: u16 = 0x0303;
@@ -186,6 +187,7 @@ pub fn is_known_type(ty: u16) -> bool {
             | TYPE_BENCH_ACCEPT
             | TYPE_BENCH_DATA
             | TYPE_BENCH_REPORT
+            | TYPE_INPUT_TUNNEL_SUSPEND
             | TYPE_FILE_OFFER
             | TYPE_FILE_ACCEPT
             | TYPE_FILE_REJECT

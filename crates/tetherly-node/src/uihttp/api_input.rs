@@ -197,6 +197,27 @@ pub(super) async fn post_input_policy(
             }
             policy.allowed_types = dtypes;
         }
+        if let Some(ref km) = b.keymap {
+            policy.keymap =
+                if km.trim().is_empty() || km == "none" || km == "identity" || km == "off" {
+                    None
+                } else {
+                    Some(km.trim().to_lowercase().replace('-', "_"))
+                };
+        }
+        if let Some(ref edge_val) = b.edge {
+            policy.edge =
+                if edge_val.trim().is_empty() || edge_val == "none" || edge_val == "default" {
+                    None
+                } else {
+                    Some(edge_val.trim().to_lowercase())
+                };
+        }
+        if let Some(ws) = b.wheel_speed {
+            if ws > 0.0 && ws <= 20.0 {
+                policy.wheel_speed = ws;
+            }
+        }
         if b.clear_filters == Some(true) {
             policy.allowed_groups.clear();
             policy.allowed_tags.clear();
@@ -263,6 +284,27 @@ pub(super) async fn post_input_policy(
             Err(e) => return err(400, &format!("invalid device type '{dt_str}': {e}")),
         }
     }
+    if let Some(km) = qmap.get("keymap").or_else(|| qmap.get("key_map")) {
+        policy.keymap = if km.trim().is_empty() || km == "none" || km == "identity" || km == "off" {
+            None
+        } else {
+            Some(km.trim().to_lowercase().replace('-', "_"))
+        };
+    }
+    if let Some(edge_str) = qmap.get("edge").or_else(|| qmap.get("screen_edge")) {
+        policy.edge = if edge_str.trim().is_empty() || edge_str == "none" || edge_str == "default" {
+            None
+        } else {
+            Some(edge_str.trim().to_lowercase())
+        };
+    }
+    if let Some(ws_str) = qmap.get("wheel_speed").or_else(|| qmap.get("scroll_speed")) {
+        if let Ok(ws) = ws_str.parse::<f64>() {
+            if ws > 0.0 && ws <= 20.0 {
+                policy.wheel_speed = ws;
+            }
+        }
+    }
     if qmap
         .get("clear_filters")
         .map(|s| s == "true" || s == "1")
@@ -276,5 +318,46 @@ pub(super) async fn post_input_policy(
     match node.set_input_policy(policy) {
         Ok(rep) => json_ok(&rep),
         Err(e) => err(400, &e.to_string()),
+    }
+}
+
+pub(super) async fn post_input_accessibility_open(
+    _method: &str,
+    _query_str: Option<&str>,
+    _body: &[u8],
+    _node: &Node,
+) -> UiResponse {
+    match crate::platform::open_accessibility_settings() {
+        Ok(()) => json_ok(&serde_json::json!({
+            "ok": true,
+            "message": "opened system accessibility settings"
+        })),
+        Err(e) => err(500, &e.to_string()),
+    }
+}
+
+pub(super) async fn post_input_ensure(
+    _method: &str,
+    _query_str: Option<&str>,
+    _body: &[u8],
+    node: &Node,
+) -> UiResponse {
+    let trusted = crate::platform::is_accessibility_trusted();
+    if !trusted {
+        return json_ok(&serde_json::json!({
+            "ok": false,
+            "accessibility_trusted": false,
+            "capture_active": false,
+            "message": "macOS Accessibility permission not granted yet"
+        }));
+    }
+    match node.ensure_input_capture() {
+        Ok(active) => json_ok(&serde_json::json!({
+            "ok": true,
+            "accessibility_trusted": true,
+            "capture_active": active,
+            "message": if active { "input capture hooks active" } else { "input capture hooks not active" }
+        })),
+        Err(e) => err(500, &e.to_string()),
     }
 }

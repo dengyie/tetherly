@@ -9,8 +9,9 @@ use std::sync::atomic::Ordering;
 use tetherly_core::frame::InnerFrame;
 use tetherly_core::{
     map_edge_exit_to_entry, CoreError, CursorSeat, DeviceId, DisplayEdge, DisplayRect, InputClient,
-    InputEvent, InputTunnelHeartbeatFrame, InputTunnelReleaseFrame, InputTunnelRequestFrame,
-    InputTunnelRespFrame, InputTunnelRole, InputTunnelValidator, MemorySink, TopologyValidator,
+    InputEvent, InputSink, InputTunnelHeartbeatFrame, InputTunnelReleaseFrame,
+    InputTunnelRequestFrame, InputTunnelRespFrame, InputTunnelRole, InputTunnelValidator,
+    MemorySink, TopologyValidator,
 };
 use tetherly_net::session::{accept_session, dial_session, ActiveSession};
 use tokio::net::TcpStream;
@@ -54,13 +55,17 @@ pub struct ActiveInputTunnelSession {
 }
 
 /// Comprehensive status report of virtual peripheral sharing and input tunneling.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct InputTunnelStatusReport {
     pub ok: bool,
     pub active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<ActiveInputTunnelSession>,
     pub policy: InputTunnelPolicy,
+    #[serde(default)]
+    pub accessibility_trusted: bool,
+    #[serde(default)]
+    pub capture_active: bool,
     pub timestamp_ms: u64,
 }
 
@@ -80,7 +85,7 @@ pub struct InputTunnelDecisionReport {
 }
 
 /// Governance policy report for virtual peripheral sharing and input tunneling.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct InputTunnelPolicyReport {
     pub ok: bool,
     pub policy: InputTunnelPolicy,
@@ -108,6 +113,12 @@ pub struct InputTunnelPolicyUpdate {
     pub allowed_tags: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_types: Option<Vec<DeviceType>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keymap: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wheel_speed: Option<f64>,
 }
 
 /// Comprehensive status report for input sharing (mouse & keyboard).
@@ -130,6 +141,67 @@ pub struct InputControlReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
     pub timestamp_ms: u64,
+}
+
+/// Composite sink combining in-memory CI telemetry snapshotting with real OS injection.
+/// All input operations (including release_all_inputs flushes on Leave, Enter, boundary return,
+/// and peer disconnect) are executed synchronously against both the memory observer and the
+/// physical platform driver.
+#[derive(Clone)]
+struct DualInputSink {
+    memory: MemorySink,
+    real: Option<Arc<Mutex<dyn InputSink>>>,
+}
+
+impl DualInputSink {
+    fn new(real: Option<Arc<Mutex<dyn InputSink>>>) -> Self {
+        Self {
+            memory: MemorySink::default(),
+            real,
+        }
+    }
+
+    fn memory(&self) -> &MemorySink {
+        &self.memory
+    }
+}
+
+impl InputSink for DualInputSink {
+    fn move_abs(&mut self, x: i32, y: i32) {
+        self.memory.move_abs(x, y);
+        if let Some(r) = &self.real {
+            if let Ok(mut sink) = r.lock() {
+                sink.move_abs(x, y);
+            }
+        }
+    }
+
+    fn button(&mut self, mask: u8, down: bool) {
+        self.memory.button(mask, down);
+        if let Some(r) = &self.real {
+            if let Ok(mut sink) = r.lock() {
+                sink.button(mask, down);
+            }
+        }
+    }
+
+    fn wheel(&mut self, dx: i16, dy: i16) {
+        self.memory.wheel(dx, dy);
+        if let Some(r) = &self.real {
+            if let Ok(mut sink) = r.lock() {
+                sink.wheel(dx, dy);
+            }
+        }
+    }
+
+    fn key(&mut self, code: u16, down: bool, mods: u8) {
+        self.memory.key(code, down, mods);
+        if let Some(r) = &self.real {
+            if let Ok(mut sink) = r.lock() {
+                sink.key(code, down, mods);
+            }
+        }
+    }
 }
 
 impl Node {
@@ -521,13 +593,18 @@ impl Node {
         }
 
         if frame.accepted {
+            let _ = self.ensure_input_capture();
             if !self.input_channel_open().await {
-                let _ = self.open_input(peer).await;
+                if let Err(e) = self.open_input(peer).await {
+                    warn!(%peer, %e, "input channel open during tunnel accept response failed");
+                }
             }
 
-            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Remote);
+            // A tunnel handshake establishes network connectivity, NOT cursor boundary crossing.
+            // The cursor seat MUST remain Local until the user physically moves past the screen edge.
+            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
             self.emit(UiEvent::input_seat_changed(
-                "remote",
+                "local",
                 true,
                 Some(peer_str.clone()),
             ));
@@ -672,8 +749,12 @@ impl Node {
             .expect("active_input_tunnel");
 
         let is_timed_out = if let Some(ref session) = *guard {
-            let timeout_ms = (policy.idle_timeout_secs as u64) * 1000;
-            now_ms.saturating_sub(session.last_activity_ms) > timeout_ms
+            if policy.idle_timeout_secs == 0 {
+                false
+            } else {
+                let timeout_ms = (policy.idle_timeout_secs as u64) * 1000;
+                now_ms.saturating_sub(session.last_activity_ms) > timeout_ms
+            }
         } else {
             false
         };
@@ -704,15 +785,26 @@ impl Node {
                     ),
                     true,
                 );
+                let accessibility_trusted = crate::platform::is_accessibility_trusted();
+                let capture_active = self.shared.input_capture_active.load(Ordering::SeqCst);
                 return InputTunnelStatusReport {
                     ok: true,
                     active: false,
                     session: None,
                     policy,
+                    accessibility_trusted,
+                    capture_active,
                     timestamp_ms: now_ms,
                 };
             }
         }
+
+        let accessibility_trusted = crate::platform::is_accessibility_trusted();
+        let capture_active = self.shared.input_capture_active.load(Ordering::SeqCst);
+        if accessibility_trusted && !capture_active && (guard.is_some() || policy.edge.is_some()) {
+            let _ = self.ensure_input_capture();
+        }
+        let capture_active = self.shared.input_capture_active.load(Ordering::SeqCst);
 
         let (active, session) = match *guard {
             Some(ref s) => (true, Some(s.clone())),
@@ -724,6 +816,8 @@ impl Node {
             active,
             session,
             policy,
+            accessibility_trusted,
+            capture_active,
             timestamp_ms: now_ms,
         }
     }
@@ -762,6 +856,7 @@ impl Node {
             requested_edge: edge,
             entry_x: x,
             entry_y: y,
+            is_resume: None,
             timestamp_ms: now_ms,
         };
 
@@ -788,6 +883,38 @@ impl Node {
                 started_at_ms: now_ms,
                 last_activity_ms: now_ms,
             });
+        }
+
+        let effective_edge: tetherly_core::ScreenEdge = if let Some(e) = edge {
+            e.into()
+        } else if let Some(e) = self.input_policy().edge.as_deref() {
+            e.parse::<tetherly_core::ScreenEdge>()
+                .unwrap_or(tetherly_core::ScreenEdge::Right)
+        } else {
+            let layout = self.shared.topology_layout.lock().expect("topology_layout");
+            layout
+                .neighbors
+                .iter()
+                .find_map(|(de, n)| {
+                    if n.peer_id == peer_str {
+                        Some((*de).into())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(tetherly_core::ScreenEdge::Right)
+        };
+        self.shared
+            .input_engine
+            .lock()
+            .expect("engine")
+            .set_edge(effective_edge);
+
+        let _ = self.ensure_input_capture();
+        if !self.input_channel_open().await {
+            if let Err(e) = self.open_input(&peer_id).await {
+                warn!(%peer_id, %e, "input channel open during tunnel attach failed");
+            }
         }
 
         Ok(InputTunnelDecisionReport {
@@ -838,6 +965,7 @@ impl Node {
             }
 
             *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+            self.disarm_input_capture();
             let alias = DeviceId::parse(&session.peer_id)
                 .ok()
                 .and_then(|id| self.peer_alias(&id))
@@ -918,6 +1046,11 @@ impl Node {
         save_input_policy(&self.shared.cfg.data_dir, &policy)
             .map_err(|e| CoreError::File(format!("failed to save input_policy.json: {e}")))?;
         *self.shared.input_policy.lock().expect("input_policy") = policy.clone();
+        self.shared
+            .input_engine
+            .lock()
+            .expect("engine")
+            .set_edge(policy.resolved_edge());
 
         self.emit(UiEvent::input_tunnel_policy_changed(
             policy.enabled,
@@ -933,6 +1066,9 @@ impl Node {
                 .iter()
                 .map(|t| t.as_str().to_string())
                 .collect(),
+            policy.keymap.clone(),
+            policy.edge.clone(),
+            policy.wheel_speed,
             now,
         ));
 
@@ -942,12 +1078,15 @@ impl Node {
             "input_tunnel_policy_changed",
             None::<String>,
             format!(
-                "Updated input policy: enabled={}, allow_inbound={}, keyboard={}, mouse={}, timeout={}s",
+                "Updated input policy: enabled={}, allow_inbound={}, keyboard={}, mouse={}, timeout={}s, keymap={:?}, edge={:?}, wheel_speed={:.2}",
                 policy.enabled,
                 policy.allow_inbound_control,
                 policy.allow_keyboard,
                 policy.allow_mouse,
-                policy.idle_timeout_secs
+                policy.idle_timeout_secs,
+                policy.keymap,
+                policy.edge,
+                policy.wheel_speed
             ),
             true,
         );
@@ -992,6 +1131,17 @@ impl Node {
         if let Some(v) = update.allowed_types {
             policy.allowed_types = v;
         }
+        if let Some(v) = update.keymap {
+            policy.keymap = Some(v);
+        }
+        if let Some(v) = update.edge {
+            policy.edge = Some(v);
+        }
+        if let Some(v) = update.wheel_speed {
+            if v > 0.0 && v <= 20.0 {
+                policy.wheel_speed = v;
+            }
+        }
         self.set_input_policy(policy)
     }
 
@@ -1031,6 +1181,7 @@ impl Node {
             SocketAddr::new(p.addr.ip(), port)
         };
         let stream = TcpStream::connect(addr).await?;
+        let _ = stream.set_nodelay(true);
         let mut cfg = self.session_config_inner(true);
         cfg.pin = None;
         let sess = match dial_session(stream, addr, &cfg).await {
@@ -1040,20 +1191,36 @@ impl Node {
                 return Err(e);
             }
         };
-        self.attach_input_server(sess).await;
+        self.attach_input_server(sess);
         Ok(())
+    }
+
+    /// True while an input control channel to a peer is attached.
+    #[inline]
+    pub fn input_channel_open_sync(&self) -> bool {
+        self.shared.input_out.lock().expect("input_out").is_some()
     }
 
     /// True while an input control channel to a peer is attached. The UI uses
     /// this to dial the channel on demand instead of tracking sessions.
     pub async fn input_channel_open(&self) -> bool {
-        self.shared.input_out.lock().await.is_some()
+        self.input_channel_open_sync()
     }
 
     /// Controller: stop forwarding local input to the remote seat and release
     /// the channel. The capture hooks stay armed (they are cheap while local).
     pub async fn input_stop(&self) -> Result<(), CoreError> {
-        *self.shared.input_out.lock().await = None;
+        *self
+            .shared
+            .input_reconnect_deadline
+            .lock()
+            .expect("deadline") = None;
+        self.shared
+            .input_buffered_frames
+            .lock()
+            .expect("buffered")
+            .clear();
+        *self.shared.input_out.lock().expect("input_out") = None;
         let peer = self.shared.input_peer.lock().expect("input_peer").take();
         self.shared
             .input_engine
@@ -1069,63 +1236,209 @@ impl Node {
         Ok(())
     }
 
+    /// Arm low-level input capture: enable keyboard swallowing, disassociate hardware mouse, and hide local cursor.
+    pub fn arm_input_capture(&self) {
+        if let Ok(guard) = self.shared.input_hook_control.lock() {
+            if let Some(ref control) = *guard {
+                let _ = control.set_keyboard(true);
+            }
+        }
+    }
+
+    /// Check if low-level keyboard hook is currently armed and actively swallowing keystrokes.
+    pub fn is_keyboard_armed(&self) -> bool {
+        if let Ok(guard) = self.shared.input_hook_control.lock() {
+            if let Some(ref control) = *guard {
+                return control.is_armed();
+            }
+        }
+        false
+    }
+
+    /// Disarm low-level input capture: disable keyboard swallowing and re-associate mouse cursor.
+    /// This is the master safety valve ensuring the local machine's input is never trapped or locked.
+    pub fn disarm_input_capture(&self) {
+        if let Ok(guard) = self.shared.input_hook_control.lock() {
+            if let Some(ref control) = *guard {
+                let _ = control.set_keyboard(false);
+            }
+        }
+    }
+
     /// Start the controller-side capture: low-level mouse hook (edge
     /// detection) and a keyboard hook armed only while the seat is remote.
     /// Events feed the same edge state machine `drive_input` uses, so CI and
     /// production share one path.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn spawn_input_capture(&self) -> Result<(), CoreError> {
         let (tx, rx) = std::sync::mpsc::channel::<crate::platform::RawInput>();
         let control = crate::platform::start_input_hooks(tx)?;
+        *self.shared.input_hook_control.lock().expect("hook_control") = Some(control.clone());
         let (w, h) = crate::platform::screen_size();
         self.shared
             .input_engine
             .lock()
             .expect("engine")
             .resize(w.max(1), h.max(1));
-        let handle = tokio::runtime::Handle::try_current()
-            .map_err(|_| CoreError::Json("input capture needs a tokio runtime".into()))?;
         let node = self.clone_handle();
         std::thread::spawn(move || {
-            let mut keyboard_armed = false;
-            for ev in rx {
+            while let Ok(ev) = rx.recv() {
                 // A failed send means the remote input channel is not open (yet)
                 // or just closed. That is transient, not fatal: keep the hook
                 // alive so a later `open_input` starts delivering again, rather
                 // than wedging input sharing until process restart. Events are
                 // paced by real user input, so retrying cannot busy-spin.
-                match ev {
-                    crate::platform::RawInput::Move { x, y } => {
-                        let _ = handle.block_on(node.drive_input(x, y, w, h));
-                    }
-                    crate::platform::RawInput::Button { mask, down } => {
-                        let _ = handle.block_on(node.drive_input_button(mask, down));
-                    }
-                    crate::platform::RawInput::Wheel { dx, dy } => {
-                        let _ = handle.block_on(node.drive_input_wheel(dx, dy));
-                    }
-                    crate::platform::RawInput::Key { code, down } => {
-                        let _ = handle.block_on(node.drive_input_key(code, down));
+                let mut cur_ev = ev;
+                loop {
+                    match cur_ev {
+                        crate::platform::RawInput::Move {
+                            mut x,
+                            mut y,
+                            mut dx,
+                            mut dy,
+                        } => {
+                            // Coalesce backlogged consecutive Move frames to eliminate queue delay
+                            let mut next_non_move = None;
+                            while let Ok(next) = rx.try_recv() {
+                                match next {
+                                    crate::platform::RawInput::Move {
+                                        x: nx,
+                                        y: ny,
+                                        dx: ndx,
+                                        dy: ndy,
+                                    } => {
+                                        x = nx;
+                                        y = ny;
+                                        dx += ndx;
+                                        dy += ndy;
+                                    }
+                                    other => {
+                                        next_non_move = Some(other);
+                                        break;
+                                    }
+                                }
+                            }
+                            let res = node.drive_input_delta(x, y, dx, dy, w, h);
+                            if let Err(e) = res {
+                                if node.input_engine_seat() == CursorSeat::Remote {
+                                    tracing::warn!(%e, "network error while in remote seat; emergency rescue to local");
+                                    let (events, (cx, cy)) = {
+                                        let mut server =
+                                            node.shared.input_engine.lock().expect("engine");
+                                        server.force_local();
+                                        (server.drain(), server.local_pos())
+                                    };
+                                    let _ = node.send_input_events(events);
+                                    *node.shared.input_seat.lock().expect("seat") =
+                                        Some(CursorSeat::Local);
+                                    node.disarm_input_capture();
+                                    crate::platform::warp_mouse_position(cx, cy);
+                                    node.emit(UiEvent::input_seat_changed("local", false, None));
+                                }
+                            }
+                            if let Some(other) = next_non_move {
+                                cur_ev = other;
+                                continue;
+                            }
+                            break;
+                        }
+                        crate::platform::RawInput::Button { mask, down } => {
+                            let _ = node.drive_input_button(mask, down);
+                            break;
+                        }
+                        crate::platform::RawInput::Wheel { dx, dy } => {
+                            let _ = node.drive_input_wheel(dx, dy);
+                            break;
+                        }
+                        crate::platform::RawInput::Key { code, down } => {
+                            let _ = node.drive_input_key(code, down);
+                            break;
+                        }
+                        crate::platform::RawInput::EmergencyEscape => {
+                            *node
+                                .shared
+                                .input_reconnect_deadline
+                                .lock()
+                                .expect("deadline") = None;
+                            node.shared
+                                .input_buffered_frames
+                                .lock()
+                                .expect("buffered")
+                                .clear();
+                            let (events, (cx, cy)) = {
+                                let mut server = node.shared.input_engine.lock().expect("engine");
+                                server.force_local();
+                                (server.drain(), server.local_pos())
+                            };
+                            let _ = node.send_input_events(events);
+                            *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                            node.disarm_input_capture();
+                            crate::platform::warp_mouse_position(cx, cy);
+                            node.emit(UiEvent::input_seat_changed("local", true, None));
+                            crate::platform::show_system_toast(
+                                "Tetherly",
+                                "已安全返回 Mac 本地控制 (双击 Esc)",
+                            );
+                            break;
+                        }
                     }
                 }
                 // The keyboard hook records real keystrokes: arm it only for
                 // the remote seat, disarm the moment the cursor comes home.
+                // Check canonical atomic HookControl state to prevent shadow-variable desync.
                 let remote = node.input_engine_seat() == CursorSeat::Remote;
-                if remote != keyboard_armed && control.set_keyboard(remote).is_ok() {
-                    keyboard_armed = remote;
+                let is_armed = node.is_keyboard_armed();
+                if remote != is_armed {
+                    if remote {
+                        node.arm_input_capture();
+                    } else {
+                        node.disarm_input_capture();
+                    }
                 }
             }
         });
+        self.shared
+            .input_capture_active
+            .store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Non-Windows builds have no low-level input hooks: report an honest
-    /// error rather than silently doing nothing (macOS/Linux capture is
-    /// Manual-required per the SSOT).
-    #[cfg(not(windows))]
+    /// Check if low-level input capture hooks are currently active.
+    pub fn is_input_capture_active(&self) -> bool {
+        self.shared.input_capture_active.load(Ordering::SeqCst)
+    }
+
+    /// Dynamically check and arm low-level input capture hooks if not yet active.
+    /// Idempotent: returns Ok(true) if already running, or attempts to spawn it.
+    pub fn ensure_input_capture(&self) -> Result<bool, CoreError> {
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            if self.shared.input_capture_active.load(Ordering::SeqCst) {
+                return Ok(true);
+            }
+            match self.spawn_input_capture() {
+                Ok(()) => {
+                    tracing::info!("ensure_input_capture: input capture hooks successfully armed");
+                    Ok(true)
+                }
+                Err(e) => {
+                    tracing::debug!(%e, "ensure_input_capture: capture not ready");
+                    Err(e)
+                }
+            }
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            Ok(false)
+        }
+    }
+
+    /// Non-Windows and non-macOS builds have no low-level input hooks: report an honest
+    /// error rather than silently doing nothing (Linux hooks are Manual-required per the SSOT).
+    #[cfg(not(any(windows, target_os = "macos")))]
     pub fn spawn_input_capture(&self) -> Result<(), CoreError> {
         Err(CoreError::Json(
-            "input capture is Windows-only in this build; macOS/Linux hooks are Manual-required"
+            "input capture is supported on Windows and macOS; Linux hooks are Manual-required"
                 .into(),
         ))
     }
@@ -1133,22 +1446,152 @@ impl Node {
     /// Push local cursor position toward the edge state machine. Crossing the
     /// right edge emits Enter + Move. Seq is monotonic for the life of the
     /// node. No JSON, and never onto 45717. OS hooks stay Manual-required.
-    pub async fn drive_input(
+    pub fn drive_input(
         &self,
         x: i32,
         y: i32,
         width: i32,
         height: i32,
     ) -> Result<Option<tetherly_core::ScreenEdge>, CoreError> {
-        let (edge, events) = {
+        self.drive_input_delta(x, y, 0, 0, width, height)
+    }
+
+    /// Push local cursor position and displacement delta toward the edge state machine.
+    /// When the seat is remote, deltas drive smooth free roaming on the target screen.
+    pub fn drive_input_delta(
+        &self,
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<Option<tetherly_core::ScreenEdge>, CoreError> {
+        // Guard: If the network input channel is not connected and we are not in grace period, never allow crossing into Remote seat.
+        let in_grace = {
+            let dl = self
+                .shared
+                .input_reconnect_deadline
+                .lock()
+                .expect("deadline");
+            dl.map(|d| std::time::Instant::now() < d).unwrap_or(false)
+        };
+        if !self.input_channel_open_sync() && !in_grace {
+            let mut server = self.shared.input_engine.lock().expect("engine");
+            if server.seat() == CursorSeat::Remote {
+                server.force_local();
+                let (cx, cy) = server.local_pos();
+                *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                self.disarm_input_capture();
+                crate::platform::warp_mouse_position(cx, cy);
+                self.emit(UiEvent::input_seat_changed("local", false, None));
+            }
+            return Ok(None);
+        }
+
+        let (edge, events, current_seat, local_pos, active_edge) = {
             let mut server = self.shared.input_engine.lock().expect("engine");
             server.resize(width, height);
-            let edge = server.local_move(x, y);
-            (edge, server.drain())
+            let active_edge = if let Some(e) = self.input_policy().edge.as_deref() {
+                e.parse::<tetherly_core::ScreenEdge>()
+                    .unwrap_or(tetherly_core::ScreenEdge::Right)
+            } else {
+                let peer_opt = self.shared.input_peer.lock().expect("input_peer").clone();
+                let edge_from_topology = peer_opt.and_then(|p| {
+                    let layout = self.shared.topology_layout.lock().expect("topology_layout");
+                    let p_str = p.to_string();
+                    layout.neighbors.iter().find_map(|(e, n)| {
+                        if n.peer_id == p_str {
+                            Some((*e).into())
+                        } else {
+                            None
+                        }
+                    })
+                });
+                edge_from_topology.unwrap_or(tetherly_core::ScreenEdge::Right)
+            };
+            server.set_edge(active_edge);
+            // On physical displays, OS cursor coordinates are clamped to [0, width - 1] and [0, height - 1].
+            // To reliably trigger boundary crossings when touching the physical screen boundary,
+            // normalize boundary-touch coordinates to the engine's edge thresholds.
+            let (target_x, target_y) = match active_edge {
+                tetherly_core::ScreenEdge::Right
+                    if x >= width.saturating_sub(2) || (x >= width.saturating_sub(8) && dx > 0) =>
+                {
+                    (width, y)
+                }
+                tetherly_core::ScreenEdge::Bottom
+                    if y >= height.saturating_sub(2)
+                        || (y >= height.saturating_sub(8) && dy > 0) =>
+                {
+                    (x, height)
+                }
+                tetherly_core::ScreenEdge::Top if y <= 2 || (y <= 8 && dy < 0) => (x, 0),
+                tetherly_core::ScreenEdge::Left if x <= 2 || (x <= 8 && dx < 0) => (0, y),
+                _ => (x, y),
+            };
+            let edge = server.local_move_delta(target_x, target_y, dx, dy);
+            (
+                edge,
+                server.drain(),
+                server.seat(),
+                server.local_pos(),
+                active_edge,
+            )
         };
-        self.send_input_events(events).await?;
-        if edge.is_some() {
-            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Remote);
+
+        let prev_seat = *self.shared.input_seat.lock().expect("seat");
+        if current_seat == CursorSeat::Remote {
+            if prev_seat != Some(CursorSeat::Remote) {
+                // Deskflow OSXScreen::leave & PR-10231 alignment:
+                // 1) On macOS, WindowServer enforces cursor visibility over the Menu Bar (y = 0) and Dock (y = height - 1),
+                //    refusing hide requests when the cursor sits at the display boundary.
+                //    Parking at screen center moves the pointer into neutral content space away from Menu Bar and Dock.
+                // 2) Warp to safe neutral position BEFORE arming input capture / hiding the cursor.
+                #[cfg(target_os = "macos")]
+                let (park_x, park_y) = {
+                    let _ = active_edge;
+                    (width / 2, height / 2)
+                };
+                #[cfg(not(target_os = "macos"))]
+                let (park_x, park_y) = match active_edge {
+                    tetherly_core::ScreenEdge::Top => (local_pos.0, 0),
+                    tetherly_core::ScreenEdge::Bottom => (local_pos.0, height.saturating_sub(1)),
+                    tetherly_core::ScreenEdge::Left => (0, local_pos.1),
+                    tetherly_core::ScreenEdge::Right => (width.saturating_sub(1), local_pos.1),
+                };
+                crate::platform::warp_mouse_position(park_x, park_y);
+                self.arm_input_capture();
+            } else if !self.is_keyboard_armed() {
+                self.arm_input_capture();
+            }
+        }
+
+        if let Err(e) = self.send_input_events(events) {
+            let in_grace = {
+                let dl = self
+                    .shared
+                    .input_reconnect_deadline
+                    .lock()
+                    .expect("deadline");
+                dl.map(|d| std::time::Instant::now() < d).unwrap_or(false)
+            };
+            if !in_grace {
+                let mut server = self.shared.input_engine.lock().expect("engine");
+                if server.seat() == CursorSeat::Remote {
+                    server.force_local();
+                    let (cx, cy) = server.local_pos();
+                    *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                    self.disarm_input_capture();
+                    crate::platform::warp_mouse_position(cx, cy);
+                    self.emit(UiEvent::input_seat_changed("local", false, None));
+                }
+                return Err(e);
+            }
+        }
+
+        if Some(current_seat) != prev_seat {
+            *self.shared.input_seat.lock().expect("seat") = Some(current_seat);
             let peer = self
                 .shared
                 .input_peer
@@ -1156,77 +1599,143 @@ impl Node {
                 .expect("input_peer")
                 .as_ref()
                 .map(|p| p.to_string());
-            self.emit(UiEvent::input_seat_changed("remote", true, peer));
+            let seat_str = match current_seat {
+                CursorSeat::Local => "local",
+                CursorSeat::Remote => "remote",
+            };
+            self.emit(UiEvent::input_seat_changed(seat_str, true, peer));
+            if current_seat == CursorSeat::Local {
+                self.disarm_input_capture();
+                crate::platform::warp_mouse_position(local_pos.0, local_pos.1);
+            }
+        }
+        if let Ok(mut guard) = self.shared.active_input_tunnel.lock() {
+            if let Some(ref mut session) = *guard {
+                session.last_activity_ms = self.shared.clock.unix_ms();
+            }
         }
         Ok(edge)
     }
 
-    pub async fn drive_input_key(&self, code: u16, down: bool) -> Result<(), CoreError> {
+    pub fn drive_input_key(&self, code: u16, down: bool) -> Result<(), CoreError> {
         let events = {
             let mut server = self.shared.input_engine.lock().expect("engine");
             if server.seat() != CursorSeat::Remote {
                 return Ok(());
             }
+            let keymap = self.input_policy().resolved_keymap_profile();
+            let remapped_code = keymap.remap_vk(code);
             let seq = server.next_seq();
             server.note_seq(seq);
-            vec![InputEvent::key(seq, code, down, 0)]
+            vec![InputEvent::key(seq, remapped_code, down, 0)]
         };
-        self.send_input_events(events).await
+        self.send_input_events(events)
     }
 
     /// Push a physical mouse-button observation to the remote seat. No-op
     /// while the seat is local (the engine gates the same way).
-    pub async fn drive_input_button(&self, mask: u8, down: bool) -> Result<(), CoreError> {
+    pub fn drive_input_button(&self, mask: u8, down: bool) -> Result<(), CoreError> {
         let events = {
             let mut server = self.shared.input_engine.lock().expect("engine");
             if server.seat() != CursorSeat::Remote {
                 return Ok(());
             }
+            server.note_button(mask, down);
             let seq = server.next_seq();
             server.note_seq(seq);
             vec![InputEvent::button(seq, mask, down)]
         };
-        self.send_input_events(events).await
+        self.send_input_events(events)
     }
 
     /// Push a physical wheel observation to the remote seat.
-    pub async fn drive_input_wheel(&self, dx: i16, dy: i16) -> Result<(), CoreError> {
+    pub fn drive_input_wheel(&self, dx: i16, dy: i16) -> Result<(), CoreError> {
         let events = {
             let mut server = self.shared.input_engine.lock().expect("engine");
             if server.seat() != CursorSeat::Remote {
                 return Ok(());
             }
+            let speed = self.input_policy().wheel_speed;
+            let (scaled_dx, scaled_dy) = if (speed - 1.0).abs() > 0.001 && speed > 0.0 {
+                let sy = ((dy as f64) * speed).round() as i16;
+                let sx = ((dx as f64) * speed).round() as i16;
+                (
+                    if dx != 0 && sx == 0 { dx.signum() } else { sx },
+                    if dy != 0 && sy == 0 { dy.signum() } else { sy },
+                )
+            } else {
+                (dx, dy)
+            };
             let seq = server.next_seq();
             server.note_seq(seq);
-            vec![InputEvent::wheel(seq, dx, dy)]
+            vec![InputEvent::wheel(seq, scaled_dx, scaled_dy)]
         };
-        self.send_input_events(events).await
+        self.send_input_events(events)
     }
 
     pub fn input_engine_seat(&self) -> CursorSeat {
         self.shared.input_engine.lock().expect("engine").seat()
     }
 
-    pub(super) async fn send_input_events(&self, events: Vec<InputEvent>) -> Result<(), CoreError> {
-        let tx = self
-            .shared
-            .input_out
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| CoreError::Json("input channel closed".into()))?;
-        for ev in events {
-            match tx.try_send(ev.to_frame()?) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    return Err(CoreError::Json("input queue full; peer too slow".into()));
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    return Err(CoreError::Json("input peer gone".into()));
+    pub(super) fn send_input_events(&self, events: Vec<InputEvent>) -> Result<(), CoreError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let tx_opt = self.shared.input_out.lock().expect("input_out").clone();
+        if let Some(tx) = tx_opt {
+            let mut disconnected = false;
+            for ev in &events {
+                match tx.try_send(ev.to_frame()?) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // Drop Move frames on queue pressure so clicks/keys are never blocked
+                        if !matches!(ev.kind, tetherly_core::InputKind::Move { .. }) {
+                            return Err(CoreError::Json("input queue full; peer too slow".into()));
+                        }
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        disconnected = true;
+                        break;
+                    }
                 }
             }
+            if !disconnected {
+                return Ok(());
+            }
         }
-        Ok(())
+
+        // Channel is closed or dropped; check if seat is remote for grace period buffering
+        let is_remote =
+            self.shared.input_engine.lock().expect("engine").seat() == CursorSeat::Remote;
+        if is_remote {
+            let in_grace = {
+                let mut dl = self
+                    .shared
+                    .input_reconnect_deadline
+                    .lock()
+                    .expect("deadline");
+                match *dl {
+                    Some(d) => std::time::Instant::now() < d,
+                    None => {
+                        *dl = Some(
+                            std::time::Instant::now() + std::time::Duration::from_millis(2500),
+                        );
+                        true
+                    }
+                }
+            };
+            if in_grace {
+                let mut buf = self.shared.input_buffered_frames.lock().expect("buffered");
+                for ev in events {
+                    if buf.len() >= 64 {
+                        buf.pop_front();
+                    }
+                    buf.push_back(ev.to_frame()?);
+                }
+                return Ok(());
+            }
+        }
+        Err(CoreError::Json("input channel closed".into()))
     }
 
     pub(super) async fn accept_input(
@@ -1234,6 +1743,7 @@ impl Node {
         stream: TcpStream,
         addr: SocketAddr,
     ) -> Result<(), tetherly_net::NetError> {
+        let _ = stream.set_nodelay(true);
         let mut cfg = self.session_config_inner(true);
         cfg.pin = None;
         let sess = match accept_session(stream, addr, &cfg).await {
@@ -1247,10 +1757,48 @@ impl Node {
         Ok(())
     }
 
-    pub(super) async fn attach_input_server(&self, mut sess: ActiveSession) {
+    pub(super) fn attach_input_server(&self, mut sess: ActiveSession) {
         let peer_id = sess.peer_id.clone();
         let (tx, mut rx) = mpsc::channel::<InnerFrame>(SESSION_QUEUE_DEPTH);
-        *self.shared.input_out.lock().await = Some(tx);
+
+        let was_in_grace = self
+            .shared
+            .input_reconnect_deadline
+            .lock()
+            .expect("deadline")
+            .take()
+            .is_some();
+        let is_remote =
+            self.shared.input_engine.lock().expect("engine").seat() == CursorSeat::Remote;
+
+        if was_in_grace || is_remote {
+            // Re-assert focus and cursor position on target InputClient
+            let resume_frames: Vec<InnerFrame> = {
+                let mut engine = self.shared.input_engine.lock().expect("engine");
+                engine.resume_remote();
+                engine
+                    .drain()
+                    .into_iter()
+                    .filter_map(|ev| ev.to_frame().ok())
+                    .collect()
+            };
+            for f in resume_frames {
+                let _ = tx.try_send(f);
+            }
+
+            // Flush frames buffered during the grace period
+            let buffered: Vec<InnerFrame> = {
+                let mut buf = self.shared.input_buffered_frames.lock().expect("buffered");
+                buf.drain(..).collect()
+            };
+            let buf_count = buffered.len();
+            for f in buffered {
+                let _ = tx.try_send(f);
+            }
+            tracing::info!(peer = %peer_id, buf_count, "input session resumed; flushed buffered frames");
+        }
+
+        *self.shared.input_out.lock().expect("input_out") = Some(tx);
         *self.shared.input_peer.lock().expect("input_peer") = Some(peer_id.clone());
         let current_seat = self.input_seat_str();
         self.emit(UiEvent::input_seat_changed(
@@ -1290,6 +1838,9 @@ impl Node {
                                     if matches!(ev.kind, tetherly_core::InputKind::Leave) {
                                         node.shared.input_engine.lock().expect("engine").on_remote_leave();
                                         *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                                        node.disarm_input_capture();
+                                        let (cx, cy) = node.shared.input_engine.lock().expect("engine").local_pos();
+                                        crate::platform::warp_mouse_position(cx, cy);
                                         node.emit(UiEvent::input_seat_changed(
                                             "local",
                                             true,
@@ -1299,36 +1850,140 @@ impl Node {
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!(%e, "input server: session recv ended; closing");
+                                let err_s = e.to_string();
+                                if err_s.contains("stream closed during header")
+                                    || err_s.contains("Connection reset")
+                                    || err_s.contains("Broken pipe")
+                                {
+                                    tracing::info!("input server: peer session closed cleanly ({err_s})");
+                                } else {
+                                    tracing::warn!(%e, "input server: session recv ended; closing");
+                                }
                                 break;
                             }
                         }
                     }
                 }
             }
-            *node.shared.input_out.lock().await = None;
-            *node.shared.input_peer.lock().expect("input_peer") = None;
-            node.shared
-                .input_engine
-                .lock()
-                .expect("engine")
-                .on_peer_gone();
-            *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
-            node.emit(UiEvent::input_seat_changed("local", false, None));
+            *node.shared.input_out.lock().expect("input_out") = None;
+
+            let is_remote =
+                node.shared.input_engine.lock().expect("engine").seat() == CursorSeat::Remote;
+            let is_shutting_down = *node.shared.shutdown.subscribe().borrow();
+
+            if is_remote && !is_shutting_down {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2500);
+                *node
+                    .shared
+                    .input_reconnect_deadline
+                    .lock()
+                    .expect("deadline") = Some(deadline);
+                tracing::info!(peer = %peer_id, "input session disconnected while in Remote seat; entering 2.5s grace period");
+
+                let retry_node = node.clone_handle();
+                let target_peer = peer_id.clone();
+                tokio::spawn(async move {
+                    let mut backoff_ms = 30u64;
+                    while std::time::Instant::now() < deadline {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                        if std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                        if retry_node.input_channel_open().await {
+                            tracing::info!(
+                                "fast input reconnect: channel is already re-established"
+                            );
+                            return;
+                        }
+                        if retry_node
+                            .shared
+                            .input_engine
+                            .lock()
+                            .expect("engine")
+                            .seat()
+                            != CursorSeat::Remote
+                        {
+                            tracing::info!(
+                                "fast input reconnect: seat is no longer remote; stopping retry"
+                            );
+                            return;
+                        }
+                        tracing::debug!(peer = %target_peer, backoff_ms, "attempting fast input reconnect");
+                        if let Ok(()) = retry_node.open_input(&target_peer).await {
+                            tracing::info!(peer = %target_peer, "fast input reconnect succeeded");
+                            return;
+                        }
+                        backoff_ms = (backoff_ms * 2).min(200);
+                    }
+
+                    if retry_node
+                        .shared
+                        .input_reconnect_deadline
+                        .lock()
+                        .expect("deadline")
+                        .take()
+                        .is_some()
+                    {
+                        tracing::warn!(peer = %target_peer, "input grace period expired (2.5s); returning seat to local");
+                        retry_node
+                            .shared
+                            .input_buffered_frames
+                            .lock()
+                            .expect("buffered")
+                            .clear();
+                        *retry_node.shared.input_peer.lock().expect("input_peer") = None;
+                        retry_node
+                            .shared
+                            .input_engine
+                            .lock()
+                            .expect("engine")
+                            .force_local();
+                        *retry_node.shared.input_seat.lock().expect("seat") =
+                            Some(CursorSeat::Local);
+                        retry_node.disarm_input_capture();
+                        let (cx, cy) = retry_node
+                            .shared
+                            .input_engine
+                            .lock()
+                            .expect("engine")
+                            .local_pos();
+                        crate::platform::warp_mouse_position(cx, cy);
+                        retry_node.emit(UiEvent::input_seat_changed("local", false, None));
+                    }
+                });
+            } else {
+                *node
+                    .shared
+                    .input_reconnect_deadline
+                    .lock()
+                    .expect("deadline") = None;
+                node.shared
+                    .input_buffered_frames
+                    .lock()
+                    .expect("buffered")
+                    .clear();
+                *node.shared.input_peer.lock().expect("input_peer") = None;
+                node.shared
+                    .input_engine
+                    .lock()
+                    .expect("engine")
+                    .on_peer_gone();
+                *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                node.disarm_input_capture();
+                let (cx, cy) = node.shared.input_engine.lock().expect("engine").local_pos();
+                crate::platform::warp_mouse_position(cx, cy);
+                node.emit(UiEvent::input_seat_changed("local", false, None));
+            }
         });
     }
 
     pub(super) async fn attach_input_client(&self, mut sess: ActiveSession) {
         let peer_id = sess.peer_id.clone();
         *self.shared.input_peer.lock().expect("input_peer") = Some(peer_id.clone());
-        let mut client = InputClient::new(MemorySink::default());
+        let real = self.shared.input_real_sink.clone();
+        let mut client = InputClient::new(DualInputSink::new(real));
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
-        // Real injection rides behind the CI observer: the sink trace records
-        // exactly the actions `apply` performed, so forwarding the tail keeps
-        // OS injection in lockstep with protocol-level filtering.
-        let real = node.shared.input_real_sink.clone();
-        let mut forwarded: usize = 0;
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -1343,64 +1998,47 @@ impl Node {
                                 let f_len = (frame.payload.len() + 12) as u64;
                                 node.shared.telemetry.record_input_rx(f_len);
                                 if let Ok(ev) = InputEvent::from_frame(&frame) {
-                                    if let Ok(Some(leave)) = client.apply(ev) {
-                                        if let Ok(f) = leave.to_frame() {
-                                            let l_len = (f.payload.len() + 12) as u64;
-                                            if sess.send_bounded(f).await.is_ok() {
-                                                node.shared.telemetry.record_input_tx(l_len);
+                                    if let Ok(leave_opt) = client.apply(ev) {
+                                        if let Some(leave) = leave_opt {
+                                            if let Ok(f) = leave.to_frame() {
+                                                let l_len = (f.payload.len() + 12) as u64;
+                                                if sess.send_bounded(f).await.is_ok() {
+                                                    node.shared.telemetry.record_input_tx(l_len);
+                                                }
                                             }
                                         }
-                                    }
-                                    *node.shared.input_sink.lock().expect("sink") = client.sink().clone();
-                                    if let Some(sink) = &real {
-                                        let mut sink = sink.lock().expect("real input sink");
-                                        let trace = client.sink().applied.as_slices();
-                                        let total = trace.0.len() + trace.1.len();
-                                        // The bounded trace (256) can wrap; min()
-                                        // then skips nothing new rather than
-                                        // replaying stale actions.
-                                        let start = forwarded.min(total);
-                                        for kind in trace.0.iter().chain(trace.1.iter()).skip(start) {
-                                            match *kind {
-                                                tetherly_core::InputKind::Move { x, y } => {
-                                                    sink.move_abs(x, y)
-                                                }
-                                                tetherly_core::InputKind::Button { mask, down } => {
-                                                    sink.button(mask, down)
-                                                }
-                                                tetherly_core::InputKind::Wheel { dx, dy } => {
-                                                    sink.wheel(dx, dy)
-                                                }
-                                                tetherly_core::InputKind::Key { code, down, mods } => {
-                                                    sink.key(code, down, mods)
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                        forwarded = total;
+                                        *node.shared.input_sink.lock().expect("sink") = client.sink().memory().clone();
                                         node.screen_force_wake_squelch();
-                                    }
-                                    let new_seat = if client.focused() {
-                                        CursorSeat::Remote
-                                    } else {
-                                        CursorSeat::Local
-                                    };
-                                    let old_seat = *node.shared.input_seat.lock().expect("seat");
-                                    *node.shared.input_seat.lock().expect("seat") = Some(new_seat);
-                                    if Some(new_seat) != old_seat {
-                                        let seat_str = if client.focused() { "remote" } else { "local" };
-                                        node.emit(UiEvent::input_seat_changed(
-                                            seat_str,
-                                            true,
-                                            Some(sess.peer_id.to_string()),
-                                        ));
+                                        let new_seat = if client.focused() {
+                                            CursorSeat::Remote
+                                        } else {
+                                            CursorSeat::Local
+                                        };
+                                        let old_seat = *node.shared.input_seat.lock().expect("seat");
+                                        *node.shared.input_seat.lock().expect("seat") = Some(new_seat);
+                                        if Some(new_seat) != old_seat {
+                                            let seat_str = if client.focused() { "remote" } else { "local" };
+                                            node.emit(UiEvent::input_seat_changed(
+                                                seat_str,
+                                                true,
+                                                Some(sess.peer_id.to_string()),
+                                            ));
+                                        }
                                     }
                                 } else if let Err(e) = InputEvent::from_frame(&frame) {
                                     tracing::warn!(%e, "input client: bad frame");
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!(%e, "input client: session recv ended; closing");
+                                let err_s = e.to_string();
+                                if err_s.contains("stream closed during header")
+                                    || err_s.contains("Connection reset")
+                                    || err_s.contains("Broken pipe")
+                                {
+                                    tracing::info!("input client: peer session closed cleanly ({err_s})");
+                                } else {
+                                    tracing::warn!(%e, "input client: session recv ended; closing");
+                                }
                                 break;
                             }
                         }
@@ -1410,7 +2048,7 @@ impl Node {
             client.on_peer_gone();
             *node.shared.input_peer.lock().expect("input_peer") = None;
             *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
-            *node.shared.input_sink.lock().expect("sink") = client.sink().clone();
+            *node.shared.input_sink.lock().expect("sink") = client.sink().memory().clone();
             node.emit(UiEvent::input_seat_changed("local", false, None));
         });
     }
@@ -1469,6 +2107,8 @@ impl Node {
             }
         };
 
+        let _ = self.ensure_input_capture();
+
         if !self.input_channel_open().await {
             self.open_input(&target_id)
                 .await
@@ -1505,5 +2145,110 @@ impl Node {
             peer,
             timestamp_ms: now,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tetherly_core::InputKind;
+
+    #[tokio::test]
+    async fn test_input_grace_period_buffering() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("input-grace");
+
+        // 1. Initially local seat: send_input_events errors if channel closed
+        let ev = InputEvent::move_to(1, 100, 200);
+        assert!(node.send_input_events(vec![ev.clone()]).is_err());
+        assert_eq!(node.shared.input_buffered_frames.lock().unwrap().len(), 0);
+
+        // 2. Set engine seat to Remote:
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(1920, 540, 10, 0); // cross right edge
+            assert_eq!(engine.seat(), CursorSeat::Remote);
+        }
+
+        // 3. Now send_input_events should enter grace period and buffer the frames
+        let res = node.send_input_events(vec![ev]);
+        assert!(res.is_ok());
+        assert!(node
+            .shared
+            .input_reconnect_deadline
+            .lock()
+            .unwrap()
+            .is_some());
+        assert_eq!(node.shared.input_buffered_frames.lock().unwrap().len(), 1);
+
+        // 4. Input stop clears grace period and buffer
+        let stop_res = node.input_stop().await;
+        assert!(stop_res.is_ok());
+        assert!(node
+            .shared
+            .input_reconnect_deadline
+            .lock()
+            .unwrap()
+            .is_none());
+        assert_eq!(node.shared.input_buffered_frames.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_dual_input_sink_forwards_all_events_and_flushes_to_real_sink() {
+        let real_sink = Arc::new(Mutex::new(MemorySink::default()));
+        let dual = DualInputSink::new(Some(real_sink.clone()));
+        let mut client = InputClient::new(dual);
+
+        // 1. Enter and move
+        client.apply(InputEvent::enter(1)).unwrap();
+        client.apply(InputEvent::move_to(2, 500, 500)).unwrap();
+
+        // 2. Press a modifier key and a mouse button
+        client.apply(InputEvent::key(3, 0xA0, true, 0)).unwrap(); // VK_LSHIFT down
+        client
+            .apply(InputEvent::button(4, tetherly_core::BTN_LEFT, true))
+            .unwrap(); // Left click down
+
+        // Verify real sink received the down events
+        {
+            let guard = real_sink.lock().unwrap();
+            assert_eq!(guard.cursor, (500, 500));
+            assert_eq!(guard.buttons, tetherly_core::BTN_LEFT);
+            assert_eq!(guard.keys_down, vec![0xA0]);
+        }
+
+        // 3. Leave event triggers release_all_inputs on both memory observer AND real sink
+        client.apply(InputEvent::leave(5)).unwrap();
+
+        {
+            let guard = real_sink.lock().unwrap();
+            // Verify real sink received key release and button release
+            assert_eq!(guard.buttons, 0);
+            assert!(guard.keys_down.is_empty());
+            assert!(guard.applied.contains(&InputKind::Key {
+                code: 0xA0,
+                down: false,
+                mods: 0
+            }));
+            assert!(guard.applied.contains(&InputKind::Button {
+                mask: tetherly_core::BTN_LEFT,
+                down: false
+            }));
+        }
+
+        // 4. Focus again, hold a key, and trigger on_peer_gone (network disconnect)
+        client.apply(InputEvent::enter(6)).unwrap();
+        client.apply(InputEvent::key(7, 0xA2, true, 0)).unwrap(); // VK_LCONTROL down
+
+        client.on_peer_gone();
+
+        {
+            let guard = real_sink.lock().unwrap();
+            assert!(guard.keys_down.is_empty());
+            assert!(guard.applied.contains(&InputKind::Key {
+                code: 0xA2,
+                down: false,
+                mods: 0
+            }));
+        }
     }
 }

@@ -46,9 +46,11 @@ openh264 = "0.9.9"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Security_Credentials",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
     "Win32_System_Threading",
     # PlatformSysProbe (platform.rs): process RSS/cpu-time, thread snapshot,
     # and host physical memory. Feature flags on the already-present
@@ -101,17 +103,29 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "std",
     "CFCGTypes",
     "CFRunLoop",
+    "CFMachPort",
 ] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
+    "objc2-core-foundation",
     "objc2-core-graphics",
     "NSApplication",
+    "NSButton",
+    "NSColor",
     "NSControl",
+    "NSCursor",
+    "NSEvent",
     "NSGraphics",
     "NSImage",
     "NSImageView",
+    "NSMenu",
+    "NSMenuItem",
     "NSResponder",
     "NSRunningApplication",
+    "NSScreen",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
     "NSView",
     "NSWindow",
 ] }
@@ -122,6 +136,10 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "CGContext",
     "CGDirectDisplay",
     "CGImage",
+    "CGEvent",
+    "CGEventTypes",
+    "CGEventSource",
+    "CGRemoteOperation",
 ] }
 # CoreBluetooth GATT client for ANCS (src/ancs/macos.rs).
 dispatch2 = { version = "0.3", default-features = false, features = ["alloc", "objc2"] }

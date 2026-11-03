@@ -33,7 +33,8 @@ pub use runtime::{
     DiscoveredPeerDto, DiscoveryReport, DiscoveryRescanReport, DismissFilter, DndMode,
     FileBatchDecisionReport, FileDecisionReport, FileOfferDto, FileOffersReport, HealthReport,
     HeartbeatConfig, HostMetrics, IfaceReportDto, InboxClearReport, InboxDeleteReport,
-    InboxFileDto, InboxOpenReport, InboxReport, InputControlReport, InputStatusReport, LinkGrade,
+    InboxFileDto, InboxOpenReport, InboxReport, InputControlReport, InputStatusReport,
+    InputTunnelPolicyReport, InputTunnelPolicyUpdate, InputTunnelStatusReport, LinkGrade,
     LinkProbeReport, LinkQualityReport, LivePeer, LocalCapsReport, MessageDirection, MessageEngine,
     MultiFileSendReport, MultiMessageSendReport, NetworkRefreshReport, NetworkReport, Node,
     NodeConfig, NodeConfigReport, NodePorts, NotifyBannerConfig, NotifyConfigReport,
@@ -82,6 +83,6 @@ pub use store::{
     VIRTUAL_DISPLAY_POLICY_FILE,
 };
 pub use uihttp::{
-    loopback_delete, loopback_events_connect, loopback_get, loopback_post, loopback_put, SseStream,
-    UiResponse,
+    loopback_delete, loopback_events_connect, loopback_get, loopback_post, loopback_put,
+    DaemonRestartReport, SseStream, UiResponse,
 };

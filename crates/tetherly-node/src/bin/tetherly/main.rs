@@ -3,11 +3,39 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tetherly_node::{Node, NodeConfig, SystemSink};
 use tracing::{info, warn};
+
+#[derive(Clone)]
+struct DualLogWriter {
+    file: Option<Arc<std::sync::Mutex<std::fs::File>>>,
+}
+
+impl Write for DualLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = std::io::stdout().write_all(buf);
+        if let Some(ref file) = self.file {
+            if let Ok(mut f) = file.lock() {
+                let _ = f.write_all(buf);
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stdout().flush();
+        if let Some(ref file) = self.file {
+            if let Ok(mut f) = file.lock() {
+                let _ = f.flush();
+            }
+        }
+        Ok(())
+    }
+}
 
 // ---- CLI surface (v0.1.64 / ADR-128) ----
 mod cli;
@@ -55,14 +83,24 @@ mod dispatch;
 mod util;
 use dispatch::dispatch;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // A closed downstream pipe (`tetherly accept | head`) must end the
     // process quietly like any classic tool, not panic in println!.
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    let data_dir = tetherly_node::store::default_data_dir();
+    let _ = tetherly_node::store::ensure_dir(&data_dir);
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(data_dir.join("tetherly.log"))
+        .ok()
+        .map(|f| Arc::new(std::sync::Mutex::new(f)));
+
+    let dual_writer = DualLogWriter { file: log_file };
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -74,12 +112,52 @@ async fn main() -> Result<()> {
                 // RUST_LOG still overrides for debugging.
                 .add_directive("mdns_sd=off".parse().unwrap()),
         )
+        .with_writer(move || dual_writer.clone())
         .init();
     if std::env::var("TETHERLY_INSECURE_LOG").ok().as_deref() == Some("1") {
         tracing::warn!("TETHERLY_INSECURE_LOG=1 is set; debug profile only");
     }
 
-    let cli = Cli::parse();
+    let args: Vec<String> = std::env::args().collect();
+    let effective_args = if args.len() <= 1 || (args.len() == 2 && args[1].starts_with("-psn_")) {
+        vec![args[0].clone(), "run".into()]
+    } else {
+        args
+    };
 
-    dispatch(cli).await
+    let cli = Cli::parse_from(effective_args);
+
+    #[cfg(target_os = "macos")]
+    if matches!(&cli.cmd, Cmd::Run { .. }) {
+        let ui_port = match &cli.cmd {
+            Cmd::Run { ui_port, .. } => ui_port.unwrap_or(45716),
+            _ => 45716,
+        };
+        let device_name = cli.name.clone().unwrap_or_else(|| "Tetherly".into());
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        std::thread::spawn(move || {
+            let res = rt.block_on(async move { dispatch(cli).await });
+            let _ = shutdown_tx.send(());
+            if let Err(e) = res {
+                eprintln!("tetherly runtime error: {e}");
+            }
+        });
+
+        tetherly_node::platform::tray::run_macos_tray_on_main_thread(
+            ui_port,
+            device_name,
+            shutdown_rx,
+        );
+        return Ok(());
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async { dispatch(cli).await })
 }

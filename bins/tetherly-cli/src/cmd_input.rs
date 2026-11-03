@@ -94,6 +94,9 @@ pub(crate) async fn input(action: InputCmd) -> Result<()> {
             tag,
             device_type,
             clear_filters,
+            keymap,
+            edge,
+            wheel_speed,
             json,
             ui_port,
         } => {
@@ -110,6 +113,9 @@ pub(crate) async fn input(action: InputCmd) -> Result<()> {
                 tag,
                 device_type,
                 clear_filters,
+                keymap,
+                edge,
+                wheel_speed,
                 json,
             )
             .await?;
@@ -157,7 +163,10 @@ pub(crate) async fn do_input_attach(
         let v: serde_json::Value = serde_json::from_slice(&body)?;
         let sid = v["session_id"].as_str().unwrap_or("unknown");
         let peer_val = v["peer"].as_str().unwrap_or(peer);
-        let accepted = v["accepted"].as_bool().unwrap_or(false);
+        let accepted = v["accepted"]
+            .as_bool()
+            .or_else(|| v["ok"].as_bool())
+            .unwrap_or(false);
         if accepted {
             println!("Virtual peripheral input tunnel attached successfully.");
             println!("  Session ID: {sid}");
@@ -221,7 +230,10 @@ pub(crate) async fn do_input_status(ui_port: u16, json: bool) -> Result<()> {
     println!("  Active Tunnel: {active}");
     if let Some(sess) = v.get("session").filter(|s| !s.is_null()) {
         let sid = sess["session_id"].as_str().unwrap_or("unknown");
-        let peer = sess["peer"].as_str().unwrap_or("unknown");
+        let peer = sess["peer_id"]
+            .as_str()
+            .or_else(|| sess["peer"].as_str())
+            .unwrap_or("unknown");
         let role = sess["role"].as_str().unwrap_or("unknown");
         println!("  Session ID:    {sid}");
         println!("  Peer:          {peer}");
@@ -244,6 +256,12 @@ pub(crate) async fn do_input_status(ui_port: u16, json: bool) -> Result<()> {
         println!("  Inbound:       {inbound}");
         println!("  Forwarding:    keyboard={kb}, mouse={mouse}, hotkeys={hotkey}");
         println!("  Idle Timeout:  {timeout}s");
+        let km = pol["keymap"].as_str().unwrap_or("none (identity)");
+        println!("  Keymap:        {km}");
+        let edge = pol["edge"].as_str().unwrap_or("right (default)");
+        println!("  Edge:          {edge}");
+        let ws = pol["wheel_speed"].as_f64().unwrap_or(1.0);
+        println!("  Wheel Speed:   {ws}x");
     }
     Ok(())
 }
@@ -262,6 +280,9 @@ pub(crate) async fn do_input_policy(
     tag: Option<Vec<String>>,
     device_type: Option<Vec<String>>,
     clear_filters: bool,
+    keymap: Option<String>,
+    edge: Option<String>,
+    wheel_speed: Option<f64>,
     json: bool,
 ) -> Result<()> {
     let is_mutation = match &action {
@@ -278,6 +299,9 @@ pub(crate) async fn do_input_policy(
                 || tag.is_some()
                 || device_type.is_some()
                 || clear_filters
+                || keymap.is_some()
+                || edge.is_some()
+                || wheel_speed.is_some()
         }
     };
 
@@ -295,6 +319,9 @@ pub(crate) async fn do_input_policy(
                 tag: t,
                 device_type: dt,
                 clear_filters: cf,
+                keymap: km,
+                edge: ed,
+                wheel_speed: ws,
                 ..
             }) => {
                 if let Some(v) = e {
@@ -327,6 +354,15 @@ pub(crate) async fn do_input_policy(
                 if cf {
                     req.insert("clear_filters".into(), serde_json::json!(true));
                 }
+                if let Some(v) = km {
+                    req.insert("keymap".into(), serde_json::json!(v));
+                }
+                if let Some(v) = ed {
+                    req.insert("edge".into(), serde_json::json!(v));
+                }
+                if let Some(v) = ws {
+                    req.insert("wheel_speed".into(), serde_json::json!(v));
+                }
             }
             _ => {
                 if let Some(v) = enable {
@@ -358,6 +394,15 @@ pub(crate) async fn do_input_policy(
                 }
                 if clear_filters {
                     req.insert("clear_filters".into(), serde_json::json!(true));
+                }
+                if let Some(v) = keymap {
+                    req.insert("keymap".into(), serde_json::json!(v));
+                }
+                if let Some(v) = edge {
+                    req.insert("edge".into(), serde_json::json!(v));
+                }
+                if let Some(v) = wheel_speed {
+                    req.insert("wheel_speed".into(), serde_json::json!(v));
                 }
             }
         }
@@ -434,6 +479,12 @@ pub(crate) fn print_input_policy_json(body: &[u8]) -> Result<()> {
     println!("  Forward Mouse:        {mouse}");
     println!("  Forward Hotkeys:      {hotkey}");
     println!("  Idle Timeout (s):     {timeout}");
+    let km = pol["keymap"].as_str().unwrap_or("none (identity)");
+    println!("  Keymap Profile:       {km}");
+    let edge_str = pol["edge"].as_str().unwrap_or("right (default)");
+    println!("  Edge Roaming:         {edge_str}");
+    let ws = pol["wheel_speed"].as_f64().unwrap_or(1.0);
+    println!("  Wheel Speed:          {ws}x");
     println!(
         "  Allowed Groups:       {}",
         if groups.is_empty() {

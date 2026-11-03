@@ -315,6 +315,23 @@ pub(super) async fn post_daemon_shutdown(
     }))
 }
 
+pub(super) async fn post_daemon_restart(
+    _method: &str,
+    _query_str: Option<&str>,
+    body: &[u8],
+    node: &Node,
+) -> UiResponse {
+    let req: DaemonRestartBody = if body.is_empty() {
+        DaemonRestartBody::default()
+    } else {
+        serde_json::from_slice::<DaemonRestartBody>(body).unwrap_or_default()
+    };
+    match node.restart_daemon(req.replacement_path.as_deref(), req.delay_ms) {
+        Ok(rep) => json_ok(&rep),
+        Err(e) => err(500, &e),
+    }
+}
+
 pub(super) async fn any_events(
     _method: &str,
     _query_str: Option<&str>,

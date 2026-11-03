@@ -24,6 +24,7 @@ pub mod hello;
 pub mod input;
 pub mod input_tunnel;
 pub mod insertion;
+pub mod keymap;
 pub mod liveness;
 pub mod locate;
 pub mod media;
@@ -114,9 +115,14 @@ pub use input::{
 };
 pub use input_tunnel::{
     InputTunnelHeartbeatFrame, InputTunnelReleaseFrame, InputTunnelRequestFrame,
-    InputTunnelRespFrame, InputTunnelRole, InputTunnelValidator,
+    InputTunnelRespFrame, InputTunnelRole, InputTunnelSuspendFrame, InputTunnelValidator,
 };
 pub use insertion::{plan as insertion_plan, InsertionDecision, InsertionPlan};
+pub use keymap::{
+    modifier_for_vk, vk_for_modifier, KeyMapProfile, KeySide, ModifierKey, MOD_ALT, MOD_CONTROL,
+    MOD_META, MOD_SHIFT, VK_CAPITAL, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
+    VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
+};
 pub use liveness::{Liveness, SESSION_HEARTBEAT, SESSION_LIVENESS_DEADLINE};
 pub use locate::{
     LocatePattern, LocateRequestFrame, LocateStopFrame, LocateValidator,
