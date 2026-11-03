@@ -634,11 +634,16 @@ static CURSOR_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 // (towards wherever the warp parked it) and races with real user input as
 // occasional drift. Each warp registers its target here; the hook drops the
 // first event that lands on it before the engine ever sees it.
+// (Hook platforms only: Linux has no capture hooks and never warps.)
+#[cfg(any(windows, target_os = "macos"))]
 static PENDING_WARP_X: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+#[cfg(any(windows, target_os = "macos"))]
 static PENDING_WARP_Y: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+#[cfg(any(windows, target_os = "macos"))]
 static PENDING_WARP_VALID: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(any(windows, target_os = "macos"))]
 fn mark_pending_warp(x: i32, y: i32) {
     use std::sync::atomic::Ordering;
     PENDING_WARP_X.store(x, Ordering::SeqCst);
@@ -648,6 +653,7 @@ fn mark_pending_warp(x: i32, y: i32) {
 
 /// Returns true when the given hook position is the echo of the pending
 /// programmatic warp (and consumes the pending marker).
+#[cfg(any(windows, target_os = "macos"))]
 fn take_warp_echo(x: i32, y: i32) -> bool {
     use std::sync::atomic::Ordering;
     if !PENDING_WARP_VALID.load(Ordering::SeqCst) {
