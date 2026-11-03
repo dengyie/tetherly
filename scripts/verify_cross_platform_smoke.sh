@@ -297,34 +297,39 @@ fi
 if [ -n "${SMOKE_PROTECT_PROCS:-}" ]; then
     PROCS_JS=""
     KEYS_JS=""
-    FIRST=1
+    SUMMARY_KEYS=""
+    IDX=0
     IFS=',' read -r -a _PROCS <<< "$SMOKE_PROTECT_PROCS"
     for p in "${_PROCS[@]}"; do
         pn=$(echo "$p" | xargs)
         [ -z "$pn" ] && continue
-        if [ $FIRST -eq 1 ]; then
-            FIRST=0
-            KEYS_JS="'${pn}:' + \$ok_${pn}"
+        # Numbered PowerShell vars: process names may contain '-' (e.g.
+        # SRBMiner-MULTI), which is illegal inside a PowerShell identifier.
+        if [ "$IDX" -eq 0 ]; then
+            KEYS_JS="'${pn}:' + \$ok${IDX}"
+            SUMMARY_KEYS="${pn}"
         else
-            PROCS_JS+="; "
-            KEYS_JS+="+'|' + '${pn}:' + \$ok_${pn}"
+            KEYS_JS+="+'|' + '${pn}:' + \$ok${IDX}"
+            SUMMARY_KEYS+="|${pn}"
         fi
-        PROCS_JS+="\$ok_${pn} = if (Get-Process -Name '${pn}' -ErrorAction SilentlyContinue) { 'true' } else { 'false' }"
+        PROCS_JS+="\$ok${IDX} = if (Get-Process -Name '${pn}' -ErrorAction SilentlyContinue) { 'true' } else { 'false' }; "
+        IDX=$((IDX + 1))
     done
-    WIN_AUDIT=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$t = Get-Process tetherly -ErrorAction SilentlyContinue | Select-Object -First 1 Id, WorkingSet64; \$ws = if (\$t) { [math]::Round(\$t.WorkingSet64 / 1MB, 1) } else { 0 }; ${PROCS_JS}; Write-Output ('ws:' + \$ws + '|' + (${KEYS_JS}))\"" 2>/dev/null || true)
+    WIN_AUDIT=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$t = Get-Process tetherly -ErrorAction SilentlyContinue | Select-Object -First 1 Id, WorkingSet64; \$ws = if (\$t) { [math]::Round(\$t.WorkingSet64 / 1MB, 1) } else { 0 }; ${PROCS_JS}Write-Output ('ws:' + \$ws + '|' + (${KEYS_JS}))\"" 2>/dev/null || true)
 
     WIN_WS=$(echo "$WIN_AUDIT" | sed -n 's/.*ws:\([^|]*\).*/\1/p')
     ALL_OK=1
     SUMMARY=""
-    for p in "${_PROCS[@]}"; do
-        pn=$(echo "$p" | xargs)
-        [ -z "$pn" ] && continue
+    IDX=0
+    IFS='|' read -r -a _KEYS <<< "$SUMMARY_KEYS"
+    for pn in "${_KEYS[@]}"; do
         if echo "$WIN_AUDIT" | grep -q "${pn}:true"; then
             SUMMARY+="${pn} ✓ "
         else
             SUMMARY+="${pn} ✗ "
             ALL_OK=0
         fi
+        IDX=$((IDX + 1))
     done
     if [ "$ALL_OK" -eq 1 ]; then
         log_pass "Windows protected processes verified 100% intact (${SUMMARY})"
