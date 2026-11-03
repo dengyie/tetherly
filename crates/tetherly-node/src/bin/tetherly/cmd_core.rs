@@ -411,10 +411,19 @@ pub(crate) async fn run(
                 }
             }
 
-            // 2. Auto-reconnect input data channel if edge or tunnel is active and channel is closed
+            // 2. Auto-reconnect input data channel if edge or tunnel is active and channel is closed.
+            //    Direction fight guard: while this node is the TARGET of an
+            //    active inbound tunnel (the peer is our controller), never
+            //    re-attach as controller — the two watchers would otherwise
+            //    capture the direction back and forth every second, leaving
+            //    both cursors driven and reverse control unusable.
             let policy = link_watcher.input_policy();
             let status = link_watcher.input_tunnel_status();
-            if (status.active || policy.edge.is_some()) && !link_watcher.input_channel_open().await
+            let being_controlled =
+                link_watcher.active_tunnel_role() == Some(tetherly_core::InputTunnelRole::Target);
+            if (status.active || policy.edge.is_some())
+                && !being_controlled
+                && !link_watcher.input_channel_open().await
             {
                 let target_peer = status
                     .session

@@ -540,3 +540,89 @@ async fn m3_8_wheel_speed_policy_mutation() {
 
     server.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn m3_9_reverse_control_takeover_flips_roles_cleanly() {
+    let (server, client, _ga, _gb) = pair().await;
+
+    // 1. Forward direction: server (Mac) attaches as controller.
+    server
+        .input_tunnel_attach(
+            client.identity().device_id().to_string().as_str(),
+            Some(tetherly_core::DisplayEdge::Top),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let start = std::time::Instant::now();
+    while client.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target) {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("target never registered the inbound tunnel");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        server.active_tunnel_role(),
+        Some(tetherly_core::InputTunnelRole::Controller)
+    );
+    assert!(server.input_channel_open_sync());
+
+    // 2. Reverse control: client (Windows) attaches. The polite-takeover
+    //    path must demote the old controller FIRST, leaving exactly one
+    //    outbound channel in the new direction — never two.
+    client
+        .input_tunnel_attach(
+            server.identity().device_id().to_string().as_str(),
+            Some(tetherly_core::DisplayEdge::Bottom),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let start = std::time::Instant::now();
+    while server.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target) {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!(
+                "old controller never demoted to target; roles: server={:?}, client={:?}",
+                server.active_tunnel_role(),
+                client.active_tunnel_role()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        client.active_tunnel_role(),
+        Some(tetherly_core::InputTunnelRole::Controller)
+    );
+
+    // 3. Exactly one outbound channel exists, and it belongs to the NEW
+    //    controller. The demoted side must have released its own.
+    assert!(
+        client.input_channel_open_sync(),
+        "new controller must hold the outbound channel"
+    );
+    assert!(
+        !server.input_channel_open_sync(),
+        "demoted controller must have released its outbound channel"
+    );
+
+    // 4. The new direction actually drives the old controller's screen:
+    //    the client (now controller) crosses its own bottom edge (its
+    //    policy edge points down toward the Mac) and the server receives
+    //    the entry frame.
+    let mut pol = client.input_policy();
+    pol.edge = Some("bottom".into());
+    client.set_input_policy(pol).unwrap();
+    client
+        .open_input(server.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let edge = client.drive_input(50, 50, 100, 50).unwrap();
+    assert_eq!(edge, Some(tetherly_core::ScreenEdge::Bottom));
+
+    server.shutdown();
+    client.shutdown();
+}

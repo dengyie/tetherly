@@ -8057,3 +8057,19 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 3. **测试覆盖**：
    - `crates/tetherly-core/src/input.rs`：新增 `cross_screen_position_mapping_is_proportional_both_directions`——断言进入 x 等比例、返回落点 denorm、二次越境使用新鲜位置、force_local 落点映射；
    - `tests/phase3.rs`：m3_5 扩展断言进入 `sink.cursor.0 == 505`（本地 x=50/100 宽度）与返回落点 `(49, 16)`；全工作区测试、fmt、三目标 clippy 全绿。
+
+## 85. 双向控制（Windows → Mac）修复与方向翻转治理 (v2.52 / v0.1.71)
+
+1. **缺陷定位（用户报告：Windows 鼠标无法控制 Mac）**：
+   - **方向竞争**：`link_watcher` 每秒轮询，凡本机策略配置 edge 即自动 attach 为 controller；两端均配置 edge 时双向互相抢占，且被控方（Target，`input_out=None`）的 channel 检查恒为"未连接"，watcher 误判并持续抢回方向；
+   - **接管不干净**：Target 接受新的入站 attach 请求时直接覆写会话记录，不释放自己既有的 controller 出站通道 → 新旧两条隧道同时存活，两台机器光标被同时驱动（双控制器冲突）；
+   - 叠加效应即"反向控制完全不可用 + 偶发乱飘"。
+
+2. **根因修复（polite takeover 治理）**：
+   - **优雅接管**：`receive_input_tunnel_request` 在接受入站请求前，若本机身为 Controller 则先 `input_stop()` 释放出站通道（带审计事件 `input_tunnel_takeover_released`），保证任意时刻全局仅一条出站输入通道；
+   - **堆叠入站会话治理**：`Shared` 新增 `input_client_task`；`attach_input_client` 中止既有入站客户端任务后再派生新的，杜绝重连竞争下双 client 竞写同一注入 sink；
+   - **watcher 方向守卫**：自动重连在 `active_tunnel_role() == Target`（正被对端控制）时跳过，方向归属稳定；翻转只由显式 attach（UI 按钮 / CLI）发起并被对方优雅接受；
+   - **UI 方向中立**：快捷漫游按钮不再硬编码 `edge:"top"`，由服务端按各自策略/拓扑解析（Mac=top、Windows=bottom 两端同一 UI 通用）。
+
+3. **测试覆盖**：
+   - `tests/phase3.rs`：新增 `m3_9_reverse_control_takeover_flips_roles_cleanly`——Mac 先 attach 为 controller → Windows 反向 attach → 断言角色翻转、旧 controller 已释放出站通道、新方向可真实驱动对端屏幕（Bottom 越境）；全工作区测试、fmt、三目标 clippy 全绿。

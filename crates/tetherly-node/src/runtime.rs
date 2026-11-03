@@ -866,6 +866,10 @@ struct Shared {
     cursor_edge_resistance_acc: Mutex<HashMap<DisplayEdge, u32>>,
     input_policy: Mutex<InputTunnelPolicy>,
     active_input_tunnel: Mutex<Option<ActiveInputTunnelSession>>,
+    /// Handle of the running inbound input-client task. A newer accept
+    /// aborts the previous one so stacked inbound sessions can never leave
+    /// two clients racing on `input_sink` / the real injection sink.
+    input_client_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     virtual_display_policy: Mutex<VirtualDisplayPolicy>,
     active_virtual_display: Mutex<Option<ActiveVirtualDisplaySession>>,
     audio_routing_policy: Mutex<AudioRoutingPolicy>,

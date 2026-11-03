@@ -108,7 +108,7 @@
       </div>
       <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
         <button id="quick-roam-attach" type="button" style="background:#2563eb; color:#fff; border:none; border-radius:6px; padding:6px 14px; font-weight:600; cursor:pointer">
-          🚀 激活漫游通道 (Top 边缘)
+          🚀 激活漫游通道 (本机 → 对端)
         </button>
         <button id="quick-roam-release" class="bad ghost" type="button" style="padding:6px 12px; font-size:12px; cursor:pointer">
           🏠 释放回本机
@@ -6603,7 +6603,10 @@ if (quickRoamAttach) {
       return;
     }
     try {
-      const rep = await api("/api/input/tunnel/attach", { peer, edge: "top" });
+      // Omit `edge`: the server resolves the roaming edge from its own
+      // policy/topology, so the same button works on either machine
+      // (Mac edge=top, Windows edge=bottom) without hardcoding a direction.
+      const rep = await api("/api/input/tunnel/attach", { peer });
       if (rep && rep.ok) {
         updateInputTunnel();
       } else {
