@@ -625,12 +625,50 @@ extern "C" {
 #[cfg(target_os = "macos")]
 static CURSOR_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+// --- Programmatic warp echo suppression (Deskflow OSXScreen warp handling) ---
+//
+// A programmatic cursor warp (park / rescue / seat return) can surface as a
+// synthetic MouseMoved event in the capture hook, carrying the full warp
+// displacement as its delta. Feeding that echo into the roaming engine
+// displaces the remote cursor away from the proportional edge-entry point
+// (towards wherever the warp parked it) and races with real user input as
+// occasional drift. Each warp registers its target here; the hook drops the
+// first event that lands on it before the engine ever sees it.
+static PENDING_WARP_X: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static PENDING_WARP_Y: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static PENDING_WARP_VALID: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn mark_pending_warp(x: i32, y: i32) {
+    use std::sync::atomic::Ordering;
+    PENDING_WARP_X.store(x, Ordering::SeqCst);
+    PENDING_WARP_Y.store(y, Ordering::SeqCst);
+    PENDING_WARP_VALID.store(true, Ordering::SeqCst);
+}
+
+/// Returns true when the given hook position is the echo of the pending
+/// programmatic warp (and consumes the pending marker).
+fn take_warp_echo(x: i32, y: i32) -> bool {
+    use std::sync::atomic::Ordering;
+    if !PENDING_WARP_VALID.load(Ordering::SeqCst) {
+        return false;
+    }
+    let wx = PENDING_WARP_X.load(Ordering::SeqCst);
+    let wy = PENDING_WARP_Y.load(Ordering::SeqCst);
+    if (x - wx).abs() <= 2 && (y - wy).abs() <= 2 {
+        PENDING_WARP_VALID.store(false, Ordering::SeqCst);
+        return true;
+    }
+    false
+}
+
 #[cfg(target_os = "macos")]
 pub fn warp_mouse_position(x: i32, y: i32) {
     let point = objc2_core_foundation::CGPoint {
         x: x as f64,
         y: y as f64,
     };
+    mark_pending_warp(x, y);
     unsafe {
         let _ = CGWarpMouseCursorPosition(point);
     }
@@ -737,6 +775,7 @@ pub fn set_mouse_cursor_associated(_associated: bool) {}
 #[cfg(windows)]
 pub fn warp_mouse_position(x: i32, y: i32) {
     use windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos;
+    mark_pending_warp(x, y);
     unsafe {
         let _ = SetCursorPos(x, y);
     }
@@ -1121,12 +1160,19 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
             if mi.flags & LLMHF_INJECTED == 0 {
                 let ev = wparam as u32;
                 match ev {
-                    WM_MOUSEMOVE => push(RawInput::Move {
-                        x: mi.pt.x,
-                        y: mi.pt.y,
-                        dx: 0,
-                        dy: 0,
-                    }),
+                    WM_MOUSEMOVE => {
+                        // Drop the echo of a programmatic SetCursorPos warp
+                        // before it can reach the roaming engine.
+                        if take_warp_echo(mi.pt.x, mi.pt.y) {
+                            return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+                        }
+                        push(RawInput::Move {
+                            x: mi.pt.x,
+                            y: mi.pt.y,
+                            dx: 0,
+                            dy: 0,
+                        })
+                    }
                     WM_LBUTTONDOWN => push(RawInput::Button {
                         mask: tetherly_core::BTN_LEFT,
                         down: true,
@@ -1406,6 +1452,17 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 let dy =
                     CGEvent::integer_value_field(Some(cg_event), CGEventField::MouseEventDeltaY)
                         as i32;
+                if take_warp_echo(loc.x as i32, loc.y as i32) {
+                    // Echo of our own programmatic warp: swallow it without
+                    // feeding the roaming engine (the delta is the warp
+                    // displacement, not user motion).
+                    let armed = ctx.keyboard_armed.load(Ordering::SeqCst);
+                    return if armed {
+                        std::ptr::null_mut()
+                    } else {
+                        event.as_ptr()
+                    };
+                }
                 let _ = ctx.tx.send(RawInput::Move {
                     x: loc.x as i32,
                     y: loc.y as i32,
