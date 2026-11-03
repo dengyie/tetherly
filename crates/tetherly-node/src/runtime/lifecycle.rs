@@ -782,54 +782,100 @@ impl Node {
         replacement_path: Option<&str>,
         delay_ms: Option<u64>,
     ) -> Result<crate::uihttp::DaemonRestartReport, String> {
+        // Single-flight gate: two concurrent restarts would interleave the
+        // rename/copy sequence and can leave a corrupt or missing daemon
+        // binary. The second caller fails fast instead.
+        if RESTART_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err("restart already in progress".to_string());
+        }
+        let result = self.restart_daemon_inner(replacement_path, delay_ms);
+        RESTART_IN_PROGRESS.store(false, Ordering::SeqCst);
+        result
+    }
+
+    fn restart_daemon_inner(
+        &self,
+        replacement_path: Option<&str>,
+        delay_ms: Option<u64>,
+    ) -> Result<crate::uihttp::DaemonRestartReport, String> {
         let old_pid = std::process::id();
         let current_exe = std::env::current_exe()
             .map_err(|e| format!("cannot determine current executable path: {e}"))?;
 
         let action = if let Some(rep) = replacement_path {
             let rep_path = std::path::PathBuf::from(rep);
-            if !rep_path.exists() {
+            if !rep_path.is_file() {
                 return Err(format!("replacement binary not found at {:?}", rep_path));
             }
+            // Security gate: the replacement must live inside the daemon's
+            // own update staging directory. A loopback HTTP caller must never
+            // be able to point the daemon at an arbitrary executable on disk
+            // and have it replace (and run as) the daemon binary.
+            let staging = update_staging_dir(&self.shared.cfg.data_dir);
+            let canonical = rep_path
+                .canonicalize()
+                .map_err(|e| format!("cannot resolve replacement path {rep_path:?}: {e}"))?;
+            if !canonical.starts_with(&staging) {
+                return Err(format!(
+                    "replacement binary must be placed inside the update staging directory {:?}",
+                    staging
+                ));
+            }
 
-            // On Windows, running binaries are write-locked, but NTFS allows renaming a running binary.
-            // On Unix/macOS, we can rename/unlink and copy.
+            // On Windows, running binaries are write-locked, but NTFS allows
+            // renaming a running binary. Sequence: rename the running binary
+            // aside, atomically rename the replacement into place, and roll
+            // back to the backup on any failure so a half-updated state can
+            // never persist.
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
             #[cfg(windows)]
-            {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis();
-                let old_backup = current_exe.with_extension(format!("exe.old.{timestamp}"));
-                std::fs::rename(&current_exe, &old_backup).map_err(|e| {
-                    format!("failed to rename current running binary to {old_backup:?}: {e}")
-                })?;
-                std::fs::copy(&rep_path, &current_exe).map_err(|e| {
-                    format!("failed to place replacement binary at {current_exe:?}: {e}")
-                })?;
+            let old_backup = current_exe.with_extension(format!("exe.old.{timestamp}"));
+            #[cfg(not(windows))]
+            let old_backup = current_exe.with_extension(format!("old.{timestamp}"));
+
+            std::fs::rename(&current_exe, &old_backup).map_err(|e| {
+                format!("failed to rename current running binary to {old_backup:?}: {e}")
+            })?;
+
+            let staging_tmp = current_exe.with_extension("new.tmp");
+            let placed = std::fs::copy(&canonical, &staging_tmp)
+                .map_err(|e| format!("failed to stage replacement binary: {e}"))
+                .and_then(|_| {
+                    if let Ok(f) = std::fs::File::open(&staging_tmp) {
+                        let _ = f.sync_all();
+                    }
+                    std::fs::rename(&staging_tmp, &current_exe).map_err(|e| {
+                        format!("failed to place replacement binary at {current_exe:?}: {e}")
+                    })
+                });
+            if let Err(e) = placed {
+                rollback_binary(&old_backup, &current_exe);
+                return Err(e);
             }
 
             #[cfg(unix)]
             {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis();
-                let old_backup = current_exe.with_extension(format!("old.{timestamp}"));
-                let _ = std::fs::rename(&current_exe, &old_backup);
-                std::fs::copy(&rep_path, &current_exe).map_err(|e| {
-                    format!("failed to copy replacement binary to {current_exe:?}: {e}")
-                })?;
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &current_exe,
-                        std::fs::Permissions::from_mode(0o755),
-                    );
-                }
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&current_exe, std::fs::Permissions::from_mode(0o755));
             }
 
-            format!("replaced_and_restarted (from {})", rep_path.display())
+            // Readiness preflight: run the new binary in a cheap `--help`
+            // mode before the old daemon schedules its own exit. A broken
+            // build (bad link, missing runtime, corrupt image) fails here
+            // while the old daemon is still alive to serve requests.
+            if let Err(e) = preflight_new_binary(&current_exe) {
+                rollback_binary(&old_backup, &current_exe);
+                return Err(format!("replacement binary failed preflight: {e}"));
+            }
+
+            format!("replaced_and_restarted (from {})", canonical.display())
         } else {
             "restarted".to_string()
         };
@@ -837,6 +883,27 @@ impl Node {
         let mut cmd = std::process::Command::new(&current_exe);
         cmd.args(std::env::args_os().skip(1));
         cmd.stdin(std::process::Stdio::null());
+        // Detach the new daemon from this process's console/job so a parent
+        // console close or job teardown cannot take the replacement with it.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    // New session: immune to terminal SIGHUP propagation.
+                    let _ = libc::setsid();
+                    Ok(())
+                });
+            }
+        }
 
         let child = cmd
             .spawn()
@@ -844,7 +911,11 @@ impl Node {
         let new_pid = child.id();
 
         let node = self.clone_handle();
-        let wait_ms = delay_ms.unwrap_or(50);
+        // Clamp the hand-off window: the port bind retry budget on the new
+        // daemon is ~1s (20 x 50ms), so a much larger delay would guarantee
+        // the new process loses the bind race and dies while this one lives
+        // on, reporting a restart that never actually happened.
+        let wait_ms = delay_ms.unwrap_or(50).min(1000);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
             node.shutdown();
@@ -1742,24 +1813,124 @@ impl Node {
     }
 }
 
+/// Single-flight gate for `restart_daemon` (see `restart_daemon` for why).
+static RESTART_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The only directory a replacement binary may be staged into. It lives
+/// under the daemon's data dir, so planting a file there requires the same
+/// privilege the daemon already has — a loopback HTTP caller (browser
+/// context) can name the path but cannot create the file.
+fn update_staging_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
+    let dir = data_dir.join("updates");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.canonicalize().unwrap_or(dir)
+}
+
+/// Restore the previous binary after a failed hot replacement: drop the
+/// broken image and rename the backup back into place.
+fn rollback_binary(old_backup: &std::path::Path, current_exe: &std::path::Path) {
+    let _ = std::fs::remove_file(current_exe);
+    let _ = std::fs::rename(old_backup, current_exe);
+}
+
+/// Run the freshly placed binary with `--help` and require a clean exit.
+/// This exercises process creation, dynamic linking and the CLI parser —
+/// the failure modes of a broken hot update — while the old daemon is
+/// still alive to serve requests and roll the file back.
+fn preflight_new_binary(exe: &std::path::Path) -> Result<(), String> {
+    let mut child = std::process::Command::new(exe)
+        .arg("--help")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("new binary failed to start: {e}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("new binary exited with {status}"))
+                };
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("new binary did not exit within 5s".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(e) => return Err(format!("preflight wait failed: {e}")),
+        }
+    }
+}
+
 fn cleanup_stale_old_binaries() {
     if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(parent) = exe_path.parent() {
-            if let Ok(entries) = std::fs::read_dir(parent) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.contains(".exe.old") || name_str.contains(".old.") {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
+        if let (Some(parent), Some(stem)) = (exe_path.parent(), exe_path.file_stem()) {
+            let cutoff =
+                std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 60 * 60);
+            cleanup_old_binaries_in(parent, &stem.to_string_lossy(), cutoff);
+        }
+    }
+}
+
+fn cleanup_old_binaries_in(parent: &std::path::Path, stem: &str, cutoff: std::time::SystemTime) {
+    // Filesystems with coarse mtime granularity (whole-second ext4/overlayfs
+    // mounts) can report a file created *after* `cutoff` with a truncated
+    // mtime that compares *before* it. Grade "recent" with a small slack so
+    // the rollback path is never deleted over a timestamp rounding artifact
+    // (and so minor wall-clock skew between processes cannot brick rollback).
+    const RECENT_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            // Only ever touch this binary's own backups
+            // (`tetherly.exe.old.<ts>` / `tetherly.old.<ts>`), never
+            // unrelated `.old.` files in the same directory.
+            // Recent backups are the only rollback path after a bad
+            // hot replacement, so they are retained for a day.
+            if !name_str.starts_with(stem) || !name_str.contains(".old.") {
+                continue;
             }
+            let recent = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t + RECENT_SLACK >= cutoff)
+                .unwrap_or(true);
+            if recent {
+                continue;
+            }
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_restart_rejects_replacement_outside_staging() {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node("restart-gate");
+        // A file that exists but is outside the daemon-managed staging
+        // directory must be refused: the loopback HTTP surface must never be
+        // able to point the daemon at an arbitrary executable.
+        let outside = dir.join("evil.bin");
+        std::fs::write(&outside, b"not-a-binary").unwrap();
+        let err = node
+            .restart_daemon(Some(outside.to_str().unwrap()), Some(0))
+            .unwrap_err();
+        assert!(
+            err.contains("update staging directory"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_daemon_restart_report_dto() {
         let rep = crate::uihttp::DaemonRestartReport {
@@ -1788,27 +1959,34 @@ mod tests {
         let old1 = tmp.join("tetherly.exe.old.12345");
         let old2 = tmp.join("tetherly.old.67890");
         let keep = tmp.join("tetherly.exe");
-        std::fs::write(&old1, b"old1").unwrap();
-        std::fs::write(&old2, b"old2").unwrap();
-        std::fs::write(&keep, b"keep").unwrap();
-
-        assert!(old1.exists());
-        assert!(old2.exists());
-        assert!(keep.exists());
-
-        if let Ok(entries) = std::fs::read_dir(&tmp) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str.contains(".exe.old") || name_str.contains(".old.") {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
+        let unrelated = tmp.join("notes.old.txt");
+        let recent_backup = tmp.join("tetherly.exe.old.99999999");
+        // The cutoff is taken before creating the fixtures, so every file
+        // created afterwards counts as "recent" unless its mtime is rewound.
+        let cutoff = std::time::SystemTime::now();
+        let stale = cutoff - std::time::Duration::from_secs(3600);
+        for f in [&old1, &old2, &keep, &unrelated, &recent_backup] {
+            std::fs::write(f, b"x").unwrap();
         }
+
+        // Backups older than the retention window are removed; recent
+        // backups (the rollback path) and unrelated files survive.
+        for f in [&old1, &old2] {
+            std::fs::File::options()
+                .write(true)
+                .open(f)
+                .unwrap()
+                .set_modified(stale)
+                .unwrap();
+        }
+
+        super::cleanup_old_binaries_in(&tmp, "tetherly", cutoff);
 
         assert!(!old1.exists());
         assert!(!old2.exists());
         assert!(keep.exists());
+        assert!(unrelated.exists());
+        assert!(recent_backup.exists());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

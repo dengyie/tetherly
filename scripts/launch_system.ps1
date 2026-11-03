@@ -1,3 +1,13 @@
+# Threat model note:
+# This launcher duplicates the CALLING process's token and retargets it to
+# the active console session, so the child inherits the caller's privilege
+# level. The intended production invocation is from the TetherlySystemLauncher
+# scheduled task running as SYSTEM, which places the input-capture daemon
+# (with its loopback HTTP/UI surface) in the interactive desktop at the
+# highest privilege so it can inject into elevated (UAC) windows. Do not run
+# this script with privileges you would not grant to the daemon itself, and
+# keep the daemon's HTTP surface bound to loopback only.
+
 $code = @'
 using System;
 using System.Runtime.InteropServices;
@@ -99,5 +109,7 @@ if ([string]::IsNullOrEmpty($cmd)) {
 }
 
 $res = [SessionLauncher]::LaunchInActiveSession($cmd)
-"SessionLauncher result: $res" | Out-File -FilePath C:\Users\mango\launcher_result.log
+# Portable, user-specific log path: no hardcoded usernames, append-only so
+# past launch results survive for diagnosis.
+"$(Get-Date -Format o) SessionLauncher result: $res" | Out-File -FilePath (Join-Path $env:TEMP 'tetherly_launcher_result.log') -Append
 Write-Host "Result: $res"

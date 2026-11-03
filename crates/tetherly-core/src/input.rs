@@ -509,6 +509,23 @@ impl InputServer {
         }
     }
 
+    /// Re-assert the remote session after a policy change that alters how
+    /// key events are interpreted (e.g. keymap profile switch). The client
+    /// flushes every held key/button on `Leave` (`release_all_inputs`), then
+    /// re-enters at the current cursor position, so a modifier held across
+    /// the switch cannot end up stuck under the old mapping. Seat stays
+    /// `Remote` and the seq keeps increasing.
+    pub fn refresh_remote_session(&mut self) {
+        if self.seat == CursorSeat::Remote {
+            self.push(InputKind::Leave);
+            self.push(InputKind::Enter);
+            self.push(InputKind::Move {
+                x: self.rem_x,
+                y: self.rem_y,
+            });
+        }
+    }
+
     fn push(&mut self, kind: InputKind) {
         if self.pending.len() >= INPUT_BATCH_MAX {
             self.pending.pop_front();

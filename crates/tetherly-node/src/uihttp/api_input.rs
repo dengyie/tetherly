@@ -209,14 +209,24 @@ pub(super) async fn post_input_policy(
             policy.edge =
                 if edge_val.trim().is_empty() || edge_val == "none" || edge_val == "default" {
                     None
+                } else if let Ok(e) = edge_val
+                    .trim()
+                    .to_lowercase()
+                    .parse::<tetherly_core::ScreenEdge>()
+                {
+                    Some(e.to_string())
                 } else {
-                    Some(edge_val.trim().to_lowercase())
+                    return err(
+                        400,
+                        &format!("invalid edge '{edge_val}' (left|right|top|bottom)"),
+                    );
                 };
         }
         if let Some(ws) = b.wheel_speed {
-            if ws > 0.0 && ws <= 20.0 {
-                policy.wheel_speed = ws;
+            if !(ws > 0.0 && ws.is_finite() && ws <= 20.0) {
+                return err(400, "wheel_speed must be within (0, 20]");
             }
+            policy.wheel_speed = ws;
         }
         if b.clear_filters == Some(true) {
             policy.allowed_groups.clear();
@@ -294,15 +304,23 @@ pub(super) async fn post_input_policy(
     if let Some(edge_str) = qmap.get("edge").or_else(|| qmap.get("screen_edge")) {
         policy.edge = if edge_str.trim().is_empty() || edge_str == "none" || edge_str == "default" {
             None
+        } else if let Ok(e) = edge_str
+            .trim()
+            .to_lowercase()
+            .parse::<tetherly_core::ScreenEdge>()
+        {
+            Some(e.to_string())
         } else {
-            Some(edge_str.trim().to_lowercase())
+            return err(
+                400,
+                &format!("invalid edge '{edge_str}' (left|right|top|bottom)"),
+            );
         };
     }
     if let Some(ws_str) = qmap.get("wheel_speed").or_else(|| qmap.get("scroll_speed")) {
-        if let Ok(ws) = ws_str.parse::<f64>() {
-            if ws > 0.0 && ws <= 20.0 {
-                policy.wheel_speed = ws;
-            }
+        match ws_str.parse::<f64>() {
+            Ok(ws) if ws > 0.0 && ws.is_finite() && ws <= 20.0 => policy.wheel_speed = ws,
+            _ => return err(400, "wheel_speed must be within (0, 20]"),
         }
     }
     if qmap

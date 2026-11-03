@@ -1599,6 +1599,14 @@ impl InputTunnelPolicy {
         if self.idle_timeout_secs != 0 {
             self.idle_timeout_secs = self.idle_timeout_secs.clamp(10, 86400);
         }
+        // Defense in depth for hand-edited policy files: the API layer
+        // enforces (0, 20], but a corrupt or hostile `input_policy.json`
+        // must not reach the injection path either (f64 can hold inf/NaN).
+        self.wheel_speed = if self.wheel_speed.is_finite() && self.wheel_speed > 0.0 {
+            self.wheel_speed.min(20.0)
+        } else {
+            1.0
+        };
         self.allowed_groups.retain(|g| !g.trim().is_empty());
         self.allowed_groups.truncate(32);
         self.allowed_tags.retain(|t| !t.trim().is_empty());
@@ -1612,7 +1620,13 @@ impl InputTunnelPolicy {
         }
         if let Some(ref mut e) = self.edge {
             *e = e.trim().to_lowercase();
-            if e.is_empty() || e == "none" || e == "default" {
+            if e.is_empty()
+                || e == "none"
+                || e == "default"
+                || e.parse::<tetherly_core::ScreenEdge>().is_err()
+            {
+                // Unknown edge strings would silently fall back to Right
+                // downstream; drop them here so the UI reflects reality.
                 self.edge = None;
             }
         }
@@ -1628,10 +1642,26 @@ impl InputTunnelPolicy {
         tetherly_core::ScreenEdge::Right
     }
 
-    /// Resolve active keymap profile according to this policy and the local platform.
-    pub fn resolved_keymap_profile(&self) -> tetherly_core::KeyMapProfile {
+    /// Resolve the active keymap profile according to this policy, the local
+    /// platform and (for `auto`) the actual peer platform.
+    ///
+    /// `auto` compares platform families: a same-OS pair must stay `identity`
+    /// (Win→Win Ctrl+C must remain Ctrl+C), a cross-OS pair remaps in the
+    /// direction of the local host. An unknown peer falls back to the
+    /// local-OS heuristic (assumes the peer is the other platform).
+    pub fn resolved_keymap_profile(
+        &self,
+        peer_platform: Option<&str>,
+    ) -> tetherly_core::KeyMapProfile {
         match self.keymap.as_deref() {
             Some("auto") => {
+                let local = std::env::consts::OS;
+                let same_family = peer_platform
+                    .map(|p| platform_family(p) == platform_family(local))
+                    .unwrap_or(false);
+                if same_family {
+                    return tetherly_core::KeyMapProfile::identity();
+                }
                 #[cfg(target_os = "macos")]
                 {
                     tetherly_core::KeyMapProfile::mac_to_windows()
@@ -1652,12 +1682,29 @@ impl InputTunnelPolicy {
     }
 }
 
+/// Collapse a platform string (hello `platform`, `std::env::consts::OS`, or a
+/// marketing name) into a family bucket so `macos`/`darwin`/`ios` compare
+/// equal, `windows` stands alone, and everything else is "other".
+fn platform_family(p: &str) -> u8 {
+    let p = p.to_ascii_lowercase();
+    if p.contains("mac") || p.contains("darwin") || p.contains("ios") {
+        0
+    } else if p.contains("win") {
+        1
+    } else {
+        2
+    }
+}
+
 pub fn load_input_policy(dir: &Path) -> InputTunnelPolicy {
     let path = dir.join(INPUT_POLICY_FILE);
-    fs::read(&path)
+    let mut policy: InputTunnelPolicy = fs::read(&path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Values loaded from disk never passed the API-layer validation.
+    policy.sanitize();
+    policy
 }
 
 pub fn save_input_policy(dir: &Path, policy: &InputTunnelPolicy) -> Result<(), NodeStoreError> {
@@ -3345,9 +3392,35 @@ mod tests {
         assert_eq!(loaded.edge, Some("top".into()));
         assert_eq!(loaded.resolved_edge(), tetherly_core::ScreenEdge::Top);
         assert_eq!(
-            loaded.resolved_keymap_profile(),
+            loaded.resolved_keymap_profile(Some("windows")),
             tetherly_core::KeyMapProfile::mac_to_windows()
         );
+
+        // 2b. `auto` is peer-aware: same-OS pairs stay identity, cross-OS
+        // pairs remap from the local host's direction, unknown peers fall
+        // back to the local-OS heuristic.
+        let mut auto_pol = custom.clone();
+        auto_pol.keymap = Some("auto".into());
+        auto_pol.sanitize();
+        assert_eq!(auto_pol.keymap, Some("auto".into()));
+        let resolved = auto_pol.resolved_keymap_profile(Some(std::env::consts::OS));
+        assert_eq!(
+            resolved,
+            tetherly_core::KeyMapProfile::identity(),
+            "auto with a same-OS peer must be identity"
+        );
+        // Cross-OS pairing remaps from the local host's direction; on Linux
+        // (no input hooks) the cross-OS resolution is also identity.
+        #[cfg(target_os = "macos")]
+        let (cross, expected_cross) = ("windows", tetherly_core::KeyMapProfile::mac_to_windows());
+        #[cfg(windows)]
+        let (cross, expected_cross) = ("macos", tetherly_core::KeyMapProfile::windows_to_mac());
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let (cross, expected_cross) = ("macos", tetherly_core::KeyMapProfile::identity());
+        let resolved_cross = auto_pol.resolved_keymap_profile(Some(cross));
+        assert_eq!(resolved_cross, expected_cross);
+        // Unknown peer keeps the historic local-OS heuristic.
+        let _ = auto_pol.resolved_keymap_profile(None);
 
         // 3. Matching
         let prof_ok = PeerProfile {

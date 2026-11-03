@@ -324,11 +324,24 @@ pub(super) async fn post_daemon_restart(
     let req: DaemonRestartBody = if body.is_empty() {
         DaemonRestartBody::default()
     } else {
-        serde_json::from_slice::<DaemonRestartBody>(body).unwrap_or_default()
+        // Malformed JSON must not silently become "restart now with
+        // defaults" — the caller gets a 400 instead.
+        match serde_json::from_slice::<DaemonRestartBody>(body) {
+            Ok(r) => r,
+            Err(e) => return err(400, &format!("bad request body: {e}")),
+        }
     };
     match node.restart_daemon(req.replacement_path.as_deref(), req.delay_ms) {
         Ok(rep) => json_ok(&rep),
-        Err(e) => err(500, &e),
+        Err(e) => {
+            if e.contains("not found") || e.contains("must be placed inside") {
+                err(400, &e)
+            } else if e.contains("already in progress") {
+                err(409, &e)
+            } else {
+                err(500, &e)
+            }
+        }
     }
 }
 

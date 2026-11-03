@@ -8010,3 +8010,33 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 
 
 
+
+## 83. 跨平台 CI 修复、控制面 CSRF 加固与热更新事务化 (v2.50 / v0.1.69)
+
+1. **跨平台 CI 修复（P0，v0.1.68 回归清偿）**：
+   - `platform.rs`：`RawInput` 从 `cfg(any(windows, macos))` 放宽为全平台定义——Linux stub `start_input_hooks` 保持与真实 hook 相同签名，`E0425` 清偿，Linux 工作区恢复可编译；
+   - `runtime/input.rs`：`spawn_input_capture` 以 move 取代 `control.clone()`（Windows 端 `HookControl` 为 `Copy`，`clone_on_copy` 触发 `-D warnings` 失败）；
+   - 本地验证矩阵升级：`cargo check/clippy --target x86_64-pc-windows-gnu` 与 `--target x86_64-unknown-linux-musl` 全绿后才允许合并，PR CI 绿灯为合并前置条件。
+
+2. **控制面安全加固（P1）**：
+   - `uihttp.rs`：Host 头从 `starts_with` 前缀匹配改为精确匹配（`127.0.0.1`/`localhost`/`[::1]`，端口分离），清偿 DNS rebinding 绕过；
+   - 全端点新增 Origin/`Sec-Fetch-Site` CSRF 闸门：跨站 `fetch no-cors` POST 与跨源 EventSource 读取被 403，curl/CLI 无 Origin 请求保持放行，`null` origin 关闭失败；
+   - `/api/daemon/restart`：`replacement_path` 限定为 `<data_dir>/updates/` staging 目录（canonicalize 后前缀校验），坏 JSON 返回 400 而非静默默认重启，路径类错误 400、并发冲突 409、内部错误 500。
+
+3. **热更新事务化（P1）**：
+   - 替换序列改为：rename 旧二进制 → 暂存 `.new.tmp` + fsync → 原子 rename 换入；任一步失败回滚 `.old` 备份，半更新状态不再可能持久化；
+   - 新增 `--help` 预检：新二进制先以探针模式启动验证可执行性，失败时旧守护进程保持存活并回滚；
+   - 并发重启 `RESTART_IN_PROGRESS` 原子闸门；`delay_ms` 钳制 ≤1000ms（与端口 bind 重试预算对齐）；新进程 `CREATE_NO_WINDOW|DETACHED_PROCESS|NEW_PROCESS_GROUP`（Windows）与 `setsid`（Unix）脱离父环境；
+   - `.old` 备份清理改为 24h 保留期 + `tetherly` 前缀精确匹配，回滚路径不再被启动即删。
+
+4. **输入治理与键位映射修复（P2）**：
+   - keymap `auto` 档位 peer-aware：比对本机与对端平台族（`LivePeer.platform`），同 OS 配对自动回退 identity，跨 OS 配对按本机方向映射，未知对端保持本地启发式；
+   - keymap 档位切换瞬间：若隧道活跃，自动发送 Leave+Enter+Move 冲刷（`InputEngine::refresh_remote_session`），修饰键不再跨档位卡死；
+   - `wheel_speed` 纵深防御：`sanitize()` 钳制 (0,20] 且 `load_input_policy` 加载后统一 sanitize，手改 `input_policy.json` 注入 inf/巨值不再可达；API 层非法值（越界/NaN/垃圾 edge 字符串）返回 400 而非静默忽略；
+   - macOS CGEventTap mask 补齐 `kCGEventTapDisabledByTimeout/UserInput` 位（位 62/63），tap 超时禁用后的自愈重启用路径真实可达；
+   - 非法 seq 帧拒绝增加 `warn!` 日志，UI 键位切换按钮改为服务端状态驱动（清偿单向死胡同），`accessibility/open` 非 macOS 返回明确失败而非假成功。
+
+5. **仓库卫生与测试补强（P2/P3）**：
+   - smoke 脚本：受保护进程清单提为 `SMOKE_PROTECT_PROCS` 环境变量（默认空跳过），不再在公开仓库硬编码生产主机工作负载；macOS RSS 检查假通过清偿；wheel_speed 恢复值读取实时策略；`SessionId==2` 精确 jq 判定；
+   - `launch_system.ps1`：SYSTEM+交互桌面威胁模型写入文件头注释，日志路径改 `$env:TEMP` 追加写；`package-macos-app.sh`：Info.plist 版本注入 workspace 版本，ad-hoc + identifier-only DR 安全权衡与"禁止分发"写入文件头，RESTART 模式先停进程再覆盖二进制（避免截断运行中签名镜像）；
+   - `tests/phase3.rs`：新增未知 keymap 回退 identity 否定用例与 edge=Top 下右边缘不穿越否定用例。
