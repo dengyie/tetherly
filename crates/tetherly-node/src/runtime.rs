@@ -2202,8 +2202,19 @@ mod locator_policy_tests {
         };
         node.receive_action_trigger(&peer, trig1);
 
-        // Allow async task to complete subprocess execution
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Subprocess execution runs on a spawned task: poll instead of a
+        // bare sleep so slow CI runners (Windows) cannot race the assert.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if node.action_history().count >= 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "action execution never recorded its history entry"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         let hist = node.action_history();
         assert_eq!(hist.count, 1);
