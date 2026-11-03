@@ -83,14 +83,48 @@ pub async fn bind_and_spawn(node: Node, port: u16) -> std::io::Result<u16> {
     let bound = listener.local_addr()?.port();
     info!(port = bound, "ui listening (loopback only)");
     tokio::spawn(async move {
-        if let Err(e) = accept_loop(listener, node).await {
+        if let Err(e) = accept_loop(listener, node, bound).await {
             warn!(%e, "ui http");
         }
     });
     Ok(bound)
 }
 
-async fn accept_loop(listener: TcpListener, node: Node) -> std::io::Result<()> {
+/// Extract the host name (without port) from a `Host` header value.
+/// Returns `None` for values that cannot be parsed, which must fail closed.
+fn host_name(host_header: &str) -> Option<String> {
+    let h = host_header.trim();
+    if let Some(rest) = h.strip_prefix('[') {
+        // Bracketed IPv6 literal: `[::1]:45716`
+        let end = rest.find(']')?;
+        return Some(rest[..end].to_ascii_lowercase());
+    }
+    // Strip exactly one `:port` suffix. An unbracketed IPv6 host (invalid
+    // per RFC 3986) splits at its last colon and fails the exact-match below.
+    let name = h.rsplit_once(':').map(|(n, _)| n).unwrap_or(h);
+    Some(name.to_ascii_lowercase())
+}
+
+/// The loopback origins the bundled dashboard may use. `None` (no Origin
+/// header at all) is allowed so curl/CLI keep working; any browser-sent
+/// Origin must match the bound UI port exactly, which defeats cross-site
+/// `fetch(..., {mode: "no-cors"})` POST forgery and cross-origin EventSource
+/// reads (`null`/file:// origins fail closed).
+fn origin_allowed(origin: &str, ui_port: u16) -> bool {
+    let Some(rest) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let (name, port) = match rest.rsplit_once(':') {
+        Some((n, p)) => (n, p.parse::<u16>().ok()),
+        None => (rest, None),
+    };
+    matches!(name, "127.0.0.1" | "localhost" | "[::1]") && port == Some(ui_port)
+}
+
+async fn accept_loop(listener: TcpListener, node: Node, ui_port: u16) -> std::io::Result<()> {
     let mut stop = node.shutdown_signal();
     loop {
         tokio::select! {
@@ -106,7 +140,7 @@ async fn accept_loop(listener: TcpListener, node: Node) -> std::io::Result<()> {
                 }
                 let node = node.clone_handle();
                 tokio::spawn(async move {
-                    if let Err(e) = handle(stream, node).await {
+                    if let Err(e) = handle(stream, node, ui_port).await {
                         warn!(%e, "ui request");
                     }
                 });
@@ -116,7 +150,7 @@ async fn accept_loop(listener: TcpListener, node: Node) -> std::io::Result<()> {
     Ok(())
 }
 
-async fn handle(mut stream: TcpStream, node: Node) -> std::io::Result<()> {
+async fn handle(mut stream: TcpStream, node: Node, ui_port: u16) -> std::io::Result<()> {
     let mut buf = vec![0u8; 4096];
     let mut n = 0usize;
     loop {
@@ -149,19 +183,55 @@ async fn handle(mut stream: TcpStream, node: Node) -> std::io::Result<()> {
     let path = parts.next().unwrap_or("/");
     let mut content_len = 0usize;
     let mut host_ok = false;
+    let mut origin: Option<String> = None;
+    let mut sec_fetch_site: Option<String> = None;
     for line in lines {
-        let lower = line.to_ascii_lowercase();
-        if let Some(v) = lower.strip_prefix("content-length:") {
-            content_len = v.trim().parse().unwrap_or(0);
-        }
-        if let Some(v) = lower.strip_prefix("host:") {
-            let h = v.trim();
-            host_ok = h.starts_with("127.0.0.1") || h.starts_with("localhost");
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let key = k.trim().to_ascii_lowercase();
+        let value = v.trim();
+        match key.as_str() {
+            "content-length" => content_len = value.parse().unwrap_or(0),
+            "host" => {
+                host_ok = matches!(
+                    host_name(value).as_deref(),
+                    Some("127.0.0.1") | Some("localhost") | Some("::1")
+                );
+            }
+            "origin" => origin = Some(value.to_string()),
+            "sec-fetch-site" => sec_fetch_site = Some(value.to_ascii_lowercase()),
+            _ => {}
         }
     }
     if !host_ok {
         write_http(&mut stream, 403, "text/plain", b"loopback only").await?;
         return Ok(());
+    }
+    // CSRF / DNS-rebinding gate: a browser page on any other origin cannot
+    // forge loopback requests. curl/CLI send no Origin and stay allowed;
+    // `Sec-Fetch-Site: cross-site` rejects even Origin-less browser requests.
+    if sec_fetch_site.as_deref() == Some("cross-site") {
+        write_http(
+            &mut stream,
+            403,
+            "text/plain",
+            b"cross-site request rejected",
+        )
+        .await?;
+        return Ok(());
+    }
+    if let Some(o) = &origin {
+        if !origin_allowed(o, ui_port) {
+            write_http(
+                &mut stream,
+                403,
+                "text/plain",
+                b"cross-origin request rejected",
+            )
+            .await?;
+            return Ok(());
+        }
     }
     if method == "GET"
         && (path == "/api/events"
@@ -1580,6 +1650,35 @@ mod tests {
         ScreenRecordingWriter, ScreenRect, ScreenSnapshotReport, ScreenWatermarkReport,
     };
 
+    #[test]
+    fn host_name_parses_and_fails_closed() {
+        assert_eq!(host_name("127.0.0.1:45716").as_deref(), Some("127.0.0.1"));
+        assert_eq!(host_name("localhost").as_deref(), Some("localhost"));
+        assert_eq!(host_name("LOCALHOST:80").as_deref(), Some("localhost"));
+        assert_eq!(host_name("[::1]:45716").as_deref(), Some("::1"));
+        // Prefix lookalikes must not match the exact allowlist downstream.
+        assert_eq!(
+            host_name("127.0.0.1.evil.com:80").as_deref(),
+            Some("127.0.0.1.evil.com")
+        );
+        assert_eq!(
+            host_name("localhost.evil.com").as_deref(),
+            Some("localhost.evil.com")
+        );
+    }
+
+    #[test]
+    fn origin_allowed_requires_exact_loopback_port() {
+        assert!(origin_allowed("http://127.0.0.1:45716", 45716));
+        assert!(origin_allowed("http://localhost:45716", 45716));
+        assert!(origin_allowed("http://[::1]:45716", 45716));
+        assert!(!origin_allowed("http://127.0.0.1:45717", 45716));
+        assert!(!origin_allowed("http://127.0.0.1.evil.com:45716", 45716));
+        assert!(!origin_allowed("https://evil.example", 45716));
+        // `null` origin (file://, sandboxed iframe) fails closed.
+        assert!(!origin_allowed("null", 45716));
+    }
+
     fn temp_test_node(tag: &str) -> (Node, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "tetherly-uihttp-test-{tag}-{}-{}",
@@ -2397,6 +2496,43 @@ mod tests {
         stream.read_to_end(&mut raw).await.unwrap();
         let (resp_code, _) = parse_http_response(&raw);
         assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_cross_origin_requests_are_rejected() {
+        let (node, dir) = temp_test_node("cross_origin");
+        let port = bind_and_spawn(node.clone(), 0).await.unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+
+        // A browser page on any other origin cannot forge loopback POSTs:
+        // fetch(..., {mode:"no-cors"}) still carries the evil Origin header.
+        let evil_req = format!(
+            "POST /api/daemon/restart HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+             Origin: https://evil.example\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        );
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        // curl/CLI style requests without Origin stay allowed (they hit the
+        // real handler; a restart with empty body would kill this test node,
+        // so use a read-only endpoint).
+        let plain_req = format!(
+            "GET /api/input/tunnel HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        );
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(plain_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 200);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

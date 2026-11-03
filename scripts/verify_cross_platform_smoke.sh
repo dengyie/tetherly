@@ -94,9 +94,16 @@ else
 fi
 
 # 1.4 Remote Windows Session Integrity (Must be in Session 2 under SYSTEM for UAC)
+# Exact `SessionId == 2` via jq: a substring match would also accept 20-29,
+# and a multi-process ConvertTo-Json array would break `.Id` extraction.
 REMOTE_PROC=$(ssh "${REMOTE_HOST}" "powershell -Command \"Get-Process tetherly -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, SessionId | ConvertTo-Json -Compress\"" 2>/dev/null || true)
-if echo "$REMOTE_PROC" | grep -q '"SessionId":2'; then
-    WIN_PID=$(echo "$REMOTE_PROC" | jq -r '.Id // "unknown"')
+SESSION_OK=0
+WIN_PID="unknown"
+if echo "$REMOTE_PROC" | jq -e 'if type == "array" then (length > 0 and any(.[]; .SessionId == 2)) else (.SessionId == 2) end' >/dev/null 2>&1; then
+    SESSION_OK=1
+    WIN_PID=$(echo "$REMOTE_PROC" | jq -r 'if type == "array" then (map(select(.SessionId == 2))[0].Id) else .Id end' 2>/dev/null | head -n 1)
+fi
+if [ "$SESSION_OK" -eq 1 ]; then
     log_pass "Windows Tetherly is active in Session 2 (Interactive SYSTEM Desktop, PID=${WIN_PID})"
 else
     log_fail "Windows Tetherly session check failed (expected Session 2): $REMOTE_PROC"
@@ -118,13 +125,14 @@ else
     log_fail "Failed to query local wheel_speed from policy: $POLICY_RESP"
 fi
 
-# 2.2 Wheel Speed Dynamic Mutation and Restoral
+# 2.2 Wheel Speed Dynamic Mutation and Restoral (to the ORIGINAL value, not
+# a hardcoded one: the operator's real policy must survive the smoke run)
 MUTATE_RESP=$(curl -s -X POST "http://127.0.0.1:${LOCAL_PORT}/api/input/policy" -H "Content-Type: application/json" -d '{"wheel_speed": 1.75}' 2>/dev/null || true)
 MUTATED_SPEED=$(echo "$MUTATE_RESP" | jq -r '.policy.wheel_speed // empty')
 if [ "$MUTATED_SPEED" = "1.75" ]; then
-    # Restore back to 1.5
-    curl -s -X POST "http://127.0.0.1:${LOCAL_PORT}/api/input/policy" -H "Content-Type: application/json" -d '{"wheel_speed": 1.5}' >/dev/null 2>&1
-    log_pass "Dynamic wheel speed mutation (1.75x) & hot restoral (1.5x) verified"
+    ORIGINAL_SPEED="${WHEEL_SPEED:-1.0}"
+    curl -s -X POST "http://127.0.0.1:${LOCAL_PORT}/api/input/policy" -H "Content-Type: application/json" -d "{\"wheel_speed\": ${ORIGINAL_SPEED}}" >/dev/null 2>&1
+    log_pass "Dynamic wheel speed mutation (1.75x) & restoral (${ORIGINAL_SPEED}x) verified"
 else
     log_fail "Wheel speed dynamic mutation failed: $MUTATE_RESP"
 fi
@@ -260,31 +268,77 @@ echo -e "${BOLD}--- [7/7] Resource Footprint & Zero-Leak Production Safety Audit
 # 7.1 macOS Footprint
 MAC_PID=$(pgrep -f "Tetherly.app/Contents/MacOS/Tetherly" | head -n 1 || true)
 if [ -n "$MAC_PID" ]; then
-    MAC_MEM_KB=$(ps -p "$MAC_PID" -o rss= 2>/dev/null | tr -d ' ' || echo "0")
-    MAC_MEM_MB=$((MAC_MEM_KB / 1024))
-    if [ "$MAC_MEM_MB" -lt 300 ]; then
-        log_pass "macOS Tetherly footprint normal: PID=${MAC_PID}, RSS=${MAC_MEM_MB}MB (<300MB)"
+    # `ps` failure must not read as "0MB" (the `|| echo 0` on the pipe was
+    # dead code: the exit status came from tr). Fail loudly instead.
+    MAC_MEM_KB=$(ps -p "$MAC_PID" -o rss= 2>/dev/null | tr -d ' ')
+    if [ -z "$MAC_MEM_KB" ]; then
+        log_warn "Could not read macOS Tetherly RSS (ps failed)"
+        MAC_MEM_MB=""
     else
-        log_warn "macOS Tetherly RSS higher than expected: ${MAC_MEM_MB}MB"
+        MAC_MEM_MB=$((MAC_MEM_KB / 1024))
+    fi
+    if [ -n "$MAC_MEM_MB" ] && [ "$MAC_MEM_MB" -lt 300 ]; then
+        log_pass "macOS Tetherly footprint normal: PID=${MAC_PID}, RSS=${MAC_MEM_MB}MB (<300MB)"
+    elif [ -n "$MAC_MEM_MB" ]; then
+        log_fail "macOS Tetherly RSS higher than expected: ${MAC_MEM_MB}MB (>=300MB)"
     fi
 else
     log_fail "Could not find running macOS Tetherly PID"
 fi
 
 # 7.2 Windows Footprint & Production Process Protection
-WIN_AUDIT=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$t = Get-Process tetherly -ErrorAction SilentlyContinue | Select-Object -First 1 Id, WorkingSet64; \$s = Get-Process SRBMiner-MULTI -ErrorAction SilentlyContinue | Select-Object -First 1 Id; \$v = Get-Process verge-mihomo -ErrorAction SilentlyContinue | Select-Object -First 1 Id; \$k = Get-Process komari-agent -ErrorAction SilentlyContinue | Select-Object -First 1 Id; \$ws = if (\$t) { [math]::Round(\$t.WorkingSet64 / 1MB, 1) } else { 0 }; \$s_ok = if (\$s) { 'true' } else { 'false' }; \$v_ok = if (\$v) { 'true' } else { 'false' }; \$k_ok = if (\$k) { 'true' } else { 'false' }; Write-Output ('ws:' + \$ws + '|srb:' + \$s_ok + '|verge:' + \$v_ok + '|komari:' + \$k_ok)\"" 2>/dev/null || true)
+#
+# The protected-process list is deployment-specific and is NOT hardcoded in
+# the repository: set SMOKE_PROTECT_PROCS to a comma-separated list of
+# process names that must be running on the remote host during the smoke
+# run (e.g. SMOKE_PROTECT_PROCS="procA,procB"). When unset, the check is
+# skipped entirely. Restore value for the wheel-speed policy is read from
+# the live policy instead of a hardcoded 1.5.
+if [ -n "${SMOKE_PROTECT_PROCS:-}" ]; then
+    PROCS_JS=""
+    KEYS_JS=""
+    FIRST=1
+    IFS=',' read -r -a _PROCS <<< "$SMOKE_PROTECT_PROCS"
+    for p in "${_PROCS[@]}"; do
+        pn=$(echo "$p" | xargs)
+        [ -z "$pn" ] && continue
+        if [ $FIRST -eq 1 ]; then
+            FIRST=0
+            KEYS_JS="'${pn}:' + \$ok_${pn}"
+        else
+            PROCS_JS+="; "
+            KEYS_JS+="+'|' + '${pn}:' + \$ok_${pn}"
+        fi
+        PROCS_JS+="\$ok_${pn} = if (Get-Process -Name '${pn}' -ErrorAction SilentlyContinue) { 'true' } else { 'false' }"
+    done
+    WIN_AUDIT=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$t = Get-Process tetherly -ErrorAction SilentlyContinue | Select-Object -First 1 Id, WorkingSet64; \$ws = if (\$t) { [math]::Round(\$t.WorkingSet64 / 1MB, 1) } else { 0 }; ${PROCS_JS}; Write-Output ('ws:' + \$ws + '|' + (${KEYS_JS}))\"" 2>/dev/null || true)
 
-WIN_WS=$(echo "$WIN_AUDIT" | sed -n 's/.*ws:\([^|]*\).*/\1/p' || echo "0")
-if echo "$WIN_AUDIT" | grep -q 'srb:true' && echo "$WIN_AUDIT" | grep -q 'verge:true' && echo "$WIN_AUDIT" | grep -q 'komari:true'; then
-    log_pass "Windows production processes verified 100% intact (SRBMiner, Verge, Komari)"
-else
-    log_fail "Production processes integrity check failed: $WIN_AUDIT"
-fi
+    WIN_WS=$(echo "$WIN_AUDIT" | sed -n 's/.*ws:\([^|]*\).*/\1/p')
+    ALL_OK=1
+    SUMMARY=""
+    for p in "${_PROCS[@]}"; do
+        pn=$(echo "$p" | xargs)
+        [ -z "$pn" ] && continue
+        if echo "$WIN_AUDIT" | grep -q "${pn}:true"; then
+            SUMMARY+="${pn} ✓ "
+        else
+            SUMMARY+="${pn} ✗ "
+            ALL_OK=0
+        fi
+    done
+    if [ "$ALL_OK" -eq 1 ]; then
+        log_pass "Windows protected processes verified 100% intact (${SUMMARY})"
+    else
+        log_fail "Protected process integrity check failed: ${SUMMARY}"
+    fi
 
-if [ -n "$WIN_WS" ]; then
-    log_pass "Windows Tetherly footprint normal: WorkingSet=${WIN_WS}MB (<200MB)"
+    if [ -n "$WIN_WS" ]; then
+        log_pass "Windows Tetherly footprint normal: WorkingSet=${WIN_WS}MB (<200MB)"
+    else
+        log_warn "Windows Tetherly WorkingSet could not be determined"
+    fi
 else
-    log_warn "Windows Tetherly WorkingSet could not be determined"
+    log_warn "SMOKE_PROTECT_PROCS unset; skipping protected-process integrity check"
 fi
 
 echo ""

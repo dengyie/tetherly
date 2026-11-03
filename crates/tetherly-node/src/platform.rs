@@ -781,7 +781,10 @@ fn inject_mouse(flags: u32, dx: i32, dy: i32, mouse_data: u32) {
 
 /// One raw local input observation from the hook thread. Mouse coordinates
 /// are physical pixels; keys are Win32 virtual-key codes.
-#[cfg(any(windows, target_os = "macos"))]
+///
+/// Defined on every platform: the Linux `start_input_hooks` stub keeps the
+/// same signature as the real Windows/macOS hooks, so callers and the lib
+/// re-export compile unchanged on targets without hook support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawInput {
     Move { x: i32, y: i32, dx: i32, dy: i32 },
@@ -1315,7 +1318,12 @@ pub fn open_accessibility_settings() -> Result<(), CoreError> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Ok(())
+        // Be honest instead of pretending success: Windows/Linux have no
+        // macOS-style Accessibility prompt to open. The UI uses `ok` to
+        // tell the user whether anything actually happened.
+        Err(CoreError::Json(
+            "accessibility settings are only applicable on macOS".to_string(),
+        ))
     }
 }
 
@@ -1751,7 +1759,15 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 | (1u64 << CGEventType::KeyDown.0)
                 | (1u64 << CGEventType::KeyUp.0)
                 | (1u64 << CGEventType::FlagsChanged.0)
-                | (1u64 << 14); // NX_SYSDEFINED = 14 (media keys, volume up/down/mute, etc.)
+                | (1u64 << 14) // NX_SYSDEFINED = 14 (media keys, volume up/down/mute, etc.)
+                // kCGEventTapDisabledByTimeout (0xFFFFFFFE) and
+                // kCGEventTapDisabledByUserInput (0xFFFFFFFF) land on mask
+                // bits 62/63 on 64-bit (CGEventMaskBit wraps the shift).
+                // Without them the tap never receives the disabled
+                // notification and the self-healing re-enable in
+                // `tap_callback` stays unreachable.
+                | (1u64 << 62)
+                | (1u64 << 63);
 
             let user_info_ptr = &*ctx as *const MacTapContext as *mut std::ffi::c_void;
 

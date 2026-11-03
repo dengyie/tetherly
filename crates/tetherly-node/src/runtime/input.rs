@@ -1043,6 +1043,12 @@ impl Node {
     ) -> Result<InputTunnelPolicyReport, CoreError> {
         let now = self.shared.clock.unix_ms();
         policy.sanitize();
+        // A keymap switch reinterprets every subsequent key event. If a
+        // modifier is currently held under the old mapping, its release
+        // would be remapped differently and the remote key stays stuck
+        // until the next seat change; a Leave+Enter cycle flushes all held
+        // inputs on the client and re-enters at the same position.
+        let keymap_changed = self.input_policy().keymap != policy.keymap;
         save_input_policy(&self.shared.cfg.data_dir, &policy)
             .map_err(|e| CoreError::File(format!("failed to save input_policy.json: {e}")))?;
         *self.shared.input_policy.lock().expect("input_policy") = policy.clone();
@@ -1051,6 +1057,17 @@ impl Node {
             .lock()
             .expect("engine")
             .set_edge(policy.resolved_edge());
+
+        if keymap_changed && self.input_channel_open_sync() {
+            let events = {
+                let mut engine = self.shared.input_engine.lock().expect("engine");
+                engine.refresh_remote_session();
+                engine.drain()
+            };
+            if let Err(e) = self.send_input_events(events) {
+                tracing::warn!(%e, "keymap change: failed to flush remote session");
+            }
+        }
 
         self.emit(UiEvent::input_tunnel_policy_changed(
             policy.enabled,
@@ -1273,7 +1290,9 @@ impl Node {
     pub fn spawn_input_capture(&self) -> Result<(), CoreError> {
         let (tx, rx) = std::sync::mpsc::channel::<crate::platform::RawInput>();
         let control = crate::platform::start_input_hooks(tx)?;
-        *self.shared.input_hook_control.lock().expect("hook_control") = Some(control.clone());
+        // Move, never clone: HookControl is Copy on Windows (clippy
+        // clone_on_copy) and Clone-only on macOS; `control` is not used again.
+        *self.shared.input_hook_control.lock().expect("hook_control") = Some(control);
         let (w, h) = crate::platform::screen_size();
         self.shared
             .input_engine
@@ -1623,13 +1642,30 @@ impl Node {
             if server.seat() != CursorSeat::Remote {
                 return Ok(());
             }
-            let keymap = self.input_policy().resolved_keymap_profile();
+            let peer_platform = self.input_peer_platform();
+            let keymap = self
+                .input_policy()
+                .resolved_keymap_profile(peer_platform.as_deref());
             let remapped_code = keymap.remap_vk(code);
             let seq = server.next_seq();
             server.note_seq(seq);
             vec![InputEvent::key(seq, remapped_code, down, 0)]
         };
         self.send_input_events(events)
+    }
+
+    /// Best-effort platform string for the current input peer (from the live
+    /// peer table), used by the `auto` keymap profile to detect same-OS
+    /// pairs where remapping must be `identity`.
+    fn input_peer_platform(&self) -> Option<String> {
+        let peer = self.shared.input_peer.lock().ok()?.clone()?;
+        let id = tetherly_core::DeviceId::parse(peer.as_str()).ok()?;
+        self.shared
+            .live
+            .lock()
+            .ok()?
+            .get(&id)
+            .map(|p| p.platform.clone())
     }
 
     /// Push a physical mouse-button observation to the remote seat. No-op
@@ -2024,6 +2060,12 @@ impl Node {
                                                 Some(sess.peer_id.to_string()),
                                             ));
                                         }
+                                    } else {
+                                        // A rejected seq means a replayed or
+                                        // reordered frame arrived: log it so
+                                        // desyncs stay diagnosable instead of
+                                        // silently disappearing.
+                                        tracing::warn!("input client rejected event (seq jump or invalid state)");
                                     }
                                 } else if let Err(e) = InputEvent::from_frame(&frame) {
                                     tracing::warn!(%e, "input client: bad frame");

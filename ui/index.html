@@ -120,7 +120,7 @@
     </div>
     <div style="display:flex; justify-content:space-between; align-items:center; background:#0d141d; border:1px solid #1e2c3d; border-radius:8px; padding:10px 16px; margin-top:12px; font-size:12px; flex-wrap:wrap; gap:8px">
       <div><strong>🖥️ 拓扑几何:</strong> Windows 位于 Mac 顶部 (接触边缘: Top ↔ Bottom)</div>
-      <div><strong>⚡ 数据传输:</strong> TCP 端口 45719 (<span id="roam-channel-indicator" style="color:var(--ok)">已联通</span>)</div>
+      <div><strong>⚡ 数据传输:</strong> 加密输入通道 (<span id="roam-channel-indicator" style="color:var(--ok)">就绪待命</span>)</div>
       <div><strong>🔒 隐私防护:</strong> 纯硬件扫描码 · 本地光标锁边防漂移 · 退出 Deskflow 零干扰</div>
     </div>
   </section>
@@ -6311,12 +6311,15 @@ async function updateInputTunnel() {
     }
 
       if ($("roam-channel-indicator")) {
-        $("roam-channel-indicator").textContent = active ? "已联通 (45719 数据流)" : "就绪 (45719 监听中)";
+        $("roam-channel-indicator").textContent = active ? "通道已建立" : "就绪待命";
         $("roam-channel-indicator").style.color = active ? "var(--ok)" : "var(--muted)";
       }
 
-      if (sess && sess.peer && $("roam-desc")) {
-        $("roam-desc").textContent = `Mac ↔ ${sess.peer} 跨端漫游中 · 鼠标推至屏幕顶部即可穿越 · 键盘自动映射 (Cmd ↔ Ctrl)`;
+      // The server DTO field is peer_id (ActiveInputTunnelSession); the old
+      // `sess.peer` never existed, so the personalized text never rendered.
+      const roamPeer = sess && (sess.peer_id || sess.peer) ? (sess.peer_id || sess.peer) : "";
+      if (roamPeer && $("roam-desc")) {
+        $("roam-desc").textContent = `Mac ↔ ${roamPeer} 跨端漫游中 · 鼠标推至屏幕边缘即可穿越 · 键盘自动映射 (Cmd ↔ Ctrl)`;
       } else if ($("roam-desc")) {
         $("roam-desc").textContent = "Mac ↔ Windows 跨端无缝漫游 · 鼠标推至屏幕边缘即可穿越 · 键盘自动映射 (Cmd ↔ Ctrl)";
       }
@@ -6430,9 +6433,16 @@ function updateInputPolicyUI(p) {
     $("input-policy-types").value = (p.allowed_types || []).join(", ");
   }
   if ($("quick-roam-toggle-keymap")) {
-    const km = p.keymap || "mac_to_windows";
+    // Server-driven state: `keymap: null` means identity/passthrough (the
+    // daemon default), NOT mac_to_windows. Deriving the label here keeps the
+    // toggle honest and prevents the old one-way dead-end where a switch to
+    // "none" got overwritten back to "mac_to_windows" on the next poll and
+    // could never be restored from the UI.
+    const km = p.keymap || "none";
     $("quick-roam-toggle-keymap").dataset.current = km;
-    $("quick-roam-toggle-keymap").textContent = km === "mac_to_windows" ? "⌨️ 键位: mac_to_windows" : `⌨️ 键位: ${km}`;
+    $("quick-roam-toggle-keymap").textContent = km === "none"
+      ? "⌨️ 键位: 原生直通 (none)"
+      : `⌨️ 键位: ${km}`;
   }
 }
 
@@ -6623,13 +6633,15 @@ const quickRoamToggleKeymap = $("quick-roam-toggle-keymap");
 if (quickRoamToggleKeymap) {
   quickRoamToggleKeymap.onclick = async () => {
     try {
-      const current = quickRoamToggleKeymap.dataset.current || "mac_to_windows";
-      const next = current === "mac_to_windows" ? "none" : "mac_to_windows";
+      // State always comes from the server render (updateInputPolicyUI),
+      // never from a locally cached dataset that the poller overwrites.
+      const current = quickRoamToggleKeymap.dataset.current || "none";
+      const next = current === "none" ? "mac_to_windows" : "none";
       const rep = await api("/api/input/policy", { keymap: next });
       if (rep && rep.ok) {
-        quickRoamToggleKeymap.dataset.current = next;
-        quickRoamToggleKeymap.textContent = next === "mac_to_windows" ? "⌨️ 键位: mac_to_windows" : "⌨️ 键位: 原生直通 (none)";
         updateInputPolicy();
+      } else {
+        alert("切换键位映射失败: " + (rep ? rep.error || "未知错误" : "未知错误"));
       }
     } catch (e) {
       alert("切换键位映射失败: " + e.message);

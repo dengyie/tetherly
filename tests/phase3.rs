@@ -307,6 +307,39 @@ async fn m3_4_input_keymap_remapping() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+
+    // Negative: an unknown keymap name must fall back to identity — the
+    // untouched VK_LWIN must arrive verbatim (and only once, no double-send
+    // of the raw key next to a remapped copy).
+    let mut policy = server.input_policy();
+    policy.keymap = Some("bogus_profile".to_string());
+    server.set_input_policy(policy).unwrap();
+    // set_input_policy flushed the remote session on the keymap change
+    // (Leave+Enter+Move); wait out the reconnect settle window.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    server.drive_input_key(VK_LWIN, true).unwrap();
+    server.drive_input_key(VK_LWIN, false).unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        let sink = client.input_sink_snapshot();
+        let raw = sink.applied.iter().any(|k| {
+            matches!(
+                k,
+                InputKind::Key {
+                    code: VK_LWIN,
+                    down: true,
+                    ..
+                }
+            )
+        });
+        if raw {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("unknown keymap did not fall back to identity: {sink:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     server.shutdown();
     client.shutdown();
 }
@@ -323,6 +356,14 @@ async fn m3_5_four_directional_edge_roaming() {
         server.input_policy().resolved_edge(),
         tetherly_core::ScreenEdge::Top
     );
+
+    // Negative: from the LOCAL seat, driving into the RIGHT boundary must
+    // NOT cross while edge=Top. If the engine ignored the configured edge
+    // and fell back to the historic Right default, this would return
+    // Some(Right).
+    let crossed = server.drive_input(100, 25, 100, 50).unwrap();
+    assert_eq!(crossed, None, "right edge must not cross under edge=Top");
+    assert_eq!(server.input_engine_seat(), CursorSeat::Local);
 
     server
         .open_input(client.identity().device_id())
