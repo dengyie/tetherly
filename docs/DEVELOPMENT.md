@@ -8073,3 +8073,8 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 
 3. **测试覆盖**：
    - `tests/phase3.rs`：新增 `m3_9_reverse_control_takeover_flips_roles_cleanly`——Mac 先 attach 为 controller → Windows 反向 attach → 断言角色翻转、旧 controller 已释放出站通道、新方向可真实驱动对端屏幕（Bottom 越境）；全工作区测试、fmt、三目标 clippy 全绿。
+
+## 86. ADR-136 路线图归档与 watcher 可观测性 (v2.52 / v0.1.71)
+
+- `docs/adr/136-bidirectional-control-takeover-and-multi-screen-roadmap.md`：双向控制治理不变式、屏幕延展（IddCx 虚拟显示器 + CGVirtualDisplay + 45720 帧通道复用）与多屏控制（邻接图拓扑）路线图；
+- `link_watcher` 的 auto-attach 失败从静默 `let _ =` 升级为 `warn!`（带 peer 与错误），接续重试语义不变。

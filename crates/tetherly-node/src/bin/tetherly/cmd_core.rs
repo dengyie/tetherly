@@ -460,14 +460,19 @@ pub(crate) async fn run(
                                         .edge
                                         .as_deref()
                                         .and_then(|e| e.parse::<tetherly_core::DisplayEdge>().ok());
-                                    let _ = link_watcher
+                                    if let Err(e) = link_watcher
                                         .input_tunnel_attach(
                                             &peer_id.to_string(),
                                             edge_opt,
                                             None,
                                             None,
                                         )
-                                        .await;
+                                        .await
+                                    {
+                                        // Silent swallow here previously hid
+                                        // attach races from operators entirely.
+                                        tracing::warn!(%peer_id, %e, "input tunnel auto-attach failed; will retry next tick");
+                                    }
                                 }
                             }
                         }
