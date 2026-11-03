@@ -463,6 +463,14 @@ pub(crate) async fn dispatch(cli: Cli) -> Result<()> {
         Cmd::Stop { ui_port } => {
             cmd_core::stop(ui_port).await?;
         }
+        Cmd::Restart {
+            replacement,
+            delay_ms,
+            json,
+            ui_port,
+        } => {
+            cmd_core::restart(replacement, delay_ms, json, ui_port).await?;
+        }
         Cmd::Events {
             count,
             timeout_secs,

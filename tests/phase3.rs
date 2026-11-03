@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
-use tetherly_core::{CursorSeat, InputKind};
+use tetherly_core::{CursorSeat, InputKind, VK_LCONTROL, VK_LWIN};
 use tetherly_net::session::{dial_session, SessionConfig, HANDSHAKE_TIMEOUT};
 use tetherly_net::NetError;
 use tetherly_node::{Node, NodeConfig, OverlayConfig};
@@ -180,10 +180,10 @@ async fn m3_1_edge_and_key_follow_on_45719() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(80)).await;
 
-    let edge = server.drive_input(100, 10, 100, 50).await.unwrap();
+    let edge = server.drive_input(100, 10, 100, 50).unwrap();
     assert_eq!(edge, Some(tetherly_core::ScreenEdge::Right));
-    server.drive_input_key(0x1E, true).await.unwrap();
-    server.drive_input_key(0x1E, false).await.unwrap();
+    server.drive_input_key(0x1E, true).unwrap();
+    server.drive_input_key(0x1E, false).unwrap();
 
     let start = std::time::Instant::now();
     loop {
@@ -217,7 +217,7 @@ async fn m3_2_peer_gone_returns_cursor() {
         .open_input(client.identity().device_id())
         .await
         .unwrap();
-    server.drive_input(80, 5, 80, 40).await.unwrap();
+    server.drive_input(80, 5, 80, 40).unwrap();
     assert_eq!(server.input_engine_seat(), CursorSeat::Remote);
     client.shutdown();
     let start = std::time::Instant::now();
@@ -240,7 +240,7 @@ async fn m3_3_clip_still_works_while_input_focused() {
         .open_input(client.identity().device_id())
         .await
         .unwrap();
-    server.drive_input(120, 20, 120, 60).await.unwrap();
+    server.drive_input(120, 20, 120, 60).unwrap();
     let start = std::time::Instant::now();
     while client.input_seat() != Some(CursorSeat::Remote) {
         if start.elapsed() > Duration::from_secs(3) {
@@ -262,4 +262,216 @@ async fn m3_3_clip_still_works_while_input_focused() {
     }
     server.shutdown();
     client.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn m3_4_input_keymap_remapping() {
+    let (server, client, _ga, _gb) = pair().await;
+    // Configure keymap profile to mac_to_windows on server
+    let mut policy = server.input_policy();
+    policy.keymap = Some("mac_to_windows".to_string());
+    server.set_input_policy(policy).unwrap();
+
+    server
+        .open_input(client.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    // Cross edge to set seat to Remote
+    let edge = server.drive_input(100, 10, 100, 50).unwrap();
+    assert_eq!(edge, Some(tetherly_core::ScreenEdge::Right));
+
+    // Send VK_LWIN (Mac Command) -> should be remapped to VK_LCONTROL on wire
+    server.drive_input_key(VK_LWIN, true).unwrap();
+    server.drive_input_key(VK_LWIN, false).unwrap();
+
+    let start = std::time::Instant::now();
+    loop {
+        let sink = client.input_sink_snapshot();
+        let mapped = sink.applied.iter().any(|k| {
+            matches!(
+                k,
+                InputKind::Key {
+                    code: VK_LCONTROL,
+                    down: true,
+                    ..
+                }
+            )
+        });
+        if mapped {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("remapped key VK_LCONTROL not received: {sink:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    server.shutdown();
+    client.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn m3_5_four_directional_edge_roaming() {
+    let (server, client, _ga, _gb) = pair().await;
+
+    // 1. Configure policy to Top edge roaming (e.g. laptop below monitor/desktop)
+    let mut policy = server.input_policy();
+    policy.edge = Some("top".to_string());
+    server.set_input_policy(policy).unwrap();
+    assert_eq!(
+        server.input_policy().resolved_edge(),
+        tetherly_core::ScreenEdge::Top
+    );
+
+    server
+        .open_input(client.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    // Moving to y <= 0 crosses the Top boundary
+    let crossed = server.drive_input(50, 0, 100, 50).unwrap();
+    assert_eq!(crossed, Some(tetherly_core::ScreenEdge::Top));
+    assert_eq!(server.input_engine_seat(), CursorSeat::Remote);
+
+    // Wait for client to focus and receive cursor entry at remote bottom (y = 1000)
+    let start = std::time::Instant::now();
+    loop {
+        let sink = client.input_sink_snapshot();
+        if client.input_seat() == Some(CursorSeat::Remote) && sink.cursor.1 >= 990 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!(
+                "client never focused or cursor did not land at y=1000: seat={:?}, sink={:?}",
+                client.input_seat(),
+                sink
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    server.shutdown();
+    client.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn m3_6_left_edge_roaming() {
+    let (server, client, _ga, _gb) = pair().await;
+
+    let mut policy = server.input_policy();
+    policy.edge = Some("left".to_string());
+    server.set_input_policy(policy).unwrap();
+    assert_eq!(
+        server.input_policy().resolved_edge(),
+        tetherly_core::ScreenEdge::Left
+    );
+
+    server
+        .open_input(client.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    // Moving to x <= 0 crosses the Left boundary
+    let crossed = server.drive_input(0, 25, 100, 50).unwrap();
+    assert_eq!(crossed, Some(tetherly_core::ScreenEdge::Left));
+    assert_eq!(server.input_engine_seat(), CursorSeat::Remote);
+
+    // Wait for client to focus and receive cursor entry at remote right (x = 1000)
+    let start = std::time::Instant::now();
+    loop {
+        let sink = client.input_sink_snapshot();
+        if client.input_seat() == Some(CursorSeat::Remote) && sink.cursor.0 == 1000 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!(
+                "client never focused or cursor did not land at x=1000: seat={:?}, sink={:?}",
+                client.input_seat(),
+                sink
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    server.shutdown();
+    client.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn m3_7_physical_boundary_touch_crossing() {
+    let (server, client, _ga, _gb) = pair().await;
+
+    // Test Right edge physical touch at width - 1 (e.g. 1919 on a 1920 display)
+    let mut policy = server.input_policy();
+    policy.edge = Some("right".to_string());
+    server.set_input_policy(policy).unwrap();
+
+    server
+        .open_input(client.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    // Moving to width - 1 (1919) must trigger crossing
+    let crossed = server.drive_input(1919, 500, 1920, 1080).unwrap();
+    assert_eq!(crossed, Some(tetherly_core::ScreenEdge::Right));
+    assert_eq!(server.input_engine_seat(), CursorSeat::Remote);
+
+    // Switch policy to Bottom edge roaming and verify height - 1 (1079) touch
+    let mut policy = server.input_policy();
+    policy.edge = Some("bottom".to_string());
+    server.set_input_policy(policy).unwrap();
+
+    // Reset cursor locally
+    server.input_stop().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    server
+        .open_input(client.identity().device_id())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let crossed = server.drive_input(500, 1079, 1920, 1080).unwrap();
+    assert_eq!(crossed, Some(tetherly_core::ScreenEdge::Bottom));
+    assert_eq!(server.input_engine_seat(), CursorSeat::Remote);
+
+    server.shutdown();
+    client.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn m3_8_wheel_speed_policy_mutation() {
+    let (server, _client, _ga, _gb) = pair().await;
+
+    // 1. Initial default wheel_speed is 1.0
+    let policy = server.input_policy();
+    assert!((policy.wheel_speed - 1.0).abs() < f64::EPSILON);
+
+    // 2. Direct mutation via set_input_policy
+    let mut policy = server.input_policy();
+    policy.wheel_speed = 1.75;
+    server.set_input_policy(policy).unwrap();
+    assert!((server.input_policy().wheel_speed - 1.75).abs() < f64::EPSILON);
+
+    // 3. Mutation via update_input_policy helper
+    let update = tetherly_node::InputTunnelPolicyUpdate {
+        wheel_speed: Some(2.5),
+        ..Default::default()
+    };
+    server.update_input_policy(update).unwrap();
+    assert!((server.input_policy().wheel_speed - 2.5).abs() < f64::EPSILON);
+
+    // 4. Boundary guard: out-of-range (>20.0 or <=0.0) is rejected/ignored
+    let invalid_update = tetherly_node::InputTunnelPolicyUpdate {
+        wheel_speed: Some(25.0),
+        ..Default::default()
+    };
+    server.update_input_policy(invalid_update).unwrap();
+    // Must remain 2.5
+    assert!((server.input_policy().wheel_speed - 2.5).abs() < f64::EPSILON);
+
+    server.shutdown();
 }

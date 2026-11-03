@@ -500,6 +500,47 @@ pub(crate) async fn stop(ui_port: u16) -> Result<()> {
     Ok(())
 }
 
+/// `tetherly-cli restart` -- Restart arm of the top-level dispatch.
+pub(crate) async fn restart(
+    replacement: Option<String>,
+    delay_ms: u64,
+    json: bool,
+    ui_port: u16,
+) -> Result<()> {
+    let payload = serde_json::json!({
+        "replacement_path": replacement,
+        "delay_ms": delay_ms,
+    });
+    let body = serde_json::to_vec(&payload)?;
+    let (code, resp) = loopback_post(ui_port, "/api/daemon/restart", &body)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        bail!(
+            "node restart failed (HTTP {code}): {}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&resp));
+    } else {
+        let rep: serde_json::Value = serde_json::from_slice(&resp)?;
+        let old_pid = rep.get("old_pid").and_then(|v| v.as_u64()).unwrap_or(0);
+        let new_pid = rep.get("new_pid").and_then(|v| v.as_u64()).unwrap_or(0);
+        let action = rep.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        println!(
+            "Node daemon restart initiated: old PID {} -> new PID {} ({})",
+            old_pid, new_pid, action
+        );
+    }
+    Ok(())
+}
+
 /// `tetherly-cli events` -- Events arm of the top-level dispatch.
 pub(crate) async fn events(
     count: usize,

@@ -849,6 +849,21 @@ pub(crate) enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Gracefully restart the running node daemon (with optional zero-disruption binary hot replacement).
+    Restart {
+        /// Optional path to new binary to replace the running daemon with before restarting.
+        #[arg(long)]
+        replacement: Option<String>,
+        /// Delay in milliseconds before terminating parent process (default: 200).
+        #[arg(long, default_value_t = 200)]
+        delay_ms: u64,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
     /// Stream real-time node events via loopback Server-Sent Events (SSE).
     Events {
         /// Maximum number of events to receive before exiting (0 for unlimited).

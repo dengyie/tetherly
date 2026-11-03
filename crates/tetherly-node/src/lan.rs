@@ -4,7 +4,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tetherly_core::{classify, is_unspecified_bind, should_listen};
 use tokio::net::TcpListener;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// One local address plus why it is, or is not, in the LAN listen set. A
 /// read-only diagnostic: it never changes the bind set, it only explains it, and
@@ -20,9 +20,22 @@ pub struct IfaceReport {
     pub reason: Option<&'static str>,
 }
 
+static CACHED_REPORT: std::sync::Mutex<Option<(std::time::Instant, Vec<IfaceReport>)>> =
+    std::sync::Mutex::new(None);
+
 /// Every local address, classified. `127.0.0.1` is always first because
 /// [`lan_ips`] seeds it unconditionally even on a host whose OS omits it.
+/// Caches results for 5 seconds to prevent kernel syscall storms under UI polling.
 pub fn interface_report() -> Vec<IfaceReport> {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(5);
+    if let Ok(guard) = CACHED_REPORT.lock() {
+        if let Some((ts, ref report)) = *guard {
+            if ts.elapsed() < TTL {
+                return report.clone();
+            }
+        }
+    }
+
     let mut out = vec![IfaceReport {
         iface: "loopback".into(),
         ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -41,6 +54,11 @@ pub fn interface_report() -> Vec<IfaceReport> {
         }
         Err(e) => warn!(%e, "ifaddrs failed; interface report is loopback only"),
     }
+
+    if let Ok(mut guard) = CACHED_REPORT.lock() {
+        *guard = Some((std::time::Instant::now(), out.clone()));
+    }
+
     out
 }
 
@@ -59,10 +77,19 @@ fn report_row(iface: String, ip: IpAddr) -> IfaceReport {
 /// neither RFC1918 nor link-local, so it is silently skipped unless the user
 /// names it with `--overlay-cidr`.
 pub fn log_skipped_interfaces() {
-    for r in interface_report() {
+    let report = interface_report();
+    let mut skipped = 0;
+    for r in &report {
         if let Some(reason) = r.reason {
-            info!(iface = %r.iface, ip = %r.ip, reason, "interface not in the LAN set");
+            debug!(iface = %r.iface, ip = %r.ip, reason, "interface not in the LAN set");
+            skipped += 1;
         }
+    }
+    if skipped > 0 {
+        debug!(
+            skipped_count = skipped,
+            "filtered non-LAN network interfaces"
+        );
     }
 }
 
@@ -103,6 +130,20 @@ pub async fn bind_many(addrs: &[SocketAddr]) -> std::io::Result<Vec<TcpListener>
     Ok(listeners)
 }
 
+async fn bind_with_retry(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let mut attempts = 0;
+    loop {
+        match TcpListener::bind(addr).await {
+            Ok(l) => return Ok(l),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempts < 20 => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Same guards as [`bind_many`] but tolerates an empty result. Data ports
 /// (file/input/screen) are optional: a missing interface is not fatal.
 pub async fn bind_many_optional(addrs: &[SocketAddr]) -> Vec<TcpListener> {
@@ -116,7 +157,7 @@ pub async fn bind_many_optional(addrs: &[SocketAddr]) -> Vec<TcpListener> {
             warn!(%addr, "skipping non-LAN bind");
             continue;
         }
-        match TcpListener::bind(*addr).await {
+        match bind_with_retry(*addr).await {
             Ok(l) => {
                 info!(%addr, "listen");
                 listeners.push(l);
@@ -138,7 +179,7 @@ pub async fn bind_overlay(addrs: &[SocketAddr]) -> Vec<TcpListener> {
             warn!(%addr, "refusing unspecified overlay bind");
             continue;
         }
-        match TcpListener::bind(*addr).await {
+        match bind_with_retry(*addr).await {
             Ok(l) => {
                 info!(%addr, "overlay listen");
                 listeners.push(l);

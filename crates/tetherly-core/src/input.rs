@@ -5,6 +5,10 @@
 use crate::error::CoreError;
 use crate::frame::{InnerFrame, FLAG_MUST_UNDERSTAND, INNER_PAYLOAD_MAX};
 use std::collections::VecDeque;
+use std::fmt;
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
 
 /// Input channel inner types. Not listed in the JSON control-plane table.
 pub const TYPE_INPUT_ENTER: u16 = 0x0401;
@@ -259,11 +263,77 @@ pub enum CursorSeat {
     Remote,
 }
 
-/// Edge a cursor can leave through. v1 uses a 1-D right/left pair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Edge a cursor can leave through (supports 4-direction spatial arrangement like Deskflow).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ScreenEdge {
     Left,
     Right,
+    Top,
+    Bottom,
+}
+
+impl ScreenEdge {
+    /// Returns the geometrically opposing edge.
+    pub fn opposite(&self) -> Self {
+        match self {
+            ScreenEdge::Left => ScreenEdge::Right,
+            ScreenEdge::Right => ScreenEdge::Left,
+            ScreenEdge::Top => ScreenEdge::Bottom,
+            ScreenEdge::Bottom => ScreenEdge::Top,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScreenEdge::Left => "left",
+            ScreenEdge::Right => "right",
+            ScreenEdge::Top => "top",
+            ScreenEdge::Bottom => "bottom",
+        }
+    }
+}
+
+impl fmt::Display for ScreenEdge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for ScreenEdge {
+    type Err = CoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "left" => Ok(ScreenEdge::Left),
+            "right" => Ok(ScreenEdge::Right),
+            "top" | "up" => Ok(ScreenEdge::Top),
+            "bottom" | "down" => Ok(ScreenEdge::Bottom),
+            _ => Err(CoreError::Json(format!("invalid screen edge '{s}'"))),
+        }
+    }
+}
+
+impl From<crate::topology::DisplayEdge> for ScreenEdge {
+    fn from(d: crate::topology::DisplayEdge) -> Self {
+        match d {
+            crate::topology::DisplayEdge::Left => ScreenEdge::Left,
+            crate::topology::DisplayEdge::Right => ScreenEdge::Right,
+            crate::topology::DisplayEdge::Top => ScreenEdge::Top,
+            crate::topology::DisplayEdge::Bottom => ScreenEdge::Bottom,
+        }
+    }
+}
+
+impl From<ScreenEdge> for crate::topology::DisplayEdge {
+    fn from(s: ScreenEdge) -> Self {
+        match s {
+            ScreenEdge::Left => crate::topology::DisplayEdge::Left,
+            ScreenEdge::Right => crate::topology::DisplayEdge::Right,
+            ScreenEdge::Top => crate::topology::DisplayEdge::Top,
+            ScreenEdge::Bottom => crate::topology::DisplayEdge::Bottom,
+        }
+    }
 }
 
 pub trait InputSink: Send + Sync {
@@ -328,7 +398,13 @@ pub struct InputServer {
     height: i32,
     x: i32,
     y: i32,
+    rem_x: i32,
+    rem_y: i32,
     seat: CursorSeat,
+    edge: ScreenEdge,
+    last_crossed_edge: ScreenEdge,
+    remote_interior: bool,
+    buttons_down: u8,
     next_seq: u64,
     pending: VecDeque<InputEvent>,
 }
@@ -342,7 +418,13 @@ impl InputServer {
             height: h,
             x: w / 2,
             y: h / 2,
+            rem_x: SCREEN_UNITS / 2,
+            rem_y: SCREEN_UNITS / 2,
             seat: CursorSeat::Local,
+            edge: ScreenEdge::Right,
+            last_crossed_edge: ScreenEdge::Right,
+            remote_interior: false,
+            buttons_down: 0,
             next_seq: 1,
             pending: VecDeque::with_capacity(INPUT_BATCH_MAX),
         }
@@ -350,6 +432,46 @@ impl InputServer {
 
     pub fn seat(&self) -> CursorSeat {
         self.seat
+    }
+
+    pub fn edge(&self) -> ScreenEdge {
+        self.edge
+    }
+
+    pub fn set_edge(&mut self, edge: ScreenEdge) {
+        self.edge = edge;
+    }
+
+    pub fn last_crossed_edge(&self) -> ScreenEdge {
+        self.last_crossed_edge
+    }
+
+    pub fn note_button(&mut self, mask: u8, down: bool) {
+        if down {
+            self.buttons_down |= mask;
+        } else {
+            self.buttons_down &= !mask;
+        }
+    }
+
+    pub fn buttons_down(&self) -> u8 {
+        self.buttons_down
+    }
+
+    /// Forcefully disarm remote roaming and restore the cursor seat to Local.
+    pub fn force_local(&mut self) {
+        self.buttons_down = 0;
+        if self.seat == CursorSeat::Remote {
+            self.seat = CursorSeat::Local;
+            self.remote_interior = false;
+            self.push(InputKind::Leave);
+            match self.last_crossed_edge {
+                ScreenEdge::Right => self.x = self.width.saturating_sub(17).max(0),
+                ScreenEdge::Left => self.x = 16.min(self.width.saturating_sub(1)),
+                ScreenEdge::Top => self.y = 16.min(self.height.saturating_sub(1)),
+                ScreenEdge::Bottom => self.y = self.height.saturating_sub(17).max(0),
+            }
+        }
     }
 
     /// Change the logical screen without resetting `seq`.
@@ -372,6 +494,21 @@ impl InputServer {
         (self.x, self.y)
     }
 
+    pub fn remote_pos(&self) -> (i32, i32) {
+        (self.rem_x, self.rem_y)
+    }
+
+    /// Prepare resume events if re-attaching while cursor was already in remote seat.
+    pub fn resume_remote(&mut self) {
+        if self.seat == CursorSeat::Remote {
+            self.push(InputKind::Enter);
+            self.push(InputKind::Move {
+                x: self.rem_x,
+                y: self.rem_y,
+            });
+        }
+    }
+
     fn push(&mut self, kind: InputKind) {
         if self.pending.len() >= INPUT_BATCH_MAX {
             self.pending.pop_front();
@@ -381,37 +518,218 @@ impl InputServer {
         self.pending.push_back(InputEvent { seq, kind });
     }
 
-    /// Pixel-space local motion. Crossing the right edge parks the cursor
+    /// Pixel-space local motion. Crossing the configured edge parks the cursor
     /// locally and emits Enter + Move in screen units for the client.
     pub fn local_move(&mut self, x: i32, y: i32) -> Option<ScreenEdge> {
-        let y = y.clamp(0, self.height.saturating_sub(1));
+        let prev_seat = self.seat;
+        let edge = self.local_move_delta(x, y, 0, 0);
+        if prev_seat == CursorSeat::Remote && self.seat == CursorSeat::Remote {
+            self.rem_x = self.norm_x();
+            self.rem_y = self.norm_y();
+            if let Some(last) = self.pending.back_mut() {
+                if let InputKind::Move {
+                    ref mut x,
+                    ref mut y,
+                } = last.kind
+                {
+                    *x = self.rem_x;
+                    *y = self.rem_y;
+                }
+            }
+        }
+        edge
+    }
+
+    /// Motion with relative displacement deltas. When the seat is remote,
+    /// deltas drive smooth free roaming on the target screen without cursor locking.
+    pub fn local_move_delta(&mut self, x: i32, y: i32, dx: i32, dy: i32) -> Option<ScreenEdge> {
+        let y_clamped = y.clamp(0, self.height.saturating_sub(1));
+        let x_clamped = x.clamp(0, self.width.saturating_sub(1));
         if self.seat == CursorSeat::Remote {
-            self.x = x.clamp(0, self.width.saturating_sub(1));
-            self.y = y;
+            let crossed_edge = self.last_crossed_edge;
+            let delta_x = if dx != 0 {
+                let d = (dx as i64 * SCREEN_UNITS as i64 / self.width.max(1) as i64) as i32;
+                if d == 0 {
+                    dx.signum()
+                } else {
+                    d
+                }
+            } else {
+                0
+            };
+            let delta_y = if dy != 0 {
+                let d = (dy as i64 * SCREEN_UNITS as i64 / self.height.max(1) as i64) as i32;
+                if d == 0 {
+                    dy.signum()
+                } else {
+                    d
+                }
+            } else {
+                0
+            };
+
+            let next_rem_x = (self.rem_x + delta_x).clamp(0, SCREEN_UNITS);
+            let next_rem_y = (self.rem_y + delta_y).clamp(0, SCREEN_UNITS);
+
+            const REMOTE_INTERIOR_HYSTERESIS: i32 = 20;
+            let is_interior = match crossed_edge {
+                ScreenEdge::Top => next_rem_y < SCREEN_UNITS - REMOTE_INTERIOR_HYSTERESIS,
+                ScreenEdge::Bottom => next_rem_y > REMOTE_INTERIOR_HYSTERESIS,
+                ScreenEdge::Left => next_rem_x < SCREEN_UNITS - REMOTE_INTERIOR_HYSTERESIS,
+                ScreenEdge::Right => next_rem_x > REMOTE_INTERIOR_HYSTERESIS,
+            };
+            if is_interior {
+                self.remote_interior = true;
+            }
+
+            // Do not switch screen back to local while holding down a mouse button (prevent drag interruption)
+            let returning_local = self.remote_interior
+                && (self.buttons_down == 0)
+                && match crossed_edge {
+                    ScreenEdge::Top => {
+                        (self.rem_y >= SCREEN_UNITS && dy > 4)
+                            || (self.rem_y + delta_y >= SCREEN_UNITS && dy > 4)
+                    }
+                    ScreenEdge::Bottom => {
+                        (self.rem_y <= 0 && dy < -4) || (self.rem_y + delta_y <= 0 && dy < -4)
+                    }
+                    ScreenEdge::Left => {
+                        (self.rem_x >= SCREEN_UNITS && dx > 4)
+                            || (self.rem_x + delta_x >= SCREEN_UNITS && dx > 4)
+                    }
+                    ScreenEdge::Right => {
+                        (self.rem_x <= 0 && dx < -4) || (self.rem_x + delta_x <= 0 && dx < -4)
+                    }
+                };
+
+            if returning_local {
+                self.seat = CursorSeat::Local;
+                self.remote_interior = false;
+                self.push(InputKind::Leave);
+                match crossed_edge {
+                    ScreenEdge::Top => {
+                        self.x = x_clamped;
+                        self.y = 16.min(self.height.saturating_sub(1));
+                    }
+                    ScreenEdge::Bottom => {
+                        self.x = x_clamped;
+                        self.y = self.height.saturating_sub(17).max(0);
+                    }
+                    ScreenEdge::Left => {
+                        self.x = 16.min(self.width.saturating_sub(1));
+                        self.y = y_clamped;
+                    }
+                    ScreenEdge::Right => {
+                        self.x = self.width.saturating_sub(17).max(0);
+                        self.y = y_clamped;
+                    }
+                }
+                return Some(crossed_edge);
+            }
+
+            self.rem_x = next_rem_x;
+            self.rem_y = next_rem_y;
+            self.x = x_clamped;
+            self.y = y_clamped;
             self.push(InputKind::Move {
-                x: self.norm_x(),
-                y: self.norm_y(),
+                x: self.rem_x,
+                y: self.rem_y,
             });
             return None;
         }
-        if x >= self.width {
-            self.x = self.width.saturating_sub(1);
-            self.y = y;
-            self.seat = CursorSeat::Remote;
-            self.push(InputKind::Enter);
-            self.push(InputKind::Move {
-                x: 0,
-                y: self.norm_y(),
-            });
-            return Some(ScreenEdge::Right);
+
+        match self.edge {
+            ScreenEdge::Right => {
+                if x >= self.width {
+                    self.x = self.width.saturating_sub(1);
+                    self.y = y_clamped;
+                    self.rem_x = 0;
+                    self.rem_y = self.norm_y();
+                    self.seat = CursorSeat::Remote;
+                    self.remote_interior = false;
+                    self.last_crossed_edge = ScreenEdge::Right;
+                    self.push(InputKind::Enter);
+                    self.push(InputKind::Move {
+                        x: self.rem_x,
+                        y: self.rem_y,
+                    });
+                    return Some(ScreenEdge::Right);
+                }
+                if x < 0 {
+                    self.x = 0;
+                    self.y = y_clamped;
+                    return None;
+                }
+            }
+            ScreenEdge::Left => {
+                if x <= 0 || (x <= 4 && dx < 0) {
+                    self.x = 0;
+                    self.y = y_clamped;
+                    self.rem_x = SCREEN_UNITS;
+                    self.rem_y = self.norm_y();
+                    self.seat = CursorSeat::Remote;
+                    self.remote_interior = false;
+                    self.last_crossed_edge = ScreenEdge::Left;
+                    self.push(InputKind::Enter);
+                    self.push(InputKind::Move {
+                        x: self.rem_x,
+                        y: self.rem_y,
+                    });
+                    return Some(ScreenEdge::Left);
+                }
+                if x >= self.width {
+                    self.x = self.width.saturating_sub(1);
+                    self.y = y_clamped;
+                    return None;
+                }
+            }
+            ScreenEdge::Top => {
+                if y <= 0 || (y <= 4 && dy < 0) {
+                    self.x = x_clamped;
+                    self.y = 0;
+                    self.rem_x = self.norm_x();
+                    self.rem_y = SCREEN_UNITS;
+                    self.seat = CursorSeat::Remote;
+                    self.remote_interior = false;
+                    self.last_crossed_edge = ScreenEdge::Top;
+                    self.push(InputKind::Enter);
+                    self.push(InputKind::Move {
+                        x: self.rem_x,
+                        y: self.rem_y,
+                    });
+                    return Some(ScreenEdge::Top);
+                }
+                if y >= self.height {
+                    self.x = x_clamped;
+                    self.y = self.height.saturating_sub(1);
+                    return None;
+                }
+            }
+            ScreenEdge::Bottom => {
+                if y >= self.height {
+                    self.x = x_clamped;
+                    self.y = self.height.saturating_sub(1);
+                    self.rem_x = self.norm_x();
+                    self.rem_y = 0;
+                    self.seat = CursorSeat::Remote;
+                    self.remote_interior = false;
+                    self.last_crossed_edge = ScreenEdge::Bottom;
+                    self.push(InputKind::Enter);
+                    self.push(InputKind::Move {
+                        x: self.rem_x,
+                        y: self.rem_y,
+                    });
+                    return Some(ScreenEdge::Bottom);
+                }
+                if y <= 0 {
+                    self.x = x_clamped;
+                    self.y = 0;
+                    return None;
+                }
+            }
         }
-        if x < 0 {
-            self.x = 0;
-            self.y = y;
-            return None;
-        }
-        self.x = x;
-        self.y = y;
+        self.x = x_clamped;
+        self.y = y_clamped;
         None
     }
 
@@ -421,16 +739,25 @@ impl InputServer {
         }
     }
 
-    /// Remote reports the cursor left back through its left edge.
+    /// Remote reports the cursor left back through its entry edge.
     pub fn on_remote_leave(&mut self) {
         self.seat = CursorSeat::Local;
-        self.x = self.width.saturating_sub(1);
+        self.remote_interior = false;
+        self.buttons_down = 0;
+        match self.last_crossed_edge {
+            ScreenEdge::Right => self.x = self.width.saturating_sub(1),
+            ScreenEdge::Left => self.x = 1.min(self.width.saturating_sub(1)),
+            ScreenEdge::Top => self.y = 1.min(self.height.saturating_sub(1)),
+            ScreenEdge::Bottom => self.y = self.height.saturating_sub(1),
+        }
     }
 
     /// Peer input session died: keyboard/mouse return here (M3.2).
     pub fn on_peer_gone(&mut self) {
         self.pending.clear();
         self.seat = CursorSeat::Local;
+        self.remote_interior = false;
+        self.buttons_down = 0;
         self.x = self.width / 2;
         self.y = self.height / 2;
     }
@@ -454,15 +781,19 @@ impl InputServer {
     }
 }
 
-/// Client-side apply: decode, drop old seq, inject, leave when x==0.
+/// Client-side apply: decode, drop old seq, inject, leave when returning through entry edge.
 pub struct InputClient<S: InputSink> {
     sink: S,
     last_seq: u64,
     focused: bool,
-    /// True after a focused move with x > 0. Entry lands at x=0 and must not leave.
+    autonomous_leave: bool,
+    entry_edge: Option<ScreenEdge>,
+    /// True after a focused move into the screen interior.
     interior: bool,
     dropped: u64,
     applied: u64,
+    keys_down: std::collections::HashSet<u16>,
+    buttons_down: u8,
 }
 
 impl<S: InputSink> InputClient<S> {
@@ -471,10 +802,23 @@ impl<S: InputSink> InputClient<S> {
             sink,
             last_seq: 0,
             focused: false,
+            autonomous_leave: false,
+            entry_edge: None,
             interior: false,
             dropped: 0,
             applied: 0,
+            keys_down: std::collections::HashSet::new(),
+            buttons_down: 0,
         }
+    }
+
+    /// Enable legacy autonomous boundary leave for standalone tests.
+    /// In production (Deskflow topology), the controlling server is the single
+    /// source of truth for screen layout and boundary returns, and the secondary
+    /// node acts as a pure slave sink.
+    pub fn with_autonomous_leave(mut self, enabled: bool) -> Self {
+        self.autonomous_leave = enabled;
+        self
     }
 
     pub fn focused(&self) -> bool {
@@ -497,6 +841,27 @@ impl<S: InputSink> InputClient<S> {
         &mut self.sink
     }
 
+    /// Release all currently held mouse buttons and keys.
+    /// This prevents stuck keys and stuck mouse buttons on seat transitions,
+    /// boundary crossings, and unexpected disconnections.
+    pub fn release_all_inputs(&mut self) {
+        if self.buttons_down != 0 {
+            let btns = [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE];
+            for &mask in &btns {
+                if (self.buttons_down & mask) != 0 {
+                    self.sink.button(mask, false);
+                }
+            }
+            self.buttons_down = 0;
+        }
+        if !self.keys_down.is_empty() {
+            let held: Vec<u16> = self.keys_down.drain().collect();
+            for code in held {
+                self.sink.key(code, false, 0);
+            }
+        }
+    }
+
     /// Apply one event. Returns `Some(Leave)` when we must send leave back.
     pub fn apply(&mut self, ev: InputEvent) -> Result<Option<InputEvent>, CoreError> {
         if ev.seq <= self.last_seq {
@@ -509,30 +874,70 @@ impl<S: InputSink> InputClient<S> {
         self.last_seq = ev.seq;
         match ev.kind {
             InputKind::Enter => {
+                self.release_all_inputs();
                 self.focused = true;
+                self.entry_edge = None;
                 self.interior = false;
                 self.applied = self.applied.saturating_add(1);
                 Ok(None)
             }
             InputKind::Leave => {
+                self.release_all_inputs();
                 self.focused = false;
+                self.entry_edge = None;
                 self.interior = false;
                 self.applied = self.applied.saturating_add(1);
                 Ok(None)
             }
             InputKind::Move { x, y } => {
                 if !self.focused {
-                    self.dropped = self.dropped.saturating_add(1);
-                    return Ok(None);
+                    // Resilient auto-focus on reconnect: if a remote controller reconnected
+                    // and immediately transmits Move coordinates, accept focus instead of dropping.
+                    self.focused = true;
+                    self.entry_edge = None;
+                    self.interior = false;
                 }
-                let leaving = x == 0 && self.interior;
+                let leaving = if self.autonomous_leave {
+                    let edge = *self.entry_edge.get_or_insert({
+                        if x <= 0 {
+                            ScreenEdge::Left
+                        } else if x >= SCREEN_UNITS {
+                            ScreenEdge::Right
+                        } else if y <= 0 {
+                            ScreenEdge::Top
+                        } else if y >= SCREEN_UNITS {
+                            ScreenEdge::Bottom
+                        } else {
+                            ScreenEdge::Left
+                        }
+                    });
+                    const INTERIOR_HYSTERESIS: i32 = 20;
+                    let (is_interior, leaving) = match edge {
+                        ScreenEdge::Left => (x > INTERIOR_HYSTERESIS, x <= 0 && self.interior),
+                        ScreenEdge::Right => (
+                            x < SCREEN_UNITS - INTERIOR_HYSTERESIS,
+                            x >= SCREEN_UNITS && self.interior,
+                        ),
+                        ScreenEdge::Top => (y > INTERIOR_HYSTERESIS, y <= 0 && self.interior),
+                        ScreenEdge::Bottom => (
+                            y < SCREEN_UNITS - INTERIOR_HYSTERESIS,
+                            y >= SCREEN_UNITS && self.interior,
+                        ),
+                    };
+                    if is_interior {
+                        self.interior = true;
+                    }
+                    leaving
+                } else {
+                    false
+                };
+
                 self.sink.move_abs(x, y);
                 self.applied = self.applied.saturating_add(1);
-                if x > 0 {
-                    self.interior = true;
-                }
                 if leaving {
+                    self.release_all_inputs();
                     self.focused = false;
+                    self.entry_edge = None;
                     self.interior = false;
                     return Ok(Some(InputEvent::leave(ev.seq.saturating_add(1))));
                 }
@@ -540,6 +945,11 @@ impl<S: InputSink> InputClient<S> {
             }
             InputKind::Button { mask, down } => {
                 if self.focused {
+                    if down {
+                        self.buttons_down |= mask;
+                    } else {
+                        self.buttons_down &= !mask;
+                    }
                     self.sink.button(mask, down);
                     self.applied = self.applied.saturating_add(1);
                 } else {
@@ -558,6 +968,11 @@ impl<S: InputSink> InputClient<S> {
             }
             InputKind::Key { code, down, mods } => {
                 if self.focused {
+                    if down {
+                        self.keys_down.insert(code);
+                    } else {
+                        self.keys_down.remove(&code);
+                    }
                     self.sink.key(code, down, mods);
                     self.applied = self.applied.saturating_add(1);
                 } else {
@@ -573,6 +988,7 @@ impl<S: InputSink> InputClient<S> {
     }
 
     pub fn on_peer_gone(&mut self) {
+        self.release_all_inputs();
         self.focused = false;
         self.interior = false;
     }
@@ -641,7 +1057,7 @@ mod tests {
     #[test]
     fn one_hundred_round_trips_zero_loss() {
         let mut srv = InputServer::new(200, 100);
-        let mut cli = InputClient::new(MemorySink::default());
+        let mut cli = InputClient::new(MemorySink::default()).with_autonomous_leave(true);
         let mut lost = 0u32;
         for _ in 0..100 {
             assert_eq!(srv.local_move(200, 40), Some(ScreenEdge::Right));
@@ -730,5 +1146,232 @@ mod tests {
         }
         assert_eq!(sink.applied.len(), INPUT_SINK_TRACE_MAX);
         assert_eq!(sink.cursor, (INPUT_SINK_TRACE_MAX as i32 + 49, 0));
+    }
+
+    #[test]
+    fn screen_edge_from_str_and_opposite() {
+        assert_eq!(ScreenEdge::Left.opposite(), ScreenEdge::Right);
+        assert_eq!(ScreenEdge::Right.opposite(), ScreenEdge::Left);
+        assert_eq!(ScreenEdge::Top.opposite(), ScreenEdge::Bottom);
+        assert_eq!(ScreenEdge::Bottom.opposite(), ScreenEdge::Top);
+
+        assert_eq!("left".parse::<ScreenEdge>().unwrap(), ScreenEdge::Left);
+        assert_eq!("right".parse::<ScreenEdge>().unwrap(), ScreenEdge::Right);
+        assert_eq!("top".parse::<ScreenEdge>().unwrap(), ScreenEdge::Top);
+        assert_eq!("up".parse::<ScreenEdge>().unwrap(), ScreenEdge::Top);
+        assert_eq!("bottom".parse::<ScreenEdge>().unwrap(), ScreenEdge::Bottom);
+        assert_eq!("down".parse::<ScreenEdge>().unwrap(), ScreenEdge::Bottom);
+        assert!("invalid".parse::<ScreenEdge>().is_err());
+    }
+
+    #[test]
+    fn four_directional_edge_crossing_and_round_trip() {
+        let edges = [
+            (ScreenEdge::Right, (201, 50), (0, 500), (500, 500), (0, 500)),
+            (
+                ScreenEdge::Left,
+                (0, 50),
+                (SCREEN_UNITS, 500),
+                (500, 500),
+                (SCREEN_UNITS, 500),
+            ),
+            (
+                ScreenEdge::Top,
+                (100, 0),
+                (500, SCREEN_UNITS),
+                (500, 500),
+                (500, SCREEN_UNITS),
+            ),
+            (
+                ScreenEdge::Bottom,
+                (100, 101),
+                (500, 0),
+                (500, 500),
+                (500, 0),
+            ),
+        ];
+
+        for (edge, trigger_pos, expected_entry, interior_pos, leave_pos) in edges {
+            let mut srv = InputServer::new(201, 101);
+            srv.set_edge(edge);
+            assert_eq!(srv.edge(), edge);
+
+            // Cross into remote seat
+            assert_eq!(srv.local_move(trigger_pos.0, trigger_pos.1), Some(edge));
+            assert_eq!(srv.seat(), CursorSeat::Remote);
+            let batch = srv.drain();
+            assert_eq!(batch[0].kind, InputKind::Enter);
+            match batch[1].kind {
+                InputKind::Move { x, y } => {
+                    assert_eq!(
+                        (x, y),
+                        expected_entry,
+                        "edge {edge:?} expected entry {expected_entry:?}"
+                    );
+                }
+                other => panic!("expected Move, got {other:?}"),
+            }
+
+            // Client applies Enter and initial Move
+            let mut cli = InputClient::new(MemorySink::default()).with_autonomous_leave(true);
+            for ev in batch {
+                assert!(cli.apply(ev).unwrap().is_none());
+            }
+            assert!(cli.focused());
+
+            // Move to interior
+            let leave = cli
+                .apply(InputEvent::move_to(10, interior_pos.0, interior_pos.1))
+                .unwrap();
+            assert!(leave.is_none());
+            assert!(cli.focused());
+
+            // Move back to entry edge -> triggers Leave!
+            let leave = cli
+                .apply(InputEvent::move_to(11, leave_pos.0, leave_pos.1))
+                .unwrap();
+            assert!(
+                leave.is_some(),
+                "edge {edge:?} should trigger Leave on return"
+            );
+            assert!(!cli.focused());
+
+            // Remote reports leave -> Server returns to local seat
+            srv.on_remote_leave();
+            assert_eq!(srv.seat(), CursorSeat::Local);
+        }
+    }
+
+    #[test]
+    fn delta_bidirectional_return_and_force_local() {
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Top);
+
+        // Move to top edge and enter Remote
+        let edge = srv.local_move_delta(960, 0, 0, -10);
+        assert_eq!(edge, Some(ScreenEdge::Top));
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+        let events = srv.drain();
+        assert_eq!(events[0].kind, InputKind::Enter);
+        assert_eq!(
+            events[1].kind,
+            InputKind::Move {
+                x: 500,
+                y: SCREEN_UNITS
+            }
+        );
+
+        // Roam upwards in remote
+        let edge = srv.local_move_delta(960, 0, 0, -100);
+        assert_eq!(edge, None);
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+        let events = srv.drain();
+        match events[0].kind {
+            InputKind::Move { x: _, y } => assert!(y < SCREEN_UNITS),
+            _ => panic!("expected Move"),
+        }
+
+        // Pull back down towards local screen (dy > 0 and rem_y reaches bottom)
+        let edge = srv.local_move_delta(960, 0, 0, 300);
+        assert_eq!(edge, Some(ScreenEdge::Top));
+        assert_eq!(srv.seat(), CursorSeat::Local);
+        let events = srv.drain();
+        assert_eq!(events[0].kind, InputKind::Leave);
+        assert_eq!(srv.local_pos().1, 16);
+
+        // Test force_local
+        srv.local_move_delta(960, 0, 0, -10);
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+        srv.force_local();
+        assert_eq!(srv.seat(), CursorSeat::Local);
+        let events = srv.drain();
+        assert_eq!(events[events.len() - 1].kind, InputKind::Leave);
+    }
+
+    #[test]
+    fn mouse_drag_prevents_accidental_screen_switch() {
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Top);
+
+        // Move to top edge and enter Remote
+        let edge = srv.local_move_delta(960, 0, 0, -10);
+        assert_eq!(edge, Some(ScreenEdge::Top));
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+
+        // Roam upwards into remote interior
+        srv.local_move_delta(960, 0, 0, -100);
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+
+        // Hold left mouse button down (dragging)
+        srv.note_button(BTN_LEFT, true);
+        assert_eq!(srv.buttons_down(), BTN_LEFT);
+
+        // Pull mouse downwards towards return edge while dragging
+        // Normally this would trigger return to local, but during drag it must stay Remote!
+        let edge = srv.local_move_delta(960, 0, 0, 300);
+        assert_eq!(edge, None);
+        assert_eq!(
+            srv.seat(),
+            CursorSeat::Remote,
+            "seat must remain Remote while dragging"
+        );
+
+        // Release mouse button (drop / finish drag)
+        srv.note_button(BTN_LEFT, false);
+        assert_eq!(srv.buttons_down(), 0);
+
+        // Now pulling mouse down triggers return to local
+        let edge = srv.local_move_delta(960, 0, 0, 50);
+        assert_eq!(edge, Some(ScreenEdge::Top));
+        assert_eq!(srv.seat(), CursorSeat::Local);
+    }
+
+    #[test]
+    fn input_client_flushes_held_keys_and_buttons_on_leave_and_peer_gone() {
+        let mut cli = InputClient::new(MemorySink::default());
+        let _ = cli.apply(InputEvent::enter(1)).unwrap();
+        assert!(cli.focused());
+
+        // Press Left Button and two keys (e.g. Shift 0xA0 and letter A 0x41)
+        let _ = cli
+            .apply(InputEvent {
+                seq: 2,
+                kind: InputKind::Button {
+                    mask: BTN_LEFT,
+                    down: true,
+                },
+            })
+            .unwrap();
+        let _ = cli.apply(InputEvent::key(3, 0xA0, true, 0)).unwrap();
+        let _ = cli.apply(InputEvent::key(4, 0x41, true, 0)).unwrap();
+
+        assert_eq!(cli.sink().buttons, BTN_LEFT);
+        assert_eq!(cli.sink().keys_down.len(), 2);
+        assert!(cli.sink().keys_down.contains(&0xA0));
+        assert!(cli.sink().keys_down.contains(&0x41));
+
+        // When Leave is applied, all held buttons and keys must be automatically released!
+        let _ = cli.apply(InputEvent::leave(5)).unwrap();
+        assert!(!cli.focused());
+        assert_eq!(
+            cli.sink().buttons,
+            0,
+            "mouse buttons must be flushed on leave"
+        );
+        assert!(
+            cli.sink().keys_down.is_empty(),
+            "held keys must be flushed on leave"
+        );
+
+        // Test on_peer_gone also flushes
+        let _ = cli.apply(InputEvent::enter(6)).unwrap();
+        let _ = cli.apply(InputEvent::key(7, 0x11, true, 0)).unwrap(); // Ctrl
+        assert_eq!(cli.sink().keys_down.len(), 1);
+        cli.on_peer_gone();
+        assert!(!cli.focused());
+        assert!(
+            cli.sink().keys_down.is_empty(),
+            "held keys must be flushed on peer gone"
+        );
     }
 }

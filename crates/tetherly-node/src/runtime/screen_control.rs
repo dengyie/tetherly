@@ -718,13 +718,12 @@ impl Node {
     }
 
     /// Wake up squelch controller immediately (e.g. upon user input or client interaction) (ADR-089).
+    /// Uses try_lock to avoid stalling high-frequency input dispatch when the video engine is encoding.
     pub fn screen_force_wake_squelch(&self) {
         let now_us = self.shared.clock.unix_us();
-        self.shared
-            .screen_engine
-            .lock()
-            .expect("screen")
-            .force_wake_squelch(now_us);
+        if let Ok(mut engine) = self.shared.screen_engine.try_lock() {
+            engine.force_wake_squelch(now_us);
+        }
     }
 
     /// Report current forward error correction (FEC) protection metrics and state (v2.04 / ADR-090).

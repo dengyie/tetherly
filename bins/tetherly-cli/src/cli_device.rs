@@ -4,6 +4,7 @@
 use super::*;
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum InputCmd {
     /// Connect and start remote keyboard/mouse channel to a peer (legacy channel).
     Start {
@@ -102,6 +103,15 @@ pub(crate) enum InputCmd {
         /// Clear all group, tag, and type filters.
         #[arg(long)]
         clear_filters: bool,
+        /// Key remapping profile (e.g. mac_to_windows, windows_to_mac, auto, identity, none).
+        #[arg(long)]
+        keymap: Option<String>,
+        /// Screen roaming edge boundary for cursor crossing (left, right, top, bottom).
+        #[arg(long)]
+        edge: Option<String>,
+        /// Mouse vertical/horizontal wheel scroll speed multiplier (0.1..=20.0, default 1.0).
+        #[arg(long = "wheel-speed", alias = "scroll-speed")]
+        wheel_speed: Option<f64>,
         /// Output raw JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -161,6 +171,15 @@ pub(crate) enum InputPolicySubCmd {
         /// Clear all group, tag, and type filters.
         #[arg(long)]
         clear_filters: bool,
+        /// Key remapping profile (e.g. mac_to_windows, windows_to_mac, auto, identity, none).
+        #[arg(long)]
+        keymap: Option<String>,
+        /// Screen roaming edge boundary for cursor crossing (left, right, top, bottom).
+        #[arg(long)]
+        edge: Option<String>,
+        /// Mouse vertical/horizontal wheel scroll speed multiplier (0.1..=20.0, default 1.0).
+        #[arg(long = "wheel-speed", alias = "scroll-speed")]
+        wheel_speed: Option<f64>,
         #[arg(long)]
         json: bool,
         #[arg(long, default_value_t = 45716)]

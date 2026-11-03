@@ -424,7 +424,9 @@ struct Shared {
     pin: Mutex<Option<([u8; 8], u64)>>,
     events: broadcast::Sender<UiEvent>,
     sessions: AsyncMutex<HashMap<DeviceId, mpsc::Sender<InnerFrame>>>,
-    input_out: AsyncMutex<Option<mpsc::Sender<InnerFrame>>>,
+    input_out: Mutex<Option<mpsc::Sender<InnerFrame>>>,
+    input_reconnect_deadline: Mutex<Option<std::time::Instant>>,
+    input_buffered_frames: Mutex<VecDeque<InnerFrame>>,
     live: Mutex<HashMap<DeviceId, LivePeer>>,
     ping_waiters: Mutex<HashMap<DeviceId, Vec<oneshot::Sender<u64>>>>,
     pending_out: Mutex<HashMap<String, OutboundFile>>,
@@ -447,6 +449,9 @@ struct Shared {
     input_engine: Mutex<InputServer>,
     /// Active input peer currently bound or focused.
     input_peer: Mutex<Option<DeviceId>>,
+    /// Whether OS-level input capture hooks have been successfully armed.
+    input_capture_active: std::sync::atomic::AtomicBool,
+    pub(crate) input_hook_control: Mutex<Option<crate::platform::HookControl>>,
     /// Frames outbound to the screen controller on 45720. None until attached.
     screen_out: AsyncMutex<Option<mpsc::Sender<InnerFrame>>>,
     /// Active screen peer currently streaming or attached.
@@ -1358,11 +1363,11 @@ mod resume_scan_tests {
 }
 
 #[cfg(test)]
-mod clipboard_policy_tests {
+pub(crate) mod clipboard_policy_tests {
     use super::*;
     use tetherly_core::{ClipSyncMode, ManualClock};
 
-    fn temp_test_node(tag: &str) -> (Node, std::path::PathBuf) {
+    pub(crate) fn temp_test_node(tag: &str) -> (Node, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "tetherly-clip-test-{tag}-{}-{}",
             std::process::id(),

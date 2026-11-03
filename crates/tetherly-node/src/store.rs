@@ -1510,7 +1510,7 @@ pub fn save_topology_policy(dir: &Path, policy: &TopologyPolicy) -> Result<(), N
 }
 
 /// Security and admission governance policy for cross-device virtual peripheral / input tunneling.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InputTunnelPolicy {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1530,6 +1530,16 @@ pub struct InputTunnelPolicy {
     pub allowed_tags: Vec<String>,
     #[serde(default)]
     pub allowed_types: Vec<DeviceType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keymap: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<String>,
+    #[serde(default = "default_wheel_speed")]
+    pub wheel_speed: f64,
+}
+
+pub fn default_wheel_speed() -> f64 {
+    1.0
 }
 
 fn default_input_tunnel_idle_timeout() -> u32 {
@@ -1548,6 +1558,9 @@ impl Default for InputTunnelPolicy {
             allowed_groups: Vec::new(),
             allowed_tags: Vec::new(),
             allowed_types: Vec::new(),
+            keymap: None,
+            edge: None,
+            wheel_speed: default_wheel_speed(),
         }
     }
 }
@@ -1583,12 +1596,59 @@ impl InputTunnelPolicy {
     }
 
     pub fn sanitize(&mut self) {
-        self.idle_timeout_secs = self.idle_timeout_secs.clamp(10, 3600);
+        if self.idle_timeout_secs != 0 {
+            self.idle_timeout_secs = self.idle_timeout_secs.clamp(10, 86400);
+        }
         self.allowed_groups.retain(|g| !g.trim().is_empty());
         self.allowed_groups.truncate(32);
         self.allowed_tags.retain(|t| !t.trim().is_empty());
         self.allowed_tags.truncate(32);
         self.allowed_types.truncate(16);
+        if let Some(ref mut k) = self.keymap {
+            *k = k.trim().to_lowercase().replace('-', "_");
+            if k.is_empty() || k == "none" || k == "identity" || k == "off" {
+                self.keymap = None;
+            }
+        }
+        if let Some(ref mut e) = self.edge {
+            *e = e.trim().to_lowercase();
+            if e.is_empty() || e == "none" || e == "default" {
+                self.edge = None;
+            }
+        }
+    }
+
+    /// Resolve active roaming edge according to this policy (defaults to Right for backward compatibility).
+    pub fn resolved_edge(&self) -> tetherly_core::ScreenEdge {
+        if let Some(ref e) = self.edge {
+            if let Ok(edge) = e.parse::<tetherly_core::ScreenEdge>() {
+                return edge;
+            }
+        }
+        tetherly_core::ScreenEdge::Right
+    }
+
+    /// Resolve active keymap profile according to this policy and the local platform.
+    pub fn resolved_keymap_profile(&self) -> tetherly_core::KeyMapProfile {
+        match self.keymap.as_deref() {
+            Some("auto") => {
+                #[cfg(target_os = "macos")]
+                {
+                    tetherly_core::KeyMapProfile::mac_to_windows()
+                }
+                #[cfg(windows)]
+                {
+                    tetherly_core::KeyMapProfile::windows_to_mac()
+                }
+                #[cfg(not(any(windows, target_os = "macos")))]
+                {
+                    tetherly_core::KeyMapProfile::identity()
+                }
+            }
+            Some(name) => tetherly_core::KeyMapProfile::from_preset(name)
+                .unwrap_or_else(tetherly_core::KeyMapProfile::identity),
+            None => tetherly_core::KeyMapProfile::identity(),
+        }
     }
 }
 
@@ -3273,11 +3333,21 @@ mod tests {
             allowed_groups: vec!["studio".into()],
             allowed_tags: vec!["peripherals".into()],
             allowed_types: vec![DeviceType::Desktop, DeviceType::Laptop],
+            keymap: Some("mac_to_windows".into()),
+            edge: Some("top".into()),
+            wheel_speed: 1.0,
         };
         custom.sanitize();
         save_input_policy(&dir, &custom).unwrap();
         let loaded = load_input_policy(&dir);
         assert_eq!(loaded, custom);
+        assert_eq!(loaded.keymap, Some("mac_to_windows".into()));
+        assert_eq!(loaded.edge, Some("top".into()));
+        assert_eq!(loaded.resolved_edge(), tetherly_core::ScreenEdge::Top);
+        assert_eq!(
+            loaded.resolved_keymap_profile(),
+            tetherly_core::KeyMapProfile::mac_to_windows()
+        );
 
         // 3. Matching
         let prof_ok = PeerProfile {

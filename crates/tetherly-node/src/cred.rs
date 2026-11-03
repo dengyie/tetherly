@@ -86,6 +86,16 @@ pub fn load_or_create_identity(dir: &Path) -> Result<Identity, NodeStoreError> {
         if dir.join(REF_FILE).exists() {
             return Err(NodeStoreError::VaultUnavailable);
         }
+    } else if dir.join(REF_FILE).exists() && !dir.join(crate::store::IDENTITY_FILE).exists() {
+        // Safe fallback migration: if identity.ref exists from a previous run but identity.bin
+        // is missing, recover the secret from the vault once and write identity.bin (0600) so
+        // the device ID is preserved and the vault is not needed again.
+        if let Some(id) = load_from_vault(dir) {
+            let _ =
+                crate::store::atomic_write(&dir.join(crate::store::IDENTITY_FILE), &id.to_bytes());
+            let _ = std::fs::remove_file(dir.join(REF_FILE));
+            return Ok(id);
+        }
     }
     let id = crate::store::load_or_create_identity(dir)?;
     // Migrate: when a vault became available after a file-backed run, move the
@@ -136,12 +146,20 @@ fn load_from_vault(dir: &Path) -> Option<Identity> {
 /// `identity.bin` and never touches the operator's real vault. An explicit
 /// `TETHERLY_VAULT=1`/`0` overrides the decision (used by tests). The cheap
 /// env/dir checks run first so a non-installed dir never probes D-Bus.
-fn vault_enabled_for(dir: &Path) -> bool {
+fn vault_enabled_for(_dir: &Path) -> bool {
     match std::env::var("TETHERLY_VAULT").ok().as_deref() {
         Some("1") => {}
         Some("0") => return false,
         _ => {
-            if dir != crate::store::default_data_dir() {
+            // macOS Keychain generic passwords trigger modal authorization prompts
+            // whenever the binary is updated/recompiled or ad-hoc signed.
+            // Default to file storage (identity.bin with 0600 permissions) on macOS
+            // to eliminate login keychain password prompts, unless explicitly requested via TETHERLY_VAULT=1.
+            #[cfg(target_os = "macos")]
+            return false;
+
+            #[cfg(not(target_os = "macos"))]
+            if _dir != crate::store::default_data_dir() {
                 return false;
             }
         }
@@ -206,12 +224,19 @@ mod tests {
 
     #[test]
     fn installed_data_dir_opts_into_the_vault() {
-        // Guards the hygiene rule: only the installed data dir uses the vault,
+        // Vault is enabled for the installed dir only, not arbitrary temp dirs,
         // so integration tests never write to the operator's real vault.
         if !vault_available() {
             return;
         }
-        assert!(vault_enabled_for(&crate::store::default_data_dir()));
+        #[cfg(target_os = "macos")]
+        {
+            assert!(!vault_enabled_for(&crate::store::default_data_dir()));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(vault_enabled_for(&crate::store::default_data_dir()));
+        }
         assert!(!vault_enabled_for(&std::env::temp_dir().join("tetherly-x")));
     }
 

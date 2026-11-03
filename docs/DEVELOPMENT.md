@@ -7925,6 +7925,81 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
    - `crates/tetherly-node/src/uihttp.rs`：新增端点单测 `test_uihttp_screen_tile_motion_endpoints`——验证回环 REST 端点全生命周期、参数配置、状态查询遥测、复位清零及 Host 头 403 阻断；
    - `tests/phase5.rs`：新增端到端集成测试 `m5_50_screen_tile_motion_vector_pipeline`——验证屏幕串流建立、初始禁用态、访客端通过 REST 启用瓦片网格与运动估计（Tag 71: enabled=true, max_displacement=32, min_match_ratio=90）、宿主双向同步、局部瓦片垂直位移 10 px 触发运动矢量命中（motion_tiles_sent >= 1, bytes_saved > 0）、接收端零拷贝位移贴合与原子双缓冲呈现（Canvas Invariance 100% 逐位像素精确还原）、Tag 72 重置复位全链路；全工作区测试全绿，Workspace 版本发布为 `0.1.62`。
 
+## 76. 屏幕与运行时巨型单文件向领域功能子模块解耦重构 (v2.41 / ADR-127)
+
+1. **动机与设计准则（ADR-127）**：
+   - 清偿历史遗留的超大源文件债务：`crates/tetherly-core/src/screen.rs`（25,611 行）与 `crates/tetherly-node/src/runtime.rs`（33,423 行）；
+   - 在保持 100% 词法与行为严格等价（零行为变更）前提下，依据领域功能边界拆分为整洁的子模块树。
+
+## 77. CLI 与回环 HTTP 巨型单文件向领域功能子模块解耦重构 (v2.42 / ADR-128)
+
+1. **动机与设计准则（ADR-128）**：
+   - 清偿 `crates/tetherly-node/src/uihttp.rs`（15,655 行）与 `crates/tetherly-node/src/bin/tetherly.rs`（27,402 行）；
+   - 拆解为 `uihttp/` 独立子模块与 `bin/tetherly/` clap 命令树派发器。
+
+## 78. tetherly-cli 巨型单文件向 clap 派发表与命令子模块解耦重构 (v2.43 / ADR-129)
+
+1. **动机与设计准则（ADR-129）**：
+   - 清偿 `bins/tetherly-cli/src/main.rs`（27,903 行）；
+   - 拆解为 `cli_*` 命令行定义、68 条静态分发 arm 的派发表及 29 个 `cmd_*` 功能实现文件，单模块行数可维护。
+
+## 79. 回环 HTTP 客户端收敛与死参数清理加固 (v2.44 / ADR-130)
+
+1. **动机与设计准则（ADR-130）**：
+   - 抽取独立轻量 crate `tetherly-loopback`，统一回环客户端并在连接、请求、SSE 握手和空闲行上强制安全超时；
+   - 统一公共格式化/时间计算至 `tetherly-core::text`，清除死参数与无效 lint 抑制；新增 CLI 递归命令树全自动化守护测试。
+
+## 80. 屏幕串流选择性 NACK 掉队分片复活与参考画面单调性加固 (v2.45 / ADR-131)
+
+1. **动机与设计准则（ADR-131）**：
+   - 根因定位并修复选择性 NACK 掉队分片复活已交付帧缺陷：`ScreenAssembler` 引入 `delivered_seq` 水位线与前置帧序单调门；
+   - 消除陈旧关键帧回退参考画布的副作用，确保参考画面严格单调递增；调整测试用例同步等待保障高负载沙盒 100% 确定性全绿。
+
+## 81. macOS 原生键鼠捕获/注入体系与跨平台键位重映射引擎（对齐并替代 Deskflow）(v2.46 / ADR-132)
+
+1. **动机与设计准则（ADR-132）**：
+   - **完全替代 Deskflow / Barrier / Synergy 的跨端生产痛点**：在 macOS 笔记本与 Windows 工作站/挖矿主机并存的双桌面生产场景下，Tetherly Phase 3 虽支持网络加密通道与边缘穿越，但缺少 macOS 端原生低级捕获、原生事件注入与跨平台修饰键映射，无法满足生产级日常操控与无感漫游需求；
+   - **协议级纯净键位映射引擎 (`tetherly-core::keymap`)**：
+     - 标准化线协议：跨端输入统一规范为 Win32 Virtual-Key 键码；
+     - 修饰键抽象：`ModifierKey`（Control/Alt/Meta/Shift）与 `KeySide`；
+     - 内置策略：`mac_to_windows`（Cmd ↔ Ctrl, Ctrl ↔ Win, Option ↔ Alt）、`windows_to_mac`、`identity` 与 `auto`（根据宿主 OS 自适应），支持用户级自定义按键覆盖；
+   - **macOS 原生全局捕获与自注入防回环 (`crates/tetherly-node/src/platform.rs`)**：
+     - 接入 CoreGraphics `CGEventTap` 全局拦截；
+     - 自注入标记 `CGEventField::EventSourceUserData = TETHERLY_INJECTED_MAGIC` 规避事件反馈风暴；
+     - `HookControl` 协同光标漫游状态：远程漫游时本地键盘静默拦截（返回 NULL），本地驻留时键盘不抓取保障隐私；
+     - `kCGEventTapDisabledByTimeout` 毫秒级自愈重启与独立线程 RunLoop 隔离；
+   - **macOS 原生低级模拟注入 (`SystemInputSink`)**：
+     - 坐标线性映射与 `CGEventCreateMouseEvent` 鼠标位移投递；
+     - 左右中键与 `CGEventCreateScrollWheelEvent2` 滚轮合成；
+     - VK ↔ `CGKeyCode` 双向键码转换表与键盘击键合成；
+   - **策略持久化与全同构控制面**：
+     - `InputTunnelPolicy` 增设 `keymap: Option<String>`；
+     - REST 端点 `/api/input/policy` 与 CLI `input policy --keymap <profile>` 双端同构支持。
+
+2. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/keymap.rs`：6 项单测验证修饰键变换、双向侧别保持、覆盖规则及 Serde 序列化；
+   - `crates/tetherly-node/src/platform.rs`：单测 `mac_win_keycodes_bidirectional` 验证键码双向无损互转；
+   - `tests/phase3.rs`：端到端集成测试 `m3_4_input_keymap_remapping` 验证跨端 Command 键映射为 Control；全工作区测试、fmt 与 clippy -D warnings 零警告全绿。
+
+## 82. 跨端四向屏幕边缘漫游与 Deskflow 空间拓扑对齐 (v2.47 / ADR-133)
+
+1. **动机与设计准则（ADR-133）**：
+   - **对齐 Deskflow 屏幕相对关系摆放（左右/上下）**：打破此前 Tetherly 虚拟输入引擎硬编码的单一右侧跨越限制，支持上下排列（如笔记本在显示器正下方）与左右任意排列；
+   - **二维四向空间几何与对称坐标映射 (`tetherly-core::input`)**：
+     - `ScreenEdge` 支持 `Left`, `Right`, `Top`, `Bottom`，与 `DisplayEdge` 双向无损互转；
+     - 4 向对称跨越：出境按比例归一化为 `0..=1000` 逻辑刻度并对准远端对应边，返程精确复位本地像素；
+     - 零线协议（`TIN1`）二进制突变：`InputClient` 依据首个入站坐标自适应识别入口边界，内部移动后触发返回；
+   - **策略治理与拓扑图无缝联动**：
+     - `InputTunnelPolicy` 持久化 `edge: Option<String>`；
+     - 自适应梯度解析：显式策略 edge > 2D 拓扑邻居配置 > 默认 right；
+     - 控制面同构：CLI `input policy --edge <left|right|top|bottom>` 与 HTTP REST `/api/input/policy` 全量打通。
+
+2. **测试覆盖与验证**：
+   - `crates/tetherly-core/src/input.rs`：新增 `screen_edge_from_str_and_opposite` 与 `four_directional_edge_crossing_and_round_trip` 单测；
+   - `tests/phase3.rs`：新增 `m3_5_four_directional_edge_roaming`（顶部穿越验证）与 `m3_6_left_edge_roaming`（左侧穿越验证）；全工作区测试、格式化与 Clippy 零警告全绿通过。
+
+
+
 
 
 
