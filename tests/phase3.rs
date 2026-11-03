@@ -393,6 +393,30 @@ async fn m3_5_four_directional_edge_roaming() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
+    // Deskflow semantics: the entry x is the proportional map of the exit x
+    // (local x=50 on a 100px screen -> 50*1000/99 = 505), NOT a stale
+    // remembered position from the previous roaming session.
+    {
+        let sink = client.input_sink_snapshot();
+        assert_eq!(
+            sink.cursor.0, 505,
+            "entry x must be proportional to the local exit x"
+        );
+    }
+
+    // Roam into the target interior first (the entry parks at the shared
+    // edge and the interior hysteresis guards against accidental instant
+    // returns), then push back down through the shared edge. The local
+    // cursor must land at the inverse-proportional x (505*99/1000 = 49),
+    // parked 16px below the top edge — not at the parked hook position.
+    server.drive_input_delta(50, 30, 0, -40, 100, 50).unwrap();
+    assert_eq!(server.input_engine_seat(), CursorSeat::Remote);
+    server.drive_input_delta(50, 30, 0, 50, 100, 50).unwrap();
+    assert_eq!(server.input_engine_seat(), CursorSeat::Local);
+    let (lx, ly) = server.input_engine_local_pos();
+    assert_eq!(ly, 16);
+    assert_eq!(lx, 49, "return x = denorm(remote x)");
+
     server.shutdown();
     client.shutdown();
 }

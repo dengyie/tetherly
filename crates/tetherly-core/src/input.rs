@@ -465,11 +465,27 @@ impl InputServer {
             self.seat = CursorSeat::Local;
             self.remote_interior = false;
             self.push(InputKind::Leave);
+            // Park on the crossed edge, but map the free axis back from the
+            // last remote position so an emergency return lands at the
+            // screen location matching where the cursor was on the target
+            // (Deskflow semantics), not wherever the parked hook last saw.
             match self.last_crossed_edge {
-                ScreenEdge::Right => self.x = self.width.saturating_sub(17).max(0),
-                ScreenEdge::Left => self.x = 16.min(self.width.saturating_sub(1)),
-                ScreenEdge::Top => self.y = 16.min(self.height.saturating_sub(1)),
-                ScreenEdge::Bottom => self.y = self.height.saturating_sub(17).max(0),
+                ScreenEdge::Right => {
+                    self.x = self.width.saturating_sub(17).max(0);
+                    self.y = self.denorm_y(self.rem_y);
+                }
+                ScreenEdge::Left => {
+                    self.x = 16.min(self.width.saturating_sub(1));
+                    self.y = self.denorm_y(self.rem_y);
+                }
+                ScreenEdge::Top => {
+                    self.y = 16.min(self.height.saturating_sub(1));
+                    self.x = self.denorm_x(self.rem_x);
+                }
+                ScreenEdge::Bottom => {
+                    self.y = self.height.saturating_sub(17).max(0);
+                    self.x = self.denorm_x(self.rem_x);
+                }
             }
         }
     }
@@ -623,22 +639,29 @@ impl InputServer {
                 self.seat = CursorSeat::Local;
                 self.remote_interior = false;
                 self.push(InputKind::Leave);
+                // Deskflow OSXScreen semantics: the return parks on the
+                // crossed edge, and the FREE axis maps back from the last
+                // remote (0..=1000) position so the cursor re-enters this
+                // screen at the location matching where it left the target.
+                // Using the raw hook x/y here would land wherever the parked
+                // local cursor sat (screen center on macOS), losing the
+                // cross-screen position mapping in both directions.
                 match crossed_edge {
                     ScreenEdge::Top => {
-                        self.x = x_clamped;
+                        self.x = self.denorm_x(self.rem_x);
                         self.y = 16.min(self.height.saturating_sub(1));
                     }
                     ScreenEdge::Bottom => {
-                        self.x = x_clamped;
+                        self.x = self.denorm_x(self.rem_x);
                         self.y = self.height.saturating_sub(17).max(0);
                     }
                     ScreenEdge::Left => {
                         self.x = 16.min(self.width.saturating_sub(1));
-                        self.y = y_clamped;
+                        self.y = self.denorm_y(self.rem_y);
                     }
                     ScreenEdge::Right => {
                         self.x = self.width.saturating_sub(17).max(0);
-                        self.y = y_clamped;
+                        self.y = self.denorm_y(self.rem_y);
                     }
                 }
                 return Some(crossed_edge);
@@ -795,6 +818,20 @@ impl InputServer {
             return 0;
         }
         ((self.y as i64) * SCREEN_UNITS as i64 / (self.height as i64 - 1)) as i32
+    }
+
+    /// Inverse of `norm_x`: map a remote 0..=1000 position back onto this
+    /// screen's pixel axis. Used for the local landing position when the
+    /// cursor returns from the target screen.
+    fn denorm_x(&self, v: i32) -> i32 {
+        ((v.clamp(0, SCREEN_UNITS) as i64) * (self.width.max(1) as i64 - 1) / SCREEN_UNITS as i64)
+            as i32
+    }
+
+    /// Inverse of `norm_y`; see `denorm_x`.
+    fn denorm_y(&self, v: i32) -> i32 {
+        ((v.clamp(0, SCREEN_UNITS) as i64) * (self.height.max(1) as i64 - 1) / SCREEN_UNITS as i64)
+            as i32
     }
 }
 
@@ -1303,6 +1340,57 @@ mod tests {
         assert_eq!(srv.seat(), CursorSeat::Local);
         let events = srv.drain();
         assert_eq!(events[events.len() - 1].kind, InputKind::Leave);
+    }
+
+    #[test]
+    fn cross_screen_position_mapping_is_proportional_both_directions() {
+        let mut srv = InputServer::new(1000, 500);
+        srv.set_edge(ScreenEdge::Top);
+
+        // 1. Cross at local x=250 (25% of the local width): the entry Move
+        // on the target must carry the proportionally mapped x, not a stale
+        // remembered position.
+        assert_eq!(srv.local_move_delta(250, 0, 0, -10), Some(ScreenEdge::Top));
+        let events = srv.drain();
+        assert_eq!(events[0].kind, InputKind::Enter);
+        match events[1].kind {
+            InputKind::Move { x, y } => assert_eq!((x, y), (250, SCREEN_UNITS)),
+            other => panic!("expected Move, got {other:?}"),
+        }
+
+        // 2. Roam into the target interior (small steps; large dy would hit
+        // the return guard because the entry parks at the shared edge).
+        assert_eq!(srv.local_move_delta(250, 0, 0, -40), None);
+        let _ = srv.drain();
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+
+        // 3. Return home: the local landing x must be the inverse mapping of
+        // the last remote x (Deskflow OSXScreen semantics), parked 16px below
+        // the crossed edge — NOT the raw hook position (which sits wherever
+        // the parked local cursor was left).
+        assert_eq!(srv.local_move_delta(250, 0, 0, 50), Some(ScreenEdge::Top));
+        let _ = srv.drain();
+        assert_eq!(srv.seat(), CursorSeat::Local);
+        let (lx, ly) = srv.local_pos();
+        assert_eq!(ly, 16);
+        assert_eq!(lx, 250 * (1000 - 1) / 1000, "return x = denorm(rem_x)");
+
+        // 4. Cross again at a different position: the entry must use the
+        // FRESH exit position, never the previous session's remote pos.
+        assert_eq!(srv.local_move_delta(750, 0, 0, -10), Some(ScreenEdge::Top));
+        let events = srv.drain();
+        match events[1].kind {
+            InputKind::Move { x, y } => assert_eq!((x, y), (750, SCREEN_UNITS)),
+            other => panic!("expected Move, got {other:?}"),
+        }
+
+        // 5. Emergency force_local maps the landing position the same way.
+        assert_eq!(srv.local_move_delta(750, 0, 0, -40), None);
+        srv.force_local();
+        assert_eq!(srv.seat(), CursorSeat::Local);
+        let (lx, ly) = srv.local_pos();
+        assert_eq!(ly, 16);
+        assert_eq!(lx, 750 * (1000 - 1) / 1000, "force_local x = denorm(rem_x)");
     }
 
     #[test]

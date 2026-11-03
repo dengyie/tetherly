@@ -8040,3 +8040,20 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
    - smoke 脚本：受保护进程清单提为 `SMOKE_PROTECT_PROCS` 环境变量（默认空跳过），不再在公开仓库硬编码生产主机工作负载；macOS RSS 检查假通过清偿；wheel_speed 恢复值读取实时策略；`SessionId==2` 精确 jq 判定；
    - `launch_system.ps1`：SYSTEM+交互桌面威胁模型写入文件头注释，日志路径改 `$env:TEMP` 追加写；`package-macos-app.sh`：Info.plist 版本注入 workspace 版本，ad-hoc + identifier-only DR 安全权衡与"禁止分发"写入文件头，RESTART 模式先停进程再覆盖二进制（避免截断运行中签名镜像）；
    - `tests/phase3.rs`：新增未知 keymap 回退 identity 否定用例与 edge=Top 下右边缘不穿越否定用例。
+
+## 84. Deskflow 式跨屏双向等比例映射与 warp 回声根治 (v2.51 / v0.1.70)
+
+1. **生产缺陷定位（日志 + 代码取证）**：
+   - **进入位置固定**：Mac 越境后 macOS 中心 park warp 的回声 MouseMoved 事件被自家 CGEventTap 捕获并喂给漫游引擎，回声 delta（= warp 全量位移）将 `rem_x` 从等比例值拉到固定点（≈norm(中心x)），与从 Mac 何处滑出无关；回声与真实输入竞争即偶发"鼠标乱飘"；
+   - **返回落点无映射**：`returning_local` 直接采用 hook 当前 x（本地光标被 park 在屏幕中心），Windows 滑下回到 Mac 时不落在等比例位置；
+   - **受控端误判越境**：受控端引擎对本地/注入光标同样执行越境判定（Windows 端策略为空回退默认 Right），存在被本地物理输入误提升为 controller 的双控制器冲突面。
+
+2. **根因修复（对齐 Deskflow OSXScreen 语义）**：
+   - **warp 回声抑制**：`warp_mouse_position`（macOS CGWarpMouseCursorPosition / Windows SetCursorPos）记录 `PENDING_WARP` 目标位置；macOS tap 回调与 Windows WH_MOUSE_LL 回调在喂引擎前匹配（±2px）并丢弃首个回声事件，park/rescue/返回三类 warp 全覆盖；
+   - **双向等比例映射**：新增 `denorm_x/denorm_y`；`returning_local` 与 `force_local` 的自由轴落点改为 `denorm(rem)`——从 Windows 上任意位置滑下，Mac 光标落在等比例位置（反之亦然），越境进入的等比例映射（`norm_x`）保持不变；
+   - **受控端越境守卫**：`drive_input_delta` 在本机为活动隧道 Target 角色时跳过越境评估（controller 全权决定座位切换），消除双控制器竞争；
+   - 新增公开访问器 `input_engine_local_pos` 供 e2e 断言。
+
+3. **测试覆盖**：
+   - `crates/tetherly-core/src/input.rs`：新增 `cross_screen_position_mapping_is_proportional_both_directions`——断言进入 x 等比例、返回落点 denorm、二次越境使用新鲜位置、force_local 落点映射；
+   - `tests/phase3.rs`：m3_5 扩展断言进入 `sink.cursor.0 == 505`（本地 x=50/100 宽度）与返回落点 `(49, 16)`；全工作区测试、fmt、三目标 clippy 全绿。

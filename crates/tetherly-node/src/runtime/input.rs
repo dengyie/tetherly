@@ -1486,6 +1486,16 @@ impl Node {
         width: i32,
         height: i32,
     ) -> Result<Option<tetherly_core::ScreenEdge>, CoreError> {
+        // Deskflow alignment: while this node is the *target* of an active
+        // input tunnel, its engine must not evaluate boundary crossings. The
+        // cursor on this screen is driven by the remote controller, and a
+        // locally-observed position touching an edge (physical mouse, or a
+        // hook that does not filter injected moves) must never promote this
+        // node to controller — that race produced two controllers driving
+        // each other's cursors (cursor fights / drift).
+        if self.active_tunnel_role() == Some(tetherly_core::InputTunnelRole::Target) {
+            return Ok(None);
+        }
         // Guard: If the network input channel is not connected and we are not in grace period, never allow crossing into Remote seat.
         let in_grace = {
             let dl = self
@@ -1668,6 +1678,16 @@ impl Node {
             .map(|p| p.platform.clone())
     }
 
+    /// Role of this node in the currently active input tunnel, if any.
+    fn active_tunnel_role(&self) -> Option<tetherly_core::InputTunnelRole> {
+        self.shared
+            .active_input_tunnel
+            .lock()
+            .expect("active_input_tunnel")
+            .as_ref()
+            .map(|s| s.role)
+    }
+
     /// Push a physical mouse-button observation to the remote seat. No-op
     /// while the seat is local (the engine gates the same way).
     pub fn drive_input_button(&self, mask: u8, down: bool) -> Result<(), CoreError> {
@@ -1711,6 +1731,12 @@ impl Node {
 
     pub fn input_engine_seat(&self) -> CursorSeat {
         self.shared.input_engine.lock().expect("engine").seat()
+    }
+
+    /// The engine's parked local cursor position (pixels). Used by tests to
+    /// assert the Deskflow-style proportional return landing.
+    pub fn input_engine_local_pos(&self) -> (i32, i32) {
+        self.shared.input_engine.lock().expect("engine").local_pos()
     }
 
     pub(super) fn send_input_events(&self, events: Vec<InputEvent>) -> Result<(), CoreError> {
