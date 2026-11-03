@@ -16,8 +16,7 @@ use tetherly_core::{
 use tetherly_net::session::{accept_session, dial_session, ActiveSession};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tracing::warn;
-
+use tracing::{info, warn};
 /// Result of an edge crossing decision on cursor movement.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CursorCrossingDecision {
@@ -473,6 +472,25 @@ impl Node {
                 false,
             );
             return;
+        }
+
+        // Polite takeover: if this node is currently the CONTROLLER of another
+        // input tunnel, the incoming request hands control over to the peer.
+        // Demote ourselves first — otherwise both machines keep an open
+        // outbound channel and both cursors are driven simultaneously (two
+        // controllers fighting), which is unreachable-to-debug drift and is
+        // exactly what broke reverse (Windows -> Mac) control.
+        if self.active_tunnel_role() == Some(InputTunnelRole::Controller) {
+            info!(peer = %peer_str, "input tunnel takeover: releasing local controller session");
+            let _ = self.input_stop().await;
+            self.record_audit(
+                AuditCategory::Config,
+                AuditSeverity::Info,
+                "input_tunnel_takeover_released",
+                Some(peer_str.clone()),
+                "Released local controller session: peer took over as controller".to_string(),
+                true,
+            );
         }
 
         let (width, height) = {
@@ -1679,7 +1697,7 @@ impl Node {
     }
 
     /// Role of this node in the currently active input tunnel, if any.
-    fn active_tunnel_role(&self) -> Option<tetherly_core::InputTunnelRole> {
+    pub fn active_tunnel_role(&self) -> Option<tetherly_core::InputTunnelRole> {
         self.shared
             .active_input_tunnel
             .lock()
@@ -2046,7 +2064,7 @@ impl Node {
         let mut client = InputClient::new(DualInputSink::new(real));
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = stop.changed() => {
@@ -2119,6 +2137,19 @@ impl Node {
             *node.shared.input_sink.lock().expect("sink") = client.sink().memory().clone();
             node.emit(UiEvent::input_seat_changed("local", false, None));
         });
+
+        // Abort any previous inbound client task: stacked accepts (reconnect
+        // races, controller takeover) must never leave two clients applying
+        // frames against the same injection sink.
+        let mut guard = self
+            .shared
+            .input_client_task
+            .lock()
+            .expect("input_client_task");
+        if let Some(old) = guard.replace(task) {
+            old.abort();
+        }
+        drop(guard);
     }
 
     /// Comprehensive status report for input sharing.

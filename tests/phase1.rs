@@ -10400,11 +10400,19 @@ async fn action_predefined_quick_actions_local_execution_and_governance_via_loop
     assert_eq!(pol_updated["policy"]["max_timeout_secs"], 15);
     assert_eq!(pol_updated["policy"]["expose_action_list"], false);
 
-    // 12. File persistence check on peer data_dir (0o600 permissions)
+    // 12. File persistence check on peer data_dir (0o600 permissions).
+    // Persistence runs on a spawned task after the API reply, so poll with a
+    // deadline instead of asserting immediately (CI runners are slow).
     let actions_path = g2.path().join("actions.json");
     let policy_path = g2.path().join("action_policy.json");
-    assert!(actions_path.exists(), "actions.json must be persisted");
-    assert!(policy_path.exists(), "action_policy.json must be persisted");
+    let start = std::time::Instant::now();
+    while !actions_path.exists() || !policy_path.exists() {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "actions.json/action_policy.json must be persisted within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

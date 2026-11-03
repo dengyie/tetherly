@@ -614,6 +614,7 @@ impl Node {
             cursor_edge_resistance_acc: Mutex::new(HashMap::new()),
             input_policy: Mutex::new(initial_input_policy),
             active_input_tunnel: Mutex::new(None),
+            input_client_task: Mutex::new(None),
             virtual_display_policy: Mutex::new(initial_virtual_display_policy),
             active_virtual_display: Mutex::new(None),
             audio_routing_policy: Mutex::new(initial_audio_routing_policy),

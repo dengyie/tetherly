@@ -866,6 +866,10 @@ struct Shared {
     cursor_edge_resistance_acc: Mutex<HashMap<DisplayEdge, u32>>,
     input_policy: Mutex<InputTunnelPolicy>,
     active_input_tunnel: Mutex<Option<ActiveInputTunnelSession>>,
+    /// Handle of the running inbound input-client task. A newer accept
+    /// aborts the previous one so stacked inbound sessions can never leave
+    /// two clients racing on `input_sink` / the real injection sink.
+    input_client_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     virtual_display_policy: Mutex<VirtualDisplayPolicy>,
     active_virtual_display: Mutex<Option<ActiveVirtualDisplaySession>>,
     audio_routing_policy: Mutex<AudioRoutingPolicy>,
@@ -2198,8 +2202,19 @@ mod locator_policy_tests {
         };
         node.receive_action_trigger(&peer, trig1);
 
-        // Allow async task to complete subprocess execution
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Subprocess execution runs on a spawned task: poll instead of a
+        // bare sleep so slow CI runners (Windows) cannot race the assert.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if node.action_history().count >= 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "action execution never recorded its history entry"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         let hist = node.action_history();
         assert_eq!(hist.count, 1);
