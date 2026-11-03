@@ -3409,17 +3409,15 @@ mod tests {
             tetherly_core::KeyMapProfile::identity(),
             "auto with a same-OS peer must be identity"
         );
-        let cross = if cfg!(target_os = "macos") {
-            "windows"
-        } else {
-            "macos"
-        };
+        // Cross-OS pairing remaps from the local host's direction; on Linux
+        // (no input hooks) the cross-OS resolution is also identity.
+        #[cfg(target_os = "macos")]
+        let (cross, expected_cross) = ("windows", tetherly_core::KeyMapProfile::mac_to_windows());
+        #[cfg(windows)]
+        let (cross, expected_cross) = ("macos", tetherly_core::KeyMapProfile::windows_to_mac());
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let (cross, expected_cross) = ("macos", tetherly_core::KeyMapProfile::identity());
         let resolved_cross = auto_pol.resolved_keymap_profile(Some(cross));
-        let expected_cross = if cfg!(target_os = "macos") {
-            tetherly_core::KeyMapProfile::mac_to_windows()
-        } else {
-            tetherly_core::KeyMapProfile::windows_to_mac()
-        };
         assert_eq!(resolved_cross, expected_cross);
         // Unknown peer keeps the historic local-OS heuristic.
         let _ = auto_pol.resolved_keymap_profile(None);
