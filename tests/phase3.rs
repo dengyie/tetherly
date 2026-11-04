@@ -663,9 +663,15 @@ async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
     pol.edge = Some("bottom".into());
     client.set_input_policy(pol).unwrap();
 
-    // 3. Deskflow switch-at-the-edge: a sustained physical push through the
-    //    target's own edge (touch events arriving within the 100ms gap
+    // 3. Deskflow switch-at-the-edge: the mouse first proves real use by
+    //    traversing the arming range (300px), then a sustained push through
+    //    the target's own edge (touch events arriving within the gap
     //    window for >= delay_ms) fires the polite takeover — no UI click.
+    for i in 0..13 {
+        client
+            .drive_input_delta(10 + i * 20, 40, 0, 0, 100, 50)
+            .unwrap();
+    }
     for _ in 0..8 {
         client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
         tokio::time::sleep(Duration::from_millis(30)).await;
@@ -782,9 +788,31 @@ async fn m3_11_auto_reverse_gates_block_accidental_flips() {
         "two isolated bumps with a 300ms gap must not take over"
     );
 
-    // The sustained push still works after the gates: a dense event stream
-    // (20ms apart, well under TOUCH_GAP_MS) held past delay_ms fires the
+    // Gate: distance arming. After an idle gap (2s) the accumulator is
+    // reset — a freshly plugged-in mouse that only reaches the edge with a
+    // few px of jitter can never start the takeover, no matter how long it
+    // pushes.
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    for _ in 0..10 {
+        client.drive_input_delta(50, 49, 0, 3, 100, 50).unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        client.active_tunnel_role(),
+        Some(tetherly_core::InputTunnelRole::Target),
+        "a mouse that never traversed the arming range must not take over"
+    );
+
+    // The sustained push still works once the mouse has proven real use: a
+    // warmup traversal crosses the arming range, then a dense event stream
+    // (30ms apart, well under TOUCH_GAP_MS) held past delay_ms fires the
     // takeover.
+    for i in 0..16 {
+        client
+            .drive_input_delta(10 + i * 12, 40, 0, 0, 100, 50)
+            .unwrap();
+    }
     for _ in 0..12 {
         client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
         tokio::time::sleep(Duration::from_millis(30)).await;

@@ -8094,3 +8094,10 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **会话回收**：watcher 对"peer 已离线且 5s 未被接受"的乐观 Controller 会话执行 release；
 - **删除**：Suspend 死协议三件套、`InputServer::local_move`（含 8 处测试语义对齐）；热路径 policy clone 移除（引擎 edge 直读）；
 - 全工作区测试、fmt、三目标 clippy 全绿。
+
+## 89. 距离武装：新插入鼠标的接管资格 (v2.55 / v0.1.74)
+
+- `drive_input_delta` Target 路径累计物理光标坐标差（曼哈顿距离）；静止 >2s 重置并吸收插拔坐标跳变；
+- `maybe_auto_reverse` 新增距离闸门：累计 <300px 时任何推边清除驻留状态（时间维度与空间维度不可互攒）；
+- `Shared` 新增 `reverse_move_accum_px` / `reverse_last_move_ms` / `reverse_last_pos`；Windows hook 无逐事件 delta，统一坐标差口径；
+- m3_10/m3_11 增加热身段与距离负例（"未越过武装范围的鼠标推边不翻转"）；全工作区测试、fmt、三目标 clippy 全绿。

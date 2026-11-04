@@ -1550,6 +1550,36 @@ impl Node {
         // configured edge requests a polite takeover, making the reverse
         // direction click-free. Everything else stays suppressed.
         if self.active_tunnel_role() == Some(tetherly_core::InputTunnelRole::Target) {
+            // Distance arming: a mouse that just got plugged into this
+            // machine (or is being bumped on the desk) must traverse a real
+            // range before its edge-push may take over. Accumulate
+            // coordinate deltas since the last idle gap; a stale gap resets
+            // the accumulator AND skips this event's jump (the first event
+            // after plug-in can carry an arbitrary position).
+            let now_ms = self.shared.clock.unix_ms();
+            let last_ms = self.shared.reverse_last_move_ms.load(Ordering::SeqCst);
+            let idle_reset =
+                last_ms != 0 && now_ms.saturating_sub(last_ms) > Self::REVERSE_RESET_AFTER_MS;
+            let mut accum = if idle_reset {
+                0
+            } else {
+                self.shared.reverse_move_accum_px.load(Ordering::SeqCst)
+            };
+            {
+                let mut last_pos = self.shared.reverse_last_pos.lock().expect("reverse_pos");
+                if !idle_reset {
+                    if let Some((lx, ly)) = *last_pos {
+                        accum += (x - lx).abs() as i64 + (y - ly).abs() as i64;
+                    }
+                }
+                *last_pos = Some((x, y));
+            }
+            self.shared
+                .reverse_move_accum_px
+                .store(accum, Ordering::SeqCst);
+            self.shared
+                .reverse_last_move_ms
+                .store(now_ms, Ordering::SeqCst);
             self.maybe_auto_reverse(x, y, dx, dy, width, height);
             return Ok(None);
         }
@@ -1745,6 +1775,15 @@ impl Node {
             .map(|s| s.role)
     }
 
+    /// Physical movement a mouse must accumulate (px, Manhattan over
+    /// coordinate deltas) after its last idle gap before an edge-push may
+    /// take over. ~1/4 of a 1080p screen height: real use from anywhere on
+    /// the screen crosses it, plug-in jitter (a few px) never does.
+    const REVERSE_ARM_MIN_PX: i64 = 300;
+    /// Idle gap that resets the movement accumulator (and absorbs the
+    /// plug-in/unplug position jump).
+    const REVERSE_RESET_AFTER_MS: u64 = 2000;
+
     /// Deskflow "switch at the shared edge" for the controlled side.
     ///
     /// While this node is the Target, a sustained physical push through its
@@ -1772,6 +1811,10 @@ impl Node {
         if self.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target) {
             return;
         }
+        // Distance gate input: the accumulator was just updated by the caller
+        // (idle-reset + coordinate deltas; see drive_input_delta).
+        let distance_armed =
+            self.shared.reverse_move_accum_px.load(Ordering::SeqCst) >= Self::REVERSE_ARM_MIN_PX;
         let edge = {
             let server = self.shared.input_engine.lock().expect("engine");
             server.edge()
@@ -1810,6 +1853,14 @@ impl Node {
             tetherly_core::ScreenEdge::Top => target_y <= 0,
             tetherly_core::ScreenEdge::Left => target_x <= 0,
         };
+
+        // Distance gate: an un-armed mouse (freshly plugged in, or bumped
+        // without real traversal) can never start the takeover dwell.
+        if !distance_armed {
+            *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
+            *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
+            return;
+        }
 
         // Gap-continuity dwell: touch events must keep arriving within
         // TOUCH_GAP_MS of each other for `delay_ms` before the push counts
