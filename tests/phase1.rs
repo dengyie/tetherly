@@ -9244,13 +9244,25 @@ async fn resource_and_url_handoff_pipeline_and_governance_via_loopback_api() {
     assert!(clr_rep["ok"].as_bool().unwrap_or(false));
     assert!(clr_rep["cleared"].as_u64().unwrap_or(0) >= 1);
 
-    // After clear, total entries in inbox is 0
-    let (_, b_empty) = tetherly_node::loopback_get(peer_ui, "/api/handoff/inbox")
-        .await
-        .unwrap();
-    let empty_rep: serde_json::Value = serde_json::from_slice(&b_empty).unwrap();
-    assert_eq!(empty_rep["total"], 0);
-    assert!(empty_rep["entries"].as_array().unwrap().is_empty());
+    // After clear, total entries in inbox is 0. Clearing runs asynchronously
+    // on the peer node, so poll instead of asserting immediately (CI race).
+    let wait_empty = std::time::Instant::now();
+    loop {
+        let (_, b_empty) = tetherly_node::loopback_get(peer_ui, "/api/handoff/inbox")
+            .await
+            .unwrap();
+        let empty_rep: serde_json::Value = serde_json::from_slice(&b_empty).unwrap();
+        if empty_rep["total"].as_u64() == Some(0)
+            && empty_rep["entries"].as_array().map(|a| a.is_empty()) == Some(true)
+        {
+            break;
+        }
+        assert!(
+            wait_empty.elapsed() < std::time::Duration::from_secs(5),
+            "handoff inbox never drained after clear: {empty_rep}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 
     // 10. Atomic Persistence & POSIX 0o600 Permissions Check
     let peer_pol_file = g2.path().join("handoff_policy.json");

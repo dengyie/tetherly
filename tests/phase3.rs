@@ -566,7 +566,15 @@ async fn m3_9_reverse_control_takeover_flips_roles_cleanly() {
         server.active_tunnel_role(),
         Some(tetherly_core::InputTunnelRole::Controller)
     );
-    assert!(server.input_channel_open_sync());
+    // role=Controller is recorded when the request is SENT; the data channel
+    // opens on the peer's accepted response — poll instead of asserting.
+    let start = std::time::Instant::now();
+    while !server.input_channel_open_sync() {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("controller never opened its outbound channel");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // 2. Reverse control: client (Windows) attaches. The polite-takeover
     //    path must demote the old controller FIRST, leaving exactly one
