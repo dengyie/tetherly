@@ -1011,12 +1011,22 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
     let (host, peer, _g1, g2) = pair_phone_desktop().await;
     let ui_port = host.spawn_ui().await.unwrap();
 
-    // 1. Prepare a test file
+    // 1. Prepare a test file large enough that cancellation deterministically
+    // lands mid-flight: a 10-chunk file finishes in sub-millisecond time on a
+    // loopback connection, racing the cancel HTTP request (flaked on
+    // loaded ubuntu runners). 160 MiB takes ~1-2 s to stream, giving a wide
+    // cancel window. Written in blocks (sparse-friendly) — never held in memory.
     let (send_dir, _g_send) = temp_dir("cancel-send");
     let file_path = send_dir.join("cancellable.bin");
-    let total_size = 10 * tetherly_core::FILE_CHUNK + 1024;
-    let file_content: Vec<u8> = vec![0x42; total_size];
-    std::fs::write(&file_path, &file_content).unwrap();
+    let total_size = 160 * 1024 * 1024;
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&file_path).unwrap();
+        let block: Vec<u8> = vec![0x42; 1024 * 1024];
+        for _ in 0..(total_size / block.len() as u64) {
+            f.write_all(&block).unwrap();
+        }
+    }
 
     // 2. Initiate send via loopback API
     let payload = serde_json::json!({
