@@ -682,7 +682,16 @@ async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
     }
 
     // 4. Single-outbound-channel invariant still holds after the flip.
-    assert!(client.input_channel_open_sync());
+    // The client records role=Controller when SENDING the takeover request;
+    // its data channel opens once the peer's accepted response lands, so
+    // poll for it (slow CI runners race the immediate assert).
+    let start = std::time::Instant::now();
+    while !client.input_channel_open_sync() {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("new controller never opened its outbound channel");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(!server.input_channel_open_sync());
 
     // 5. The new direction actually drives the old controller's screen:
