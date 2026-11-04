@@ -17,6 +17,9 @@ use tetherly_net::session::{accept_session, dial_session, ActiveSession};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+/// Monotonic generation counter for outbound input channels.
+static INPUT_CHANNEL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Result of an edge crossing decision on cursor movement.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CursorCrossingDecision {
@@ -874,7 +877,6 @@ impl Node {
             requested_edge: edge,
             entry_x: x,
             entry_y: y,
-            is_resume: None,
             timestamp_ms: now_ms,
         };
 
@@ -929,10 +931,14 @@ impl Node {
             .set_edge(effective_edge);
 
         let _ = self.ensure_input_capture();
-        if !self.input_channel_open().await {
-            if let Err(e) = self.open_input(&peer_id).await {
-                warn!(%peer_id, %e, "input channel open during tunnel attach failed");
-            }
+        // Never reuse an existing outbound channel across an attach: on a
+        // takeover the demoted peer tears its side of the old connection
+        // down (input_stop), so the previous channel is dying by design —
+        // reusing it would leave this controller with a dead channel and no
+        // rebuild. Drop it and dial fresh.
+        *self.shared.input_out.lock().expect("input_out") = None;
+        if let Err(e) = self.open_input(&peer_id).await {
+            warn!(%peer_id, %e, "input channel open during tunnel attach failed");
         }
 
         Ok(InputTunnelDecisionReport {
@@ -1207,6 +1213,34 @@ impl Node {
 
     /// Open the resume-only input channel. Pairing on 45719 is refused.
     pub async fn open_input(&self, peer: &DeviceId) -> Result<(), tetherly_net::NetError> {
+        // Single dialer: concurrent callers (link watcher tick, takeover
+        // attach, UI) must not open competing connections to the same peer —
+        // the loser's session becomes a zombie and its eventual teardown
+        // flips `input_out`/seat events while the winner is serving. The
+        // caller that lost the race returns Ok: the in-flight dial will
+        // establish the channel, and a later tick re-checks.
+        // A healthy channel to a peer makes another dial pure churn: the
+        // new session would orphan the old one. Callers that need a REBUILD
+        // clear `input_out` first (see input_tunnel_attach).
+        if self.input_channel_open_sync() {
+            return Ok(());
+        }
+        if self
+            .shared
+            .input_dialing
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Ok(());
+        }
+        struct ResetDialing<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for ResetDialing<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _reset_dialing = ResetDialing(&self.shared.input_dialing);
+
         let addr = {
             let live = self.shared.live.lock().expect("live");
             let p = live
@@ -1504,13 +1538,6 @@ impl Node {
         width: i32,
         height: i32,
     ) -> Result<Option<tetherly_core::ScreenEdge>, CoreError> {
-        // Track physical activity: the auto-reverse trigger only fires for a
-        // mouse that is actually being used right now (remote-driven frames
-        // never pass through here — they arrive via InputClient directly).
-        self.shared
-            .last_local_input_ms
-            .store(self.shared.clock.unix_ms(), Ordering::SeqCst);
-
         // Deskflow alignment: while this node is the *target* of an active
         // input tunnel, its engine must not roam. The cursor on this screen
         // is driven by the remote controller, and a locally-observed position
@@ -1723,15 +1750,21 @@ impl Node {
     /// While this node is the Target, a sustained physical push through its
     /// own configured edge takes over as controller automatically — the
     /// reverse direction (e.g. Windows -> Mac) needs no UI click. Accidental
-    /// flips are fenced by four gates:
+    /// flips are fenced by three gates:
     ///
-    /// 1. the node's own `edge` policy must be configured (a direction
-    ///    must be declared before it can be triggered);
-    /// 2. the physical mouse must have moved within the last 2s (a parked
-    ///    mouse resting at the edge can never steal control);
-    /// 3. the push must persist for the topology `delay_ms` dwell
-    ///    (default 100ms) — a graze does not flip;
-    /// 4. a 3s cooldown between automatic flips prevents storm flip-flops.
+    /// 1. the node's own `edge` policy must be configured (a direction must
+    ///    be declared before it can be triggered); the engine already mirrors
+    ///    this edge (`set_edge` on attach and policy change), so it is read
+    ///    lock-only here — no policy clone on the per-move hot path;
+    /// 2. gap-continuity dwell: boundary-touching events must keep arriving
+    ///    (gap <= 150ms) for the topology `delay_ms` (default 100ms). A
+    ///    sustained push emits a dense event stream and fires; two isolated
+    ///    bumps any timespan apart never do, because the second bump's gap
+    ///    since the previous touch event resets the dwell. (A plain
+    ///    elapsed-since-first-touch check would flip on "bump + bump 500ms
+    ///    later", and a "recent input within 2s" gate is tautological — the
+    ///    triggering event itself is recent input.)
+    /// 3. a 3s cooldown between automatic flips prevents storm flip-flops.
     ///
     /// The flip itself reuses the polite-takeover attach path, so the
     /// global single-outbound-channel invariant still holds.
@@ -1739,30 +1772,11 @@ impl Node {
         if self.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target) {
             return;
         }
-        let policy = self.input_policy();
-        let Some(edge_str) = policy.edge.clone() else {
-            return;
+        let edge = {
+            let server = self.shared.input_engine.lock().expect("engine");
+            server.edge()
         };
-        let Ok(edge) = edge_str.parse::<tetherly_core::ScreenEdge>() else {
-            return;
-        };
-        let Some(peer) = self
-            .shared
-            .active_input_tunnel
-            .lock()
-            .expect("active_input_tunnel")
-            .as_ref()
-            .map(|s| s.peer_id.clone())
-        else {
-            return;
-        };
-
         let now_ms = self.shared.clock.unix_ms();
-        let last_input = self.shared.last_local_input_ms.load(Ordering::SeqCst);
-        if last_input == 0 || now_ms.saturating_sub(last_input) > 2000 {
-            *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
-            return;
-        }
         let last_flip = self.shared.last_auto_reverse_ms.load(Ordering::SeqCst);
         if last_flip != 0 && now_ms.saturating_sub(last_flip) < 3000 {
             return;
@@ -1786,6 +1800,7 @@ impl Node {
             tetherly_core::ScreenEdge::Left if x <= 2 || (x <= 8 && dx < 0) => (0, y),
             _ => {
                 *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
+                *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
                 return;
             }
         };
@@ -1795,33 +1810,71 @@ impl Node {
             tetherly_core::ScreenEdge::Top => target_y <= 0,
             tetherly_core::ScreenEdge::Left => target_x <= 0,
         };
-        if !crossed {
-            *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
-            return;
-        }
 
-        let delay_ms = {
-            let layout = self.shared.topology_layout.lock().expect("topology_layout");
-            layout.config.delay_ms.max(50) as u64
-        };
-        let armed = {
+        // Gap-continuity dwell: touch events must keep arriving within
+        // TOUCH_GAP_MS of each other for `delay_ms` before the push counts
+        // as sustained. Real mice report at 8-16ms intervals, so 150ms
+        // means the pushing hand actually paused; two isolated accidental
+        // bumps (typically >=300ms apart) reset the dwell instead. Leaving
+        // the edge for longer than TOUCH_GAP_MS disarms the dwell.
+        const TOUCH_GAP_MS: u64 = 150;
+        let now = std::time::Instant::now();
+        let fired = if !crossed {
+            // Left the edge: the push is over, reset the dwell.
+            *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
+            *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
+            false
+        } else {
+            let delay_ms = {
+                let layout = self.shared.topology_layout.lock().expect("topology_layout");
+                layout.config.delay_ms.max(50) as u64
+            };
             let mut arm = self.shared.reverse_arm_since.lock().expect("reverse_arm");
-            match *arm {
-                Some(since) => since.elapsed().as_millis() as u64 >= delay_ms,
-                None => {
-                    *arm = Some(std::time::Instant::now());
+            let mut last_tick = self.shared.reverse_last_tick.lock().expect("reverse_tick");
+            match (*arm, *last_tick) {
+                (Some(started), Some(prev_tick)) => {
+                    let sustained = now.duration_since(started).as_millis() as u64 >= delay_ms;
+                    let contiguous =
+                        now.duration_since(prev_tick).as_millis() as u64 <= TOUCH_GAP_MS;
+                    if sustained && contiguous {
+                        *arm = None;
+                        *last_tick = None;
+                        true
+                    } else if contiguous {
+                        // Still pushing: keep accumulating towards delay_ms.
+                        false
+                    } else {
+                        // Gap too long: a fresh push, not a continuation.
+                        *arm = Some(now);
+                        *last_tick = Some(now);
+                        false
+                    }
+                }
+                _ => {
+                    // First touch of a new push.
+                    *arm = Some(now);
+                    *last_tick = Some(now);
                     false
                 }
             }
         };
-        if !armed {
+        if !fired {
             return;
         }
-        *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
         self.shared
             .last_auto_reverse_ms
             .store(now_ms, Ordering::SeqCst);
 
+        let Some(peer) = self
+            .shared
+            .active_input_tunnel
+            .lock()
+            .expect("active_input_tunnel")
+            .as_ref()
+            .map(|s| s.peer_id.clone())
+        else {
+            return;
+        };
         info!(peer = %peer, %edge, "auto-reverse: sustained edge push; requesting polite takeover");
         self.record_audit(
             AuditCategory::Config,
@@ -1850,6 +1903,7 @@ impl Node {
             warn!("auto-reverse: no runtime handle available; cannot take over");
         }
     }
+
     /// Push a physical mouse-button observation to the remote seat. No-op
     /// while the seat is local (the engine gates the same way).
     pub fn drive_input_button(&self, mask: u8, down: bool) -> Result<(), CoreError> {
@@ -1905,7 +1959,13 @@ impl Node {
         if events.is_empty() {
             return Ok(());
         }
-        let tx_opt = self.shared.input_out.lock().expect("input_out").clone();
+        let tx_opt = self
+            .shared
+            .input_out
+            .lock()
+            .expect("input_out")
+            .as_ref()
+            .map(|(_, tx)| tx.clone());
         if let Some(tx) = tx_opt {
             let mut disconnected = false;
             for ev in &events {
@@ -2022,7 +2082,8 @@ impl Node {
             tracing::info!(peer = %peer_id, buf_count, "input session resumed; flushed buffered frames");
         }
 
-        *self.shared.input_out.lock().expect("input_out") = Some(tx);
+        let channel_gen = INPUT_CHANNEL_SEQ.fetch_add(1, Ordering::SeqCst);
+        *self.shared.input_out.lock().expect("input_out") = Some((channel_gen, tx));
         *self.shared.input_peer.lock().expect("input_peer") = Some(peer_id.clone());
         let current_seat = self.input_seat_str();
         self.emit(UiEvent::input_seat_changed(
@@ -2089,7 +2150,41 @@ impl Node {
                     }
                 }
             }
-            *node.shared.input_out.lock().expect("input_out") = None;
+            {
+                let mut out = node.shared.input_out.lock().expect("input_out");
+                if let Some((gen, _)) = out.as_ref() {
+                    if *gen == channel_gen {
+                        *out = None;
+                    }
+                }
+            }
+
+            // Supersession guard: this teardown must only run while this
+            // task's session is still the current one (same peer, same
+            // Controller role). On a takeover the peer demotes us (role ->
+            // Target) and rebuilds the channel — the dying task must NOT
+            // touch seat/engine/grace state. This exact race shipped a bug
+            // where the demoted side's dying task flipped the freshly
+            // rebuilt session back to Local.
+            let still_current = {
+                let role_now = node
+                    .shared
+                    .active_input_tunnel
+                    .lock()
+                    .expect("active_input_tunnel")
+                    .as_ref()
+                    .map(|s| s.role)
+                    // Bare input channels (no tunnel session) keep the legacy
+                    // controller-side cleanup; only an actual demotion
+                    // (role = Target) suppresses it.
+                    .unwrap_or(InputTunnelRole::Controller);
+                let peer_now = node.shared.input_peer.lock().expect("input_peer").clone();
+                role_now == InputTunnelRole::Controller
+                    && peer_now.as_ref().map(|d| d.to_string()).as_deref() == Some(peer_id.as_str())
+            };
+            if !still_current {
+                return;
+            }
 
             let is_remote =
                 node.shared.input_engine.lock().expect("engine").seat() == CursorSeat::Remote;
@@ -2275,11 +2370,32 @@ impl Node {
                     }
                 }
             }
-            client.on_peer_gone();
-            *node.shared.input_peer.lock().expect("input_peer") = None;
-            *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
-            *node.shared.input_sink.lock().expect("sink") = client.sink().memory().clone();
-            node.emit(UiEvent::input_seat_changed("local", false, None));
+            // Supersession guard (mirror of the server-side one): after a
+            // takeover this node may already be the Controller with a live
+            // roaming engine — the dying target-era session must not force
+            // it back to Local.
+            let still_current = match node
+                .shared
+                .active_input_tunnel
+                .lock()
+                .expect("active_input_tunnel")
+                .as_ref()
+            {
+                // A tunnel session exists: only the still-current target-era
+                // session may run the teardown. After a takeover this node is
+                // the Controller with a live roaming engine — the dying
+                // target-era session must not force it back to Local.
+                Some(s) => s.role == InputTunnelRole::Target && s.peer_id == peer_id.as_str(),
+                // Bare input channel (no tunnel session): legacy behavior.
+                None => true,
+            };
+            if still_current {
+                client.on_peer_gone();
+                *node.shared.input_peer.lock().expect("input_peer") = None;
+                *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                *node.shared.input_sink.lock().expect("sink") = client.sink().memory().clone();
+                node.emit(UiEvent::input_seat_changed("local", false, None));
+            }
         });
 
         // Abort any previous inbound client task: stacked accepts (reconnect

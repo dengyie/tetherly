@@ -115,7 +115,7 @@ pub use input::{
 };
 pub use input_tunnel::{
     InputTunnelHeartbeatFrame, InputTunnelReleaseFrame, InputTunnelRequestFrame,
-    InputTunnelRespFrame, InputTunnelRole, InputTunnelSuspendFrame, InputTunnelValidator,
+    InputTunnelRespFrame, InputTunnelRole, InputTunnelValidator,
 };
 pub use insertion::{plan as insertion_plan, InsertionDecision, InsertionPlan};
 pub use keymap::{

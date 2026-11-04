@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::CoreError;
 use crate::frame::{
     InnerFrame, TYPE_INPUT_TUNNEL_HEARTBEAT, TYPE_INPUT_TUNNEL_RELEASE, TYPE_INPUT_TUNNEL_REQUEST,
-    TYPE_INPUT_TUNNEL_RESP, TYPE_INPUT_TUNNEL_SUSPEND,
+    TYPE_INPUT_TUNNEL_RESP,
 };
 use crate::topology::DisplayEdge;
 
@@ -37,8 +37,6 @@ pub struct InputTunnelRequestFrame {
     pub entry_x: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry_y: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_resume: Option<bool>,
     #[serde(default)]
     pub timestamp_ms: u64,
 }
@@ -175,34 +173,6 @@ impl InputTunnelHeartbeatFrame {
     }
 }
 
-/// Suspension notice sent before daemon restart/update to hold seat and focus.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InputTunnelSuspendFrame {
-    pub session_id: String,
-    pub grace_period_ms: u64,
-    pub reason: String,
-    #[serde(default)]
-    pub timestamp_ms: u64,
-}
-
-impl InputTunnelSuspendFrame {
-    pub fn to_frame(&self) -> Result<InnerFrame, CoreError> {
-        let payload = serde_json::to_vec(self).map_err(|_| CoreError::PayloadTooLarge)?;
-        InnerFrame::new(TYPE_INPUT_TUNNEL_SUSPEND, payload)
-    }
-
-    pub fn from_payload(payload: &[u8]) -> Result<Self, CoreError> {
-        serde_json::from_slice(payload).map_err(|_| CoreError::TruncatedFrame)
-    }
-
-    pub fn from_frame(frame: &InnerFrame) -> Result<Self, CoreError> {
-        if frame.ty != TYPE_INPUT_TUNNEL_SUSPEND {
-            return Err(CoreError::TruncatedFrame);
-        }
-        Self::from_payload(&frame.payload)
-    }
-}
-
 /// Security validation and coordinate clamping engine for input tunneling.
 pub struct InputTunnelValidator;
 
@@ -256,7 +226,6 @@ mod tests {
             requested_edge: Some(DisplayEdge::Right),
             entry_x: Some(0),
             entry_y: Some(540),
-            is_resume: Some(true),
             timestamp_ms: 1700000000000,
         };
         let frame = req.to_frame().expect("serializes");
@@ -295,20 +264,6 @@ mod tests {
         assert_eq!(frame.ty, TYPE_INPUT_TUNNEL_RELEASE);
         let decoded = InputTunnelReleaseFrame::from_frame(&frame).expect("deserializes");
         assert_eq!(rel, decoded);
-    }
-
-    #[test]
-    fn test_input_tunnel_suspend_frame_codec() {
-        let sus = InputTunnelSuspendFrame {
-            session_id: "tun-test-123".into(),
-            grace_period_ms: 2500,
-            reason: "daemon_restarting".into(),
-            timestamp_ms: 1700000000000,
-        };
-        let frame = sus.to_frame().expect("serializes");
-        assert_eq!(frame.ty, TYPE_INPUT_TUNNEL_SUSPEND);
-        let decoded = InputTunnelSuspendFrame::from_frame(&frame).expect("deserializes");
-        assert_eq!(sus, decoded);
     }
 
     #[test]

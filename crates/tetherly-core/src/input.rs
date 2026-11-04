@@ -551,28 +551,6 @@ impl InputServer {
         self.pending.push_back(InputEvent { seq, kind });
     }
 
-    /// Pixel-space local motion. Crossing the configured edge parks the cursor
-    /// locally and emits Enter + Move in screen units for the client.
-    pub fn local_move(&mut self, x: i32, y: i32) -> Option<ScreenEdge> {
-        let prev_seat = self.seat;
-        let edge = self.local_move_delta(x, y, 0, 0);
-        if prev_seat == CursorSeat::Remote && self.seat == CursorSeat::Remote {
-            self.rem_x = self.norm_x();
-            self.rem_y = self.norm_y();
-            if let Some(last) = self.pending.back_mut() {
-                if let InputKind::Move {
-                    ref mut x,
-                    ref mut y,
-                } = last.kind
-                {
-                    *x = self.rem_x;
-                    *y = self.rem_y;
-                }
-            }
-        }
-        edge
-    }
-
     /// Motion with relative displacement deltas. When the seat is remote,
     /// deltas drive smooth free roaming on the target screen without cursor locking.
     pub fn local_move_delta(&mut self, x: i32, y: i32, dx: i32, dy: i32) -> Option<ScreenEdge> {
@@ -1081,9 +1059,9 @@ mod tests {
     #[test]
     fn edge_enter_and_keyboard_follow() {
         let mut srv = InputServer::new(100, 50);
-        assert_eq!(srv.local_move(99, 10), None);
+        assert_eq!(srv.local_move_delta(99, 10, 0, 0), None);
         assert_eq!(srv.seat(), CursorSeat::Local);
-        assert_eq!(srv.local_move(100, 10), Some(ScreenEdge::Right));
+        assert_eq!(srv.local_move_delta(100, 10, 0, 0), Some(ScreenEdge::Right));
         assert_eq!(srv.seat(), CursorSeat::Remote);
         srv.local_key(0x1E, true, 0);
         srv.local_key(0x1E, false, 0);
@@ -1114,7 +1092,7 @@ mod tests {
         let mut cli = InputClient::new(MemorySink::default()).with_autonomous_leave(true);
         let mut lost = 0u32;
         for _ in 0..100 {
-            assert_eq!(srv.local_move(200, 40), Some(ScreenEdge::Right));
+            assert_eq!(srv.local_move_delta(200, 40, 0, 0), Some(ScreenEdge::Right));
             let batch = srv.drain();
             let mut seq = batch.last().map(|e| e.seq).unwrap_or(0);
             for ev in batch {
@@ -1138,7 +1116,7 @@ mod tests {
             if srv.seat() != CursorSeat::Local {
                 lost += 1;
             }
-            srv.local_move(100, 40);
+            srv.local_move_delta(100, 40, 0, 0);
         }
         assert_eq!(lost, 0);
         assert_eq!(cli.dropped(), 0);
@@ -1148,7 +1126,7 @@ mod tests {
     #[test]
     fn peer_gone_returns_cursor_home() {
         let mut srv = InputServer::new(80, 40);
-        assert_eq!(srv.local_move(80, 5), Some(ScreenEdge::Right));
+        assert_eq!(srv.local_move_delta(80, 5, 0, 0), Some(ScreenEdge::Right));
         assert_eq!(srv.seat(), CursorSeat::Remote);
         srv.on_peer_gone();
         assert_eq!(srv.seat(), CursorSeat::Local);
@@ -1175,12 +1153,16 @@ mod tests {
     #[test]
     fn remote_motion_is_forwarded_after_edge() {
         let mut srv = InputServer::new(100, 50);
-        assert_eq!(srv.local_move(100, 25), Some(ScreenEdge::Right));
+        assert_eq!(srv.local_move_delta(100, 25, 0, 0), Some(ScreenEdge::Right));
         assert_eq!(srv.seat(), CursorSeat::Remote);
         let cross = srv.drain();
         assert!(matches!(cross[0].kind, InputKind::Enter));
 
-        srv.local_move(80, 25);
+        // Delta-driven motion is the ONLY remote-seat input path in
+        // production (hooks report deltas): the deleted absolute-coordinate
+        // wrapper used to overwrite rem here, a semantic that never existed
+        // on the wire path.
+        srv.local_move_delta(80, 25, 5, 0);
         let out = srv.drain();
         assert_eq!(out.len(), 1, "remote motion must be forwarded");
         match out[0].kind {
@@ -1251,7 +1233,10 @@ mod tests {
             assert_eq!(srv.edge(), edge);
 
             // Cross into remote seat
-            assert_eq!(srv.local_move(trigger_pos.0, trigger_pos.1), Some(edge));
+            assert_eq!(
+                srv.local_move_delta(trigger_pos.0, trigger_pos.1, 0, 0),
+                Some(edge)
+            );
             assert_eq!(srv.seat(), CursorSeat::Remote);
             let batch = srv.drain();
             assert_eq!(batch[0].kind, InputKind::Enter);
