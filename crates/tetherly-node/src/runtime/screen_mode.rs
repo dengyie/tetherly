@@ -8,7 +8,7 @@ use tetherly_core::{ControlMsg, CoreError};
 impl Node {
     /// Report dynamic Screen Region-of-Interest (ROI) status and dimensions (v2.21 / ADR-107).
     pub fn screen_roi_report(&self) -> tetherly_core::ScreenRoiReport {
-        let roi = *self.shared.screen_roi.read().unwrap();
+        let roi = *self.shared.screen_roi.read().expect("lock");
         let updates = self.shared.screen_roi_updates.load(Ordering::Relaxed);
         let (src_w, src_h) = {
             let last = self.shared.screen_last_frame.lock().expect("last_frame");
@@ -62,11 +62,11 @@ impl Node {
             w,
             h,
             zoom_percent: zoom_percent
-                .unwrap_or_else(|| self.shared.screen_roi.read().unwrap().zoom_percent),
+                .unwrap_or_else(|| self.shared.screen_roi.read().expect("lock").zoom_percent),
         };
         new_roi.sanitize(src_w, src_h);
         {
-            let mut roi = self.shared.screen_roi.write().unwrap();
+            let mut roi = self.shared.screen_roi.write().expect("lock");
             *roi = new_roi;
             self.shared
                 .screen_roi_updates
@@ -92,7 +92,7 @@ impl Node {
     /// Reset Region-of-Interest (ROI) back to full screen capture (v2.21 / ADR-107).
     pub async fn screen_reset_roi(&self) -> Result<tetherly_core::ScreenRoiReport, CoreError> {
         {
-            let mut roi = self.shared.screen_roi.write().unwrap();
+            let mut roi = self.shared.screen_roi.write().expect("lock");
             roi.active = false;
             roi.zoom_percent = 100;
             self.shared
@@ -111,7 +111,7 @@ impl Node {
     ) -> Result<tetherly_core::ScreenRoiReport, CoreError> {
         let clamped = zoom_percent.clamp(50, 800);
         {
-            let mut roi = self.shared.screen_roi.write().unwrap();
+            let mut roi = self.shared.screen_roi.write().expect("lock");
             roi.zoom_percent = clamped;
             self.shared
                 .screen_roi_updates
@@ -126,7 +126,7 @@ impl Node {
 
     /// Report screen adaptive color depth & quantization configuration (v2.22 / ADR-108).
     pub fn screen_color_report(&self) -> tetherly_core::ScreenColorReport {
-        let cfg = *self.shared.screen_color_mode.read().unwrap();
+        let cfg = *self.shared.screen_color_mode.read().expect("lock");
         let updates = self.shared.screen_color_updates.load(Ordering::Relaxed);
         tetherly_core::ScreenColorReport {
             ok: true,
@@ -147,7 +147,7 @@ impl Node {
             .unwrap_or(tetherly_core::SCREEN_COLOR_DEFAULT_THRESHOLD)
             .clamp(1, 254);
         {
-            let mut cfg = self.shared.screen_color_mode.write().unwrap();
+            let mut cfg = self.shared.screen_color_mode.write().expect("lock");
             cfg.mode = mode;
             cfg.threshold = th;
             self.shared
@@ -167,7 +167,7 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenColorReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_color_mode.write().unwrap();
+            let mut cfg = self.shared.screen_color_mode.write().expect("lock");
             *cfg = tetherly_core::ScreenColorConfig::default();
             self.shared
                 .screen_color_updates
@@ -180,7 +180,7 @@ impl Node {
 
     /// Report screen differential delta patch configuration and telemetry (v2.23 / ADR-109).
     pub fn screen_delta_report(&self) -> tetherly_core::ScreenDeltaReport {
-        let cfg = *self.shared.screen_delta_config.read().unwrap();
+        let cfg = *self.shared.screen_delta_config.read().expect("lock");
         tetherly_core::ScreenDeltaReport {
             ok: true,
             enabled: cfg.enabled,
@@ -212,7 +212,7 @@ impl Node {
             .unwrap_or(tetherly_core::SCREEN_DELTA_DEFAULT_KEYFRAME_INTERVAL)
             .clamp(1, 600);
         {
-            let mut cfg = self.shared.screen_delta_config.write().unwrap();
+            let mut cfg = self.shared.screen_delta_config.write().expect("lock");
             cfg.enabled = enabled;
             cfg.keyframe_interval = interval;
             self.shared.screen_delta_counter.store(0, Ordering::Relaxed);
@@ -230,7 +230,7 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenDeltaReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_delta_config.write().unwrap();
+            let mut cfg = self.shared.screen_delta_config.write().expect("lock");
             *cfg = tetherly_core::ScreenDeltaConfig::default();
             self.shared.screen_delta_counter.store(0, Ordering::Relaxed);
         }
@@ -241,7 +241,11 @@ impl Node {
 
     /// Report screen objective visual quality metric configuration and evaluation telemetry (v2.24 / ADR-110).
     pub fn screen_quality_metric_report(&self) -> tetherly_core::ScreenQualityMetricReport {
-        let cfg = *self.shared.screen_quality_metric_config.read().unwrap();
+        let cfg = *self
+            .shared
+            .screen_quality_metric_config
+            .read()
+            .expect("lock");
         let state = self
             .shared
             .screen_quality_metric_state
@@ -285,7 +289,11 @@ impl Node {
             .unwrap_or(tetherly_core::SCREEN_METRIC_DEFAULT_SAMPLE_INTERVAL)
             .clamp(1, 120);
         {
-            let mut cfg = self.shared.screen_quality_metric_config.write().unwrap();
+            let mut cfg = self
+                .shared
+                .screen_quality_metric_config
+                .write()
+                .expect("lock");
             cfg.enabled = enabled;
             cfg.sample_interval = interval;
             self.shared
@@ -305,14 +313,22 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenQualityMetricReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_quality_metric_config.write().unwrap();
+            let mut cfg = self
+                .shared
+                .screen_quality_metric_config
+                .write()
+                .expect("lock");
             *cfg = tetherly_core::ScreenQualityMetricConfig::default();
             self.shared
                 .screen_metric_counter
                 .store(0, Ordering::Relaxed);
-            let mut state = self.shared.screen_quality_metric_state.write().unwrap();
+            let mut state = self
+                .shared
+                .screen_quality_metric_state
+                .write()
+                .expect("lock");
             *state = ScreenQualityMetricState::default();
-            *self.shared.screen_metric_ref_frame.write().unwrap() = None;
+            *self.shared.screen_metric_ref_frame.write().expect("lock") = None;
         }
         let msg = ControlMsg::ResetScreenQualityMetricMode;
         let _ = self.send_screen_control(msg).await;
@@ -337,14 +353,18 @@ impl Node {
         target_ssim_pct: Option<u8>,
     ) -> Result<tetherly_core::ScreenQoeReport, CoreError> {
         let (psnr, ssim) = {
-            let mut qoe = self.shared.screen_qoe_controller.write().unwrap();
+            let mut qoe = self.shared.screen_qoe_controller.write().expect("lock");
             let cfg = tetherly_core::ScreenQoeConfig::new(mode, target_psnr_db, target_ssim_pct);
             qoe.set_config(cfg);
             (cfg.target_psnr_db, cfg.target_ssim_pct)
         };
 
         if mode.is_active() {
-            let mut metric_cfg = self.shared.screen_quality_metric_config.write().unwrap();
+            let mut metric_cfg = self
+                .shared
+                .screen_quality_metric_config
+                .write()
+                .expect("lock");
             metric_cfg.enabled = true;
         }
 
@@ -360,7 +380,7 @@ impl Node {
     /// Reset screen autonomous closed-loop QoE adaptation back to default disabled state (v2.25 / ADR-111).
     pub async fn screen_reset_qoe_mode(&self) -> Result<tetherly_core::ScreenQoeReport, CoreError> {
         {
-            let mut qoe = self.shared.screen_qoe_controller.write().unwrap();
+            let mut qoe = self.shared.screen_qoe_controller.write().expect("lock");
             qoe.reset();
         }
         let msg = ControlMsg::ResetScreenQoeMode;
@@ -370,7 +390,7 @@ impl Node {
 
     /// Report screen streaming Progressive Intra-Refresh (PIR) configuration and status (v2.26 / ADR-112).
     pub fn screen_pir_report(&self) -> tetherly_core::ScreenPirReport {
-        let cfg = *self.shared.screen_pir_config.read().unwrap();
+        let cfg = *self.shared.screen_pir_config.read().expect("lock");
         tetherly_core::ScreenPirReport {
             ok: true,
             mode: cfg.mode.as_str().to_string(),
@@ -407,7 +427,7 @@ impl Node {
                 tetherly_core::SCREEN_PIR_MAX_BANDS,
             );
         {
-            let mut cfg = self.shared.screen_pir_config.write().unwrap();
+            let mut cfg = self.shared.screen_pir_config.write().expect("lock");
             cfg.mode = mode;
             cfg.bands = b;
             if mode == tetherly_core::ScreenPirMode::OnDemand {
@@ -438,7 +458,7 @@ impl Node {
     /// Reset screen streaming Progressive Intra-Refresh (PIR) back to default disabled state (v2.26 / ADR-112).
     pub async fn screen_reset_pir_mode(&self) -> Result<tetherly_core::ScreenPirReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_pir_config.write().unwrap();
+            let mut cfg = self.shared.screen_pir_config.write().expect("lock");
             *cfg = tetherly_core::ScreenPirConfig::default();
             self.shared
                 .screen_pir_active_sweep
@@ -454,7 +474,7 @@ impl Node {
 
     /// Report screen streaming Long-Term Reference (LTR) configuration and metrics (v2.27 / ADR-113).
     pub fn screen_ltr_report(&self) -> tetherly_core::ScreenLtrReport {
-        let cfg = *self.shared.screen_ltr_config.read().unwrap();
+        let cfg = *self.shared.screen_ltr_config.read().expect("lock");
         tetherly_core::ScreenLtrReport {
             ok: true,
             enabled: cfg.enabled,
@@ -495,12 +515,16 @@ impl Node {
                 tetherly_core::SCREEN_LTR_MAX_INTERVAL,
             );
         {
-            let mut cfg = self.shared.screen_ltr_config.write().unwrap();
+            let mut cfg = self.shared.screen_ltr_config.write().expect("lock");
             cfg.enabled = enabled;
             cfg.auto_interval = interval;
             if !enabled {
-                *self.shared.screen_sender_ltr_canvas.write().unwrap() = None;
-                *self.shared.screen_receiver_ltr_canvas.write().unwrap() = None;
+                *self.shared.screen_sender_ltr_canvas.write().expect("lock") = None;
+                *self
+                    .shared
+                    .screen_receiver_ltr_canvas
+                    .write()
+                    .expect("lock") = None;
                 self.shared
                     .screen_ltr_current_seq
                     .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -526,10 +550,20 @@ impl Node {
                 .read()
                 .unwrap()
                 .clone()
-                .or_else(|| self.shared.screen_sender_ltr_canvas.read().unwrap().clone());
+                .or_else(|| {
+                    self.shared
+                        .screen_sender_ltr_canvas
+                        .read()
+                        .expect("lock")
+                        .clone()
+                });
             if let Some(canvas) = maybe_canvas {
-                *self.shared.screen_sender_ltr_canvas.write().unwrap() = Some(canvas.clone());
-                *self.shared.screen_receiver_ltr_canvas.write().unwrap() = Some(canvas.clone());
+                *self.shared.screen_sender_ltr_canvas.write().expect("lock") = Some(canvas.clone());
+                *self
+                    .shared
+                    .screen_receiver_ltr_canvas
+                    .write()
+                    .expect("lock") = Some(canvas.clone());
                 self.shared
                     .screen_ltr_current_seq
                     .store(canvas.seq, std::sync::atomic::Ordering::Relaxed);
@@ -576,10 +610,14 @@ impl Node {
     /// Reset screen streaming LTR mode back to default disabled state and purge golden canvases (v2.27 / ADR-113).
     pub async fn screen_reset_ltr_mode(&self) -> Result<tetherly_core::ScreenLtrReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_ltr_config.write().unwrap();
+            let mut cfg = self.shared.screen_ltr_config.write().expect("lock");
             *cfg = tetherly_core::ScreenLtrConfig::default();
-            *self.shared.screen_sender_ltr_canvas.write().unwrap() = None;
-            *self.shared.screen_receiver_ltr_canvas.write().unwrap() = None;
+            *self.shared.screen_sender_ltr_canvas.write().expect("lock") = None;
+            *self
+                .shared
+                .screen_receiver_ltr_canvas
+                .write()
+                .expect("lock") = None;
             self.shared
                 .screen_ltr_current_seq
                 .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -594,7 +632,7 @@ impl Node {
 
     /// Report screen streaming 2-Layer Temporal Scalability (SVC-T) status and telemetry (v2.28 / ADR-114).
     pub fn screen_svc_report(&self) -> tetherly_core::ScreenSvcReport {
-        let cfg = *self.shared.screen_svc_config.read().unwrap();
+        let cfg = *self.shared.screen_svc_config.read().expect("lock");
         tetherly_core::ScreenSvcReport {
             ok: true,
             enabled: cfg.is_enabled(),
@@ -626,12 +664,12 @@ impl Node {
         drop_t1: bool,
     ) -> Result<tetherly_core::ScreenSvcReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_svc_config.write().unwrap();
+            let mut cfg = self.shared.screen_svc_config.write().expect("lock");
             cfg.mode = mode;
             cfg.drop_t1 = drop_t1;
             if !cfg.is_enabled() {
-                *self.shared.screen_sender_t0_canvas.write().unwrap() = None;
-                *self.shared.screen_receiver_t0_canvas.write().unwrap() = None;
+                *self.shared.screen_sender_t0_canvas.write().expect("lock") = None;
+                *self.shared.screen_receiver_t0_canvas.write().expect("lock") = None;
             }
         }
         let msg = ControlMsg::SetScreenSvcMode {
@@ -647,17 +685,17 @@ impl Node {
         &self,
         drop_t1: bool,
     ) -> Result<tetherly_core::ScreenSvcReport, CoreError> {
-        let mode = self.shared.screen_svc_config.read().unwrap().mode;
+        let mode = self.shared.screen_svc_config.read().expect("lock").mode;
         self.screen_set_svc_mode(mode, drop_t1).await
     }
 
     /// Reset screen streaming SVC mode to default disabled state and reset metrics (v2.28 / ADR-114).
     pub async fn screen_reset_svc_mode(&self) -> Result<tetherly_core::ScreenSvcReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_svc_config.write().unwrap();
+            let mut cfg = self.shared.screen_svc_config.write().expect("lock");
             *cfg = tetherly_core::ScreenSvcConfig::default();
-            *self.shared.screen_sender_t0_canvas.write().unwrap() = None;
-            *self.shared.screen_receiver_t0_canvas.write().unwrap() = None;
+            *self.shared.screen_sender_t0_canvas.write().expect("lock") = None;
+            *self.shared.screen_receiver_t0_canvas.write().expect("lock") = None;
             self.shared
                 .screen_svc_t0_frames_sent
                 .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -678,7 +716,7 @@ impl Node {
 
     /// Report screen streaming 2D motion vector estimation and scroll acceleration status (v2.29 / ADR-115).
     pub fn screen_motion_report(&self) -> tetherly_core::ScreenMotionReport {
-        let cfg = *self.shared.screen_motion_config.read().unwrap();
+        let cfg = *self.shared.screen_motion_config.read().expect("lock");
         tetherly_core::ScreenMotionReport {
             ok: true,
             enabled: cfg.enabled,
@@ -709,11 +747,15 @@ impl Node {
             tetherly_core::SCREEN_MOTION_MAX_DISPLACEMENT,
         );
         {
-            let mut cfg = self.shared.screen_motion_config.write().unwrap();
+            let mut cfg = self.shared.screen_motion_config.write().expect("lock");
             cfg.enabled = enabled;
             cfg.max_displacement = max_displacement;
             if !enabled {
-                *self.shared.screen_sender_motion_canvas.write().unwrap() = None;
+                *self
+                    .shared
+                    .screen_sender_motion_canvas
+                    .write()
+                    .expect("lock") = None;
             }
         }
         let msg = ControlMsg::SetScreenMotionMode {
@@ -729,9 +771,13 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenMotionReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_motion_config.write().unwrap();
+            let mut cfg = self.shared.screen_motion_config.write().expect("lock");
             *cfg = tetherly_core::ScreenMotionConfig::default();
-            *self.shared.screen_sender_motion_canvas.write().unwrap() = None;
+            *self
+                .shared
+                .screen_sender_motion_canvas
+                .write()
+                .expect("lock") = None;
             self.shared
                 .screen_motion_frames_sent
                 .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -749,7 +795,7 @@ impl Node {
 
     /// Report screen streaming spatial tile-grid decomposition status (v2.30 / ADR-116).
     pub fn screen_tile_report(&self) -> tetherly_core::ScreenTileReport {
-        let cfg = *self.shared.screen_tile_config.read().unwrap();
+        let cfg = *self.shared.screen_tile_config.read().expect("lock");
         tetherly_core::ScreenTileReport {
             ok: true,
             enabled: cfg.enabled,
@@ -788,11 +834,11 @@ impl Node {
             )
         };
         {
-            let mut cfg = self.shared.screen_tile_config.write().unwrap();
+            let mut cfg = self.shared.screen_tile_config.write().expect("lock");
             cfg.enabled = enabled;
             cfg.tile_size = tile_size;
             if !enabled {
-                *self.shared.screen_sender_tile_canvas.write().unwrap() = None;
+                *self.shared.screen_sender_tile_canvas.write().expect("lock") = None;
             }
         }
         let msg = ControlMsg::SetScreenTileMode { enabled, tile_size };
@@ -805,9 +851,9 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenTileReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_tile_config.write().unwrap();
+            let mut cfg = self.shared.screen_tile_config.write().expect("lock");
             *cfg = tetherly_core::ScreenTileConfig::default();
-            *self.shared.screen_sender_tile_canvas.write().unwrap() = None;
+            *self.shared.screen_sender_tile_canvas.write().expect("lock") = None;
             self.shared
                 .screen_tile_frames_sent
                 .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -828,7 +874,7 @@ impl Node {
 
     /// Report screen streaming tile dictionary cache status (v2.31 / ADR-117).
     pub fn screen_tile_cache_report(&self) -> tetherly_core::ScreenTileCacheReport {
-        let cfg = *self.shared.screen_tile_cache_config.read().unwrap();
+        let cfg = *self.shared.screen_tile_cache_config.read().expect("lock");
         let hits = self
             .shared
             .screen_tile_cache_hits
@@ -879,7 +925,7 @@ impl Node {
             )
         };
         {
-            let mut cfg = self.shared.screen_tile_cache_config.write().unwrap();
+            let mut cfg = self.shared.screen_tile_cache_config.write().expect("lock");
             cfg.enabled = enabled;
             cfg.max_entries = max_entries;
             self.shared
@@ -906,10 +952,14 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenTileCacheReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_tile_cache_config.write().unwrap();
+            let mut cfg = self.shared.screen_tile_cache_config.write().expect("lock");
             *cfg = tetherly_core::ScreenTileCacheConfig::default();
-            self.shared.screen_tile_cache_dict.lock().unwrap().clear();
-            let mut rx = self.shared.screen_tile_cache_receiver.lock().unwrap();
+            self.shared
+                .screen_tile_cache_dict
+                .lock()
+                .expect("lock")
+                .clear();
+            let mut rx = self.shared.screen_tile_cache_receiver.lock().expect("lock");
             rx.clear();
             rx.resize(
                 tetherly_core::SCREEN_TILE_CACHE_DEFAULT_MAX_ENTRIES as usize,
@@ -932,7 +982,7 @@ impl Node {
 
     /// Report screen streaming foveated focus awareness and spatial priority scheduling status (v2.32 / ADR-118).
     pub fn screen_focus_report(&self) -> tetherly_core::ScreenFocusReport {
-        let cfg = *self.shared.screen_focus_config.read().unwrap();
+        let cfg = *self.shared.screen_focus_config.read().expect("lock");
         tetherly_core::ScreenFocusReport {
             ok: true,
             enabled: cfg.enabled,
@@ -972,7 +1022,7 @@ impl Node {
         box_coords: Option<(u16, u16, u16, u16)>,
     ) -> Result<tetherly_core::ScreenFocusReport, CoreError> {
         let (mode, radius, peripheral_skip_ratio, (box_x, box_y, box_w, box_h)) = {
-            let mut cfg = self.shared.screen_focus_config.write().unwrap();
+            let mut cfg = self.shared.screen_focus_config.write().expect("lock");
             cfg.enabled = enabled;
             if let Some(m) = mode {
                 cfg.mode = m;
@@ -1023,7 +1073,7 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenFocusReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_focus_config.write().unwrap();
+            let mut cfg = self.shared.screen_focus_config.write().expect("lock");
             *cfg = tetherly_core::ScreenFocusConfig::default();
             self.shared
                 .screen_focus_tiles_sent
@@ -1045,7 +1095,7 @@ impl Node {
 
     /// Report screen streaming tile-level adaptive palette compression status (v2.33 / ADR-119).
     pub fn screen_tile_palette_report(&self) -> tetherly_core::ScreenTilePaletteReport {
-        let cfg = *self.shared.screen_tile_palette_config.read().unwrap();
+        let cfg = *self.shared.screen_tile_palette_config.read().expect("lock");
         tetherly_core::ScreenTilePaletteReport {
             ok: true,
             enabled: cfg.enabled,
@@ -1082,7 +1132,11 @@ impl Node {
         enable_rle: Option<bool>,
     ) -> Result<tetherly_core::ScreenTilePaletteReport, CoreError> {
         let (max_c, rle) = {
-            let mut cfg = self.shared.screen_tile_palette_config.write().unwrap();
+            let mut cfg = self
+                .shared
+                .screen_tile_palette_config
+                .write()
+                .expect("lock");
             cfg.enabled = enabled;
             if let Some(mc) = max_colors {
                 cfg.max_colors = mc.clamp(2, 16);
@@ -1106,7 +1160,11 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenTilePaletteReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_tile_palette_config.write().unwrap();
+            let mut cfg = self
+                .shared
+                .screen_tile_palette_config
+                .write()
+                .expect("lock");
             *cfg = tetherly_core::ScreenTilePaletteConfig::default();
             self.shared
                 .screen_tile_palette_solid_count
@@ -1131,7 +1189,7 @@ impl Node {
 
     /// Report current screen streaming tile predictive filter configuration and statistics (v2.34 / ADR-120).
     pub fn screen_tile_predict_report(&self) -> tetherly_core::ScreenTilePredictReport {
-        let cfg = *self.shared.screen_tile_predict_config.read().unwrap();
+        let cfg = *self.shared.screen_tile_predict_config.read().expect("lock");
         tetherly_core::ScreenTilePredictReport {
             ok: true,
             enabled: cfg.enabled,
@@ -1156,7 +1214,11 @@ impl Node {
         enable_rct: Option<bool>,
     ) -> Result<tetherly_core::ScreenTilePredictReport, CoreError> {
         let (filter, rct) = {
-            let mut cfg = self.shared.screen_tile_predict_config.write().unwrap();
+            let mut cfg = self
+                .shared
+                .screen_tile_predict_config
+                .write()
+                .expect("lock");
             cfg.enabled = enabled;
             if let Some(fm) = filter_mode {
                 cfg.filter_mode = fm;
@@ -1180,7 +1242,11 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenTilePredictReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_tile_predict_config.write().unwrap();
+            let mut cfg = self
+                .shared
+                .screen_tile_predict_config
+                .write()
+                .expect("lock");
             *cfg = tetherly_core::ScreenTilePredictConfig::default();
             self.shared
                 .screen_tile_predict_tiles_count
@@ -1196,7 +1262,7 @@ impl Node {
 
     /// Report current screen streaming tile presentation transaction and double-buffer state (v2.35 / ADR-121).
     pub fn screen_tile_present_report(&self) -> tetherly_core::ScreenTilePresentReport {
-        let cfg = *self.shared.screen_tile_present_config.read().unwrap();
+        let cfg = *self.shared.screen_tile_present_config.read().expect("lock");
         let committed = self
             .shared
             .screen_tile_present_committed_txs
@@ -1236,7 +1302,11 @@ impl Node {
         tear_prevention: Option<bool>,
     ) -> Result<tetherly_core::ScreenTilePresentReport, CoreError> {
         let (v_mode, db, tp) = {
-            let mut cfg = self.shared.screen_tile_present_config.write().unwrap();
+            let mut cfg = self
+                .shared
+                .screen_tile_present_config
+                .write()
+                .expect("lock");
             cfg.enabled = enabled;
             if let Some(vm) = vsync_mode {
                 cfg.vsync_mode = vm;
@@ -1264,7 +1334,11 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenTilePresentReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_tile_present_config.write().unwrap();
+            let mut cfg = self
+                .shared
+                .screen_tile_present_config
+                .write()
+                .expect("lock");
             *cfg = tetherly_core::ScreenTilePresentConfig::default();
             self.shared
                 .screen_tile_present_committed_txs
@@ -1286,7 +1360,7 @@ impl Node {
 
     /// Report current screen streaming tile NACK and fast retransmission state (v2.36 / ADR-122).
     pub fn screen_tile_nack_report(&self) -> tetherly_core::ScreenTileNackReport {
-        let cfg = *self.shared.screen_tile_nack_config.read().unwrap();
+        let cfg = *self.shared.screen_tile_nack_config.read().expect("lock");
         let sent = self
             .shared
             .screen_tile_nack_requests_sent
@@ -1318,7 +1392,7 @@ impl Node {
         max_retries: Option<u8>,
     ) -> Result<tetherly_core::ScreenTileNackReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_tile_nack_config.write().unwrap();
+            let mut cfg = self.shared.screen_tile_nack_config.write().expect("lock");
             cfg.enabled = enabled;
             if let Some(t) = timeout_ms {
                 cfg.timeout_ms = t;
@@ -1350,7 +1424,7 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenTileNackReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_tile_nack_config.write().unwrap();
+            let mut cfg = self.shared.screen_tile_nack_config.write().expect("lock");
             *cfg = tetherly_core::ScreenTileNackConfig::default();
             self.shared
                 .screen_tile_resend_buffer
@@ -1374,7 +1448,11 @@ impl Node {
 
     /// Report current screen streaming tile saliency and tiered scheduling state (v2.37 / ADR-123).
     pub fn screen_tile_saliency_report(&self) -> tetherly_core::ScreenTileSaliencyReport {
-        let cfg = *self.shared.screen_tile_saliency_config.read().unwrap();
+        let cfg = *self
+            .shared
+            .screen_tile_saliency_config
+            .read()
+            .expect("lock");
         let crit = self
             .shared
             .screen_tile_saliency_critical_tiles
@@ -1413,7 +1491,11 @@ impl Node {
         drop_background_on_congestion: Option<bool>,
     ) -> Result<tetherly_core::ScreenTileSaliencyReport, CoreError> {
         let (high, low, drop_bg) = {
-            let mut cfg = self.shared.screen_tile_saliency_config.write().unwrap();
+            let mut cfg = self
+                .shared
+                .screen_tile_saliency_config
+                .write()
+                .expect("lock");
             cfg.enabled = enabled;
             if let Some(h) = high_threshold {
                 cfg.high_threshold = h;
@@ -1448,7 +1530,11 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenTileSaliencyReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_tile_saliency_config.write().unwrap();
+            let mut cfg = self
+                .shared
+                .screen_tile_saliency_config
+                .write()
+                .expect("lock");
             *cfg = tetherly_core::ScreenTileSaliencyConfig::default();
             self.shared
                 .screen_tile_saliency_critical_tiles
@@ -1470,7 +1556,7 @@ impl Node {
 
     /// Report current screen streaming tile Level-of-Detail (LoD) downsampling state (v2.38 / ADR-124).
     pub fn screen_tile_lod_report(&self) -> tetherly_core::ScreenTileLodReport {
-        let cfg = *self.shared.screen_tile_lod_config.read().unwrap();
+        let cfg = *self.shared.screen_tile_lod_config.read().expect("lock");
         let lod0 = self
             .shared
             .screen_tile_lod0_tiles
@@ -1507,7 +1593,7 @@ impl Node {
         auto_lod_on_congestion: Option<bool>,
     ) -> Result<tetherly_core::ScreenTileLodReport, CoreError> {
         let (max_lod_val, auto_lod_val) = {
-            let mut cfg = self.shared.screen_tile_lod_config.write().unwrap();
+            let mut cfg = self.shared.screen_tile_lod_config.write().expect("lock");
             cfg.enabled = enabled;
             if let Some(m) = max_lod {
                 cfg.max_lod = m.clamp(1, 2);
@@ -1531,7 +1617,7 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenTileLodReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_tile_lod_config.write().unwrap();
+            let mut cfg = self.shared.screen_tile_lod_config.write().expect("lock");
             *cfg = tetherly_core::ScreenTileLodConfig::default();
             self.shared
                 .screen_tile_lod0_tiles
@@ -1553,7 +1639,7 @@ impl Node {
 
     /// Dynamic tile batching and pacing status report (v2.39 / ADR-125).
     pub fn screen_tile_batch_report(&self) -> tetherly_core::ScreenTileBatchReport {
-        let cfg = *self.shared.screen_tile_batch_config.read().unwrap();
+        let cfg = *self.shared.screen_tile_batch_config.read().expect("lock");
         let batches = self
             .shared
             .screen_tile_batches_sent
@@ -1591,7 +1677,7 @@ impl Node {
         pacing_interval_us: Option<u16>,
     ) -> Result<tetherly_core::ScreenTileBatchReport, CoreError> {
         let (target_val, pacing_val) = {
-            let mut cfg = self.shared.screen_tile_batch_config.write().unwrap();
+            let mut cfg = self.shared.screen_tile_batch_config.write().expect("lock");
             cfg.enabled = enabled;
             if let Some(tb) = target_chunk_bytes {
                 cfg.target_chunk_bytes = tb.clamp(
@@ -1619,7 +1705,7 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenTileBatchReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_tile_batch_config.write().unwrap();
+            let mut cfg = self.shared.screen_tile_batch_config.write().expect("lock");
             *cfg = tetherly_core::ScreenTileBatchConfig::default();
             self.shared
                 .screen_tile_batches_sent
@@ -1633,7 +1719,11 @@ impl Node {
             self.shared
                 .screen_tile_batch_pacing_pauses
                 .store(0, std::sync::atomic::Ordering::Relaxed);
-            *self.shared.screen_tile_batch_receiver_state.lock().unwrap() = None;
+            *self
+                .shared
+                .screen_tile_batch_receiver_state
+                .lock()
+                .expect("lock") = None;
         }
         let msg = ControlMsg::ResetScreenTileBatchMode;
         let _ = self.send_screen_control(msg).await;
@@ -1642,7 +1732,7 @@ impl Node {
 
     /// Dynamic tile motion estimation and displacement compensation status report (v2.40 / ADR-126).
     pub fn screen_tile_motion_report(&self) -> tetherly_core::ScreenTileMotionReport {
-        let cfg = *self.shared.screen_tile_motion_config.read().unwrap();
+        let cfg = *self.shared.screen_tile_motion_config.read().expect("lock");
         let motion = self
             .shared
             .screen_tile_motion_tiles_sent
@@ -1674,7 +1764,7 @@ impl Node {
         min_match_ratio: Option<u8>,
     ) -> Result<tetherly_core::ScreenTileMotionReport, CoreError> {
         let (disp_val, ratio_val) = {
-            let mut cfg = self.shared.screen_tile_motion_config.write().unwrap();
+            let mut cfg = self.shared.screen_tile_motion_config.write().expect("lock");
             cfg.enabled = enabled;
             if let Some(md) = max_displacement {
                 cfg.max_displacement = md.clamp(
@@ -1701,7 +1791,7 @@ impl Node {
         &self,
     ) -> Result<tetherly_core::ScreenTileMotionReport, CoreError> {
         {
-            let mut cfg = self.shared.screen_tile_motion_config.write().unwrap();
+            let mut cfg = self.shared.screen_tile_motion_config.write().expect("lock");
             *cfg = tetherly_core::ScreenTileMotionConfig::default();
             self.shared
                 .screen_tile_motion_tiles_sent

@@ -80,7 +80,7 @@ mod macos_impl {
 
     /// Destroys and removes any active shield windows (strictly on the main thread).
     fn remove_cursor_shields_main(_mtm: MainThreadMarker) {
-        let mut shields = SHIELD_WINDOWS.lock().unwrap();
+        let mut shields = SHIELD_WINDOWS.lock().expect("lock");
         for &ptr in shields.iter() {
             if ptr != 0 {
                 if let Some(window) = unsafe { Retained::from_raw(ptr as *mut NSWindow) } {
@@ -158,7 +158,7 @@ mod macos_impl {
 
             set_blank_cursor_main(mtm);
 
-            let mut guard = SHIELD_WINDOWS.lock().unwrap();
+            let mut guard = SHIELD_WINDOWS.lock().expect("lock");
             *guard = new_shields;
         });
     }

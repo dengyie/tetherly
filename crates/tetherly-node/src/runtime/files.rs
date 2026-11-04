@@ -7,7 +7,7 @@ use crate::store::{AutoAcceptPolicy, TargetSelector};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tetherly_core::frame::{FileDone, FileOffer};
+use tetherly_core::frame::{FileDone, FileOffer, IncrementalSha256};
 use tetherly_core::{CoreError, DeviceId};
 use tetherly_net::filechan::read_header as read_file_header;
 use tokio::net::TcpStream;
@@ -274,23 +274,37 @@ impl Node {
 
         let mut hasher = tetherly_core::IncrementalSha256::new();
         // If resuming, verify that the on-disk partial exists and matches start,
-        // feeding the prefix [0..start] into the incremental hasher.
+        // feeding the prefix [0..start] into the incremental hasher. The prefix
+        // read runs off-thread (a multi-GiB re-read would pin a runtime worker);
+        // it returns the seeded hasher so the async receive loop continues the
+        // same digest without needing state merging.
         if start > 0 {
             let meta = std::fs::metadata(&part)?;
             let aligned = meta.len() - (meta.len() % tetherly_core::FILE_CHUNK as u64);
             if aligned < start {
                 return Err(tetherly_net::NetError::Handshake);
             }
-            use std::io::Read;
-            let mut f = std::fs::File::open(&part)?;
-            let mut buf = [0u8; tetherly_core::FILE_CHUNK];
-            let mut read_total = 0u64;
-            while read_total < start {
-                let want = ((start - read_total) as usize).min(buf.len());
-                f.read_exact(&mut buf[..want])?;
-                hasher.update(&buf[..want]);
-                read_total += want as u64;
-            }
+            let prefix_part = part.clone();
+            let prefix_len = start;
+            let prefix_hasher = tokio::task::spawn_blocking(
+                move || -> Result<IncrementalSha256, std::io::Error> {
+                    let mut hasher = IncrementalSha256::new();
+                    use std::io::Read;
+                    let mut f = std::fs::File::open(&prefix_part)?;
+                    let mut buf = [0u8; tetherly_core::FILE_CHUNK];
+                    let mut read_total = 0u64;
+                    while read_total < prefix_len {
+                        let want = ((prefix_len - read_total) as usize).min(buf.len());
+                        f.read_exact(&mut buf[..want])?;
+                        hasher.update(&buf[..want]);
+                        read_total += want as u64;
+                    }
+                    Ok(hasher)
+                },
+            )
+            .await
+            .map_err(|e| tetherly_net::NetError::File(format!("hash task panicked: {e}")))??;
+            hasher = prefix_hasher;
         }
         let mut written = start;
         let now = self.shared.clock.unix_ms();
@@ -971,10 +985,13 @@ impl Node {
         let safe_name = tetherly_core::sanitize_file_name(&filename)?;
 
         // Stream file in 64 KiB chunks to compute SHA-256 with O(1) memory.
-        let mut hasher = tetherly_core::IncrementalSha256::new();
-        {
+        // Off-thread: a whole-file read can stall a tokio worker for seconds
+        // on large payloads (up to FILE_MAX), starving every other task on it.
+        let hash_path = path.to_path_buf();
+        let digest = tokio::task::spawn_blocking(move || -> Result<String, std::io::Error> {
+            let mut hasher = tetherly_core::IncrementalSha256::new();
             use std::io::Read;
-            let mut f = std::fs::File::open(path)?;
+            let mut f = std::fs::File::open(&hash_path)?;
             let mut buf = [0u8; tetherly_core::FILE_CHUNK];
             loop {
                 let n = f.read(&mut buf)?;
@@ -983,8 +1000,10 @@ impl Node {
                 }
                 hasher.update(&buf[..n]);
             }
-        }
-        let digest = hasher.finalize_hex();
+            Ok(hasher.finalize_hex())
+        })
+        .await
+        .map_err(|e| CoreError::File(format!("hash task panicked: {e}")))??;
         let transfer_id = format!("tr_{}", &digest[..16]);
         let offer = FileOffer {
             transfer_id: transfer_id.clone(),
@@ -1088,11 +1107,13 @@ impl Node {
             .unwrap_or_else(|| "file.bin".to_string());
         let safe_name = tetherly_core::sanitize_file_name(&filename)?;
 
-        // Single-pass stream in 64 KiB chunks to compute SHA-256 with O(1) memory bound
-        let mut hasher = tetherly_core::IncrementalSha256::new();
-        {
+        // Single-pass stream in 64 KiB chunks to compute SHA-256 with O(1) memory
+        // bound. Off-thread so a large read cannot stall the async runtime.
+        let hash_path = path.to_path_buf();
+        let digest = tokio::task::spawn_blocking(move || -> Result<String, std::io::Error> {
+            let mut hasher = tetherly_core::IncrementalSha256::new();
             use std::io::Read;
-            let mut f = std::fs::File::open(path)?;
+            let mut f = std::fs::File::open(&hash_path)?;
             let mut buf = [0u8; tetherly_core::FILE_CHUNK];
             loop {
                 let n = f.read(&mut buf)?;
@@ -1101,8 +1122,10 @@ impl Node {
                 }
                 hasher.update(&buf[..n]);
             }
-        }
-        let digest = hasher.finalize_hex();
+            Ok(hasher.finalize_hex())
+        })
+        .await
+        .map_err(|e| CoreError::File(format!("hash task panicked: {e}")))??;
 
         let targets = self.resolve_dispatch_targets(selector)?;
         let live = self.live_peers();

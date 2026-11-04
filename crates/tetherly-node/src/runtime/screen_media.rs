@@ -285,7 +285,7 @@ impl Node {
                     engine.pause();
                     let mut r = engine.report();
                     r.path = path_str.clone();
-                    *rep_clone.lock().unwrap() = r;
+                    *rep_clone.lock().expect("lock") = r;
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     continue;
                 } else if engine.state() == ScreenPlaybackState::Paused {
@@ -309,7 +309,7 @@ impl Node {
                 match res {
                     Ok(Some(mut frame)) => {
                         {
-                            let wm_cfg = shared.screen_watermark.read().unwrap();
+                            let wm_cfg = shared.screen_watermark.read().expect("lock");
                             if wm_cfg.enabled {
                                 let peer_id_str = shared
                                     .screen_peer
@@ -332,12 +332,12 @@ impl Node {
                         }
                         {
                             let now_ms = shared.clock.unix_us() / 1_000;
-                            let annotations = shared.screen_annotations.read().unwrap();
+                            let annotations = shared.screen_annotations.read().expect("lock");
                             if !annotations.is_empty() {
                                 let _ = frame.apply_annotations(&annotations, now_ms);
                             }
                             if let Some(laser) =
-                                shared.screen_laser_pointer.read().unwrap().as_ref()
+                                shared.screen_laser_pointer.read().expect("lock").as_ref()
                             {
                                 let _ = frame.apply_laser_pointer(laser);
                             }
@@ -345,12 +345,12 @@ impl Node {
                         let _ = shared.screen_observer.lock().map(|o| o.present(&frame));
                         *shared.screen_last_frame.lock().expect("last_frame") = Some(frame.clone());
                         if !*stop_rx.borrow() {
-                            *rep_clone.lock().unwrap() = r;
+                            *rep_clone.lock().expect("lock") = r;
                         }
                     }
                     Ok(None) => {
                         if !*stop_rx.borrow() {
-                            *rep_clone.lock().unwrap() = r;
+                            *rep_clone.lock().expect("lock") = r;
                         }
                         if engine.state() == ScreenPlaybackState::Finished
                             || engine.state() == ScreenPlaybackState::Stopped
@@ -362,13 +362,13 @@ impl Node {
                     Err(e) => {
                         tracing::warn!(%e, "screen playback step error");
                         r.state = ScreenPlaybackState::Stopped.as_str().to_string();
-                        *rep_clone.lock().unwrap() = r;
+                        *rep_clone.lock().expect("lock") = r;
                         break;
                     }
                 }
             }
             if *stop_rx.borrow() {
-                let mut guard = rep_clone.lock().unwrap();
+                let mut guard = rep_clone.lock().expect("lock");
                 guard.state = ScreenPlaybackState::Stopped.as_str().to_string();
             }
         });
@@ -386,7 +386,7 @@ impl Node {
                 return Err(CoreError::InvalidConfig("playback is not active".into()));
             }
             s.paused.store(true, std::sync::atomic::Ordering::Relaxed);
-            let mut r = s.report.lock().unwrap();
+            let mut r = s.report.lock().expect("lock");
             r.state = ScreenPlaybackState::Paused.as_str().to_string();
             Ok(r.clone())
         } else {
@@ -406,7 +406,7 @@ impl Node {
                 return Err(CoreError::InvalidConfig("playback is not active".into()));
             }
             s.paused.store(false, std::sync::atomic::Ordering::Relaxed);
-            let mut r = s.report.lock().unwrap();
+            let mut r = s.report.lock().expect("lock");
             r.state = ScreenPlaybackState::Playing.as_str().to_string();
             Ok(r.clone())
         } else {
@@ -421,7 +421,7 @@ impl Node {
         let guard = self.shared.screen_playback.lock().expect("playback");
         if let Some(s) = guard.as_ref() {
             let _ = s.stop_tx.send(true);
-            let mut r = s.report.lock().unwrap();
+            let mut r = s.report.lock().expect("lock");
             r.state = ScreenPlaybackState::Stopped.as_str().to_string();
             Ok(r.clone())
         } else {
@@ -499,7 +499,7 @@ impl Node {
         // 4. Dynamic security watermark overlay (ADR-104)
         let mut watermarked = false;
         if !privacy_active {
-            let wm_cfg = self.shared.screen_watermark.read().unwrap();
+            let wm_cfg = self.shared.screen_watermark.read().expect("lock");
             if wm_cfg.enabled {
                 let peer_id_str = self
                     .shared
@@ -521,11 +521,17 @@ impl Node {
             }
             // Collaborative whiteboard annotations & transient virtual laser pointer (ADR-105)
             let now_ms = self.shared.clock.unix_us() / 1_000;
-            let annotations = self.shared.screen_annotations.read().unwrap();
+            let annotations = self.shared.screen_annotations.read().expect("lock");
             if !annotations.is_empty() {
                 let _ = frame.apply_annotations(&annotations, now_ms);
             }
-            if let Some(laser) = self.shared.screen_laser_pointer.read().unwrap().as_ref() {
+            if let Some(laser) = self
+                .shared
+                .screen_laser_pointer
+                .read()
+                .expect("lock")
+                .as_ref()
+            {
                 let _ = frame.apply_laser_pointer(laser);
             }
         }
@@ -699,7 +705,7 @@ impl Node {
 
     /// Report dynamic security watermark status and configuration (v2.18 / ADR-104).
     pub fn screen_watermark_report(&self) -> ScreenWatermarkReport {
-        let cfg = self.shared.screen_watermark.read().unwrap().clone();
+        let cfg = self.shared.screen_watermark.read().expect("lock").clone();
         let peer_id = self
             .shared
             .screen_peer
@@ -740,7 +746,7 @@ impl Node {
         }
 
         let (enabled, host_enforced) = {
-            let mut cfg = self.shared.screen_watermark.write().unwrap();
+            let mut cfg = self.shared.screen_watermark.write().expect("lock");
             if let Some(e) = update.enabled {
                 cfg.enabled = e;
             }
@@ -824,10 +830,10 @@ impl Node {
             item.created_at_ms = self.shared.clock.unix_ms();
         }
         let item_id = {
-            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            let mut wb = self.shared.screen_whiteboard.write().expect("lock");
             let id = wb.add_item(item.clone())?;
             item.id = id;
-            *self.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+            *self.shared.screen_annotations.write().expect("lock") = wb.active_items().to_vec();
             id
         };
         self.shared
@@ -846,9 +852,13 @@ impl Node {
     /// Clear all collaborative screen whiteboard annotations (v2.19 / ADR-105, v2.20 / ADR-106).
     pub async fn screen_clear_annotations(&self) -> Result<(), CoreError> {
         {
-            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            let mut wb = self.shared.screen_whiteboard.write().expect("lock");
             wb.clear();
-            self.shared.screen_annotations.write().unwrap().clear();
+            self.shared
+                .screen_annotations
+                .write()
+                .expect("lock")
+                .clear();
         }
 
         // Broadcast clear control to peer
@@ -867,9 +877,9 @@ impl Node {
         author: Option<&str>,
     ) -> Result<Option<tetherly_core::AnnotationItem>, CoreError> {
         let undone = {
-            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            let mut wb = self.shared.screen_whiteboard.write().expect("lock");
             let res = wb.undo(author);
-            *self.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+            *self.shared.screen_annotations.write().expect("lock") = wb.active_items().to_vec();
             res
         };
         if undone.is_some() {
@@ -895,9 +905,9 @@ impl Node {
         author: Option<&str>,
     ) -> Result<Option<tetherly_core::AnnotationItem>, CoreError> {
         let redone = {
-            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            let mut wb = self.shared.screen_whiteboard.write().expect("lock");
             let res = wb.redo(author);
-            *self.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+            *self.shared.screen_annotations.write().expect("lock") = wb.active_items().to_vec();
             res
         };
         if let Some(ref it) = redone {
@@ -929,7 +939,7 @@ impl Node {
         let now_ms = self.shared.clock.unix_ms();
         let session_id = self.shared.identity.device_id().to_string();
         let snapshot = {
-            let wb = self.shared.screen_whiteboard.read().unwrap();
+            let wb = self.shared.screen_whiteboard.read().expect("lock");
             wb.export_snapshot(session_id, now_ms)
         };
         if let Some(path_str) = out {
@@ -955,9 +965,9 @@ impl Node {
         replace: bool,
     ) -> Result<usize, CoreError> {
         let count = {
-            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            let mut wb = self.shared.screen_whiteboard.write().expect("lock");
             let c = wb.import_snapshot(snapshot.clone(), replace)?;
-            *self.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+            *self.shared.screen_annotations.write().expect("lock") = wb.active_items().to_vec();
             c
         };
         let msg = tetherly_core::ScreenAnnotationMsg::Snapshot(snapshot);
@@ -973,7 +983,7 @@ impl Node {
         policy: tetherly_core::WhiteboardPolicy,
     ) -> Result<(), CoreError> {
         {
-            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            let mut wb = self.shared.screen_whiteboard.write().expect("lock");
             wb.set_policy(policy);
         }
         let msg = ControlMsg::SetWhiteboardPolicy {
@@ -991,7 +1001,7 @@ impl Node {
 
     /// Get current whiteboard policy (v2.20 / ADR-106).
     pub fn screen_whiteboard_get_policy(&self) -> tetherly_core::WhiteboardPolicy {
-        self.shared.screen_whiteboard.read().unwrap().policy()
+        self.shared.screen_whiteboard.read().expect("lock").policy()
     }
 
     /// Update transient virtual laser pointer state (v2.19 / ADR-105).
@@ -1004,7 +1014,7 @@ impl Node {
         let y = state.y;
         let color_rgb = state.color_rgb;
 
-        *self.shared.screen_laser_pointer.write().unwrap() =
+        *self.shared.screen_laser_pointer.write().expect("lock") =
             if active { Some(state) } else { None };
         self.shared
             .screen_laser_updates
@@ -1025,12 +1035,12 @@ impl Node {
     pub fn screen_annotation_report(&self) -> tetherly_core::ScreenAnnotationReport {
         let now_ms = self.shared.clock.unix_ms();
         let (items, policy, redo_cnt) = {
-            let mut wb = self.shared.screen_whiteboard.write().unwrap();
+            let mut wb = self.shared.screen_whiteboard.write().expect("lock");
             wb.prune_expired(now_ms);
-            *self.shared.screen_annotations.write().unwrap() = wb.active_items().to_vec();
+            *self.shared.screen_annotations.write().expect("lock") = wb.active_items().to_vec();
             (wb.active_items().to_vec(), wb.policy(), wb.redo_count())
         };
-        let laser = *self.shared.screen_laser_pointer.read().unwrap();
+        let laser = *self.shared.screen_laser_pointer.read().expect("lock");
         tetherly_core::ScreenAnnotationReport {
             ok: true,
             annotations_count: items.len(),

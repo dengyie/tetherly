@@ -598,12 +598,12 @@ pub struct ScreenPlaybackSession {
 
 impl ScreenPlaybackSession {
     pub fn state(&self) -> ScreenPlaybackState {
-        let r = self.report.lock().unwrap();
+        let r = self.report.lock().expect("lock");
         r.state.parse().unwrap_or(ScreenPlaybackState::Idle)
     }
 
     pub fn current_report(&self) -> ScreenPlaybackReport {
-        self.report.lock().unwrap().clone()
+        self.report.lock().expect("lock").clone()
     }
 }
 
