@@ -55,10 +55,15 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), CoreError> {
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        // Linux / BSD fallback
+        // Linux / BSD fallback: highlight the containing directory instead of
+        // opening the file itself (never execute received payloads).
+        let parent_str = match path_str.rsplit_once('/') {
+            Some(("", _)) => "/", // file sits at filesystem root
+            Some((parent, _)) => parent,
+            None => ".",
+        };
         let mut cmd = Command::new("xdg-open");
-        let parent = abs_path.parent().unwrap_or(&abs_path);
-        cmd.arg(parent)
+        cmd.arg(parent_str)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
