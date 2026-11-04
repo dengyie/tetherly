@@ -692,7 +692,9 @@ async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
     }
     let start = std::time::Instant::now();
     while server.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target) {
-        if start.elapsed() > Duration::from_secs(3) {
+        // 10s: demotion rides the takeover request/response round-trip; 3s
+        // flaked on loaded runners (see the sink-drive window below).
+        if start.elapsed() > Duration::from_secs(10) {
             panic!("old controller never demoted to target");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -704,7 +706,7 @@ async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
     // poll for it (slow CI runners race the immediate assert).
     let start = std::time::Instant::now();
     while !client.input_channel_open_sync() {
-        if start.elapsed() > Duration::from_secs(3) {
+        if start.elapsed() > Duration::from_secs(10) {
             panic!("new controller never opened its outbound channel");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -726,7 +728,11 @@ async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
         if server.input_seat() == Some(CursorSeat::Remote) && sink.cursor.0 >= 500 {
             break;
         }
-        if start.elapsed() > Duration::from_secs(3) {
+        // 10s: this window spans the takeover response round-trip, the grace
+        // buffer flush, and the first reverse-channel frames — on a loaded
+        // macos runner the 3s budget flaked (run 41930403598) even though the
+        // flow is locally deterministic (5/5 at 1.44s).
+        if start.elapsed() > Duration::from_secs(10) {
             panic!(
                 "reverse direction never drove the old controller's screen: seat={:?}, sink={:?}",
                 server.input_seat(),
