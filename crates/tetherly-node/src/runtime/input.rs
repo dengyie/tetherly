@@ -536,6 +536,9 @@ impl Node {
             .lock()
             .expect("active_input_tunnel") = Some(session);
 
+        // Reset any leftover arming/dwell state from an earlier session.
+        self.reset_reverse_arming_state();
+
         let resp = InputTunnelRespFrame {
             session_id: frame.session_id.clone(),
             accepted: true,
@@ -990,6 +993,7 @@ impl Node {
 
             *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
             self.disarm_input_capture();
+            self.reset_reverse_arming_state();
             let alias = DeviceId::parse(&session.peer_id)
                 .ok()
                 .and_then(|id| self.peer_alias(&id))
@@ -1514,6 +1518,21 @@ impl Node {
         ))
     }
 
+    /// Clear all distance arming, dwell, and movement tracking state for auto-reverse.
+    fn reset_reverse_arming_state(&self) {
+        self.shared.reverse_move_accum_px.store(0, Ordering::SeqCst);
+        *self.shared.reverse_last_move.lock().expect("reverse_move") = None;
+        *self.shared.reverse_last_pos.lock().expect("reverse_pos") = None;
+        *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
+        *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
+    }
+
+    /// Refresh physical activity timestamp without accumulating movement distance.
+    fn note_reverse_physical_activity(&self) {
+        *self.shared.reverse_last_move.lock().expect("reverse_move") =
+            Some(std::time::Instant::now());
+    }
+
     /// Push local cursor position toward the edge state machine. Crossing the
     /// right edge emits Enter + Move. Seq is monotonic for the life of the
     /// node. No JSON, and never onto 45717. OS hooks stay Manual-required.
@@ -1556,10 +1575,15 @@ impl Node {
             // coordinate deltas since the last idle gap; a stale gap resets
             // the accumulator AND skips this event's jump (the first event
             // after plug-in can carry an arbitrary position).
-            let now_ms = self.shared.clock.unix_ms();
-            let last_ms = self.shared.reverse_last_move_ms.load(Ordering::SeqCst);
-            let idle_reset =
-                last_ms != 0 && now_ms.saturating_sub(last_ms) > Self::REVERSE_RESET_AFTER_MS;
+            // Use monotonic Instant to prevent NTP / clock adjustments from altering the gap.
+            let now = std::time::Instant::now();
+            let idle_reset = {
+                let last = self.shared.reverse_last_move.lock().expect("reverse_move");
+                last.map(|t| {
+                    now.duration_since(t).as_millis() as u64 > Self::REVERSE_RESET_AFTER_MS
+                })
+                .unwrap_or(false)
+            };
             let mut accum = if idle_reset {
                 0
             } else {
@@ -1577,9 +1601,7 @@ impl Node {
             self.shared
                 .reverse_move_accum_px
                 .store(accum, Ordering::SeqCst);
-            self.shared
-                .reverse_last_move_ms
-                .store(now_ms, Ordering::SeqCst);
+            *self.shared.reverse_last_move.lock().expect("reverse_move") = Some(now);
             self.maybe_auto_reverse(x, y, dx, dy, width, height);
             return Ok(None);
         }
@@ -1819,10 +1841,14 @@ impl Node {
             let server = self.shared.input_engine.lock().expect("engine");
             server.edge()
         };
-        let now_ms = self.shared.clock.unix_ms();
-        let last_flip = self.shared.last_auto_reverse_ms.load(Ordering::SeqCst);
-        if last_flip != 0 && now_ms.saturating_sub(last_flip) < 3000 {
-            return;
+        let now = std::time::Instant::now();
+        {
+            let last_flip = self.shared.last_auto_reverse.lock().expect("last_flip");
+            if let Some(t) = *last_flip {
+                if now.duration_since(t).as_millis() < 3000 {
+                    return;
+                }
+            }
         }
 
         // Same boundary normalization the controller path uses: the OS
@@ -1912,9 +1938,7 @@ impl Node {
         if !fired {
             return;
         }
-        self.shared
-            .last_auto_reverse_ms
-            .store(now_ms, Ordering::SeqCst);
+        *self.shared.last_auto_reverse.lock().expect("last_flip") = Some(now);
 
         let Some(peer) = self
             .shared
@@ -1963,6 +1987,7 @@ impl Node {
             if server.seat() != CursorSeat::Remote {
                 return Ok(());
             }
+            self.note_reverse_physical_activity();
             server.note_button(mask, down);
             let seq = server.next_seq();
             server.note_seq(seq);
@@ -1978,6 +2003,7 @@ impl Node {
             if server.seat() != CursorSeat::Remote {
                 return Ok(());
             }
+            self.note_reverse_physical_activity();
             let speed = self.input_policy().wheel_speed;
             let (scaled_dx, scaled_dy) = if (speed - 1.0).abs() > 0.001 && speed > 0.0 {
                 let sy = ((dy as f64) * speed).round() as i16;
@@ -2445,6 +2471,7 @@ impl Node {
                 *node.shared.input_peer.lock().expect("input_peer") = None;
                 *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
                 *node.shared.input_sink.lock().expect("sink") = client.sink().memory().clone();
+                node.reset_reverse_arming_state();
                 node.emit(UiEvent::input_seat_changed("local", false, None));
             }
         });

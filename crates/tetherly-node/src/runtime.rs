@@ -879,8 +879,8 @@ struct Shared {
     /// same peer: the loser's session would become a zombie and flip
     /// `input_out` back and forth.
     input_dialing: std::sync::atomic::AtomicBool,
-    /// unix_ms of the last automatic direction flip (cooldown between flips).
-    last_auto_reverse_ms: std::sync::atomic::AtomicU64,
+    /// Instant of the last automatic direction flip (cooldown between flips).
+    last_auto_reverse: Mutex<Option<std::time::Instant>>,
     /// Auto-reverse dwell state: start of the current sustained edge push and
     /// the instant of the last boundary-touching event (gap-continuity check:
     /// a push counts as sustained only while touch events keep arriving).
@@ -892,7 +892,7 @@ struct Shared {
     /// it may take over; its last cursor position feeds the coordinate-delta
     /// accumulation (Windows hooks report no per-event deltas).
     reverse_move_accum_px: std::sync::atomic::AtomicI64,
-    reverse_last_move_ms: std::sync::atomic::AtomicU64,
+    reverse_last_move: Mutex<Option<std::time::Instant>>,
     reverse_last_pos: Mutex<Option<(i32, i32)>>,
     /// Async runtime handle captured at startup: the capture-hook thread has
     /// no runtime context but must be able to spawn the takeover attach.

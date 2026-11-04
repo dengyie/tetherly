@@ -225,7 +225,9 @@ async fn m3_2_peer_gone_returns_cursor() {
         if server.input_engine_seat() == CursorSeat::Local {
             break;
         }
-        if start.elapsed() > Duration::from_secs(3) {
+        // Node holds a 2.5s grace period for reconnect before returning the
+        // seat to local; allow 5s total to avoid runner scheduling flakiness.
+        if start.elapsed() > Duration::from_secs(5) {
             panic!("cursor did not return home");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

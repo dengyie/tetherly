@@ -91,3 +91,15 @@ v0.1.72 的生产验证暴露了翻转链路的三个真实缺陷，本节为根
 - 真实使用从屏幕任意位置移动到底边必然越过 300px（约 1080p 高度 1/4），主流程无感。
 
 至此 auto-reverse 共四道闸：**方向声明 → 距离武装（新）→ 间隔连续性驻留 → 3s 冷却**。
+
+## 9. 增补（v0.1.75）：单调时钟域统一与累加状态生命周期重置
+
+v0.1.74 引入距离武装后的生产代码审查暴露了时钟域与状态生命周期的边界问题：
+
+1. **单调时钟域统一（Monotonic Clock Unification）**：
+   - 原 `last_auto_reverse_ms` 与 `reverse_last_move_ms` 使用墙上时钟 `unix_ms()`，在系统时间同步（NTP 跃变/夏令时）期间存在时差负溢出或超期判断失真的风险；
+   - 全面迁移为单调时钟 `std::time::Instant`（`Mutex<Option<Instant>>`），确保驻留与静止判定严格基于物理单调时间推进。
+2. **累加状态生命周期重置（Lifecycle Reset Guard）**：
+   - 提取 `reset_reverse_arming_state()`，在入站隧道建立（`receive_input_tunnel_req`）、隧道主动注销（`input_tunnel_release`）与入站通道退出清理（`attach_input_client`）时显式清零距离累加与驻留起点，杜绝前序会话未过 2s 窗口留存的累加距离击穿新会话防御。
+3. **物理活跃心跳扩展（Physical Activity Heartbeat）**：
+   - 在 `drive_input_button` 与 `drive_input_wheel` 中植入 `note_reverse_physical_activity()`，在原地点击或滚动时刷新最近物理活跃时间，防止误判为静止超时。

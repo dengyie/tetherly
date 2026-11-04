@@ -8101,3 +8101,10 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - `maybe_auto_reverse` 新增距离闸门：累计 <300px 时任何推边清除驻留状态（时间维度与空间维度不可互攒）；
 - `Shared` 新增 `reverse_move_accum_px` / `reverse_last_move_ms` / `reverse_last_pos`；Windows hook 无逐事件 delta，统一坐标差口径；
 - m3_10/m3_11 增加热身段与距离负例（"未越过武装范围的鼠标推边不翻转"）；全工作区测试、fmt、三目标 clippy 全绿。
+
+## 90. 单调时钟域统一与累加状态生命周期重置 (v2.56 / v0.1.75)
+
+- **单调时钟域统一**：将 `last_auto_reverse_ms` 与 `reverse_last_move_ms`（依赖系统墙上时钟 `unix_ms()`）全面重构为单调时钟 `Instant`（`Mutex<Option<Instant>>`），消除 NTP 校时、时间跳变或夏令时对静止超时（2s）与反向接管冷却（3s Cooldown）的干扰；
+- **会话接替守卫与累加状态显式重置**：封装 `reset_reverse_arming_state()`，在入站隧道建立（`receive_input_tunnel_req`）、隧道主动释放（`input_tunnel_release`）及入站会话销毁（`attach_input_client`）时显式重置距离累加、最后位置与驻留状态，防止跨会话残留距离击穿新会话防御；
+- **物理活跃心跳扩展**：在物理按键（`drive_input_button`）与滚轮（`drive_input_wheel`）中植入 `note_reverse_physical_activity()`，确保原地点击或滚动时系统感知设备处于活跃使用中，不被误判为静止超时；
+- 三目标编译检查、Workspace 测试 0 失败、Clippy -D warnings 全绿。
