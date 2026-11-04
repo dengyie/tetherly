@@ -123,13 +123,13 @@ impl DragController {
 
         // Cancel any prior session so the receiver tears down its ghost overlay
         // instead of leaking it until timeout.
-        let superseded_cancel = self
-            .active_session
-            .take()
-            .map(|prev| DragControlMsg::RemoteDragCancel {
-                drag_id: prev.drag_id,
-                reason: DragCancelReason::UserEscPressed,
-            });
+        let superseded_cancel =
+            self.active_session
+                .take()
+                .map(|prev| DragControlMsg::RemoteDragCancel {
+                    drag_id: prev.drag_id,
+                    reason: DragCancelReason::UserEscPressed,
+                });
 
         self.active_session = Some(session);
 
@@ -148,11 +148,7 @@ impl DragController {
     }
 
     /// Sync cursor movement on remote screen.
-    pub fn sync_remote_move(
-        &mut self,
-        norm_x: f32,
-        norm_y: f32,
-    ) -> Option<DragControlMsg> {
+    pub fn sync_remote_move(&mut self, norm_x: f32, norm_y: f32) -> Option<DragControlMsg> {
         let session = self.active_session.as_mut()?;
         session.norm_x = norm_x.clamp(0.0, 1.0);
         session.norm_y = norm_y.clamp(0.0, 1.0);
@@ -293,7 +289,9 @@ mod tests {
                 );
 
                 // Drop confirm
-                let xfer = ctl.on_drop_confirm(drag_id, 0.5, 0.5).expect("drop confirm");
+                let xfer = ctl
+                    .on_drop_confirm(drag_id, 0.5, 0.5)
+                    .expect("drop confirm");
                 assert_eq!(xfer.target_peer, "home-win");
                 assert_eq!(xfer.file_paths, vec![tmp.clone()]);
             }
@@ -378,7 +376,9 @@ mod tests {
         };
 
         // A mismatched drag_id must not consume the real session.
-        assert!(ctl.on_drop_confirm(real_id.wrapping_add(1), 0.5, 0.5).is_none());
+        assert!(ctl
+            .on_drop_confirm(real_id.wrapping_add(1), 0.5, 0.5)
+            .is_none());
         assert!(ctl.active_session().is_some());
 
         let _ = std::fs::remove_file(&tmp);

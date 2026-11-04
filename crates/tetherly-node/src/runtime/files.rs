@@ -424,7 +424,9 @@ impl Node {
         }
         let _ = self.send_to(&source, done.to_frame()?).await;
         self.set_transfer_phase(&transfer_id, TransferPhase::Completed, None);
-        self.emit(UiEvent::FileDone { transfer_id: transfer_id.clone() });
+        self.emit(UiEvent::FileDone {
+            transfer_id: transfer_id.clone(),
+        });
         // Settle any drag session that originated this inbound transfer:
         // applies MOTW and reveals the file in the native file manager.
         self.settle_drag_for_transfer(&transfer_id, &path);

@@ -358,7 +358,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_drag_control_msg_roundtrip_json() {        let enter = DragControlMsg::RemoteDragEnter {
+    fn test_drag_control_msg_roundtrip_json() {
+        let enter = DragControlMsg::RemoteDragEnter {
             drag_id: 1730773000,
             file_count: 3,
             total_bytes: 104_857_600,
@@ -405,17 +406,8 @@ mod tests {
         assert_eq!(sm.current_phase(), DragPhase::Idle);
 
         // Enter
-        sm.on_remote_enter(
-            42,
-            1,
-            2048,
-            "report.pdf".into(),
-            0.1,
-            0.2,
-            false,
-            1000,
-        )
-        .expect("enter");
+        sm.on_remote_enter(42, 1, 2048, "report.pdf".into(), 0.1, 0.2, false, 1000)
+            .expect("enter");
         assert_eq!(sm.current_phase(), DragPhase::RemoteDragActive);
 
         // Move
@@ -434,17 +426,8 @@ mod tests {
     #[test]
     fn test_drag_state_machine_cancel_and_timeout() {
         let mut sm = DragStateMachine::new();
-        sm.on_remote_enter(
-            100,
-            2,
-            4096,
-            "test.png".into(),
-            0.1,
-            0.1,
-            false,
-            1000,
-        )
-        .expect("enter");
+        sm.on_remote_enter(100, 2, 4096, "test.png".into(), 0.1, 0.1, false, 1000)
+            .expect("enter");
 
         // Timeout check before 10s
         assert!(!sm.prune_expired(5000));
@@ -455,17 +438,8 @@ mod tests {
         assert_eq!(sm.current_phase(), DragPhase::Idle);
 
         // Re-enter and cancel with ESC
-        sm.on_remote_enter(
-            101,
-            1,
-            1024,
-            "doc.txt".into(),
-            0.3,
-            0.3,
-            false,
-            15_000,
-        )
-        .expect("enter");
+        sm.on_remote_enter(101, 1, 1024, "doc.txt".into(), 0.3, 0.3, false, 15_000)
+            .expect("enter");
         let r = sm
             .on_cancel(101, DragCancelReason::UserEscPressed)
             .expect("cancel");
@@ -515,10 +489,7 @@ mod tests {
             serde_json::to_string(&DragPhase::RemoteDragActive).unwrap(),
             "\"remote_drag_active\""
         );
-        assert_eq!(
-            serde_json::to_string(&DragPhase::Idle).unwrap(),
-            "\"idle\""
-        );
+        assert_eq!(serde_json::to_string(&DragPhase::Idle).unwrap(), "\"idle\"");
         assert_eq!(
             serde_json::to_string(&DragPhase::Dropping).unwrap(),
             "\"dropping\""

@@ -139,12 +139,13 @@ impl Node {
     /// has at most one active drag at a time).
     pub(crate) fn claim_drag_offer(&self, peer: &DeviceId, transfer_id: &str) {
         let drag_id = {
-            let mut pending = self.shared.pending_drag_drops.lock().expect("pending_drag_drops");
+            let mut pending = self
+                .shared
+                .pending_drag_drops
+                .lock()
+                .expect("pending_drag_drops");
             // Find a pending drop from this peer and claim it.
-            let found = pending
-                .iter()
-                .find(|(_, p)| *p == peer)
-                .map(|(id, _)| *id);
+            let found = pending.iter().find(|(_, p)| *p == peer).map(|(id, _)| *id);
             if let Some(id) = found {
                 pending.remove(&id);
                 Some(id)
@@ -257,7 +258,9 @@ mod tests {
             norm_y: 0.5,
             has_directory: false,
         };
-        a.send_drag_control(&b_id, &enter).await.expect("send enter");
+        a.send_drag_control(&b_id, &enter)
+            .await
+            .expect("send enter");
 
         // B's DragTarget must transition to RemoteDragActive (proves the
         // dispatcher routed the inbound signal, not just that the wire moved).
@@ -298,7 +301,9 @@ mod tests {
             drop_norm_x: 0.5,
             drop_norm_y: 0.5,
         };
-        a.send_drag_control(&b_id, &confirm).await.expect("send confirm");
+        a.send_drag_control(&b_id, &confirm)
+            .await
+            .expect("send confirm");
 
         // B reaches Dropping and records the pending drag so the file
         // completion hook can settle MOTW + reveal once bytes land.
@@ -330,7 +335,9 @@ mod tests {
             drag_id: 4242,
             reason: tetherly_core::drag::DragCancelReason::UserEscPressed,
         };
-        a.send_drag_control(&b_id, &cancel).await.expect("send cancel");
+        a.send_drag_control(&b_id, &cancel)
+            .await
+            .expect("send cancel");
         let mut tries = 0;
         loop {
             let phase = b.drag_target().lock().expect("t").current_phase();

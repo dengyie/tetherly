@@ -30,9 +30,7 @@ pub enum GhostOverlayVisual {
         has_directory: bool,
     },
     /// Drop confirmed, displaying transfer progress spinner.
-    DroppingProgress {
-        first_file_name: String,
-    },
+    DroppingProgress { first_file_name: String },
 }
 
 /// Target-side manager orchestrating incoming cross-screen drag events and overlay feedback.
@@ -102,10 +100,7 @@ impl DragTarget {
 
         info!(
             drag_id,
-            norm_x,
-            norm_y,
-            file_count,
-            "ghost drag overlay activated on target"
+            norm_x, norm_y, file_count, "ghost drag overlay activated on target"
         );
 
         Ok(())
@@ -133,9 +128,9 @@ impl DragTarget {
         drop_norm_y: f32,
         now_ms: u64,
     ) -> Result<DragControlMsg, CoreError> {
-        let session = self
-            .state_machine
-            .on_drop_confirm(drag_id, drop_norm_x, drop_norm_y, now_ms)?;
+        let session =
+            self.state_machine
+                .on_drop_confirm(drag_id, drop_norm_x, drop_norm_y, now_ms)?;
 
         self.visual_state = GhostOverlayVisual::DroppingProgress {
             first_file_name: session.first_file_name.clone(),
@@ -143,9 +138,7 @@ impl DragTarget {
 
         info!(
             drag_id,
-            drop_norm_x,
-            drop_norm_y,
-            "drop confirmed on target; requesting data stream"
+            drop_norm_x, drop_norm_y, "drop confirmed on target; requesting data stream"
         );
 
         Ok(DragControlMsg::RemoteDropConfirm {
@@ -262,7 +255,9 @@ mod tests {
         assert_eq!(target.current_norm_pos(), (0.4, 0.5));
 
         // Drop confirm
-        let reply = target.handle_drop_confirm(555, 0.4, 0.5, 1200).expect("confirm");
+        let reply = target
+            .handle_drop_confirm(555, 0.4, 0.5, 1200)
+            .expect("confirm");
         assert_eq!(
             reply,
             DragControlMsg::RemoteDropConfirm {

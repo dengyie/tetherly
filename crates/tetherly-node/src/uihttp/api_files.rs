@@ -1459,4 +1459,3 @@ pub(super) async fn post_file_drag_confirm(
         }
     }
 }
-

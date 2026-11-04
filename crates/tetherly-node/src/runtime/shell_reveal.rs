@@ -22,9 +22,7 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), CoreError> {
         return Err(CoreError::File("target path does not exist".into()));
     }
 
-    let abs_path = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
+    let abs_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
     let path_str = abs_path.to_str().ok_or(CoreError::UnsafeFileName)?;
 
@@ -79,12 +77,15 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), CoreError> {
 /// On non-Windows platforms, this is a safe no-op.
 pub fn apply_motw(file_path: &Path, source_peer: &str) -> Result<(), CoreError> {
     if !file_path.exists() {
-        return Err(CoreError::File("target file does not exist for MOTW".into()));
+        return Err(CoreError::File(
+            "target file does not exist for MOTW".into(),
+        ));
     }
 
     #[cfg(target_os = "windows")]
     {
-        let clean_peer = source_peer.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "");
+        let clean_peer =
+            source_peer.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "");
         let zone_path = format!("{}:Zone.Identifier", file_path.display());
         let content = format!(
             "[ZoneTransfer]\r\nZoneId=3\r\nReferrerUrl=tetherly://peer/{clean_peer}\r\nHostUrl=tetherly://peer/{clean_peer}\r\n"
@@ -114,7 +115,8 @@ mod tests {
 
     #[test]
     fn test_apply_motw_on_temp_file() {
-        let tmp = std::env::temp_dir().join(format!("tetherly_test_motw_{}.tmp", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("tetherly_test_motw_{}.tmp", std::process::id()));
         std::fs::write(&tmp, b"sample tetherly payload").expect("write temp");
         let res = apply_motw(&tmp, "home-win");
         let _ = std::fs::remove_file(&tmp);

@@ -1305,4 +1305,3 @@ pub struct DragStatusReport {
     pub target_visual: crate::runtime::GhostOverlayVisual,
     pub target_norm_pos: (f32, f32),
 }
-
