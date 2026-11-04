@@ -1504,14 +1504,26 @@ impl Node {
         width: i32,
         height: i32,
     ) -> Result<Option<tetherly_core::ScreenEdge>, CoreError> {
+        // Track physical activity: the auto-reverse trigger only fires for a
+        // mouse that is actually being used right now (remote-driven frames
+        // never pass through here — they arrive via InputClient directly).
+        self.shared
+            .last_local_input_ms
+            .store(self.shared.clock.unix_ms(), Ordering::SeqCst);
+
         // Deskflow alignment: while this node is the *target* of an active
-        // input tunnel, its engine must not evaluate boundary crossings. The
-        // cursor on this screen is driven by the remote controller, and a
-        // locally-observed position touching an edge (physical mouse, or a
-        // hook that does not filter injected moves) must never promote this
-        // node to controller — that race produced two controllers driving
-        // each other's cursors (cursor fights / drift).
+        // input tunnel, its engine must not roam. The cursor on this screen
+        // is driven by the remote controller, and a locally-observed position
+        // touching an edge must never silently promote this node to
+        // controller — that race produced two controllers driving each
+        // other's cursors (cursor fights / drift).
+        //
+        // The single exception is the Deskflow "switch at the shared edge":
+        // a sustained, deliberate physical push through THIS node's own
+        // configured edge requests a polite takeover, making the reverse
+        // direction click-free. Everything else stays suppressed.
         if self.active_tunnel_role() == Some(tetherly_core::InputTunnelRole::Target) {
+            self.maybe_auto_reverse(x, y, dx, dy, width, height);
             return Ok(None);
         }
         // Guard: If the network input channel is not connected and we are not in grace period, never allow crossing into Remote seat.
@@ -1706,6 +1718,138 @@ impl Node {
             .map(|s| s.role)
     }
 
+    /// Deskflow "switch at the shared edge" for the controlled side.
+    ///
+    /// While this node is the Target, a sustained physical push through its
+    /// own configured edge takes over as controller automatically — the
+    /// reverse direction (e.g. Windows -> Mac) needs no UI click. Accidental
+    /// flips are fenced by four gates:
+    ///
+    /// 1. the node's own `edge` policy must be configured (a direction
+    ///    must be declared before it can be triggered);
+    /// 2. the physical mouse must have moved within the last 2s (a parked
+    ///    mouse resting at the edge can never steal control);
+    /// 3. the push must persist for the topology `delay_ms` dwell
+    ///    (default 100ms) — a graze does not flip;
+    /// 4. a 3s cooldown between automatic flips prevents storm flip-flops.
+    ///
+    /// The flip itself reuses the polite-takeover attach path, so the
+    /// global single-outbound-channel invariant still holds.
+    fn maybe_auto_reverse(&self, x: i32, y: i32, dx: i32, dy: i32, width: i32, height: i32) {
+        if self.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target) {
+            return;
+        }
+        let policy = self.input_policy();
+        let Some(edge_str) = policy.edge.clone() else {
+            return;
+        };
+        let Ok(edge) = edge_str.parse::<tetherly_core::ScreenEdge>() else {
+            return;
+        };
+        let Some(peer) = self
+            .shared
+            .active_input_tunnel
+            .lock()
+            .expect("active_input_tunnel")
+            .as_ref()
+            .map(|s| s.peer_id.clone())
+        else {
+            return;
+        };
+
+        let now_ms = self.shared.clock.unix_ms();
+        let last_input = self.shared.last_local_input_ms.load(Ordering::SeqCst);
+        if last_input == 0 || now_ms.saturating_sub(last_input) > 2000 {
+            *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
+            return;
+        }
+        let last_flip = self.shared.last_auto_reverse_ms.load(Ordering::SeqCst);
+        if last_flip != 0 && now_ms.saturating_sub(last_flip) < 3000 {
+            return;
+        }
+
+        // Same boundary normalization the controller path uses: the OS
+        // clamps the cursor to [0, size-1], so a boundary touch is promoted
+        // to the true edge when the push direction agrees.
+        let (target_x, target_y) = match edge {
+            tetherly_core::ScreenEdge::Right
+                if x >= width.saturating_sub(2) || (x >= width.saturating_sub(8) && dx > 0) =>
+            {
+                (width, y)
+            }
+            tetherly_core::ScreenEdge::Bottom
+                if y >= height.saturating_sub(2) || (y >= height.saturating_sub(8) && dy > 0) =>
+            {
+                (x, height)
+            }
+            tetherly_core::ScreenEdge::Top if y <= 2 || (y <= 8 && dy < 0) => (x, 0),
+            tetherly_core::ScreenEdge::Left if x <= 2 || (x <= 8 && dx < 0) => (0, y),
+            _ => {
+                *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
+                return;
+            }
+        };
+        let crossed = match edge {
+            tetherly_core::ScreenEdge::Right => target_x >= width,
+            tetherly_core::ScreenEdge::Bottom => target_y >= height,
+            tetherly_core::ScreenEdge::Top => target_y <= 0,
+            tetherly_core::ScreenEdge::Left => target_x <= 0,
+        };
+        if !crossed {
+            *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
+            return;
+        }
+
+        let delay_ms = {
+            let layout = self.shared.topology_layout.lock().expect("topology_layout");
+            layout.config.delay_ms.max(50) as u64
+        };
+        let armed = {
+            let mut arm = self.shared.reverse_arm_since.lock().expect("reverse_arm");
+            match *arm {
+                Some(since) => since.elapsed().as_millis() as u64 >= delay_ms,
+                None => {
+                    *arm = Some(std::time::Instant::now());
+                    false
+                }
+            }
+        };
+        if !armed {
+            return;
+        }
+        *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
+        self.shared
+            .last_auto_reverse_ms
+            .store(now_ms, Ordering::SeqCst);
+
+        info!(peer = %peer, %edge, "auto-reverse: sustained edge push; requesting polite takeover");
+        self.record_audit(
+            AuditCategory::Config,
+            AuditSeverity::Info,
+            "input_tunnel_auto_reverse",
+            Some(peer.clone()),
+            format!("Edge-push takeover requested toward peer {peer} (edge {edge})"),
+            true,
+        );
+
+        let node = self.clone_handle();
+        let display_edge: tetherly_core::DisplayEdge = edge.into();
+        let rt = tokio::runtime::Handle::try_current()
+            .ok()
+            .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
+        if let Some(handle) = rt {
+            handle.spawn(async move {
+                if let Err(e) = node
+                    .input_tunnel_attach(&peer, Some(display_edge), None, None)
+                    .await
+                {
+                    warn!(peer = %peer, %e, "auto-reverse takeover attach failed");
+                }
+            });
+        } else {
+            warn!("auto-reverse: no runtime handle available; cannot take over");
+        }
+    }
     /// Push a physical mouse-button observation to the remote seat. No-op
     /// while the seat is local (the engine gates the same way).
     pub fn drive_input_button(&self, mask: u8, down: bool) -> Result<(), CoreError> {

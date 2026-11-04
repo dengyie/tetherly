@@ -566,7 +566,15 @@ async fn m3_9_reverse_control_takeover_flips_roles_cleanly() {
         server.active_tunnel_role(),
         Some(tetherly_core::InputTunnelRole::Controller)
     );
-    assert!(server.input_channel_open_sync());
+    // role=Controller is recorded when the request is SENT; the data channel
+    // opens on the peer's accepted response — poll instead of asserting.
+    let start = std::time::Instant::now();
+    while !server.input_channel_open_sync() {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("controller never opened its outbound channel");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // 2. Reverse control: client (Windows) attaches. The polite-takeover
     //    path must demote the old controller FIRST, leaving exactly one
@@ -622,6 +630,97 @@ async fn m3_9_reverse_control_takeover_flips_roles_cleanly() {
     tokio::time::sleep(Duration::from_millis(80)).await;
     let edge = client.drive_input(50, 50, 100, 50).unwrap();
     assert_eq!(edge, Some(tetherly_core::ScreenEdge::Bottom));
+
+    server.shutdown();
+    client.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
+    let (server, client, _ga, _gb) = pair().await;
+
+    // 1. Forward direction: server attaches as controller (Mac drives Windows).
+    server
+        .input_tunnel_attach(
+            client.identity().device_id().to_string().as_str(),
+            Some(tetherly_core::DisplayEdge::Top),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let start = std::time::Instant::now();
+    while client.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target) {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("target never registered the inbound tunnel");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. The target declares its own reverse direction (Windows bottom edge
+    //    points down toward the Mac).
+    let mut pol = client.input_policy();
+    pol.edge = Some("bottom".into());
+    client.set_input_policy(pol).unwrap();
+
+    // 3. Deskflow switch-at-the-edge: a sustained physical push through the
+    //    target's own edge arms the dwell (topology delay_ms), and the next
+    //    push past the dwell fires the polite takeover — no UI click.
+    client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
+
+    let start = std::time::Instant::now();
+    while client.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Controller) {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!(
+                "edge-push takeover never happened; server={:?}, client={:?}",
+                server.active_tunnel_role(),
+                client.active_tunnel_role()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let start = std::time::Instant::now();
+    while server.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target) {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("old controller never demoted to target");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 4. Single-outbound-channel invariant still holds after the flip.
+    // The client records role=Controller when SENDING the takeover request;
+    // its data channel opens once the peer's accepted response lands, so
+    // poll for it (slow CI runners race the immediate assert).
+    let start = std::time::Instant::now();
+    while !client.input_channel_open_sync() {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("new controller never opened its outbound channel");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!server.input_channel_open_sync());
+
+    // 5. The new direction actually drives the old controller's screen:
+    //    continuing to push through the bottom edge crosses into the Mac.
+    let edge = client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
+    assert_eq!(edge, Some(tetherly_core::ScreenEdge::Bottom));
+    let start = std::time::Instant::now();
+    loop {
+        let sink = server.input_sink_snapshot();
+        if server.input_seat() == Some(CursorSeat::Remote) && sink.cursor.0 >= 500 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!(
+                "reverse direction never drove the old controller's screen: seat={:?}, sink={:?}",
+                server.input_seat(),
+                sink
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     server.shutdown();
     client.shutdown();
