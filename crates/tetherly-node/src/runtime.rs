@@ -870,6 +870,17 @@ struct Shared {
     /// aborts the previous one so stacked inbound sessions can never leave
     /// two clients racing on `input_sink` / the real injection sink.
     input_client_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// unix_ms of the last local physical input observation. The auto-reverse
+    /// trigger requires recent physical activity so a parked mouse resting
+    /// against the shared edge can never steal control.
+    last_local_input_ms: std::sync::atomic::AtomicU64,
+    /// unix_ms of the last automatic direction flip (cooldown between flips).
+    last_auto_reverse_ms: std::sync::atomic::AtomicU64,
+    /// Start of the current sustained edge-push (auto-reverse dwell).
+    reverse_arm_since: Mutex<Option<std::time::Instant>>,
+    /// Async runtime handle captured at startup: the capture-hook thread has
+    /// no runtime context but must be able to spawn the takeover attach.
+    rt_handle: Mutex<Option<tokio::runtime::Handle>>,
     virtual_display_policy: Mutex<VirtualDisplayPolicy>,
     active_virtual_display: Mutex<Option<ActiveVirtualDisplaySession>>,
     audio_routing_policy: Mutex<AudioRoutingPolicy>,

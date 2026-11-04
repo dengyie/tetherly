@@ -8078,3 +8078,10 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 
 - `docs/adr/136-bidirectional-control-takeover-and-multi-screen-roadmap.md`：双向控制治理不变式、屏幕延展（IddCx 虚拟显示器 + CGVirtualDisplay + 45720 帧通道复用）与多屏控制（邻接图拓扑）路线图；
 - `link_watcher` 的 auto-attach 失败从静默 `let _ =` 升级为 `warn!`（带 peer 与错误），接续重试语义不变。
+
+## 87. 推边自动接管：双向漫游零点击 (v2.53 / v0.1.72)
+
+- **`maybe_auto_reverse`**（runtime/input.rs）：Target 角色下物理光标持续推过本机声明 edge（驻留 = topology delay_ms）自动发起 polite takeover；四重防误触闸（edge 声明、2s 内物理活动、100ms 驻留、3s 冷却）；
+- `Shared` 新增 `last_local_input_ms` / `last_auto_reverse_ms` / `reverse_arm_since` / `rt_handle`（capture 线程无 runtime 上下文，经启动时捕获的 Handle spawn 接管任务）；
+- UI 漫游按钮降级为手动覆盖手段，日常使用零点击；
+- `tests/phase3.rs::m3_10_auto_reverse_edge_push_takes_over_without_click`：正向 attach → 受控端两次推边（驻留间隔）→ 断言角色自动翻转、单通道不变式、新方向真实驱动对端；全工作区测试、fmt、三目标 clippy 全绿。
