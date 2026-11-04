@@ -886,6 +886,14 @@ struct Shared {
     /// a push counts as sustained only while touch events keep arriving).
     reverse_arm_since: Mutex<Option<std::time::Instant>>,
     reverse_last_tick: Mutex<Option<std::time::Instant>>,
+    /// Distance arming for auto-reverse: accumulated physical movement (px)
+    /// since the mouse was last idle for REVERSE_RESET_AFTER_MS. A freshly
+    /// plugged-in or merely bumped mouse must traverse a real range before
+    /// it may take over; its last cursor position feeds the coordinate-delta
+    /// accumulation (Windows hooks report no per-event deltas).
+    reverse_move_accum_px: std::sync::atomic::AtomicI64,
+    reverse_last_move_ms: std::sync::atomic::AtomicU64,
+    reverse_last_pos: Mutex<Option<(i32, i32)>>,
     /// Async runtime handle captured at startup: the capture-hook thread has
     /// no runtime context but must be able to spawn the takeover attach.
     rt_handle: Mutex<Option<tokio::runtime::Handle>>,
