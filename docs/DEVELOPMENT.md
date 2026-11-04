@@ -8108,3 +8108,17 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **会话接替守卫与累加状态显式重置**：封装 `reset_reverse_arming_state()`，在入站隧道建立（`receive_input_tunnel_req`）、隧道主动释放（`input_tunnel_release`）及入站会话销毁（`attach_input_client`）时显式重置距离累加、最后位置与驻留状态，防止跨会话残留距离击穿新会话防御；
 - **物理活跃心跳扩展**：在物理按键（`drive_input_button`）与滚轮（`drive_input_wheel`）中植入 `note_reverse_physical_activity()`，确保原地点击或滚动时系统感知设备处于活跃使用中，不被误判为静止超时；
 - 三目标编译检查、Workspace 测试 0 失败、Clippy -D warnings 全绿。
+
+## 91. 生产构建全链路 CI 化与本地跨平台编译依赖彻底剥离 (v2.56 / v0.1.75)
+
+- **构建与部署体系 CI-First 彻底收敛**：
+  - 遵循用户指令：「以后我们的部署全部都要依赖 GitHub CI 去编译，不要在本地编译了」；
+  - 正式将 GitHub Actions 发布流水线（`.github/workflows/release.yml`）作为生产交付二进制（macOS arm64、Windows x86_64、Linux x86_64、Android apk/so）的唯一编译源；
+- **本地跨平台编译中间件与残留工具全面清退**：
+  - 彻底卸载 Homebrew 安装的交叉编译器中间件：`mingw-w64`（1.4GB）、`musl-cross`（954MB）及其依赖（`gmp`, `isl`, `libmpc`, `mpfr`）；
+  - 移除 Rustup 非宿主编译 target：`x86_64-pc-windows-gnu`、`x86_64-pc-windows-msvc`、`x86_64-unknown-linux-musl`、`aarch64-unknown-linux-gnu`，仅保留宿主 `aarch64-apple-darwin`；
+  - 移除 `.cargo/config.toml` 中专为本地 MinGW 交叉配置的遗留配置；
+  - 执行 `cargo clean` 彻底清除本地 54.5GB 构建缓存，磁盘空间完全释放；
+- **部署脚本标准化改造**：
+  - 重构 `scripts/package-macos-app.sh`：支持直接通过 `--binary <path>`、`--tag <TAG>` 或 `--run-id <ID>` 获取并安装 CI 编译产物，默认自动拉取最新 Release，剥离强制 `cargo build`；
+  - 新建 `scripts/deploy.sh`：一键自动化部署流水线，统一支持 `--target <mac|windows|all>`，实现 GitHub CI 产物拉取、Windows 受保护生产进程检查、NTFS 原地热替换与跨平台冒烟验收全闭环。

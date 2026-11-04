@@ -20,19 +20,100 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_DIR="/Applications/Tetherly.app"
 BUNDLE_ID="dev.tetherly.tetherly"
 RESTART=false
+BINARY_PATH=""
+FROM_TAG=""
+FROM_RUN=""
+BUILD_LOCAL=false
 
-for arg in "$@"; do
-    case "$arg" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --restart)
             RESTART=true
+            shift
+            ;;
+        --binary)
+            BINARY_PATH="$2"
+            shift 2
+            ;;
+        --tag|--from-tag)
+            FROM_TAG="$2"
+            shift 2
+            ;;
+        --run-id|--from-run)
+            FROM_RUN="$2"
+            shift 2
+            ;;
+        --local)
+            BUILD_LOCAL=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--restart] [--binary <path>] [--tag <vX.Y.Z>] [--run-id <id>] [--local]"
+            echo ""
+            echo "Options:"
+            echo "  --restart        Gracefully stop running daemon and restart via LaunchServices after install"
+            echo "  --binary <path>  Install specified pre-built binary (e.g. from GitHub CI)"
+            echo "  --tag <vX.Y.Z>   Download and install binary from GitHub Release tag (default: latest)"
+            echo "  --run-id <id>    Download and install artifact from GitHub Actions workflow run"
+            echo "  --local          Compile release binary locally via cargo (discouraged; CI is preferred)"
+            exit 0
             ;;
         *)
+            echo "Unknown argument: $1" >&2
+            exit 1
             ;;
     esac
 done
 
-echo "==> [1/4] Building release binary..."
+TMP_CLEANUP=""
+cleanup() {
+    if [ -n "$TMP_CLEANUP" ] && [ -d "$TMP_CLEANUP" ]; then
+        rm -rf "$TMP_CLEANUP"
+    fi
+}
+trap cleanup EXIT
+
+echo "==> [1/4] Acquiring release binary..."
 cd "$REPO_ROOT"
+
+if [ -n "$BINARY_PATH" ]; then
+    if [ ! -f "$BINARY_PATH" ]; then
+        echo "Error: specified binary not found at $BINARY_PATH" >&2
+        exit 1
+    fi
+    echo "==> Using provided binary: $BINARY_PATH"
+elif [ -n "$FROM_RUN" ]; then
+    echo "==> Downloading artifact from GitHub Actions run $FROM_RUN..."
+    TMP_CLEANUP=$(mktemp -d /tmp/tetherly-ci-XXXXXX)
+    gh run download "$FROM_RUN" -n "tetherly-macos-arm64" -D "$TMP_CLEANUP"
+    BINARY_PATH="$TMP_CLEANUP/tetherly-macos-arm64"
+elif [ -n "$FROM_TAG" ]; then
+    echo "==> Downloading artifact from GitHub Release tag $FROM_TAG..."
+    TMP_CLEANUP=$(mktemp -d /tmp/tetherly-ci-XXXXXX)
+    gh release download "$FROM_TAG" -p "tetherly-macos-arm64" -D "$TMP_CLEANUP"
+    BINARY_PATH="$TMP_CLEANUP/tetherly-macos-arm64"
+elif [ "$BUILD_LOCAL" = true ]; then
+    echo "==> Building release binary locally via cargo..."
+    cargo build --release -p tetherly-node -p tetherly-cli
+    BINARY_PATH="$REPO_ROOT/target/release/tetherly"
+else
+    # Default: attempt to download latest release artifact from GitHub CI
+    LATEST_TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+    if [ -n "$LATEST_TAG" ]; then
+        echo "==> No binary specified, downloading latest CI release ($LATEST_TAG)..."
+        TMP_CLEANUP=$(mktemp -d /tmp/tetherly-ci-XXXXXX)
+        gh release download "$LATEST_TAG" -p "tetherly-macos-arm64" -D "$TMP_CLEANUP" 2>/dev/null || true
+        if [ -f "$TMP_CLEANUP/tetherly-macos-arm64" ]; then
+            BINARY_PATH="$TMP_CLEANUP/tetherly-macos-arm64"
+        fi
+    fi
+    if [ -z "$BINARY_PATH" ] || [ ! -f "$BINARY_PATH" ]; then
+        # Fallback to local build if offline or no release exists
+        echo "==> Could not fetch from CI; falling back to local cargo build..."
+        cargo build --release -p tetherly-node -p tetherly-cli
+        BINARY_PATH="$REPO_ROOT/target/release/tetherly"
+    fi
+fi
 
 if [ "$RESTART" = true ]; then
     # Shut the previous daemon down BEFORE overwriting its binary: cp opens
@@ -47,8 +128,6 @@ if [ "$RESTART" = true ]; then
     done
 fi
 
-cargo build --release -p tetherly-node -p tetherly-cli
-
 # Keep the bundle version in sync with the workspace version instead of a
 # hardcoded string that drifts every release.
 WORKSPACE_VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
@@ -60,7 +139,7 @@ echo "==> [2/4] Assembling /Applications/Tetherly.app bundle..."
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
-cp "$REPO_ROOT/target/release/tetherly" "$APP_DIR/Contents/MacOS/Tetherly"
+cp "$BINARY_PATH" "$APP_DIR/Contents/MacOS/Tetherly"
 chmod +x "$APP_DIR/Contents/MacOS/Tetherly"
 
 cat << EOF > "$APP_DIR/Contents/Info.plist"
