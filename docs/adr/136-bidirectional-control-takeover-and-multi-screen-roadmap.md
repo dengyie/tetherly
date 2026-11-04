@@ -69,3 +69,13 @@ v0.1.70 引入 Target 越境守卫后暴露了方向治理缺陷：Windows 无�
 
 两端都声明 edge（Mac=top、Windows=bottom）即达 Deskflow 语义：**任意方向推边即切、全程零点击**；仅一端声明时另一方向仍走 UI/CLI 显式接管。boot 竞速若落入"双 target"中性态（无人驱动、各控各的），任一端推边即恢复漫游——中性态是特性而非故障。
 
+
+## 7. 增补（v0.1.73）：翻转通道重建与接替守卫（review 根因修复）
+
+v0.1.72 的生产验证暴露了翻转链路的三个真实缺陷，本节为根因修复记录：
+
+1. **通道僵尸复用**：takeover 后新 controller 复用了 target 时代的旧出站通道；被降级方 `input_stop` 关闭 socket → 旧通道死亡且无人重建。修复：`input_tunnel_attach` 无条件弃用旧出站通道并重新拨号（attach = 会话重置语义）；`open_input` 增加幂等（通道健康即跳过）+ `input_dialing` 单拨号闸门（并发 caller 不再产生僵尸连接）。
+2. **接替清理竞态**：被取代的旧会话任务退出时无条件执行 `seat=Local + on_peer_gone`，把新会话刚建立的漫游态打回。修复：出站/入站任务退出清理加"会话仍属我"守卫（role+peer 一致性；入站任务另加代际标记）。裸 input 通道（无 tunnel 会话，CI/直连路径）保持既有清理行为。
+3. **防误触闸门语义修正**：v0.1.72 的"2 秒内物理输入"闸门是恒真死代码（触发事件本身即新鲜输入）；"首次触边起算 elapsed"驻留会被"两次间隔 500ms 的孤立误碰"击穿。修复：**间隔连续性驻留**——触边事件必须持续到达（间隔 ≤150ms，等价于鼠标报点停顿 10Hz 断链线）累计满 `delay_ms` 才翻转；`TOUCH_GAP` 语义与测试（m3_11：单触不翻、双误碰 300ms 不翻、连续推翻）固化。
+
+同批删除：`InputTunnelSuspendFrame`/`TYPE_INPUT_TUNNEL_SUSPEND`/`is_resume`（v0.1.68 引入、从未兑现的协议骨架）与 `InputServer::local_move`（生产零调用的双轨语义）。

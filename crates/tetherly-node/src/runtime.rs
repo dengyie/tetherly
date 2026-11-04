@@ -424,7 +424,11 @@ struct Shared {
     pin: Mutex<Option<([u8; 8], u64)>>,
     events: broadcast::Sender<UiEvent>,
     sessions: AsyncMutex<HashMap<DeviceId, mpsc::Sender<InnerFrame>>>,
-    input_out: Mutex<Option<mpsc::Sender<InnerFrame>>>,
+    /// Outbound input channel tagged with a generation id. A session task
+    /// may only clear the slot if its own generation is still current — a
+    /// stale task exiting late (e.g. after a takeover rebuilt the channel)
+    /// must not kill the new channel.
+    input_out: Mutex<Option<(u64, mpsc::Sender<InnerFrame>)>>,
     input_reconnect_deadline: Mutex<Option<std::time::Instant>>,
     input_buffered_frames: Mutex<VecDeque<InnerFrame>>,
     live: Mutex<HashMap<DeviceId, LivePeer>>,
@@ -870,14 +874,18 @@ struct Shared {
     /// aborts the previous one so stacked inbound sessions can never leave
     /// two clients racing on `input_sink` / the real injection sink.
     input_client_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// unix_ms of the last local physical input observation. The auto-reverse
-    /// trigger requires recent physical activity so a parked mouse resting
-    /// against the shared edge can never steal control.
-    last_local_input_ms: std::sync::atomic::AtomicU64,
+    /// Single-dialer gate for `open_input`. Concurrent callers (link watcher
+    /// tick, takeover attach, UI) must not open competing connections to the
+    /// same peer: the loser's session would become a zombie and flip
+    /// `input_out` back and forth.
+    input_dialing: std::sync::atomic::AtomicBool,
     /// unix_ms of the last automatic direction flip (cooldown between flips).
     last_auto_reverse_ms: std::sync::atomic::AtomicU64,
-    /// Start of the current sustained edge-push (auto-reverse dwell).
+    /// Auto-reverse dwell state: start of the current sustained edge push and
+    /// the instant of the last boundary-touching event (gap-continuity check:
+    /// a push counts as sustained only while touch events keep arriving).
     reverse_arm_since: Mutex<Option<std::time::Instant>>,
+    reverse_last_tick: Mutex<Option<std::time::Instant>>,
     /// Async runtime handle captured at startup: the capture-hook thread has
     /// no runtime context but must be able to spawn the takeover attach.
     rt_handle: Mutex<Option<tokio::runtime::Handle>>,

@@ -664,11 +664,12 @@ async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
     client.set_input_policy(pol).unwrap();
 
     // 3. Deskflow switch-at-the-edge: a sustained physical push through the
-    //    target's own edge arms the dwell (topology delay_ms), and the next
-    //    push past the dwell fires the polite takeover — no UI click.
-    client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
+    //    target's own edge (touch events arriving within the 100ms gap
+    //    window for >= delay_ms) fires the polite takeover — no UI click.
+    for _ in 0..8 {
+        client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
 
     let start = std::time::Instant::now();
     while client.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Controller) {
@@ -702,10 +703,15 @@ async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
     }
     assert!(!server.input_channel_open_sync());
 
-    // 5. The new direction actually drives the old controller's screen:
-    //    continuing to push through the bottom edge crosses into the Mac.
-    let edge = client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
-    assert_eq!(edge, Some(tetherly_core::ScreenEdge::Bottom));
+    // 5. The new direction actually drives the old controller's screen.
+    //    During the takeover the sustained push already carried the engine
+    //    into the Remote seat (the crossing frames sat in the grace buffer
+    //    until the fresh channel flushed them), so further pushes continue
+    //    free roaming instead of re-crossing — what must be asserted is
+    //    that the Mac's sink receives the motion, polled below.
+    // Downward (deeper into the Mac): the entry parked at the Mac's top
+    // edge (rem_y = 0), pushing up would auto-return to Windows.
+    client.drive_input_delta(50, 40, 0, 10, 100, 50).unwrap();
     let start = std::time::Instant::now();
     loop {
         let sink = server.input_sink_snapshot();
@@ -717,6 +723,79 @@ async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
                 "reverse direction never drove the old controller's screen: seat={:?}, sink={:?}",
                 server.input_seat(),
                 sink
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    server.shutdown();
+    client.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn m3_11_auto_reverse_gates_block_accidental_flips() {
+    let (server, client, _ga, _gb) = pair().await;
+
+    // Forward direction: server is controller, client is target.
+    server
+        .input_tunnel_attach(
+            client.identity().device_id().to_string().as_str(),
+            Some(tetherly_core::DisplayEdge::Top),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let start = std::time::Instant::now();
+    while client.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target) {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("target never registered the inbound tunnel");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut pol = client.input_policy();
+    pol.edge = Some("bottom".into());
+    client.set_input_policy(pol).unwrap();
+
+    // Gate: a single touch of the shared edge must NOT flip. The dwell
+    // requires touch events to keep arriving for delay_ms; one isolated
+    // push has no continuation, so no takeover may occur.
+    client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        client.active_tunnel_role(),
+        Some(tetherly_core::InputTunnelRole::Target),
+        "single isolated edge touch must not take over"
+    );
+
+    // Gate: two isolated bumps 300ms apart (gap > TOUCH_GAP_MS) must NOT
+    // flip either — this is exactly the accidental parked-mouse-bump
+    // pattern the gap-continuity dwell exists to fence. (A plain
+    // elapsed-since-first-touch dwell would flip here.)
+    client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        client.active_tunnel_role(),
+        Some(tetherly_core::InputTunnelRole::Target),
+        "two isolated bumps with a 300ms gap must not take over"
+    );
+
+    // The sustained push still works after the gates: a dense event stream
+    // (20ms apart, well under TOUCH_GAP_MS) held past delay_ms fires the
+    // takeover.
+    for _ in 0..12 {
+        client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let start = std::time::Instant::now();
+    while client.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Controller) {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!(
+                "sustained push never took over; server={:?}, client={:?}",
+                server.active_tunnel_role(),
+                client.active_tunnel_role()
             );
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

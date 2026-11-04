@@ -421,6 +421,33 @@ pub(crate) async fn run(
             let status = link_watcher.input_tunnel_status();
             let being_controlled =
                 link_watcher.active_tunnel_role() == Some(tetherly_core::InputTunnelRole::Target);
+
+            // Recycle stale optimistic attach sessions: `input_tunnel_attach`
+            // records role=Controller when SENDING the request; if the peer
+            // vanished before answering, the session lingers as a Controller
+            // tunnel the UI can see but that can never roam. Once the peer is
+            // no longer live and the session is older than 5s, retries are
+            // pointless — release so a fresh attach (watcher/edge-push) can
+            // start cleanly. A live peer keeps its retry loop untouched.
+            if status.active && !being_controlled && !link_watcher.input_channel_open().await {
+                if let Some(s) = status.session.as_ref() {
+                    // status.timestamp_ms is the daemon's own clock — the
+                    // same clock that stamped started_at_ms.
+                    let stale = s.role == tetherly_core::InputTunnelRole::Controller
+                        && status.timestamp_ms.saturating_sub(s.started_at_ms) > 5000
+                        && !link_watcher
+                            .live_peers()
+                            .iter()
+                            .any(|p| p.device_id.to_string() == s.peer_id);
+                    if stale {
+                        tracing::warn!(peer = %s.peer_id, "releasing stale input tunnel session (peer gone, never accepted)");
+                        let _ = link_watcher
+                            .input_tunnel_release(Some("peer lost before accept"))
+                            .await;
+                    }
+                }
+            }
+
             if (status.active || policy.edge.is_some())
                 && !being_controlled
                 && !link_watcher.input_channel_open().await

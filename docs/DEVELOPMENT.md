@@ -8085,3 +8085,12 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - `Shared` 新增 `last_local_input_ms` / `last_auto_reverse_ms` / `reverse_arm_since` / `rt_handle`（capture 线程无 runtime 上下文，经启动时捕获的 Handle spawn 接管任务）；
 - UI 漫游按钮降级为手动覆盖手段，日常使用零点击；
 - `tests/phase3.rs::m3_10_auto_reverse_edge_push_takes_over_without_click`：正向 attach → 受控端两次推边（驻留间隔）→ 断言角色自动翻转、单通道不变式、新方向真实驱动对端；全工作区测试、fmt、三目标 clippy 全绿。
+
+## 88. 翻转链路 review 根因修复 (v2.54 / v0.1.73)
+
+- **通道重建**：`input_tunnel_attach` 弃旧拨新 + `open_input` 幂等/单拨号闸门（P2：翻转窗口双拨号僵尸连接）；
+- **接替守卫**：出站/入站会话任务退出清理按"会话仍属我"（role+peer/代际）门控（P1：被降级方死亡任务把新会话打回 Local——翻转后反向控制失灵的直接根因）；
+- **驻留语义**：2s 恒真死闸门删除，改为间隔连续性驻留（TOUCH_GAP=150ms + delay_ms 累计），m3_11 固化三态；
+- **会话回收**：watcher 对"peer 已离线且 5s 未被接受"的乐观 Controller 会话执行 release；
+- **删除**：Suspend 死协议三件套、`InputServer::local_move`（含 8 处测试语义对齐）；热路径 policy clone 移除（引擎 edge 直读）；
+- 全工作区测试、fmt、三目标 clippy 全绿。
