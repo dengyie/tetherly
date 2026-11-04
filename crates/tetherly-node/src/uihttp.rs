@@ -658,6 +658,21 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
         ("POST", "/api/file/send-batch") | ("POST", "/api/file/batch") => {
             api_files::post_file_send_batch(method, query_str, body, node).await
         }
+        ("GET", "/api/file/drag/status") | ("GET", "/api/files/drag/status") => {
+            api_files::get_file_drag_status(method, query_str, body, node).await
+        }
+        ("POST", "/api/file/drag/intent") | ("POST", "/api/files/drag/intent") => {
+            api_files::post_file_drag_intent(method, query_str, body, node).await
+        }
+        ("POST", "/api/file/drag/move") | ("POST", "/api/files/drag/move") => {
+            api_files::post_file_drag_move(method, query_str, body, node).await
+        }
+        ("POST", "/api/file/drag/cancel") | ("POST", "/api/files/drag/cancel") => {
+            api_files::post_file_drag_cancel(method, query_str, body, node).await
+        }
+        ("POST", "/api/file/drag/confirm") | ("POST", "/api/files/drag/confirm") => {
+            api_files::post_file_drag_confirm(method, query_str, body, node).await
+        }
         ("GET", "/api/file/resume") | ("GET", "/api/storage/resume") => {
             api_files::get_file_resume(method, query_str, body, node).await
         }
@@ -6603,6 +6618,82 @@ mod tests {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let evil_req = "GET /api/screen/tile/motion HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_drag_drop_endpoints() {
+        let (node, dir) = temp_test_node("drag_drop_api");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/file/drag/status (idle)
+        let (code, body) = loopback_get(port, "/api/file/drag/status").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["controller_active"], false);
+        assert_eq!(rep["target_phase"], "idle");
+
+        // 2. POST /api/file/drag/intent with empty paths fails 400
+        let bad_intent = serde_json::json!({
+            "paths": []
+        });
+        let (code, _) = loopback_post(
+            port,
+            "/api/file/drag/intent",
+            &serde_json::to_vec(&bad_intent).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 400);
+
+        // 3. POST /api/file/drag/move without session returns 404
+        let move_req = serde_json::json!({
+            "norm_x": 0.5,
+            "norm_y": 0.5
+        });
+        let (code, _) = loopback_post(
+            port,
+            "/api/file/drag/move",
+            &serde_json::to_vec(&move_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 404);
+
+        // 4. POST /api/file/drag/cancel when idle returns 200 gracefully
+        let (code, body) = loopback_post(port, "/api/file/drag/cancel", b"{}")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+
+        // 5. POST /api/file/drag/confirm with unknown drag_id returns 404
+        let conf_req = serde_json::json!({
+            "drag_id": 99999,
+            "drop_norm_x": 0.5,
+            "drop_norm_y": 0.5
+        });
+        let (code, _) = loopback_post(
+            port,
+            "/api/file/drag/confirm",
+            &serde_json::to_vec(&conf_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 404);
+
+        // 6. Security guard: Host header 403 on /api/file/drag/status
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/file/drag/status HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
         stream.write_all(evil_req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut raw = Vec::new();

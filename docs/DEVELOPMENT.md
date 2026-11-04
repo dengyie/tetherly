@@ -8122,3 +8122,27 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - **部署脚本标准化改造**：
   - 重构 `scripts/package-macos-app.sh`：支持直接通过 `--binary <path>`、`--tag <TAG>` 或 `--run-id <ID>` 获取并安装 CI 编译产物，默认自动拉取最新 Release，剥离强制 `cargo build`；
   - 新建 `scripts/deploy.sh`：一键自动化部署流水线，统一支持 `--target <mac|windows|all>`，实现 GitHub CI 产物拉取、Windows 受保护生产进程检查、NTFS 原地热替换与跨平台冒烟验收全闭环。
+
+## 92. 跨端文件传输双引擎（系统托盘 Popover / 灵动悬浮岛与跨屏穿透拖拽）开发规范 (v2.57 / v0.1.76)
+
+1. **调研提炼与历史陷阱规避（对标 Deskflow / Universal Control / Dropover）**：
+   - 详见 `docs/adr/137-cross-platform-file-transfer-ui-popover-and-roaming-drag-drop.md`；
+   - 彻底规避 Deskflow / Synergy 历史废弃拖拽的致命缺陷：Win32 `DoDragDrop` / Cocoa `NSDraggingSession` 模态阻塞导致的屏幕边缘光标硬锁死、网络传输延迟导致的落盘时序倒挂、`fakeKeyDown(Escape)` 破坏本地 Finder 状态；
+   - 确立两阶段双引擎互补模型：形态一（托盘即投即走 + 边缘灵动悬浮岛）与形态二（跨屏漫游穿透拖拽 + 虚拟虚影伴随）。
+
+2. **引擎一：系统托盘 Popover 与边缘灵动悬浮岛（Phase 1 优先落地）**：
+   - **macOS 托盘拖拽直投**：`NSStatusItem.button.registerForDraggedTypes([.fileURL])` 绑定 `NSDraggingDestination`，拖入高亮脉冲，松手通过 Loopback API 调用 45718 发送通道；
+   - **Windows 任务栏托盘**：`Shell_NotifyIcon` 配合微型分层透明置顶 DropTarget 窗口；
+   - **边缘灵动悬浮岛**：靠近漫游方向的屏幕边缘部署 2px 透明感应条，拖拽撞边自动展开高斯模糊毛玻璃卡片（`🖥️ home-win (Windows) | 松手直投`），松手即传；
+   - **Popover 面板**：点击展开 Peer 在线状态、大投放区、实时传输环（MB/s）、最近历史与一键定位对端文件目录。
+
+3. **引擎二：跨屏漫游文件拖拽穿透（Phase 2 高级 Deskflow 语义）**：
+   - **拖拽识别与预飞信令**：Mac 控制端 `CGEventTap` 识别 `LeftMouseDown` 伴随位移 >5px；越界瞬间通过 45719 发送 `ControlMsg::RemoteDragEnter { files }`，避免模态死锁；
+   - **受控端虚拟光标虚影（Ghost Drag Overlay）**：Windows 端创建 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` 半透明分层置顶窗口，伴随鼠标位移渲染文件图标与信息；
+   - **松手交付与资源管理器自动高亮**：对端 `LeftMouseUp` 触发 45718 极速推流；落盘至 `data/inbox` 后调用 `SHOpenFolderAndSelectItems` 自动唤起 Explorer 聚焦选中新文件。
+
+4. **架构不变式与生产保护**：
+   - 45719 仅承载轻量控制信令（$\le 1\text{ KiB}$），文件数据 100% 走 45718 Noise 加密与 64 KiB 分块断点续传隧道；
+   - 严禁任何 UI/拖拽钩子干扰 Windows 生产环境（`SRBMiner-MULTI.exe`、`verge-mihomo.exe`、`komari-agent.exe`）；
+   - 任何中途中断或 ESC 取消由状态机自动销毁虚影与临时句柄，杜绝文件碎片与僵尸会话。
+

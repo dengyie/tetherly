@@ -51,6 +51,9 @@ mod camera;
 mod clipboard;
 mod config;
 mod discovery;
+mod drag;
+mod drag_controller;
+mod drag_target;
 mod files;
 mod focus;
 mod handoff;
@@ -69,6 +72,7 @@ mod screen_mode;
 mod screen_status;
 mod screen_stream;
 mod session;
+mod shell_reveal;
 mod storage;
 mod topology;
 mod trust;
@@ -81,6 +85,8 @@ pub use bench::*;
 pub use camera::*;
 pub use clipboard::*;
 pub use discovery::*;
+pub use drag_controller::*;
+pub use drag_target::*;
 pub use files::*;
 pub use focus::*;
 pub use handoff::*;
@@ -91,6 +97,7 @@ pub use messages::*;
 pub use notify::*;
 pub use routes::*;
 pub use screen_dto::*;
+pub use shell_reveal::*;
 pub use storage::*;
 pub use topology::*;
 pub use trust::*;
@@ -909,6 +916,16 @@ struct Shared {
     active_bench: Mutex<Option<ActiveBenchSession>>,
     last_bench_report: Mutex<Option<BenchReportFrame>>,
     bandwidth_profiles: Mutex<BandwidthProfileTable>,
+    pub(crate) drag_controller: Mutex<DragController>,
+    pub(crate) drag_target: Mutex<DragTarget>,
+    /// Pending receiver-side drag sessions awaiting their first byte:
+    /// `drag_id -> source peer`, populated when a `RemoteDropConfirm` arrives
+    /// and consumed when the first inbound `FileOffer` claims it.
+    pub(crate) pending_drag_drops: Mutex<HashMap<u64, DeviceId>>,
+    /// `transfer_id -> drag_id` linking an accepted inbound transfer back to
+    /// the drag session that originated it, so the completion hook can settle
+    /// MOTW + reveal. Populated when the first FileOffer of a drag arrives.
+    pub(crate) transfer_drag_ids: Mutex<HashMap<String, u64>>,
 }
 
 impl Shared {
@@ -1137,7 +1154,7 @@ use tetherly_core::MediaCommandFrame;
 use tetherly_core::PlaybackState;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]

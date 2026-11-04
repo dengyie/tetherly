@@ -424,7 +424,10 @@ impl Node {
         }
         let _ = self.send_to(&source, done.to_frame()?).await;
         self.set_transfer_phase(&transfer_id, TransferPhase::Completed, None);
-        self.emit(UiEvent::FileDone { transfer_id });
+        self.emit(UiEvent::FileDone { transfer_id: transfer_id.clone() });
+        // Settle any drag session that originated this inbound transfer:
+        // applies MOTW and reveals the file in the native file manager.
+        self.settle_drag_for_transfer(&transfer_id, &path);
         let banner_title = "已接收文件";
         let banner_body = format!("文件 {name} 接收完成");
         let _ = self.dispatch_notification_banner(
@@ -2199,5 +2202,78 @@ impl Node {
 
         info!(transfer = %transfer_id, "transfer cancelled by user");
         Ok(())
+    }
+
+    // =========================================================================
+    // Roaming File Drag & Drop (Engine II - Deskflow+ Semantics)
+    // =========================================================================
+
+    pub fn drag_controller(&self) -> &Mutex<DragController> {
+        &self.shared.drag_controller
+    }
+
+    pub fn drag_target(&self) -> &Mutex<DragTarget> {
+        &self.shared.drag_target
+    }
+
+    pub fn initiate_drag(
+        &self,
+        target_peer: &str,
+        file_paths: Vec<std::path::PathBuf>,
+        norm_x: f32,
+        norm_y: f32,
+    ) -> Result<
+        (
+            tetherly_core::drag::DragControlMsg,
+            Option<tetherly_core::drag::DragControlMsg>,
+        ),
+        CoreError,
+    > {
+        let now = self.shared.clock.unix_ms();
+        let mut ctl = self.shared.drag_controller.lock().expect("drag_controller");
+        ctl.initiate_cross_border_drag(target_peer, file_paths, norm_x, norm_y, now)
+    }
+
+    pub fn update_drag_move(
+        &self,
+        norm_x: f32,
+        norm_y: f32,
+    ) -> Option<tetherly_core::drag::DragControlMsg> {
+        let mut ctl = self.shared.drag_controller.lock().expect("drag_controller");
+        ctl.sync_remote_move(norm_x, norm_y)
+    }
+
+    pub fn cancel_drag(
+        &self,
+        reason: tetherly_core::drag::DragCancelReason,
+    ) -> Option<tetherly_core::drag::DragControlMsg> {
+        let mut ctl = self.shared.drag_controller.lock().expect("drag_controller");
+        ctl.cancel(reason)
+    }
+
+    /// Peek at the transfer a drop would commit, without consuming the session.
+    pub fn peek_drag_transfer(&self, drag_id: u64) -> Option<OutgoingTransferRequest> {
+        let ctl = self.shared.drag_controller.lock().expect("drag_controller");
+        ctl.peek_transfer(drag_id)
+    }
+
+    pub fn confirm_drop(
+        &self,
+        drag_id: u64,
+        norm_x: f32,
+        norm_y: f32,
+    ) -> Option<OutgoingTransferRequest> {
+        let mut ctl = self.shared.drag_controller.lock().expect("drag_controller");
+        ctl.on_drop_confirm(drag_id, norm_x, norm_y)
+    }
+
+    /// Roll a committed-but-failed transfer back into an active session.
+    pub fn abort_drag_transfer(&self, req: OutgoingTransferRequest) {
+        let mut ctl = self.shared.drag_controller.lock().expect("drag_controller");
+        ctl.abort_transfer(req);
+    }
+
+    pub fn now_ms(&self) -> u64 {
+        self.shared.clock.unix_ms()
     }
 }

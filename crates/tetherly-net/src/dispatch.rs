@@ -13,6 +13,7 @@ use tetherly_core::bench::{BenchAcceptFrame, BenchDataFrame, BenchReportFrame, B
 use tetherly_core::camera::{
     CameraAnnounceFrame, CameraAttachFrame, CameraDetachFrame, CameraFrameChunk,
 };
+use tetherly_core::drag::DragControlMsg;
 use tetherly_core::focus::{FocusStateFrame, FocusSyncReqFrame};
 use tetherly_core::frame::{
     decode_unix_ms, CapsUpdate, ClipSet, FileDecision, FileDone, FileOffer, InnerFrame,
@@ -21,15 +22,15 @@ use tetherly_core::frame::{
     TYPE_AUDIO_ROUTING_ANNOUNCE, TYPE_AUDIO_ROUTING_ATTACH, TYPE_AUDIO_ROUTING_CHUNK,
     TYPE_AUDIO_ROUTING_DETACH, TYPE_BATTERY_STATE, TYPE_BENCH_ACCEPT, TYPE_BENCH_DATA,
     TYPE_BENCH_REPORT, TYPE_BENCH_REQUEST, TYPE_CAMERA_ANNOUNCE, TYPE_CAMERA_ATTACH,
-    TYPE_CAMERA_DETACH, TYPE_CAMERA_FRAME_CHUNK, TYPE_CAPS_UPDATE, TYPE_CLIP_SET, TYPE_FILE_ACCEPT,
-    TYPE_FILE_DONE, TYPE_FILE_OFFER, TYPE_FILE_REJECT, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ,
-    TYPE_INPUT_TUNNEL_HEARTBEAT, TYPE_INPUT_TUNNEL_RELEASE, TYPE_INPUT_TUNNEL_REQUEST,
-    TYPE_INPUT_TUNNEL_RESP, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND,
-    TYPE_MEDIA_STATE, TYPE_MIC_ANNOUNCE, TYPE_MIC_ATTACH, TYPE_MIC_AUDIO_CHUNK, TYPE_MIC_DETACH,
-    TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY, TYPE_PING, TYPE_PONG,
-    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE, TYPE_TOPOLOGY_SYNC_REQ,
-    TYPE_VIRTUAL_DISPLAY_ANNOUNCE, TYPE_VIRTUAL_DISPLAY_ATTACH, TYPE_VIRTUAL_DISPLAY_DETACH,
-    TYPE_VIRTUAL_DISPLAY_FRAME_ACK,
+    TYPE_CAMERA_DETACH, TYPE_CAMERA_FRAME_CHUNK, TYPE_CAPS_UPDATE, TYPE_CLIP_SET,
+    TYPE_DRAG_CONTROL, TYPE_FILE_ACCEPT, TYPE_FILE_DONE, TYPE_FILE_OFFER, TYPE_FILE_REJECT,
+    TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ, TYPE_INPUT_TUNNEL_HEARTBEAT,
+    TYPE_INPUT_TUNNEL_RELEASE, TYPE_INPUT_TUNNEL_REQUEST, TYPE_INPUT_TUNNEL_RESP,
+    TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_MIC_ANNOUNCE,
+    TYPE_MIC_ATTACH, TYPE_MIC_AUDIO_CHUNK, TYPE_MIC_DETACH, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH,
+    TYPE_NOTIFY_REPLY, TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE,
+    TYPE_TOPOLOGY_STATE, TYPE_TOPOLOGY_SYNC_REQ, TYPE_VIRTUAL_DISPLAY_ANNOUNCE,
+    TYPE_VIRTUAL_DISPLAY_ATTACH, TYPE_VIRTUAL_DISPLAY_DETACH, TYPE_VIRTUAL_DISPLAY_FRAME_ACK,
 };
 use tetherly_core::input_tunnel::{
     InputTunnelHeartbeatFrame, InputTunnelReleaseFrame, InputTunnelRequestFrame,
@@ -97,6 +98,7 @@ pub enum SessionEvent {
     FileAccept(FileDecision),
     FileReject(FileDecision),
     FileDone(FileDone),
+    DragControl(DragControlMsg),
     Caps(CapsUpdate),
     Unknown(u16),
 }
@@ -241,6 +243,9 @@ impl SessionEvent {
                 SessionEvent::FileReject(FileDecision::from_payload(&frame.payload)?)
             }
             TYPE_FILE_DONE => SessionEvent::FileDone(FileDone::from_payload(&frame.payload)?),
+            TYPE_DRAG_CONTROL => {
+                SessionEvent::DragControl(DragControlMsg::from_payload(&frame.payload)?)
+            }
             TYPE_CAPS_UPDATE => SessionEvent::Caps(CapsUpdate::from_payload(&frame.payload)?),
             other => SessionEvent::Unknown(other),
         })
