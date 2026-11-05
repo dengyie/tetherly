@@ -539,6 +539,33 @@ impl Node {
         // Reset any leftover arming/dwell state from an earlier session.
         self.reset_reverse_arming_state();
 
+        // Apply the controller's proportional entry placement: without this
+        // the cursor on this screen stays parked wherever the previous
+        // session left it (production showed a constant bottom-center start)
+        // until the first Move frame happens to arrive. The entry is in this
+        // display's pixel coordinates (clamped above); warp the real cursor
+        // there so control begins exactly where the cross-screen mapping
+        // says. SetCursorPos warps are injected events and are filtered by
+        // the local capture hook, so no feedback loop.
+        if let (Some(ex), Some(ey)) = (clamped_entry_x, clamped_entry_y) {
+            let (sw, sh) = crate::platform::screen_size();
+            let px = ex.clamp(0, sw.saturating_sub(1));
+            let py = ey.clamp(0, sh.saturating_sub(1));
+            crate::platform::warp_mouse_position(px, py);
+            {
+                let mut sink = self.shared.input_sink.lock().expect("sink");
+                sink.cursor = (px, py);
+            }
+            self.record_audit(
+                AuditCategory::Config,
+                AuditSeverity::Info,
+                "input_tunnel_entry_applied",
+                Some(peer_str.clone()),
+                format!("Placed cursor at controller-mapped entry ({px}, {py})"),
+                true,
+            );
+        }
+
         let resp = InputTunnelRespFrame {
             session_id: frame.session_id.clone(),
             accepted: true,
@@ -1254,11 +1281,46 @@ impl Node {
         // flips `input_out`/seat events while the winner is serving. The
         // caller that lost the race returns Ok: the in-flight dial will
         // establish the channel, and a later tick re-checks.
-        // A healthy channel to a peer makes another dial pure churn: the
-        // new session would orphan the old one. Callers that need a REBUILD
-        // clear `input_out` first (see input_tunnel_attach).
+        // A channel that still has a sender but no live reader (a takeover
+        // demolished the peer side, the dial task died late, TCP went
+        // half-open) makes `input_out.is_some()` a lie: every crossing's
+        // Enter+Move lands in the mpsc buffer and nothing ever reaches the
+        // peer — the "black hole" seen in production. Probe with a harmless
+        // ClipHint (the client counts it without touching the cursor) and
+        // rebuild on a dead queue instead of trusting the slot.
         if self.input_channel_open_sync() {
-            return Ok(());
+            let probe_alive = {
+                let probe = {
+                    let mut engine = self.shared.input_engine.lock().expect("engine");
+                    let seq = engine.next_seq();
+                    engine.note_seq(seq);
+                    InputEvent::clip_hint(seq).to_frame()
+                };
+                match probe {
+                    Ok(frame) => {
+                        let tx_opt = self
+                            .shared
+                            .input_out
+                            .lock()
+                            .expect("input_out")
+                            .as_ref()
+                            .map(|(_, tx)| tx.clone());
+                        match tx_opt {
+                            Some(tx) => !matches!(
+                                tx.try_send(frame),
+                                Err(mpsc::error::TrySendError::Closed(_))
+                            ),
+                            None => false,
+                        }
+                    }
+                    Err(_) => false,
+                }
+            };
+            if probe_alive {
+                return Ok(());
+            }
+            warn!("input channel probe found a dead queue; rebuilding");
+            *self.shared.input_out.lock().expect("input_out") = None;
         }
         if self
             .shared
@@ -1998,13 +2060,54 @@ impl Node {
 
         let node = self.clone_handle();
         let display_edge: tetherly_core::DisplayEdge = edge.into();
+        // Deskflow proportional entry: map the edge-push position onto the
+        // controller-side screen being taken over, so its cursor starts
+        // where the push happened instead of at a stale resting spot.
+        // Same mapping the forward auto_link crossing uses.
+        let push_pos = (x, y);
+        let mapped_peer = peer.clone();
+        fn mapped_entry(
+            node: &Node,
+            mapped_peer: &str,
+            display_edge: tetherly_core::DisplayEdge,
+            push_pos: (i32, i32),
+        ) -> Option<(i32, i32)> {
+            let layout = node.shared.topology_layout.lock().expect("topology_layout");
+            let neighbor = layout
+                .neighbors
+                .iter()
+                .find(|(_, n)| n.peer_id == mapped_peer)
+                .map(|(_, n)| n.clone());
+            let local_display = layout.display;
+            let remote = node
+                .shared
+                .peer_topologies
+                .lock()
+                .expect("peer_topologies")
+                .get(mapped_peer)
+                .map(|p| p.display);
+            neighbor.zip(remote).map(|(n, remote_display)| {
+                map_edge_exit_to_entry(
+                    &local_display,
+                    display_edge,
+                    push_pos,
+                    &remote_display,
+                    n.peer_edge,
+                    n.offset,
+                )
+            })
+        }
+        let entry = mapped_entry(self, &mapped_peer, display_edge, push_pos);
+        let (entry_x, entry_y) = entry
+            .map(|(ex, ey)| (Some(ex), Some(ey)))
+            .unwrap_or((None, None));
         let rt = tokio::runtime::Handle::try_current()
             .ok()
             .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
         if let Some(handle) = rt {
             handle.spawn(async move {
                 if let Err(e) = node
-                    .input_tunnel_attach(&peer, Some(display_edge), None, None)
+                    .input_tunnel_attach(&peer, Some(display_edge), entry_x, entry_y)
                     .await
                 {
                     warn!(peer = %peer, %e, "auto-reverse takeover attach failed");
@@ -2321,12 +2424,11 @@ impl Node {
                         if std::time::Instant::now() >= deadline {
                             break;
                         }
-                        if retry_node.input_channel_open().await {
-                            tracing::info!(
-                                "fast input reconnect: channel is already re-established"
-                            );
-                            return;
-                        }
+                        // Do not gate on input_channel_open(): a slot that
+                        // is Some but dead (half-open TCP, dead reader)
+                        // would spin here forever reporting "re-established".
+                        // open_input probes the queue and rebuilds it when
+                        // dead; on a healthy channel it returns Ok at once.
                         if retry_node
                             .shared
                             .input_engine
@@ -2340,8 +2442,7 @@ impl Node {
                             );
                             return;
                         }
-                        tracing::debug!(peer = %target_peer, backoff_ms, "attempting fast input reconnect");
-                        if let Ok(()) = retry_node.open_input(&target_peer).await {
+                        if retry_node.open_input(&target_peer).await.is_ok() {
                             tracing::info!(peer = %target_peer, "fast input reconnect succeeded");
                             return;
                         }
@@ -2640,6 +2741,7 @@ impl Node {
 mod tests {
     use super::*;
     use tetherly_core::InputKind;
+    use tetherly_core::{TrustStore, TrustedPeer, TYPE_INPUT_CLIP_HINT};
 
     #[tokio::test]
     async fn test_input_grace_period_buffering() {
@@ -2737,6 +2839,153 @@ mod tests {
                 down: false,
                 mods: 0
             }));
+        }
+    }
+
+    // Regression: a takeover demolished the peer side of the old channel but
+    // `input_out` still held the dead sender, so `open_input` early-returned
+    // and every later Enter+Move landed in a nobody-read queue — the
+    // production "black hole". The probe must clear the dead slot so the
+    // dial proceeds.
+    #[tokio::test]
+    async fn test_open_input_probe_clears_dead_channel() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("probe-dead");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("probe-dead-peer");
+        let other_id = other.identity().device_id().clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        drop(rx);
+        *node.shared.input_out.lock().unwrap() = Some((999, tx));
+
+        // Unknown peer makes the post-probe dial fail; the assertion is that
+        // the dead slot was cleared on the way there.
+        assert!(node.open_input(&other_id).await.is_err());
+        assert!(
+            node.shared.input_out.lock().unwrap().is_none(),
+            "dead channel slot must be cleared by the open_input probe"
+        );
+    }
+
+    // The probe must leave a HEALTHY channel alone: a queued ClipHint means
+    // a live reader, so open_input early-returns without churning a dial.
+    #[tokio::test]
+    async fn test_open_input_probe_keeps_healthy_channel() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("probe-alive");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("probe-alive-peer");
+        let other_id = other.identity().device_id().clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        *node.shared.input_out.lock().unwrap() = Some((999, tx));
+
+        assert!(node.open_input(&other_id).await.is_ok());
+        {
+            let guard = node.shared.input_out.lock().unwrap();
+            assert!(guard.is_some(), "healthy channel must be kept");
+        }
+        let frame = rx.try_recv().expect("probe frame queued");
+        assert_eq!(frame.ty, TYPE_INPUT_CLIP_HINT);
+    }
+
+    // Regression: the target never applied the controller's mapped entry,
+    // so its cursor stayed parked wherever the previous session left it.
+    // A tunnel request carrying entry must place the cursor there.
+    #[tokio::test]
+    async fn test_tunnel_request_applies_proportional_entry() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("entry-apply");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("entry-peer");
+        let peer_id = other.identity().device_id().clone();
+
+        // Target display 1920x1080; the entry lands on the bottom edge.
+        node.shared.topology_layout.lock().unwrap().display = DisplayRect::new(1920, 1080, 1.0);
+
+        let frame = InputTunnelRequestFrame {
+            session_id: "tun_entry_test".into(),
+            client_device_id: peer_id.to_string(),
+            requested_edge: Some(DisplayEdge::Top),
+            entry_x: Some(960),
+            entry_y: Some(2000), // out of range: must clamp to 1079
+            timestamp_ms: 1,
+        };
+        node.receive_input_tunnel_request(&peer_id, frame).await;
+
+        {
+            let guard = node.shared.active_input_tunnel.lock().unwrap();
+            let session = guard.as_ref().expect("tunnel session accepted");
+            assert_eq!(session.role, InputTunnelRole::Target);
+            assert_eq!(session.entry_x, Some(960));
+            assert_eq!(session.entry_y, Some(1079), "entry must clamp to display");
+        }
+        let (sw, sh) = crate::platform::screen_size();
+        let (exp_x, exp_y) = (
+            960.clamp(0, sw.saturating_sub(1)),
+            1079.clamp(0, sh.saturating_sub(1)),
+        );
+        assert_eq!(
+            node.shared.input_sink.lock().unwrap().cursor,
+            (exp_x, exp_y),
+            "cursor must be placed at the controller-mapped entry"
+        );
+    }
+
+    // Wire-level regression: the attach frame must carry the entry coords to
+    // the target's session (forward auto_link path sends them; auto-reverse
+    // now computes them too — see maybe_auto_reverse).
+    #[tokio::test]
+    async fn test_tunnel_attach_transmits_entry_to_target() {
+        use crate::runtime::clipboard_policy_tests::temp_test_node;
+
+        let (a, _dir_a) = temp_test_node("attach_entry_a");
+        let (b, _dir_b) = temp_test_node("attach_entry_b");
+
+        let now = 1u64;
+        for (node, peer) in [(&a, &b), (&b, &a)] {
+            let tp = TrustedPeer {
+                device_id: peer.identity().device_id().clone(),
+                id_pk: *peer.identity().id_pk(),
+                n_pk: *peer.identity().n_pk(),
+                alias: "peer".into(),
+                paired_at: now,
+                revoked: false,
+            };
+            node.shared
+                .trust
+                .lock()
+                .expect("trust")
+                .put(tp)
+                .expect("seed trust");
+        }
+
+        b.spawn_listeners().await.expect("spawn b listeners");
+        let b_addr = b.control_addr();
+        a.dial(b_addr).await.expect("a dials b");
+        b.shared.topology_layout.lock().unwrap().display = DisplayRect::new(1920, 1080, 1.0);
+
+        let b_id = b.identity().device_id().to_string();
+        a.input_tunnel_attach(&b_id, Some(DisplayEdge::Bottom), Some(123), Some(456))
+            .await
+            .expect("attach accepted");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let session = b.shared.active_input_tunnel.lock().unwrap().clone();
+            match session {
+                Some(s) => {
+                    assert_eq!(s.role, InputTunnelRole::Target);
+                    assert_eq!(s.entry_x, Some(123), "entry x must survive the wire");
+                    assert_eq!(s.entry_y, Some(456), "entry y must survive the wire");
+                    break;
+                }
+                None => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "target never recorded the tunnel session with entry"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
         }
     }
 }
