@@ -374,10 +374,16 @@ impl tetherly_core::InputSink for SystemInputSink {
         };
         use windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos;
         let (w, h) = screen_size();
+        // Round to nearest: must mirror the controller engine's rounded
+        // norm/denorm, else each round trip truncates in one direction and
+        // repeated crossings walk the cursor (production bug).
         let px = (x.clamp(0, tetherly_core::SCREEN_UNITS) as i64 * (w.saturating_sub(1) as i64)
-            / (tetherly_core::SCREEN_UNITS as i64)) as i32;
+            + tetherly_core::SCREEN_UNITS as i64 / 2)
+            / (tetherly_core::SCREEN_UNITS as i64);
         let py = (y.clamp(0, tetherly_core::SCREEN_UNITS) as i64 * (h.saturating_sub(1) as i64)
-            / (tetherly_core::SCREEN_UNITS as i64)) as i32;
+            + tetherly_core::SCREEN_UNITS as i64 / 2)
+            / (tetherly_core::SCREEN_UNITS as i64);
+        let (px, py) = (px as i32, py as i32);
         unsafe {
             let _ = SetCursorPos(px, py);
         }
@@ -486,12 +492,15 @@ impl tetherly_core::InputSink for SystemInputSink {
         };
 
         let (w, h) = screen_size();
+        // Round to nearest: must mirror the controller engine's rounded
+        // norm/denorm, else each round trip truncates in one direction and
+        // repeated crossings walk the cursor (production bug).
         let px = (x.clamp(0, tetherly_core::SCREEN_UNITS) as f64 * (w.saturating_sub(1) as f64)
             / (tetherly_core::SCREEN_UNITS as f64))
-            as objc2_core_foundation::CGFloat;
+            .round();
         let py = (y.clamp(0, tetherly_core::SCREEN_UNITS) as f64 * (h.saturating_sub(1) as f64)
             / (tetherly_core::SCREEN_UNITS as f64))
-            as objc2_core_foundation::CGFloat;
+            .round();
         let pt = CGPoint { x: px, y: py };
 
         if let Some(event) =

@@ -409,15 +409,17 @@ async fn m3_5_four_directional_edge_roaming() {
     // Roam into the target interior first (the entry parks at the shared
     // edge and the interior hysteresis guards against accidental instant
     // returns), then push back down through the shared edge. The local
-    // cursor must land at the inverse-proportional x (505*99/1000 = 49),
-    // parked 16px below the top edge — not at the parked hook position.
+    // cursor must land at the inverse-proportional x (denorm(505) = 50
+    // with round-to-nearest — the truncating map gave 49, shearing every
+    // round trip one pixel), parked 16px below the top edge — not at the
+    // parked hook position.
     server.drive_input_delta(50, 30, 0, -40, 100, 50).unwrap();
     assert_eq!(server.input_engine_seat(), CursorSeat::Remote);
     server.drive_input_delta(50, 30, 0, 50, 100, 50).unwrap();
     assert_eq!(server.input_engine_seat(), CursorSeat::Local);
     let (lx, ly) = server.input_engine_local_pos();
     assert_eq!(ly, 16);
-    assert_eq!(lx, 49, "return x = denorm(remote x)");
+    assert_eq!(lx, 50, "return x = denorm(remote x), round-trip stable");
 
     server.shutdown();
     client.shutdown();

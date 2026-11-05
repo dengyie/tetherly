@@ -323,10 +323,15 @@ pub fn map_edge_exit_to_entry(
     remote_edge: DisplayEdge,
     offset: i32,
 ) -> (i32, i32) {
-    let lw = local_display.width.max(1) as f32;
-    let lh = local_display.height.max(1) as f32;
-    let rw = remote_display.width.max(1) as f32;
-    let rh = remote_display.height.max(1) as f32;
+    // Basis (w-1), matching the engine's norm/denorm and the target sink's
+    // pixel mapping; round to nearest, not truncate — a truncating map with
+    // a different basis shears every round trip in one direction, so
+    // repeated crossings visibly walk the cursor.
+    let lw = (local_display.width.max(1) - 1) as f32;
+    let lh = (local_display.height.max(1) - 1) as f32;
+    let rw = (remote_display.width.max(1) - 1) as f32;
+    let rh = (remote_display.height.max(1) - 1) as f32;
+    let scale = |frac: f32, dim: f32| -> i32 { (frac * dim).round() as i32 };
 
     let (exit_x, exit_y) = exit_pos;
 
@@ -334,7 +339,7 @@ pub fn map_edge_exit_to_entry(
         // Horizontal: Left/Right to Left/Right
         (DisplayEdge::Right, DisplayEdge::Left) => {
             let frac_y = (exit_y as f32 / lh).clamp(0.0, 1.0);
-            let entry_y = (frac_y * rh) as i32 + offset;
+            let entry_y = scale(frac_y, rh) + offset;
             (
                 0,
                 entry_y.clamp(0, remote_display.height.saturating_sub(1) as i32),
@@ -342,7 +347,7 @@ pub fn map_edge_exit_to_entry(
         }
         (DisplayEdge::Left, DisplayEdge::Right) => {
             let frac_y = (exit_y as f32 / lh).clamp(0.0, 1.0);
-            let entry_y = (frac_y * rh) as i32 + offset;
+            let entry_y = scale(frac_y, rh) + offset;
             (
                 remote_display.width.saturating_sub(1) as i32,
                 entry_y.clamp(0, remote_display.height.saturating_sub(1) as i32),
@@ -351,7 +356,7 @@ pub fn map_edge_exit_to_entry(
         // Vertical: Top/Bottom to Top/Bottom
         (DisplayEdge::Top, DisplayEdge::Bottom) => {
             let frac_x = (exit_x as f32 / lw).clamp(0.0, 1.0);
-            let entry_x = (frac_x * rw) as i32 + offset;
+            let entry_x = scale(frac_x, rw) + offset;
             (
                 entry_x.clamp(0, remote_display.width.saturating_sub(1) as i32),
                 remote_display.height.saturating_sub(1) as i32,
@@ -359,7 +364,7 @@ pub fn map_edge_exit_to_entry(
         }
         (DisplayEdge::Bottom, DisplayEdge::Top) => {
             let frac_x = (exit_x as f32 / lw).clamp(0.0, 1.0);
-            let entry_x = (frac_x * rw) as i32 + offset;
+            let entry_x = scale(frac_x, rw) + offset;
             (
                 entry_x.clamp(0, remote_display.width.saturating_sub(1) as i32),
                 0,
@@ -368,7 +373,7 @@ pub fn map_edge_exit_to_entry(
         // Orthogonal or same edge fallback
         (DisplayEdge::Right, DisplayEdge::Right) => {
             let frac_y = (exit_y as f32 / lh).clamp(0.0, 1.0);
-            let entry_y = (frac_y * rh) as i32 + offset;
+            let entry_y = scale(frac_y, rh) + offset;
             (
                 remote_display.width.saturating_sub(1) as i32,
                 entry_y.clamp(0, remote_display.height.saturating_sub(1) as i32),
@@ -376,7 +381,7 @@ pub fn map_edge_exit_to_entry(
         }
         (DisplayEdge::Left, DisplayEdge::Left) => {
             let frac_y = (exit_y as f32 / lh).clamp(0.0, 1.0);
-            let entry_y = (frac_y * rh) as i32 + offset;
+            let entry_y = scale(frac_y, rh) + offset;
             (
                 0,
                 entry_y.clamp(0, remote_display.height.saturating_sub(1) as i32),
@@ -384,7 +389,7 @@ pub fn map_edge_exit_to_entry(
         }
         (DisplayEdge::Top, DisplayEdge::Top) => {
             let frac_x = (exit_x as f32 / lw).clamp(0.0, 1.0);
-            let entry_x = (frac_x * rw) as i32 + offset;
+            let entry_x = scale(frac_x, rw) + offset;
             (
                 entry_x.clamp(0, remote_display.width.saturating_sub(1) as i32),
                 0,
@@ -392,7 +397,7 @@ pub fn map_edge_exit_to_entry(
         }
         (DisplayEdge::Bottom, DisplayEdge::Bottom) => {
             let frac_x = (exit_x as f32 / lw).clamp(0.0, 1.0);
-            let entry_x = (frac_x * rw) as i32 + offset;
+            let entry_x = scale(frac_x, rw) + offset;
             (
                 entry_x.clamp(0, remote_display.width.saturating_sub(1) as i32),
                 remote_display.height.saturating_sub(1) as i32,
@@ -539,7 +544,9 @@ mod tests {
         let local = DisplayRect::new(1920, 1080, 1.0);
         let remote = DisplayRect::new(3840, 2160, 1.0);
 
-        // Exit at Right midpoint (1919, 540) -> Enter Remote Left (0, 1080)
+        // Exit at Right midpoint (1919, 540) -> Enter Remote Left (0, 1081).
+        // (540/1079)*2159 = 1081.08 -> rounds to 1081; the old truncating
+        // map on a w basis gave 1080 and drifted on every round trip.
         let (rx, ry) = map_edge_exit_to_entry(
             &local,
             DisplayEdge::Right,
@@ -549,9 +556,10 @@ mod tests {
             0,
         );
         assert_eq!(rx, 0);
-        assert_eq!(ry, 1080);
+        assert_eq!(ry, 1081);
 
-        // Exit at Top midpoint (960, 0) -> Enter Remote Bottom (1920, 2159)
+        // Exit at Top midpoint (960, 0) -> Enter Remote Bottom (1921, 2159).
+        // (960/1919)*3839 = 1921.0 -> 1921 (round-to-nearest on the w-1 basis).
         let (rx, ry) = map_edge_exit_to_entry(
             &local,
             DisplayEdge::Top,
@@ -560,7 +568,7 @@ mod tests {
             DisplayEdge::Bottom,
             0,
         );
-        assert_eq!(rx, 1920);
+        assert_eq!(rx, 1921);
         assert_eq!(ry, 2159);
     }
 

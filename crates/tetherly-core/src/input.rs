@@ -788,28 +788,36 @@ impl InputServer {
         if self.width <= 1 {
             return 0;
         }
-        ((self.x as i64) * SCREEN_UNITS as i64 / (self.width as i64 - 1)) as i32
+        // Round, not truncate: the remote side's pixel mapping rounds too.
+        // Truncation on both hops shears every round trip in one direction,
+        // so repeated crossings visibly walk the cursor (production bug).
+        ((self.x as i64 * SCREEN_UNITS as i64 + (self.width as i64 - 1) / 2)
+            / (self.width as i64 - 1)) as i32
     }
 
     fn norm_y(&self) -> i32 {
         if self.height <= 1 {
             return 0;
         }
-        ((self.y as i64) * SCREEN_UNITS as i64 / (self.height as i64 - 1)) as i32
+        ((self.y as i64 * SCREEN_UNITS as i64 + (self.height as i64 - 1) / 2)
+            / (self.height as i64 - 1)) as i32
     }
 
     /// Inverse of `norm_x`: map a remote 0..=1000 position back onto this
     /// screen's pixel axis. Used for the local landing position when the
     /// cursor returns from the target screen.
     fn denorm_x(&self, v: i32) -> i32 {
-        ((v.clamp(0, SCREEN_UNITS) as i64) * (self.width.max(1) as i64 - 1) / SCREEN_UNITS as i64)
-            as i32
+        // Round to nearest; must mirror norm_x so round trips are stable.
+        ((v.clamp(0, SCREEN_UNITS) as i64 * (self.width.max(1) as i64 - 1)
+            + SCREEN_UNITS as i64 / 2)
+            / SCREEN_UNITS as i64) as i32
     }
 
     /// Inverse of `norm_y`; see `denorm_x`.
     fn denorm_y(&self, v: i32) -> i32 {
-        ((v.clamp(0, SCREEN_UNITS) as i64) * (self.height.max(1) as i64 - 1) / SCREEN_UNITS as i64)
-            as i32
+        ((v.clamp(0, SCREEN_UNITS) as i64 * (self.height.max(1) as i64 - 1)
+            + SCREEN_UNITS as i64 / 2)
+            / SCREEN_UNITS as i64) as i32
     }
 }
 
@@ -1358,14 +1366,18 @@ mod tests {
         assert_eq!(srv.seat(), CursorSeat::Local);
         let (lx, ly) = srv.local_pos();
         assert_eq!(ly, 16);
-        assert_eq!(lx, 250 * (1000 - 1) / 1000, "return x = denorm(rem_x)");
+        // denorm(250) = 250 with round-to-nearest; the old truncating map
+        // gave 249 and sheared every round trip.
+        assert_eq!(lx, 250, "return x = denorm(rem_x)");
 
         // 4. Cross again at a different position: the entry must use the
         // FRESH exit position, never the previous session's remote pos.
         assert_eq!(srv.local_move_delta(750, 0, 0, -10), Some(ScreenEdge::Top));
         let events = srv.drain();
         match events[1].kind {
-            InputKind::Move { x, y } => assert_eq!((x, y), (750, SCREEN_UNITS)),
+            // norm(750) = 751 with round-to-nearest (750*1000/999 = 750.75);
+            // the truncating map gave 750 and sheared round trips.
+            InputKind::Move { x, y } => assert_eq!((x, y), (751, SCREEN_UNITS)),
             other => panic!("expected Move, got {other:?}"),
         }
 
@@ -1375,7 +1387,10 @@ mod tests {
         assert_eq!(srv.seat(), CursorSeat::Local);
         let (lx, ly) = srv.local_pos();
         assert_eq!(ly, 16);
-        assert_eq!(lx, 750 * (1000 - 1) / 1000, "force_local x = denorm(rem_x)");
+        // norm(750) = 751 (rounded), denorm(751) = 750 (rounded): the round
+        // trip returns exactly to the origin — the truncating chain
+        // (750 -> 749) walked a pixel per emergency return.
+        assert_eq!(lx, 750, "force_local x = denorm(rem_x)");
     }
 
     #[test]
