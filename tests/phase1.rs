@@ -148,6 +148,22 @@ async fn wait_inbox(dir: &std::path::Path, name: &str, timeout: Duration) -> Vec
     }
 }
 
+/// Like [`wait_inbox`] but tolerates zero-byte payloads: the existence of the
+/// final inbox path (not its length) is the completion signal.
+async fn wait_inbox_any(dir: &std::path::Path, name: &str, timeout: Duration) -> Vec<u8> {
+    let path = dir.join("inbox").join(name);
+    let start = std::time::Instant::now();
+    loop {
+        if let Ok(bytes) = std::fs::read(&path) {
+            return bytes;
+        }
+        if start.elapsed() > timeout {
+            panic!("inbox file missing");
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+}
+
 async fn pair_phone_desktop() -> (Node, Node, DirGuard, DirGuard) {
     let (phone_dir, g1) = temp_dir("phone");
     let (desk_dir, g2) = temp_dir("desk");
@@ -12672,6 +12688,180 @@ async fn link_bench_throughput_and_governance_via_loopback_api() {
     // 12. Clean Shutdown
     host.shutdown();
     peer.shutdown();
+}
+
+/// Zero-byte files are a legal payload: the sender's content-addressed id is
+/// the sha256 of the empty string, the offer carries size 0, and the receiver
+/// must still complete the full lifecycle (offer -> accept -> verify -> inbox)
+/// without hanging on a channel that carries no chunks at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_byte_file_completes_the_full_lifecycle() {
+    let (a_dir, _g1) = temp_dir("zero-a");
+    let (b_dir, g2) = temp_dir("zero-b");
+    let a = Node::start(cfg(a_dir, "a", "windows")).unwrap();
+    let b = Node::start(cfg(b_dir.clone(), "b", "windows")).unwrap();
+    a.spawn_listeners().await.unwrap();
+    b.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    a.set_pin(pin);
+    b.set_pin(pin);
+    a.dial(b.control_addr()).await.unwrap();
+    wait_live(&a, Duration::from_secs(45)).await;
+    wait_live(&b, Duration::from_secs(45)).await;
+    let start = std::time::Instant::now();
+    loop {
+        if a.live_peers().iter().any(|p| p.file_port.is_some())
+            && b.live_peers().iter().any(|p| p.file_port.is_some())
+        {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("fileport caps.update never arrived");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let peer_b = b.identity().device_id().clone();
+    let id = a
+        .offer_and_send_bytes(&peer_b, "empty.bin", &[], false)
+        .await
+        .unwrap();
+    // Content-addressed id of the empty payload.
+    assert_eq!(id, format!("tr_{}", &hex_sha256(&[])[..16]));
+    wait_offered(&b, Duration::from_secs(3)).await;
+    let offered = b.offered_files();
+    assert_eq!(offered[0].files[0].size, 0);
+
+    b.user_accept_file(&id).await.unwrap();
+    let got = wait_inbox_any(g2.path(), "empty.bin", Duration::from_secs(15)).await;
+    assert!(got.is_empty(), "inbox file must be zero bytes");
+    let rt = b.transfer_by_id(&id).expect("receiver transfer record");
+    assert_eq!(rt.phase, TransferPhase::Completed);
+    assert_eq!(rt.transferred, 0);
+    a.shutdown();
+    b.shutdown();
+}
+
+/// The same content re-offered to the same peer carries the same
+/// content-addressed id. After a completed transfer the hub must accept the
+/// re-offer as a fresh candidate (not reject it as a duplicate), so the
+/// user-facing re-send button works without any state scrubbing.
+#[tokio::test(flavor = "multi_thread")]
+async fn same_content_reoffer_after_completion_is_a_fresh_offer() {
+    let (a_dir, _g1) = temp_dir("reoffer-a");
+    let (b_dir, g2) = temp_dir("reoffer-b");
+    let a = Node::start(cfg(a_dir, "a", "windows")).unwrap();
+    let b = Node::start(cfg(b_dir.clone(), "b", "windows")).unwrap();
+    a.spawn_listeners().await.unwrap();
+    b.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    a.set_pin(pin);
+    b.set_pin(pin);
+    a.dial(b.control_addr()).await.unwrap();
+    wait_live(&a, Duration::from_secs(45)).await;
+    wait_live(&b, Duration::from_secs(45)).await;
+    let start = std::time::Instant::now();
+    loop {
+        if a.live_peers().iter().any(|p| p.file_port.is_some())
+            && b.live_peers().iter().any(|p| p.file_port.is_some())
+        {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("fileport caps.update never arrived");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let payload = vec![0x42u8; 4096];
+    let peer_b = b.identity().device_id().clone();
+
+    let id1 = a
+        .offer_and_send_bytes(&peer_b, "twice.bin", &payload, false)
+        .await
+        .unwrap();
+    wait_offered(&b, Duration::from_secs(3)).await;
+    b.user_accept_file(&id1).await.unwrap();
+    let got1 = wait_inbox(g2.path(), "twice.bin", Duration::from_secs(15)).await;
+    assert_eq!(got1, payload);
+
+    // Re-offer the identical bytes under a different name: same id, fresh
+    // lifecycle, and the receiver's inbox keeps the last completed file.
+    let id2 = a
+        .offer_and_send_bytes(&peer_b, "twice_again.bin", &payload, false)
+        .await
+        .unwrap();
+    assert_eq!(id1, id2, "content-addressed id must be identical");
+    let start2 = std::time::Instant::now();
+    while b.offered_files().is_empty() {
+        if start2.elapsed() > Duration::from_secs(3) {
+            panic!("re-offer did not surface as a fresh offer");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    b.user_accept_file(&id2).await.unwrap();
+    let got2 = wait_inbox(g2.path(), "twice_again.bin", Duration::from_secs(15)).await;
+    assert_eq!(got2, payload);
+    let rt = b.transfer_by_id(&id2).expect("receiver transfer record");
+    assert_eq!(rt.phase, TransferPhase::Completed);
+    a.shutdown();
+    b.shutdown();
+}
+
+/// Streaming the file body before the user accepts must not create the inbox
+/// file: nothing final is ever written before the hub has Accepted, and the
+/// unsolicited stream must not corrupt the offer state for a later accept.
+#[tokio::test(flavor = "multi_thread")]
+async fn unsolicited_stream_before_accept_writes_nothing() {
+    let (a_dir, _g1) = temp_dir("unsol-a");
+    let (b_dir, g2) = temp_dir("unsol-b");
+    let a = Node::start(cfg(a_dir, "a", "windows")).unwrap();
+    let b = Node::start(cfg(b_dir.clone(), "b", "windows")).unwrap();
+    a.spawn_listeners().await.unwrap();
+    b.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    a.set_pin(pin);
+    b.set_pin(pin);
+    a.dial(b.control_addr()).await.unwrap();
+    wait_live(&a, Duration::from_secs(45)).await;
+    wait_live(&b, Duration::from_secs(45)).await;
+    let start = std::time::Instant::now();
+    loop {
+        if a.live_peers().iter().any(|p| p.file_port.is_some())
+            && b.live_peers().iter().any(|p| p.file_port.is_some())
+        {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("fileport caps.update never arrived");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let payload = vec![0x77u8; 8192];
+    let peer_b = b.identity().device_id().clone();
+    // The offer goes out; the sender immediately streams (its own accepted=
+    // tracking is async), but the receiver must not persist anything until
+    // the hub Accepted.
+    let _id = a
+        .offer_and_send_bytes(&peer_b, "eager.bin", &payload, false)
+        .await
+        .unwrap();
+    // Give the unsolicited stream a moment to arrive and be refused.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !g2.path().join("inbox").join("eager.bin").exists(),
+        "nothing final may be written before the user accepts"
+    );
+    // The offer is still pending and the normal flow still works afterwards.
+    wait_offered(&b, Duration::from_secs(3)).await;
+    let offered = b.offered_files();
+    let id = offered[0].transfer_id.clone();
+    b.user_accept_file(&id).await.unwrap();
+    let got = wait_inbox(g2.path(), "eager.bin", Duration::from_secs(15)).await;
+    assert_eq!(got, payload);
+    a.shutdown();
+    b.shutdown();
 }
 
 mod tracing_capture {
