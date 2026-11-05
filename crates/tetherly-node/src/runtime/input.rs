@@ -1195,7 +1195,7 @@ impl Node {
                 engine.refresh_remote_session();
                 engine.drain()
             };
-            if let Err(e) = self.send_input_events(events) {
+            if let Err(e) = self.send_input_events(events, "keymap_refresh") {
                 tracing::warn!(%e, "keymap change: failed to flush remote session");
             }
         }
@@ -1541,7 +1541,7 @@ impl Node {
                                         server.force_local();
                                         (server.drain(), server.local_pos())
                                     };
-                                    let _ = node.send_input_events(events);
+                                    let _ = node.send_input_events(events, "hook_rescue");
                                     *node.shared.input_seat.lock().expect("seat") =
                                         Some(CursorSeat::Local);
                                     node.disarm_input_capture();
@@ -1583,7 +1583,7 @@ impl Node {
                                 server.force_local();
                                 (server.drain(), server.local_pos())
                             };
-                            let _ = node.send_input_events(events);
+                            let _ = node.send_input_events(events, "guard_force_local");
                             *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
                             node.disarm_input_capture();
                             crate::platform::warp_mouse_position(cx, cy);
@@ -1915,7 +1915,7 @@ impl Node {
             }
         }
 
-        if let Err(e) = self.send_input_events(events) {
+        if let Err(e) = self.send_input_events(events, "drive_delta") {
             let in_grace = {
                 let dl = self
                     .shared
@@ -1985,7 +1985,7 @@ impl Node {
             server.note_seq(seq);
             vec![InputEvent::key(seq, remapped_code, down, 0)]
         };
-        self.send_input_events(events)
+        self.send_input_events(events, "drive_key")
     }
 
     /// Best-effort platform string for the current input peer (from the live
@@ -2267,7 +2267,7 @@ impl Node {
             server.note_seq(seq);
             vec![InputEvent::button(seq, mask, down)]
         };
-        self.send_input_events(events)
+        self.send_input_events(events, "drive_button")
     }
 
     /// Push a physical wheel observation to the remote seat.
@@ -2293,7 +2293,7 @@ impl Node {
             server.note_seq(seq);
             vec![InputEvent::wheel(seq, scaled_dx, scaled_dy)]
         };
-        self.send_input_events(events)
+        self.send_input_events(events, "drive_wheel")
     }
 
     pub fn input_engine_seat(&self) -> CursorSeat {
@@ -2306,25 +2306,41 @@ impl Node {
         self.shared.input_engine.lock().expect("engine").local_pos()
     }
 
-    pub(super) fn send_input_events(&self, events: Vec<InputEvent>) -> Result<(), CoreError> {
+    pub(super) fn send_input_events(
+        &self,
+        events: Vec<InputEvent>,
+        source: &'static str,
+    ) -> Result<(), CoreError> {
         if events.is_empty() {
             return Ok(());
         }
-        // Diagnostic (v0.1.82): log every pushed batch that carries an Enter
-        // plus its following Move — the authoritative record of what the
-        // controller engine actually emits at each crossing.
-        if let Some(pos) = events
-            .iter()
-            .position(|ev| ev.kind == tetherly_core::InputKind::Enter)
-        {
-            if let Some(tetherly_core::InputEvent {
-                kind: tetherly_core::InputKind::Move { x, y },
-                ..
-            }) = events.get(pos + 1)
-            {
-                tracing::info!(rem_x = x, rem_y = y, "push: enter+move batch");
-            } else {
-                tracing::info!("push: enter without trailing move");
+        // Diagnostic (v0.1.83): name every push batch — enter-carrying ones
+        // AND lone edge-clamp Moves (rem_y==1000) — so the ghost
+        // re-placement frame's producer is attributable.
+        for (idx, ev) in events.iter().enumerate() {
+            match &ev.kind {
+                tetherly_core::InputKind::Enter => {
+                    if let Some(tetherly_core::InputEvent {
+                        kind: tetherly_core::InputKind::Move { x, y },
+                        ..
+                    }) = events.get(idx + 1)
+                    {
+                        tracing::info!(source, rem_x = x, rem_y = y, "push: enter+move");
+                    } else {
+                        tracing::info!(source, "push: enter");
+                    }
+                }
+                tetherly_core::InputKind::Move { x, y }
+                    if *y == tetherly_core::SCREEN_UNITS && idx == 0 =>
+                {
+                    tracing::info!(
+                        source,
+                        rem_x = x,
+                        seq = ev.seq,
+                        "push: lone edge-clamp move"
+                    );
+                }
+                _ => {}
             }
         }
         let tx_opt = self
@@ -2461,6 +2477,18 @@ impl Node {
                 buf.drain(..).collect()
             };
             let buf_count = buffered.len();
+            // Diagnostic (v0.1.83): replayed buffer frames are the prime
+            // suspect for stale re-placement — log any edge-clamp Move they
+            // carry with its rem.
+            for f in &buffered {
+                if let Ok(ev) = tetherly_core::InputEvent::from_frame(f) {
+                    if let tetherly_core::InputKind::Move { x, y } = ev.kind {
+                        if y == tetherly_core::SCREEN_UNITS {
+                            tracing::info!(rem_x = x, rem_y = y, "buffer flush: edge-clamp move");
+                        }
+                    }
+                }
+            }
             for f in buffered {
                 let _ = tx.try_send(f);
             }
@@ -2958,7 +2986,7 @@ mod tests {
 
         // 1. Initially local seat: send_input_events errors if channel closed
         let ev = InputEvent::move_to(1, 100, 200);
-        assert!(node.send_input_events(vec![ev.clone()]).is_err());
+        assert!(node.send_input_events(vec![ev.clone()], "test").is_err());
         assert_eq!(node.shared.input_buffered_frames.lock().unwrap().len(), 0);
 
         // 2. Set engine seat to Remote:
@@ -2969,7 +2997,7 @@ mod tests {
         }
 
         // 3. Now send_input_events should enter grace period and buffer the frames
-        let res = node.send_input_events(vec![ev]);
+        let res = node.send_input_events(vec![ev], "test");
         assert!(res.is_ok());
         assert!(node
             .shared
