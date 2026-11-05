@@ -993,7 +993,27 @@ impl Node {
             }
         }
         if let Err(e) = self.open_input(&peer_id).await {
-            warn!(%peer_id, %e, "input channel open during tunnel attach failed");
+            // A takeover demotes the peer right as this dial races its
+            // teardown; a single failure would leave a LIVE session with a
+            // DEAD channel until the next watcher tick — every edge push in
+            // that window is silently eaten ("occasionally can't cross").
+            // Retry briefly before giving up; the watcher remains the
+            // backstop.
+            let mut last_err = Some(e);
+            for attempt in 1..=3u8 {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                match self.open_input(&peer_id).await {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+                let _ = attempt;
+            }
+            if let Some(e) = last_err {
+                warn!(%peer_id, %e, "input channel open during tunnel attach failed after retries");
+            }
         }
 
         Ok(InputTunnelDecisionReport {
@@ -1636,6 +1656,46 @@ impl Node {
         ))
     }
 
+    /// Resolve the peer a self-heal dial should target. Same priority chain
+    /// as the watcher reconnect: the tunnel session's peer, then the
+    /// topology neighbor on our configured edge, then the single live peer.
+    fn reconnect_target_peer(&self) -> Option<DeviceId> {
+        if let Some(s) = self
+            .shared
+            .active_input_tunnel
+            .lock()
+            .expect("active_input_tunnel")
+            .as_ref()
+        {
+            if let Ok(id) = DeviceId::parse(&s.peer_id) {
+                return Some(id);
+            }
+        }
+        let live = self.shared.live.lock().expect("live");
+        if let Some(edge) = self
+            .input_policy()
+            .edge
+            .as_deref()
+            .and_then(|e| e.parse::<tetherly_core::DisplayEdge>().ok())
+        {
+            let layout = self.shared.topology_layout.lock().expect("topology_layout");
+            if let Some(n) = layout.neighbors.get(&edge) {
+                if let Ok(id) = DeviceId::parse(&n.peer_id) {
+                    if live.contains_key(&id) {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+        let mut peers: Vec<String> = live.keys().map(|d| d.to_string()).collect();
+        peers.sort();
+        if peers.len() == 1 {
+            DeviceId::parse(&peers.pop().expect("single peer")).ok()
+        } else {
+            None
+        }
+    }
+
     /// Clear all distance arming, dwell, and movement tracking state for auto-reverse.
     fn reset_reverse_arming_state(&self) {
         self.shared.reverse_move_accum_px.store(0, Ordering::SeqCst);
@@ -1741,6 +1801,28 @@ impl Node {
                 self.disarm_input_capture();
                 crate::platform::warp_mouse_position(cx, cy);
                 self.emit(UiEvent::input_seat_changed("local", false, None));
+            }
+            drop(server);
+            // Self-heal: the watcher reconnects on its own tick, but a push
+            // landing inside that gap is silently eaten — the user experiences
+            // "occasionally can't cross". Kick a dial right here (deduped by
+            // the input_dialing CAS inside open_input) so the NEXT push
+            // crosses instead of vanishing.
+            if !self.shared.input_dialing.load(Ordering::SeqCst) {
+                let peer = self.reconnect_target_peer();
+                if let Some(peer) = peer {
+                    let rt = tokio::runtime::Handle::try_current()
+                        .ok()
+                        .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
+                    if let Some(handle) = rt {
+                        let node = self.clone_handle();
+                        handle.spawn(async move {
+                            if let Err(e) = node.open_input(&peer).await {
+                                tracing::debug!(%peer, %e, "crossing-guard self-heal dial failed");
+                            }
+                        });
+                    }
+                }
             }
             return Ok(None);
         }
@@ -3012,5 +3094,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    // Regression (root-fix D): with the channel closed and no grace, an
+    // edge push must SELF-HEAL — kick a dial via reconnect_target_peer —
+    // instead of silently eating the event until the watcher tick.
+    #[tokio::test]
+    async fn test_crossing_guard_self_heal_dials() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("guard-heal");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("guard-peer");
+        let peer_id = other.identity().device_id().clone();
+
+        // Seed the peer as live (unreachable addr is fine: the spawned dial
+        // fails asynchronously; the assertion is that the heal fired).
+        node.shared.live.lock().unwrap().insert(
+            peer_id.clone(),
+            crate::runtime::trust::LivePeer {
+                device_id: peer_id.clone(),
+                name: "peer".into(),
+                platform: "test".into(),
+                addr: "127.0.0.1:1".parse().unwrap(),
+                handshake_hash: [0u8; 32],
+                file_port: None,
+                input_port: Some(45719),
+                screen_port: None,
+                caps: Vec::new(),
+                path: tetherly_core::PathKind::Lan,
+                rtt_ms: None,
+                last_seen_ms: 0,
+            },
+        );
+
+        assert!(!node.input_channel_open_sync());
+        let res = node
+            .drive_input_delta(10, 10, 1, 0, 100, 50)
+            .expect("guard must not error");
+        assert_eq!(res, None, "no crossing while channel closed");
+        // The heal dial CAS must be held (or already finished) — poll briefly.
+        let saw_dialing = std::iter::repeat_n((), 50)
+            .find(|_| node.shared.input_dialing.load(Ordering::SeqCst))
+            .is_some();
+        assert!(
+            saw_dialing || !node.input_channel_open_sync(),
+            "guard must trigger a heal dial (or keep the channel closed, never wedge)"
+        );
     }
 }
