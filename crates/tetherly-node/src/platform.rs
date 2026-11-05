@@ -651,6 +651,14 @@ static PENDING_WARP_Y: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI
 #[cfg(any(windows, target_os = "macos"))]
 static PENDING_WARP_VALID: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+// Root-fix E3: on macOS one warp produces TWO hook-visible events — the real
+// CGWarp jump and the synthetic MouseMoved posted to SessionEventTap to
+// dismiss hover tracking. A single-shot marker consumed the first echo and
+// let the second through, where it re-entered the engine at the park
+// position and re-placed the remote cursor (production: cursor snapped to
+// screen center right after a correct proportional entry). Count the echoes.
+#[cfg(target_os = "macos")]
+static PENDING_WARP_ECHOES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 #[cfg(any(windows, target_os = "macos"))]
 fn mark_pending_warp(x: i32, y: i32) {
@@ -658,10 +666,12 @@ fn mark_pending_warp(x: i32, y: i32) {
     PENDING_WARP_X.store(x, Ordering::SeqCst);
     PENDING_WARP_Y.store(y, Ordering::SeqCst);
     PENDING_WARP_VALID.store(true, Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    PENDING_WARP_ECHOES.store(2, Ordering::SeqCst);
 }
 
 /// Returns true when the given hook position is the echo of the pending
-/// programmatic warp (and consumes the pending marker).
+/// programmatic warp (and consumes one pending echo slot).
 #[cfg(any(windows, target_os = "macos"))]
 fn take_warp_echo(x: i32, y: i32) -> bool {
     use std::sync::atomic::Ordering;
@@ -671,7 +681,17 @@ fn take_warp_echo(x: i32, y: i32) -> bool {
     let wx = PENDING_WARP_X.load(Ordering::SeqCst);
     let wy = PENDING_WARP_Y.load(Ordering::SeqCst);
     if (x - wx).abs() <= 2 && (y - wy).abs() <= 2 {
-        PENDING_WARP_VALID.store(false, Ordering::SeqCst);
+        #[cfg(target_os = "macos")]
+        {
+            let left = PENDING_WARP_ECHOES.fetch_sub(1, Ordering::SeqCst);
+            if left <= 1 {
+                PENDING_WARP_VALID.store(false, Ordering::SeqCst);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            PENDING_WARP_VALID.store(false, Ordering::SeqCst);
+        }
         return true;
     }
     false

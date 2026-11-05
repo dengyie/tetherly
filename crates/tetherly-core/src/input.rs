@@ -639,6 +639,7 @@ impl InputServer {
             if returning_local {
                 self.seat = CursorSeat::Local;
                 self.remote_interior = false;
+                self.pending.clear();
                 self.push(InputKind::Leave);
                 // Deskflow OSXScreen semantics: the return parks on the
                 // crossed edge, and the FREE axis maps back from the last
@@ -689,6 +690,13 @@ impl InputServer {
                     self.seat = CursorSeat::Remote;
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Right;
+                    // Root-fix E: drop any stale frame lingering in the
+                    // pending queue (e.g. a remote-branch Move that raced a
+                    // teardown) — the crossing batch must be exactly
+                    // [Enter, Move{rem}]; a stale Move after the Enter
+                    // re-places the cursor at an old position (production:
+                    // cursor snapped to screen center).
+                    self.pending.clear();
                     self.push(InputKind::Enter);
                     self.push(InputKind::Move {
                         x: self.rem_x,
@@ -711,6 +719,13 @@ impl InputServer {
                     self.seat = CursorSeat::Remote;
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Left;
+                    // Root-fix E: drop any stale frame lingering in the
+                    // pending queue (e.g. a remote-branch Move that raced a
+                    // teardown) — the crossing batch must be exactly
+                    // [Enter, Move{rem}]; a stale Move after the Enter
+                    // re-places the cursor at an old position (production:
+                    // cursor snapped to screen center).
+                    self.pending.clear();
                     self.push(InputKind::Enter);
                     self.push(InputKind::Move {
                         x: self.rem_x,
@@ -733,6 +748,13 @@ impl InputServer {
                     self.seat = CursorSeat::Remote;
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Top;
+                    // Root-fix E: drop any stale frame lingering in the
+                    // pending queue (e.g. a remote-branch Move that raced a
+                    // teardown) — the crossing batch must be exactly
+                    // [Enter, Move{rem}]; a stale Move after the Enter
+                    // re-places the cursor at an old position (production:
+                    // cursor snapped to screen center).
+                    self.pending.clear();
                     self.push(InputKind::Enter);
                     self.push(InputKind::Move {
                         x: self.rem_x,
@@ -755,6 +777,13 @@ impl InputServer {
                     self.seat = CursorSeat::Remote;
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Bottom;
+                    // Root-fix E: drop any stale frame lingering in the
+                    // pending queue (e.g. a remote-branch Move that raced a
+                    // teardown) — the crossing batch must be exactly
+                    // [Enter, Move{rem}]; a stale Move after the Enter
+                    // re-places the cursor at an old position (production:
+                    // cursor snapped to screen center).
+                    self.pending.clear();
                     self.push(InputKind::Enter);
                     self.push(InputKind::Move {
                         x: self.rem_x,
