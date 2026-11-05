@@ -1,6 +1,6 @@
 // Probe: simulate the production crossing flow for Mac top edge -> Windows
 use tetherly_core::input::InputServer;
-use tetherly_core::{InputKind, ScreenEdge, SCREEN_UNITS};
+use tetherly_core::{CursorSeat, InputKind, ScreenEdge, SCREEN_UNITS};
 
 #[test]
 fn probe_top_edge_crossing_entry_x() {
@@ -105,4 +105,44 @@ fn roundtrip_is_position_stable() {
         worst <= 1,
         "round trip must not drift more than 1px; worst={worst}"
     );
+}
+
+// Regression: a takeover demotes this node mid-roam and the engine seat
+// stays Remote. A later re-attach used to find that stale seat, replay the
+// old rem via resume_remote, and permanently block the fresh edge-crossing
+// arm (it needs seat Local) — the cursor then drifted from the stale spot
+// instead of entering proportionally. clear_stale_remote must drop the seat
+// WITHOUT moving the hook position, so the next push crosses fresh.
+#[test]
+fn clear_stale_remote_resets_seat_but_keeps_position() {
+    let mut srv = InputServer::new(1512, 982);
+    srv.set_edge(ScreenEdge::Top);
+
+    // Enter remote and roam somewhere: rem_x tracks hook x (777).
+    assert_eq!(srv.local_move_delta(777, 0, 0, -6), Some(ScreenEdge::Top));
+    let _ = srv.drain();
+    assert_eq!(srv.seat(), CursorSeat::Remote);
+    srv.local_move_delta(777, 30, 0, 30);
+    let _ = srv.drain();
+
+    // Simulate the demote-then-reattach: stale seat must clear.
+    srv.clear_stale_remote();
+    assert_eq!(srv.seat(), CursorSeat::Local);
+    assert_eq!(srv.local_pos().0, 777, "hook position must be preserved");
+
+    // The next physical push must fire a FRESH proportional crossing, not
+    // an incremental move from the stale rem.
+    assert_eq!(srv.local_move_delta(400, 0, 0, -6), Some(ScreenEdge::Top));
+    let evs = srv.drain();
+    let mv = evs
+        .iter()
+        .find_map(|ev| match ev.kind {
+            InputKind::Move { x, y } => Some((x, y)),
+            _ => None,
+        })
+        .expect("fresh Enter+Move after stale-seat clear");
+    // norm(400) with rounding = round(400*1000/1511) = 265 — proportional
+    // to the NEW position, not a delta from the old roam.
+    assert_eq!(mv.0, 265, "entry rem must be proportional to fresh x");
+    assert_eq!(mv.1, SCREEN_UNITS);
 }

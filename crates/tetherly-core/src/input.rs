@@ -458,6 +458,29 @@ impl InputServer {
         self.buttons_down
     }
 
+    /// Drop a STALE Remote seat before establishing a new controller session.
+    ///
+    /// A takeover demotes this node while its engine still sits in Remote
+    /// from the previous controller stint. If a later re-attach finds the
+    /// seat Remote, `resume_remote` replays the old rem coordinates onto the
+    /// target and — worse — the fresh edge-crossing arm never fires again
+    /// (it requires seat Local), so the cursor keeps drifting from the stale
+    /// spot instead of entering proportionally at the shared edge.
+    /// Production symptom: after auto-reverse, the cursor emerged mid-screen
+    /// on the target instead of at the mapped entry.
+    ///
+    /// Unlike `force_local`, nothing is pushed and nothing warps: the
+    /// hook-observed x/y are kept so the next physical edge push crosses
+    /// fresh with a proportional rem.
+    pub fn clear_stale_remote(&mut self) {
+        if self.seat == CursorSeat::Remote {
+            self.seat = CursorSeat::Local;
+            self.remote_interior = false;
+            self.buttons_down = 0;
+            self.pending.clear();
+        }
+    }
+
     /// Forcefully disarm remote roaming and restore the cursor seat to Local.
     pub fn force_local(&mut self) {
         self.buttons_down = 0;

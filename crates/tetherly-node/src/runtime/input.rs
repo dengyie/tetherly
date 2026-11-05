@@ -967,6 +967,31 @@ impl Node {
         // reusing it would leave this controller with a dead channel and no
         // rebuild. Drop it and dial fresh.
         *self.shared.input_out.lock().expect("input_out") = None;
+        // A NEW controller session must not inherit engine state from the
+        // previous stint. A leftover Remote seat (a takeover demotes this
+        // node mid-roam without resetting the seat) makes attach_input_server
+        // replay the stale rem via resume_remote and permanently blocks the
+        // fresh edge crossing — production showed the cursor emerging
+        // mid-screen instead of at the mapped entry. Frames buffered across
+        // the session boundary belong to the dead session too.
+        {
+            let mut engine = self.shared.input_engine.lock().expect("engine");
+            if engine.seat() == CursorSeat::Remote {
+                engine.clear_stale_remote();
+                self.shared
+                    .input_buffered_frames
+                    .lock()
+                    .expect("buffered")
+                    .clear();
+                *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                self.emit(UiEvent::input_seat_changed(
+                    "local",
+                    true,
+                    Some(peer_str.clone()),
+                ));
+                info!(%peer_id, "tunnel attach: cleared stale remote seat; next edge push crosses fresh");
+            }
+        }
         if let Err(e) = self.open_input(&peer_id).await {
             warn!(%peer_id, %e, "input channel open during tunnel attach failed");
         }
