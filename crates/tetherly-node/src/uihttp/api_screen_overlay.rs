@@ -691,7 +691,9 @@ pub(super) async fn post_screen_whiteboard_import(
         {
             return err(400, "path traversal rejected");
         }
-        match std::fs::read(path) {
+        // Async read: a large snapshot must not stall the single UI accept
+        // loop (this server has one dispatch task for all clients + SSE).
+        match tokio::fs::read(path).await {
             Ok(bytes) => serde_json::from_slice::<tetherly_core::WhiteboardSnapshot>(&bytes)
                 .map_err(|e| format!("invalid snapshot file: {e}")),
             Err(e) => return err(400, &format!("failed to read snapshot file: {e}")),

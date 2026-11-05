@@ -51,6 +51,9 @@ mod camera;
 mod clipboard;
 mod config;
 mod discovery;
+mod drag;
+mod drag_controller;
+mod drag_target;
 mod files;
 mod focus;
 mod handoff;
@@ -69,6 +72,7 @@ mod screen_mode;
 mod screen_status;
 mod screen_stream;
 mod session;
+mod shell_reveal;
 mod storage;
 mod topology;
 mod trust;
@@ -81,6 +85,8 @@ pub use bench::*;
 pub use camera::*;
 pub use clipboard::*;
 pub use discovery::*;
+pub use drag_controller::*;
+pub use drag_target::*;
 pub use files::*;
 pub use focus::*;
 pub use handoff::*;
@@ -91,6 +97,7 @@ pub use messages::*;
 pub use notify::*;
 pub use routes::*;
 pub use screen_dto::*;
+pub use shell_reveal::*;
 pub use storage::*;
 pub use topology::*;
 pub use trust::*;
@@ -909,6 +916,16 @@ struct Shared {
     active_bench: Mutex<Option<ActiveBenchSession>>,
     last_bench_report: Mutex<Option<BenchReportFrame>>,
     bandwidth_profiles: Mutex<BandwidthProfileTable>,
+    pub(crate) drag_controller: Mutex<DragController>,
+    pub(crate) drag_target: Mutex<DragTarget>,
+    /// Pending receiver-side drag sessions awaiting their first byte:
+    /// `drag_id -> source peer`, populated when a `RemoteDropConfirm` arrives
+    /// and consumed when the first inbound `FileOffer` claims it.
+    pub(crate) pending_drag_drops: Mutex<HashMap<u64, DeviceId>>,
+    /// `transfer_id -> drag_id` linking an accepted inbound transfer back to
+    /// the drag session that originated it, so the completion hook can settle
+    /// MOTW + reveal. Populated when the first FileOffer of a drag arrives.
+    pub(crate) transfer_drag_ids: Mutex<HashMap<String, u64>>,
 }
 
 impl Shared {
@@ -972,63 +989,59 @@ impl Shared {
                             quality_warning: psnr < 30.0 || ssim < 0.85,
                         };
                         let action = {
-                            let mut qoe = self.screen_qoe_controller.write().unwrap();
+                            let mut qoe = self.screen_qoe_controller.write().expect("screen_qoe");
                             qoe.evaluate(&metric_rep, now_us)
                         };
                         match action {
                             tetherly_core::ScreenQoeAction::Hold => {}
                             tetherly_core::ScreenQoeAction::BoostBitrate => {
-                                if let Ok(mut engine) = self.screen_engine.lock() {
-                                    let cur = engine.bitrate_bps();
-                                    let boosted = (cur.saturating_mul(120) / 100)
-                                        .min(tetherly_core::SCREEN_BITRATE_MAX_BPS);
-                                    engine.set_bitrate_bps(boosted);
-                                    if let Some(sel) = &self.screen_encode_codec {
-                                        sel.set_bitrate_bps(boosted);
-                                    }
-                                    self.screen_source.set_bitrate_bps(boosted);
+                                let mut engine = self.screen_engine.lock().expect("screen");
+                                let cur = engine.bitrate_bps();
+                                let boosted = (cur.saturating_mul(120) / 100)
+                                    .min(tetherly_core::SCREEN_BITRATE_MAX_BPS);
+                                engine.set_bitrate_bps(boosted);
+                                if let Some(sel) = &self.screen_encode_codec {
+                                    sel.set_bitrate_bps(boosted);
                                 }
+                                self.screen_source.set_bitrate_bps(boosted);
                             }
                             tetherly_core::ScreenQoeAction::UpgradeScale => {
-                                if let Ok(mut engine) = self.screen_engine.lock() {
-                                    let cur = engine.scale_pct();
-                                    if cur < 100 {
-                                        engine.set_scale_pct(100);
-                                        if let Some(sel) = &self.screen_encode_codec {
-                                            sel.set_scale_pct(100);
-                                        }
-                                        self.screen_source.set_scale_pct(100);
+                                let mut engine = self.screen_engine.lock().expect("screen");
+                                let cur = engine.scale_pct();
+                                if cur < 100 {
+                                    engine.set_scale_pct(100);
+                                    if let Some(sel) = &self.screen_encode_codec {
+                                        sel.set_scale_pct(100);
                                     }
+                                    self.screen_source.set_scale_pct(100);
                                 }
                             }
                             tetherly_core::ScreenQoeAction::LowerQp => {
-                                if let Ok(mut engine) = self.screen_engine.lock() {
-                                    let (min_qp, max_qp) = engine.qp_range();
-                                    let new_min = min_qp.saturating_sub(4).max(10);
-                                    let new_max = max_qp.saturating_sub(4).max(20);
-                                    engine.set_qp_range(new_min, new_max);
-                                }
+                                let mut engine = self.screen_engine.lock().expect("screen");
+                                let (min_qp, max_qp) = engine.qp_range();
+                                let new_min = min_qp.saturating_sub(4).max(10);
+                                let new_max = max_qp.saturating_sub(4).max(20);
+                                engine.set_qp_range(new_min, new_max);
                             }
                             tetherly_core::ScreenQoeAction::ForceKeyframe => {
-                                if let Ok(mut engine) = self.screen_engine.lock() {
-                                    let _ = engine
-                                        .on_control(tetherly_core::ControlMsg::KeyframeRequest);
-                                }
+                                let mut engine = self.screen_engine.lock().expect("screen");
+                                let _ =
+                                    engine.on_control(tetherly_core::ControlMsg::KeyframeRequest);
+                                drop(engine);
                                 self.screen_source.force_idr();
                                 if let Some(sel) = &self.screen_encode_codec {
                                     sel.force_idr();
                                 }
                             }
                             tetherly_core::ScreenQoeAction::FallbackThrottle => {
-                                if let Ok(mut engine) = self.screen_engine.lock() {
-                                    let cur = engine.fps_target();
-                                    let new_fps = cur.saturating_sub(5).max(15);
-                                    engine.set_fps(new_fps);
-                                    if let Some(sel) = &self.screen_encode_codec {
-                                        sel.set_fps(new_fps);
-                                    }
-                                    self.screen_source.set_fps(new_fps);
+                                let mut engine = self.screen_engine.lock().expect("screen");
+                                let cur = engine.fps_target();
+                                let new_fps = cur.saturating_sub(5).max(15);
+                                engine.set_fps(new_fps);
+                                if let Some(sel) = &self.screen_encode_codec {
+                                    sel.set_fps(new_fps);
                                 }
+                                self.screen_source.set_fps(new_fps);
                             }
                         }
                     }
@@ -1137,7 +1150,7 @@ use tetherly_core::MediaCommandFrame;
 use tetherly_core::PlaybackState;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]

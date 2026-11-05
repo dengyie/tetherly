@@ -71,6 +71,7 @@ pub const TYPE_FILE_OFFER: u16 = 0x0301;
 pub const TYPE_FILE_ACCEPT: u16 = 0x0302;
 pub const TYPE_FILE_REJECT: u16 = 0x0303;
 pub const TYPE_FILE_DONE: u16 = 0x0304;
+pub const TYPE_DRAG_CONTROL: u16 = 0x0305;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InnerFrame {
@@ -190,6 +191,7 @@ pub fn is_known_type(ty: u16) -> bool {
             | TYPE_FILE_ACCEPT
             | TYPE_FILE_REJECT
             | TYPE_FILE_DONE
+            | TYPE_DRAG_CONTROL
     )
 }
 

@@ -1255,3 +1255,53 @@ pub struct DaemonRestartReport {
     pub message: String,
     pub timestamp_ms: u64,
 }
+
+#[derive(serde::Deserialize, Default, Debug, Clone)]
+pub struct DragIntentBody {
+    #[serde(default)]
+    pub peer: Option<String>,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub norm_x: Option<f32>,
+    #[serde(default)]
+    pub norm_y: Option<f32>,
+}
+
+#[derive(serde::Deserialize, Default, Debug, Clone)]
+pub struct DragMoveBody {
+    #[serde(default)]
+    pub norm_x: f32,
+    #[serde(default)]
+    pub norm_y: f32,
+}
+
+#[derive(serde::Deserialize, Default, Debug, Clone)]
+pub struct DragCancelBody {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default, Debug, Clone)]
+pub struct DragConfirmBody {
+    #[serde(default)]
+    pub drag_id: u64,
+    #[serde(default)]
+    pub drop_norm_x: Option<f32>,
+    #[serde(default)]
+    pub drop_norm_y: Option<f32>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+pub struct DragStatusReport {
+    pub controller_active: bool,
+    pub controller_phase: tetherly_core::drag::DragPhase,
+    pub controller_target_peer: Option<String>,
+    pub controller_first_file: Option<String>,
+    pub controller_file_count: u32,
+    pub controller_total_bytes: u64,
+    pub controller_norm_pos: (f32, f32),
+    pub target_phase: tetherly_core::drag::DragPhase,
+    pub target_visual: crate::runtime::GhostOverlayVisual,
+    pub target_norm_pos: (f32, f32),
+}

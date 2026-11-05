@@ -635,6 +635,10 @@ impl Node {
             active_bench: Mutex::new(None),
             last_bench_report: Mutex::new(None),
             bandwidth_profiles: Mutex::new(initial_bandwidth_profiles),
+            drag_controller: Mutex::new(DragController::new()),
+            drag_target: Mutex::new(DragTarget::new()),
+            pending_drag_drops: Mutex::new(HashMap::new()),
+            transfer_drag_ids: Mutex::new(HashMap::new()),
         });
         Ok(Self { shared })
     }
@@ -1223,6 +1227,7 @@ impl Node {
             SessionEvent::FileAccept(_) => (32u64, tetherly_core::frame::TYPE_FILE_ACCEPT),
             SessionEvent::FileReject(_) => (32u64, tetherly_core::frame::TYPE_FILE_REJECT),
             SessionEvent::FileDone(_) => (32u64, tetherly_core::frame::TYPE_FILE_DONE),
+            SessionEvent::DragControl(_) => (64u64, tetherly_core::frame::TYPE_DRAG_CONTROL),
             SessionEvent::Caps(_) => (32u64, tetherly_core::frame::TYPE_CAPS_UPDATE),
             SessionEvent::ActionListReq(r) => (
                 (r.request_id.len() + 32) as u64,
@@ -1490,6 +1495,11 @@ impl Node {
                 };
                 match offered {
                     Ok(t) => {
+                        // Claim a pending drag drop: if this inbound offer is the
+                        // first file of a drag-originated drop, bind its
+                        // transfer_id to the drag_id so the completion hook can
+                        // settle MOTW + reveal.
+                        self.claim_drag_offer(peer, &tid);
                         self.emit(file_offered(&t));
                         let is_auto_accept = {
                             let policy = self
@@ -1771,6 +1781,9 @@ impl Node {
             }
             SessionEvent::BenchReport(rep) => {
                 self.receive_bench_report(peer, rep).await;
+            }
+            SessionEvent::DragControl(msg) => {
+                self.receive_drag_control(peer, msg).await;
             }
             SessionEvent::Unknown(_) => {}
         }

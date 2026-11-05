@@ -658,6 +658,21 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
         ("POST", "/api/file/send-batch") | ("POST", "/api/file/batch") => {
             api_files::post_file_send_batch(method, query_str, body, node).await
         }
+        ("GET", "/api/file/drag/status") | ("GET", "/api/files/drag/status") => {
+            api_files::get_file_drag_status(method, query_str, body, node).await
+        }
+        ("POST", "/api/file/drag/intent") | ("POST", "/api/files/drag/intent") => {
+            api_files::post_file_drag_intent(method, query_str, body, node).await
+        }
+        ("POST", "/api/file/drag/move") | ("POST", "/api/files/drag/move") => {
+            api_files::post_file_drag_move(method, query_str, body, node).await
+        }
+        ("POST", "/api/file/drag/cancel") | ("POST", "/api/files/drag/cancel") => {
+            api_files::post_file_drag_cancel(method, query_str, body, node).await
+        }
+        ("POST", "/api/file/drag/confirm") | ("POST", "/api/files/drag/confirm") => {
+            api_files::post_file_drag_confirm(method, query_str, body, node).await
+        }
         ("GET", "/api/file/resume") | ("GET", "/api/storage/resume") => {
             api_files::get_file_resume(method, query_str, body, node).await
         }
@@ -1644,6 +1659,7 @@ mod tests {
     use crate::runtime::{Node, NodeConfig};
     use crate::sidecar::OverlayConfig;
     use std::sync::Arc;
+    use tetherly_core::drag::DragPhase;
     use tetherly_core::ports::ManualClock;
     use tetherly_core::{
         PixelFormat, ScreenAnnotationReport, ScreenFrame, ScreenRecordingMeta,
@@ -6611,5 +6627,209 @@ mod tests {
         assert_eq!(resp_code, 403);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_uihttp_drag_drop_endpoints() {
+        let (node, dir) = temp_test_node("drag_drop_api");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+
+        // 1. GET /api/file/drag/status (idle)
+        let (code, body) = loopback_get(port, "/api/file/drag/status").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["controller_active"], false);
+        assert_eq!(rep["target_phase"], "idle");
+
+        // 2. POST /api/file/drag/intent with empty paths fails 400
+        let bad_intent = serde_json::json!({
+            "paths": []
+        });
+        let (code, _) = loopback_post(
+            port,
+            "/api/file/drag/intent",
+            &serde_json::to_vec(&bad_intent).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 400);
+
+        // 3. POST /api/file/drag/move without session returns 404
+        let move_req = serde_json::json!({
+            "norm_x": 0.5,
+            "norm_y": 0.5
+        });
+        let (code, _) = loopback_post(
+            port,
+            "/api/file/drag/move",
+            &serde_json::to_vec(&move_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 404);
+
+        // 4. POST /api/file/drag/cancel when idle returns 200 gracefully
+        let (code, body) = loopback_post(port, "/api/file/drag/cancel", b"{}")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+
+        // 5. POST /api/file/drag/confirm with unknown drag_id returns 404
+        let conf_req = serde_json::json!({
+            "drag_id": 99999,
+            "drop_norm_x": 0.5,
+            "drop_norm_y": 0.5
+        });
+        let (code, _) = loopback_post(
+            port,
+            "/api/file/drag/confirm",
+            &serde_json::to_vec(&conf_req).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 404);
+
+        // 6. Security guard: Host header 403 on /api/file/drag/status
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let evil_req = "GET /api/file/drag/status HTTP/1.1\r\nHost: evil.attacker.com\r\nConnection: close\r\n\r\n";
+        stream.write_all(evil_req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let (resp_code, _) = parse_http_response(&raw);
+        assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression for the v0.1.76 rollout gap: the REST confirm handler MUST
+    /// transmit `RemoteDropConfirm` to the receiver before streaming. This is
+    /// the exact seam that broke in production (receiver never advanced past
+    /// RemoteDragActive; MOTW + reveal never fired) and that the in-process
+    /// wire test could not see because it sent the signal by hand. Drives the
+    /// real HTTP surface against a real peered receiver and asserts the
+    /// receiver's DragTarget advanced to Dropping with the pending delivery
+    /// registered before any byte moves.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_uihttp_drag_confirm_signals_receiver_over_wire() {
+        use crate::runtime::clipboard_policy_tests::temp_test_node as ui_temp_node;
+        use tetherly_core::TrustedPeer;
+
+        let (host, dir_host) = ui_temp_node("drag_confirm_host");
+        let (recv, dir_recv) = ui_temp_node("drag_confirm_recv");
+        let port = bind_and_spawn(host.clone_handle(), 0).await.unwrap();
+
+        let now = 1u64;
+        for (node, peer) in [(&host, &recv), (&recv, &host)] {
+            let tp = TrustedPeer {
+                device_id: peer.identity().device_id().clone(),
+                id_pk: *peer.identity().id_pk(),
+                n_pk: *peer.identity().n_pk(),
+                alias: "peer".into(),
+                paired_at: now,
+                revoked: false,
+            };
+            node.seed_trusted_peer(tp).expect("seed trust");
+        }
+        recv.spawn_listeners().await.expect("spawn recv listeners");
+        host.dial(recv.control_addr()).await.expect("dial");
+
+        let recv_id = recv.identity().device_id().clone();
+        let mut tries = 0;
+        loop {
+            let live = host.live_peers().iter().any(|p| p.device_id == recv_id);
+            if live {
+                break;
+            }
+            tries += 1;
+            assert!(tries < 100, "peer session never established");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Real file on disk so intent/confirm operate the production path.
+        let drag_file = dir_host.join("confirm_wire.txt");
+        std::fs::write(&drag_file, b"confirm wire regression").unwrap();
+
+        // 1. intent — creates the controller session and signals enter.
+        let intent = serde_json::json!({
+            "target": "peer",
+            "paths": [drag_file.to_str().unwrap()],
+            "norm_x": 0.5,
+            "norm_y": 0.5,
+        });
+        let (code, body) = loopback_post(
+            port,
+            "/api/file/drag/intent",
+            &serde_json::to_vec(&intent).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            code,
+            200,
+            "intent must succeed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let drag_id = rep["signal"]["payload"]["drag_id"].as_u64().unwrap();
+
+        // Receiver must show the enter signal arrived.
+        let mut tries = 0;
+        loop {
+            let phase = recv.drag_target().lock().expect("t").current_phase();
+            if phase == DragPhase::RemoteDragActive {
+                break;
+            }
+            tries += 1;
+            assert!(tries < 100, "receiver never saw RemoteDragEnter");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // 2. confirm via the real REST handler — this is the seam under test:
+        // the handler must signal RemoteDropConfirm to the receiver BEFORE
+        // streaming, so the receiver reaches Dropping with the pending drop
+        // registered. (The subsequent file stream itself is exercised by the
+        // phase1 suites; here we only need the signal ordering.)
+        let confirm = serde_json::json!({ "drag_id": drag_id });
+        let (code, body) = loopback_post(
+            port,
+            "/api/file/drag/confirm",
+            &serde_json::to_vec(&confirm).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            code,
+            200,
+            "confirm must succeed: {}",
+            String::from_utf8_lossy(&body)
+        );
+
+        // The receiver must have advanced to Dropping — impossible unless the
+        // handler transmitted the confirm signal over the wire (the phase only
+        // leaves RemoteDragActive upon that signal; the pending-map details are
+        // covered by runtime::drag's settlement regression).
+        let mut tries = 0;
+        loop {
+            let phase = recv.drag_target().lock().expect("t").current_phase();
+            if phase == DragPhase::Dropping {
+                break;
+            }
+            tries += 1;
+            assert!(
+                tries < 100,
+                "REST confirm never reached the receiver (phase={phase:?}) — \
+                 the handler must transmit RemoteDropConfirm before streaming"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        host.shutdown();
+        recv.shutdown();
+        let _ = std::fs::remove_dir_all(&dir_host);
+        let _ = std::fs::remove_dir_all(&dir_recv);
     }
 }

@@ -179,8 +179,13 @@ impl Node {
                 .shared
                 .screen_snapshot_count
                 .load(std::sync::atomic::Ordering::Relaxed),
-            watermark_enabled: self.shared.screen_watermark.read().unwrap().enabled,
-            watermark_enforced: self.shared.screen_watermark.read().unwrap().host_enforced
+            watermark_enabled: self.shared.screen_watermark.read().expect("lock").enabled,
+            watermark_enforced: self
+                .shared
+                .screen_watermark
+                .read()
+                .expect("lock")
+                .host_enforced
                 || self
                     .shared
                     .screen_peer_watermark_enforced
@@ -189,7 +194,7 @@ impl Node {
                 .shared
                 .screen_watermark_frames
                 .load(std::sync::atomic::Ordering::Relaxed),
-            annotations_count: self.shared.screen_annotations.read().unwrap().len(),
+            annotations_count: self.shared.screen_annotations.read().expect("lock").len(),
             laser_active: self
                 .shared
                 .screen_laser_pointer
@@ -228,12 +233,12 @@ impl Node {
                 .unwrap()
                 .policy()
                 .max_items,
-            roi_active: self.shared.screen_roi.read().unwrap().active,
-            roi_x: self.shared.screen_roi.read().unwrap().x,
-            roi_y: self.shared.screen_roi.read().unwrap().y,
-            roi_w: self.shared.screen_roi.read().unwrap().w,
-            roi_h: self.shared.screen_roi.read().unwrap().h,
-            roi_zoom_percent: self.shared.screen_roi.read().unwrap().zoom_percent,
+            roi_active: self.shared.screen_roi.read().expect("lock").active,
+            roi_x: self.shared.screen_roi.read().expect("lock").x,
+            roi_y: self.shared.screen_roi.read().expect("lock").y,
+            roi_w: self.shared.screen_roi.read().expect("lock").w,
+            roi_h: self.shared.screen_roi.read().expect("lock").h,
+            roi_zoom_percent: self.shared.screen_roi.read().expect("lock").zoom_percent,
             roi_updates: self
                 .shared
                 .screen_roi_updates
@@ -246,12 +251,22 @@ impl Node {
                 .mode
                 .as_str()
                 .to_string(),
-            color_threshold: self.shared.screen_color_mode.read().unwrap().threshold,
+            color_threshold: self
+                .shared
+                .screen_color_mode
+                .read()
+                .expect("lock")
+                .threshold,
             color_updates: self
                 .shared
                 .screen_color_updates
                 .load(std::sync::atomic::Ordering::Relaxed),
-            delta_enabled: self.shared.screen_delta_config.read().unwrap().enabled,
+            delta_enabled: self
+                .shared
+                .screen_delta_config
+                .read()
+                .expect("lock")
+                .enabled,
             delta_keyframe_interval: self
                 .shared
                 .screen_delta_config
@@ -309,8 +324,16 @@ impl Node {
                 .unwrap()
                 .last_ssim,
             metric_quality_warning: {
-                let cfg = *self.shared.screen_quality_metric_config.read().unwrap();
-                let state = self.shared.screen_quality_metric_state.read().unwrap();
+                let cfg = *self
+                    .shared
+                    .screen_quality_metric_config
+                    .read()
+                    .expect("lock");
+                let state = self
+                    .shared
+                    .screen_quality_metric_state
+                    .read()
+                    .expect("lock");
                 cfg.enabled
                     && state.evaluated_frames > 0
                     && (state.last_psnr_db < 30.0 || state.last_ssim < 0.85)
@@ -374,7 +397,7 @@ impl Node {
                 .mode
                 .as_str()
                 .to_string(),
-            pir_bands: self.shared.screen_pir_config.read().unwrap().bands,
+            pir_bands: self.shared.screen_pir_config.read().expect("lock").bands,
             pir_sweeps_completed: self
                 .shared
                 .screen_pir_sweeps_completed
@@ -383,8 +406,13 @@ impl Node {
                 .shared
                 .screen_pir_slices_sent
                 .load(std::sync::atomic::Ordering::Relaxed),
-            ltr_enabled: self.shared.screen_ltr_config.read().unwrap().enabled,
-            ltr_auto_interval: self.shared.screen_ltr_config.read().unwrap().auto_interval,
+            ltr_enabled: self.shared.screen_ltr_config.read().expect("lock").enabled,
+            ltr_auto_interval: self
+                .shared
+                .screen_ltr_config
+                .read()
+                .expect("lock")
+                .auto_interval,
             ltr_current_seq: self
                 .shared
                 .screen_ltr_current_seq
@@ -397,7 +425,12 @@ impl Node {
                 .shared
                 .screen_ltr_recoveries_completed
                 .load(std::sync::atomic::Ordering::Relaxed),
-            svc_enabled: self.shared.screen_svc_config.read().unwrap().is_enabled(),
+            svc_enabled: self
+                .shared
+                .screen_svc_config
+                .read()
+                .expect("lock")
+                .is_enabled(),
             svc_mode: self
                 .shared
                 .screen_svc_config
@@ -406,7 +439,7 @@ impl Node {
                 .mode
                 .as_str()
                 .to_string(),
-            svc_drop_t1: self.shared.screen_svc_config.read().unwrap().drop_t1,
+            svc_drop_t1: self.shared.screen_svc_config.read().expect("lock").drop_t1,
             svc_t0_sent: self
                 .shared
                 .screen_svc_t0_frames_sent
@@ -419,7 +452,12 @@ impl Node {
                 .shared
                 .screen_svc_t1_frames_dropped
                 .load(std::sync::atomic::Ordering::Relaxed),
-            motion_enabled: self.shared.screen_motion_config.read().unwrap().enabled,
+            motion_enabled: self
+                .shared
+                .screen_motion_config
+                .read()
+                .expect("lock")
+                .enabled,
             motion_max_displacement: self
                 .shared
                 .screen_motion_config
@@ -438,8 +476,13 @@ impl Node {
                 .shared
                 .screen_motion_saved_bytes
                 .load(std::sync::atomic::Ordering::Relaxed),
-            tile_enabled: self.shared.screen_tile_config.read().unwrap().enabled,
-            tile_size: self.shared.screen_tile_config.read().unwrap().tile_size,
+            tile_enabled: self.shared.screen_tile_config.read().expect("lock").enabled,
+            tile_size: self
+                .shared
+                .screen_tile_config
+                .read()
+                .expect("lock")
+                .tile_size,
             tile_frames_sent: self
                 .shared
                 .screen_tile_frames_sent
@@ -456,7 +499,12 @@ impl Node {
                 .shared
                 .screen_tile_saved_bytes
                 .load(std::sync::atomic::Ordering::Relaxed),
-            tile_cache_enabled: self.shared.screen_tile_cache_config.read().unwrap().enabled,
+            tile_cache_enabled: self
+                .shared
+                .screen_tile_cache_config
+                .read()
+                .expect("lock")
+                .enabled,
             tile_cache_max_entries: self
                 .shared
                 .screen_tile_cache_config
@@ -497,7 +545,12 @@ impl Node {
                 .shared
                 .screen_tile_cache_saved_bytes
                 .load(std::sync::atomic::Ordering::Relaxed),
-            focus_enabled: self.shared.screen_focus_config.read().unwrap().enabled,
+            focus_enabled: self
+                .shared
+                .screen_focus_config
+                .read()
+                .expect("lock")
+                .enabled,
             focus_mode: self
                 .shared
                 .screen_focus_config
@@ -506,17 +559,17 @@ impl Node {
                 .mode
                 .as_str()
                 .to_string(),
-            focus_radius: self.shared.screen_focus_config.read().unwrap().radius,
+            focus_radius: self.shared.screen_focus_config.read().expect("lock").radius,
             focus_peripheral_skip_ratio: self
                 .shared
                 .screen_focus_config
                 .read()
                 .unwrap()
                 .peripheral_skip_ratio,
-            focus_box_x: self.shared.screen_focus_config.read().unwrap().box_x,
-            focus_box_y: self.shared.screen_focus_config.read().unwrap().box_y,
-            focus_box_w: self.shared.screen_focus_config.read().unwrap().box_w,
-            focus_box_h: self.shared.screen_focus_config.read().unwrap().box_h,
+            focus_box_x: self.shared.screen_focus_config.read().expect("lock").box_x,
+            focus_box_y: self.shared.screen_focus_config.read().expect("lock").box_y,
+            focus_box_w: self.shared.screen_focus_config.read().expect("lock").box_w,
+            focus_box_h: self.shared.screen_focus_config.read().expect("lock").box_h,
             focus_tiles_sent: self
                 .shared
                 .screen_focus_tiles_sent
@@ -648,7 +701,12 @@ impl Node {
                     .load(std::sync::atomic::Ordering::Relaxed);
                 total_lat.checked_div(swaps).unwrap_or(0)
             },
-            tile_nack_enabled: self.shared.screen_tile_nack_config.read().unwrap().enabled,
+            tile_nack_enabled: self
+                .shared
+                .screen_tile_nack_config
+                .read()
+                .expect("lock")
+                .enabled,
             tile_nack_timeout_ms: self
                 .shared
                 .screen_tile_nack_config
@@ -713,8 +771,18 @@ impl Node {
                 .shared
                 .screen_tile_saliency_background_skipped
                 .load(std::sync::atomic::Ordering::Relaxed),
-            tile_lod_enabled: self.shared.screen_tile_lod_config.read().unwrap().enabled,
-            tile_lod_max_lod: self.shared.screen_tile_lod_config.read().unwrap().max_lod,
+            tile_lod_enabled: self
+                .shared
+                .screen_tile_lod_config
+                .read()
+                .expect("lock")
+                .enabled,
+            tile_lod_max_lod: self
+                .shared
+                .screen_tile_lod_config
+                .read()
+                .expect("lock")
+                .max_lod,
             tile_lod_auto_lod_on_congestion: self
                 .shared
                 .screen_tile_lod_config
@@ -737,7 +805,12 @@ impl Node {
                 .shared
                 .screen_tile_lod_bytes_saved
                 .load(std::sync::atomic::Ordering::Relaxed),
-            tile_batch_enabled: self.shared.screen_tile_batch_config.read().unwrap().enabled,
+            tile_batch_enabled: self
+                .shared
+                .screen_tile_batch_config
+                .read()
+                .expect("lock")
+                .enabled,
             tile_batch_target_chunk_bytes: self
                 .shared
                 .screen_tile_batch_config

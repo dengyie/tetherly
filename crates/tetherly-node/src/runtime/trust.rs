@@ -282,6 +282,16 @@ impl Node {
         self.shared.trust.lock().expect("trust").all()
     }
 
+    /// Test-only seeding of a trusted peer without the pairing handshake.
+    /// The public HTTP surface must never mint trust on its own.
+    #[cfg(test)]
+    pub(crate) fn seed_trusted_peer(
+        &self,
+        peer: tetherly_core::TrustedPeer,
+    ) -> Result<(), CoreError> {
+        self.shared.trust.lock().expect("trust").put(peer)
+    }
+
     pub fn is_trusted(&self, id: &DeviceId) -> bool {
         let store = self.shared.trust.lock().expect("trust");
         store.peers.get(id).is_some_and(|p| !p.revoked)

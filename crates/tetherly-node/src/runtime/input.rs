@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use tetherly_core::frame::InnerFrame;
 use tetherly_core::{
     map_edge_exit_to_entry, CoreError, CursorSeat, DeviceId, DisplayEdge, DisplayRect, InputClient,
-    InputEvent, InputSink, InputTunnelHeartbeatFrame, InputTunnelReleaseFrame,
+    InputEvent, InputKind, InputSink, InputTunnelHeartbeatFrame, InputTunnelReleaseFrame,
     InputTunnelRequestFrame, InputTunnelRespFrame, InputTunnelRole, InputTunnelValidator,
     MemorySink, TopologyValidator,
 };
@@ -1055,6 +1055,37 @@ impl Node {
             .clone()
     }
 
+    /// Hot-path accessors: read a single policy field without deep-cloning
+    /// the whole struct (Vec<String> allowlists + Options) per input event.
+    /// Callers on the per-move / per-key / per-wheel paths MUST use these
+    /// instead of `input_policy()` — see the no-policy-clone invariant noted
+    /// in `maybe_auto_reverse`.
+    fn policy_edge_str(&self) -> Option<String> {
+        self.shared
+            .input_policy
+            .lock()
+            .expect("input_policy")
+            .edge
+            .clone()
+    }
+
+    fn policy_keymap_name(&self) -> Option<String> {
+        self.shared
+            .input_policy
+            .lock()
+            .expect("input_policy")
+            .keymap
+            .clone()
+    }
+
+    fn policy_wheel_speed(&self) -> f64 {
+        self.shared
+            .input_policy
+            .lock()
+            .expect("input_policy")
+            .wheel_speed
+    }
+
     /// Status and configuration report for input policy.
     pub fn input_policy_report(&self) -> InputTunnelPolicyReport {
         InputTunnelPolicyReport {
@@ -1630,7 +1661,7 @@ impl Node {
         let (edge, events, current_seat, local_pos, active_edge) = {
             let mut server = self.shared.input_engine.lock().expect("engine");
             server.resize(width, height);
-            let active_edge = if let Some(e) = self.input_policy().edge.as_deref() {
+            let active_edge = if let Some(e) = self.policy_edge_str().as_deref() {
                 e.parse::<tetherly_core::ScreenEdge>()
                     .unwrap_or(tetherly_core::ScreenEdge::Right)
             } else {
@@ -1762,9 +1793,14 @@ impl Node {
                 return Ok(());
             }
             let peer_platform = self.input_peer_platform();
-            let keymap = self
-                .input_policy()
-                .resolved_keymap_profile(peer_platform.as_deref());
+            // Hot path: derive the profile from just the keymap name instead of
+            // deep-cloning the whole policy struct per keystroke.
+            let keymap_name = self.policy_keymap_name();
+            let probe = InputTunnelPolicy {
+                keymap: keymap_name,
+                ..InputTunnelPolicy::default()
+            };
+            let keymap = probe.resolved_keymap_profile(peer_platform.as_deref());
             let remapped_code = keymap.remap_vk(code);
             let seq = server.next_seq();
             server.note_seq(seq);
@@ -2004,7 +2040,7 @@ impl Node {
                 return Ok(());
             }
             self.note_reverse_physical_activity();
-            let speed = self.input_policy().wheel_speed;
+            let speed = self.policy_wheel_speed();
             let (scaled_dx, scaled_dy) = if (speed - 1.0).abs() > 0.001 && speed > 0.0 {
                 let sy = ((dy as f64) * speed).round() as i16;
                 let sx = ((dx as f64) * speed).round() as i16;
@@ -2394,6 +2430,13 @@ impl Node {
                                 let f_len = (frame.payload.len() + 12) as u64;
                                 node.shared.telemetry.record_input_rx(f_len);
                                 if let Ok(ev) = InputEvent::from_frame(&frame) {
+                                    // Mirror-fast path: Move frames dominate input
+                                    // traffic (up to 1000 Hz). Cloning the whole
+                                    // 256-entry trace per frame would cost dozens
+                                    // of heap allocs under the sink lock, so only
+                                    // the cursor scalars are synced; the trace is
+                                    // refreshed on every other event kind.
+                                    let is_move = matches!(ev.kind, InputKind::Move { .. });
                                     if let Ok(leave_opt) = client.apply(ev) {
                                         if let Some(leave) = leave_opt {
                                             if let Ok(f) = leave.to_frame() {
@@ -2403,7 +2446,15 @@ impl Node {
                                                 }
                                             }
                                         }
-                                        *node.shared.input_sink.lock().expect("sink") = client.sink().memory().clone();
+                                        if is_move {
+                                            let (x, y) = client.sink().memory().cursor;
+                                            let mut sink =
+                                                node.shared.input_sink.lock().expect("sink");
+                                            sink.cursor = (x, y);
+                                        } else {
+                                            *node.shared.input_sink.lock().expect("sink") =
+                                                client.sink().memory().clone();
+                                        }
                                         node.screen_force_wake_squelch();
                                         let new_seat = if client.focused() {
                                             CursorSeat::Remote

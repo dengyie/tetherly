@@ -15,6 +15,7 @@ pub mod camera;
 pub mod clip;
 pub mod dedup;
 pub mod device_id;
+pub mod drag;
 pub mod error;
 pub mod filexfer;
 pub mod focus;
@@ -82,6 +83,11 @@ pub use clip::{
 };
 pub use dedup::{ClipLimiter, NotifyLimiter, TcpLimiter, TokenBucket};
 pub use device_id::DeviceId;
+pub use drag::{
+    denormalize_coord, normalize_coord, DragCancelReason, DragControlMsg, DragPhase, DragSession,
+    DragStateMachine, DEFAULT_DROP_NORM, DEFAULT_EDGE_ENTRY_NORM, DRAG_CONTROL_MSG_MAX,
+    DRAG_SESSION_TIMEOUT_MS,
+};
 pub use error::CoreError;
 pub use filexfer::{FileHub, IncomingTransfer, ResumeState, ResumeTable, TransferStatus, FILE_MAX};
 pub use focus::{
@@ -97,10 +103,11 @@ pub use frame::{
     TYPE_AUDIO_ROUTING_ANNOUNCE, TYPE_AUDIO_ROUTING_ATTACH, TYPE_AUDIO_ROUTING_CHUNK,
     TYPE_AUDIO_ROUTING_DETACH, TYPE_BATTERY_STATE, TYPE_BENCH_ACCEPT, TYPE_BENCH_DATA,
     TYPE_BENCH_REPORT, TYPE_BENCH_REQUEST, TYPE_CAMERA_ANNOUNCE, TYPE_CAMERA_ATTACH,
-    TYPE_CAMERA_DETACH, TYPE_CAMERA_FRAME_CHUNK, TYPE_FOCUS_STATE, TYPE_FOCUS_SYNC_REQ,
-    TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_MIC_ANNOUNCE,
-    TYPE_MIC_ATTACH, TYPE_MIC_AUDIO_CHUNK, TYPE_MIC_DETACH, TYPE_PING, TYPE_PONG,
-    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE, TYPE_TOPOLOGY_SYNC_REQ,
+    TYPE_CAMERA_DETACH, TYPE_CAMERA_FRAME_CHUNK, TYPE_DRAG_CONTROL, TYPE_FOCUS_STATE,
+    TYPE_FOCUS_SYNC_REQ, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP, TYPE_MEDIA_COMMAND,
+    TYPE_MEDIA_STATE, TYPE_MIC_ANNOUNCE, TYPE_MIC_ATTACH, TYPE_MIC_AUDIO_CHUNK, TYPE_MIC_DETACH,
+    TYPE_PING, TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE,
+    TYPE_TOPOLOGY_SYNC_REQ,
 };
 pub use handoff::{
     HandoffAction, HandoffEntry, HandoffStatus, ResourceHandoffValidator, SanitizedHandoffUrl,

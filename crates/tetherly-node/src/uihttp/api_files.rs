@@ -1113,3 +1113,363 @@ pub(super) async fn post_file_outbox_resend(
         Err(e) => err(400, &e.to_string()),
     }
 }
+
+pub(super) async fn get_file_drag_status(
+    _method: &str,
+    _query_str: Option<&str>,
+    _body: &[u8],
+    node: &Node,
+) -> UiResponse {
+    let now = node.now_ms();
+    let (
+        controller_active,
+        controller_phase,
+        controller_target_peer,
+        controller_first_file,
+        controller_file_count,
+        controller_total_bytes,
+        controller_norm_pos,
+    ) = {
+        let ctl = node.drag_controller().lock().expect("drag_controller");
+        if let Some(session) = ctl.active_session() {
+            (
+                true,
+                session.phase,
+                Some(session.target_peer.clone()),
+                Some(session.first_file_name.clone()),
+                session.file_count,
+                session.total_bytes,
+                (session.norm_x, session.norm_y),
+            )
+        } else {
+            (
+                false,
+                tetherly_core::drag::DragPhase::Idle,
+                None,
+                None,
+                0,
+                0,
+                (0.0, 0.0),
+            )
+        }
+    };
+
+    let (target_phase, target_visual, target_norm_pos) = {
+        let mut target = node.drag_target().lock().expect("drag_target");
+        target.prune_expired(now);
+        (
+            target.current_phase(),
+            target.visual_state().clone(),
+            target.current_norm_pos(),
+        )
+    };
+
+    json_ok(&DragStatusReport {
+        controller_active,
+        controller_phase,
+        controller_target_peer,
+        controller_first_file,
+        controller_file_count,
+        controller_total_bytes,
+        controller_norm_pos,
+        target_phase,
+        target_visual,
+        target_norm_pos,
+    })
+}
+
+pub(super) async fn post_file_drag_intent(
+    _method: &str,
+    query_str: Option<&str>,
+    body: &[u8],
+    node: &Node,
+) -> UiResponse {
+    let qmap = query_str.map(parse_query_map).unwrap_or_default();
+    let d: DragIntentBody = if body.is_empty() {
+        let peer = qmap.get("peer").cloned();
+        let paths: Vec<String> = qmap
+            .get("paths")
+            .or_else(|| qmap.get("path"))
+            .map(|p| {
+                p.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let norm_x = qmap.get("norm_x").and_then(|v| v.parse::<f32>().ok());
+        let norm_y = qmap.get("norm_y").and_then(|v| v.parse::<f32>().ok());
+        DragIntentBody {
+            peer,
+            paths,
+            norm_x,
+            norm_y,
+        }
+    } else {
+        match serde_json::from_slice::<DragIntentBody>(body) {
+            Ok(b) => b,
+            Err(_) => return err(400, "bad json, expected DragIntentBody"),
+        }
+    };
+
+    if d.paths.is_empty() {
+        return err(400, "paths cannot be empty");
+    }
+
+    let mut peers = node.live_peers();
+    peers.sort_by_key(|p| p.device_id.to_string());
+    let target = match d.peer.as_deref().filter(|s| !s.is_empty()) {
+        Some(raw) => match node.resolve_peer(raw) {
+            Ok(id) => {
+                if peers.iter().any(|p| p.device_id == id) {
+                    id
+                } else {
+                    return err(400, "peer is not connected");
+                }
+            }
+            Err(e) => return err(400, &format!("bad peer id: {e}")),
+        },
+        None => match peers.len() {
+            0 => return err(400, "no connected peer"),
+            1 => peers[0].device_id.clone(),
+            _ => return err(400, "multiple peers connected; pass peer"),
+        },
+    };
+
+    let path_bufs: Vec<std::path::PathBuf> =
+        d.paths.into_iter().map(std::path::PathBuf::from).collect();
+    let (norm_x, norm_y) = tetherly_core::DEFAULT_EDGE_ENTRY_NORM;
+    let norm_x = d.norm_x.unwrap_or(norm_x);
+    let norm_y = d.norm_y.unwrap_or(norm_y);
+
+    match node.initiate_drag(target.as_str(), path_bufs, norm_x, norm_y) {
+        Ok((enter, superseded_cancel)) => {
+            // Cancel the superseded session's ghost overlay first, then enter.
+            if let Some(cancel) = superseded_cancel {
+                if let Err(e) = node.send_drag_control(&target, &cancel).await {
+                    return err(502, &format!("failed to signal prior drag cancel: {e}"));
+                }
+            }
+            if let Err(e) = node.send_drag_control(&target, &enter).await {
+                return err(502, &format!("failed to transmit drag enter: {e}"));
+            }
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "peer": target.as_str(),
+                "signal": enter,
+            }))
+        }
+        Err(e) => err(400, &e.to_string()),
+    }
+}
+
+pub(super) async fn post_file_drag_move(
+    _method: &str,
+    query_str: Option<&str>,
+    body: &[u8],
+    node: &Node,
+) -> UiResponse {
+    let qmap = query_str.map(parse_query_map).unwrap_or_default();
+    let d: DragMoveBody = if body.is_empty() {
+        let norm_x = qmap
+            .get("norm_x")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        let norm_y = qmap
+            .get("norm_y")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        DragMoveBody { norm_x, norm_y }
+    } else {
+        match serde_json::from_slice::<DragMoveBody>(body) {
+            Ok(b) => b,
+            Err(_) => return err(400, "bad json, expected DragMoveBody"),
+        }
+    };
+
+    match node.update_drag_move(d.norm_x, d.norm_y) {
+        Some(msg) => {
+            let target = {
+                let ctl = node.drag_controller().lock().expect("drag_controller");
+                ctl.active_target_peer().map(|s| s.to_string())
+            };
+            if let Some(tp) = target {
+                if let Ok(peer_id) = node.resolve_peer(&tp) {
+                    if let Err(e) = node.send_drag_control(&peer_id, &msg).await {
+                        return err(502, &format!("failed to transmit drag move: {e}"));
+                    }
+                }
+            }
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "signal": msg,
+            }))
+        }
+        None => err(404, "no active drag session"),
+    }
+}
+
+pub(super) async fn post_file_drag_cancel(
+    _method: &str,
+    query_str: Option<&str>,
+    body: &[u8],
+    node: &Node,
+) -> UiResponse {
+    let qmap = query_str.map(parse_query_map).unwrap_or_default();
+    let reason_str = qmap.get("reason").cloned().or_else(|| {
+        if !body.is_empty() {
+            serde_json::from_slice::<DragCancelBody>(body)
+                .ok()
+                .and_then(|b| b.reason)
+        } else {
+            None
+        }
+    });
+
+    let reason = match reason_str.as_deref() {
+        Some("esc") | Some("UserEscPressed") => {
+            tetherly_core::drag::DragCancelReason::UserEscPressed
+        }
+        Some("back") | Some("DraggedBackToLocal") => {
+            tetherly_core::drag::DragCancelReason::DraggedBackToLocal
+        }
+        Some("timeout") | Some("SessionTimeout") => {
+            tetherly_core::drag::DragCancelReason::SessionTimeout
+        }
+        _ => tetherly_core::drag::DragCancelReason::UserEscPressed,
+    };
+
+    // Capture the target peer before cancel consumes the session.
+    let cancel_target = {
+        let ctl = node.drag_controller().lock().expect("drag_controller");
+        ctl.active_target_peer().map(|s| s.to_string())
+    };
+
+    match node.cancel_drag(reason) {
+        Some(msg) => {
+            if let Some(tp) = cancel_target {
+                if let Ok(peer_id) = node.resolve_peer(&tp) {
+                    if let Err(e) = node.send_drag_control(&peer_id, &msg).await {
+                        return err(502, &format!("failed to transmit drag cancel: {e}"));
+                    }
+                }
+            }
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "signal": msg,
+            }))
+        }
+        None => json_ok(&serde_json::json!({
+            "ok": true,
+            "message": "no active drag session to cancel",
+        })),
+    }
+}
+
+pub(super) async fn post_file_drag_confirm(
+    _method: &str,
+    query_str: Option<&str>,
+    body: &[u8],
+    node: &Node,
+) -> UiResponse {
+    let qmap = query_str.map(parse_query_map).unwrap_or_default();
+    let d: DragConfirmBody = if body.is_empty() {
+        let drag_id = qmap
+            .get("drag_id")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let drop_norm_x = qmap.get("drop_norm_x").and_then(|v| v.parse::<f32>().ok());
+        let drop_norm_y = qmap.get("drop_norm_y").and_then(|v| v.parse::<f32>().ok());
+        DragConfirmBody {
+            drag_id,
+            drop_norm_x,
+            drop_norm_y,
+        }
+    } else {
+        match serde_json::from_slice::<DragConfirmBody>(body) {
+            Ok(b) => b,
+            Err(_) => return err(400, "bad json, expected DragConfirmBody"),
+        }
+    };
+
+    let (def_x, def_y) = tetherly_core::DEFAULT_DROP_NORM;
+    let norm_x = d.drop_norm_x.unwrap_or(def_x);
+    let norm_y = d.drop_norm_y.unwrap_or(def_y);
+
+    // F4: peek first — validate the session exists and the peer is reachable
+    // before committing (consuming) anything, so failures stay retryable.
+    let peek = match node.peek_drag_transfer(d.drag_id) {
+        Some(p) => p,
+        None => return err(404, "no matching active drag session for confirmation"),
+    };
+
+    let peer_id = match node.resolve_peer(&peek.target_peer) {
+        Ok(id) => id,
+        Err(e) => return err(400, &format!("cannot resolve drag peer: {e}")),
+    };
+
+    // Peer must be connected before we commit the drop.
+    if !node.live_peers().iter().any(|p| p.device_id == peer_id) {
+        return err(400, "drag target peer is not connected");
+    }
+
+    // Signal the receiver BEFORE committing: the target advances its own state
+    // machine to Dropping and registers the pending delivery only when this
+    // wire message arrives; skipping it would leave the receiver's ghost
+    // overlay stuck until prune and its settlement (MOTW + reveal) silent —
+    // exactly the production gap observed in the v0.1.76 rollout test.
+    let confirm_signal = tetherly_core::drag::DragControlMsg::RemoteDropConfirm {
+        drag_id: d.drag_id,
+        drop_norm_x: norm_x,
+        drop_norm_y: norm_y,
+    };
+    if let Err(e) = node.send_drag_control(&peer_id, &confirm_signal).await {
+        return err(502, &format!("failed to transmit drop confirm: {e}"));
+    }
+
+    // Commit: consume the session into a transfer request.
+    let xfer_req = match node.confirm_drop(d.drag_id, norm_x, norm_y) {
+        Some(r) => r,
+        None => return err(404, "no matching active drag session for confirmation"),
+    };
+
+    let result = if xfer_req.file_paths.len() == 1 {
+        let p = &xfer_req.file_paths[0];
+        node.offer_and_send_file(&peer_id, p, None)
+            .await
+            .map(|transfer_id| {
+                serde_json::json!({
+                    "ok": true,
+                    "drag_id": xfer_req.drag_id,
+                    "transfer_id": transfer_id,
+                    "peer": peer_id.as_str(),
+                    "file_count": 1,
+                    "total_bytes": xfer_req.total_bytes,
+                })
+            })
+            .map_err(|e| format!("failed to stream dropped file: {e}"))
+    } else {
+        node.send_files_batch(&peer_id, &xfer_req.file_paths)
+            .await
+            .map(|batch_report| {
+                serde_json::json!({
+                    "ok": true,
+                    "drag_id": xfer_req.drag_id,
+                    "batch": batch_report,
+                    "peer": peer_id.as_str(),
+                    "file_count": xfer_req.file_paths.len(),
+                    "total_bytes": xfer_req.total_bytes,
+                })
+            })
+            .map_err(|e| format!("failed to stream dropped batch: {e}"))
+    };
+
+    match result {
+        Ok(body) => json_ok(&body),
+        Err(msg) => {
+            // F4: roll the session back so the caller can retry the same drag_id.
+            node.abort_drag_transfer(xfer_req);
+            err(500, &msg)
+        }
+    }
+}
