@@ -1907,6 +1907,7 @@ impl Node {
                     tetherly_core::ScreenEdge::Left => (0, local_pos.1),
                     tetherly_core::ScreenEdge::Right => (width.saturating_sub(1), local_pos.1),
                 };
+                tracing::info!(park_x, park_y, "park warp before remote roaming");
                 crate::platform::warp_mouse_position(park_x, park_y);
                 self.arm_input_capture();
             } else if !self.is_keyboard_armed() {
@@ -2309,6 +2310,23 @@ impl Node {
         if events.is_empty() {
             return Ok(());
         }
+        // Diagnostic (v0.1.82): log every pushed batch that carries an Enter
+        // plus its following Move — the authoritative record of what the
+        // controller engine actually emits at each crossing.
+        if let Some(pos) = events
+            .iter()
+            .position(|ev| ev.kind == tetherly_core::InputKind::Enter)
+        {
+            if let Some(tetherly_core::InputEvent {
+                kind: tetherly_core::InputKind::Move { x, y },
+                ..
+            }) = events.get(pos + 1)
+            {
+                tracing::info!(rem_x = x, rem_y = y, "push: enter+move batch");
+            } else {
+                tracing::info!("push: enter without trailing move");
+            }
+        }
         let tx_opt = self
             .shared
             .input_out
@@ -2410,11 +2428,28 @@ impl Node {
             let resume_frames: Vec<InnerFrame> = {
                 let mut engine = self.shared.input_engine.lock().expect("engine");
                 engine.resume_remote();
-                engine
+                let frames = engine
                     .drain()
                     .into_iter()
                     .filter_map(|ev| ev.to_frame().ok())
-                    .collect()
+                    .collect::<Vec<_>>();
+                // Diagnostic (v0.1.82): the resume replay is the prime
+                // suspect for stale re-placement frames — record what rem it
+                // actually pushed.
+                if let Some(f) = frames.get(1) {
+                    if let Ok(ev) = tetherly_core::InputEvent::from_frame(f) {
+                        if let tetherly_core::InputKind::Move { x, y } = ev.kind {
+                            tracing::info!(
+                                rem_x = x,
+                                rem_y = y,
+                                was_in_grace,
+                                is_remote,
+                                "resume_remote replayed move"
+                            );
+                        }
+                    }
+                }
+                frames
             };
             for f in resume_frames {
                 let _ = tx.try_send(f);
