@@ -659,6 +659,10 @@ static PENDING_WARP_VALID: std::sync::atomic::AtomicBool =
 // screen center right after a correct proportional entry). Count the echoes.
 #[cfg(target_os = "macos")]
 static PENDING_WARP_ECHOES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+// Root-fix F: events after a warp whose deltas would span the teleport get
+// their deltas zeroed for this many events (see the macOS tap below).
+#[cfg(target_os = "macos")]
+static WARP_SETTLE_EVENTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 #[cfg(any(windows, target_os = "macos"))]
 fn mark_pending_warp(x: i32, y: i32) {
@@ -667,7 +671,12 @@ fn mark_pending_warp(x: i32, y: i32) {
     PENDING_WARP_Y.store(y, Ordering::SeqCst);
     PENDING_WARP_VALID.store(true, Ordering::SeqCst);
     #[cfg(target_os = "macos")]
-    PENDING_WARP_ECHOES.store(2, Ordering::SeqCst);
+    {
+        PENDING_WARP_ECHOES.store(2, Ordering::SeqCst);
+        // Zero the deltas of the first few post-warp events: macOS computes
+        // them across the teleport, so they carry the park displacement.
+        WARP_SETTLE_EVENTS.store(4, Ordering::SeqCst);
+    }
 }
 
 /// Returns true when the given hook position is the echo of the pending
@@ -1498,6 +1507,20 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                         event.as_ptr()
                     };
                 }
+                // Root-fix F: the deltas macOS computes for the FIRST events
+                // after a warp span the teleport (they include the park
+                // displacement), so applying them drives the remote cursor
+                // to the park position's map (production: entry placement
+                // snapped to screen center). Zero the deltas for the first
+                // few post-warp events; their positions are near the park
+                // point and the deltas carry no real hand motion.
+                let settle = WARP_SETTLE_EVENTS.load(Ordering::SeqCst);
+                let (dx, dy) = if settle > 0 {
+                    WARP_SETTLE_EVENTS.store(settle - 1, Ordering::SeqCst);
+                    (0, 0)
+                } else {
+                    (dx, dy)
+                };
                 let _ = ctx.tx.send(RawInput::Move {
                     x: loc.x as i32,
                     y: loc.y as i32,
