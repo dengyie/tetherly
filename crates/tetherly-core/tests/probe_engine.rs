@@ -146,3 +146,50 @@ fn clear_stale_remote_resets_seat_but_keeps_position() {
     assert_eq!(mv.0, 265, "entry rem must be proportional to fresh x");
     assert_eq!(mv.1, SCREEN_UNITS);
 }
+
+// Root-fix E regression: a stale remote-branch Move lingering in the
+// pending queue must NOT ride along with the next crossing batch. The
+// crossing arms clear pending first, so the batch is exactly
+// [Enter, Move{fresh rem}] — a stale Move after the Enter used to
+// re-place the cursor at an old position (production: snap to center).
+#[test]
+fn crossing_batch_carries_no_stale_frames() {
+    let mut srv = InputServer::new(1470, 956);
+    srv.set_edge(ScreenEdge::Top);
+
+    // First crossing: enter remote and roam to the middle-bottom.
+    assert_eq!(srv.local_move_delta(735, 0, 0, -6), Some(ScreenEdge::Top));
+    let _ = srv.drain();
+    // Roam up into the interior (rem_y drops below the hysteresis) and
+    // sideways so the remote branch pushes Move frames.
+    srv.local_move_delta(735, 40, 0, -40);
+    srv.local_move_delta(400, 40, -30, 0);
+    let _ = srv.drain();
+
+    // Simulate the return (Leave batch): push back down through the entry
+    // edge (rem_y returns to 1000 with dy > 4).
+    assert_eq!(srv.local_move_delta(400, 40, 0, 60), Some(ScreenEdge::Top));
+    let leave_batch = srv.drain();
+    assert!(leave_batch.iter().any(|ev| ev.kind == InputKind::Leave));
+
+    // A stale remote-branch Move lands in pending (race shape).
+    srv.local_move_delta(735, 30, 0, 30);
+    let _ = srv.drain();
+    assert_eq!(srv.local_move_delta(300, 0, 0, -6), Some(ScreenEdge::Top));
+    let batch = srv.drain();
+
+    // The crossing batch must be exactly [Enter, Move{fresh rem}]: no stale
+    // frame may appear after the Enter.
+    let enter_idx = batch
+        .iter()
+        .position(|ev| ev.kind == InputKind::Enter)
+        .expect("Enter present");
+    assert_eq!(batch.len(), enter_idx + 2, "batch = [Enter, Move] exactly");
+    match &batch[enter_idx + 1].kind {
+        InputKind::Move { x, y } => {
+            assert_eq!(*y, SCREEN_UNITS, "entry at bottom edge");
+            assert_eq!(*x, 204, "fresh proportional rem (norm(300) on 1470)");
+        }
+        other => panic!("expected Move, got {other:?}"),
+    }
+}
