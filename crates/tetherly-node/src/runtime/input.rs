@@ -1869,6 +1869,15 @@ impl Node {
                 _ => (x, y),
             };
             let edge = server.local_move_delta(target_x, target_y, dx, dy);
+            // Diagnostic (v0.1.81): one line per actual edge crossing — the
+            // hook x and the derived rem prove the proportional mapping at
+            // the source.
+            if let Some(e) = edge {
+                tracing::info!(
+                    hook_x = x, hook_y = y, edge = ?e,
+                    "engine crossing fired"
+                );
+            }
             (
                 edge,
                 server.drain(),
@@ -2088,6 +2097,24 @@ impl Node {
         // Distance gate: an un-armed mouse (freshly plugged in, or bumped
         // without real traversal) can never start the takeover dwell.
         if !distance_armed {
+            // Diagnostic (v0.1.81): an edge push blocked by the distance gate
+            // is invisible to the user ("push does nothing") — log it, at most
+            // once per second, so the block is attributable.
+            static LAST_BLOCK_LOG: std::sync::Mutex<Option<std::time::Instant>> =
+                std::sync::Mutex::new(None);
+            let mut last = LAST_BLOCK_LOG.lock().expect("blocklog");
+            if last
+                .map(|t| t.elapsed() >= std::time::Duration::from_millis(1000))
+                .unwrap_or(true)
+            {
+                *last = Some(std::time::Instant::now());
+                tracing::info!(
+                    accum_px = self.shared.reverse_move_accum_px.load(Ordering::SeqCst),
+                    gate_px = Self::REVERSE_ARM_MIN_PX,
+                    %edge,
+                    "auto-reverse blocked: distance gate not armed"
+                );
+            }
             *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
             *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
             return;
@@ -2625,6 +2652,7 @@ impl Node {
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
         let task = tokio::spawn(async move {
+            let entry_moves_logged = std::sync::atomic::AtomicU32::new(0);
             loop {
                 tokio::select! {
                     _ = stop.changed() => {
@@ -2638,6 +2666,44 @@ impl Node {
                                 let f_len = (frame.payload.len() + 12) as u64;
                                 node.shared.telemetry.record_input_rx(f_len);
                                 if let Ok(ev) = InputEvent::from_frame(&frame) {
+                                    // Diagnostic (v0.1.81): log the entry placement
+                                    // moment — Enter and the first Move after it —
+                                    // so a mis-placed crossing cursor is attributable
+                                    // to the received rem coords vs the sink math.
+                                    // Low volume: one line per crossing + 2.
+                                    match &ev.kind {
+                                        InputKind::Enter => {
+                                            tracing::info!(
+                                                "apply: enter (crossing placement begins)"
+                                            );
+                                            entry_moves_logged.store(0, Ordering::SeqCst);
+                                        }
+                                        InputKind::Move { x, y } => {
+                                            if entry_moves_logged.fetch_add(1, Ordering::SeqCst)
+                                                < 2
+                                            {
+                                                let (x, y) = (*x, *y);
+                                                let (w, h) = crate::platform::screen_size();
+                                                let px = ((x.clamp(0, tetherly_core::SCREEN_UNITS)
+                                                    as i64
+                                                    * (w.saturating_sub(1) as i64)
+                                                    + tetherly_core::SCREEN_UNITS as i64 / 2)
+                                                    / (tetherly_core::SCREEN_UNITS as i64))
+                                                    as i32;
+                                                let py = ((y.clamp(0, tetherly_core::SCREEN_UNITS)
+                                                    as i64
+                                                    * (h.saturating_sub(1) as i64)
+                                                    + tetherly_core::SCREEN_UNITS as i64 / 2)
+                                                    / (tetherly_core::SCREEN_UNITS as i64))
+                                                    as i32;
+                                                tracing::info!(
+                                                    rem_x = x, rem_y = y, px, py,
+                                                    "apply: entry move placed"
+                                                );
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                     // Mirror-fast path: Move frames dominate input
                                     // traffic (up to 1000 Hz). Cloning the whole
                                     // 256-entry trace per frame would cost dozens
