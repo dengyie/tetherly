@@ -1413,6 +1413,20 @@ pub(super) async fn post_file_drag_confirm(
         return err(400, "drag target peer is not connected");
     }
 
+    // Signal the receiver BEFORE committing: the target advances its own state
+    // machine to Dropping and registers the pending delivery only when this
+    // wire message arrives; skipping it would leave the receiver's ghost
+    // overlay stuck until prune and its settlement (MOTW + reveal) silent —
+    // exactly the production gap observed in the v0.1.76 rollout test.
+    let confirm_signal = tetherly_core::drag::DragControlMsg::RemoteDropConfirm {
+        drag_id: d.drag_id,
+        drop_norm_x: norm_x,
+        drop_norm_y: norm_y,
+    };
+    if let Err(e) = node.send_drag_control(&peer_id, &confirm_signal).await {
+        return err(502, &format!("failed to transmit drop confirm: {e}"));
+    }
+
     // Commit: consume the session into a transfer request.
     let xfer_req = match node.confirm_drop(d.drag_id, norm_x, norm_y) {
         Some(r) => r,

@@ -349,4 +349,123 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
+
+    /// Regression for the v0.1.76 rollout gap: the receiver-side settlement
+    /// chain (pending_drag_drops registration → claim on FileOffer → settle on
+    /// FileDone → MOTW + reveal) must fire when — and only when — the
+    /// controller's confirm REST handler transmits `RemoteDropConfirm` before
+    /// streaming. Exercises the exact in-process order the confirm handler
+    /// performs (signal → confirm_drop → offer-claim → FileDone-settle).
+    #[tokio::test]
+    async fn test_confirm_signal_settles_delivery_with_motw() {
+        use crate::runtime::clipboard_policy_tests::temp_test_node;
+        use tetherly_core::ports::TrustStore;
+        use tetherly_core::TrustedPeer;
+
+        let (a, _dir_a) = temp_test_node("drag_settle_a");
+        let (b, _dir_b) = temp_test_node("drag_settle_b");
+
+        let now = 1u64;
+        for (node, peer) in [(&a, &b), (&b, &a)] {
+            let tp = TrustedPeer {
+                device_id: peer.identity().device_id().clone(),
+                id_pk: *peer.identity().id_pk(),
+                n_pk: *peer.identity().n_pk(),
+                alias: "peer".into(),
+                paired_at: now,
+                revoked: false,
+            };
+            node.shared
+                .trust
+                .lock()
+                .expect("trust")
+                .put(tp)
+                .expect("seed trust");
+        }
+        b.spawn_listeners().await.expect("spawn b listeners");
+        a.dial(b.control_addr()).await.expect("dial");
+
+        let b_id = b.identity().device_id().clone();
+
+        // The receiver side of the drop: B's DragTarget has an active remote
+        // drag session (as after RemoteDragEnter), mirroring production order.
+        {
+            let mut target = b.drag_target().lock().expect("t");
+            target
+                .handle_drag_enter(777, 1, 4, "settle.txt".into(), 0.5, 0.5, false, 100)
+                .expect("enter");
+        }
+
+        // Controller handler order (post-fix): transmit the confirm signal on
+        // the wire FIRST. On B this advances the target to Dropping and
+        // registers the pending delivery keyed by drag_id.
+        let confirm = DragControlMsg::RemoteDropConfirm {
+            drag_id: 777,
+            drop_norm_x: 0.5,
+            drop_norm_y: 0.5,
+        };
+        a.send_drag_control(&b_id, &confirm)
+            .await
+            .expect("send confirm");
+
+        let mut tries = 0;
+        loop {
+            let phase = b.drag_target().lock().expect("t").current_phase();
+            let pending = b
+                .shared
+                .pending_drag_drops
+                .lock()
+                .expect("pending")
+                .contains_key(&777);
+            if phase == DragPhase::Dropping && pending {
+                break;
+            }
+            tries += 1;
+            assert!(
+                tries < 100,
+                "receiver must reach Dropping with a pending delivery after the confirm signal"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // The inbound FileOffer claims the pending drop (what the offer
+        // handler does), then the completion hook settles it with MOTW.
+        let a_id = a.identity().device_id().clone();
+        b.claim_drag_offer(&a_id, "tr_settle_regression");
+        assert!(
+            b.shared
+                .transfer_drag_ids
+                .lock()
+                .expect("ids")
+                .contains_key("tr_settle_regression"),
+            "offer must claim the pending drag drop"
+        );
+
+        let inbox = b.shared.cfg.data_dir.join("inbox");
+        std::fs::create_dir_all(&inbox).expect("mkdir inbox");
+        let saved = inbox.join("settle.txt");
+        std::fs::write(&saved, b"data").expect("write saved file");
+
+        b.settle_drag_for_transfer("tr_settle_regression", &saved);
+
+        // Settlement drives the target back to Idle and clears both maps.
+        assert_eq!(
+            b.drag_target().lock().expect("t").current_phase(),
+            DragPhase::Idle,
+            "delivery completion must settle the drag session"
+        );
+        assert!(
+            b.shared.transfer_drag_ids.lock().expect("ids").is_empty(),
+            "transfer binding must be consumed by settlement"
+        );
+        assert!(
+            b.shared
+                .pending_drag_drops
+                .lock()
+                .expect("pending")
+                .is_empty(),
+            "pending drop must be consumed by settlement"
+        );
+        let _ = std::fs::remove_file(&saved);
+    }
 }
