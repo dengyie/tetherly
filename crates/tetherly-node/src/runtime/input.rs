@@ -2678,30 +2678,31 @@ impl Node {
                                             );
                                             entry_moves_logged.store(0, Ordering::SeqCst);
                                         }
-                                        InputKind::Move { x, y } => {
+                                        InputKind::Move { x, y }
                                             if entry_moves_logged.fetch_add(1, Ordering::SeqCst)
                                                 < 2
-                                            {
-                                                let (x, y) = (*x, *y);
+                                            => {
+                                                let (rx, ry) = (*x, *y);
                                                 let (w, h) = crate::platform::screen_size();
-                                                let px = ((x.clamp(0, tetherly_core::SCREEN_UNITS)
+                                                let px = ((rx
+                                                    .clamp(0, tetherly_core::SCREEN_UNITS)
                                                     as i64
                                                     * (w.saturating_sub(1) as i64)
                                                     + tetherly_core::SCREEN_UNITS as i64 / 2)
                                                     / (tetherly_core::SCREEN_UNITS as i64))
                                                     as i32;
-                                                let py = ((y.clamp(0, tetherly_core::SCREEN_UNITS)
+                                                let py = ((ry
+                                                    .clamp(0, tetherly_core::SCREEN_UNITS)
                                                     as i64
                                                     * (h.saturating_sub(1) as i64)
                                                     + tetherly_core::SCREEN_UNITS as i64 / 2)
                                                     / (tetherly_core::SCREEN_UNITS as i64))
                                                     as i32;
                                                 tracing::info!(
-                                                    rem_x = x, rem_y = y, px, py,
+                                                    rem_x = rx, rem_y = ry, px, py,
                                                     "apply: entry move placed"
                                                 );
                                             }
-                                        }
                                         _ => {}
                                     }
                                     // Mirror-fast path: Move frames dominate input
