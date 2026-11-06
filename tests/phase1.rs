@@ -1033,7 +1033,8 @@ async fn enterprise_file_limits_speed_and_status_observability() {
     assert_eq!(received.len(), total_size);
 
     // 3. Verify loopback_get /api/state reveals updated transfer with completed phase and speed_bps zeroed out
-    let final_state = wait_state_terminal(ui_port, transfer_id, "completed", Duration::from_secs(10)).await;
+    let final_state =
+        wait_state_terminal(ui_port, transfer_id, "completed", Duration::from_secs(10)).await;
     let transfers = final_state["transfers"]
         .as_array()
         .expect("transfers array");
