@@ -74,6 +74,7 @@ windows = { version = "0.59", features = [
     # gated on Com_StructuredStorage + Gdi), `COINIT_APARTMENTTHREADED` in
     # System::Com, `MODIFIERKEYS_FLAGS` in SystemServices.
     "Win32_System_Ole",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_SystemServices",
     # ANCS over BLE (src/ancs/win_gatt.rs): the WinRT Bluetooth stack, the
     # `IVectorView` the service/characteristic queries return, and the
