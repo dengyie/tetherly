@@ -164,6 +164,38 @@ async fn wait_inbox_any(dir: &std::path::Path, name: &str, timeout: Duration) ->
     }
 }
 
+/// Poll `/api/state` until the given transfer reaches the wanted phase (e.g.
+/// "completed" or "failed") and return the final state document. The sender's
+/// terminal state flip races the receiver's final file rename by microseconds;
+/// under a loaded test runner an unchecked single read can observe the
+/// mid-flight phase and flake. Polling to a deadline is the deterministic form
+/// of the same assertion.
+async fn wait_state_terminal(
+    ui_port: u16,
+    transfer_id: &str,
+    phase_want: &str,
+    timeout: Duration,
+) -> serde_json::Value {
+    let start = std::time::Instant::now();
+    loop {
+        let (code, body) = tetherly_node::loopback_get(ui_port, "/api/state")
+            .await
+            .expect("loopback_get state succeeds");
+        assert_eq!(code, 200);
+        let state: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let transfers = state["transfers"].as_array().expect("transfers array");
+        if let Some(t) = transfers.iter().find(|t| t["transfer_id"] == transfer_id) {
+            if t["phase"] == phase_want {
+                return state;
+            }
+        }
+        if start.elapsed() > timeout {
+            panic!("transfer {transfer_id} never reached phase '{phase_want}': {body:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn pair_phone_desktop() -> (Node, Node, DirGuard, DirGuard) {
     let (phone_dir, g1) = temp_dir("phone");
     let (desk_dir, g2) = temp_dir("desk");
@@ -867,20 +899,41 @@ async fn streaming_file_transfer_tracks_active_progress_and_completion_states() 
     assert_eq!(received.len(), total_size);
     assert_eq!(hex_sha256(&received), expected_hash);
 
-    // Host should reflect completed outbound transfer with full progress
-    let host_transfers = host.active_transfers();
+    // Host should reflect completed outbound transfer with full progress.
+    // The sender's terminal flip races the receiver's rename by microseconds;
+    // poll instead of a single read (same flake window as the enterprise test).
+    let start = std::time::Instant::now();
+    let host_transfers = loop {
+        let transfers = host.active_transfers();
+        if transfers.len() == 1 && transfers[0].phase == TransferPhase::Completed {
+            break transfers;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("host transfer never reached Completed: {transfers:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(host_transfers.len(), 1);
-    assert_eq!(host_transfers[0].phase, TransferPhase::Completed);
     assert_eq!(host_transfers[0].transferred, total_size as u64);
 
     // Peer should reflect completed inbound transfer with full progress
-    let peer_transfers = peer.active_transfers();
+    let start = std::time::Instant::now();
+    let peer_transfers = loop {
+        let transfers = peer.active_transfers();
+        if transfers.len() == 1 && transfers[0].phase == TransferPhase::Completed {
+            break transfers;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("peer transfer never reached Completed: {transfers:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(peer_transfers.len(), 1);
-    assert_eq!(peer_transfers[0].phase, TransferPhase::Completed);
     assert_eq!(peer_transfers[0].direction, TransferDirection::Inbound);
     assert_eq!(peer_transfers[0].transferred, total_size as u64);
 
-    // Snapshot HTTP endpoint should expose transfers array
+    // Snapshot HTTP endpoint should expose transfers array — the runtime side
+    // just polled to Completed above, so a single read is now deterministic.
     let (sc_code, sc_body) = {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], ui_port));
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -906,12 +959,15 @@ async fn streaming_file_transfer_tracks_active_progress_and_completion_states() 
     assert_eq!(sc_code, 200);
     let snapshot: serde_json::Value = serde_json::from_slice(&sc_body).unwrap();
     let snap_transfers = snapshot["transfers"].as_array().expect("transfers array");
+    let snap_entry = snap_transfers
+        .iter()
+        .find(|t| t["transfer_id"] == transfer_id)
+        .expect("transfer entry present");
     assert_eq!(snap_transfers.len(), 1);
-    assert_eq!(snap_transfers[0]["transfer_id"], transfer_id);
-    assert_eq!(snap_transfers[0]["phase"], "completed");
-    assert_eq!(snap_transfers[0]["transferred"], total_size as u64);
-    assert_eq!(snap_transfers[0]["total"], total_size as u64);
-    assert_eq!(snap_transfers[0]["filename"], "large_progress.bin");
+    assert_eq!(snap_entry["phase"], "completed");
+    assert_eq!(snap_entry["transferred"], total_size as u64);
+    assert_eq!(snap_entry["total"], total_size as u64);
+    assert_eq!(snap_entry["filename"], "large_progress.bin");
 
     host.shutdown();
     peer.shutdown();
@@ -977,21 +1033,19 @@ async fn enterprise_file_limits_speed_and_status_observability() {
     assert_eq!(received.len(), total_size);
 
     // 3. Verify loopback_get /api/state reveals updated transfer with completed phase and speed_bps zeroed out
-    let (sc_code, sc_body) = tetherly_node::loopback_get(ui_port, "/api/state")
-        .await
-        .expect("loopback_get state succeeds");
-    assert_eq!(sc_code, 200);
-    let final_state: serde_json::Value = serde_json::from_slice(&sc_body).unwrap();
+    let final_state = wait_state_terminal(ui_port, transfer_id, "completed", Duration::from_secs(10)).await;
     let transfers = final_state["transfers"]
         .as_array()
         .expect("transfers array");
+    let entry = transfers
+        .iter()
+        .find(|t| t["transfer_id"] == transfer_id)
+        .expect("transfer entry present");
     assert_eq!(transfers.len(), 1);
-    assert_eq!(transfers[0]["transfer_id"], transfer_id);
-    assert_eq!(transfers[0]["phase"], "completed");
-    assert_eq!(transfers[0]["transferred"], total_size as u64);
-    assert_eq!(transfers[0]["total"], total_size as u64);
+    assert_eq!(entry["transferred"], total_size as u64);
+    assert_eq!(entry["total"], total_size as u64);
     // On terminal phase, speed_bps must be settled to 0
-    assert_eq!(transfers[0]["speed_bps"], 0);
+    assert_eq!(entry["speed_bps"], 0);
 
     // 4. Test 64 GiB limit boundary via wire offer to peer
     let peer_dev_id = peer.identity().device_id().clone();
@@ -1044,15 +1098,19 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
         }
     }
 
-    // 2. Initiate send via loopback API
+    // 2. Initiate send via loopback API. The daemon hashes the whole file before
+    // answering (the transfer id is derived from the digest), so on a saturated
+    // machine this legitimately takes longer than the default 30 s budget.
     let payload = serde_json::json!({
         "path": file_path.to_str().unwrap(),
         "name": "cancellable.bin",
     });
-    let (send_code, send_body) = tetherly_node::loopback_post(
+    let (send_code, send_body) = tetherly_node::loopback_post_with_deadlines(
         ui_port,
         "/api/file/send",
         &serde_json::to_vec(&payload).unwrap(),
+        Duration::from_secs(5),
+        Duration::from_secs(120),
     )
     .await
     .expect("send succeeds");
@@ -1187,7 +1245,7 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
         &serde_json::to_vec(&ok_payload).unwrap(),
     )
     .await
-    .unwrap();
+    .unwrap_or_else(|e| panic!("small send never times out, but failed: {e}"));
     assert_eq!(ok_code, 200);
     let ok_resp: serde_json::Value = serde_json::from_slice(&ok_body).unwrap();
     let ok_transfer_id = ok_resp["transfer_id"].as_str().unwrap().to_string();
@@ -10297,7 +10355,9 @@ async fn action_predefined_quick_actions_local_execution_and_governance_via_loop
         "/api/action/remote?peer={}",
         tetherly_core::text::encode_query_value(&peer_id.to_string())
     );
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    // Deadline is generous: under full-suite parallel load the mesh round-trip
+    // can lag well past 5 s, and this loop only ever ends early on success.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut found_advertised_action = false;
     let mut raw_remote_body = Vec::new();
     while tokio::time::Instant::now() < deadline {
@@ -10352,7 +10412,7 @@ async fn action_predefined_quick_actions_local_execution_and_governance_via_loop
     assert_eq!(trig_rep["status"], "triggered");
 
     // 8. Wait for Peer to execute and return ActionResultFrame to Host
-    let exec_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let exec_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut action_executed_successfully = false;
     while tokio::time::Instant::now() < exec_deadline {
         let (c, b) = tetherly_node::loopback_get(host_ui, "/api/action/history")
@@ -10386,7 +10446,7 @@ async fn action_predefined_quick_actions_local_execution_and_governance_via_loop
     );
 
     // 9. Verify Host receives SSE event action_result_received
-    let sse_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let sse_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut saw_result_event = false;
     while tokio::time::Instant::now() < sse_deadline {
         if let Ok(Ok(Some(raw))) =

@@ -20,7 +20,10 @@ use tracing::{info, warn};
 // `tetherly_node::loopback_*` call sites and the router tests are unchanged.
 #[cfg(test)]
 use tetherly_loopback::parse_http_response;
-pub use tetherly_loopback::{loopback_delete, loopback_get, loopback_post, loopback_put};
+pub use tetherly_loopback::{
+    loopback_delete, loopback_get, loopback_get_with_deadlines, loopback_post,
+    loopback_post_with_deadlines, loopback_put, loopback_put_with_deadlines,
+};
 
 const INDEX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/index.html"));
 const MAX_HEADER: usize = 16 * 1024;
