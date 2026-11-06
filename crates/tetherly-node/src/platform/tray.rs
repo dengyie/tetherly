@@ -410,12 +410,10 @@ mod windows_tray {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-        DispatchMessageW, GetCursorPos, GetMessageW, KillTimer, LoadIconW, PostQuitMessage,
-        RegisterClassExW, SetForegroundWindow, SetTimer, ShowWindow, TrackPopupMenuEx,
-        TranslateMessage, HICON, HMENU, IDI_APPLICATION, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG,
-        SW_HIDE, SW_SHOWNOACTIVATE, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-        WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
-        WNDCLASSEXW,
+        DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, PostQuitMessage, RegisterClassExW,
+        SetForegroundWindow, TrackPopupMenuEx, TranslateMessage, HICON, HMENU, IDI_APPLICATION,
+        MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND,
+        WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSEXW,
     };
 
     const WM_TRAYICON: u32 = WM_APP + 42;
@@ -516,16 +514,15 @@ mod windows_tray {
             COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
         };
         use windows_sys::Win32::Graphics::Gdi::{
-            BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
-            InvalidateRect, SelectObject, SetBkMode, SetTextColor, DEFAULT_GUI_FONT,
-            DRAW_TEXT_FORMAT, DT_LEFT, DT_NOPREFIX, DT_WORDBREAK, HBRUSH, HDC, HFONT, PAINTSTRUCT,
-            TRANSPARENT,
+            BeginPaint, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
+            InvalidateRect, SelectObject, SetBkMode, SetTextColor, DEFAULT_GUI_FONT, DT_LEFT,
+            DT_NOPREFIX, DT_WORDBREAK, HBRUSH, PAINTSTRUCT, TRANSPARENT,
         };
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, KillTimer,
-            RegisterClassExW, SetForegroundWindow, SetTimer, ShowWindow, SystemParametersInfoW,
-            SPI_GETWORKAREA, SW_HIDE, SW_SHOWNOACTIVATE, WM_KILLFOCUS, WM_PAINT, WM_TIMER,
-            WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            CreateWindowExW, DefWindowProcW, GetCursorPos, KillTimer, RegisterClassExW,
+            SetForegroundWindow, SetTimer, ShowWindow, SystemParametersInfoW, SPI_GETWORKAREA,
+            SW_HIDE, SW_SHOWNOACTIVATE, WM_KILLFOCUS, WM_PAINT, WM_TIMER, WNDCLASSEXW,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         };
 
         const POPOVER_CLASS: &str = "TetherlyPopoverClass";
@@ -622,7 +619,7 @@ mod windows_tray {
                         text.as_ptr(),
                         (text.len().saturating_sub(1)) as i32,
                         &mut rc,
-                        DT_LEFT | DT_NOPREFIX | DT_WORDBREAK as DRAW_TEXT_FORMAT,
+                        DT_LEFT | DT_NOPREFIX | DT_WORDBREAK,
                     );
                     SelectObject(hdc, old);
                     EndPaint(hwnd, &ps);
