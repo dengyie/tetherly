@@ -5368,7 +5368,7 @@ async fn m5_29_screen_collaborative_annotation_and_laser_pointer_pipeline() {
 
     // Send a frame to trigger apply_annotations with expired item cleanup
     assert!(host.screen_send_frame().await.unwrap());
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
 
     // Verify TTL annotation expired
     let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/annotation")
@@ -6546,7 +6546,7 @@ async fn m5_33_screen_dynamic_delta_patch_and_temporal_compression_pipeline() {
 
     // 5. Send subsequent frames until keyframe_interval (3) triggers a fresh keyframe
     source.update_rect(0, 0, 16, 16, [0x11, 0x22, 0x33, 255]);
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     let prev_count2 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap()); // delta 2
     let wait_frame3 = std::time::Instant::now();
@@ -6561,7 +6561,7 @@ async fn m5_33_screen_dynamic_delta_patch_and_temporal_compression_pipeline() {
     }
 
     source.update_rect(0, 0, 16, 16, [0x44, 0x55, 0x66, 255]);
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     let prev_count3 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap()); // delta 3
     let wait_frame4 = std::time::Instant::now();
@@ -6577,7 +6577,7 @@ async fn m5_33_screen_dynamic_delta_patch_and_temporal_compression_pipeline() {
 
     // Next frame reaches keyframe_interval threshold -> triggers keyframe
     source.update_rect(0, 0, 16, 16, [0x77, 0x88, 0x99, 255]);
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     let prev_count4 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap()); // keyframe
     let wait_frame5 = std::time::Instant::now();
@@ -6769,7 +6769,7 @@ async fn m5_34_screen_objective_visual_quality_metric_and_psnr_ssim_pipeline() {
 
     // 4. Stream 3 identical frames -> triggers at least 1 evaluation on host and visitor
     for _ in 0..3 {
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::time::sleep(PACER_SETTLE).await;
         let prev = visitor.screen_sink_snapshot().count();
         assert!(host.screen_send_frame().await.unwrap());
         let wait_frame = std::time::Instant::now();
@@ -6800,7 +6800,7 @@ async fn m5_34_screen_objective_visual_quality_metric_and_psnr_ssim_pipeline() {
     // 5. Update sub-rectangle and stream perturbed frames
     source.update_rect(0, 0, 32, 32, [0xFF, 0x00, 0x00, 255]);
     for _ in 0..3 {
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::time::sleep(PACER_SETTLE).await;
         let prev = visitor.screen_sink_snapshot().count();
         assert!(host.screen_send_frame().await.unwrap());
         let wait_frame = std::time::Instant::now();
@@ -7010,7 +7010,7 @@ async fn m5_35_screen_autonomous_qoe_closed_loop_adaptation_pipeline() {
     // 5. Inject full color distortion into source to trigger QoE action
     source.update_rect(0, 0, 64, 64, [0x00, 0xFF, 0x00, 255]);
     for i in 0..3 {
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::time::sleep(PACER_SETTLE).await;
         let prev = visitor.screen_sink_snapshot().count();
         assert!(host.screen_send_frame().await.unwrap());
         let wait_frame = std::time::Instant::now();
