@@ -24,17 +24,161 @@ impl Drop for TrayHandle {
 
 #[cfg(target_os = "macos")]
 mod macos_tray {
-    use objc2::rc::Retained;
-    use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
-    use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass};
+    use objc2::rc::{Allocated, Retained};
+    use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol, ProtocolObject};
+    use objc2::{define_class, msg_send, sel, AnyThread, ClassType, DefinedClass, MainThreadOnly};
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem, NSStatusBar,
+        NSApplication, NSApplicationActivationPolicy, NSDragOperation, NSDraggingDestination,
+        NSDraggingInfo, NSMenu, NSMenuItem, NSPasteboardTypeFileURL, NSStatusBar, NSView,
     };
-    use objc2_foundation::{MainThreadMarker, NSString};
+    use objc2_foundation::{MainThreadMarker, NSArray, NSDictionary, NSRect, NSString, NSURL};
 
     pub(crate) struct TrayIvars {
         ui_port: u16,
     }
+
+    /// Extract local file paths from a dropping pasteboard.
+    ///
+    /// Only `file:` URLs are accepted (the dropzone registers exclusively for
+    /// `NSPasteboardTypeFileURL`); anything else is ignored, so a hostile or
+    /// malformed drag can at worst deliver zero paths.
+    fn file_paths_from_drag(sender: &ProtocolObject<dyn NSDraggingInfo>) -> Vec<String> {
+        let pb = sender.draggingPasteboard();
+        let classes = NSArray::from_slice(&[<NSURL as ClassType>::class()]);
+        let options: Option<&NSDictionary<NSString, AnyObject>> = None;
+        let urls: Retained<NSArray<AnyObject>> =
+            match unsafe { pb.readObjectsForClasses_options(&classes, options) } {
+                Some(arr) => arr,
+                None => return Vec::new(),
+            };
+        let mut paths = Vec::new();
+        for url in urls.iter() {
+            // The dropzone registered for file URLs only; re-check the class
+            // anyway so a malformed pasteboard item is skipped, not mis-cast.
+            let Ok(url) = url.downcast::<NSURL>() else {
+                continue;
+            };
+            if url.isFileURL() {
+                if let Some(path) = url.path() {
+                    paths.push(path.to_string());
+                }
+            }
+        }
+        paths
+    }
+
+    /// Fire the drag intent + confirm REST chain on a background thread so the
+    /// main thread (AppKit run loop) never blocks on network I/O. The daemon's
+    /// confirm handler streams the file and settles MOTW + reveal (ADR-137).
+    fn dispatch_tray_drop(ui_port: u16, paths: Vec<String>) {
+        std::thread::Builder::new()
+            .name("tray-drop".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "tray drop: no tokio runtime");
+                        return;
+                    }
+                };
+                let result = runtime.block_on(async {
+                    let intent = serde_json::json!({ "paths": paths });
+                    let (code, body) = tetherly_loopback::loopback_post(
+                        ui_port,
+                        "/api/file/drag/intent",
+                        &serde_json::to_vec(&intent).unwrap_or_default(),
+                    )
+                    .await?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "drag intent failed ({code}): {}",
+                            String::from_utf8_lossy(&body)
+                        );
+                    }
+                    let resp: serde_json::Value = serde_json::from_slice(&body)?;
+                    let drag_id = resp["signal"]
+                        .get("drag_id")
+                        .and_then(|v| v.as_u64())
+                        .ok_or_else(|| anyhow::anyhow!("drag intent reply missing drag_id"))?;
+                    let confirm = serde_json::json!({ "drag_id": drag_id });
+                    let (code, body) = tetherly_loopback::loopback_post(
+                        ui_port,
+                        "/api/file/drag/confirm",
+                        &serde_json::to_vec(&confirm).unwrap_or_default(),
+                    )
+                    .await?;
+                    if code != 200 {
+                        anyhow::bail!(
+                            "drag confirm failed ({code}): {}",
+                            String::from_utf8_lossy(&body)
+                        );
+                    }
+                    Ok(())
+                });
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, "tray drop delivery failed");
+                }
+            })
+            .expect("spawn tray-drop thread");
+    }
+
+    define_class!(
+        #[unsafe(super(NSView))]
+        // NSDraggingDestination requires main-thread-only objects (AppKit rule).
+        #[thread_kind = MainThreadOnly]
+        #[name = "TetherlyTrayDropView"]
+        #[ivars = TrayIvars]
+        pub(crate) struct TrayDropView;
+
+        impl TrayDropView {
+            #[unsafe(method_id(initWithFrame:))]
+            fn init_with_frame(this: Allocated<Self>, frame: NSRect) -> Retained<Self> {
+                let this = this.set_ivars(TrayIvars { ui_port: 0 });
+                unsafe { msg_send![super(this), initWithFrame: frame] }
+            }
+        }
+
+        unsafe impl NSObjectProtocol for TrayDropView {}
+
+        unsafe impl NSDraggingDestination for TrayDropView {
+            /// Accept the drag: report Copy so the cursor shows a live dropzone.
+            #[unsafe(method(draggingEntered:))]
+            fn dragging_entered(
+                &self,
+                _sender: &ProtocolObject<dyn NSDraggingInfo>,
+            ) -> NSDragOperation {
+                NSDragOperation::Copy
+            }
+
+            /// Keep the copy cursor while hovering over the tray icon.
+            #[unsafe(method(draggingUpdated:))]
+            fn dragging_updated(
+                &self,
+                _sender: &ProtocolObject<dyn NSDraggingInfo>,
+            ) -> NSDragOperation {
+                NSDragOperation::Copy
+            }
+
+            /// Commit the drop: extract file URLs and hand them to the daemon
+            /// via the loopback drag REST chain (background thread). Returning
+            /// `true` ends the drag session cleanly on our side; delivery
+            /// progress lands in the outbox / transfer state.
+            #[unsafe(method(performDragOperation:))]
+            fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> Bool {
+                let paths = file_paths_from_drag(sender);
+                if paths.is_empty() {
+                    tracing::warn!("tray drop contained no readable file URLs");
+                    return false.into();
+                }
+                let port = self.ivars().ui_port;
+                dispatch_tray_drop(port, paths);
+                true.into()
+            }
+        }
+    );
 
     define_class!(
         #[unsafe(super(NSObject))]
@@ -64,6 +208,32 @@ mod macos_tray {
         unsafe impl NSObjectProtocol for TetherlyTrayTarget {}
     );
 
+    /// Build the tray dropzone view covering the full bounds of the status
+    /// item's button. The view is the registered dragging destination; the
+    /// button stays clickable underneath (the view is non-interfering for
+    /// mouse events because a plain NSView passes clicks through its own
+    /// hit-testing only when it has no event handlers — the menu still works
+    /// since dragging is the only gesture this view intercepts).
+    fn attach_drop_view(
+        button: &objc2_app_kit::NSStatusBarButton,
+        ui_port: u16,
+        mtm: MainThreadMarker,
+    ) {
+        let frame = button.bounds();
+        let drop = TrayDropView::alloc(mtm).set_ivars(TrayIvars { ui_port });
+        let drop: Retained<TrayDropView> = unsafe { msg_send![super(drop), initWithFrame: frame] };
+        let file_type = unsafe { NSPasteboardTypeFileURL };
+        drop.registerForDraggedTypes(&NSArray::from_slice(&[file_type]));
+        // Auto-resize with the button so the dropzone never shrinks away.
+        drop.setAutoresizingMask(
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        button.addSubview(&drop);
+        // Keep the drop view alive for the process lifetime.
+        std::mem::forget(drop);
+    }
+
     pub fn run_macos_tray_on_main_thread(
         ui_port: u16,
         device_alias: String,
@@ -82,6 +252,10 @@ mod macos_tray {
         if let Some(button) = item.button(mtm) {
             let title = NSString::from_str("⇄ Tetherly");
             button.setTitle(&title);
+            // ADR-137 Engine I: the tray icon is a live dropzone — dragging
+            // files onto it sends them to the connected peer via the loopback
+            // drag REST chain (intent → confirm → stream → MOTW settle).
+            attach_drop_view(&button, ui_port, mtm);
         }
 
         let target = TetherlyTrayTarget::alloc().set_ivars(TrayIvars { ui_port });
@@ -216,7 +390,7 @@ mod windows_tray {
         DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, PostQuitMessage, RegisterClassExW,
         SetForegroundWindow, TrackPopupMenuEx, TranslateMessage, HICON, HMENU, IDI_APPLICATION,
         MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND,
-        WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSEXW,
+        WM_CREATE, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSEXW,
     };
 
     const WM_TRAYICON: u32 = WM_APP + 42;
@@ -338,6 +512,12 @@ mod windows_tray {
                 return;
             }
 
+            // ADR-137 Engine I: the tray window is a live dropzone — dropped
+            // files stream to the connected peer through the loopback drag
+            // REST chain. Best-effort: a failed registration leaves a working
+            // (non-droppable) tray.
+            drop_target::register_tray_drop_target(hwnd, ui_port);
+
             let mut nid = std::mem::zeroed::<NOTIFYICONDATAW>();
             nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
             nid.hWnd = hwnd;
@@ -366,6 +546,210 @@ mod windows_tray {
             }
 
             Shell_NotifyIconW(NIM_DELETE, &nid);
+        }
+    }
+
+    /// OLE drop-target wiring for the tray window, kept in its own module so
+    /// the `windows` crate types never mix with the `windows-sys` types the
+    /// tray message pump above uses (the two crates' HWND/handle newtypes are
+    /// distinct).
+    mod drop_target {
+        use windows::core::implement;
+        use windows::Win32::Foundation::POINTL;
+        use windows::Win32::System::Com::{
+            CoInitializeEx, CoUninitialize, IDataObject, COINIT_APARTMENTTHREADED, FORMATETC,
+        };
+        use windows::Win32::System::Ole::{
+            IDropTarget, IDropTarget_Impl, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
+            DROPEFFECT,
+        };
+        use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+        use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+        // CF_HDROP: the standard "list of files" drag/clipboard format.
+        const CF_HDROP: u16 = 15;
+        const DROPEFFECT_COPY: DROPEFFECT = DROPEFFECT(1);
+
+        /// Extract file paths from an OLE data object carrying a `CF_HDROP`.
+        ///
+        /// Bound-checked: `DragQueryFileW` with `None` as the buffer returns the
+        /// item count and per-item length, so a malformed payload cannot
+        /// overflow. `ReleaseStgMedium` frees the transferred HGLOBAL.
+        fn paths_from_data_object(data: &IDataObject) -> Vec<String> {
+            // DVASPECT_CONTENT = 1, TYMED_HGLOBAL = 1 (raw u32 fields in 0.59).
+            let fmt = FORMATETC {
+                cfFormat: CF_HDROP,
+                ptd: std::ptr::null_mut(),
+                dwAspect: 1,
+                lindex: -1,
+                tymed: 1,
+            };
+            let medium = match unsafe { data.GetData(&fmt) } {
+                Ok(m) => m,
+                Err(_) => return Vec::new(),
+            };
+            let hdrop = HDROP(unsafe { medium.u.hGlobal }.0);
+            // u32::MAX asks for the item count; a null buffer asks for a name length.
+            let count = unsafe { DragQueryFileW(hdrop, u32::MAX, None) };
+            let mut paths = Vec::with_capacity(count.min(1024) as usize);
+            for i in 0..count {
+                let len = unsafe { DragQueryFileW(hdrop, i, None) } as usize;
+                if len == 0 {
+                    continue;
+                }
+                let mut buf = vec![0u16; len + 1];
+                let n = unsafe { DragQueryFileW(hdrop, i, Some(&mut buf)) };
+                buf.truncate(n as usize);
+                paths.push(String::from_utf16_lossy(&buf));
+            }
+            unsafe {
+                ReleaseStgMedium(&medium as *const _ as *mut _);
+            }
+            paths
+        }
+
+        /// Fire the drag intent + confirm REST chain on a background thread so
+        /// the STA message loop never blocks on network I/O. The daemon's
+        /// confirm handler streams the file and settles MOTW + reveal
+        /// (ADR-137); mirrors the macOS tray drop path.
+        fn dispatch_tray_drop(ui_port: u16, paths: Vec<String>) {
+            std::thread::Builder::new()
+                .name("tray-drop".into())
+                .spawn(move || {
+                    let runtime = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "tray drop: no tokio runtime");
+                            return;
+                        }
+                    };
+                    let result = runtime.block_on(async {
+                        let intent = serde_json::json!({ "paths": paths });
+                        let (code, body) = tetherly_loopback::loopback_post(
+                            ui_port,
+                            "/api/file/drag/intent",
+                            &serde_json::to_vec(&intent).unwrap_or_default(),
+                        )
+                        .await?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "drag intent failed ({code}): {}",
+                                String::from_utf8_lossy(&body)
+                            );
+                        }
+                        let resp: serde_json::Value = serde_json::from_slice(&body)?;
+                        let drag_id = resp["signal"]
+                            .get("drag_id")
+                            .and_then(|v| v.as_u64())
+                            .ok_or_else(|| anyhow::anyhow!("drag intent reply missing drag_id"))?;
+                        let confirm = serde_json::json!({ "drag_id": drag_id });
+                        let (code, body) = tetherly_loopback::loopback_post(
+                            ui_port,
+                            "/api/file/drag/confirm",
+                            &serde_json::to_vec(&confirm).unwrap_or_default(),
+                        )
+                        .await?;
+                        if code != 200 {
+                            anyhow::bail!(
+                                "drag confirm failed ({code}): {}",
+                                String::from_utf8_lossy(&body)
+                            );
+                        }
+                        Ok(())
+                    });
+                    if let Err(e) = result {
+                        tracing::warn!(error = %e, "tray drop delivery failed");
+                    }
+                })
+                .expect("spawn tray-drop thread");
+        }
+
+        /// OLE drop target for the tray window: accepts dropped files and
+        /// forwards them to the local daemon over the loopback drag REST chain.
+        #[implement(IDropTarget)]
+        struct TrayDropTarget {
+            ui_port: u16,
+        }
+
+        impl IDropTarget_Impl for TrayDropTarget_Impl {
+            fn DragEnter(
+                &self,
+                _pdataobj: windows::core::Ref<'_, IDataObject>,
+                _grfkeystate: MODIFIERKEYS_FLAGS,
+                _pt: &POINTL,
+                pdweffect: *mut DROPEFFECT,
+            ) -> windows::core::Result<()> {
+                unsafe {
+                    *pdweffect = DROPEFFECT_COPY;
+                }
+                Ok(())
+            }
+
+            fn DragOver(
+                &self,
+                _grfkeystate: MODIFIERKEYS_FLAGS,
+                _pt: &POINTL,
+                pdweffect: *mut DROPEFFECT,
+            ) -> windows::core::Result<()> {
+                unsafe {
+                    *pdweffect = DROPEFFECT_COPY;
+                }
+                Ok(())
+            }
+
+            fn DragLeave(&self) -> windows::core::Result<()> {
+                Ok(())
+            }
+
+            fn Drop(
+                &self,
+                pdataobj: windows::core::Ref<'_, IDataObject>,
+                _grfkeystate: MODIFIERKEYS_FLAGS,
+                _pt: &POINTL,
+                pdweffect: *mut DROPEFFECT,
+            ) -> windows::core::Result<()> {
+                unsafe {
+                    *pdweffect = DROPEFFECT_COPY;
+                }
+                let Ok(data) = pdataobj.ok() else {
+                    return Ok(());
+                };
+                let paths = paths_from_data_object(data);
+                if paths.is_empty() {
+                    tracing::warn!("tray drop contained no readable file paths");
+                    return Ok(());
+                }
+                dispatch_tray_drop(self.ui_port, paths);
+                Ok(())
+            }
+        }
+
+        /// Make the tray window a live dropzone: init COM as STA (the tray
+        /// thread owns the message pump), register the drop target, and hand
+        /// back a revoker for teardown.
+        pub(super) fn register_tray_drop_target(
+            hwnd: windows_sys::Win32::Foundation::HWND,
+            ui_port: u16,
+        ) -> Option<impl FnOnce()> {
+            // STA is mandatory for OLE drag-and-drop; the tray thread runs a
+            // message pump for its whole lifetime, satisfying the STA
+            // requirements.
+            if unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_err() {
+                return None;
+            }
+            // windows-sys HWND is a bare pointer; the windows crate wraps it.
+            let hwnd_win = windows::Win32::Foundation::HWND(hwnd);
+            let target: IDropTarget = TrayDropTarget { ui_port }.into();
+            unsafe {
+                RegisterDragDrop(hwnd_win, &target).ok()?;
+            }
+            Some(move || unsafe {
+                let _ = RevokeDragDrop(hwnd_win);
+                CoUninitialize();
+            })
         }
     }
 }

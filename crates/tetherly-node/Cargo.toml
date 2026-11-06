@@ -67,7 +67,14 @@ windows = { version = "0.59", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
     "Win32_System_Com",
+    # Tray dropzone (src/platform/tray.rs): the OLE `IDropTarget` implementation
+    # lives in System::Ole (its `ReleaseStgMedium`/`IDataObject::GetData` are
+    # gated on Com_StructuredStorage + Gdi), `COINIT_APARTMENTTHREADED` in
+    # System::Com, `MODIFIERKEYS_FLAGS` in SystemServices.
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
     # ANCS over BLE (src/ancs/win_gatt.rs): the WinRT Bluetooth stack, the
     # `IVectorView` the service/characteristic queries return, and the
     # `IBuffer`/`DataReader`/`DataWriter` used to move GATT values in and out.
@@ -79,6 +86,10 @@ windows = { version = "0.59", features = [
     "Devices_Bluetooth",
     "Devices_Bluetooth_GenericAttributeProfile",
 ] }
+# The `windows::core::implement` derive expands to `::windows_core::...` paths,
+# so windows-core must be a direct dependency (already in the lockfile via
+# `windows` — no new package).
+windows-core = "0.59"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keychain generic-password storage for the identity secret (src/cred/macos.rs).
@@ -98,6 +109,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSRunLoop",
     "NSDate",
     "NSObject",
+    "NSDictionary",
+    "NSURL",
+    "NSEnumerator",
 ] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std",
@@ -128,6 +142,13 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSStatusItem",
     "NSView",
     "NSWindow",
+    "NSDragging",
+    "NSDraggingItem",
+    "NSDraggingSession",
+    "NSPasteboard",
+    "NSPasteboardItem",
+    "NSPopover",
+    "NSPanel",
 ] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std",
