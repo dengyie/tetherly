@@ -907,6 +907,9 @@ struct Shared {
     /// is how "silence" is simulated now that the heartbeat actually keeps
     /// the host slot alive.
     pub(crate) session_heartbeat_paused: std::sync::atomic::AtomicBool,
+    /// Last time a four-finger swipe was dropped for "not controlling"
+    /// (throttles the debug log so stray swipes don't spam).
+    pub(crate) gesture_swipe_last_ignored_ms: std::sync::atomic::AtomicU64,
     /// Monotonic generation of the active 45720 server channel. Each
     /// `attach_screen_server` increments it; a pump loop may only run the
     /// engine-level `on_peer_gone` reset when its generation is still the

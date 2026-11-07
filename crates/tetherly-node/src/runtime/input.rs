@@ -2142,6 +2142,10 @@ impl Node {
                             let _ = node.drive_input_key(code, down);
                             break;
                         }
+                        crate::platform::RawInput::GestureSwipe { direction } => {
+                            let _ = node.drive_gesture_swipe(direction);
+                            break;
+                        }
                         crate::platform::RawInput::EmergencyEscape => {
                             *node
                                 .shared
@@ -2325,11 +2329,24 @@ impl Node {
         // ADR-138: while a remote desktop SESSION is driving this node
         // (SessionTarget), even the deliberate edge-push takeover is
         // suppressed — the session window is the only control surface until
-        // it closes (m6_3 asserts the watcher skip too).
-        if self.remote_session_active()
+        // it closes (m6_3 asserts the watcher skip too). The CONTROLLER side
+        // must NOT be suppressed: its physical deltas are the session's
+        // input stream (seat==Remote forwards them over 45719). An
+        // unconditional `remote_session_active()` check here dead-ended the
+        // controller's MOUSE while its keyboard (drive_input_key, which
+        // never had this guard) kept working — the "Windows mouse cannot
+        // control the Mac" session bug.
+        let session_drives_this_node = self
+            .shared
+            .remote_session
+            .lock()
+            .expect("remote_session")
+            .as_ref()
+            .is_some_and(|s| s.role.is_receiving());
+        if session_drives_this_node
             || self.active_tunnel_role() == Some(tetherly_core::InputTunnelRole::Target)
         {
-            if self.remote_session_active() {
+            if session_drives_this_node {
                 return Ok(None);
             }
             // Distance arming: a mouse that just got plugged into this
@@ -2571,6 +2588,65 @@ impl Node {
             vec![InputEvent::key(seq, remapped_code, down, 0)]
         };
         self.send_input_events(events, "drive_key")
+    }
+
+    /// Forward a LOCAL four-finger horizontal swipe as the remote's virtual
+    /// desktop switch: `Ctrl+Win+Left/Right` on the target (Windows). Codes
+    /// are injected RAW — deliberately NOT passed through the keymap profile
+    /// (`drive_input_key` remaps mac→win; this gesture already targets Win32
+    /// semantics directly).
+    ///
+    /// `direction`: -1 = fingers moved LEFT (content follows fingers → switch
+    /// to the desktop on the RIGHT), 1 = fingers moved RIGHT (switch left).
+    /// Only acts while this node is controlling (seat Remote); otherwise a
+    /// throttled no-op so stray swipes never leak keys to a local session.
+    pub fn drive_gesture_swipe(&self, direction: i8) -> Result<(), CoreError> {
+        const VK_LCONTROL: u16 = 0xA2;
+        const VK_LWIN: u16 = 0x5B;
+        const VK_LEFT: u16 = 0x25;
+        const VK_RIGHT: u16 = 0x27;
+        const GESTURE_LOG_THROTTLE_MS: u64 = 30_000;
+
+        let events = {
+            let mut server = self.shared.input_engine.lock().expect("engine");
+            if server.seat() != CursorSeat::Remote {
+                let now = self.shared.clock.unix_ms();
+                let last = self
+                    .shared
+                    .gesture_swipe_last_ignored_ms
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if now.saturating_sub(last) > GESTURE_LOG_THROTTLE_MS {
+                    self.shared
+                        .gesture_swipe_last_ignored_ms
+                        .store(now, std::sync::atomic::Ordering::Relaxed);
+                    tracing::debug!(
+                        direction,
+                        "four-finger swipe ignored: not controlling a remote desktop"
+                    );
+                }
+                return Ok(());
+            }
+            let arrow = if direction < 0 { VK_RIGHT } else { VK_LEFT };
+            let base = server.next_seq();
+            let events = vec![
+                InputEvent::key(base, VK_LCONTROL, true, 0),
+                InputEvent::key(base + 1, VK_LWIN, true, 0),
+                InputEvent::key(base + 2, arrow, true, 0),
+                InputEvent::key(base + 3, arrow, false, 0),
+                InputEvent::key(base + 4, VK_LWIN, false, 0),
+                InputEvent::key(base + 5, VK_LCONTROL, false, 0),
+            ];
+            server.note_seq(base + 5);
+            events
+        };
+        let len = events.len();
+        self.send_input_events(events, "gesture_vdesk")?;
+        tracing::info!(
+            direction,
+            events = len,
+            "four-finger swipe forwarded as remote virtual-desktop switch"
+        );
+        Ok(())
     }
 
     /// Best-effort platform string for the current input peer (from the live

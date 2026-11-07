@@ -12552,6 +12552,69 @@ async fn m6_9_session_heartbeat_keeps_host_slot_alive() {
     drop(_gb);
 }
 
+/// m6_10 — the session CONTROLLER's physical mouse must reach the target.
+/// The m6_3 target-suppression guard in `drive_input_delta` used to fire
+/// unconditionally on `remote_session_active()`, which also dead-ended the
+/// controller's seat-Remote delta forwarding: the session's keyboard
+/// (drive_input_key, never guarded) worked while the mouse did not — the
+/// "Windows mouse cannot control the Mac" production bug.
+#[tokio::test(flavor = "multi_thread")]
+async fn m6_10_session_controller_mouse_delta_reaches_target() {
+    let (host, viewer, _ga, _gb) = pair_view().await;
+    let host_id = host.identity().device_id().clone();
+
+    viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect("session start");
+    wait_session_controlling(&viewer, Duration::from_secs(10)).await;
+
+    // The controller's engine must be in the Remote seat once Controlling
+    // (same precondition drive_input_key relies on for m6_6 keys).
+    let sink_before = host.input_sink_snapshot().applied.len();
+
+    // Drive a controller-side mouse delta (position + displacement) while
+    // the session is live. This is exactly what the macOS CGEventTap feeds
+    // on real hardware.
+    viewer
+        .drive_input_delta(1000, 500, 12, 6, 1920, 1080)
+        .expect("controller delta must not error under the session guard");
+
+    let start = std::time::Instant::now();
+    loop {
+        let sink = host.input_sink_snapshot();
+        let moved = sink
+            .applied
+            .iter()
+            .skip(sink_before)
+            .any(|k| matches!(k, tetherly_core::InputKind::Move { .. }));
+        if moved {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "session controller's mouse delta never reached the target \
+                 sink — the seat-Remote forward path is blocked again"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    viewer
+        .remote_session_stop("m6_10")
+        .await
+        .expect("session stop");
+    wait_session_gone(&host, Duration::from_secs(3)).await;
+
+    host.shutdown();
+    viewer.shutdown();
+    drop(_ga);
+    drop(_gb);
+}
+
 /// m6_6 — keymap end-to-end: the host suggests `mac_to_windows`; the session
 /// resp carries it; a Mac-source VK_LWIN from the viewer remaps to
 /// VK_LCONTROL on the wire and the host MemorySink records VK_LCONTROL.

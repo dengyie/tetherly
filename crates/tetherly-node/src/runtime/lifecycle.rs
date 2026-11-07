@@ -620,6 +620,7 @@ impl Node {
             remote_session_keymap: Mutex::new(None),
             remote_session_auto_allowed: std::sync::atomic::AtomicBool::new(false),
             session_heartbeat_paused: std::sync::atomic::AtomicBool::new(false),
+            gesture_swipe_last_ignored_ms: std::sync::atomic::AtomicU64::new(0),
             screen_channel_gen: std::sync::atomic::AtomicU64::new(0),
             screen_client_gen: std::sync::atomic::AtomicU64::new(0),
             input_client_task: Mutex::new(None),

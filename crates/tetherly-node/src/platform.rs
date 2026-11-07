@@ -916,11 +916,171 @@ fn inject_mouse(flags: u32, dx: i32, dy: i32, mouse_data: u32) {
 /// re-export compile unchanged on targets without hook support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawInput {
-    Move { x: i32, y: i32, dx: i32, dy: i32 },
-    Button { mask: u8, down: bool },
-    Wheel { dx: i16, dy: i16 },
-    Key { code: u16, down: bool },
+    Move {
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+    },
+    Button {
+        mask: u8,
+        down: bool,
+    },
+    Wheel {
+        dx: i16,
+        dy: i16,
+    },
+    Key {
+        code: u16,
+        down: bool,
+    },
+    /// Four-finger horizontal swipe on the LOCAL trackpad, observed while
+    /// this node is controlling a remote desktop. Forwarded as the remote's
+    /// virtual-desktop switch (Win+Ctrl+Left/Right on a Windows target).
+    /// `direction`: -1 = fingers moved left (switch to the desktop on the
+    /// right), 1 = fingers moved right (switch to the desktop on the left) —
+    /// the same content-follows-fingers convention macOS Spaces uses.
+    GestureSwipe {
+        direction: i8,
+    },
     EmergencyEscape,
+}
+
+/// Channel the gesture monitor forwards through. Set by `start_input_hooks`
+/// (the same mpsc the mouse/keyboard tap feeds) so the AppKit-side monitor
+/// installed on the tray main thread can reach the input loop without new
+/// plumbing.
+#[cfg(target_os = "macos")]
+static GESTURE_RAW_TX: std::sync::OnceLock<std::sync::mpsc::Sender<RawInput>> =
+    std::sync::OnceLock::new();
+
+/// Install a global NSEvent monitor for trackpad gesture events (public
+/// AppKit API, covered by the Accessibility permission the input capture
+/// already requires). Must run on the main thread (the tray's AppKit
+/// runloop). Detects four-finger horizontal swipes and forwards them as
+/// [`RawInput::GestureSwipe`]; the input loop drops them when this node is
+/// not controlling a remote desktop.
+///
+/// Note: the gesture event stream is OBSERVED, not consumed — macOS keeps
+/// handling the system-side action (Spaces switching) itself. Forwarding
+/// works regardless; suppressing the local switch needs the corresponding
+/// gesture disabled in System Settings.
+#[cfg(target_os = "macos")]
+pub fn start_gesture_swipe_monitor() {
+    use block2::RcBlock;
+    use core::ptr::NonNull;
+    use objc2_app_kit::{NSEvent, NSEventPhase, NSTouchPhase};
+    use objc2_foundation::MainThreadMarker;
+
+    let Some(_mtm) = MainThreadMarker::new() else {
+        tracing::warn!("gesture monitor: not on the main thread; skipped");
+        return;
+    };
+
+    struct SwipeAccum {
+        active: bool,
+        max_touches: usize,
+        start_x: Option<f64>,
+        last_x: f64,
+    }
+    let accum = std::sync::Mutex::new(SwipeAccum {
+        active: false,
+        max_touches: 0,
+        start_x: None,
+        last_x: 0.0,
+    });
+
+    let handler = move |event: NonNull<NSEvent>| {
+        let event = unsafe { event.as_ref() };
+        // NSEventTypeGesture stream: begin/changed/end for every trackpad
+        // multi-touch gesture. Magnify/rotate are excluded by the mask at
+        // registration time; this handler only tracks horizontal motion.
+        let phase = event.phase();
+        let touching = event.touchesMatchingPhase_inView(NSTouchPhase::Touching, None);
+        let touch_count = touching.count();
+        // Centroid of the currently-touching fingers in normalized trackpad
+        // space ([0,1]); a four-finger swipe moves it visibly left/right.
+        let mut sum_x = 0.0f64;
+        let mut n = 0usize;
+        let enumerator = unsafe { touching.objectEnumerator() };
+        while let Some(touch) = enumerator.nextObject() {
+            sum_x += touch.normalizedPosition().x;
+            n += 1;
+        }
+        let centroid_x = if n > 0 { sum_x / n as f64 } else { f64::NAN };
+
+        let mut state = match accum.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        match phase {
+            NSEventPhase::Began | NSEventPhase::MayBegin => {
+                state.active = true;
+                state.max_touches = touch_count;
+                state.start_x = (n > 0).then_some(centroid_x);
+                state.last_x = centroid_x;
+            }
+            NSEventPhase::Changed => {
+                if !state.active {
+                    return;
+                }
+                state.max_touches = state.max_touches.max(touch_count);
+                if n > 0 && !centroid_x.is_nan() {
+                    state.last_x = centroid_x;
+                }
+            }
+            NSEventPhase::Ended | NSEventPhase::Cancelled => {
+                if !state.active {
+                    return;
+                }
+                state.max_touches = state.max_touches.max(touch_count);
+                let started = state.start_x;
+                let dx = match started {
+                    Some(sx) if !centroid_x.is_nan() => centroid_x - sx,
+                    _ => state.last_x - started.unwrap_or(state.last_x),
+                };
+                let max_touches = state.max_touches;
+                *state = SwipeAccum {
+                    active: false,
+                    max_touches: 0,
+                    start_x: None,
+                    last_x: 0.0,
+                };
+                // Four fingers moving ≥10% of the trackpad width horizontally.
+                if max_touches >= 4 && dx.abs() >= 0.10 {
+                    let direction: i8 = if dx < 0.0 { -1 } else { 1 };
+                    tracing::info!(
+                        dx = format!("{dx:.3}"),
+                        max_touches,
+                        direction,
+                        "four-finger swipe detected; forwarding virtual-desktop switch"
+                    );
+                    if let Some(tx) = GESTURE_RAW_TX.get() {
+                        let _ = tx.send(RawInput::GestureSwipe { direction });
+                    }
+                } else if max_touches >= 4 {
+                    tracing::debug!(
+                        dx = format!("{dx:.3}"),
+                        max_touches,
+                        "four-finger gesture below swipe threshold"
+                    );
+                }
+            }
+            _ => {}
+        }
+    };
+    let handler = RcBlock::new(handler);
+    let monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
+        objc2_app_kit::NSEventMask::Gesture,
+        &handler,
+    );
+    if monitor.is_some() {
+        // Deliberately leaked: the monitor must live for the process lifetime.
+        std::mem::forget(monitor);
+        tracing::info!("gesture monitor: four-finger swipe forwarding armed (forwarded to the remote desktop while controlling)");
+    } else {
+        tracing::warn!("gesture monitor: addGlobalMonitorForEventsMatchingMask returned null");
+    }
 }
 
 /// Bidirectional macOS CGKeyCode ↔ Win32 Virtual-Key mapping table.
@@ -1482,6 +1642,10 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
         CGEventTapPlacement, CGEventTapProxy, CGEventType,
     };
     use std::sync::atomic::Ordering;
+
+    // Register the channel the four-finger swipe monitor forwards through
+    // (the monitor itself is installed on the tray main thread).
+    let _ = GESTURE_RAW_TX.set(tx.clone());
 
     if !is_accessibility_trusted() {
         return Err(CoreError::Json(
