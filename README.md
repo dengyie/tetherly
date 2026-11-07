@@ -37,8 +37,6 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Windows GNU 链接需要较新的 MinGW(Scoop `mingw` 16+)。不要用 MinGW.org 6.3:它的 `ld` 不认识 `--high-entropy-va`。
-
 ## 平台承诺(v1)
 
 | 端 | 角色 |

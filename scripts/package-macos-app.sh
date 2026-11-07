@@ -66,9 +66,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 TMP_CLEANUP=""
+STAGE_DIR=""
 cleanup() {
     if [ -n "$TMP_CLEANUP" ] && [ -d "$TMP_CLEANUP" ]; then
         rm -rf "$TMP_CLEANUP"
+    fi
+    if [ -n "$STAGE_DIR" ] && [ -d "$STAGE_DIR" ]; then
+        rm -rf "$STAGE_DIR"
     fi
 }
 trap cleanup EXIT
@@ -97,35 +101,40 @@ elif [ "$BUILD_LOCAL" = true ]; then
     cargo build --release -p tetherly-node -p tetherly-cli
     BINARY_PATH="$REPO_ROOT/target/release/tetherly"
 else
-    # Default: attempt to download latest release artifact from GitHub CI
+    # Default: download the latest release artifact from GitHub CI. There is
+    # deliberately NO local-build fallback (the repo is CI-only by design —
+    # 6d28b9d): a silent local compile would ship an unreviewed binary.
     LATEST_TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
-    if [ -n "$LATEST_TAG" ]; then
-        echo "==> No binary specified, downloading latest CI release ($LATEST_TAG)..."
-        TMP_CLEANUP=$(mktemp -d /tmp/tetherly-ci-XXXXXX)
-        gh release download "$LATEST_TAG" -p "tetherly-macos-arm64" -D "$TMP_CLEANUP" 2>/dev/null || true
-        if [ -f "$TMP_CLEANUP/tetherly-macos-arm64" ]; then
-            BINARY_PATH="$TMP_CLEANUP/tetherly-macos-arm64"
-        fi
+    if [ -z "$LATEST_TAG" ]; then
+        echo "Error: no binary specified and no GitHub release found. Pass --binary <path> (or --tag/--run-id)." >&2
+        exit 1
     fi
-    if [ -z "$BINARY_PATH" ] || [ ! -f "$BINARY_PATH" ]; then
-        # Fallback to local build if offline or no release exists
-        echo "==> Could not fetch from CI; falling back to local cargo build..."
-        cargo build --release -p tetherly-node -p tetherly-cli
-        BINARY_PATH="$REPO_ROOT/target/release/tetherly"
-    fi
+    echo "==> No binary specified, downloading latest CI release ($LATEST_TAG)..."
+    TMP_CLEANUP=$(mktemp -d /tmp/tetherly-ci-XXXXXX)
+    gh release download "$LATEST_TAG" -p "tetherly-macos-arm64" -D "$TMP_CLEANUP"
+    BINARY_PATH="$TMP_CLEANUP/tetherly-macos-arm64"
 fi
 
 if [ "$RESTART" = true ]; then
-    # Shut the previous daemon down BEFORE overwriting its binary: cp opens
-    # the destination with O_TRUNC, and truncating a running (signed) image
-    # can get the live process SIGKILLed by code-signing validation. Wait
-    # for the port to be released so `open` cannot race a second instance.
+    # Shut the previous daemon down BEFORE replacing its binary: overwriting
+    # a running (signed) image can get the live process SIGKILLed by
+    # code-signing validation. A daemon that refuses to exit is a hard
+    # failure — proceeding would truncate a live image and brick the install.
     echo "==> Stopping previous daemon before replacing its binary..."
     curl -s -X POST http://127.0.0.1:45716/api/daemon/shutdown >/dev/null 2>&1 || true
+    daemon_stopped=""
     for _ in $(seq 1 20); do
-        pgrep -f "Tetherly.app/Contents/MacOS/Tetherly" >/dev/null 2>&1 || break
+        if ! pgrep -f "Tetherly.app/Contents/MacOS/Tetherly" >/dev/null 2>&1; then
+            daemon_stopped=1
+            break
+        fi
         sleep 0.25
     done
+    if [ -z "$daemon_stopped" ]; then
+        echo "Error: previous daemon did not stop within 5s — aborting so the" >&2
+        echo "       running binary is not truncated. Kill it manually and retry." >&2
+        exit 1
+    fi
 fi
 
 # Keep the bundle version in sync with the workspace version instead of a
@@ -135,14 +144,21 @@ WORKSPACE_VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
     2>/dev/null || grep -m1 '^version' "$REPO_ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')
 echo "==> Workspace version: ${WORKSPACE_VERSION}"
 
-echo "==> [2/4] Assembling /Applications/Tetherly.app bundle..."
-mkdir -p "$APP_DIR/Contents/MacOS"
-mkdir -p "$APP_DIR/Contents/Resources"
+# Assemble and sign a STAGED bundle first, then swap it in atomically: any
+# failure before the swap leaves the previous (working) install untouched —
+# the old in-place flow could destroy /Applications/Tetherly.app mid-way and
+# leave neither a working old nor a usable new bundle.
+STAGE_DIR=$(mktemp -d /tmp/tetherly-stage-XXXXXX)
+STAGED_APP="$STAGE_DIR/Tetherly.app"
 
-cp "$BINARY_PATH" "$APP_DIR/Contents/MacOS/Tetherly"
-chmod +x "$APP_DIR/Contents/MacOS/Tetherly"
+echo "==> [2/4] Assembling staged Tetherly.app bundle..."
+mkdir -p "$STAGED_APP/Contents/MacOS"
+mkdir -p "$STAGED_APP/Contents/Resources"
 
-cat << EOF > "$APP_DIR/Contents/Info.plist"
+cp "$BINARY_PATH" "$STAGED_APP/Contents/MacOS/Tetherly"
+chmod +x "$STAGED_APP/Contents/MacOS/Tetherly"
+
+cat << EOF > "$STAGED_APP/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -169,24 +185,41 @@ cat << EOF > "$APP_DIR/Contents/Info.plist"
 </plist>
 EOF
 
-echo "==> [3/4] Signing bundle with stable Designated Requirement..."
-# Remove old ad-hoc signatures / test artifacts inside bundle
-find "$APP_DIR" -name ".DS_Store" -delete 2>/dev/null || true
-rm -rf "$APP_DIR/Contents/_CodeSignature" 2>/dev/null || true
+echo "==> [3/4] Signing staged bundle with stable Designated Requirement..."
+# Remove old ad-hoc signatures / test artifacts inside the staged bundle
+find "$STAGED_APP" -name ".DS_Store" -delete 2>/dev/null || true
 
 # Sign binary and bundle with explicit identifier and designated requirement
 codesign -f -s - \
     --identifier "$BUNDLE_ID" \
     -r="designated => identifier \"$BUNDLE_ID\"" \
-    "$APP_DIR/Contents/MacOS/Tetherly"
+    "$STAGED_APP/Contents/MacOS/Tetherly"
 
 codesign -f -s - \
     --identifier "$BUNDLE_ID" \
     -r="designated => identifier \"$BUNDLE_ID\"" \
-    "$APP_DIR"
+    "$STAGED_APP"
 
-echo "==> Verifying signature and DR:"
-codesign -d -r- "$APP_DIR"
+echo "==> Verifying signature and DR of the staged bundle:"
+codesign -d -r- "$STAGED_APP"
+
+echo "==> Swapping staged bundle into $APP_DIR..."
+# Same-volume rename keeps this near-atomic; move the old bundle aside first
+# (rename onto a non-empty directory fails). The daemon is already stopped
+# at this point when --restart is used.
+if [ -d "$APP_DIR" ]; then
+    OLD_APP="$APP_DIR.old.$$"
+    mv "$APP_DIR" "$OLD_APP"
+    if ! mv "$STAGED_APP" "$APP_DIR"; then
+        # Roll the previous (working) install back rather than leaving nothing.
+        mv "$OLD_APP" "$APP_DIR"
+        echo "Error: failed to move staged bundle into place; previous install restored." >&2
+        exit 1
+    fi
+    rm -rf "$OLD_APP"
+else
+    mv "$STAGED_APP" "$APP_DIR"
+fi
 
 if [ "$RESTART" = true ]; then
     echo "==> [4/4] Restarting via LaunchServices (open $APP_DIR)..."
