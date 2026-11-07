@@ -213,19 +213,21 @@ fi
 # 4.3 Passive sync mode guard: forced /api/clip/sync works even when the
 # passive clipboard watcher is dead (mode=manual). That masking is exactly
 # how the "one side copied, other side no effect" bug shipped unnoticed.
-# Assert the live policy is an auto mode on BOTH ends; if a user or config
-# explicitly set manual, this guard reports it instead of silently passing.
+# Each end is checked for the direction it must support: the local end must
+# be able to SEND, the remote end must be able to RECEIVE. A one-way mode
+# (send_only / receive_only) is valid only on the side it serves, so the
+# failure text names both the live mode and the missing capability.
 LOCAL_CLIP_MODE=$(curl -s "http://127.0.0.1:${LOCAL_PORT}/api/clip/policy" | jq -r '.policy.mode // empty')
 REMOTE_CLIP_MODE=$(ssh "${REMOTE_HOST}" "powershell -Command \"(Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/clip/policy) | ConvertTo-Json -Compress\"" 2>/dev/null | jq -r '.policy.mode // empty' || true)
 if [ "$LOCAL_CLIP_MODE" = "bidirectional_auto" ] || [ "$LOCAL_CLIP_MODE" = "send_only" ]; then
-    log_pass "Local clipboard passive auto-sync active (mode=${LOCAL_CLIP_MODE})"
+    log_pass "Local clipboard passive auto-sync active (mode=${LOCAL_CLIP_MODE}, can send)"
 else
-    log_fail "Local clipboard passive auto-sync DISABLED (mode=${LOCAL_CLIP_MODE:-unknown}) — passive copy sync is off"
+    log_fail "Local clipboard cannot auto-send (mode=${LOCAL_CLIP_MODE:-unknown}, needs bidirectional_auto or send_only) — passive copy sync is off"
 fi
 if [ "$REMOTE_CLIP_MODE" = "bidirectional_auto" ] || [ "$REMOTE_CLIP_MODE" = "receive_only" ]; then
-    log_pass "Remote clipboard passive auto-sync active (mode=${REMOTE_CLIP_MODE})"
+    log_pass "Remote clipboard passive auto-sync active (mode=${REMOTE_CLIP_MODE}, can receive)"
 else
-    log_fail "Remote clipboard passive auto-sync DISABLED (mode=${REMOTE_CLIP_MODE:-unknown}) — passive copy sync is off"
+    log_fail "Remote clipboard cannot auto-receive (mode=${REMOTE_CLIP_MODE:-unknown}, needs bidirectional_auto or receive_only) — passive copy sync is off"
 fi
 
 echo ""
