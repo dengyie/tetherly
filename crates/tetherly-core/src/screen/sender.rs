@@ -800,7 +800,11 @@ impl ScreenSender {
             ControlMsg::Start => {
                 if !matches!(self.state, ScreenState::Allowed | ScreenState::Streaming) {
                     self.stats.refused = self.stats.refused.saturating_add(1);
-                    return Ok(None);
+                    // Reply `Stop` so the controller learns its Start was
+                    // refused (consent revoked mid-session): silence would
+                    // leave the viewer believing pixels are coming. The
+                    // receiver treats an unsolicited Stop reply as a refusal.
+                    return Ok(Some(ControlMsg::Stop));
                 }
                 self.state = ScreenState::Streaming;
                 Ok(None)

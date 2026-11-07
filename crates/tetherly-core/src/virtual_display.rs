@@ -142,7 +142,7 @@ pub struct VirtualDisplayAttachFrame {
 impl VirtualDisplayAttachFrame {
     pub fn sanitize(&mut self) {
         self.session_id = VirtualDisplayValidator::validate_session_id(&self.session_id)
-            .unwrap_or_else(|_| "invalid_session".to_string());
+            .unwrap_or_else(|_| String::new());
     }
 
     pub fn to_frame(&self) -> Result<InnerFrame, CoreError> {
@@ -175,7 +175,7 @@ pub struct VirtualDisplayDetachFrame {
 impl VirtualDisplayDetachFrame {
     pub fn sanitize(&mut self) {
         self.session_id = VirtualDisplayValidator::validate_session_id(&self.session_id)
-            .unwrap_or_else(|_| "invalid_session".to_string());
+            .unwrap_or_else(|_| String::new());
         if let Some(ref r) = self.reason {
             self.reason = Some(VirtualDisplayValidator::sanitize_reason(r));
         }

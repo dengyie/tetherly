@@ -64,6 +64,7 @@ mod media;
 mod messages;
 mod notify;
 mod overlay;
+mod remote_session;
 mod routes;
 mod screen_control;
 mod screen_dto;
@@ -95,6 +96,7 @@ pub use locate::*;
 pub use media::*;
 pub use messages::*;
 pub use notify::*;
+pub use remote_session::RemoteSessionStartReport;
 pub use routes::*;
 pub use screen_dto::*;
 pub use shell_reveal::*;
@@ -545,6 +547,11 @@ struct Shared {
     screen_recording: Mutex<Option<ScreenRecordingSession>>,
     /// Peer disclosed recording state via ControlMsg::SetRecordingState (ADR-101).
     screen_peer_recording: std::sync::atomic::AtomicBool,
+    /// Viewer-side: the host answered our `Start` with the refusal `Stop`
+    /// reply (consent revoked mid-session / never granted). One-shot latch
+    /// the remote-session start consults to roll the session back instead of
+    /// presenting an endless black screen.
+    screen_start_refused: std::sync::atomic::AtomicBool,
     /// Active screen session in-container playback session (ADR-102).
     screen_playback: Mutex<Option<ScreenPlaybackSession>>,
     /// Most recent uncompressed screen frame presented or grabbed for snapshots (ADR-103).
@@ -877,6 +884,14 @@ struct Shared {
     cursor_edge_resistance_acc: Mutex<HashMap<DisplayEdge, u32>>,
     input_policy: Mutex<InputTunnelPolicy>,
     active_input_tunnel: Mutex<Option<ActiveInputTunnelSession>>,
+    /// ADR-138 remote desktop session — single slot. In-memory only: a crash
+    /// resets to no session by construction (sessions are transient).
+    pub(crate) remote_session: Mutex<Option<crate::runtime::input::RemoteSessionState>>,
+    /// ADR-138 session-scoped keymap: the host's suggested preset from the
+    /// session resp (e.g. "mac_to_windows"). Applied for the lifetime of the
+    /// session so the controller's keystrokes remap as the target expects;
+    /// cleared on close. In-memory only, like the session itself.
+    pub(crate) remote_session_keymap: Mutex<Option<String>>,
     /// Handle of the running inbound input-client task. A newer accept
     /// aborts the previous one so stacked inbound sessions can never leave
     /// two clients racing on `input_sink` / the real injection sink.

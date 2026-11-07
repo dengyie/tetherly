@@ -11,7 +11,8 @@ use tetherly_core::{
     map_edge_exit_to_entry, CoreError, CursorSeat, DeviceId, DisplayEdge, DisplayRect, InputClient,
     InputEvent, InputKind, InputSink, InputTunnelHeartbeatFrame, InputTunnelReleaseFrame,
     InputTunnelRequestFrame, InputTunnelRespFrame, InputTunnelRole, InputTunnelValidator,
-    MemorySink, TopologyValidator,
+    MemorySink, RemoteSessionCloseFrame, RemoteSessionRejectReason, RemoteSessionRequestFrame,
+    RemoteSessionRespFrame, RemoteSessionStateMachine, ScreenState, TopologyValidator,
 };
 use tetherly_net::session::{accept_session, dial_session, ActiveSession};
 use tokio::net::TcpStream;
@@ -54,6 +55,34 @@ pub struct ActiveInputTunnelSession {
     pub capture_height: Option<u32>,
     pub started_at_ms: u64,
     pub last_activity_ms: u64,
+}
+
+/// Active ADR-138 remote desktop session metadata (controller or target side).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ActiveRemoteSessionState {
+    pub session_id: String,
+    pub peer_id: String,
+    pub role: InputTunnelRole,
+    /// Host physical resolution — the viewer's viewport mapping baseline.
+    pub screen_width: u32,
+    pub screen_height: u32,
+    pub started_at_ms: u64,
+    pub last_activity_ms: u64,
+}
+
+/// One remote session slot: metadata plus its pure state machine. Stored in
+/// `Shared.remote_session` (single slot — at most one session per node).
+#[derive(Debug, Clone)]
+pub struct RemoteSessionState {
+    pub state: ActiveRemoteSessionState,
+    pub machine: RemoteSessionStateMachine,
+}
+
+impl std::ops::Deref for RemoteSessionState {
+    type Target = ActiveRemoteSessionState;
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
 }
 
 /// Comprehensive status report of virtual peripheral sharing and input tunneling.
@@ -789,6 +818,451 @@ impl Node {
         }
     }
 
+    // ------------------------------------------------------------------
+    // ADR-138 remote desktop session mode.
+    //
+    // A session is a single permanent Enter: seat → Remote + focused=true,
+    // with no boundary semantics on either side. The wire format is unchanged
+    // (`InputEvent::to_frame`/`from_frame`), only the Enter source differs —
+    // session establishment instead of an edge crossing. `InputClient`'s
+    // focused gating, seq dedup, and `release_all_inputs` flush are reused
+    // verbatim.
+    // ------------------------------------------------------------------
+
+    /// Target side: enter Session mode. A single permanent Enter puts the
+    /// client in focus and parks the cursor at the host screen center; the
+    /// controller's first Move frame re-places it inside the session window.
+    /// Nothing here touches edge state — Session mode has no boundaries.
+    pub fn enter_session(&self) {
+        let events = {
+            let mut engine = self.shared.input_engine.lock().expect("engine");
+            engine.clear_stale_remote();
+            engine.set_edge(tetherly_core::ScreenEdge::Right);
+            // Session mode = permanent Enter at screen center. push() assigns
+            // the next seq; the client dedups by seq as with any other Enter.
+            engine.force_remote_center();
+            engine.drain()
+        };
+        // The resume/grace machinery exists for edge roaming recovery; a
+        // session Enter goes straight through the live channel or fails.
+        if let Err(e) = self.send_input_events(events, "remote_session_enter") {
+            warn!(%e, "remote session: failed to send Enter frames");
+        }
+        {
+            let mut sink = self.shared.input_sink.lock().expect("sink");
+            let (w, h) = crate::platform::screen_size();
+            sink.cursor = (w / 2, h / 2);
+        }
+        *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Remote);
+        self.emit(UiEvent::input_seat_changed("remote", true, None));
+    }
+
+    /// Target side: leave Session mode. Flushes every held key/button via the
+    /// engine's Leave frame (client `release_all_inputs`), restores Local seat.
+    pub fn exit_session(&self) {
+        let events = {
+            let mut engine = self.shared.input_engine.lock().expect("engine");
+            engine.force_local();
+            engine.drain()
+        };
+        if let Err(e) = self.send_input_events(events, "remote_session_exit") {
+            warn!(%e, "remote session: failed to send Leave frame");
+        }
+        *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        self.emit(UiEvent::input_seat_changed("local", false, None));
+    }
+
+    /// Host side of an ADR-138 session request. Validate-first: a malformed
+    /// session_id is rejected outright, never aliased into a sentinel that
+    /// would keep flowing through policy checks.
+    pub async fn receive_remote_session_request(
+        &self,
+        peer: &DeviceId,
+        mut frame: RemoteSessionRequestFrame,
+    ) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+
+        frame.sanitize();
+        if InputTunnelValidator::validate_session_id(&frame.session_id).is_err() {
+            warn!(peer = %peer, "invalid remote session_id rejected");
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Warning,
+                "remote_session_rejected",
+                Some(peer_str.clone()),
+                "Rejected remote session request: invalid session_id".to_string(),
+                false,
+            );
+            return;
+        }
+
+        // Single-session invariant: Busy while this node is already hosting
+        // (or negotiating) a remote session, regardless of requester.
+        let policy = self.input_policy();
+        let profile = self.peer_profile(peer);
+
+        let (accept, reject_reason) = {
+            let guard = self.shared.remote_session.lock().expect("remote_session");
+            if guard.is_some() {
+                (false, Some(RemoteSessionRejectReason::Busy))
+            } else if !policy.enabled
+                || !policy.allow_inbound_control
+                || !policy.is_peer_eligible(&profile)
+            {
+                (false, Some(RemoteSessionRejectReason::PolicyDisabled))
+            } else if !matches!(
+                self.screen_state(),
+                ScreenState::Allowed | ScreenState::Streaming
+            ) {
+                // ADR-138 §2.4: a host that never allowed screen streaming
+                // auto-allows for the session — the user explicitly chose to
+                // be controlled via the session handshake. Policy gating
+                // happened above. `Requested` (a 45720 dial that raced this
+                // handler) counts as never-allowed; `Idle/Requested` →
+                // allow. An explicit prior `Allowed`/`Streaming` is kept.
+                // `allow()` only transitions from `Requested|Allowed`, so
+                // mark the imminent 45720 dial first (idempotent with the
+                // real dial's on_peer_connected) — from Idle the allow
+                // would be a silent no-op and the later Start would be
+                // refused at Requested (trace: refused=1, state wedged at
+                // Requested, screen never streams).
+                self.shared
+                    .screen_engine
+                    .lock()
+                    .expect("screen")
+                    .on_peer_connected();
+                self.screen_allow();
+                (true, None)
+            } else {
+                (true, None)
+            }
+        };
+
+        if !accept {
+            if let Some(reason) = reject_reason {
+                let resp = RemoteSessionRespFrame {
+                    session_id: frame.session_id.clone(),
+                    accepted: false,
+                    reject_reason: Some(reason.as_str().to_string()),
+                    screen_width: 0,
+                    screen_height: 0,
+                    keymap_profile: None,
+                    timestamp_ms: now_ms,
+                };
+                if let Ok(inner) = resp.to_frame() {
+                    let _ = self.send_to(peer, inner).await;
+                }
+                self.record_audit(
+                    AuditCategory::Security,
+                    AuditSeverity::Warning,
+                    "remote_session_rejected",
+                    Some(peer_str.clone()),
+                    format!(
+                        "Rejected remote session request from {}: {}",
+                        peer_str,
+                        reason.as_str()
+                    ),
+                    false,
+                );
+            }
+            return;
+        }
+
+        // Accept: register as SessionTarget, then answer with this machine's
+        // physical resolution and suggested keymap preset.
+        let (width, height) = {
+            let layout = self.shared.topology_layout.lock().expect("topology_layout");
+            (layout.display.width, layout.display.height)
+        };
+        let state = ActiveRemoteSessionState {
+            session_id: frame.session_id.clone(),
+            peer_id: peer_str.clone(),
+            role: InputTunnelRole::SessionTarget,
+            screen_width: width,
+            screen_height: height,
+            started_at_ms: now_ms,
+            last_activity_ms: now_ms,
+        };
+        let mut sm = RemoteSessionStateMachine::new();
+        let _ = sm.request_received();
+        let _ = sm.accepted();
+        *self.shared.remote_session.lock().expect("remote_session") = Some(RemoteSessionState {
+            state: state.clone(),
+            machine: sm,
+        });
+
+        // Screen flow gate: consent is already open (or auto-allowed above);
+        // the controller drives Start via the existing screen control path.
+        let resp = RemoteSessionRespFrame {
+            session_id: frame.session_id.clone(),
+            accepted: true,
+            reject_reason: None,
+            screen_width: width,
+            screen_height: height,
+            keymap_profile: policy.keymap.clone(),
+            timestamp_ms: now_ms,
+        };
+        if let Ok(inner) = resp.to_frame() {
+            let _ = self.send_to(peer, inner).await;
+        }
+
+        self.emit(UiEvent::input_tunnel_session_started(
+            &frame.session_id,
+            &peer_str,
+            &alias,
+            "session_target",
+            Some(width),
+            Some(height),
+            now_ms,
+        ));
+        self.record_audit(
+            AuditCategory::Security,
+            AuditSeverity::Notice,
+            "remote_session_started",
+            Some(peer_str.clone()),
+            format!(
+                "Remote desktop session {} accepted from peer {} (target role)",
+                frame.session_id, peer_str
+            ),
+            true,
+        );
+    }
+
+    /// Controller side: process the host's session answer. On accept, store
+    /// the viewport baseline and enter Session mode (Enter frame out).
+    pub async fn receive_remote_session_resp(
+        &self,
+        peer: &DeviceId,
+        mut frame: RemoteSessionRespFrame,
+    ) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+
+        frame.sanitize();
+        if InputTunnelValidator::validate_session_id(&frame.session_id).is_err() {
+            warn!(peer = %peer, "invalid remote session_id in resp");
+            return;
+        }
+
+        let current = self
+            .shared
+            .remote_session
+            .lock()
+            .expect("remote_session")
+            .clone();
+        let Some(state) = current else {
+            return; // No session in flight; a late resp must not resurrect it.
+        };
+        if state.session_id != frame.session_id || state.peer_id != peer_str {
+            return; // Stale or foreign resp.
+        }
+        if !frame.accepted {
+            let reason = frame
+                .reject_reason
+                .as_deref()
+                .and_then(RemoteSessionRejectReason::from_reason)
+                .map(|r| r.as_str().to_string())
+                .unwrap_or_else(|| "unspecified".to_string());
+            *self.shared.remote_session.lock().expect("remote_session") = None;
+            *self.shared.remote_session_keymap.lock().expect("rs_keymap") = None;
+            self.emit(UiEvent::input_tunnel_session_closed(
+                &frame.session_id,
+                &peer_str,
+                self.peer_alias(peer).unwrap_or_else(|| peer_str.clone()),
+                &reason,
+                now_ms,
+            ));
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Info,
+                "remote_session_rejected",
+                Some(peer_str.clone()),
+                format!("Remote session rejected by host: {reason}"),
+                false,
+            );
+            return;
+        }
+
+        let mut sm = state.machine;
+        // Viewer-side transitions: Requesting --accepted()--> Streaming
+        // (session established, Enter outgoing) --input_enabled()-->
+        // Controlling (Enter sent through 45719, Session mode active). The
+        // wire's `accepted` flag drives BOTH hops: without the second hop the
+        // viewer machine never reaches Controlling and every start times out.
+        if sm.accepted().is_err() {
+            return; // Duplicate resp or concurrent teardown.
+        }
+        {
+            let mut guard = self.shared.remote_session.lock().expect("remote_session");
+            if let Some(s) = guard.as_mut() {
+                s.machine = sm;
+                s.state.screen_width = frame.screen_width.max(1);
+                s.state.screen_height = frame.screen_height.max(1);
+                s.state.last_activity_ms = now_ms;
+            }
+        }
+        // Session-scoped keymap: the host's suggested preset drives how this
+        // controller's keystrokes are remapped for the lifetime of the
+        // session (cleared on close). The operator's own policy stays intact.
+        if let Some(profile) = frame.keymap_profile.as_deref() {
+            if tetherly_core::KeyMapProfile::from_preset(profile).is_some() {
+                *self.shared.remote_session_keymap.lock().expect("rs_keymap") =
+                    Some(profile.to_string());
+            }
+        }
+        self.enter_session();
+        {
+            let mut guard = self.shared.remote_session.lock().expect("remote_session");
+            if let Some(s) = guard.as_mut() {
+                // enter_session sent the Enter frames — the session is now
+                // controlling. A concurrent close may have cleared the slot;
+                // that close wins and the transition is dropped.
+                let _ = s.machine.input_enabled();
+            }
+        }
+        self.record_audit(
+            AuditCategory::Security,
+            AuditSeverity::Notice,
+            "remote_session_controlling",
+            Some(peer_str.clone()),
+            format!("Remote session {} entered Controlling", frame.session_id),
+            true,
+        );
+    }
+
+    /// Either side: gracefully end the session. Flushes held inputs on the
+    /// target via `exit_session` and clears the slot; idempotent.
+    pub async fn receive_remote_session_close(
+        &self,
+        peer: &DeviceId,
+        frame: RemoteSessionCloseFrame,
+    ) {
+        let now_ms = self.shared.clock.unix_ms();
+        let peer_str = peer.to_string();
+        let current = self
+            .shared
+            .remote_session
+            .lock()
+            .expect("remote_session")
+            .clone();
+        let Some(state) = current else {
+            return;
+        };
+        // Match on session_id OR peer so a half-open peer may still tear down.
+        if state.session_id != frame.session_id && state.peer_id != peer_str {
+            return;
+        }
+        *self.shared.remote_session.lock().expect("remote_session") = None;
+        *self.shared.remote_session_keymap.lock().expect("rs_keymap") = None;
+        if state.role.is_receiving() {
+            self.exit_session();
+        } else {
+            // Controller side: drop the screen channel with the session.
+            self.screen_stop().await.ok();
+        }
+        let alias = self.peer_alias(peer).unwrap_or_else(|| peer_str.clone());
+        self.emit(UiEvent::input_tunnel_session_closed(
+            &state.session_id,
+            &state.peer_id,
+            &alias,
+            InputTunnelValidator::sanitize_reason(&frame.reason),
+            now_ms,
+        ));
+        self.record_audit(
+            AuditCategory::Security,
+            AuditSeverity::Notice,
+            "remote_session_closed",
+            Some(state.peer_id.clone()),
+            format!(
+                "Remote session {} closed: {}",
+                state.session_id,
+                InputTunnelValidator::sanitize_reason(&frame.reason)
+            ),
+            true,
+        );
+    }
+
+    /// Refresh session liveness. Called by the controller's heartbeat loop.
+    pub fn touch_remote_session(&self, session_id: &str) {
+        let now_ms = self.shared.clock.unix_ms();
+        let mut guard = self.shared.remote_session.lock().expect("remote_session");
+        if let Some(s) = guard.as_mut() {
+            if s.session_id == session_id {
+                s.state.last_activity_ms = now_ms;
+            }
+        }
+    }
+
+    /// Idle-timeout sweep, mirrors `input_tunnel_status` semantics. Returns
+    /// `true` when a session was force-closed.
+    pub fn remote_session_idle_check(&self) -> bool {
+        let now_ms = self.shared.clock.unix_ms();
+        let policy = self.input_policy();
+        let expired = {
+            let guard = self.shared.remote_session.lock().expect("remote_session");
+            match guard.as_ref() {
+                Some(s) => {
+                    policy.idle_timeout_secs != 0
+                        && now_ms.saturating_sub(s.last_activity_ms)
+                            > (policy.idle_timeout_secs as u64) * 1000
+                }
+                None => false,
+            }
+        };
+        if !expired {
+            return false;
+        }
+        let state = self
+            .shared
+            .remote_session
+            .lock()
+            .expect("remote_session")
+            .clone();
+        if let Some(s) = state {
+            let peer = DeviceId::parse(&s.peer_id).ok();
+            *self.shared.remote_session.lock().expect("remote_session") = None;
+            *self.shared.remote_session_keymap.lock().expect("rs_keymap") = None;
+            if s.role.is_receiving() {
+                self.exit_session();
+            }
+            if let Some(peer) = peer {
+                let close = RemoteSessionCloseFrame {
+                    session_id: s.session_id.clone(),
+                    reason: "idle timeout exceeded".to_string(),
+                    timestamp_ms: now_ms,
+                };
+                if let Ok(inner) = close.to_frame() {
+                    let node = self.clone_handle();
+                    tokio::spawn(async move {
+                        let _ = node.send_to(&peer, inner).await;
+                    });
+                }
+            }
+            self.record_audit(
+                AuditCategory::Security,
+                AuditSeverity::Notice,
+                "remote_session_idle_timeout",
+                Some(s.peer_id.clone()),
+                format!("Remote session {} closed due to idle timeout", s.session_id),
+                true,
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Current remote session snapshot for status/REST consumers.
+    pub fn remote_session_status(&self) -> Option<ActiveRemoteSessionState> {
+        self.shared
+            .remote_session
+            .lock()
+            .expect("remote_session")
+            .as_ref()
+            .map(|s| s.state.clone())
+    }
+
     /// Query status of active virtual input tunnel session and governance policy.
     pub fn input_tunnel_status(&self) -> InputTunnelStatusReport {
         let now_ms = self.shared.clock.unix_ms();
@@ -1142,6 +1616,20 @@ impl Node {
     }
 
     fn policy_keymap_name(&self) -> Option<String> {
+        // ADR-138: while a remote session is active on the controller side,
+        // the host's suggested preset (from the session resp) wins over the
+        // local operator policy — the target decided how its keys translate.
+        if self.remote_session_active() {
+            if let Some(km) = self
+                .shared
+                .remote_session_keymap
+                .lock()
+                .expect("rs_keymap")
+                .clone()
+            {
+                return Some(km);
+            }
+        }
         self.shared
             .input_policy
             .lock()
@@ -1746,7 +2234,17 @@ impl Node {
         // a sustained, deliberate physical push through THIS node's own
         // configured edge requests a polite takeover, making the reverse
         // direction click-free. Everything else stays suppressed.
-        if self.active_tunnel_role() == Some(tetherly_core::InputTunnelRole::Target) {
+        //
+        // ADR-138: while a remote desktop SESSION is driving this node
+        // (SessionTarget), even the deliberate edge-push takeover is
+        // suppressed — the session window is the only control surface until
+        // it closes (m6_3 asserts the watcher skip too).
+        if self.remote_session_active()
+            || self.active_tunnel_role() == Some(tetherly_core::InputTunnelRole::Target)
+        {
+            if self.remote_session_active() {
+                return Ok(None);
+            }
             // Distance arming: a mouse that just got plugged into this
             // machine (or is being bumped on the desk) must traverse a real
             // range before its edge-push may take over. Accumulate
@@ -2010,6 +2508,17 @@ impl Node {
             .expect("active_input_tunnel")
             .as_ref()
             .map(|s| s.role)
+    }
+
+    /// ADR-138: is a remote desktop session active on this node (either side)?
+    /// While true, roaming takeover is suppressed and the watcher must not
+    /// auto-attach — the session owns the single outbound input channel.
+    pub fn remote_session_active(&self) -> bool {
+        self.shared
+            .remote_session
+            .lock()
+            .expect("remote_session")
+            .is_some()
     }
 
     /// Physical movement a mouse must accumulate (px, Manhattan over

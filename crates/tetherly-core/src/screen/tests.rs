@@ -93,8 +93,12 @@ fn start_is_refused_until_the_local_machine_allows() {
     let mut s = ScreenSender::new();
     s.on_peer_connected();
     assert_eq!(s.state(), ScreenState::Requested);
-    // Arriving at the channel is not consent.
-    assert_eq!(s.on_control(ControlMsg::Start).unwrap(), None);
+    // Arriving at the channel is not consent: refusal is answered with the
+    // Stop reply so the controller learns the Start did not take effect.
+    assert_eq!(
+        s.on_control(ControlMsg::Start).unwrap(),
+        Some(ControlMsg::Stop)
+    );
     assert_eq!(s.state(), ScreenState::Requested);
     assert_eq!(s.stats().refused, 1);
     // A push while un-allowed is dropped, not queued.
@@ -119,8 +123,11 @@ fn revoke_stops_streaming_and_clears_the_queue() {
     s.revoke();
     assert_eq!(s.state(), ScreenState::Requested);
     assert!(s.drain().is_empty());
-    // After a revoke, Start is refused again.
-    s.on_control(ControlMsg::Start).unwrap();
+    // After a revoke, Start is refused again (with the Stop refusal reply).
+    assert_eq!(
+        s.on_control(ControlMsg::Start).unwrap(),
+        Some(ControlMsg::Stop)
+    );
     assert_eq!(s.state(), ScreenState::Requested);
     assert_eq!(s.stats().refused, 1);
 }

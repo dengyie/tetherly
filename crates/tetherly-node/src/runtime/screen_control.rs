@@ -88,9 +88,33 @@ impl Node {
     }
 
     /// Visitor: ask the host to begin sending. Refused by the host until it has
-    /// allowed locally.
+    /// allowed locally. A refusal comes back as the host's `Stop` reply, which
+    /// the control pump latches in `screen_start_refused`; the next call
+    /// surfaces it as an error so callers (e.g. the ADR-138 session start) can
+    /// roll back deterministically.
     pub async fn screen_start(&self) -> Result<(), CoreError> {
+        self.shared
+            .screen_start_refused
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         self.send_screen_control(ControlMsg::Start).await?;
+        // Give the host's reply a beat to round-trip before the caller reads
+        // the latch (poll, not sleep-guess: exit early on refusal).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < deadline {
+            if self
+                .shared
+                .screen_start_refused
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(CoreError::Json(
+                    "screen start refused by host (consent not granted)".into(),
+                ));
+            }
+            if self.screen_state() == ScreenState::Streaming {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         let peer = self
             .shared
             .screen_peer

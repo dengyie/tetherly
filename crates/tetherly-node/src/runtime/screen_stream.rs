@@ -1127,6 +1127,17 @@ impl Node {
                                         if let ControlMsg::SetRecordingState { active } = msg {
                                             node.shared.screen_peer_recording.store(active, std::sync::atomic::Ordering::Relaxed);
                                         }
+                                        if matches!(msg, ControlMsg::Stop) {
+                                            // ADR-138: an unsolicited `Stop` from the host
+                                            // on the control channel is the Start-refusal
+                                            // reply (consent revoked mid-session). Latch
+                                            // it so a pending remote-session start rolls
+                                            // back instead of presenting a dead screen.
+                                            node.shared
+                                                .screen_start_refused
+                                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                                            tracing::info!("viewer: host refused screen start (consent stop reply)");
+                                        }
                                         match &msg {
                                             ControlMsg::SetLaserPointer { x, y, active, color_rgb } => {
                                                 let state = if *active {

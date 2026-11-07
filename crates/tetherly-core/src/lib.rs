@@ -37,6 +37,7 @@ pub mod persist;
 pub mod pin;
 pub mod ports;
 pub mod recommend;
+pub mod remote_session;
 pub mod replay;
 pub mod screen;
 pub mod screen_font;
@@ -159,6 +160,10 @@ pub use ports::{
 pub use recommend::{
     recommend_streaming_params, AudioTier, CameraTier, DisplayTier, MicTier,
     StreamingRecommendation,
+};
+pub use remote_session::{
+    RemoteSessionCloseFrame, RemoteSessionPhase, RemoteSessionReason, RemoteSessionRejectReason,
+    RemoteSessionRequestFrame, RemoteSessionRespFrame, RemoteSessionStateMachine,
 };
 pub use replay::ReplayGuard;
 pub use screen::{

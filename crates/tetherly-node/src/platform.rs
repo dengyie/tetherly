@@ -2387,3 +2387,34 @@ impl SysProbe for PlatformSysProbe {
         Ok(HostSample { total_memory_bytes })
     }
 }
+
+/// Spawn the remote-session viewer window (ADR-138 §2.6 step 5). AppKit
+/// windows must live in the `tetherly-viewer` subprocess (installed next to
+/// this binary); a headless host has no viewer and reports honestly — the
+/// session still works wire-side without it.
+#[cfg(target_os = "macos")]
+pub fn spawn_remote_session_viewer() -> Result<u32, tetherly_core::CoreError> {
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("tetherly-viewer")))
+        .unwrap_or_else(|| std::path::PathBuf::from("tetherly-viewer"));
+    let child = std::process::Command::new(exe)
+        .arg("--remote-session")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            tetherly_core::CoreError::ScreenRefused(format!(
+                "spawning tetherly-viewer failed ({e}); macOS session viewer needs the AppKit subprocess"
+            ))
+        })?;
+    Ok(child.id())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn spawn_remote_session_viewer() -> Result<u32, tetherly_core::CoreError> {
+    Err(tetherly_core::CoreError::ScreenRefused(
+        "no session viewer on this platform; session continues wire-side only".into(),
+    ))
+}

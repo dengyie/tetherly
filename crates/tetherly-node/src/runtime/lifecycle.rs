@@ -328,6 +328,7 @@ impl Node {
             }),
             screen_recording: Mutex::new(None),
             screen_peer_recording: std::sync::atomic::AtomicBool::new(false),
+            screen_start_refused: std::sync::atomic::AtomicBool::new(false),
             screen_playback: Mutex::new(None),
             screen_last_frame: Mutex::new(None),
             screen_snapshot_count: AtomicU64::new(0),
@@ -614,6 +615,8 @@ impl Node {
             cursor_edge_resistance_acc: Mutex::new(HashMap::new()),
             input_policy: Mutex::new(initial_input_policy),
             active_input_tunnel: Mutex::new(None),
+            remote_session: Mutex::new(None),
+            remote_session_keymap: Mutex::new(None),
             input_client_task: Mutex::new(None),
             input_dialing: std::sync::atomic::AtomicBool::new(false),
             last_auto_reverse: Mutex::new(None),
@@ -1282,6 +1285,19 @@ impl Node {
                 (hb.session_id.len() + 32) as u64,
                 tetherly_core::frame::TYPE_INPUT_TUNNEL_HEARTBEAT,
             ),
+            SessionEvent::RemoteSessionRequest(req) => (
+                (req.session_id.len() + req.client_device_id.len() + 48) as u64,
+                tetherly_core::frame::TYPE_REMOTE_SESSION_REQUEST,
+            ),
+            SessionEvent::RemoteSessionResp(resp) => (
+                (resp.session_id.len() + resp.reject_reason.as_ref().map_or(0, |s| s.len()) + 64)
+                    as u64,
+                tetherly_core::frame::TYPE_REMOTE_SESSION_RESP,
+            ),
+            SessionEvent::RemoteSessionClose(close) => (
+                (close.session_id.len() + close.reason.len() + 48) as u64,
+                tetherly_core::frame::TYPE_REMOTE_SESSION_CLOSE,
+            ),
             SessionEvent::VirtualDisplayAnnounce(ann) => (
                 (ann.display_name.len() + 64) as u64,
                 tetherly_core::frame::TYPE_VIRTUAL_DISPLAY_ANNOUNCE,
@@ -1721,6 +1737,15 @@ impl Node {
             }
             SessionEvent::InputTunnelHeartbeat(hb) => {
                 self.receive_input_tunnel_heartbeat(peer, hb);
+            }
+            SessionEvent::RemoteSessionRequest(req) => {
+                self.receive_remote_session_request(peer, req).await;
+            }
+            SessionEvent::RemoteSessionResp(resp) => {
+                self.receive_remote_session_resp(peer, resp).await;
+            }
+            SessionEvent::RemoteSessionClose(close) => {
+                self.receive_remote_session_close(peer, close).await;
             }
             SessionEvent::VirtualDisplayAnnounce(ann) => {
                 self.receive_virtual_display_announce(peer, ann);
