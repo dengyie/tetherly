@@ -773,10 +773,6 @@ impl ScreenSender {
     }
 
     pub fn revoke(&mut self) {
-        eprintln!(
-            "[m6dbg] revoke: state {:?} -> requested-path, next_seq={} (kept)",
-            self.state, self.next_seq
-        );
         self.state = match self.state {
             ScreenState::Idle => ScreenState::Idle,
             _ => ScreenState::Requested,
@@ -1591,10 +1587,6 @@ impl ScreenSender {
     /// Peer gone: back to Idle, sequence reset so a reconnect starts clean and
     /// cannot replay.
     pub fn on_peer_gone(&mut self) {
-        eprintln!(
-            "[m6dbg] on_peer_gone: next_seq {} -> 1 (SEQ RESET)",
-            self.next_seq
-        );
         self.state = ScreenState::Idle;
         self.next_seq = 1;
         self.pending.clear();

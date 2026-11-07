@@ -12401,26 +12401,30 @@ async fn m6_8_reused_channel_second_session_streams_frames() {
         .expect("session 1 start must succeed");
     wait_session_controlling(&viewer, Duration::from_secs(10)).await;
 
+    // Stream a substantial run (24 frames): the seq-cliff failure mode drops
+    // the WHOLE previous run (>= 24 stale drops) while slow-runner HARQ
+    // duplicate delivery contributes only 2-4 counted drops — a full-order
+    // of magnitude of assertion margin between the two.
     let start = std::time::Instant::now();
     loop {
         host.screen_send_frame()
             .await
             .expect("session 1 frame send");
         let rx = viewer.screen_rx_stats();
-        if rx.received >= 3 {
+        if rx.received >= 24 {
             break;
         }
-        if start.elapsed() > Duration::from_secs(5) {
+        if start.elapsed() > Duration::from_secs(15) {
             panic!(
                 "session 1 never streamed frames to the viewer; received={}",
                 rx.received
             );
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let session1_received = viewer.screen_rx_stats().received;
     assert!(
-        session1_received >= 3,
+        session1_received >= 24,
         "precondition: session 1 must have advanced the receiver's sequence"
     );
 

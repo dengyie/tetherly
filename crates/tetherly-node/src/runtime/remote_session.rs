@@ -200,12 +200,6 @@ impl Node {
             // silently time out into a black screen.
             let open_peer = self.shared.screen_peer.lock().expect("screen_peer").clone();
             let ctl_open = self.shared.screen_ctl.lock().await.is_some();
-            eprintln!(
-                "[m6dbg] reuse check: open_peer={:?} ctl_open={} (reuse={})",
-                open_peer.as_ref().map(|p| p.as_str()),
-                ctl_open,
-                ctl_open && open_peer.as_ref() == Some(&peer_id)
-            );
             if !(ctl_open && open_peer.as_ref() == Some(&peer_id)) {
                 if let Err(e) = self.open_screen(&peer_id).await {
                     self.teardown_session_silent(&session_id).await;
