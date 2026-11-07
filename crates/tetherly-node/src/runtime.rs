@@ -64,6 +64,7 @@ mod media;
 mod messages;
 mod notify;
 mod overlay;
+mod remote_session;
 mod routes;
 mod screen_control;
 mod screen_dto;
@@ -95,6 +96,7 @@ pub use locate::*;
 pub use media::*;
 pub use messages::*;
 pub use notify::*;
+pub use remote_session::RemoteSessionStartReport;
 pub use routes::*;
 pub use screen_dto::*;
 pub use shell_reveal::*;
@@ -545,6 +547,16 @@ struct Shared {
     screen_recording: Mutex<Option<ScreenRecordingSession>>,
     /// Peer disclosed recording state via ControlMsg::SetRecordingState (ADR-101).
     screen_peer_recording: std::sync::atomic::AtomicBool,
+    /// Viewer-side: the host answered our `Start` with the refusal `Stop`
+    /// reply (consent revoked mid-session / never granted). One-shot latch
+    /// the remote-session start consults to roll the session back instead of
+    /// presenting an endless black screen.
+    screen_start_refused: std::sync::atomic::AtomicBool,
+    /// Monotonic ticket of the in-flight `screen_start` attempt. A Stop-reply
+    /// may only latch `screen_start_refused` when its ticket matches — a
+    /// leftover refusal reply from a PREVIOUS screen channel (teardown racing
+    /// a new session's Start) must not poison the new attempt's verdict.
+    screen_start_ticket: std::sync::atomic::AtomicU64,
     /// Active screen session in-container playback session (ADR-102).
     screen_playback: Mutex<Option<ScreenPlaybackSession>>,
     /// Most recent uncompressed screen frame presented or grabbed for snapshots (ADR-103).
@@ -877,6 +889,24 @@ struct Shared {
     cursor_edge_resistance_acc: Mutex<HashMap<DisplayEdge, u32>>,
     input_policy: Mutex<InputTunnelPolicy>,
     active_input_tunnel: Mutex<Option<ActiveInputTunnelSession>>,
+    /// ADR-138 remote desktop session — single slot. In-memory only: a crash
+    /// resets to no session by construction (sessions are transient).
+    pub(crate) remote_session: Mutex<Option<crate::runtime::input::RemoteSessionState>>,
+    /// ADR-138 session-scoped keymap: the host's suggested preset from the
+    /// session resp (e.g. "mac_to_windows"). Applied for the lifetime of the
+    /// session so the controller's keystrokes remap as the target expects;
+    /// cleared on close. In-memory only, like the session itself.
+    pub(crate) remote_session_keymap: Mutex<Option<String>>,
+    /// ADR-138: set when the host auto-allowed screen streaming only because
+    /// the session handshake implied consent (accept path with no prior
+    /// Allowed|Streaming). On session teardown the auto-grant is revoked —
+    /// an explicit operator allow granted before the session survives it.
+    pub(crate) remote_session_auto_allowed: std::sync::atomic::AtomicBool,
+    /// Monotonic generation of the active 45720 server channel. Each
+    /// `attach_screen_server` increments it; a pump loop may only run the
+    /// engine-level `on_peer_gone` reset when its generation is still the
+    /// newest — a replaced loop's teardown must not reset its successor.
+    pub(crate) screen_channel_gen: std::sync::atomic::AtomicU64,
     /// Handle of the running inbound input-client task. A newer accept
     /// aborts the previous one so stacked inbound sessions can never leave
     /// two clients racing on `input_sink` / the real injection sink.
@@ -1478,7 +1508,7 @@ pub(crate) mod clipboard_policy_tests {
         let (node, dir) = temp_test_node("defaults");
         let report = node.clipboard_policy_report();
         assert!(report.ok);
-        assert_eq!(report.policy.mode, ClipSyncMode::Manual);
+        assert_eq!(report.policy.mode, ClipSyncMode::BidirectionalAuto);
         assert!(report.policy.sensitive_guard);
         assert_eq!(report.policy.max_payload_bytes, 65536);
         assert_eq!(report.auto_synced_out_count, 0);

@@ -542,7 +542,12 @@ pub struct ClipboardPolicy {
 impl Default for ClipboardPolicy {
     fn default() -> Self {
         Self {
-            mode: ClipSyncMode::Manual,
+            // Bidirectional auto-sync is the product default (ADR: cross-device
+            // clipboard must "just work" on copy). Manual is an explicit opt-out
+            // persisted via /api/clip/policy. Previously defaulted to Manual,
+            // which silently disabled passive clipboard watching on fresh
+            // installs — the "one side copied, other side no effect" bug.
+            mode: ClipSyncMode::BidirectionalAuto,
             sensitive_guard: true,
             allowed_groups: Vec::new(),
             allowed_tags: Vec::new(),
@@ -2623,7 +2628,7 @@ mod tests {
 
         // 1. Default policy check
         let def = load_clipboard_policy(&dir);
-        assert_eq!(def.mode, ClipSyncMode::Manual);
+        assert_eq!(def.mode, ClipSyncMode::BidirectionalAuto);
         assert!(def.sensitive_guard);
         assert_eq!(def.max_payload_bytes, DEFAULT_MAX_CLIP_AUTO_SYNC_BYTES);
         assert!(def.allowed_groups.is_empty());
@@ -2700,6 +2705,29 @@ mod tests {
         };
         assert!(!loaded.is_peer_eligible(&prof_unmatched));
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression lock: a fresh install (no clipboard_policy.json on disk) must
+    /// default to passive auto-sync. Manual would silently disable the
+    /// clipboard watcher — the "one side copied, other side no effect" bug.
+    #[test]
+    fn fresh_install_clipboard_policy_defaults_to_bidirectional_auto() {
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-clipdef-auto-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+        assert!(!dir.join(CLIPBOARD_POLICY_FILE).exists());
+        let def = load_clipboard_policy(&dir);
+        assert_eq!(def.mode, ClipSyncMode::BidirectionalAuto);
+        assert!(def.mode.can_send());
+        assert!(def.mode.can_receive());
         let _ = fs::remove_dir_all(&dir);
     }
 

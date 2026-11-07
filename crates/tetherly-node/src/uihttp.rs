@@ -20,7 +20,10 @@ use tracing::{info, warn};
 // `tetherly_node::loopback_*` call sites and the router tests are unchanged.
 #[cfg(test)]
 use tetherly_loopback::parse_http_response;
-pub use tetherly_loopback::{loopback_delete, loopback_get, loopback_post, loopback_put};
+pub use tetherly_loopback::{
+    loopback_delete, loopback_get, loopback_get_with_deadlines, loopback_post,
+    loopback_post_with_deadlines, loopback_put, loopback_put_with_deadlines,
+};
 
 const INDEX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/index.html"));
 const MAX_HEADER: usize = 16 * 1024;
@@ -47,6 +50,7 @@ mod api_mic;
 mod api_notify;
 mod api_peers;
 mod api_power;
+mod api_remote_session;
 mod api_screen_analysis;
 mod api_screen_overlay;
 mod api_screen_quality;
@@ -1202,6 +1206,15 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
         }
         ("POST", "/api/input/ensure") => {
             api_input::post_input_ensure(method, query_str, body, node).await
+        }
+        ("POST", "/api/remote/session/start") => {
+            api_remote_session::post_remote_session_start(method, query_str, body, node).await
+        }
+        ("POST", "/api/remote/session/stop") => {
+            api_remote_session::post_remote_session_stop(method, query_str, body, node).await
+        }
+        ("GET", "/api/remote/session") | ("GET", "/api/remote/session/status") => {
+            api_remote_session::get_remote_session(method, query_str, body, node).await
         }
         ("GET", "/api/display/virtual") | ("GET", "/api/display/virtual/status") => {
             api_display::get_display_virtual(method, query_str, body, node).await

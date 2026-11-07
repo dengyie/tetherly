@@ -148,6 +148,54 @@ async fn wait_inbox(dir: &std::path::Path, name: &str, timeout: Duration) -> Vec
     }
 }
 
+/// Like [`wait_inbox`] but tolerates zero-byte payloads: the existence of the
+/// final inbox path (not its length) is the completion signal.
+async fn wait_inbox_any(dir: &std::path::Path, name: &str, timeout: Duration) -> Vec<u8> {
+    let path = dir.join("inbox").join(name);
+    let start = std::time::Instant::now();
+    loop {
+        if let Ok(bytes) = std::fs::read(&path) {
+            return bytes;
+        }
+        if start.elapsed() > timeout {
+            panic!("inbox file missing");
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+}
+
+/// Poll `/api/state` until the given transfer reaches the wanted phase (e.g.
+/// "completed" or "failed") and return the final state document. The sender's
+/// terminal state flip races the receiver's final file rename by microseconds;
+/// under a loaded test runner an unchecked single read can observe the
+/// mid-flight phase and flake. Polling to a deadline is the deterministic form
+/// of the same assertion.
+async fn wait_state_terminal(
+    ui_port: u16,
+    transfer_id: &str,
+    phase_want: &str,
+    timeout: Duration,
+) -> serde_json::Value {
+    let start = std::time::Instant::now();
+    loop {
+        let (code, body) = tetherly_node::loopback_get(ui_port, "/api/state")
+            .await
+            .expect("loopback_get state succeeds");
+        assert_eq!(code, 200);
+        let state: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let transfers = state["transfers"].as_array().expect("transfers array");
+        if let Some(t) = transfers.iter().find(|t| t["transfer_id"] == transfer_id) {
+            if t["phase"] == phase_want {
+                return state;
+            }
+        }
+        if start.elapsed() > timeout {
+            panic!("transfer {transfer_id} never reached phase '{phase_want}': {body:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn pair_phone_desktop() -> (Node, Node, DirGuard, DirGuard) {
     let (phone_dir, g1) = temp_dir("phone");
     let (desk_dir, g2) = temp_dir("desk");
@@ -851,20 +899,41 @@ async fn streaming_file_transfer_tracks_active_progress_and_completion_states() 
     assert_eq!(received.len(), total_size);
     assert_eq!(hex_sha256(&received), expected_hash);
 
-    // Host should reflect completed outbound transfer with full progress
-    let host_transfers = host.active_transfers();
+    // Host should reflect completed outbound transfer with full progress.
+    // The sender's terminal flip races the receiver's rename by microseconds;
+    // poll instead of a single read (same flake window as the enterprise test).
+    let start = std::time::Instant::now();
+    let host_transfers = loop {
+        let transfers = host.active_transfers();
+        if transfers.len() == 1 && transfers[0].phase == TransferPhase::Completed {
+            break transfers;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("host transfer never reached Completed: {transfers:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(host_transfers.len(), 1);
-    assert_eq!(host_transfers[0].phase, TransferPhase::Completed);
     assert_eq!(host_transfers[0].transferred, total_size as u64);
 
     // Peer should reflect completed inbound transfer with full progress
-    let peer_transfers = peer.active_transfers();
+    let start = std::time::Instant::now();
+    let peer_transfers = loop {
+        let transfers = peer.active_transfers();
+        if transfers.len() == 1 && transfers[0].phase == TransferPhase::Completed {
+            break transfers;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("peer transfer never reached Completed: {transfers:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(peer_transfers.len(), 1);
-    assert_eq!(peer_transfers[0].phase, TransferPhase::Completed);
     assert_eq!(peer_transfers[0].direction, TransferDirection::Inbound);
     assert_eq!(peer_transfers[0].transferred, total_size as u64);
 
-    // Snapshot HTTP endpoint should expose transfers array
+    // Snapshot HTTP endpoint should expose transfers array — the runtime side
+    // just polled to Completed above, so a single read is now deterministic.
     let (sc_code, sc_body) = {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], ui_port));
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -890,12 +959,15 @@ async fn streaming_file_transfer_tracks_active_progress_and_completion_states() 
     assert_eq!(sc_code, 200);
     let snapshot: serde_json::Value = serde_json::from_slice(&sc_body).unwrap();
     let snap_transfers = snapshot["transfers"].as_array().expect("transfers array");
+    let snap_entry = snap_transfers
+        .iter()
+        .find(|t| t["transfer_id"] == transfer_id)
+        .expect("transfer entry present");
     assert_eq!(snap_transfers.len(), 1);
-    assert_eq!(snap_transfers[0]["transfer_id"], transfer_id);
-    assert_eq!(snap_transfers[0]["phase"], "completed");
-    assert_eq!(snap_transfers[0]["transferred"], total_size as u64);
-    assert_eq!(snap_transfers[0]["total"], total_size as u64);
-    assert_eq!(snap_transfers[0]["filename"], "large_progress.bin");
+    assert_eq!(snap_entry["phase"], "completed");
+    assert_eq!(snap_entry["transferred"], total_size as u64);
+    assert_eq!(snap_entry["total"], total_size as u64);
+    assert_eq!(snap_entry["filename"], "large_progress.bin");
 
     host.shutdown();
     peer.shutdown();
@@ -961,21 +1033,20 @@ async fn enterprise_file_limits_speed_and_status_observability() {
     assert_eq!(received.len(), total_size);
 
     // 3. Verify loopback_get /api/state reveals updated transfer with completed phase and speed_bps zeroed out
-    let (sc_code, sc_body) = tetherly_node::loopback_get(ui_port, "/api/state")
-        .await
-        .expect("loopback_get state succeeds");
-    assert_eq!(sc_code, 200);
-    let final_state: serde_json::Value = serde_json::from_slice(&sc_body).unwrap();
+    let final_state =
+        wait_state_terminal(ui_port, transfer_id, "completed", Duration::from_secs(10)).await;
     let transfers = final_state["transfers"]
         .as_array()
         .expect("transfers array");
+    let entry = transfers
+        .iter()
+        .find(|t| t["transfer_id"] == transfer_id)
+        .expect("transfer entry present");
     assert_eq!(transfers.len(), 1);
-    assert_eq!(transfers[0]["transfer_id"], transfer_id);
-    assert_eq!(transfers[0]["phase"], "completed");
-    assert_eq!(transfers[0]["transferred"], total_size as u64);
-    assert_eq!(transfers[0]["total"], total_size as u64);
+    assert_eq!(entry["transferred"], total_size as u64);
+    assert_eq!(entry["total"], total_size as u64);
     // On terminal phase, speed_bps must be settled to 0
-    assert_eq!(transfers[0]["speed_bps"], 0);
+    assert_eq!(entry["speed_bps"], 0);
 
     // 4. Test 64 GiB limit boundary via wire offer to peer
     let peer_dev_id = peer.identity().device_id().clone();
@@ -1028,15 +1099,19 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
         }
     }
 
-    // 2. Initiate send via loopback API
+    // 2. Initiate send via loopback API. The daemon hashes the whole file before
+    // answering (the transfer id is derived from the digest), so on a saturated
+    // machine this legitimately takes longer than the default 30 s budget.
     let payload = serde_json::json!({
         "path": file_path.to_str().unwrap(),
         "name": "cancellable.bin",
     });
-    let (send_code, send_body) = tetherly_node::loopback_post(
+    let (send_code, send_body) = tetherly_node::loopback_post_with_deadlines(
         ui_port,
         "/api/file/send",
         &serde_json::to_vec(&payload).unwrap(),
+        Duration::from_secs(5),
+        Duration::from_secs(120),
     )
     .await
     .expect("send succeeds");
@@ -1171,7 +1246,7 @@ async fn in_flight_streaming_transfer_can_be_cancelled_via_loopback_api() {
         &serde_json::to_vec(&ok_payload).unwrap(),
     )
     .await
-    .unwrap();
+    .unwrap_or_else(|e| panic!("small send never times out, but failed: {e}"));
     assert_eq!(ok_code, 200);
     let ok_resp: serde_json::Value = serde_json::from_slice(&ok_body).unwrap();
     let ok_transfer_id = ok_resp["transfer_id"].as_str().unwrap().to_string();
@@ -8463,7 +8538,10 @@ async fn policy_based_clipboard_auto_sync_and_sensitive_leak_guard_via_loopback_
     assert_eq!(code_h, 200);
     let h_rep: tetherly_node::ClipboardPolicyReport = serde_json::from_slice(&body_h).unwrap();
     assert!(h_rep.ok);
-    assert_eq!(h_rep.policy.mode, tetherly_core::ClipSyncMode::Manual);
+    assert_eq!(
+        h_rep.policy.mode,
+        tetherly_core::ClipSyncMode::BidirectionalAuto
+    );
     assert!(h_rep.policy.sensitive_guard);
     assert_eq!(h_rep.policy.max_payload_bytes, 65536);
     assert!(h_rep.policy.allowed_groups.is_empty());
@@ -10281,7 +10359,9 @@ async fn action_predefined_quick_actions_local_execution_and_governance_via_loop
         "/api/action/remote?peer={}",
         tetherly_core::text::encode_query_value(&peer_id.to_string())
     );
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    // Deadline is generous: under full-suite parallel load the mesh round-trip
+    // can lag well past 5 s, and this loop only ever ends early on success.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut found_advertised_action = false;
     let mut raw_remote_body = Vec::new();
     while tokio::time::Instant::now() < deadline {
@@ -10336,7 +10416,7 @@ async fn action_predefined_quick_actions_local_execution_and_governance_via_loop
     assert_eq!(trig_rep["status"], "triggered");
 
     // 8. Wait for Peer to execute and return ActionResultFrame to Host
-    let exec_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let exec_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut action_executed_successfully = false;
     while tokio::time::Instant::now() < exec_deadline {
         let (c, b) = tetherly_node::loopback_get(host_ui, "/api/action/history")
@@ -10370,7 +10450,7 @@ async fn action_predefined_quick_actions_local_execution_and_governance_via_loop
     );
 
     // 9. Verify Host receives SSE event action_result_received
-    let sse_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let sse_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut saw_result_event = false;
     while tokio::time::Instant::now() < sse_deadline {
         if let Ok(Ok(Some(raw))) =
@@ -12672,6 +12752,180 @@ async fn link_bench_throughput_and_governance_via_loopback_api() {
     // 12. Clean Shutdown
     host.shutdown();
     peer.shutdown();
+}
+
+/// Zero-byte files are a legal payload: the sender's content-addressed id is
+/// the sha256 of the empty string, the offer carries size 0, and the receiver
+/// must still complete the full lifecycle (offer -> accept -> verify -> inbox)
+/// without hanging on a channel that carries no chunks at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_byte_file_completes_the_full_lifecycle() {
+    let (a_dir, _g1) = temp_dir("zero-a");
+    let (b_dir, g2) = temp_dir("zero-b");
+    let a = Node::start(cfg(a_dir, "a", "windows")).unwrap();
+    let b = Node::start(cfg(b_dir.clone(), "b", "windows")).unwrap();
+    a.spawn_listeners().await.unwrap();
+    b.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    a.set_pin(pin);
+    b.set_pin(pin);
+    a.dial(b.control_addr()).await.unwrap();
+    wait_live(&a, Duration::from_secs(45)).await;
+    wait_live(&b, Duration::from_secs(45)).await;
+    let start = std::time::Instant::now();
+    loop {
+        if a.live_peers().iter().any(|p| p.file_port.is_some())
+            && b.live_peers().iter().any(|p| p.file_port.is_some())
+        {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("fileport caps.update never arrived");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let peer_b = b.identity().device_id().clone();
+    let id = a
+        .offer_and_send_bytes(&peer_b, "empty.bin", &[], false)
+        .await
+        .unwrap();
+    // Content-addressed id of the empty payload.
+    assert_eq!(id, format!("tr_{}", &hex_sha256(&[])[..16]));
+    wait_offered(&b, Duration::from_secs(3)).await;
+    let offered = b.offered_files();
+    assert_eq!(offered[0].files[0].size, 0);
+
+    b.user_accept_file(&id).await.unwrap();
+    let got = wait_inbox_any(g2.path(), "empty.bin", Duration::from_secs(15)).await;
+    assert!(got.is_empty(), "inbox file must be zero bytes");
+    let rt = b.transfer_by_id(&id).expect("receiver transfer record");
+    assert_eq!(rt.phase, TransferPhase::Completed);
+    assert_eq!(rt.transferred, 0);
+    a.shutdown();
+    b.shutdown();
+}
+
+/// The same content re-offered to the same peer carries the same
+/// content-addressed id. After a completed transfer the hub must accept the
+/// re-offer as a fresh candidate (not reject it as a duplicate), so the
+/// user-facing re-send button works without any state scrubbing.
+#[tokio::test(flavor = "multi_thread")]
+async fn same_content_reoffer_after_completion_is_a_fresh_offer() {
+    let (a_dir, _g1) = temp_dir("reoffer-a");
+    let (b_dir, g2) = temp_dir("reoffer-b");
+    let a = Node::start(cfg(a_dir, "a", "windows")).unwrap();
+    let b = Node::start(cfg(b_dir.clone(), "b", "windows")).unwrap();
+    a.spawn_listeners().await.unwrap();
+    b.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    a.set_pin(pin);
+    b.set_pin(pin);
+    a.dial(b.control_addr()).await.unwrap();
+    wait_live(&a, Duration::from_secs(45)).await;
+    wait_live(&b, Duration::from_secs(45)).await;
+    let start = std::time::Instant::now();
+    loop {
+        if a.live_peers().iter().any(|p| p.file_port.is_some())
+            && b.live_peers().iter().any(|p| p.file_port.is_some())
+        {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("fileport caps.update never arrived");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let payload = vec![0x42u8; 4096];
+    let peer_b = b.identity().device_id().clone();
+
+    let id1 = a
+        .offer_and_send_bytes(&peer_b, "twice.bin", &payload, false)
+        .await
+        .unwrap();
+    wait_offered(&b, Duration::from_secs(3)).await;
+    b.user_accept_file(&id1).await.unwrap();
+    let got1 = wait_inbox(g2.path(), "twice.bin", Duration::from_secs(15)).await;
+    assert_eq!(got1, payload);
+
+    // Re-offer the identical bytes under a different name: same id, fresh
+    // lifecycle, and the receiver's inbox keeps the last completed file.
+    let id2 = a
+        .offer_and_send_bytes(&peer_b, "twice_again.bin", &payload, false)
+        .await
+        .unwrap();
+    assert_eq!(id1, id2, "content-addressed id must be identical");
+    let start2 = std::time::Instant::now();
+    while b.offered_files().is_empty() {
+        if start2.elapsed() > Duration::from_secs(3) {
+            panic!("re-offer did not surface as a fresh offer");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    b.user_accept_file(&id2).await.unwrap();
+    let got2 = wait_inbox(g2.path(), "twice_again.bin", Duration::from_secs(15)).await;
+    assert_eq!(got2, payload);
+    let rt = b.transfer_by_id(&id2).expect("receiver transfer record");
+    assert_eq!(rt.phase, TransferPhase::Completed);
+    a.shutdown();
+    b.shutdown();
+}
+
+/// Streaming the file body before the user accepts must not create the inbox
+/// file: nothing final is ever written before the hub has Accepted, and the
+/// unsolicited stream must not corrupt the offer state for a later accept.
+#[tokio::test(flavor = "multi_thread")]
+async fn unsolicited_stream_before_accept_writes_nothing() {
+    let (a_dir, _g1) = temp_dir("unsol-a");
+    let (b_dir, g2) = temp_dir("unsol-b");
+    let a = Node::start(cfg(a_dir, "a", "windows")).unwrap();
+    let b = Node::start(cfg(b_dir.clone(), "b", "windows")).unwrap();
+    a.spawn_listeners().await.unwrap();
+    b.spawn_listeners().await.unwrap();
+    let pin = tetherly_core::pin::parse_pin("25170394").unwrap();
+    a.set_pin(pin);
+    b.set_pin(pin);
+    a.dial(b.control_addr()).await.unwrap();
+    wait_live(&a, Duration::from_secs(45)).await;
+    wait_live(&b, Duration::from_secs(45)).await;
+    let start = std::time::Instant::now();
+    loop {
+        if a.live_peers().iter().any(|p| p.file_port.is_some())
+            && b.live_peers().iter().any(|p| p.file_port.is_some())
+        {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("fileport caps.update never arrived");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let payload = vec![0x77u8; 8192];
+    let peer_b = b.identity().device_id().clone();
+    // The offer goes out; the sender immediately streams (its own accepted=
+    // tracking is async), but the receiver must not persist anything until
+    // the hub Accepted.
+    let _id = a
+        .offer_and_send_bytes(&peer_b, "eager.bin", &payload, false)
+        .await
+        .unwrap();
+    // Give the unsolicited stream a moment to arrive and be refused.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !g2.path().join("inbox").join("eager.bin").exists(),
+        "nothing final may be written before the user accepts"
+    );
+    // The offer is still pending and the normal flow still works afterwards.
+    wait_offered(&b, Duration::from_secs(3)).await;
+    let offered = b.offered_files();
+    let id = offered[0].transfer_id.clone();
+    b.user_accept_file(&id).await.unwrap();
+    let got = wait_inbox(g2.path(), "eager.bin", Duration::from_secs(15)).await;
+    assert_eq!(got, payload);
+    a.shutdown();
+    b.shutdown();
 }
 
 mod tracing_capture {

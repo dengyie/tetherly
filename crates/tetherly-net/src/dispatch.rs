@@ -28,9 +28,10 @@ use tetherly_core::frame::{
     TYPE_INPUT_TUNNEL_REQUEST, TYPE_INPUT_TUNNEL_RESP, TYPE_LOCATE_REQUEST, TYPE_LOCATE_STOP,
     TYPE_MEDIA_COMMAND, TYPE_MEDIA_STATE, TYPE_MIC_ANNOUNCE, TYPE_MIC_ATTACH, TYPE_MIC_AUDIO_CHUNK,
     TYPE_MIC_DETACH, TYPE_NOTIFY_DISMISS, TYPE_NOTIFY_PUSH, TYPE_NOTIFY_REPLY, TYPE_PING,
-    TYPE_PONG, TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE,
-    TYPE_TOPOLOGY_SYNC_REQ, TYPE_VIRTUAL_DISPLAY_ANNOUNCE, TYPE_VIRTUAL_DISPLAY_ATTACH,
-    TYPE_VIRTUAL_DISPLAY_DETACH, TYPE_VIRTUAL_DISPLAY_FRAME_ACK,
+    TYPE_PONG, TYPE_REMOTE_SESSION_CLOSE, TYPE_REMOTE_SESSION_REQUEST, TYPE_REMOTE_SESSION_RESP,
+    TYPE_RESOURCE_HANDOFF, TYPE_TEXT_MESSAGE, TYPE_TOPOLOGY_STATE, TYPE_TOPOLOGY_SYNC_REQ,
+    TYPE_VIRTUAL_DISPLAY_ANNOUNCE, TYPE_VIRTUAL_DISPLAY_ATTACH, TYPE_VIRTUAL_DISPLAY_DETACH,
+    TYPE_VIRTUAL_DISPLAY_FRAME_ACK,
 };
 use tetherly_core::input_tunnel::{
     InputTunnelHeartbeatFrame, InputTunnelReleaseFrame, InputTunnelRequestFrame,
@@ -40,6 +41,9 @@ use tetherly_core::locate::{LocateRequestFrame, LocateStopFrame};
 use tetherly_core::media::{MediaCommandFrame, MediaStateFrame};
 use tetherly_core::microphone::{
     MicAnnounceFrame, MicAttachFrame, MicAudioChunkFrame, MicDetachFrame,
+};
+use tetherly_core::remote_session::{
+    RemoteSessionCloseFrame, RemoteSessionRequestFrame, RemoteSessionRespFrame,
 };
 use tetherly_core::topology::{TopologyStateFrame, TopologySyncReqFrame};
 use tetherly_core::virtual_display::{
@@ -74,6 +78,9 @@ pub enum SessionEvent {
     InputTunnelResp(InputTunnelRespFrame),
     InputTunnelRelease(InputTunnelReleaseFrame),
     InputTunnelHeartbeat(InputTunnelHeartbeatFrame),
+    RemoteSessionRequest(RemoteSessionRequestFrame),
+    RemoteSessionResp(RemoteSessionRespFrame),
+    RemoteSessionClose(RemoteSessionCloseFrame),
     VirtualDisplayAnnounce(VirtualDisplayAnnounceFrame),
     VirtualDisplayAttach(VirtualDisplayAttachFrame),
     VirtualDisplayDetach(VirtualDisplayDetachFrame),
@@ -174,6 +181,15 @@ impl SessionEvent {
             ),
             TYPE_INPUT_TUNNEL_HEARTBEAT => SessionEvent::InputTunnelHeartbeat(
                 InputTunnelHeartbeatFrame::from_payload(&frame.payload)?,
+            ),
+            TYPE_REMOTE_SESSION_REQUEST => SessionEvent::RemoteSessionRequest(
+                RemoteSessionRequestFrame::from_payload(&frame.payload)?,
+            ),
+            TYPE_REMOTE_SESSION_RESP => SessionEvent::RemoteSessionResp(
+                RemoteSessionRespFrame::from_payload(&frame.payload)?,
+            ),
+            TYPE_REMOTE_SESSION_CLOSE => SessionEvent::RemoteSessionClose(
+                RemoteSessionCloseFrame::from_payload(&frame.payload)?,
             ),
             TYPE_VIRTUAL_DISPLAY_ANNOUNCE => SessionEvent::VirtualDisplayAnnounce(
                 VirtualDisplayAnnounceFrame::from_payload(&frame.payload)?,

@@ -417,10 +417,23 @@ pub(crate) async fn run(
             //    re-attach as controller — the two watchers would otherwise
             //    capture the direction back and forth every second, leaving
             //    both cursors driven and reverse control unusable.
+            //    ADR-138: an active remote desktop session suppresses the
+            //    watcher entirely — the session owns the input channel and
+            //    the edge-push takeover arm, on both controller and target
+            //    sides, until it closes.
             let policy = link_watcher.input_policy();
             let status = link_watcher.input_tunnel_status();
-            let being_controlled =
-                link_watcher.active_tunnel_role() == Some(tetherly_core::InputTunnelRole::Target);
+            let session_active = link_watcher.remote_session_active();
+            let being_controlled = session_active
+                || link_watcher
+                    .active_tunnel_role()
+                    .is_some_and(|r| r.is_receiving());
+
+            // Idle-timeout sweep for ADR-138 sessions (host and viewer side).
+            if session_active {
+                link_watcher.remote_session_idle_check();
+                continue;
+            }
 
             // Recycle stale optimistic attach sessions: `input_tunnel_attach`
             // records role=Controller when SENDING the request; if the peer

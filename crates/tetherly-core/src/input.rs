@@ -548,6 +548,23 @@ impl InputServer {
         }
     }
 
+    /// ADR-138 remote session: promote to Remote seat and emit a single
+    /// permanent `[Enter, Move{center}]` pair. Session mode has no boundary
+    /// semantics — the controller's session-window mapping owns every
+    /// subsequent Move coordinate. Unconditional (unlike `resume_remote`):
+    /// the caller has already validated the transition.
+    pub fn force_remote_center(&mut self) {
+        self.seat = CursorSeat::Remote;
+        self.remote_interior = false;
+        self.buttons_down = 0;
+        self.pending.clear();
+        self.push(InputKind::Enter);
+        self.push(InputKind::Move {
+            x: SCREEN_UNITS / 2,
+            y: SCREEN_UNITS / 2,
+        });
+    }
+
     /// Re-assert the remote session after a policy change that alters how
     /// key events are interpreted (e.g. keymap profile switch). The client
     /// flushes every held key/button on `Leave` (`release_all_inputs`), then

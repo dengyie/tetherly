@@ -9,6 +9,7 @@ use tetherly_core::{
 };
 
 pub mod cursor_shield;
+pub mod popover;
 pub mod tray;
 
 pub struct SystemClip;
@@ -663,6 +664,15 @@ static PENDING_WARP_ECHOES: std::sync::atomic::AtomicU32 = std::sync::atomic::At
 // their deltas zeroed for this many events (see the macOS tap below).
 #[cfg(target_os = "macos")]
 static WARP_SETTLE_EVENTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+// Time bound for both warp counters. If the post-warp events never surface
+// (tap disabled by timeout, events lost), the counters would otherwise hang
+// and silently zero the deltas of the user's next real motions. The marker
+// expires after this window; a warp that delivered no events within it is
+// indistinguishable from a warp that delivered them all.
+#[cfg(target_os = "macos")]
+const WARP_MARKER_MAX_AGE_MS: u64 = 250;
+#[cfg(target_os = "macos")]
+static WARP_MARKED_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(any(windows, target_os = "macos"))]
 fn mark_pending_warp(x: i32, y: i32) {
@@ -676,7 +686,31 @@ fn mark_pending_warp(x: i32, y: i32) {
         // Zero the deltas of the first few post-warp events: macOS computes
         // them across the teleport, so they carry the park displacement.
         WARP_SETTLE_EVENTS.store(4, Ordering::SeqCst);
+        WARP_MARKED_AT_MS.store(now_mono_ms(), Ordering::SeqCst);
     }
+}
+
+#[cfg(target_os = "macos")]
+fn now_mono_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// True while the warp marker (echo + settle counters) is still fresh. A
+/// marker older than [`WARP_MARKER_MAX_AGE_MS`] is dropped on read: its
+/// events never surfaced (lost or tap disabled), so letting the counters hang
+/// would zero the deltas of the user's next real motions.
+#[cfg(target_os = "macos")]
+fn warp_marker_fresh() -> bool {
+    use std::sync::atomic::Ordering;
+    let marked = WARP_MARKED_AT_MS.load(Ordering::SeqCst);
+    if marked == 0 {
+        return false;
+    }
+    now_mono_ms().saturating_sub(marked) <= WARP_MARKER_MAX_AGE_MS
 }
 
 /// Returns true when the given hook position is the echo of the pending
@@ -686,6 +720,18 @@ fn take_warp_echo(x: i32, y: i32) -> bool {
     use std::sync::atomic::Ordering;
     if !PENDING_WARP_VALID.load(Ordering::SeqCst) {
         return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Expired marker: its events never surfaced (tap disabled or lost).
+        // Drop the whole marker instead of letting stale echo/settle counters
+        // eat later real events.
+        if !warp_marker_fresh() {
+            PENDING_WARP_VALID.store(false, Ordering::SeqCst);
+            PENDING_WARP_ECHOES.store(0, Ordering::SeqCst);
+            WARP_SETTLE_EVENTS.store(0, Ordering::SeqCst);
+            return false;
+        }
     }
     let wx = PENDING_WARP_X.load(Ordering::SeqCst);
     let wy = PENDING_WARP_Y.load(Ordering::SeqCst);
@@ -1513,12 +1559,18 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 // to the park position's map (production: entry placement
                 // snapped to screen center). Zero the deltas for the first
                 // few post-warp events; their positions are near the park
-                // point and the deltas carry no real hand motion.
+                // point and the deltas carry no real hand motion. The counter
+                // is time-bounded: if its events never surfaced within
+                // WARP_MARKER_MAX_AGE_MS it is dropped rather than eating
+                // later real motion.
                 let settle = WARP_SETTLE_EVENTS.load(Ordering::SeqCst);
-                let (dx, dy) = if settle > 0 {
+                let (dx, dy) = if settle > 0 && warp_marker_fresh() {
                     WARP_SETTLE_EVENTS.store(settle - 1, Ordering::SeqCst);
                     (0, 0)
                 } else {
+                    if settle > 0 {
+                        WARP_SETTLE_EVENTS.store(0, Ordering::SeqCst);
+                    }
                     (dx, dy)
                 };
                 let _ = ctx.tx.send(RawInput::Move {
@@ -2334,4 +2386,35 @@ impl SysProbe for PlatformSysProbe {
 
         Ok(HostSample { total_memory_bytes })
     }
+}
+
+/// Spawn the remote-session viewer window (ADR-138 §2.6 step 5). AppKit
+/// windows must live in the `tetherly-viewer` subprocess (installed next to
+/// this binary); a headless host has no viewer and reports honestly — the
+/// session still works wire-side without it.
+#[cfg(target_os = "macos")]
+pub fn spawn_remote_session_viewer() -> Result<u32, tetherly_core::CoreError> {
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("tetherly-viewer")))
+        .unwrap_or_else(|| std::path::PathBuf::from("tetherly-viewer"));
+    let child = std::process::Command::new(exe)
+        .arg("--remote-session")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            tetherly_core::CoreError::ScreenRefused(format!(
+                "spawning tetherly-viewer failed ({e}); macOS session viewer needs the AppKit subprocess"
+            ))
+        })?;
+    Ok(child.id())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn spawn_remote_session_viewer() -> Result<u32, tetherly_core::CoreError> {
+    Err(tetherly_core::CoreError::ScreenRefused(
+        "no session viewer on this platform; session continues wire-side only".into(),
+    ))
 }

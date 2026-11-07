@@ -5368,7 +5368,7 @@ async fn m5_29_screen_collaborative_annotation_and_laser_pointer_pipeline() {
 
     // Send a frame to trigger apply_annotations with expired item cleanup
     assert!(host.screen_send_frame().await.unwrap());
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
 
     // Verify TTL annotation expired
     let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/annotation")
@@ -6546,7 +6546,7 @@ async fn m5_33_screen_dynamic_delta_patch_and_temporal_compression_pipeline() {
 
     // 5. Send subsequent frames until keyframe_interval (3) triggers a fresh keyframe
     source.update_rect(0, 0, 16, 16, [0x11, 0x22, 0x33, 255]);
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     let prev_count2 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap()); // delta 2
     let wait_frame3 = std::time::Instant::now();
@@ -6561,7 +6561,7 @@ async fn m5_33_screen_dynamic_delta_patch_and_temporal_compression_pipeline() {
     }
 
     source.update_rect(0, 0, 16, 16, [0x44, 0x55, 0x66, 255]);
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     let prev_count3 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap()); // delta 3
     let wait_frame4 = std::time::Instant::now();
@@ -6577,7 +6577,7 @@ async fn m5_33_screen_dynamic_delta_patch_and_temporal_compression_pipeline() {
 
     // Next frame reaches keyframe_interval threshold -> triggers keyframe
     source.update_rect(0, 0, 16, 16, [0x77, 0x88, 0x99, 255]);
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::sleep(PACER_SETTLE).await;
     let prev_count4 = visitor.screen_sink_snapshot().count();
     assert!(host.screen_send_frame().await.unwrap()); // keyframe
     let wait_frame5 = std::time::Instant::now();
@@ -6769,7 +6769,7 @@ async fn m5_34_screen_objective_visual_quality_metric_and_psnr_ssim_pipeline() {
 
     // 4. Stream 3 identical frames -> triggers at least 1 evaluation on host and visitor
     for _ in 0..3 {
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::time::sleep(PACER_SETTLE).await;
         let prev = visitor.screen_sink_snapshot().count();
         assert!(host.screen_send_frame().await.unwrap());
         let wait_frame = std::time::Instant::now();
@@ -6800,7 +6800,7 @@ async fn m5_34_screen_objective_visual_quality_metric_and_psnr_ssim_pipeline() {
     // 5. Update sub-rectangle and stream perturbed frames
     source.update_rect(0, 0, 32, 32, [0xFF, 0x00, 0x00, 255]);
     for _ in 0..3 {
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::time::sleep(PACER_SETTLE).await;
         let prev = visitor.screen_sink_snapshot().count();
         assert!(host.screen_send_frame().await.unwrap());
         let wait_frame = std::time::Instant::now();
@@ -7010,7 +7010,7 @@ async fn m5_35_screen_autonomous_qoe_closed_loop_adaptation_pipeline() {
     // 5. Inject full color distortion into source to trigger QoE action
     source.update_rect(0, 0, 64, 64, [0x00, 0xFF, 0x00, 255]);
     for i in 0..3 {
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::time::sleep(PACER_SETTLE).await;
         let prev = visitor.screen_sink_snapshot().count();
         assert!(host.screen_send_frame().await.unwrap());
         let wait_frame = std::time::Instant::now();
@@ -11896,4 +11896,512 @@ async fn m5_50_screen_tile_motion_vector_pipeline() {
     visitor.shutdown();
     drop(ga);
     drop(gb);
+} // --------------------------------------------------------------------------
+  // ADR-138 remote desktop session pipeline (m6_1 ~ m6_6)
+  // --------------------------------------------------------------------------
+
+/// Poll until the viewer reports Controlling: the host answered the session
+/// request, the viewer sent its Session Enter through 45719. Shares the
+/// wait-shape of `wait_host_streaming` — poll the state you assert about,
+/// never sleep a guessed interval.
+async fn wait_session_controlling(viewer: &Node, timeout: Duration) {
+    let start = std::time::Instant::now();
+    loop {
+        let rep = viewer.remote_session_report();
+        if rep.message == "controlling" {
+            return;
+        }
+        if start.elapsed() > timeout {
+            panic!(
+                "session never reached controlling: {:?} / {:?}",
+                rep.message, rep.session_id
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_session_gone(node: &Node, timeout: Duration) {
+    let start = std::time::Instant::now();
+    while node.remote_session_active() {
+        if start.elapsed() > timeout {
+            panic!("remote session slot never cleared");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// m6_1 — request → accept → host MemorySink receives the Session Enter+Move
+/// sequence. The host auto-allows screen consent (ADR-138 §2.4), registers as
+/// SessionTarget, and the viewer's resp-driven Enter parks the host sink
+/// cursor at screen center with seat=Remote.
+#[tokio::test(flavor = "multi_thread")]
+async fn m6_1_remote_session_request_accept_enter_pipeline() {
+    let (host, viewer, _ga, _gb) = pair_view().await;
+    let host_id = host.identity().device_id().clone();
+
+    let rep = viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect("session start");
+    assert!(rep.ok, "start report must be ok");
+    assert_eq!(rep.message, "remote session controlling");
+    let session_id = rep.session_id.clone().expect("session id in report");
+    assert_eq!(rep.peer_id.as_deref(), Some(host_id.to_string().as_str()));
+    assert!(rep.screen_width.unwrap_or(0) > 0);
+    assert!(rep.screen_height.unwrap_or(0) > 0);
+
+    // Host: SessionTarget registered, screen consent auto-opened.
+    assert!(host.remote_session_active());
+    let target = host.remote_session_status().expect("host session state");
+    assert_eq!(target.session_id, session_id);
+    assert_eq!(target.role, tetherly_core::InputTunnelRole::SessionTarget);
+    let start = std::time::Instant::now();
+    loop {
+        // Allowed is consent; Streaming is consent + viewer Start landed.
+        if matches!(
+            host.screen_state(),
+            ScreenState::Allowed | ScreenState::Streaming
+        ) {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host screen consent was not auto-allowed, state={:?}",
+                host.screen_state()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Host MemorySink: the session Enter+Move(center) sequence landed through
+    // 45719 — focused, parked at center, seat Remote. Note: the MemorySink
+    // observer never records Enter (the engine consumes it internally: focus
+    // + release_all_inputs), so the observable trace is the center Move.
+    let start = std::time::Instant::now();
+    loop {
+        let sink = host.input_sink_snapshot();
+        let centered = sink.applied.iter().any(|k| match k {
+            tetherly_core::InputKind::Move { x, y } => {
+                *x == tetherly_core::SCREEN_UNITS / 2 && *y == tetherly_core::SCREEN_UNITS / 2
+            }
+            _ => false,
+        });
+        if centered {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "host sink never received the session center Move (tail: {:?})",
+                sink.applied.iter().rev().take(8).collect::<Vec<_>>()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let sink = host.input_sink_snapshot();
+    let last_move = sink
+        .applied
+        .iter()
+        .rev()
+        .find_map(|k| match k {
+            tetherly_core::InputKind::Move { x, y } => Some((*x, *y)),
+            _ => None,
+        })
+        .expect("move after enter");
+    assert_eq!(
+        last_move,
+        (
+            tetherly_core::SCREEN_UNITS / 2,
+            tetherly_core::SCREEN_UNITS / 2
+        ),
+        "session Enter parks the cursor at screen center"
+    );
+    assert_eq!(
+        host.input_seat(),
+        Some(tetherly_core::CursorSeat::Remote),
+        "session Enter focuses the host client (input_seat, not the local engine)"
+    );
+
+    // Graceful stop: close frame flows, both slots clear, host seat back to
+    // Local with a Leave-driven release.
+    viewer
+        .remote_session_stop("m6_1 end")
+        .await
+        .expect("session stop");
+    wait_session_gone(&viewer, Duration::from_secs(3)).await;
+    wait_session_gone(&host, Duration::from_secs(3)).await;
+    assert_eq!(
+        host.input_seat(),
+        Some(tetherly_core::CursorSeat::Local),
+        "session stop restores the host seat to local"
+    );
+
+    host.shutdown();
+    viewer.shutdown();
+    drop(_ga);
+    drop(_gb);
+}
+
+/// m6_2 — policy reject: `allow_inbound_control=false` on the host answers
+/// `PolicyDisabled`, no session state is created on either side.
+#[tokio::test(flavor = "multi_thread")]
+async fn m6_2_remote_session_policy_reject() {
+    let (host, viewer, _ga, _gb) = pair_view().await;
+    let host_id = host.identity().device_id().clone();
+
+    let mut policy = host.input_policy();
+    policy.allow_inbound_control = false;
+    host.set_input_policy(policy).unwrap();
+
+    let err = viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect_err("policy-disabled host must reject");
+    assert!(
+        err.to_string().contains("rejected or closed by peer"),
+        "unexpected error: {err}"
+    );
+
+    // Neither side leaks state; the reject reason reached the wire correctly.
+    wait_session_gone(&viewer, Duration::from_secs(2)).await;
+    wait_session_gone(&host, Duration::from_secs(2)).await;
+
+    host.shutdown();
+    viewer.shutdown();
+    drop(_ga);
+    drop(_gb);
+}
+
+/// m6_3 — Session roaming-guard: while a session drives the host
+/// (SessionTarget), local `drive_input` edge pushes are suppressed entirely —
+/// the deliberate edge-push takeover must not fire, and the watcher-style
+/// `active_tunnel_role()`/`remote_session_active()` predicates the watcher
+/// consults report the session so auto-attach is skipped.
+#[tokio::test(flavor = "multi_thread")]
+async fn m6_3_remote_session_roaming_guard_skips_takeover() {
+    let (host, viewer, _ga, _gb) = pair_view().await;
+    let host_id = host.identity().device_id().clone();
+
+    viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect("session start");
+    wait_session_controlling(&viewer, Duration::from_secs(5)).await;
+
+    // Deliberate edge push on the host while being session-controlled: the
+    // guard must swallow it (no edge, no takeover, seat unchanged).
+    let edge = host.drive_input(0, 10, 100, 50).unwrap();
+    assert_eq!(
+        edge, None,
+        "edge-push takeover must be suppressed during a session"
+    );
+    assert_eq!(
+        host.input_seat(),
+        Some(tetherly_core::CursorSeat::Remote),
+        "session keeps the host seat remote"
+    );
+    assert!(host.remote_session_active());
+    // The watcher consults exactly these predicates; the session's receiving
+    // role lives in the remote_session slot (active_input_tunnel stays None).
+    assert_eq!(
+        host.remote_session_status().map(|s| s.role),
+        Some(tetherly_core::InputTunnelRole::SessionTarget)
+    );
+    assert!(host
+        .remote_session_status()
+        .map(|s| s.role.is_receiving())
+        .unwrap_or(false));
+
+    viewer.remote_session_stop("m6_3 end").await.expect("stop");
+    wait_session_gone(&host, Duration::from_secs(3)).await;
+
+    host.shutdown();
+    viewer.shutdown();
+    drop(_ga);
+    drop(_gb);
+}
+
+/// m6_4 — idle timeout: with `idle_timeout_secs` at the floor, a session the
+/// heartbeat no longer touches is force-closed by `remote_session_idle_check`,
+/// the host's held keys are flushed (MemorySink keys_down emptied via the
+/// Leave-driven release) and the slot clears.
+#[tokio::test(flavor = "multi_thread")]
+async fn m6_4_remote_session_idle_timeout_flushes_inputs() {
+    let (host, viewer, _ga, _gb) = pair_view().await;
+    let host_id = host.identity().device_id().clone();
+
+    viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect("session start");
+    wait_session_controlling(&viewer, Duration::from_secs(5)).await;
+
+    // Hold a key so the flush assertion has something to observe.
+    host.drive_input_key(0x1E, true).unwrap();
+
+    // Floor the idle budget after the key is held; the heartbeat keeps the
+    // tunnel table alive but the session sweep uses its own clock.
+    let mut policy = host.input_policy();
+    policy.idle_timeout_secs = 1;
+    host.set_input_policy(policy).unwrap();
+
+    // Simulate silence: stop refreshing last_activity on the host session and
+    // run the same sweep the watcher tick runs every second.
+    let started = std::time::Instant::now();
+    loop {
+        let closed = host.remote_session_idle_check();
+        if closed {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(10) {
+            panic!("idle sweep never force-closed the session");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    wait_session_gone(&host, Duration::from_secs(3)).await;
+    wait_session_gone(&viewer, Duration::from_secs(3)).await;
+
+    // Held key flushed: the Leave-driven release emptied keys_down.
+    let start = std::time::Instant::now();
+    loop {
+        let sink = host.input_sink_snapshot();
+        if sink.keys_down.is_empty() {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!(
+                "keys_down not flushed after idle close: {:?}",
+                sink.keys_down
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(host.input_engine_seat(), tetherly_core::CursorSeat::Local);
+
+    host.shutdown();
+    viewer.shutdown();
+    drop(_ga);
+    drop(_gb);
+}
+
+/// m6_5 — a session whose screen flow is refused rolls the viewer back to
+/// Idle, clears both slots, and the host learns via Close rather than idling
+/// Busy. Forced deterministically: consent is revoked on the host *between*
+/// its session accept (auto-allow) and the viewer's screen Start, so the
+/// host's Start-refusal `Stop` reply reaches the viewer and `screen_start`
+/// errors — the viewer tears down (slot cleared + Close sent) and the host's
+/// session slot is freed by the received Close.
+#[tokio::test(flavor = "multi_thread")]
+async fn m6_5_remote_session_screen_failure_returns_to_idle() {
+    let (host, viewer, _ga, _gb) = pair_view().await;
+    let host_id = host.identity().device_id().clone();
+
+    // Revoke consent while the request is in flight: the accept handler's
+    // auto-allow wins the race, then this revoke closes it before the
+    // viewer's screen Start arrives.
+    let revoke_host = host.clone_handle();
+    tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        loop {
+            if matches!(
+                revoke_host.screen_state(),
+                ScreenState::Allowed | ScreenState::Streaming
+            ) {
+                revoke_host.screen_revoke();
+                return;
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+
+    let err = viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect_err("refused screen flow must fail the session start");
+    assert!(
+        err.to_string().contains("refused") || err.to_string().contains("screen"),
+        "unexpected failure mode: {err}"
+    );
+
+    wait_session_gone(&viewer, Duration::from_secs(3)).await;
+    wait_session_gone(&host, Duration::from_secs(3)).await;
+    assert_eq!(
+        host.input_seat(),
+        Some(tetherly_core::CursorSeat::Local),
+        "host seat must stay local — no session Enter ever landed"
+    );
+
+    host.shutdown();
+    viewer.shutdown();
+    drop(_ga);
+    drop(_gb);
+}
+
+/// m6_7 — session-scoped screen consent (root fix #9): the host's accept-path
+/// auto-allow is revoked when the session ends, so the peer cannot re-dial
+/// 45720 without a fresh grant; an operator allow that predates the session
+/// survives the teardown. Verified via `screen_state()` on the host.
+#[tokio::test(flavor = "multi_thread")]
+async fn m6_7_remote_session_teardown_revokes_auto_allowed_screen() {
+    let (host, viewer, _ga, _gb) = pair_view().await;
+    let host_id = host.identity().device_id().clone();
+
+    // Full session lifecycle: request → accept (auto-allow) → controlling.
+    viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect("session start must succeed");
+    wait_session_controlling(&viewer, Duration::from_secs(10)).await;
+    assert!(
+        matches!(
+            host.screen_state(),
+            ScreenState::Allowed | ScreenState::Streaming
+        ),
+        "host screen must be allowed while the session is active, got {:?}",
+        host.screen_state()
+    );
+
+    // Controller-initiated stop → host receives Close → auto-allow revoked.
+    viewer
+        .remote_session_stop("m6_7")
+        .await
+        .expect("session stop must succeed");
+    wait_session_gone(&host, Duration::from_secs(3)).await;
+    assert_eq!(
+        host.screen_state(),
+        ScreenState::Idle,
+        "session-scoped screen consent must be revoked after the session — \
+         the peer must not be able to re-dial 45720 without a fresh grant"
+    );
+
+    // Operator-granted consent survives a session teardown. The operator
+    // grants for a *connected* peer: a real 45720 dial moves the engine to
+    // Requested (the accept handler runs on_peer_connected), then allow —
+    // the same shape as the m5_2 real-handshake path.
+    viewer
+        .open_screen(host.identity().device_id())
+        .await
+        .expect("viewer must reach the host's 45720 screen channel");
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_state() == ScreenState::Requested {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!(
+                "host never reached Requested after the operator dial, state={:?}",
+                host.screen_state()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    host.screen_allow();
+    assert!(
+        matches!(host.screen_state(), ScreenState::Allowed),
+        "operator allow on a connected peer must grant consent, got {:?}",
+        host.screen_state()
+    );
+    viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect("second session start must succeed");
+    wait_session_controlling(&viewer, Duration::from_secs(10)).await;
+    viewer
+        .remote_session_stop("m6_7b")
+        .await
+        .expect("second session stop must succeed");
+    wait_session_gone(&host, Duration::from_secs(3)).await;
+    assert!(
+        matches!(host.screen_state(), ScreenState::Allowed),
+        "operator consent must survive session teardown, got {:?}",
+        host.screen_state()
+    );
+
+    host.shutdown();
+    viewer.shutdown();
+    drop(_ga);
+    drop(_gb);
+}
+
+/// m6_6 — keymap end-to-end: the host suggests `mac_to_windows`; the session
+/// resp carries it; a Mac-source VK_LWIN from the viewer remaps to
+/// VK_LCONTROL on the wire and the host MemorySink records VK_LCONTROL.
+#[tokio::test(flavor = "multi_thread")]
+async fn m6_6_remote_session_keymap_end_to_end() {
+    let (host, viewer, _ga, _gb) = pair_view().await;
+    let host_id = host.identity().device_id().clone();
+
+    let mut policy = host.input_policy();
+    policy.keymap = Some("mac_to_windows".to_string());
+    host.set_input_policy(policy).unwrap();
+
+    let rep = viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect("session start");
+    assert_eq!(rep.message, "remote session controlling");
+
+    // The viewer drives a Mac Command press (VK_LWIN) in Session mode; the
+    // host-side policy remap applies on the wire and lands as VK_LCONTROL.
+    const VK_LWIN: u16 = 0x5B;
+    const VK_LCONTROL: u16 = 0xA2;
+    viewer.drive_input_key(VK_LWIN, true).unwrap();
+    viewer.drive_input_key(VK_LWIN, false).unwrap();
+
+    let start = std::time::Instant::now();
+    loop {
+        let sink = host.input_sink_snapshot();
+        let remapped = sink.applied.iter().any(|k| {
+            matches!(
+                k,
+                tetherly_core::InputKind::Key {
+                    code: VK_LCONTROL,
+                    down: true,
+                    ..
+                }
+            )
+        });
+        if remapped {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!("host sink never received remapped VK_LCONTROL");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    viewer.remote_session_stop("m6_6 end").await.expect("stop");
+    wait_session_gone(&host, Duration::from_secs(3)).await;
+
+    host.shutdown();
+    viewer.shutdown();
+    drop(_ga);
+    drop(_gb);
 }

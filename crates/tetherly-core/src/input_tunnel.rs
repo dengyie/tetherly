@@ -15,6 +15,10 @@ pub enum InputTunnelRole {
     Controller,
     /// Node whose virtual cursor/input focus is driven by the controller.
     Target,
+    /// Node driving the peer desktop through an ADR-138 remote session window.
+    SessionController,
+    /// Node whose desktop is being driven through an ADR-138 remote session.
+    SessionTarget,
 }
 
 impl InputTunnelRole {
@@ -22,7 +26,26 @@ impl InputTunnelRole {
         match self {
             Self::Controller => "controller",
             Self::Target => "target",
+            Self::SessionController => "session_controller",
+            Self::SessionTarget => "session_target",
         }
+    }
+
+    /// `true` when this node is the one injecting input into its own desktop
+    /// on behalf of a remote peer (roaming target or remote-session target).
+    pub fn is_receiving(self) -> bool {
+        matches!(self, Self::Target | Self::SessionTarget)
+    }
+
+    /// `true` when this node drives the remote peer (roaming controller or
+    /// remote-session controller).
+    pub fn is_driving(self) -> bool {
+        matches!(self, Self::Controller | Self::SessionController)
+    }
+
+    /// `true` when this role was established by an ADR-138 remote session.
+    pub fn is_session(self) -> bool {
+        matches!(self, Self::SessionController | Self::SessionTarget)
     }
 }
 
@@ -44,7 +67,7 @@ pub struct InputTunnelRequestFrame {
 impl InputTunnelRequestFrame {
     pub fn sanitize(&mut self) {
         self.session_id = InputTunnelValidator::validate_session_id(&self.session_id)
-            .unwrap_or_else(|_| "invalid_session".to_string());
+            .unwrap_or_else(|_| String::new());
         self.client_device_id = self.client_device_id.trim().to_string();
     }
 
@@ -83,7 +106,7 @@ pub struct InputTunnelRespFrame {
 impl InputTunnelRespFrame {
     pub fn sanitize(&mut self) {
         self.session_id = InputTunnelValidator::validate_session_id(&self.session_id)
-            .unwrap_or_else(|_| "invalid_session".to_string());
+            .unwrap_or_else(|_| String::new());
         if let Some(ref r) = self.reject_reason {
             self.reject_reason = Some(InputTunnelValidator::sanitize_reason(r));
         }
@@ -125,7 +148,7 @@ pub struct InputTunnelReleaseFrame {
 impl InputTunnelReleaseFrame {
     pub fn sanitize(&mut self) {
         self.session_id = InputTunnelValidator::validate_session_id(&self.session_id)
-            .unwrap_or_else(|_| "invalid_session".to_string());
+            .unwrap_or_else(|_| String::new());
         self.reason = InputTunnelValidator::sanitize_reason(&self.reason);
     }
 

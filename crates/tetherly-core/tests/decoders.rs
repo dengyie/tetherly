@@ -21,7 +21,10 @@ use tetherly_core::frame::{
 use tetherly_core::screen::{
     ControlMsg, PixelFormat, ScreenAssembler, ScreenFrame, ScreenRect, SCREEN_PAYLOAD_MAX,
 };
-use tetherly_core::{DataAssembler, DeviceId, Hello, InputEvent, NotificationEvent};
+use tetherly_core::{
+    DataAssembler, DeviceId, Hello, InputEvent, NotificationEvent, RemoteSessionCloseFrame,
+    RemoteSessionRequestFrame, RemoteSessionRespFrame,
+};
 
 // ---------------------------------------------------------------- strategies
 
@@ -189,6 +192,9 @@ proptest! {
         let _ = FileDecision::from_payload(&b);
         let _ = FileDone::from_payload(&b);
         let _ = CapsUpdate::from_payload(&b);
+        let _ = RemoteSessionRequestFrame::from_payload(&b);
+        let _ = RemoteSessionRespFrame::from_payload(&b);
+        let _ = RemoteSessionCloseFrame::from_payload(&b);
     }
 
     /// Feeding arbitrary chunks, the ANCS assembler must never panic and never

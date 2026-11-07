@@ -85,6 +85,14 @@ impl Node {
     pub(super) async fn attach_screen_server(&self, mut sess: ActiveSession) {
         let peer_id = sess.peer_id.clone();
         let (tx, mut rx) = mpsc::channel::<InnerFrame>(SCREEN_QUEUE_DEPTH);
+        // Generation tag: when this loop exits it must only run the
+        // engine-level `on_peer_gone` if it is STILL the active channel — a
+        // replacement attach (new dial) must not be reset by this loop's
+        // teardown racing behind it.
+        let my_gen = self
+            .shared
+            .screen_channel_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.shared.screen_out.lock().await = Some(tx);
         *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
         // A new screen session re-evaluates the ADR-078 bitrate tier.
@@ -862,13 +870,22 @@ impl Node {
                     }
                 }
             }
-            node.shared
-                .screen_engine
-                .lock()
-                .expect("screen")
-                .on_peer_gone();
-            *node.shared.screen_peer.lock().expect("screen_peer") = None;
-            *node.shared.screen_out.lock().await = None;
+            // Only reset the engine when this loop still owns the channel:
+            // a newer attach has incremented the generation past ours.
+            let still_active = node
+                .shared
+                .screen_channel_gen
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == my_gen + 1;
+            if still_active {
+                node.shared
+                    .screen_engine
+                    .lock()
+                    .expect("screen")
+                    .on_peer_gone();
+                *node.shared.screen_peer.lock().expect("screen_peer") = None;
+                *node.shared.screen_out.lock().await = None;
+            }
             node.shared
                 .screen_privacy_enabled
                 .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1126,6 +1143,35 @@ impl Node {
                                         }
                                         if let ControlMsg::SetRecordingState { active } = msg {
                                             node.shared.screen_peer_recording.store(active, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        if matches!(msg, ControlMsg::Stop) {
+                                            // ADR-138: an unsolicited `Stop` from the host
+                                            // on the control channel is the Start-refusal
+                                            // reply (consent revoked mid-session). Latch
+                                            // it so a pending remote-session start rolls
+                                            // back instead of presenting a dead screen.
+                                            // Ticket protocol: `screen_start` claims a
+                                            // fresh ticket BEFORE sending Start and
+                                            // records it as the open window; the reply
+                                            // may only latch the refusal while the
+                                            // window it belongs to is still open — a
+                                            // leftover refusal from a PREVIOUS channel
+                                            // arriving after a newer start claimed its
+                                            // own ticket is discarded (m6_7 CI race).
+                                            let current = node
+                                                .shared
+                                                .screen_start_ticket
+                                                .load(std::sync::atomic::Ordering::SeqCst);
+                                            if current % 2 == 1 {
+                                                // Odd = a start attempt is in flight (its
+                                                // claim made the value odd); latch the refusal.
+                                                node.shared
+                                                    .screen_start_refused
+                                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                                                tracing::info!("viewer: host refused screen start (consent stop reply)");
+                                            } else {
+                                                tracing::info!("viewer: ignoring stale screen-start Stop reply (no start in flight)");
+                                            }
                                         }
                                         match &msg {
                                             ControlMsg::SetLaserPointer { x, y, active, color_rgb } => {
