@@ -934,6 +934,11 @@ impl Node {
                     .expect("screen")
                     .on_peer_connected();
                 self.screen_allow();
+                // Mark the consent as session-scoped so teardown revokes it;
+                // an operator's pre-existing Allowed|Streaming must survive.
+                self.shared
+                    .remote_session_auto_allowed
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 (true, None)
             } else {
                 (true, None)
@@ -1067,6 +1072,12 @@ impl Node {
                 .unwrap_or_else(|| "unspecified".to_string());
             *self.shared.remote_session.lock().expect("remote_session") = None;
             *self.shared.remote_session_keymap.lock().expect("rs_keymap") = None;
+            // Controller-side reject: if a *previous* session on this node had
+            // left the auto-allow latch set (crash race), clear it — the
+            // reject path itself never granted consent.
+            self.shared
+                .remote_session_auto_allowed
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             self.emit(UiEvent::input_tunnel_session_closed(
                 &frame.session_id,
                 &peer_str,
@@ -1156,6 +1167,27 @@ impl Node {
         }
         *self.shared.remote_session.lock().expect("remote_session") = None;
         *self.shared.remote_session_keymap.lock().expect("rs_keymap") = None;
+        // Session-scoped screen consent: the accept path may have auto-allowed
+        // streaming — pull it back so the peer cannot re-dial 45720 after the
+        // session without a fresh grant. An operator allow granted before the
+        // session is left untouched. The session's dedicated screen channel
+        // dies with the Close, so the canonical `on_peer_gone` reset (Idle,
+        // seq reset, pacers cleared) applies — not `revoke()`, which keeps
+        // `Requested` for a live channel that no longer exists here.
+        if self
+            .shared
+            .remote_session_auto_allowed
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.shared
+                .screen_engine
+                .lock()
+                .expect("screen")
+                .on_peer_gone();
+            let state = self.screen_state();
+            let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
+            self.emit(UiEvent::screen_state_changed(state.as_str(), allowed, None));
+        }
         if state.role.is_receiving() {
             self.exit_session();
         } else {
@@ -1224,6 +1256,22 @@ impl Node {
             let peer = DeviceId::parse(&s.peer_id).ok();
             *self.shared.remote_session.lock().expect("remote_session") = None;
             *self.shared.remote_session_keymap.lock().expect("rs_keymap") = None;
+            if self
+                .shared
+                .remote_session_auto_allowed
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                // Same rationale as the Close handler: the session's screen
+                // channel dies here, so reset to Idle, not `Requested`.
+                self.shared
+                    .screen_engine
+                    .lock()
+                    .expect("screen")
+                    .on_peer_gone();
+                let state = self.screen_state();
+                let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
+                self.emit(UiEvent::screen_state_changed(state.as_str(), allowed, None));
+            }
             if s.role.is_receiving() {
                 self.exit_session();
             }

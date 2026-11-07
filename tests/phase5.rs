@@ -12255,6 +12255,98 @@ async fn m6_5_remote_session_screen_failure_returns_to_idle() {
     drop(_gb);
 }
 
+/// m6_7 — session-scoped screen consent (root fix #9): the host's accept-path
+/// auto-allow is revoked when the session ends, so the peer cannot re-dial
+/// 45720 without a fresh grant; an operator allow that predates the session
+/// survives the teardown. Verified via `screen_state()` on the host.
+#[tokio::test(flavor = "multi_thread")]
+async fn m6_7_remote_session_teardown_revokes_auto_allowed_screen() {
+    let (host, viewer, _ga, _gb) = pair_view().await;
+    let host_id = host.identity().device_id().clone();
+
+    // Full session lifecycle: request → accept (auto-allow) → controlling.
+    viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect("session start must succeed");
+    wait_session_controlling(&viewer, Duration::from_secs(10)).await;
+    assert!(
+        matches!(
+            host.screen_state(),
+            ScreenState::Allowed | ScreenState::Streaming
+        ),
+        "host screen must be allowed while the session is active, got {:?}",
+        host.screen_state()
+    );
+
+    // Controller-initiated stop → host receives Close → auto-allow revoked.
+    viewer
+        .remote_session_stop("m6_7")
+        .await
+        .expect("session stop must succeed");
+    wait_session_gone(&host, Duration::from_secs(3)).await;
+    assert_eq!(
+        host.screen_state(),
+        ScreenState::Idle,
+        "session-scoped screen consent must be revoked after the session — \
+         the peer must not be able to re-dial 45720 without a fresh grant"
+    );
+
+    // Operator-granted consent survives a session teardown. The operator
+    // grants for a *connected* peer: a real 45720 dial moves the engine to
+    // Requested (the accept handler runs on_peer_connected), then allow —
+    // the same shape as the m5_2 real-handshake path.
+    viewer
+        .open_screen(host.identity().device_id())
+        .await
+        .expect("viewer must reach the host's 45720 screen channel");
+    let start = std::time::Instant::now();
+    loop {
+        if host.screen_state() == ScreenState::Requested {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!(
+                "host never reached Requested after the operator dial, state={:?}",
+                host.screen_state()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    host.screen_allow();
+    assert!(
+        matches!(host.screen_state(), ScreenState::Allowed),
+        "operator allow on a connected peer must grant consent, got {:?}",
+        host.screen_state()
+    );
+    viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect("second session start must succeed");
+    wait_session_controlling(&viewer, Duration::from_secs(10)).await;
+    viewer
+        .remote_session_stop("m6_7b")
+        .await
+        .expect("second session stop must succeed");
+    wait_session_gone(&host, Duration::from_secs(3)).await;
+    assert!(
+        matches!(host.screen_state(), ScreenState::Allowed),
+        "operator consent must survive session teardown, got {:?}",
+        host.screen_state()
+    );
+
+    host.shutdown();
+    viewer.shutdown();
+    drop(_ga);
+    drop(_gb);
+}
+
 /// m6_6 — keymap end-to-end: the host suggests `mac_to_windows`; the session
 /// resp carries it; a Mac-source VK_LWIN from the viewer remaps to
 /// VK_LCONTROL on the wire and the host MemorySink records VK_LCONTROL.

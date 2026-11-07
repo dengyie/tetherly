@@ -892,6 +892,16 @@ struct Shared {
     /// session so the controller's keystrokes remap as the target expects;
     /// cleared on close. In-memory only, like the session itself.
     pub(crate) remote_session_keymap: Mutex<Option<String>>,
+    /// ADR-138: set when the host auto-allowed screen streaming only because
+    /// the session handshake implied consent (accept path with no prior
+    /// Allowed|Streaming). On session teardown the auto-grant is revoked —
+    /// an explicit operator allow granted before the session survives it.
+    pub(crate) remote_session_auto_allowed: std::sync::atomic::AtomicBool,
+    /// Monotonic generation of the active 45720 server channel. Each
+    /// `attach_screen_server` increments it; a pump loop may only run the
+    /// engine-level `on_peer_gone` reset when its generation is still the
+    /// newest — a replaced loop's teardown must not reset its successor.
+    pub(crate) screen_channel_gen: std::sync::atomic::AtomicU64,
     /// Handle of the running inbound input-client task. A newer accept
     /// aborts the previous one so stacked inbound sessions can never leave
     /// two clients racing on `input_sink` / the real injection sink.

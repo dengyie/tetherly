@@ -617,6 +617,8 @@ impl Node {
             active_input_tunnel: Mutex::new(None),
             remote_session: Mutex::new(None),
             remote_session_keymap: Mutex::new(None),
+            remote_session_auto_allowed: std::sync::atomic::AtomicBool::new(false),
+            screen_channel_gen: std::sync::atomic::AtomicU64::new(0),
             input_client_task: Mutex::new(None),
             input_dialing: std::sync::atomic::AtomicBool::new(false),
             last_auto_reverse: Mutex::new(None),

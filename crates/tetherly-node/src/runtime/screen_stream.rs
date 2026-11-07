@@ -85,6 +85,14 @@ impl Node {
     pub(super) async fn attach_screen_server(&self, mut sess: ActiveSession) {
         let peer_id = sess.peer_id.clone();
         let (tx, mut rx) = mpsc::channel::<InnerFrame>(SCREEN_QUEUE_DEPTH);
+        // Generation tag: when this loop exits it must only run the
+        // engine-level `on_peer_gone` if it is STILL the active channel — a
+        // replacement attach (new dial) must not be reset by this loop's
+        // teardown racing behind it.
+        let my_gen = self
+            .shared
+            .screen_channel_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.shared.screen_out.lock().await = Some(tx);
         *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
         // A new screen session re-evaluates the ADR-078 bitrate tier.
@@ -862,13 +870,22 @@ impl Node {
                     }
                 }
             }
-            node.shared
-                .screen_engine
-                .lock()
-                .expect("screen")
-                .on_peer_gone();
-            *node.shared.screen_peer.lock().expect("screen_peer") = None;
-            *node.shared.screen_out.lock().await = None;
+            // Only reset the engine when this loop still owns the channel:
+            // a newer attach has incremented the generation past ours.
+            let still_active = node
+                .shared
+                .screen_channel_gen
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == my_gen + 1;
+            if still_active {
+                node.shared
+                    .screen_engine
+                    .lock()
+                    .expect("screen")
+                    .on_peer_gone();
+                *node.shared.screen_peer.lock().expect("screen_peer") = None;
+                *node.shared.screen_out.lock().await = None;
+            }
             node.shared
                 .screen_privacy_enabled
                 .store(false, std::sync::atomic::Ordering::Relaxed);

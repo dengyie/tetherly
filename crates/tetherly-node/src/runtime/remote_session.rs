@@ -109,6 +109,11 @@ impl Node {
         let req_frame: InnerFrame = req.to_frame()?;
         if let Err(e) = self.send_to(&peer_id, req_frame).await {
             *self.shared.remote_session.lock().expect("remote_session") = None;
+            // Never leave a stale auto-allow latch from an earlier session
+            // latched across unrelated attempts.
+            self.shared
+                .remote_session_auto_allowed
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             return Err(CoreError::InvalidPayload(format!(
                 "failed to send remote session request: {e}"
             )));
@@ -230,6 +235,9 @@ impl Node {
         let peer_id = DeviceId::parse(&state.peer_id).ok();
         *self.shared.remote_session.lock().expect("remote_session") = None;
         *self.shared.remote_session_keymap.lock().expect("rs_keymap") = None;
+        self.shared
+            .remote_session_auto_allowed
+            .store(false, std::sync::atomic::Ordering::Relaxed);
 
         if let Some(peer) = peer_id {
             let close = tetherly_core::RemoteSessionCloseFrame {
@@ -319,6 +327,9 @@ impl Node {
             if state.session_id == session_id {
                 *self.shared.remote_session.lock().expect("remote_session") = None;
                 *self.shared.remote_session_keymap.lock().expect("rs_keymap") = None;
+                self.shared
+                    .remote_session_auto_allowed
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
                 if let Ok(peer) = DeviceId::parse(&state.peer_id) {
                     let close = tetherly_core::RemoteSessionCloseFrame {
                         session_id: state.session_id.clone(),
