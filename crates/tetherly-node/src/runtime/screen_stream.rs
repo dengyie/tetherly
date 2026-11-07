@@ -1032,6 +1032,7 @@ impl Node {
                         let now_us = node.shared.clock.unix_us();
                         if let Some(twcc_fb) = receiver.generate_twcc_feedback(now_us) {
                             *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
+                            *node.shared.screen_seq_trace.lock().expect("seq trace") = receiver.trace_pairs();
                             *node.shared.screen_twcc_stats.lock().expect("twcc stats") = receiver.twcc_stats();
                             if let Ok(twcc_frame) = twcc_fb.to_inner() {
                                 let t_len = (twcc_frame.payload.len() + 12) as u64;
@@ -2861,6 +2862,7 @@ impl Node {
                 .lock()
                 .expect("cursor stats") = receiver.cursor_stats();
             *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
+            *node.shared.screen_seq_trace.lock().expect("seq trace") = receiver.trace_pairs();
             *node.shared.screen_sync_stats.lock().expect("sync stats") = receiver.sync_stats();
             // Only clear the registration triple when this loop is still the
             // newest client channel. A replaced loop's late exit must not wipe
@@ -4887,6 +4889,16 @@ impl Node {
     }
 
     /// Visitor-side receiver counters. All zeros until this node views a peer.
+    /// Seq-decision trace of the active client-loop receiver: `(seq,
+    /// accepted)` pairs, oldest first (diagnostics: cliff vs duplicates).
+    pub fn screen_seq_trace(&self) -> Vec<(u64, bool)> {
+        self.shared
+            .screen_seq_trace
+            .lock()
+            .expect("seq trace")
+            .clone()
+    }
+
     pub fn screen_rx_stats(&self) -> ScreenStats {
         *self.shared.screen_rx_stats.lock().expect("screen rx")
     }

@@ -11,6 +11,8 @@ pub struct ScreenReceiver {
     pub(super) last_seq: u64,
     pub(super) stats: ScreenStats,
     pub(super) trace: VecDeque<u64>,
+    /// `(seq, accepted)` for every apply call (see `trace_pairs`).
+    pub(super) trace_pairs: VecDeque<(u64, bool)>,
     pub(super) playout_buffer: ScreenPlayoutBuffer,
     pub(super) cursor_controller: ScreenCursorController,
     pub(super) last_cursor: Option<ScreenCursorUpdate>,
@@ -97,6 +99,7 @@ impl ScreenReceiver {
             last_seq: 0,
             stats,
             trace: VecDeque::with_capacity(SCREEN_TRACE_MAX),
+            trace_pairs: VecDeque::with_capacity(SCREEN_TRACE_MAX),
             playout_buffer: ScreenPlayoutBuffer::default(),
             cursor_controller,
             last_cursor: None,
@@ -177,6 +180,7 @@ impl ScreenReceiver {
             last_seq: 0,
             stats,
             trace: VecDeque::with_capacity(SCREEN_TRACE_MAX),
+            trace_pairs: VecDeque::with_capacity(SCREEN_TRACE_MAX),
             playout_buffer: ScreenPlayoutBuffer::new(mode),
             cursor_controller,
             last_cursor: None,
@@ -806,12 +810,28 @@ impl ScreenReceiver {
         self.trace.iter().copied().collect()
     }
 
+    /// Seq-decision trace: `(seq, accepted)` for every `apply` call, oldest
+    /// first. Distinguishes a sender-side sequence reset (a descending run
+    /// of rejected seqs below the high-water mark) from legitimate HARQ
+    /// duplicate retransmits (isolated rejects near the current seq).
+    pub fn trace_pairs(&self) -> Vec<(u64, bool)> {
+        self.trace_pairs.iter().copied().collect()
+    }
+
     /// Validate and accept one frame. Duplicates and stale frames are dropped
     /// (counted), a forward jump beyond the window is an error, and a valid
     /// frame is recorded. `Ok(None)` means "not for presentation".
     pub fn apply(&mut self, frame: &ScreenFrame) -> Result<Option<u64>, CoreError> {
+        // Seq-decision trace (accept AND drop): a long descending run of
+        // dropped seqs below the high-water mark is the fingerprint of a
+        // sender-side sequence reset (the reused-channel cliff), while
+        // isolated stale drops are legitimate HARQ retransmits.
+        if self.trace_pairs.len() >= SCREEN_TRACE_MAX {
+            self.trace_pairs.pop_front();
+        }
         if frame.seq <= self.last_seq {
             self.stats.dropped = self.stats.dropped.saturating_add(1);
+            self.trace_pairs.push_back((frame.seq, false));
             return Ok(None);
         }
         if self.last_seq != 0 && frame.seq > self.last_seq.saturating_add(SCREEN_SEQ_WINDOW) {
@@ -832,6 +852,10 @@ impl ScreenReceiver {
             self.trace.pop_front();
         }
         self.trace.push_back(frame.seq);
+        if self.trace_pairs.len() >= SCREEN_TRACE_MAX {
+            self.trace_pairs.pop_front();
+        }
+        self.trace_pairs.push_back((frame.seq, true));
 
         // ADR-099 Screen Streaming Microsecond Latency Breakdown & Multi-Stage Frame Profiler
         if self.frame_profiler.mode() != ScreenProfilerMode::Disabled {

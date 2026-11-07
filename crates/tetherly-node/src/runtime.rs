@@ -910,6 +910,9 @@ struct Shared {
     /// Last time a four-finger swipe was dropped for "not controlling"
     /// (throttles the debug log so stray swipes don't spam).
     pub(crate) gesture_swipe_last_ignored_ms: std::sync::atomic::AtomicU64,
+    /// Receiver seq-decision ring `(seq, accepted)` mirrored from the
+    /// client-loop receiver for diagnostics (cliff-vs-duplicate triage).
+    pub(crate) screen_seq_trace: Mutex<Vec<(u64, bool)>>,
     /// Auto-reverse escape gate: while this node is a roaming TARGET, the
     /// local push-back takeover may only arm after the cursor has been seen
     /// far enough away from the shared edge. Without it, the ENTRY placement

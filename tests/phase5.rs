@@ -12478,9 +12478,17 @@ async fn m6_8_reused_channel_second_session_streams_frames() {
          next_seq would drop the whole previous session's frame run \
          (dropped >= {session1_received}) before seq caught up. Small \
          duplicate counts are legitimate HARQ shard retransmits carrying \
-         their original seq under load (received={}, dropped={})",
+         their original seq under load (received={}, dropped={}). \
+         seq-trace tail (seq,accepted): {:?}",
         rx.received,
-        rx.dropped
+        rx.dropped,
+        viewer
+            .screen_seq_trace()
+            .iter()
+            .rev()
+            .take(48)
+            .rev()
+            .collect::<Vec<_>>()
     );
 
     viewer
