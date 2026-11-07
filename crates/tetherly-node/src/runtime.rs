@@ -902,11 +902,24 @@ struct Shared {
     /// Allowed|Streaming). On session teardown the auto-grant is revoked —
     /// an explicit operator allow granted before the session survives it.
     pub(crate) remote_session_auto_allowed: std::sync::atomic::AtomicBool,
+    /// Test/operator gate that pauses the controller's session heartbeat
+    /// loop (the keepalive that refreshes the host's session slot). Pausing
+    /// is how "silence" is simulated now that the heartbeat actually keeps
+    /// the host slot alive.
+    pub(crate) session_heartbeat_paused: std::sync::atomic::AtomicBool,
     /// Monotonic generation of the active 45720 server channel. Each
     /// `attach_screen_server` increments it; a pump loop may only run the
     /// engine-level `on_peer_gone` reset when its generation is still the
     /// newest — a replaced loop's teardown must not reset its successor.
     pub(crate) screen_channel_gen: std::sync::atomic::AtomicU64,
+    /// Monotonic generation of the active 45720 client (viewer) channel.
+    /// Each `attach_screen_client` increments it; a client pump loop may only
+    /// clear `screen_peer` / `screen_ctl` / `screen_client_out` when its
+    /// generation is still the newest — a replaced loop's exit must not wipe
+    /// the registration triple its successor just wrote (and the reuse check
+    /// in `remote_session_start` reads `screen_peer`, so a stale wipe also
+    /// defeats channel reuse).
+    pub(crate) screen_client_gen: std::sync::atomic::AtomicU64,
     /// Handle of the running inbound input-client task. A newer accept
     /// aborts the previous one so stacked inbound sessions can never leave
     /// two clients racing on `input_sink` / the real injection sink.
@@ -949,16 +962,38 @@ struct Shared {
     pub(crate) drag_controller: Mutex<DragController>,
     pub(crate) drag_target: Mutex<DragTarget>,
     /// Pending receiver-side drag sessions awaiting their first byte:
-    /// `drag_id -> source peer`, populated when a `RemoteDropConfirm` arrives
-    /// and consumed when the first inbound `FileOffer` claims it.
-    pub(crate) pending_drag_drops: Mutex<HashMap<u64, DeviceId>>,
-    /// `transfer_id -> drag_id` linking an accepted inbound transfer back to
-    /// the drag session that originated it, so the completion hook can settle
-    /// MOTW + reveal. Populated when the first FileOffer of a drag arrives.
-    pub(crate) transfer_drag_ids: Mutex<HashMap<String, u64>>,
+    /// `drag_id -> {source peer, registered at}`, populated when a
+    /// `RemoteDropConfirm` arrives and consumed when the first inbound
+    /// `FileOffer` claims it. Entries carry their registration time so a
+    /// confirm whose transfer never arrived (crash, dropped connection)
+    /// ages out instead of mis-claiming an unrelated later offer.
+    pub(crate) pending_drag_drops: Mutex<HashMap<u64, PendingDragDrop>>,
+    /// `transfer_id -> (source peer, drag_id)` linking an accepted inbound
+    /// transfer back to the drag session that originated it, so the
+    /// completion hook can settle MOTW + reveal with the real source
+    /// attribution. Populated when the first FileOffer of a drag arrives.
+    pub(crate) transfer_drag_ids: Mutex<HashMap<String, (DeviceId, u64)>>,
+}
+
+/// Value of `Shared.pending_drag_drops`.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingDragDrop {
+    pub(crate) peer: DeviceId,
+    pub(crate) registered_ms: u64,
 }
 
 impl Shared {
+    /// Lock the screen engine for a QoE adjustment, tolerating poisoning: an
+    /// unrelated panic while holding the engine lock must cost us the quality
+    /// adaptation, not the whole frame-pump task (`expect` here turned a
+    /// poisoned lock into a frozen stream).
+    fn screen_engine_recovered(&self) -> std::sync::MutexGuard<'_, ScreenSender> {
+        match self.screen_engine.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     pub fn record_quality_metric(&self, frame: &tetherly_core::ScreenFrame) {
         let (enabled, sample_interval) = {
             let cfg = self.screen_quality_metric_config.read().unwrap();
@@ -1025,7 +1060,11 @@ impl Shared {
                         match action {
                             tetherly_core::ScreenQoeAction::Hold => {}
                             tetherly_core::ScreenQoeAction::BoostBitrate => {
-                                let mut engine = self.screen_engine.lock().expect("screen");
+                                // QoE adjustment is best-effort: a poisoned
+                                // engine lock (an invariant bug elsewhere)
+                                // must degrade quality adaptation, not panic
+                                // the frame-pump task and freeze the stream.
+                                let mut engine = self.screen_engine_recovered();
                                 let cur = engine.bitrate_bps();
                                 let boosted = (cur.saturating_mul(120) / 100)
                                     .min(tetherly_core::SCREEN_BITRATE_MAX_BPS);
@@ -1036,7 +1075,7 @@ impl Shared {
                                 self.screen_source.set_bitrate_bps(boosted);
                             }
                             tetherly_core::ScreenQoeAction::UpgradeScale => {
-                                let mut engine = self.screen_engine.lock().expect("screen");
+                                let mut engine = self.screen_engine_recovered();
                                 let cur = engine.scale_pct();
                                 if cur < 100 {
                                     engine.set_scale_pct(100);
@@ -1047,14 +1086,14 @@ impl Shared {
                                 }
                             }
                             tetherly_core::ScreenQoeAction::LowerQp => {
-                                let mut engine = self.screen_engine.lock().expect("screen");
+                                let mut engine = self.screen_engine_recovered();
                                 let (min_qp, max_qp) = engine.qp_range();
                                 let new_min = min_qp.saturating_sub(4).max(10);
                                 let new_max = max_qp.saturating_sub(4).max(20);
                                 engine.set_qp_range(new_min, new_max);
                             }
                             tetherly_core::ScreenQoeAction::ForceKeyframe => {
-                                let mut engine = self.screen_engine.lock().expect("screen");
+                                let mut engine = self.screen_engine_recovered();
                                 let _ =
                                     engine.on_control(tetherly_core::ControlMsg::KeyframeRequest);
                                 drop(engine);
@@ -1064,7 +1103,7 @@ impl Shared {
                                 }
                             }
                             tetherly_core::ScreenQoeAction::FallbackThrottle => {
-                                let mut engine = self.screen_engine.lock().expect("screen");
+                                let mut engine = self.screen_engine_recovered();
                                 let cur = engine.fps_target();
                                 let new_fps = cur.saturating_sub(5).max(15);
                                 engine.set_fps(new_fps);

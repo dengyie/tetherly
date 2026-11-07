@@ -619,7 +619,9 @@ impl Node {
             remote_session: Mutex::new(None),
             remote_session_keymap: Mutex::new(None),
             remote_session_auto_allowed: std::sync::atomic::AtomicBool::new(false),
+            session_heartbeat_paused: std::sync::atomic::AtomicBool::new(false),
             screen_channel_gen: std::sync::atomic::AtomicU64::new(0),
+            screen_client_gen: std::sync::atomic::AtomicU64::new(0),
             input_client_task: Mutex::new(None),
             input_dialing: std::sync::atomic::AtomicBool::new(false),
             last_auto_reverse: Mutex::new(None),
@@ -1169,6 +1171,36 @@ impl Node {
                         .expect("ping_waiters")
                         .remove(&peer_id);
                     *node.shared.input_seat.lock().expect("seat") = None;
+                    // Drag reverse path: a peer going down must not leave
+                    // pending drop registrations or an in-flight target
+                    // session behind — a stale registration would mis-claim
+                    // an arbitrary later FileOffer from the (re)connected
+                    // peer and apply MOTW + reveal to a normal transfer.
+                    {
+                        let mut pending = node
+                            .shared
+                            .pending_drag_drops
+                            .lock()
+                            .expect("pending_drag_drops");
+                        let stale_ids: Vec<u64> = pending
+                            .iter()
+                            .filter(|(_, p)| p.peer == peer_id)
+                            .map(|(id, _)| *id)
+                            .collect();
+                        for id in &stale_ids {
+                            pending.remove(id);
+                        }
+                        let active_drag_id = node
+                            .shared
+                            .drag_target
+                            .lock()
+                            .expect("drag_target")
+                            .active_session()
+                            .map(|s| s.drag_id);
+                        if active_drag_id.is_some_and(|id| stale_ids.contains(&id)) {
+                            node.shared.drag_target.lock().expect("drag_target").reset();
+                        }
+                    }
                     node.emit(UiEvent::PeerDown {
                         device_id: peer_id.to_string(),
                     });

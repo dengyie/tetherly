@@ -12175,16 +12175,24 @@ async fn m6_4_remote_session_idle_timeout_flushes_inputs() {
     policy.idle_timeout_secs = 1;
     host.set_input_policy(policy).unwrap();
 
-    // Simulate silence: stop refreshing last_activity on the host session and
-    // run the same sweep the watcher tick runs every second.
+    // Simulate silence: pause the controller's session heartbeats — they are
+    // what refreshes the host slot now, so real silence means no heartbeat
+    // traffic at all. (The policy floor clamps to 10s, hence the 15s budget
+    // below.) Then run the same sweep the watcher tick runs every second.
+    viewer.set_session_heartbeat_paused(true);
     let started = std::time::Instant::now();
     loop {
         let closed = host.remote_session_idle_check();
         if closed {
             break;
         }
-        if started.elapsed() > Duration::from_secs(10) {
-            panic!("idle sweep never force-closed the session");
+        if started.elapsed() > Duration::from_secs(15) {
+            let host_rep = host.remote_session_report();
+            panic!(
+                "idle sweep never force-closed the session; host_session={:?} viewer_session={:?}",
+                host_rep.session_id,
+                viewer.remote_session_report().session_id
+            );
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -12308,9 +12316,13 @@ async fn m6_7_remote_session_teardown_revokes_auto_allowed_screen() {
     wait_session_gone(&host, Duration::from_secs(3)).await;
     assert_eq!(
         host.screen_state(),
-        ScreenState::Idle,
+        ScreenState::Requested,
         "session-scoped screen consent must be revoked after the session — \
-         the peer must not be able to re-dial 45720 without a fresh grant"
+         the peer must not stream again without a fresh operator grant. \
+         Revocation lands in `Requested` (not the channel-death `Idle`): the \
+         45720 channel survives the session and is reused by the next one, \
+         and an Idle engine would refuse every later Start while the \
+         still-attached receiver would black-screen on a reset next_seq"
     );
 
     // Operator-granted consent survives a session teardown. The operator
@@ -12358,6 +12370,172 @@ async fn m6_7_remote_session_teardown_revokes_auto_allowed_screen() {
         "operator consent must survive session teardown, got {:?}",
         host.screen_state()
     );
+
+    host.shutdown();
+    viewer.shutdown();
+    drop(_ga);
+    drop(_gb);
+}
+
+/// m6_8 — the cross-session 45720 channel-reuse path must survive REAL frame
+/// flow (the m6 series previously only exercised the control plane). Session
+/// 1 streams frames, ends, consent is revoked, and session 2 REUSES the
+/// still-open channel (no re-dial). Two regression classes live here:
+/// 1. session 2 must start at all — revocation must land in `Requested`
+///    (re-allowable), not the channel-death `Idle` that refuses every Start;
+/// 2. no seq cliff — revocation must keep the sender's `next_seq` monotonic
+///    because the receiver instance is NOT recreated on reuse and would
+///    silently drop every frame until seq caught up with `last_seq`.
+#[tokio::test(flavor = "multi_thread")]
+async fn m6_8_reused_channel_second_session_streams_frames() {
+    let (host, viewer, _ga, _gb) = pair_view().await;
+    let host_id = host.identity().device_id().clone();
+
+    // ---- Session 1: full lifecycle with real frames on the wire. ----
+    viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect("session 1 start must succeed");
+    wait_session_controlling(&viewer, Duration::from_secs(10)).await;
+
+    let start = std::time::Instant::now();
+    loop {
+        host.screen_send_frame()
+            .await
+            .expect("session 1 frame send");
+        let rx = viewer.screen_rx_stats();
+        if rx.received >= 3 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "session 1 never streamed frames to the viewer; received={}",
+                rx.received
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let session1_received = viewer.screen_rx_stats().received;
+    assert!(
+        session1_received >= 3,
+        "precondition: session 1 must have advanced the receiver's sequence"
+    );
+
+    viewer
+        .remote_session_stop("m6_8 s1")
+        .await
+        .expect("session 1 stop must succeed");
+    wait_session_gone(&host, Duration::from_secs(3)).await;
+    assert_eq!(
+        host.screen_state(),
+        ScreenState::Requested,
+        "revocation must leave the engine re-allowable (Requested), not Idle"
+    );
+
+    // ---- Session 2: the reuse path (screen_ctl + screen_peer still point
+    // at the host) — must start without a fresh dial and keep streaming. ----
+    viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect(
+            "session 2 start MUST succeed on the reused channel — an Idle \
+             engine or a seq reset here is the regression this test pins",
+        );
+    wait_session_controlling(&viewer, Duration::from_secs(10)).await;
+
+    let start = std::time::Instant::now();
+    loop {
+        host.screen_send_frame()
+            .await
+            .expect("session 2 frame send");
+        let rx = viewer.screen_rx_stats();
+        if rx.received >= session1_received + 3 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "session 2 frames not arriving after channel reuse; \
+                 received={} (session 1 got {session1_received}), dropped={}",
+                rx.received, rx.dropped
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let rx = viewer.screen_rx_stats();
+    assert_eq!(
+        rx.dropped, 0,
+        "reused-channel session must not drop a stale-seq run — the sender \
+         sequence must continue monotonically across sessions"
+    );
+
+    viewer
+        .remote_session_stop("m6_8 s2")
+        .await
+        .expect("session 2 stop must succeed");
+    wait_session_gone(&host, Duration::from_secs(3)).await;
+
+    host.shutdown();
+    viewer.shutdown();
+    drop(_ga);
+    drop(_gb);
+}
+
+/// m6_9 — the controller's session heartbeat keeps the HOST's session slot
+/// alive. Before the heartbeat→`remote_session.last_activity_ms` wiring, the
+/// host-side timestamp was written only once at accept and the idle sweep
+/// force-closed EVERY session after `idle_timeout_secs`, active or not.
+#[tokio::test(flavor = "multi_thread")]
+async fn m6_9_session_heartbeat_keeps_host_slot_alive() {
+    let (host, viewer, _ga, _gb) = pair_view().await;
+    let host_id = host.identity().device_id().clone();
+
+    viewer
+        .remote_session_start(
+            host_id.to_string().as_str(),
+            tetherly_core::RemoteSessionReason::UserInitiated,
+        )
+        .await
+        .expect("session start");
+    wait_session_controlling(&viewer, Duration::from_secs(10)).await;
+
+    // The policy floor clamps `idle_timeout_secs` to 10s. Without the
+    // heartbeat wiring the sweep closes the session at accept+10s; with it,
+    // the 2s heartbeats keep the host slot fresh forever. Run past 12s —
+    // past the floor — and demand both slots are still alive.
+    let mut policy = host.input_policy();
+    policy.idle_timeout_secs = 2;
+    host.set_input_policy(policy).unwrap();
+
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let viewer_rep = viewer.remote_session_report();
+    assert!(
+        viewer_rep.session_id.is_some(),
+        "controller session slot must survive while heartbeats flow"
+    );
+    let host_rep = host.remote_session_report();
+    assert!(
+        host_rep.session_id.is_some(),
+        "host session slot must be kept alive by the controller's heartbeats — \
+         a 300s-style force close during active use is the P1 regression"
+    );
+    // And the sweep itself must agree the session is not expired.
+    assert!(
+        !host.remote_session_idle_check(),
+        "idle sweep must not fire while the controller's heartbeats keep \
+         the host slot fresh"
+    );
+
+    viewer
+        .remote_session_stop("m6_9")
+        .await
+        .expect("session stop");
+    wait_session_gone(&host, Duration::from_secs(3)).await;
 
     host.shutdown();
     viewer.shutdown();

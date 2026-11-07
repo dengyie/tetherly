@@ -126,7 +126,7 @@ impl Node {
         //    a takeover's teardown races this dial.
         if let Err(e) = self.open_input(&peer_id).await {
             let mut last_err = Some(e);
-            for attempt in 1..=3u8 {
+            for _ in 0..3u8 {
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 match self.open_input(&peer_id).await {
                     Ok(()) => {
@@ -135,7 +135,6 @@ impl Node {
                     }
                     Err(e) => last_err = Some(e),
                 }
-                let _ = attempt;
             }
             if let Some(e) = last_err {
                 self.teardown_session_silent(&session_id).await;
@@ -192,8 +191,16 @@ impl Node {
         //    (m6_7 part-2 CI race). A channel to a DIFFERENT peer is replaced
         //    — the session must ride a channel to its own host.
         {
+            // Only reuse a channel this machine holds as the VIEWER for this
+            // exact peer. `screen_peer` is also written by the server-side
+            // attach (someone watching us), and `send_screen_control` falls
+            // back to the server channel when `screen_ctl` is missing — a
+            // role-blind check here would send the session's Start into the
+            // peer's viewer pump, where it is ignored, and the start would
+            // silently time out into a black screen.
             let open_peer = self.shared.screen_peer.lock().expect("screen_peer").clone();
-            if open_peer.as_ref() != Some(&peer_id) {
+            let ctl_open = self.shared.screen_ctl.lock().await.is_some();
+            if !(ctl_open && open_peer.as_ref() == Some(&peer_id)) {
                 if let Err(e) = self.open_screen(&peer_id).await {
                     self.teardown_session_silent(&session_id).await;
                     return Err(CoreError::InvalidPayload(format!("screen open: {e}")));
@@ -287,6 +294,16 @@ impl Node {
         })
     }
 
+    /// Pause/resume the controller-side session heartbeat loop. The heartbeat
+    /// is what refreshes the host's session slot; pausing it is how "real
+    /// silence" is simulated in tests (the idle-timeout floor is 10s, so a
+    /// silent-but-refreshing session can never expire).
+    pub fn set_session_heartbeat_paused(&self, paused: bool) {
+        self.shared
+            .session_heartbeat_paused
+            .store(paused, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Status snapshot for `GET /api/remote/session`.
     pub fn remote_session_report(&self) -> RemoteSessionStartReport {
         let now_ms = self.shared.clock.unix_ms();
@@ -362,18 +379,32 @@ impl Node {
     /// the platform ships the AppKit viewer subprocess (macOS); CI/headless
     /// hosts report `None` and the session still works wire-side.
     fn spawn_session_viewer(&self, _peer: &DeviceId) -> Option<u32> {
-        crate::platform::spawn_remote_session_viewer().ok()
+        match crate::platform::spawn_remote_session_viewer() {
+            Ok(pid) => Some(pid),
+            Err(e) => {
+                tracing::warn!("session viewer unavailable: {e}");
+                None
+            }
+        }
     }
 
     /// Heartbeat loop: reuse `TYPE_INPUT_TUNNEL_HEARTBEAT` for session
     /// liveness. `idle_timeout_secs` (InputTunnelPolicy) governs both sides;
-    /// the target's `remote_session_idle_check` force-closes on silence.
+    /// the target's `remote_session_idle_check` force-closes on silence, and
+    /// the heartbeat keeps both the target's session slot and this side's
+    /// tunnel table fresh (`receive_input_tunnel_heartbeat` refreshes both).
+    /// Consecutive send failures mean the peer link is gone and the target's
+    /// own sweep may never reach us (its Close can be lost with the link), so
+    /// after `HEARTBEAT_FAIL_LIMIT` failures the controller tears itself down
+    /// instead of holding the slot (and the suppressed watcher) forever.
     fn spawn_session_heartbeat(&self, session_id: &str) {
+        const HEARTBEAT_FAIL_LIMIT: u32 = 3;
         let node = self.clone_handle();
         let session_id = session_id.to_string();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut send_failures: u32 = 0;
             loop {
                 ticker.tick().await;
                 let alive = node
@@ -385,6 +416,16 @@ impl Node {
                     .is_some_and(|s| s.session_id == session_id);
                 if !alive {
                     return;
+                }
+                if node
+                    .shared
+                    .session_heartbeat_paused
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    // Paused (tests simulate silence this way): skip the
+                    // self-refresh AND the wire heartbeat so the target's
+                    // idle sweep observes real silence.
+                    continue;
                 }
                 node.touch_remote_session(&session_id);
                 let hb = tetherly_core::InputTunnelHeartbeatFrame {
@@ -403,7 +444,23 @@ impl Node {
                         }
                     };
                     if let Some(peer) = peer {
-                        let _ = node.send_to(&peer, inner).await;
+                        match node.send_to(&peer, inner).await {
+                            Ok(()) => send_failures = 0,
+                            Err(e) => {
+                                send_failures += 1;
+                                tracing::warn!(
+                                    "session {session_id}: heartbeat #{send_failures} to {peer} failed: {e}"
+                                );
+                                if send_failures >= HEARTBEAT_FAIL_LIMIT {
+                                    tracing::warn!(
+                                        "session {session_id}: peer unreachable after \
+                                         {HEARTBEAT_FAIL_LIMIT} heartbeats — self-teardown"
+                                    );
+                                    node.teardown_session_silent(&session_id).await;
+                                    return;
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -476,6 +476,12 @@ impl Node {
             Some("inbound input control rejected by target policy".to_string())
         } else if !policy.is_peer_eligible(&profile) {
             Some("peer ineligible under input policy filters".to_string())
+        } else if self.remote_session_active() {
+            // ADR-138 §2.7 single-session invariant, inbound half: an active
+            // remote desktop session owns the seat, so a roaming tunnel
+            // request (from a third node or the session peer) must not stack
+            // a second controller on the same desktop.
+            Some("remote desktop session active".to_string())
         } else {
             None
         };
@@ -814,6 +820,22 @@ impl Node {
         if let Some(ref mut session) = *guard {
             if session.session_id == frame.session_id && session.peer_id == peer_str {
                 session.last_activity_ms = now_ms;
+            }
+        }
+        // ADR-138: the controller's session heartbeat also keeps the *session*
+        // slot alive on the host. Without this the host-side
+        // `remote_session.last_activity_ms` is written only once at accept and
+        // the idle sweep force-closes every session after `idle_timeout_secs`
+        // even while the operator is actively typing.
+        if let Some(s) = self
+            .shared
+            .remote_session
+            .lock()
+            .expect("remote_session")
+            .as_mut()
+        {
+            if s.state.session_id == frame.session_id && s.state.peer_id == peer_str {
+                s.state.last_activity_ms = now_ms;
             }
         }
     }
@@ -1170,23 +1192,33 @@ impl Node {
         // Session-scoped screen consent: the accept path may have auto-allowed
         // streaming — pull it back so the peer cannot re-dial 45720 after the
         // session without a fresh grant. An operator allow granted before the
-        // session is left untouched. The session's dedicated screen channel
-        // dies with the Close, so the canonical `on_peer_gone` reset (Idle,
-        // seq reset, pacers cleared) applies — not `revoke()`, which keeps
-        // `Requested` for a live channel that no longer exists here.
+        // session is left untouched. The 45720 channel survives the Close
+        // (remote_session_start reuses it across sessions), so the revocation
+        // must NOT use `on_peer_gone`: that resets `next_seq` to 1 while the
+        // still-attached receiver keeps `last_seq`, and leaves the engine in
+        // Idle where `allow()` is a no-op and every later Start is refused.
+        // `revoke()` lands in `Requested` and keeps the sequence monotonic;
+        // genuine channel death is still reset by the gen-guarded loop-exit
+        // `on_peer_gone`.
         if self
             .shared
             .remote_session_auto_allowed
             .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
-            self.shared
-                .screen_engine
-                .lock()
-                .expect("screen")
-                .on_peer_gone();
+            self.shared.screen_engine.lock().expect("screen").revoke();
             let state = self.screen_state();
             let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
-            self.emit(UiEvent::screen_state_changed(state.as_str(), allowed, None));
+            // The channel typically survives the session — report the real
+            // peer so the UI does not show a viewer-less state while the
+            // 45720 connection is still open.
+            let peer = self
+                .shared
+                .screen_peer
+                .lock()
+                .expect("screen_peer")
+                .as_ref()
+                .map(|p| p.to_string());
+            self.emit(UiEvent::screen_state_changed(state.as_str(), allowed, peer));
         }
         if state.role.is_receiving() {
             self.exit_session();
@@ -1261,16 +1293,24 @@ impl Node {
                 .remote_session_auto_allowed
                 .swap(false, std::sync::atomic::Ordering::Relaxed)
             {
-                // Same rationale as the Close handler: the session's screen
-                // channel dies here, so reset to Idle, not `Requested`.
-                self.shared
-                    .screen_engine
-                    .lock()
-                    .expect("screen")
-                    .on_peer_gone();
+                // Same rationale as the Close handler: the 45720 channel
+                // survives the session, so revoke to `Requested` (keep seq
+                // monotonic) instead of the channel-death `on_peer_gone`.
+                self.shared.screen_engine.lock().expect("screen").revoke();
                 let state = self.screen_state();
                 let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
-                self.emit(UiEvent::screen_state_changed(state.as_str(), allowed, None));
+                let live_peer = self
+                    .shared
+                    .screen_peer
+                    .lock()
+                    .expect("screen_peer")
+                    .as_ref()
+                    .map(|p| p.to_string());
+                self.emit(UiEvent::screen_state_changed(
+                    state.as_str(),
+                    allowed,
+                    live_peer,
+                ));
             }
             if s.role.is_receiving() {
                 self.exit_session();
@@ -1522,7 +1562,7 @@ impl Node {
             // Retry briefly before giving up; the watcher remains the
             // backstop.
             let mut last_err = Some(e);
-            for attempt in 1..=3u8 {
+            for _ in 0..3u8 {
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 match self.open_input(&peer_id).await {
                     Ok(()) => {
@@ -1531,7 +1571,6 @@ impl Node {
                     }
                     Err(e) => last_err = Some(e),
                 }
-                let _ = attempt;
             }
             if let Some(e) = last_err {
                 warn!(%peer_id, %e, "input channel open during tunnel attach failed after retries");
