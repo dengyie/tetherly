@@ -1629,9 +1629,147 @@ struct MacTapContext {
     keyboard_armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pressed_modifiers: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u16>>>,
     tap_port: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Raw kCGEventGesture (type 29) tracking: the gesture field layout is
+    /// not public, so the handler dumps candidate fields for the first
+    /// events and accumulates whichever delta-like fields move — the
+    /// four-finger swipe direction is derived from the field pair that
+    /// actually travels during a swipe (empirically confirmed in prod).
+    gesture_state: std::sync::Arc<std::sync::Mutex<GestureTapState>>,
     _retained_port: std::sync::Mutex<
         Option<objc2_core_foundation::CFRetained<objc2_core_foundation::CFMachPort>>,
     >,
+}
+
+/// Accumulator for kCGEventGesture (type 29) horizontal swipe detection.
+#[derive(Default)]
+struct GestureTapState {
+    /// Observed non-zero values per candidate field, from the gesture's
+    /// begin to its end (keyed by CGEventField number).
+    sums: std::collections::HashMap<u32, i64>,
+    /// Events dumped so far (field discovery is logged only initially).
+    dumped: u32,
+    /// True while a gesture is in progress (begin seen, end not yet).
+    in_gesture: bool,
+    /// Milliseconds timestamp of the last gesture event (gap finalize).
+    last_event_ms: u128,
+    /// Generation counter for the deferred finalize threads.
+    generation: u64,
+}
+
+/// Handle one raw kCGEventGesture (type 29) event inside the HID tap.
+///
+/// The gesture field layout is undocumented; the handler (a) dumps candidate
+/// integer fields for the first events (empirical record), (b) accumulates
+/// every candidate field across the gesture, finalizing on a >250ms event
+/// gap, and (c) at finalize fires a [`RawInput::GestureSwipe`] when a
+/// dominant delta-like field accumulated past the swipe threshold — while
+/// the local capture is armed, the event is DROPPED so macOS does not ALSO
+/// perform the local Spaces switch. Not armed: pass through untouched.
+#[cfg(target_os = "macos")]
+unsafe fn handle_gesture_tap_event(
+    cg_event: &objc2_core_graphics::CGEvent,
+    ctx: &MacTapContext,
+) -> *mut objc2_core_graphics::CGEvent {
+    use objc2_core_graphics::{CGEvent, CGEventField};
+    use std::sync::atomic::Ordering;
+
+    const CANDIDATE_FIELDS: [u32; 14] = [45, 46, 53, 61, 62, 63, 64, 65, 70, 71, 87, 88, 89, 90];
+    const SWIPE_SUM_THRESHOLD: i64 = 30;
+    const FINALIZE_GAP_MS: u128 = 250;
+
+    let armed = ctx.keyboard_armed.load(Ordering::SeqCst);
+    let mut state = match ctx.gesture_state.lock() {
+        Ok(s) => s,
+        Err(_) => return cg_event as *const CGEvent as *mut CGEvent,
+    };
+
+    // Empirical record: dump the candidate fields for the first events so a
+    // mis-parse can be corrected against real data.
+    if state.dumped < 12 {
+        state.dumped += 1;
+        let dump: Vec<String> = CANDIDATE_FIELDS
+            .iter()
+            .map(|f| {
+                let v = CGEvent::integer_value_field(Some(cg_event), CGEventField(*f));
+                format!("{f}={v}")
+            })
+            .collect();
+        tracing::info!(armed, "gesture event fields: {}", dump.join(" "));
+    }
+
+    // Accumulate every candidate field; finalize when the event stream gaps.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let gap = now_ms.saturating_sub(state.last_event_ms) > FINALIZE_GAP_MS;
+    state.last_event_ms = now_ms;
+    if gap && state.in_gesture {
+        // Previous gesture ended silently — finalize it now.
+        finalize_gesture(&mut state, &ctx.tx, SWIPE_SUM_THRESHOLD);
+    }
+    state.in_gesture = true;
+    for f in CANDIDATE_FIELDS {
+        let v = CGEvent::integer_value_field(Some(cg_event), CGEventField(f));
+        *state.sums.entry(f).or_insert(0) += v;
+    }
+
+    // Schedule the finalize: a quiet period after this event ends the
+    // gesture. Generation counter guards against stale threads.
+    state.generation += 1;
+    let generation = state.generation;
+    let state_arc = ctx.gesture_state.clone();
+    let tx = ctx.tx.clone();
+    std::thread::Builder::new()
+        .name("gesture-finalize".into())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(
+                FINALIZE_GAP_MS as u64 + 50,
+            ));
+            if let Ok(mut s) = state_arc.lock() {
+                if s.generation == generation && s.in_gesture {
+                    finalize_gesture(&mut s, &tx, SWIPE_SUM_THRESHOLD);
+                }
+            }
+        })
+        .ok();
+
+    if armed {
+        // Consumed: keep macOS from ALSO switching the local Space.
+        std::ptr::null_mut()
+    } else {
+        cg_event as *const CGEvent as *mut CGEvent
+    }
+}
+
+/// Field-access shim removed: the deferred finalize thread closes over the
+/// raw sender directly.
+#[cfg(target_os = "macos")]
+fn finalize_gesture(
+    state: &mut GestureTapState,
+    tx: &std::sync::mpsc::Sender<RawInput>,
+    threshold: i64,
+) {
+    let sums = std::mem::take(&mut state.sums);
+    state.in_gesture = false;
+    // Dominant field = the one that accumulated the most horizontal-looking
+    // travel. Its sign is the swipe direction (fingers left => negative).
+    let dominant = sums
+        .iter()
+        .max_by_key(|(_, v)| v.abs())
+        .map(|(f, v)| (*f, *v));
+    if let Some((field, sum)) = dominant {
+        if sum.abs() >= threshold {
+            let direction: i8 = if sum < 0 { -1 } else { 1 };
+            tracing::info!(
+                field,
+                sum,
+                direction,
+                "four-finger swipe finalized; forwarding remote virtual-desktop switch"
+            );
+            let _ = tx.send(crate::platform::RawInput::GestureSwipe { direction });
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1692,6 +1830,18 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
             CGEvent::integer_value_field(Some(cg_event), CGEventField::EventSourceUserData);
         if user_data == TETHERLY_INJECTED_MAGIC {
             return event.as_ptr();
+        }
+
+        // Raw trackpad gesture stream (kCGEventGesture = 29, not in the
+        // CGEventType enum). The window server consumes system gesture
+        // actions (Spaces switching) BEFORE app-level delivery, so the
+        // NSEvent monitor never sees them — the HID tap is the only
+        // interception point. While the local capture is armed (this node
+        // is controlling a remote desktop), a horizontal four-finger swipe
+        // is forwarded as the remote virtual-desktop switch and the event
+        // is DROPPED so macOS does not also switch the local Space.
+        if event_type.0 == 29 {
+            return handle_gesture_tap_event(cg_event, ctx);
         }
 
         match event_type {
@@ -2073,6 +2223,9 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 keyboard_armed: keyboard_armed_thread,
                 pressed_modifiers: pressed_modifiers_thread,
                 tap_port: tap_port_thread,
+                gesture_state: std::sync::Arc::new(std::sync::Mutex::new(
+                    GestureTapState::default(),
+                )),
                 _retained_port: std::sync::Mutex::new(None),
             });
 
@@ -2091,6 +2244,7 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 | (1u64 << CGEventType::KeyUp.0)
                 | (1u64 << CGEventType::FlagsChanged.0)
                 | (1u64 << 14) // NX_SYSDEFINED = 14 (media keys, volume up/down/mute, etc.)
+                | (1u64 << 29) // kCGEventGesture = 29 (raw trackpad gestures)
                 // kCGEventTapDisabledByTimeout (0xFFFFFFFE) and
                 // kCGEventTapDisabledByUserInput (0xFFFFFFFF) land on mask
                 // bits 62/63 on 64-bit (CGEventMaskBit wraps the shift).

@@ -2557,6 +2557,14 @@ impl Node {
             if current_seat == CursorSeat::Local {
                 self.disarm_input_capture();
                 crate::platform::warp_mouse_position(local_pos.0, local_pos.1);
+            } else {
+                // Becoming the controlled side: the entry placement parks the
+                // cursor ON the shared edge — the push-back escape gate must
+                // re-arm from scratch (leave the edge, come back, dwell).
+                self.shared
+                    .reverse_edge_escape_armed
+                    .store(false, Ordering::SeqCst);
+                self.reset_reverse_arming_state();
             }
         }
         if let Ok(mut guard) = self.shared.active_input_tunnel.lock() {
@@ -2755,6 +2763,34 @@ impl Node {
             tetherly_core::ScreenEdge::Top if y <= 2 || (y <= 8 && dy < 0) => (x, 0),
             tetherly_core::ScreenEdge::Left if x <= 2 || (x <= 8 && dx < 0) => (0, y),
             _ => {
+                // Cursor away from the edge zone. Only a REAL escape — far
+                // enough that the user demonstrably left the shared edge —
+                // arms the next push-back dwell. The entry placement parks
+                // the cursor ON the edge; without this gate, residual local
+                // motion dwelt there and the target snatched control back
+                // seconds after every takeover. The escape distance scales
+                // with the edge-normal dimension (1/7th, min 8px) so tiny
+                // virtual screens in tests behave like real ones.
+                let normal_dim = match edge {
+                    tetherly_core::ScreenEdge::Right | tetherly_core::ScreenEdge::Left => width,
+                    tetherly_core::ScreenEdge::Top | tetherly_core::ScreenEdge::Bottom => height,
+                } as i64;
+                let escape_px = (normal_dim / 7).max(8);
+                let escaped = match edge {
+                    tetherly_core::ScreenEdge::Right => {
+                        (width.saturating_sub(1)).saturating_sub(x.max(0)) as i64
+                    }
+                    tetherly_core::ScreenEdge::Bottom => {
+                        (height.saturating_sub(1)).saturating_sub(y.max(0)) as i64
+                    }
+                    tetherly_core::ScreenEdge::Top => y.max(0) as i64,
+                    tetherly_core::ScreenEdge::Left => x.max(0) as i64,
+                };
+                if escaped >= escape_px {
+                    self.shared
+                        .reverse_edge_escape_armed
+                        .store(true, Ordering::SeqCst);
+                }
                 *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
                 *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
                 return;
@@ -2769,7 +2805,7 @@ impl Node {
 
         // Distance gate: an un-armed mouse (freshly plugged in, or bumped
         // without real traversal) can never start the takeover dwell.
-        if !distance_armed {
+        if !distance_armed || !self.shared.reverse_edge_escape_armed.load(Ordering::SeqCst) {
             // Diagnostic (v0.1.81): an edge push blocked by the distance gate
             // is invisible to the user ("push does nothing") — log it, at most
             // once per second, so the block is attributable.
@@ -2844,6 +2880,11 @@ impl Node {
             return;
         }
         *self.shared.last_auto_reverse.lock().expect("last_flip") = Some(now);
+        // The takeover is consumed: the next one needs a fresh deliberate
+        // escape-and-push cycle.
+        self.shared
+            .reverse_edge_escape_armed
+            .store(false, Ordering::SeqCst);
 
         let Some(peer) = self
             .shared

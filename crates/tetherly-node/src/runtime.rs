@@ -910,6 +910,13 @@ struct Shared {
     /// Last time a four-finger swipe was dropped for "not controlling"
     /// (throttles the debug log so stray swipes don't spam).
     pub(crate) gesture_swipe_last_ignored_ms: std::sync::atomic::AtomicU64,
+    /// Auto-reverse escape gate: while this node is a roaming TARGET, the
+    /// local push-back takeover may only arm after the cursor has been seen
+    /// far enough away from the shared edge. Without it, the ENTRY placement
+    /// parks the cursor ON the edge and any residual local motion dwells
+    /// there — the target snatched control back seconds after every
+    /// takeover (the "Windows mouse cannot stay on the Mac" bug).
+    pub(crate) reverse_edge_escape_armed: std::sync::atomic::AtomicBool,
     /// Monotonic generation of the active 45720 server channel. Each
     /// `attach_screen_server` increments it; a pump loop may only run the
     /// engine-level `on_peer_gone` reset when its generation is still the
