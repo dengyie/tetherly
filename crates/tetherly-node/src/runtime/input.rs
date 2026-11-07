@@ -3298,6 +3298,24 @@ impl Node {
                                             let mut sink =
                                                 node.shared.input_sink.lock().expect("sink");
                                             sink.cursor = (x, y);
+                                            // The Move fast-path skips the full
+                                            // memory clone, so the shared trace
+                                            // would never see move-only sequences
+                                            // (a session Enter+Move is exactly
+                                            // that — Enter is engine-internal and
+                                            // leaves no sink record). Append the
+                                            // single record with the same bounded
+                                            // ring accounting the memory observer
+                                            // uses; a later full clone stays
+                                            // consistent.
+                                            if sink.applied.len()
+                                                >= tetherly_core::INPUT_SINK_TRACE_MAX
+                                            {
+                                                sink.applied.pop_front();
+                                            }
+                                            sink.applied.push_back(
+                                                tetherly_core::InputKind::Move { x, y },
+                                            );
                                         } else {
                                             *node.shared.input_sink.lock().expect("sink") =
                                                 client.sink().memory().clone();

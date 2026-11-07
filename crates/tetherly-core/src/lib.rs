@@ -117,9 +117,9 @@ pub use handoff::{
 pub use hello::Hello;
 pub use input::{
     is_input_type, CursorSeat, InputClient, InputEvent, InputKind, InputServer, InputSink,
-    MemorySink, ScreenEdge, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, INPUT_MAGIC, SCREEN_UNITS,
-    TYPE_INPUT_BUTTON, TYPE_INPUT_CLIP_HINT, TYPE_INPUT_ENTER, TYPE_INPUT_KEY, TYPE_INPUT_LEAVE,
-    TYPE_INPUT_MOVE, TYPE_INPUT_WHEEL,
+    MemorySink, ScreenEdge, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, INPUT_MAGIC, INPUT_SINK_TRACE_MAX,
+    SCREEN_UNITS, TYPE_INPUT_BUTTON, TYPE_INPUT_CLIP_HINT, TYPE_INPUT_ENTER, TYPE_INPUT_KEY,
+    TYPE_INPUT_LEAVE, TYPE_INPUT_MOVE, TYPE_INPUT_WHEEL,
 };
 pub use input_tunnel::{
     InputTunnelHeartbeatFrame, InputTunnelReleaseFrame, InputTunnelRequestFrame,
