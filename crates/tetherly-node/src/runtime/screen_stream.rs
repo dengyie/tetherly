@@ -904,7 +904,12 @@ impl Node {
                     .shared
                     .screen_channel_gen
                     .load(std::sync::atomic::Ordering::SeqCst);
-                eprintln!("[m6dbg] server loop exit: my_gen={} current={} (still_newest={})", my_gen, current, current == my_gen + 1);
+                eprintln!(
+                    "[m6dbg] server loop exit: my_gen={} current={} (still_newest={})",
+                    my_gen,
+                    current,
+                    current == my_gen + 1
+                );
                 if current == my_gen + 1 {
                     engine.on_peer_gone();
                 }
@@ -946,7 +951,10 @@ impl Node {
             .screen_client_gen
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        eprintln!("[m6dbg] client attach: gen={} peer={}", my_client_gen, peer_id);
+        eprintln!(
+            "[m6dbg] client attach: gen={} peer={}",
+            my_client_gen, peer_id
+        );
         let (ctl_tx, mut ctl_rx) = mpsc::channel::<ControlMsg>(SCREEN_QUEUE_DEPTH);
         *self.shared.screen_ctl.lock().await = Some(ctl_tx);
         let (client_frame_tx, mut client_frame_rx) =
