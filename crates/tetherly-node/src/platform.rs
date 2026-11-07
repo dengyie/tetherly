@@ -1641,6 +1641,7 @@ struct MacTapContext {
 }
 
 /// Accumulator for kCGEventGesture (type 29) horizontal swipe detection.
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct GestureTapState {
     /// Observed non-zero values per candidate field, from the gesture's
