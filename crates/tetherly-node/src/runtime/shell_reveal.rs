@@ -22,6 +22,14 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), CoreError> {
         return Err(CoreError::File("target path does not exist".into()));
     }
 
+    // Windows: `Path::canonicalize` returns an extended-length path
+    // (`\\?\C:\...`, `\\?\UNC\...`) which `explorer /select,` does not
+    // accept — the reveal would silently no-op. `std::path::absolute` keeps
+    // the plain Win32 form. macOS/Linux keep canonicalize (resolves symlinks
+    // for a stable highlight target).
+    #[cfg(target_os = "windows")]
+    let abs_path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(not(target_os = "windows"))]
     let abs_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
     let path_str = abs_path.to_str().ok_or(CoreError::UnsafeFileName)?;
@@ -35,9 +43,7 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), CoreError> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
 
-        cmd.spawn()
-            .map(|_| ())
-            .map_err(|e| CoreError::OpenRefused(format!("failed to reveal in Finder: {e}")))
+        spawn_reaped(cmd, "failed to reveal in Finder", "open -R")
     }
 
     #[cfg(target_os = "windows")]
@@ -48,9 +54,7 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), CoreError> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
 
-        cmd.spawn()
-            .map(|_| ())
-            .map_err(|e| CoreError::OpenRefused(format!("failed to reveal in Explorer: {e}")))
+        spawn_reaped(cmd, "failed to reveal in Explorer", "explorer /select")
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -68,10 +72,37 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), CoreError> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
 
-        cmd.spawn()
-            .map(|_| ())
-            .map_err(|e| CoreError::OpenRefused(format!("failed to open file manager: {e}")))
+        spawn_reaped(cmd, "failed to open file manager", "xdg-open")
     }
+}
+
+/// Fire-and-forget spawn with correct child hygiene for a long-lived daemon:
+/// a reaper thread collects the short-lived child (no zombie accumulation)
+/// and its non-zero exit is surfaced as a warning instead of being silently
+/// swallowed (`spawn` success does not mean the reveal succeeded).
+fn spawn_reaped(
+    mut cmd: Command,
+    spawn_err_label: &str,
+    what: &'static str,
+) -> Result<(), CoreError> {
+    let label = spawn_err_label.to_string();
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| CoreError::OpenRefused(format!("{label}: {e}")))?;
+    let pid = child.id();
+    std::thread::Builder::new()
+        .name("shell-reveal-reap".into())
+        .spawn(move || match child.wait() {
+            Ok(status) if !status.success() => {
+                tracing::warn!(
+                    "{what} exited non-zero ({status}) — reveal likely did not happen (pid {pid})"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("{what} wait failed: {e} (pid {pid})"),
+        })
+        .ok();
+    Ok(())
 }
 
 /// Apply Mark of the Web (MOTW) Zone.Identifier stream on Windows NTFS files.

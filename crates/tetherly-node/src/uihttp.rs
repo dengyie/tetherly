@@ -21,8 +21,7 @@ use tracing::{info, warn};
 #[cfg(test)]
 use tetherly_loopback::parse_http_response;
 pub use tetherly_loopback::{
-    loopback_delete, loopback_get, loopback_get_with_deadlines, loopback_post,
-    loopback_post_with_deadlines, loopback_put, loopback_put_with_deadlines,
+    loopback_delete, loopback_get, loopback_post, loopback_post_with_deadlines, loopback_put,
 };
 
 const INDEX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/index.html"));

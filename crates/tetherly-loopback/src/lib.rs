@@ -127,27 +127,6 @@ pub async fn loopback_get(port: u16, path: &str) -> io::Result<(u16, Vec<u8>)> {
     .await
 }
 
-/// `GET` with an explicit request deadline.
-///
-/// The default [`REQUEST_TIMEOUT`] assumes an in-memory-state answer; routes
-/// that do real work before replying (e.g. hashing a large file for
-/// `/api/file/send`) need a longer budget on loaded or slow-disk machines.
-pub async fn loopback_get_with_deadlines(
-    port: u16,
-    path: &str,
-    connect_timeout: Duration,
-    request_timeout: Duration,
-) -> io::Result<(u16, Vec<u8>)> {
-    exchange(
-        port,
-        headless_head("GET", path),
-        None,
-        connect_timeout,
-        request_timeout,
-    )
-    .await
-}
-
 /// `DELETE` a path and return `(status, body)`.
 pub async fn loopback_delete(port: u16, path: &str) -> io::Result<(u16, Vec<u8>)> {
     exchange(
@@ -207,25 +186,6 @@ pub async fn loopback_put(port: u16, path: &str, body: &[u8]) -> io::Result<(u16
         Some(body),
         CONNECT_TIMEOUT,
         REQUEST_TIMEOUT,
-    )
-    .await
-}
-
-/// `PUT` with an explicit request deadline (same rationale as
-/// [`loopback_post_with_deadlines`]).
-pub async fn loopback_put_with_deadlines(
-    port: u16,
-    path: &str,
-    body: &[u8],
-    connect_timeout: Duration,
-    request_timeout: Duration,
-) -> io::Result<(u16, Vec<u8>)> {
-    exchange(
-        port,
-        body_head("PUT", path, body),
-        Some(body),
-        connect_timeout,
-        request_timeout,
     )
     .await
 }

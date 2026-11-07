@@ -84,7 +84,6 @@ pub use store::{
     VIRTUAL_DISPLAY_POLICY_FILE,
 };
 pub use uihttp::{
-    loopback_delete, loopback_events_connect, loopback_get, loopback_get_with_deadlines,
-    loopback_post, loopback_post_with_deadlines, loopback_put, loopback_put_with_deadlines,
-    DaemonRestartReport, SseStream, UiResponse,
+    loopback_delete, loopback_events_connect, loopback_get, loopback_post,
+    loopback_post_with_deadlines, loopback_put, DaemonRestartReport, SseStream, UiResponse,
 };

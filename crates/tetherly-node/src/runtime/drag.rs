@@ -121,7 +121,13 @@ impl Node {
                         .pending_drag_drops
                         .lock()
                         .expect("pending_drag_drops")
-                        .insert(drag_id, peer.clone());
+                        .insert(
+                            drag_id,
+                            crate::runtime::PendingDragDrop {
+                                peer: peer.clone(),
+                                registered_ms: now,
+                            },
+                        );
                 }
                 // Echo the confirm back so the controller proceeds to stream.
                 if let Some(echo) = confirm_echo {
@@ -136,52 +142,52 @@ impl Node {
     /// Bind the first inbound `FileOffer` of a drag-originated drop to its
     /// drag session. Called from the receiver offer handler; claims at most
     /// one pending drag per peer (FIFO by insertion is not required — a peer
-    /// has at most one active drag at a time).
+    /// has at most one active drag at a time). Pending entries older than
+    /// [`PENDING_DRAG_TTL_MS`] are purged first: a confirm whose transfer
+    /// never arrived (crash, dropped connection) must not mis-claim an
+    /// unrelated later offer from the same peer.
     pub(crate) fn claim_drag_offer(&self, peer: &DeviceId, transfer_id: &str) {
-        let drag_id = {
+        const PENDING_DRAG_TTL_MS: u64 = 30_000;
+        let now = self.now_ms();
+        let claimed = {
             let mut pending = self
                 .shared
                 .pending_drag_drops
                 .lock()
                 .expect("pending_drag_drops");
+            pending.retain(|_, p| now.saturating_sub(p.registered_ms) <= PENDING_DRAG_TTL_MS);
             // Find a pending drop from this peer and claim it.
-            let found = pending.iter().find(|(_, p)| *p == peer).map(|(id, _)| *id);
-            if let Some(id) = found {
-                pending.remove(&id);
-                Some(id)
-            } else {
-                None
-            }
+            let found = pending
+                .iter()
+                .find(|(_, p)| p.peer == *peer)
+                .map(|(id, _)| *id);
+            found.and_then(|id| pending.remove(&id).map(|entry| (id, entry)))
         };
-        if let Some(drag_id) = drag_id {
+        if let Some((drag_id, entry)) = claimed {
+            // Source attribution rides with the claim so settlement can label
+            // MOTW with the real peer (it used to fall back to "peer" because
+            // the pending entry was already consumed here).
             self.shared
                 .transfer_drag_ids
                 .lock()
                 .expect("transfer_drag_ids")
-                .insert(transfer_id.to_string(), drag_id);
+                .insert(transfer_id.to_string(), (entry.peer, drag_id));
         }
     }
 
     /// Settle a delivered drag payload when an inbound transfer lands on disk:
     /// apply MOTW and reveal in the file manager. No-op for non-drag transfers.
     pub(crate) fn settle_drag_for_transfer(&self, transfer_id: &str, saved_path: &std::path::Path) {
-        let drag_id = self
+        let claimed = self
             .shared
             .transfer_drag_ids
             .lock()
             .expect("transfer_drag_ids")
             .remove(transfer_id);
-        let Some(drag_id) = drag_id else { return };
-        let peer = self
-            .shared
-            .pending_drag_drops
-            .lock()
-            .expect("pending_drag_drops")
-            .remove(&drag_id);
-        let label = peer
-            .as_ref()
-            .map(|p| self.drag_peer_label(p))
-            .unwrap_or_else(|| "peer".to_string());
+        let Some((peer, drag_id)) = claimed else {
+            return;
+        };
+        let label = self.drag_peer_label(&peer);
         let now = self.now_ms();
         let mut target = self.shared.drag_target.lock().expect("drag_target");
         if let Err(e) = target.on_delivery_completed(drag_id, saved_path, &label, true, now) {
@@ -464,7 +470,7 @@ mod tests {
                 .lock()
                 .expect("pending")
                 .is_empty(),
-            "pending drop must be consumed by settlement"
+            "pending drop must be consumed by the offer claim"
         );
         let _ = std::fs::remove_file(&saved);
     }
