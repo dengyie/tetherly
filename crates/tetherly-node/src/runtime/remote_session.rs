@@ -184,9 +184,21 @@ impl Node {
         // 5. Screen flow: dial the host's 45720 and ask it to stream. The
         //    host's accept already opened consent (auto-allow in the request
         //    handler), so Start proceeds without a manual allow click.
-        if let Err(e) = self.open_screen(&peer_id).await {
-            self.teardown_session_silent(&session_id).await;
-            return Err(CoreError::InvalidPayload(format!("screen open: {e}")));
+        //    Reuse a channel that is already open to this peer (an operator
+        //    pre-dial, an earlier view) instead of stacking a second 45720
+        //    connection: the replacement dial makes the old host-side loop
+        //    tear down, and its exit can land between our allow and the new
+        //    attach, wiping operator consent and refusing the session's Start
+        //    (m6_7 part-2 CI race). A channel to a DIFFERENT peer is replaced
+        //    — the session must ride a channel to its own host.
+        {
+            let open_peer = self.shared.screen_peer.lock().expect("screen_peer").clone();
+            if open_peer.as_ref() != Some(&peer_id) {
+                if let Err(e) = self.open_screen(&peer_id).await {
+                    self.teardown_session_silent(&session_id).await;
+                    return Err(CoreError::InvalidPayload(format!("screen open: {e}")));
+                }
+            }
         }
         if let Err(e) = self.screen_start().await {
             self.teardown_session_silent(&session_id).await;
