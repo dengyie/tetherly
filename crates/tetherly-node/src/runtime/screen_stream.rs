@@ -88,25 +88,32 @@ impl Node {
         // Generation tag: when this loop exits it must only run the
         // engine-level `on_peer_gone` if it is STILL the active channel — a
         // replacement attach (new dial) must not be reset by this loop's
-        // teardown racing behind it.
-        let my_gen = self
-            .shared
-            .screen_channel_gen
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // teardown racing behind it. The fetch_add happens INSIDE the engine
+        // lock so an old loop's exit check (same lock) can never interleave
+        // between "gen still looks current" and this attach's
+        // `on_peer_connected` — the m6_7 CI race: a middle generation's
+        // teardown ran its check before the next attach bumped the gen, then
+        // its `on_peer_gone` landed after the new attach, wiping the fresh
+        // consent and wedging the engine back at `Requested`/`Idle`.
+        let my_gen = {
+            let mut engine = self.shared.screen_engine.lock().expect("screen");
+            let gen = self
+                .shared
+                .screen_channel_gen
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let displays = self.screen_displays();
+            if !displays.is_empty() {
+                engine.set_displays(displays);
+            }
+            engine.on_peer_connected();
+            gen
+        };
         *self.shared.screen_out.lock().await = Some(tx);
         *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
         // A new screen session re-evaluates the ADR-078 bitrate tier.
         self.shared
             .screen_bitrate_applied
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        {
-            let mut engine = self.shared.screen_engine.lock().expect("screen");
-            let displays = self.screen_displays();
-            if !displays.is_empty() {
-                engine.set_displays(displays);
-            }
-            engine.on_peer_connected();
-        }
         let state = self.screen_state();
         let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
         self.emit(UiEvent::screen_state_changed(
@@ -871,18 +878,25 @@ impl Node {
                 }
             }
             // Only reset the engine when this loop still owns the channel:
-            // a newer attach has incremented the generation past ours.
-            let still_active = node
-                .shared
-                .screen_channel_gen
-                .load(std::sync::atomic::Ordering::SeqCst)
-                == my_gen + 1;
+            // a newer attach has incremented the generation past ours. The
+            // check runs INSIDE the engine lock, the same lock the attach
+            // holds while bumping the generation — so an exit can never
+            // observe "still newest" and then land its `on_peer_gone` after
+            // a new attach's `on_peer_connected` (the m6_7 CI race). The
+            // async channel/peer clears happen after the guard is dropped
+            // (MutexGuard is not Send across the awaits below).
+            let still_active = {
+                let mut engine = node.shared.screen_engine.lock().expect("screen");
+                let current = node
+                    .shared
+                    .screen_channel_gen
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                if current == my_gen + 1 {
+                    engine.on_peer_gone();
+                }
+                current == my_gen + 1
+            };
             if still_active {
-                node.shared
-                    .screen_engine
-                    .lock()
-                    .expect("screen")
-                    .on_peer_gone();
                 *node.shared.screen_peer.lock().expect("screen_peer") = None;
                 *node.shared.screen_out.lock().await = None;
             }
