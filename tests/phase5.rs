@@ -6709,6 +6709,24 @@ async fn m5_34_screen_objective_visual_quality_metric_and_psnr_ssim_pipeline() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
+    // This test streams IDENTICAL frames to drive MSE=0/PSNR=100 quality
+    // evaluations (ADR-110). The ADR-089 adaptive squelch treats an
+    // unchanged screen as static and suppresses frames after its 500ms
+    // delay — on slow CI runners the grab+queue latency between frames can
+    // exceed that, squelching a stream the metric pipeline needs. Squelch
+    // is an orthogonal bandwidth feature; disable it for the host here so
+    // the metric assertions are deterministic.
+    let (c_sq, b_sq) = tetherly_node::loopback_post(
+        host_ui,
+        "/api/screen/squelch",
+        &serde_json::to_vec(&serde_json::json!({ "mode": "disabled" })).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c_sq, 200);
+    let sq: tetherly_node::ScreenSquelchReport = serde_json::from_slice(&b_sq).unwrap();
+    assert_eq!(sq.mode, "disabled");
+
     // 2. Initial state: quality metric is disabled by default
     let (c, b) = tetherly_node::loopback_get(visitor_ui, "/api/screen/metric")
         .await
