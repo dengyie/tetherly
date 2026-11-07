@@ -96,25 +96,49 @@ impl Node {
         self.shared
             .screen_start_refused
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        // Open the refusal window (ticket → odd) BEFORE sending Start and
+        // close it (ticket → even) on every exit path. The wire pump only
+        // latches a refusal Stop-reply while the window is open, so a leftover
+        // refusal from the previous screen channel — its teardown racing this
+        // start — cannot poison this attempt's verdict (m6_7 CI race).
+        self.shared
+            .screen_start_ticket
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        debug_assert!(
+            self.shared
+                .screen_start_ticket
+                .load(std::sync::atomic::Ordering::SeqCst)
+                % 2
+                == 1,
+            "screen_start window must open odd"
+        );
         self.send_screen_control(ControlMsg::Start).await?;
         // Give the host's reply a beat to round-trip before the caller reads
         // the latch (poll, not sleep-guess: exit early on refusal).
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
-        while std::time::Instant::now() < deadline {
+        let outcome = loop {
             if self
                 .shared
                 .screen_start_refused
                 .load(std::sync::atomic::Ordering::SeqCst)
             {
-                return Err(CoreError::Json(
+                break Err(CoreError::Json(
                     "screen start refused by host (consent not granted)".into(),
                 ));
             }
             if self.screen_state() == ScreenState::Streaming {
-                return Ok(());
+                break Ok(());
+            }
+            if std::time::Instant::now() > deadline {
+                break Ok(());
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        };
+        // Close the refusal window (ticket → even) — after this, any Stop
+        // reply from this or a stale channel is ignored by the pump latch.
+        self.shared
+            .screen_start_ticket
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let peer = self
             .shared
             .screen_peer
@@ -125,7 +149,7 @@ impl Node {
         let state = self.screen_state();
         let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
         self.emit(UiEvent::screen_state_changed(state.as_str(), allowed, peer));
-        Ok(())
+        outcome
     }
 
     /// Ask the host to begin sending with channel auto-dial and strongly typed report return.

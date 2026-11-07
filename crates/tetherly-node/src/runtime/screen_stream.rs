@@ -1150,10 +1150,28 @@ impl Node {
                                             // reply (consent revoked mid-session). Latch
                                             // it so a pending remote-session start rolls
                                             // back instead of presenting a dead screen.
-                                            node.shared
-                                                .screen_start_refused
-                                                .store(true, std::sync::atomic::Ordering::SeqCst);
-                                            tracing::info!("viewer: host refused screen start (consent stop reply)");
+                                            // Ticket protocol: `screen_start` claims a
+                                            // fresh ticket BEFORE sending Start and
+                                            // records it as the open window; the reply
+                                            // may only latch the refusal while the
+                                            // window it belongs to is still open — a
+                                            // leftover refusal from a PREVIOUS channel
+                                            // arriving after a newer start claimed its
+                                            // own ticket is discarded (m6_7 CI race).
+                                            let current = node
+                                                .shared
+                                                .screen_start_ticket
+                                                .load(std::sync::atomic::Ordering::SeqCst);
+                                            if current % 2 == 1 {
+                                                // Odd = a start attempt is in flight (its
+                                                // claim made the value odd); latch the refusal.
+                                                node.shared
+                                                    .screen_start_refused
+                                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                                                tracing::info!("viewer: host refused screen start (consent stop reply)");
+                                            } else {
+                                                tracing::info!("viewer: ignoring stale screen-start Stop reply (no start in flight)");
+                                            }
                                         }
                                         match &msg {
                                             ControlMsg::SetLaserPointer { x, y, active, color_rgb } => {

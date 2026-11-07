@@ -329,6 +329,7 @@ impl Node {
             screen_recording: Mutex::new(None),
             screen_peer_recording: std::sync::atomic::AtomicBool::new(false),
             screen_start_refused: std::sync::atomic::AtomicBool::new(false),
+            screen_start_ticket: std::sync::atomic::AtomicU64::new(0),
             screen_playback: Mutex::new(None),
             screen_last_frame: Mutex::new(None),
             screen_snapshot_count: AtomicU64::new(0),

@@ -552,6 +552,11 @@ struct Shared {
     /// the remote-session start consults to roll the session back instead of
     /// presenting an endless black screen.
     screen_start_refused: std::sync::atomic::AtomicBool,
+    /// Monotonic ticket of the in-flight `screen_start` attempt. A Stop-reply
+    /// may only latch `screen_start_refused` when its ticket matches — a
+    /// leftover refusal reply from a PREVIOUS screen channel (teardown racing
+    /// a new session's Start) must not poison the new attempt's verdict.
+    screen_start_ticket: std::sync::atomic::AtomicU64,
     /// Active screen session in-container playback session (ADR-102).
     screen_playback: Mutex<Option<ScreenPlaybackSession>>,
     /// Most recent uncompressed screen frame presented or grabbed for snapshots (ADR-103).
