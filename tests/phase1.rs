@@ -8538,7 +8538,10 @@ async fn policy_based_clipboard_auto_sync_and_sensitive_leak_guard_via_loopback_
     assert_eq!(code_h, 200);
     let h_rep: tetherly_node::ClipboardPolicyReport = serde_json::from_slice(&body_h).unwrap();
     assert!(h_rep.ok);
-    assert_eq!(h_rep.policy.mode, tetherly_core::ClipSyncMode::Manual);
+    assert_eq!(
+        h_rep.policy.mode,
+        tetherly_core::ClipSyncMode::BidirectionalAuto
+    );
     assert!(h_rep.policy.sensitive_guard);
     assert_eq!(h_rep.policy.max_payload_bytes, 65536);
     assert!(h_rep.policy.allowed_groups.is_empty());

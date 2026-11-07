@@ -1503,7 +1503,7 @@ pub(crate) mod clipboard_policy_tests {
         let (node, dir) = temp_test_node("defaults");
         let report = node.clipboard_policy_report();
         assert!(report.ok);
-        assert_eq!(report.policy.mode, ClipSyncMode::Manual);
+        assert_eq!(report.policy.mode, ClipSyncMode::BidirectionalAuto);
         assert!(report.policy.sensitive_guard);
         assert_eq!(report.policy.max_payload_bytes, 65536);
         assert_eq!(report.auto_synced_out_count, 0);
