@@ -12472,23 +12472,32 @@ async fn m6_8_reused_channel_second_session_streams_frames() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let rx = viewer.screen_rx_stats();
+    // Cliff signature, decided from the seq-decision trace: a DEEP drop is a
+    // rejected seq far below the accepted high-water mark (the sender
+    // restarted). Per-frame duplicate deliveries — the same seq applied once
+    // then rejected once, (n,true),(n,false) — are legitimate FEC/HARQ
+    // retransmits of an already-applied frame under load and must NOT fail
+    // the test. A real reset produces a descending run of deep drops covering
+    // the whole previous run.
+    let trace = viewer.screen_seq_trace();
+    let mut high_water = 0u64;
+    let mut deep_drops = 0usize;
+    for (seq, accepted) in &trace {
+        if *accepted {
+            high_water = (*seq).max(high_water);
+        } else if *seq + 8 < high_water {
+            deep_drops += 1;
+        }
+    }
     assert!(
-        rx.dropped < session1_received,
-        "reused-channel session must not hit a stale-seq cliff — a reset \
-         next_seq would drop the whole previous session's frame run \
-         (dropped >= {session1_received}) before seq caught up. Small \
-         duplicate counts are legitimate HARQ shard retransmits carrying \
-         their original seq under load (received={}, dropped={}). \
-         seq-trace tail (seq,accepted): {:?}",
+        deep_drops < session1_received as usize / 2,
+        "reused-channel session hit a stale-seq cliff — a reset next_seq \
+         drops deep below the accepted high-water mark for the whole \
+         previous run (deep_drops={deep_drops}, session1={session1_received}). \
+         Stats: received={}, dropped={}. seq-trace tail: {:?}",
         rx.received,
         rx.dropped,
-        viewer
-            .screen_seq_trace()
-            .iter()
-            .rev()
-            .take(48)
-            .rev()
-            .collect::<Vec<_>>()
+        trace.iter().rev().take(48).rev().collect::<Vec<_>>()
     );
 
     viewer
