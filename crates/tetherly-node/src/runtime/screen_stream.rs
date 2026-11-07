@@ -110,9 +110,21 @@ impl Node {
         };
         *self.shared.screen_out.lock().await = Some(tx);
         *self.shared.screen_peer.lock().expect("screen_peer") = Some(peer_id.clone());
-        // A new screen session re-evaluates the ADR-078 bitrate tier.
+        // A new screen session re-evaluates every ADR-083/084/085 bandwidth
+        // tier from scratch — not just bitrate. The fps/scale/profile flags
+        // gate first-frame tier selection too; leaving them set would pin a
+        // second session to the previous session's adaptive tier.
         self.shared
             .screen_bitrate_applied
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .screen_fps_applied
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .screen_scale_applied
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .screen_profile_applied
             .store(false, std::sync::atomic::Ordering::Relaxed);
         let state = self.screen_state();
         let allowed = matches!(state, ScreenState::Allowed | ScreenState::Streaming);
@@ -922,6 +934,16 @@ impl Node {
     /// sink, and acks the sequence it accepted.
     pub(super) async fn attach_screen_client(&self, mut sess: ActiveSession) {
         let peer_id = sess.peer_id.clone();
+        // Client-side generation tag (mirror of the server-side
+        // `screen_channel_gen`): this loop may only clear the registration
+        // triple on exit if it is STILL the newest client channel. Bumped
+        // before the fields are written so a replaced loop's exit check
+        // always observes a newer generation.
+        let my_client_gen = self
+            .shared
+            .screen_client_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         let (ctl_tx, mut ctl_rx) = mpsc::channel::<ControlMsg>(SCREEN_QUEUE_DEPTH);
         *self.shared.screen_ctl.lock().await = Some(ctl_tx);
         let (client_frame_tx, mut client_frame_rx) =
@@ -2840,9 +2862,22 @@ impl Node {
                 .expect("cursor stats") = receiver.cursor_stats();
             *node.shared.screen_rx_stats.lock().expect("screen rx") = receiver.stats();
             *node.shared.screen_sync_stats.lock().expect("sync stats") = receiver.sync_stats();
-            *node.shared.screen_peer.lock().expect("screen_peer") = None;
-            *node.shared.screen_ctl.lock().await = None;
-            *node.shared.screen_client_out.lock().await = None;
+            // Only clear the registration triple when this loop is still the
+            // newest client channel. A replaced loop's late exit must not wipe
+            // the fields its successor just wrote: `screen_ctl=None` breaks
+            // every control send of the new session, and `screen_peer=None`
+            // defeats the cross-session channel-reuse check in
+            // `remote_session_start`.
+            let still_newest_client = node
+                .shared
+                .screen_client_gen
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == my_client_gen;
+            if still_newest_client {
+                *node.shared.screen_peer.lock().expect("screen_peer") = None;
+                *node.shared.screen_ctl.lock().await = None;
+                *node.shared.screen_client_out.lock().await = None;
+            }
             node.shared
                 .screen_privacy_enabled
                 .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -2864,7 +2899,9 @@ impl Node {
             node.shared
                 .screen_peer_watermark_enforced
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            node.emit(UiEvent::screen_state_changed("idle", false, None));
+            if still_newest_client {
+                node.emit(UiEvent::screen_state_changed("idle", false, None));
+            }
         });
     }
 

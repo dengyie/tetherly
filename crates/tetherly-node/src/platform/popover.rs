@@ -33,6 +33,26 @@ pub mod macos {
     /// Data refresh cadence while the panel is visible.
     const REFRESH_SECS: NSTimeInterval = 1.0;
 
+    /// At most one loopback fetch in flight: the AppKit main thread never
+    /// blocks on I/O (loopback can legitimately take seconds when the daemon
+    /// is busy — a stall here freezes the whole tray), and a slow fetch must
+    /// not pile up threads/runtimes faster than they drain.
+    static FETCH_IN_FLIGHT: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// Latest completed fetch, rendered as final row text. The timer paints
+    /// this on the main thread; the background fetcher fills it. `None`
+    /// until the first fetch lands (panel shows the placeholder).
+    static ROWS_CACHE: std::sync::Mutex<RowsCache> = std::sync::Mutex::new(RowsCache {
+        peers: None,
+        transfers: None,
+    });
+
+    struct RowsCache {
+        peers: Option<String>,
+        transfers: Option<String>,
+    }
+
     pub(crate) struct PopoverIvars {
         ui_port: u16,
         peers_line: Retained<NSTextField>,
@@ -71,13 +91,41 @@ pub mod macos {
                 }
             }
 
-            /// Timer callback: refresh rows from the loopback plane.
+            /// Timer callback: refresh rows from the loopback plane. The
+            /// fetch itself runs on a background thread (deduped); this
+            /// callback only paints the latest cached rows on the main
+            /// thread — never blocks on I/O.
             #[unsafe(method(refreshData))]
             fn refresh_data(&self) {
                 let ivars = self.ivars();
                 let port = ivars.ui_port;
-                set_peers_line(&ivars.peers_line, port);
-                set_transfers_line(&ivars.transfers_line, port);
+                if FETCH_IN_FLIGHT
+                    .compare_exchange(
+                        false,
+                        true,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+                {
+                    std::thread::spawn(move || {
+                        let peers = render_peers_line(port);
+                        let transfers = render_transfers_line(port);
+                        if let Ok(mut cache) = ROWS_CACHE.lock() {
+                            cache.peers = Some(peers);
+                            cache.transfers = Some(transfers);
+                        }
+                        FETCH_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+                    });
+                }
+                if let Ok(cache) = ROWS_CACHE.lock() {
+                    if let Some(text) = &cache.peers {
+                        ivars.peers_line.setStringValue(&NSString::from_str(text));
+                    }
+                    if let Some(text) = &cache.transfers {
+                        ivars.transfers_line.setStringValue(&NSString::from_str(text));
+                    }
+                }
             }
         }
 
@@ -136,8 +184,9 @@ pub mod macos {
         serde_json::from_slice(&body).ok()
     }
 
-    fn set_peers_line(line: &NSTextField, port: u16) {
-        let text = match get_json(port, "/api/peers").and_then(|v| v.get("live").cloned()) {
+    /// Pure renderer for the peers row (runs on the fetch thread).
+    fn render_peers_line(port: u16) -> String {
+        match get_json(port, "/api/peers").and_then(|v| v.get("live").cloned()) {
             Some(live) => {
                 let rows: Vec<String> = live
                     .as_array()
@@ -161,8 +210,7 @@ pub mod macos {
                 }
             }
             None => "⚠️ 无法连接本地守护进程".to_string(),
-        };
-        line.setStringValue(&NSString::from_str(&text));
+        }
     }
 
     fn fmt_bytes(n: u64) -> String {
@@ -195,8 +243,9 @@ pub mod macos {
         format!("{}{}", "█".repeat(filled), "░".repeat(WIDTH - filled))
     }
 
-    fn set_transfers_line(line: &NSTextField, port: u16) {
-        let text = match get_json(port, "/api/file/transfers") {
+    /// Pure renderer for the transfers row (runs on the fetch thread).
+    fn render_transfers_line(port: u16) -> String {
+        match get_json(port, "/api/file/transfers") {
             Some(v) => {
                 let items = v.get("transfers").and_then(|t| t.as_array());
                 let rows: Vec<String> = items
@@ -244,8 +293,7 @@ pub mod macos {
                 }
             }
             None => "传输: 无法读取状态".to_string(),
-        };
-        line.setStringValue(&NSString::from_str(&text));
+        }
     }
 
     // ------------------------------------------------------------------
@@ -328,10 +376,12 @@ pub mod macos {
                 .addTimer_forMode(&timer, NSRunLoopCommonModes);
 
             *guard = Some(PopoverState { popover, timer });
-            // AppKit retains the VC through the popover's content view
-            // controller + the timer's target; forget our typed handle so
-            // it survives past this function.
-            std::mem::forget(vc);
+            // Our typed handle can be dropped here: `contentViewController`
+            // and the runloop timer's target both hold strong references, so
+            // the VC lives until the popover closes and the timer is
+            // invalidated. (Forgetting this handle leaked one VC + view tree
+            // per toggle.)
+            drop(vc);
         }
     }
 }

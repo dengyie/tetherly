@@ -15,10 +15,12 @@ pub const MAX_CLIP_HISTORY: usize = 32;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ClipSyncMode {
-    /// Only synchronize on explicit manual user request (default secure state).
-    #[default]
+    /// Only synchronize on explicit manual user request. An explicit opt-out
+    /// persisted via `/api/clip/policy` — not the product default (the
+    /// pre-0.1.92 default, kept deserializable for older policy files).
     Manual,
     /// Automatically synchronize local clipboard changes to peers and apply remote updates.
+    #[default]
     BidirectionalAuto,
     /// Automatically synchronize local clipboard changes out, but never overwrite local clipboard from remote.
     SendOnly,

@@ -83,6 +83,18 @@ if [ -z "$TAG" ] && [ -z "$RUN_ID" ]; then
     echo "==> Target release: ${TAG}"
 fi
 
+# TAG/RUN_ID are interpolated into remote PowerShell one-liners below —
+# validate the shape before it ever reaches a shell (rejects quoting and
+# metacharacter injection through operator-supplied values).
+if [ -n "$TAG" ] && ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Error: --tag must match vX.Y.Z (got: ${TAG})." >&2
+    exit 1
+fi
+if [ -n "$RUN_ID" ] && ! [[ "$RUN_ID" =~ ^[0-9]+$ ]]; then
+    echo "Error: --run-id must be numeric (got: ${RUN_ID})." >&2
+    exit 1
+fi
+
 TMP_DIR=$(mktemp -d /tmp/tetherly-deploy-XXXXXX)
 cleanup() {
     rm -rf "$TMP_DIR"
@@ -116,9 +128,21 @@ deploy_mac() {
     echo "==> Packaging /Applications/Tetherly.app with stable Designated Requirement..."
     "$SCRIPT_DIR/package-macos-app.sh" --binary "$MAC_BIN" --restart
 
-    echo "==> Verifying local macOS health..."
-    sleep 1
-    curl -s "http://127.0.0.1:${LOCAL_PORT}/api/health" | jq . || true
+    echo "==> Verifying local macOS health (this is a gate, not a print)..."
+    health_ok=""
+    for _ in $(seq 1 20); do
+        if curl -fsS "http://127.0.0.1:${LOCAL_PORT}/api/health" 2>/dev/null | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
+            health_ok=1
+            break
+        fi
+        sleep 0.5
+    done
+    if [ -z "$health_ok" ]; then
+        echo "Error: macOS daemon did not become healthy after package+restart." >&2
+        echo "       The app bundle may have failed to launch (codesign/TCC). Aborting before Windows deploy." >&2
+        exit 1
+    fi
+    curl -s "http://127.0.0.1:${LOCAL_PORT}/api/health" | jq .
     echo "==> macOS deployment complete."
 }
 

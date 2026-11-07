@@ -340,7 +340,6 @@ if [ -n "${SMOKE_PROTECT_PROCS:-}" ]; then
     WIN_WS=$(echo "$WIN_AUDIT" | sed -n 's/.*ws:\([^|]*\).*/\1/p')
     ALL_OK=1
     SUMMARY=""
-    IDX=0
     IFS='|' read -r -a _KEYS <<< "$SUMMARY_KEYS"
     for pn in "${_KEYS[@]}"; do
         if echo "$WIN_AUDIT" | grep -q "${pn}:true"; then
@@ -349,7 +348,6 @@ if [ -n "${SMOKE_PROTECT_PROCS:-}" ]; then
             SUMMARY+="${pn} ✗ "
             ALL_OK=0
         fi
-        IDX=$((IDX + 1))
     done
     if [ "$ALL_OK" -eq 1 ]; then
         log_pass "Windows protected processes verified 100% intact (${SUMMARY})"

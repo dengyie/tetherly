@@ -537,7 +537,19 @@ pub struct ClipboardPolicy {
     /// Optional auto-clear countdown in seconds for local clipboard after receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_clear_timeout_secs: Option<u64>,
+    /// Policy-file schema version. `None` marks a legacy (pre-0.1.92) file,
+    /// whose `mode` defaulted to `manual`; `load_clipboard_policy` migrates
+    /// exactly that shape to the current default once. Files written by this
+    /// version always carry `Some(CLIPBOARD_POLICY_VERSION)`, so a manual
+    /// mode set explicitly afterwards is never re-migrated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_version: Option<u32>,
 }
+
+/// Current `ClipboardPolicy` schema version. v1 = the unversioned pre-0.1.92
+/// era (mode defaulted to `manual`); v2 = `bidirectional_auto` product
+/// default with one-time legacy migration.
+pub const CLIPBOARD_POLICY_VERSION: u32 = 2;
 
 impl Default for ClipboardPolicy {
     fn default() -> Self {
@@ -554,6 +566,7 @@ impl Default for ClipboardPolicy {
             allowed_types: Vec::new(),
             max_payload_bytes: DEFAULT_MAX_CLIP_AUTO_SYNC_BYTES,
             auto_clear_timeout_secs: None,
+            policy_version: Some(CLIPBOARD_POLICY_VERSION),
         }
     }
 }
@@ -604,17 +617,43 @@ impl ClipboardPolicy {
 
 pub fn load_clipboard_policy(dir: &Path) -> ClipboardPolicy {
     let path = dir.join(CLIPBOARD_POLICY_FILE);
-    fs::read(&path)
+    let parsed = fs::read(&path)
         .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+        .and_then(|b| serde_json::from_slice::<ClipboardPolicy>(&b).ok());
+    match parsed {
+        None => ClipboardPolicy::default(),
+        Some(mut policy) => {
+            let legacy = policy.policy_version.is_none();
+            if legacy {
+                // One-time migration of a pre-0.1.92 policy file: its `mode`
+                // field defaulted to `manual` (the old product default), so a
+                // persisted `manual` there is the old default, not a choice
+                // made under the bidirectional_auto regime. Migrate it so the
+                // "one side copied, other side no effect" root fix actually
+                // reaches upgraded installs; stamp the version so a manual
+                // mode set explicitly from now on is respected forever.
+                if policy.mode == ClipSyncMode::Manual {
+                    policy.mode = ClipSyncMode::BidirectionalAuto;
+                }
+                policy.policy_version = Some(CLIPBOARD_POLICY_VERSION);
+                if save_clipboard_policy(dir, &policy).is_err() {
+                    // Migration is best-effort: keep serving the migrated
+                    // policy even if the write-back fails (e.g. read-only dir);
+                    // the next explicit save stamps the version anyway.
+                }
+            }
+            policy
+        }
+    }
 }
 
 pub fn save_clipboard_policy(dir: &Path, policy: &ClipboardPolicy) -> Result<(), NodeStoreError> {
     ensure_dir(dir)?;
+    let mut stamped = policy.clone();
+    stamped.policy_version = Some(CLIPBOARD_POLICY_VERSION);
     atomic_write(
         &dir.join(CLIPBOARD_POLICY_FILE),
-        &serde_json::to_vec_pretty(policy)?,
+        &serde_json::to_vec_pretty(&stamped)?,
     )?;
     Ok(())
 }
@@ -2655,6 +2694,7 @@ mod tests {
             allowed_types: vec![DeviceType::Laptop, DeviceType::Tablet],
             max_payload_bytes: 32 * 1024,
             auto_clear_timeout_secs: Some(30),
+            policy_version: Some(CLIPBOARD_POLICY_VERSION),
         };
 
         save_clipboard_policy(&dir, &custom).unwrap();
@@ -2728,6 +2768,85 @@ mod tests {
         assert_eq!(def.mode, ClipSyncMode::BidirectionalAuto);
         assert!(def.mode.can_send());
         assert!(def.mode.can_receive());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_manual_policy_file_migrates_to_bidirectional_auto_once() {
+        // Pre-0.1.92 shape: no `policy_version`, mode burned in as the old
+        // default `manual`. The loader must migrate it exactly once so the
+        // passive-sync root fix reaches upgraded installs.
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-clipmig-legacy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+        fs::write(
+            dir.join(CLIPBOARD_POLICY_FILE),
+            br#"{"mode":"manual","sensitive_guard":true,"allowed_groups":[],"allowed_tags":[],"allowed_types":[],"max_payload_bytes":65536}"#,
+        )
+        .unwrap();
+        let loaded = load_clipboard_policy(&dir);
+        assert_eq!(loaded.mode, ClipSyncMode::BidirectionalAuto);
+        assert_eq!(loaded.policy_version, Some(CLIPBOARD_POLICY_VERSION));
+        // Migration is persisted: a reload sees a versioned file.
+        let reloaded = load_clipboard_policy(&dir);
+        assert_eq!(reloaded.mode, ClipSyncMode::BidirectionalAuto);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn versioned_manual_policy_is_explicit_choice_and_survives() {
+        // v2 file with `manual` = explicit opt-out under the new regime —
+        // never re-migrated.
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-clipmig-manual-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+        fs::write(
+            dir.join(CLIPBOARD_POLICY_FILE),
+            format!(
+                r#"{{"mode":"manual","sensitive_guard":true,"allowed_groups":[],"allowed_tags":[],"allowed_types":[],"max_payload_bytes":65536,"policy_version":{CLIPBOARD_POLICY_VERSION}}}"#
+            ),
+        )
+        .unwrap();
+        let loaded = load_clipboard_policy(&dir);
+        assert_eq!(loaded.mode, ClipSyncMode::Manual);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn policy_json_missing_mode_field_defaults_to_bidirectional_auto() {
+        // `#[serde(default)]` resolves through `ClipSyncMode::default()` —
+        // that enum default must agree with the struct default.
+        let dir = std::env::temp_dir().join(format!(
+            "tetherly-clipmig-nofield-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+        fs::write(
+            dir.join(CLIPBOARD_POLICY_FILE),
+            br#"{"sensitive_guard":true,"allowed_groups":[],"allowed_tags":[],"allowed_types":[],"max_payload_bytes":65536}"#,
+        )
+        .unwrap();
+        let loaded = load_clipboard_policy(&dir);
+        assert_eq!(loaded.mode, ClipSyncMode::BidirectionalAuto);
         let _ = fs::remove_dir_all(&dir);
     }
 

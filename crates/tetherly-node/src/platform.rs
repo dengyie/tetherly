@@ -2392,13 +2392,22 @@ impl SysProbe for PlatformSysProbe {
 /// windows must live in the `tetherly-viewer` subprocess (installed next to
 /// this binary); a headless host has no viewer and reports honestly — the
 /// session still works wire-side without it.
+/// Spawn the remote-session viewer window (ADR-138 §2.6 step 5). AppKit
+/// windows must live in the `tetherly-viewer` subprocess (installed next to
+/// this binary); a headless host has no viewer and reports honestly — the
+/// session still works wire-side without it.
+///
+/// A viewer that exits immediately (not installed, or a stale binary that
+/// does not understand `--remote-session`) is reported as absent instead of
+/// returning a PID for a process that is already gone; a long-lived viewer
+/// is handed to a reaper thread so the daemon never accumulates zombies.
 #[cfg(target_os = "macos")]
 pub fn spawn_remote_session_viewer() -> Result<u32, tetherly_core::CoreError> {
     let exe = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("tetherly-viewer")))
         .unwrap_or_else(|| std::path::PathBuf::from("tetherly-viewer"));
-    let child = std::process::Command::new(exe)
+    let mut child = std::process::Command::new(exe)
         .arg("--remote-session")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -2409,7 +2418,24 @@ pub fn spawn_remote_session_viewer() -> Result<u32, tetherly_core::CoreError> {
                 "spawning tetherly-viewer failed ({e}); macOS session viewer needs the AppKit subprocess"
             ))
         })?;
-    Ok(child.id())
+    let pid = child.id();
+    // Give the subprocess a moment to fail fast, then report honestly: a
+    // viewer that already exited must not be advertised as a live window.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    if let Ok(Some(status)) = child.try_wait() {
+        return Err(tetherly_core::CoreError::ScreenRefused(format!(
+            "tetherly-viewer exited immediately (status: {status}); session viewer window unavailable — session continues wire-side only"
+        )));
+    }
+    // Still alive: detach with a reaper so the exit is collected (no zombie)
+    // once the operator closes the window.
+    std::thread::Builder::new()
+        .name("session-viewer-reap".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+        .ok();
+    Ok(pid)
 }
 
 #[cfg(not(target_os = "macos"))]

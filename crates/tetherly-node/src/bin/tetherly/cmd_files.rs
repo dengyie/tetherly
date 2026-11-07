@@ -124,14 +124,26 @@ pub(crate) async fn send(
             "peer": peer,
         });
         let bytes = serde_json::to_vec(&payload)?;
-        let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/file/send", &bytes)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
-                     start one with `tetherly --data-dir <dir> run` first"
-                )
-            })?;
+        // The daemon hashes the whole file before answering /api/file/send
+        // (the transfer id is content-addressed) — the default 30s budget
+        // fails large sends on loaded machines while the transfer actually
+        // completes: a false failure. Give the hash a wide deadline.
+        const FILE_SEND_CONNECT: std::time::Duration = std::time::Duration::from_secs(5);
+        const FILE_SEND_REQUEST: std::time::Duration = std::time::Duration::from_secs(300);
+        let (code, resp) = tetherly_node::loopback_post_with_deadlines(
+            ui_port,
+            "/api/file/send",
+            &bytes,
+            FILE_SEND_CONNECT,
+            FILE_SEND_REQUEST,
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
         if code != 200 {
             anyhow::bail!(
                 "node refused file send (HTTP {code}): {}",

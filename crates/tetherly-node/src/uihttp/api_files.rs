@@ -1403,6 +1403,28 @@ pub(super) async fn post_file_drag_confirm(
         None => return err(404, "no matching active drag session for confirmation"),
     };
 
+    // Directory entries cannot ride the file-offer pipeline: rejecting BEFORE
+    // the confirm signal keeps the receiver's ghost overlay and pending
+    // registration clean, and the banner tells the dropzone user why nothing
+    // happened (the old path failed silently with a per-item "failed" report
+    // or a bare 500).
+    if let Some(dir) = peek.file_paths.iter().find(|p| !p.is_file()) {
+        node.dispatch_notification_banner(
+            "Tetherly 拖放",
+            "暂不支持文件夹投递 — 请拖选具体文件",
+            None,
+            false,
+        )
+        .ok();
+        return err(
+            400,
+            &format!(
+                "drag payload contains a non-file entry ({}); folders are not supported yet",
+                dir.display()
+            ),
+        );
+    }
+
     let peer_id = match node.resolve_peer(&peek.target_peer) {
         Ok(id) => id,
         Err(e) => return err(400, &format!("cannot resolve drag peer: {e}")),

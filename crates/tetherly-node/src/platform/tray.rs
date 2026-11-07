@@ -104,10 +104,19 @@ mod macos_tray {
                         .and_then(|v| v.as_u64())
                         .ok_or_else(|| anyhow::anyhow!("drag intent reply missing drag_id"))?;
                     let confirm = serde_json::json!({ "drag_id": drag_id });
-                    let (code, body) = tetherly_loopback::loopback_post(
+                    // The confirm handler hashes every payload file before it
+                    // answers — a 30s budget reports false failures on big
+                    // drops while the transfer actually proceeds.
+                    const DRAG_CONFIRM_CONNECT: std::time::Duration =
+                        std::time::Duration::from_secs(5);
+                    const DRAG_CONFIRM_REQUEST: std::time::Duration =
+                        std::time::Duration::from_secs(300);
+                    let (code, body) = tetherly_loopback::loopback_post_with_deadlines(
                         ui_port,
                         "/api/file/drag/confirm",
                         &serde_json::to_vec(&confirm).unwrap_or_default(),
+                        DRAG_CONFIRM_CONNECT,
+                        DRAG_CONFIRM_REQUEST,
                     )
                     .await?;
                     if code != 200 {
@@ -543,6 +552,10 @@ mod windows_tray {
         static ROWS: Mutex<String> = Mutex::new(String::new());
         static POPUP_HWND: AtomicIsize = AtomicIsize::new(0);
         static VISIBLE: AtomicBool = AtomicBool::new(false);
+        /// At most one fetch in flight: the 1s WM_TIMER must not pile up
+        /// threads/runtimes when the daemon answers slower than the tick, and
+        /// a late old fetch must not overwrite fresher rows.
+        static FETCH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
         fn to_wide(s: &str) -> Vec<u16> {
             OsStr::new(s).encode_wide().chain(Some(0)).collect()
@@ -646,29 +659,43 @@ mod windows_tray {
         }
 
         fn spawn_fetch() {
+            // One fetch at a time; the timer simply skips this tick when the
+            // previous round-trip is still draining.
+            if FETCH_IN_FLIGHT
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                return;
+            }
             let port = super::GLOBAL_UI_PORT.load(Ordering::Relaxed);
-            std::thread::Builder::new()
+            let spawned = std::thread::Builder::new()
                 .name("tray-popover-fetch".into())
                 .spawn(move || {
-                    let runtime = match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(rt) => rt,
-                        Err(_) => return,
-                    };
-                    let text = runtime.block_on(async { render_rows(port).await });
-                    if let Ok(mut rows) = ROWS.lock() {
-                        *rows = text;
-                    }
-                    let hwnd = POPUP_HWND.load(Ordering::Relaxed);
-                    if hwnd != 0 && VISIBLE.load(Ordering::Relaxed) {
-                        unsafe {
-                            InvalidateRect(hwnd as HWND, std::ptr::null(), 0);
+                    let text = (|| {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .ok()?;
+                        Some(runtime.block_on(async { render_rows(port).await }))
+                    })();
+                    if let Some(text) = text {
+                        if let Ok(mut rows) = ROWS.lock() {
+                            *rows = text;
+                        }
+                        let hwnd = POPUP_HWND.load(Ordering::Relaxed);
+                        if hwnd != 0 && VISIBLE.load(Ordering::Relaxed) {
+                            unsafe {
+                                InvalidateRect(hwnd as HWND, std::ptr::null(), 0);
+                            }
                         }
                     }
-                })
-                .ok();
+                    FETCH_IN_FLIGHT.store(false, Ordering::SeqCst);
+                });
+            if spawned.is_err() {
+                // No worker will ever run — release the gate or fetches stop
+                // forever.
+                FETCH_IN_FLIGHT.store(false, Ordering::SeqCst);
+            }
         }
 
         /// Same rows as the macOS popover (ADR-137 §4.3): peer status line +
@@ -1045,10 +1072,18 @@ mod windows_tray {
                             .and_then(|v| v.as_u64())
                             .ok_or_else(|| anyhow::anyhow!("drag intent reply missing drag_id"))?;
                         let confirm = serde_json::json!({ "drag_id": drag_id });
-                        let (code, body) = tetherly_loopback::loopback_post(
+                        // Wide budget: confirm hashes the payload before it
+                        // answers (see the macOS drop path above).
+                        const DRAG_CONFIRM_CONNECT: std::time::Duration =
+                            std::time::Duration::from_secs(5);
+                        const DRAG_CONFIRM_REQUEST: std::time::Duration =
+                            std::time::Duration::from_secs(300);
+                        let (code, body) = tetherly_loopback::loopback_post_with_deadlines(
                             ui_port,
                             "/api/file/drag/confirm",
                             &serde_json::to_vec(&confirm).unwrap_or_default(),
+                            DRAG_CONFIRM_CONNECT,
+                            DRAG_CONFIRM_REQUEST,
                         )
                         .await?;
                         if code != 200 {
