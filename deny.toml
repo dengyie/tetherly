@@ -39,7 +39,12 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
+# Workspace-internal path dependencies are intentionally version-less:
+# a hardcoded version here broke cargo metadata on every 0.x MAJOR bump
+# (0.1.5 pins failed against 0.2.0). The crates are not published, so
+# internal wildcards are by design; external wildcard deps would still
+# show up as warnings worth reviewing.
+wildcards = "warn"
 deny = [
     { crate = "easytier" },
     { crate = "easytier-core" },
