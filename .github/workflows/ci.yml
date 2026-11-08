@@ -62,9 +62,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      # cargo-deny is a docker action (no Node runtime), and its `advisories`
-      # check uses the same RustSec database as rustsec/audit-check — so it
-      # covers the advisory scan too, with no deprecated Node runtime.
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      # cargo-deny via taiki-e/install-action: the docker-based
+      # EmbarkStudios action builds its container by curl|tar-ing a release
+      # tarball inside the build, which has failed repeatedly on runner
+      # network flakiness. Installing the binary on the runner directly is
+      # retryable and pins the same tool. The `advisories` check uses the
+      # same RustSec database as rustsec/audit-check.
+      - uses: taiki-e/install-action@v2
         with:
-          command: check advisories licenses bans sources
+          tool: cargo-deny
+      - run: cargo deny check advisories licenses bans sources
