@@ -2603,19 +2603,25 @@ impl Node {
         let events = {
             let mut server = self.shared.input_engine.lock().expect("engine");
             // Seat Remote alone is not enough: the CONTROLLED side is also in
-            // the Remote seat. Forward only when this node is the CONTROLLER
-            // (roaming tunnel or ADR-138 session), so a target's stray swipe
-            // never injects an app switch into its controller.
-            let is_controller = self.active_tunnel_role()
-                == Some(tetherly_core::InputTunnelRole::Controller)
-                || self
-                    .shared
-                    .remote_session
-                    .lock()
-                    .expect("remote_session")
-                    .as_ref()
-                    .is_some_and(|s| !s.role.is_receiving());
-            if server.seat() != CursorSeat::Remote || !is_controller {
+            // the Remote seat. Suppress only the role where THIS node is the
+            // one being driven — an ADR-138 receiving session or an input
+            // tunnel with role=Target. Everything else in the Remote seat
+            // (roaming tunnel, bare input channel, ADR-138 controlling) is a
+            // controller by construction, because the dock-swipe tap only
+            // fires while this node's capture hooks are armed for remote
+            // roaming. Slot presence (tunnel/remote_session) is NOT the
+            // source of truth here: a bare-channel controller (edge-crossing
+            // roam without a tunnel session) owns no slot but still controls.
+            let session_receiving = self
+                .shared
+                .remote_session
+                .lock()
+                .expect("remote_session")
+                .as_ref()
+                .is_some_and(|s| s.role.is_receiving());
+            let tunnel_target =
+                self.active_tunnel_role() == Some(tetherly_core::InputTunnelRole::Target);
+            if server.seat() != CursorSeat::Remote || session_receiving || tunnel_target {
                 let now = self.shared.clock.unix_ms();
                 let last = self
                     .shared
@@ -2636,7 +2642,7 @@ impl Node {
                             .expect("remote_session")
                             .as_ref()
                             .is_some_and(|s| s.role.is_receiving()),
-                        "four-finger swipe ignored: not controlling a remote desktop"
+                        "four-finger swipe ignored: this node is the controlled side"
                     );
                 }
                 return Ok(());
@@ -4004,6 +4010,142 @@ mod tests {
         assert!(
             saw_dialing || !node.input_channel_open_sync(),
             "guard must trigger a heal dial (or keep the channel closed, never wedge)"
+        );
+    }
+
+    // Regression (v0.2.1 field failure): the gesture-forwarding guard required
+    // an active tunnel/remote-session slot, but a BARE input channel
+    // controller (edge-crossing roam; deploy-window peer-gone cleared the
+    // slot) owns no slot — its swipe was permanently rejected while the
+    // mouse/keyboard kept working. The source of truth is the ENGINE SEAT;
+    // only the controlled side (tunnel Target / receiving session) is
+    // suppressed.
+    #[tokio::test]
+    async fn test_gesture_swipe_forwards_on_bare_channel_control() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("gesture-bare");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("gesture-peer");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+        *node.shared.input_peer.lock().unwrap() = Some(other.identity().device_id().clone());
+
+        // Bare-channel controller: engine seat Remote, NO tunnel slot, NO
+        // remote_session slot. The old guard rejected here — must not.
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(100, 50, 2, 0); // cross right edge -> Remote
+            assert_eq!(engine.seat(), CursorSeat::Remote);
+        }
+        assert!(node.active_tunnel_role().is_none());
+        assert!(!node.remote_session_active());
+
+        node.drive_gesture_swipe(1)
+            .expect("controller swipe must forward");
+
+        // direction>0 = Shift+Alt+Esc: Shift down is the first event.
+        let key_down = rx.recv().await.expect("Shift down queued");
+        let ev = InputEvent::from_frame(&key_down).expect("frame is an input event");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0xA0,
+                    down: true,
+                    ..
+                }
+            ),
+            "first event of a forwarded right-swipe must be Shift down, got {:?}",
+            ev.kind
+        );
+        let alt_down = rx.recv().await.expect("Alt down queued");
+        let ev = InputEvent::from_frame(&alt_down).expect("frame is an input event");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0xA4,
+                    down: true,
+                    ..
+                }
+            ),
+            "second event must be Alt down, got {:?}",
+            ev.kind
+        );
+    }
+
+    // The controlled side must never inject an app switch into its own
+    // controller: tunnel role Target is suppressed even in the Remote seat.
+    #[tokio::test]
+    async fn test_gesture_swipe_suppressed_on_tunnel_target() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("gesture-tgt");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(100, 50, 2, 0);
+            assert_eq!(engine.seat(), CursorSeat::Remote);
+        }
+        let now = node.shared.clock.unix_ms();
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_test".into(),
+            peer_id: "tdev_peer".into(),
+            role: InputTunnelRole::Target,
+            requested_edge: None,
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: now,
+            last_activity_ms: now,
+        });
+
+        node.drive_gesture_swipe(1)
+            .expect("suppression is not an error");
+        assert!(
+            rx.try_recv().is_err(),
+            "target-side swipe must not queue any injected key"
+        );
+    }
+
+    // An ADR-138 session that is DRIVING this node (SessionTarget) is the
+    // same controlled side: suppressed.
+    #[tokio::test]
+    async fn test_gesture_swipe_suppressed_on_receiving_session() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("gesture-recv");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(100, 50, 2, 0);
+            assert_eq!(engine.seat(), CursorSeat::Remote);
+        }
+        let now = node.shared.clock.unix_ms();
+        let mut sm = RemoteSessionStateMachine::new();
+        let _ = sm.request_received();
+        let _ = sm.accepted();
+        *node.shared.remote_session.lock().unwrap() = Some(RemoteSessionState {
+            state: ActiveRemoteSessionState {
+                session_id: "ses_test".into(),
+                peer_id: "tdev_peer".into(),
+                role: InputTunnelRole::SessionTarget,
+                screen_width: 1920,
+                screen_height: 1080,
+                started_at_ms: now,
+                last_activity_ms: now,
+            },
+            machine: sm,
+        });
+
+        node.drive_gesture_swipe(-1)
+            .expect("suppression is not an error");
+        assert!(
+            rx.try_recv().is_err(),
+            "receiving-session swipe must not queue any injected key"
         );
     }
 }
