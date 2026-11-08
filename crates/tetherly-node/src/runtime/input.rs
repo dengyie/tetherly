@@ -2598,6 +2598,8 @@ impl Node {
         const VK_LMENU: u16 = 0xA4;
         const VK_LSHIFT: u16 = 0xA0;
         const VK_ESCAPE: u16 = 0x1B;
+        const VK_LWIN: u16 = 0x5B;
+        const VK_TAB: u16 = 0x09;
         const GESTURE_LOG_THROTTLE_MS: u64 = 30_000;
 
         let events = {
@@ -2652,8 +2654,24 @@ impl Node {
             // key events (they arrive microseconds apart over the wire);
             // Alt+Esc is handled directly by the window manager — an
             // instant, injection-reliable window switch with no overlay.
+            //
+            // direction == 0 (vertical swipe): Win+Tab — Task View, the
+            // Mission Control counterpart. It is a RegisterHotKey owned by
+            // explorer, consumed off the message queue, so synthetic input
+            // triggers it reliably (unlike the Alt+Tab overlay state
+            // machine). Direction-agnostic: swipe again to dismiss, exactly
+            // like Mission Control's toggle. The raw VK pair must NOT go
+            // through the keymap: mac_to_windows remaps Meta->Ctrl, which
+            // would turn it into Ctrl+Tab (browser tab switch).
             let base = server.next_seq();
-            let events = if direction < 0 {
+            let events = if direction == 0 {
+                vec![
+                    InputEvent::key(base, VK_LWIN, true, 0),
+                    InputEvent::key(base + 1, VK_TAB, true, 0),
+                    InputEvent::key(base + 2, VK_TAB, false, 0),
+                    InputEvent::key(base + 3, VK_LWIN, false, 0),
+                ]
+            } else if direction < 0 {
                 vec![
                     InputEvent::key(base, VK_LMENU, true, 0),
                     InputEvent::key(base + 1, VK_ESCAPE, true, 0),
@@ -2682,7 +2700,7 @@ impl Node {
         tracing::info!(
             direction,
             events = len,
-            "four-finger swipe forwarded as remote app switch"
+            "four-finger swipe forwarded as remote gesture"
         );
         Ok(())
     }
@@ -4070,6 +4088,59 @@ mod tests {
                 }
             ),
             "second event must be Alt down, got {:?}",
+            ev.kind
+        );
+    }
+
+    // Vertical swipe (direction 0) forwards Win+Tab — Task View, the Mission
+    // Control counterpart. The raw VK pair must survive verbatim: it is
+    // deliberately NOT routed through the keymap (mac_to_windows would remap
+    // Meta->Ctrl, turning it into a browser tab switch).
+    #[tokio::test]
+    async fn test_gesture_swipe_vertical_forwards_win_tab() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("gesture-vswipe");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("gesture-vpeer");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+        *node.shared.input_peer.lock().unwrap() = Some(other.identity().device_id().clone());
+
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(100, 50, 2, 0);
+            assert_eq!(engine.seat(), CursorSeat::Remote);
+        }
+
+        node.drive_gesture_swipe(0)
+            .expect("vertical swipe must forward");
+
+        let win_down = rx.recv().await.expect("Win down queued");
+        let ev = InputEvent::from_frame(&win_down).expect("frame is an input event");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0x5B,
+                    down: true,
+                    ..
+                }
+            ),
+            "first event of a vertical swipe must be Win down, got {:?}",
+            ev.kind
+        );
+        let tab_down = rx.recv().await.expect("Tab down queued");
+        let ev = InputEvent::from_frame(&tab_down).expect("frame is an input event");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0x09,
+                    down: true,
+                    ..
+                }
+            ),
+            "second event must be Tab down, got {:?}",
             ev.kind
         );
     }

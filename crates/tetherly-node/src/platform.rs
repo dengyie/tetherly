@@ -934,12 +934,17 @@ pub enum RawInput {
         code: u16,
         down: bool,
     },
-    /// Four-finger horizontal swipe on the LOCAL trackpad, observed while
-    /// this node is controlling a remote desktop. Forwarded as the remote's
-    /// virtual-desktop switch (Win+Ctrl+Left/Right on a Windows target).
-    /// `direction`: -1 = fingers moved left (switch to the desktop on the
-    /// right), 1 = fingers moved right (switch to the desktop on the left) —
-    /// the same content-follows-fingers convention macOS Spaces uses.
+    /// Four-finger swipe on the LOCAL trackpad, observed while this node is
+    /// controlling a remote desktop.
+    ///
+    /// Horizontal: forwarded as the remote's app switch (Alt+Esc on a
+    /// Windows target). `direction`: -1 = fingers moved left (next window),
+    /// 1 = fingers moved right (previous window) — the same
+    /// content-follows-fingers convention macOS Spaces uses.
+    ///
+    /// Vertical: forwarded as the remote's Task View toggle
+    /// (`direction: 0` — direction-agnostic; Win+Tab on a Windows target,
+    /// swipe again to dismiss, mirroring Mission Control's toggle).
     GestureSwipe {
         direction: i8,
     },
@@ -1510,6 +1515,7 @@ mod dock_swipe {
     pub const K_CGS_EVENT_GESTURE: u32 = 29; // companion marker event
     pub const K_CGS_EVENT_DOCK_CONTROL: u32 = 30; // the actual dock-swipe event
     pub const K_MOTION_HORIZONTAL: i64 = 1;
+    pub const K_MOTION_VERTICAL: i64 = 2;
     pub const PHASE_BEGAN: i64 = 1;
     pub const PHASE_CHANGED: i64 = 2;
     pub const PHASE_ENDED: i64 = 4;
@@ -1600,10 +1606,11 @@ mod dock_swipe {
             return event.as_ptr();
         }
 
-        // Only horizontal dock swipes (Spaces switching) are ours. Vertical
-        // (Mission Control / App Exposé) and pinch pass through untouched.
+        // Horizontal dock swipes (Spaces switching) forward as the remote
+        // app switch; vertical (Mission Control / App Exposé) forward as the
+        // remote Task View toggle. Pinch passes through untouched.
         let motion = CGEvent::integer_value_field(Some(cg_event), CGEventField(F_SWIPE_MOTION));
-        if motion != K_MOTION_HORIZONTAL {
+        if motion != K_MOTION_HORIZONTAL && motion != K_MOTION_VERTICAL {
             return event.as_ptr();
         }
 
@@ -1652,31 +1659,52 @@ mod dock_swipe {
             if progress.abs() > state.max_abs_progress {
                 state.max_abs_progress = progress.abs();
             }
-            // Finalize: fire the app switch when the swipe was deliberate.
+            // Finalize: fire the remote gesture when the swipe was deliberate.
             if armed
                 && ended
                 && !cancelled
                 && state.events >= 2
                 && state.max_abs_progress >= SWIPE_MIN_PROGRESS
             {
-                let mut direction: i8 = if progress < 0.0 { -1 } else { 1 };
-                if os_major() >= 26 {
-                    direction = -direction;
-                }
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                if now_ms.saturating_sub(state.last_fire_ms) >= 400 {
-                    state.last_fire_ms = now_ms;
-                    tracing::info!(
-                        progress = format!("{progress:.4}"),
-                        direction,
-                        "dock swipe suppressed locally; forwarding remote app switch"
-                    );
-                    let _ = ctx
-                        .tx
-                        .send(crate::platform::RawInput::GestureSwipe { direction });
+                // Vertical = Mission Control toggle. Direction-agnostic: the
+                // remote side gets Win+Tab, which is itself a toggle (swipe
+                // again to dismiss) — and the macOS>=26 progress-sign flip
+                // is unobservable in that semantics.
+                if motion == K_MOTION_VERTICAL {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    if now_ms.saturating_sub(state.last_fire_ms) >= 400 {
+                        state.last_fire_ms = now_ms;
+                        tracing::info!(
+                            progress = format!("{progress:.4}"),
+                            "dock swipe (vertical) suppressed locally; forwarding remote task view toggle"
+                        );
+                        let _ = ctx
+                            .tx
+                            .send(crate::platform::RawInput::GestureSwipe { direction: 0 });
+                    }
+                } else {
+                    let mut direction: i8 = if progress < 0.0 { -1 } else { 1 };
+                    if os_major() >= 26 {
+                        direction = -direction;
+                    }
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    if now_ms.saturating_sub(state.last_fire_ms) >= 400 {
+                        state.last_fire_ms = now_ms;
+                        tracing::info!(
+                            progress = format!("{progress:.4}"),
+                            direction,
+                            "dock swipe suppressed locally; forwarding remote app switch"
+                        );
+                        let _ = ctx
+                            .tx
+                            .send(crate::platform::RawInput::GestureSwipe { direction });
+                    }
                 }
             }
             *state = DockSwipeState {
