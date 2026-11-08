@@ -2602,7 +2602,20 @@ impl Node {
 
         let events = {
             let mut server = self.shared.input_engine.lock().expect("engine");
-            if server.seat() != CursorSeat::Remote {
+            // Seat Remote alone is not enough: the CONTROLLED side is also in
+            // the Remote seat. Forward only when this node is the CONTROLLER
+            // (roaming tunnel or ADR-138 session), so a target's stray swipe
+            // never injects an app switch into its controller.
+            let is_controller = self.active_tunnel_role()
+                == Some(tetherly_core::InputTunnelRole::Controller)
+                || self
+                    .shared
+                    .remote_session
+                    .lock()
+                    .expect("remote_session")
+                    .as_ref()
+                    .is_some_and(|s| !s.role.is_receiving());
+            if server.seat() != CursorSeat::Remote || !is_controller {
                 let now = self.shared.clock.unix_ms();
                 let last = self
                     .shared

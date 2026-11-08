@@ -264,13 +264,6 @@ mod macos_tray {
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-        // Four-finger swipe → remote virtual-desktop switch (ADR-138 UX):
-        // the global NSEvent gesture monitor rides the main-thread AppKit
-        // runloop; detected swipes reach the input loop via the shared
-        // RawInput channel and forward as Win+Ctrl+Left/Right while the
-        // node is controlling a remote desktop.
-        crate::platform::start_gesture_swipe_monitor();
-
         let bar = NSStatusBar::systemStatusBar();
         let item = bar.statusItemWithLength(-1.0);
         let target = TetherlyTrayTarget::alloc().set_ivars(TrayIvars { ui_port });

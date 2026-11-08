@@ -946,143 +946,6 @@ pub enum RawInput {
     EmergencyEscape,
 }
 
-/// Channel the gesture monitor forwards through. Set by `start_input_hooks`
-/// (the same mpsc the mouse/keyboard tap feeds) so the AppKit-side monitor
-/// installed on the tray main thread can reach the input loop without new
-/// plumbing.
-#[cfg(target_os = "macos")]
-static GESTURE_RAW_TX: std::sync::OnceLock<std::sync::mpsc::Sender<RawInput>> =
-    std::sync::OnceLock::new();
-
-/// Install a global NSEvent monitor for trackpad gesture events (public
-/// AppKit API, covered by the Accessibility permission the input capture
-/// already requires). Must run on the main thread (the tray's AppKit
-/// runloop). Detects four-finger horizontal swipes and forwards them as
-/// [`RawInput::GestureSwipe`]; the input loop drops them when this node is
-/// not controlling a remote desktop.
-///
-/// Note: the gesture event stream is OBSERVED, not consumed — macOS keeps
-/// handling the system-side action (Spaces switching) itself. Forwarding
-/// works regardless; suppressing the local switch needs the corresponding
-/// gesture disabled in System Settings.
-#[cfg(target_os = "macos")]
-pub fn start_gesture_swipe_monitor() {
-    use block2::RcBlock;
-    use core::ptr::NonNull;
-    use objc2_app_kit::{NSEvent, NSEventPhase, NSTouchPhase};
-    use objc2_foundation::MainThreadMarker;
-
-    let Some(_mtm) = MainThreadMarker::new() else {
-        tracing::warn!("gesture monitor: not on the main thread; skipped");
-        return;
-    };
-
-    struct SwipeAccum {
-        active: bool,
-        max_touches: usize,
-        start_x: Option<f64>,
-        last_x: f64,
-    }
-    let accum = std::sync::Mutex::new(SwipeAccum {
-        active: false,
-        max_touches: 0,
-        start_x: None,
-        last_x: 0.0,
-    });
-
-    let handler = move |event: NonNull<NSEvent>| {
-        let event = unsafe { event.as_ref() };
-        // NSEventTypeGesture stream: begin/changed/end for every trackpad
-        // multi-touch gesture. Magnify/rotate are excluded by the mask at
-        // registration time; this handler only tracks horizontal motion.
-        let phase = event.phase();
-        let touching = event.touchesMatchingPhase_inView(NSTouchPhase::Touching, None);
-        let touch_count = touching.count();
-        // Centroid of the currently-touching fingers in normalized trackpad
-        // space ([0,1]); a four-finger swipe moves it visibly left/right.
-        let mut sum_x = 0.0f64;
-        let mut n = 0usize;
-        let enumerator = unsafe { touching.objectEnumerator() };
-        while let Some(touch) = enumerator.nextObject() {
-            sum_x += touch.normalizedPosition().x;
-            n += 1;
-        }
-        let centroid_x = if n > 0 { sum_x / n as f64 } else { f64::NAN };
-
-        let mut state = match accum.lock() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        match phase {
-            NSEventPhase::Began | NSEventPhase::MayBegin => {
-                state.active = true;
-                state.max_touches = touch_count;
-                state.start_x = (n > 0).then_some(centroid_x);
-                state.last_x = centroid_x;
-            }
-            NSEventPhase::Changed => {
-                if !state.active {
-                    return;
-                }
-                state.max_touches = state.max_touches.max(touch_count);
-                if n > 0 && !centroid_x.is_nan() {
-                    state.last_x = centroid_x;
-                }
-            }
-            NSEventPhase::Ended | NSEventPhase::Cancelled => {
-                if !state.active {
-                    return;
-                }
-                state.max_touches = state.max_touches.max(touch_count);
-                let started = state.start_x;
-                let dx = match started {
-                    Some(sx) if !centroid_x.is_nan() => centroid_x - sx,
-                    _ => state.last_x - started.unwrap_or(state.last_x),
-                };
-                let max_touches = state.max_touches;
-                *state = SwipeAccum {
-                    active: false,
-                    max_touches: 0,
-                    start_x: None,
-                    last_x: 0.0,
-                };
-                // Four fingers moving ≥10% of the trackpad width horizontally.
-                if max_touches >= 4 && dx.abs() >= 0.10 {
-                    let direction: i8 = if dx < 0.0 { -1 } else { 1 };
-                    tracing::info!(
-                        dx = format!("{dx:.3}"),
-                        max_touches,
-                        direction,
-                        "four-finger swipe detected; forwarding virtual-desktop switch"
-                    );
-                    if let Some(tx) = GESTURE_RAW_TX.get() {
-                        let _ = tx.send(RawInput::GestureSwipe { direction });
-                    }
-                } else if max_touches >= 4 {
-                    tracing::debug!(
-                        dx = format!("{dx:.3}"),
-                        max_touches,
-                        "four-finger gesture below swipe threshold"
-                    );
-                }
-            }
-            _ => {}
-        }
-    };
-    let handler = RcBlock::new(handler);
-    let monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-        objc2_app_kit::NSEventMask::Gesture,
-        &handler,
-    );
-    if monitor.is_some() {
-        // Deliberately leaked: the monitor must live for the process lifetime.
-        std::mem::forget(monitor);
-        tracing::info!("gesture monitor: four-finger swipe forwarding armed (forwarded to the remote desktop while controlling)");
-    } else {
-        tracing::warn!("gesture monitor: addGlobalMonitorForEventsMatchingMask returned null");
-    }
-}
-
 /// Bidirectional macOS CGKeyCode ↔ Win32 Virtual-Key mapping table.
 pub const MAC_TO_WIN_KEYS: &[(u16, u16)] = &[
     (0x00, 0x41), // A
@@ -1629,179 +1492,315 @@ struct MacTapContext {
     keyboard_armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pressed_modifiers: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u16>>>,
     tap_port: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    /// Raw kCGEventGesture (type 29) tracking: the gesture field layout is
-    /// not public, so the handler dumps candidate fields for the first
-    /// events and accumulates whichever delta-like fields move — the
-    /// four-finger swipe direction is derived from the field pair that
-    /// actually travels during a swipe (empirically confirmed in prod).
-    gesture_state: std::sync::Arc<std::sync::Mutex<GestureTapState>>,
     _retained_port: std::sync::Mutex<
         Option<objc2_core_foundation::CFRetained<objc2_core_foundation::CFMachPort>>,
     >,
 }
 
-/// Accumulator for kCGEventGesture (type 29) horizontal swipe detection.
+/// Private WindowServer/Dock gesture-routing fields, reverse-engineered by
+/// the Instant Space Switcher / Mac Mouse Fix / dockswipe projects (the
+/// layout is undocumented but stable across recent macOS releases).
 #[cfg(target_os = "macos")]
-#[derive(Default)]
-struct GestureTapState {
-    /// Horizontal gesture field (CGEventField 87, empirically identified —
-    /// all other candidate fields stay 0 during a horizontal swipe). Its
-    /// 32-bit value is the swipe's horizontal velocity/delta component;
-    /// negative = fingers moving left.
-    last_87: i64,
-    max_abs_87: i64,
-    events: u64,
-    /// Events dumped so far (field discovery is logged only initially).
-    dumped: u32,
-    /// True while a gesture is in progress (begin seen, end not yet).
-    in_gesture: bool,
-    /// Milliseconds timestamp of the last gesture event (gap finalize).
-    last_event_ms: u128,
-    /// Generation counter for the deferred finalize threads.
-    generation: u64,
-    /// Milliseconds timestamp of the last fired swipe (cooldown).
-    last_fire_ms: u128,
-}
-
-/// Handle one raw kCGEventGesture (type 29) event inside the HID tap.
-///
-/// The gesture field layout is undocumented; the handler (a) dumps candidate
-/// integer fields for the first events (empirical record), (b) accumulates
-/// every candidate field across the gesture, finalizing on a >250ms event
-/// gap, and (c) at finalize fires a [`RawInput::GestureSwipe`] when a
-/// dominant delta-like field accumulated past the swipe threshold — while
-/// the local capture is armed, the event is DROPPED so macOS does not ALSO
-/// perform the local Spaces switch. Not armed: pass through untouched.
-#[cfg(target_os = "macos")]
-unsafe fn handle_gesture_tap_event(
-    cg_event: &objc2_core_graphics::CGEvent,
-    ctx: &MacTapContext,
-) -> *mut objc2_core_graphics::CGEvent {
+mod dock_swipe {
+    use objc2_core_foundation::CFMachPort;
     use objc2_core_graphics::{CGEvent, CGEventField};
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
-    const CANDIDATE_FIELDS: [u32; 14] = [45, 46, 53, 61, 62, 63, 64, 65, 70, 71, 87, 88, 89, 90];
-    const SWIPE_SUM_THRESHOLD: i64 = 30;
-    const FINALIZE_GAP_MS: u128 = 250;
+    pub const K_CGS_EVENT_GESTURE: u32 = 29; // companion marker event
+    pub const K_CGS_EVENT_DOCK_CONTROL: u32 = 30; // the actual dock-swipe event
+    pub const K_MOTION_HORIZONTAL: i64 = 1;
+    pub const PHASE_BEGAN: i64 = 1;
+    pub const PHASE_CHANGED: i64 = 2;
+    pub const PHASE_ENDED: i64 = 4;
+    pub const PHASE_CANCELLED: i64 = 8;
 
-    let armed = ctx.keyboard_armed.load(Ordering::SeqCst);
-    let mut state = match ctx.gesture_state.lock() {
-        Ok(s) => s,
-        Err(_) => return cg_event as *const CGEvent as *mut CGEvent,
-    };
+    // CGEventField numbers (private).
+    const F_SWIPE_MOTION: u32 = 123; // 1 horizontal, 2 vertical, 3 pinch
+    const F_SWIPE_PROGRESS: u32 = 124; // cumulative distance, signed
+    const F_GESTURE_PHASE: u32 = 132; // began/changed/ended/cancelled bits
 
-    // Empirical record: dump the candidate fields for the first events so a
-    // mis-parse can be corrected against real data.
-    if state.dumped < 12 {
-        state.dumped += 1;
-        let dump: Vec<String> = CANDIDATE_FIELDS
-            .iter()
-            .map(|f| {
-                let v = CGEvent::integer_value_field(Some(cg_event), CGEventField(*f));
-                format!("{f}={v}")
-            })
-            .collect();
-        tracing::info!(armed, "gesture event fields: {}", dump.join(" "));
+    /// Minimum |progress| for a gesture to count as a deliberate swipe.
+    /// Progress is a cumulative, screen-normalized distance; a full swipe
+    /// reaches ~1.0. Calibrated against the per-event dumps if needed.
+    pub const SWIPE_MIN_PROGRESS: f64 = 0.10;
+
+    pub struct DockSwipeState {
+        pub in_gesture: bool,
+        pub last_progress: f64,
+        pub max_abs_progress: f64,
+        pub events: u64,
+        pub dumped: u32,
+        pub last_fire_ms: u128,
     }
 
-    // Accumulate every candidate field; finalize when the event stream gaps.
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let gap = now_ms.saturating_sub(state.last_event_ms) > FINALIZE_GAP_MS;
-    state.last_event_ms = now_ms;
-    if gap && state.in_gesture {
-        // Previous gesture ended silently — finalize it now.
-        finalize_gesture(&mut state, &ctx.tx, SWIPE_SUM_THRESHOLD);
-    }
-    state.in_gesture = true;
-    state.events += 1;
-    let mut v87 = CGEvent::integer_value_field(Some(cg_event), CGEventField(87));
-    // Gesture delta fields are 32-bit two's complement stored in the low 32
-    // bits: 4294970251 is -7045 (fingers moving LEFT), not +4.29e9. Without
-    // the wrap the sign — and therefore the direction — inverts.
-    if v87 > i32::MAX as i64 {
-        v87 -= 1i64 << 32;
-    }
-    state.last_87 = v87;
-    if v87.abs() > state.max_abs_87 {
-        state.max_abs_87 = v87.abs();
+    pub struct DockSwipeContext {
+        pub armed: Arc<AtomicBool>,
+        pub tx: std::sync::mpsc::Sender<crate::platform::RawInput>,
+        pub state: Mutex<DockSwipeState>,
+        pub tap_port: AtomicUsize,
     }
 
-    // Schedule the finalize: a quiet period after this event ends the
-    // gesture. Generation counter guards against stale threads.
-    state.generation += 1;
-    let generation = state.generation;
-    let state_arc = ctx.gesture_state.clone();
-    let tx = ctx.tx.clone();
-    std::thread::Builder::new()
-        .name("gesture-finalize".into())
-        .spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(
-                FINALIZE_GAP_MS as u64 + 50,
-            ));
-            if let Ok(mut s) = state_arc.lock() {
-                if s.generation == generation && s.in_gesture {
-                    finalize_gesture(&mut s, &tx, SWIPE_SUM_THRESHOLD);
+    /// macOS 26 reports horizontal swipe progress with the opposite sign of
+    /// earlier releases (iss: ISS_SWIPE_DIRECTION_REVERSED).
+    fn os_major() -> u32 {
+        static MAJOR: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        *MAJOR.get_or_init(|| {
+            // /System/Library/CoreServices/SystemVersion.plist carries
+            // ProductVersion (e.g. "26.1") — dependency-free runtime read.
+            let plist = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist")
+                .unwrap_or_default();
+            let mut major = 15u32;
+            if let Some(pos) = plist.find("<key>ProductVersion</key>") {
+                if let Some(rest) = plist.get(pos..) {
+                    if let Some(start) = rest.find("<string>").map(|p| p + 8) {
+                        if let Some(end) = rest[start..].find("</string>") {
+                            let v = &rest[start..start + end];
+                            if let Some(m) = v.split('.').next() {
+                                if let Ok(n) = m.parse() {
+                                    major = n;
+                                }
+                            }
+                        }
+                    }
                 }
             }
+            major
         })
-        .ok();
+    }
 
-    if armed {
-        // Consumed: keep macOS from ALSO switching the local Space.
-        std::ptr::null_mut()
-    } else {
-        cg_event as *const CGEvent as *mut CGEvent
+    pub unsafe extern "C-unwind" fn dock_swipe_callback(
+        _proxy: objc2_core_graphics::CGEventTapProxy,
+        event_type: objc2_core_graphics::CGEventType,
+        event: core::ptr::NonNull<CGEvent>,
+        user_info: *mut std::ffi::c_void,
+    ) -> *mut CGEvent {
+        let ctx = &*(user_info as *const DockSwipeContext);
+        let cg_event = event.as_ref();
+
+        // Tap-disabled self-heal (same as the main input tap).
+        if event_type.0 == 0xFFFF_FFFE || event_type.0 == 0xFFFF_FFFF {
+            let port = ctx.tap_port.load(Ordering::SeqCst);
+            if port != 0 {
+                let p = unsafe { &*(port as *const CFMachPort) };
+                CGEvent::tap_enable(p, true);
+            }
+            return event.as_ptr();
+        }
+
+        // The type-29 marker accompanies every dock-swipe step; consume it
+        // while armed so the system sees no partial gesture stream.
+        if event_type.0 == K_CGS_EVENT_GESTURE {
+            return if ctx.armed.load(Ordering::SeqCst) {
+                std::ptr::null_mut()
+            } else {
+                event.as_ptr()
+            };
+        }
+        if event_type.0 != K_CGS_EVENT_DOCK_CONTROL {
+            return event.as_ptr();
+        }
+
+        // Only horizontal dock swipes (Spaces switching) are ours. Vertical
+        // (Mission Control / App Exposé) and pinch pass through untouched.
+        let motion = CGEvent::integer_value_field(Some(cg_event), CGEventField(F_SWIPE_MOTION));
+        if motion != K_MOTION_HORIZONTAL {
+            return event.as_ptr();
+        }
+
+        let phase = CGEvent::integer_value_field(Some(cg_event), CGEventField(F_GESTURE_PHASE));
+        let progress = CGEvent::double_value_field(Some(cg_event), CGEventField(F_SWIPE_PROGRESS));
+        let armed = ctx.armed.load(Ordering::SeqCst);
+
+        let mut state = match ctx.state.lock() {
+            Ok(s) => s,
+            Err(_) => return event.as_ptr(),
+        };
+        if state.dumped < 12 {
+            state.dumped += 1;
+            tracing::info!(
+                phase,
+                progress = format!("{progress:.4}"),
+                motion,
+                armed,
+                "dock-swipe event"
+            );
+        }
+        match phase {
+            PHASE_BEGAN => {
+                state.in_gesture = true;
+                state.last_progress = progress;
+                state.max_abs_progress = progress.abs();
+                state.events = 1;
+            }
+            PHASE_CHANGED => {
+                if !state.in_gesture {
+                    state.in_gesture = true;
+                    state.events = 0;
+                    state.max_abs_progress = 0.0;
+                }
+                state.events += 1;
+                state.last_progress = progress;
+                if progress.abs() > state.max_abs_progress {
+                    state.max_abs_progress = progress.abs();
+                }
+            }
+            PHASE_ENDED | PHASE_CANCELLED => {
+                state.in_gesture = false;
+                state.last_progress = progress;
+                if progress.abs() > state.max_abs_progress {
+                    state.max_abs_progress = progress.abs();
+                }
+                // Finalize: fire the app switch when the swipe was deliberate.
+                if armed
+                    && phase == PHASE_ENDED
+                    && state.events >= 2
+                    && state.max_abs_progress >= SWIPE_MIN_PROGRESS
+                {
+                    let mut direction: i8 = if progress < 0.0 { -1 } else { 1 };
+                    if os_major() >= 26 {
+                        direction = -direction;
+                    }
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    if now_ms.saturating_sub(state.last_fire_ms) >= 400 {
+                        state.last_fire_ms = now_ms;
+                        tracing::info!(
+                            progress = format!("{progress:.4}"),
+                            direction,
+                            "dock swipe suppressed locally; forwarding remote app switch"
+                        );
+                        let _ = ctx
+                            .tx
+                            .send(crate::platform::RawInput::GestureSwipe { direction });
+                    }
+                }
+                *state = DockSwipeState {
+                    in_gesture: false,
+                    last_progress: 0.0,
+                    max_abs_progress: 0.0,
+                    events: 0,
+                    dumped: state.dumped,
+                    last_fire_ms: state.last_fire_ms,
+                };
+            }
+            _ => {}
+        }
+
+        if armed {
+            // Consumed: the Dock never sees the swipe, so macOS does not
+            // switch the local Space. The app switch happens on the remote.
+            std::ptr::null_mut()
+        } else {
+            event.as_ptr()
+        }
     }
 }
 
-/// Field-access shim removed: the deferred finalize thread closes over the
-/// raw sender directly.
+/// Install the session-level dock-swipe event tap. Runs on its own thread
+/// with its own CFRunLoop (same pattern as the HID input tap).
 #[cfg(target_os = "macos")]
-fn finalize_gesture(
-    state: &mut GestureTapState,
-    tx: &std::sync::mpsc::Sender<RawInput>,
-    _threshold: i64,
-) {
-    state.in_gesture = false;
-    // One action per swipe: a finalize landing right after a fired one (the
-    // 250ms gap can occur mid-gesture) must not fire again.
-    const FIRE_COOLDOWN_MS: u128 = 800;
-    // A real four-finger swipe delivers a burst of gesture events carrying a
-    // strong horizontal component; hand noise near the pad produces few
-    // events with near-zero velocity.
-    const MIN_EVENTS: u64 = 5;
-    const MIN_PEAK_VELOCITY: i64 = 1000;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    if now_ms.saturating_sub(state.last_fire_ms) < FIRE_COOLDOWN_MS {
-        return;
+pub fn start_dock_swipe_tap(
+    armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tx: std::sync::mpsc::Sender<RawInput>,
+) -> Result<(), CoreError> {
+    use objc2_core_foundation::{kCFRunLoopCommonModes, CFMachPort, CFRunLoop};
+    use objc2_core_graphics::{
+        CGEvent, CGEventMask, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    if !is_accessibility_trusted() {
+        return Err(CoreError::Json(
+            "macOS Accessibility permission is required for gesture capture".into(),
+        ));
     }
-    if state.events < MIN_EVENTS || state.max_abs_87 < MIN_PEAK_VELOCITY {
-        tracing::debug!(
-            events = state.events,
-            max_abs_87 = state.max_abs_87,
-            "gesture below swipe threshold"
-        );
-        return;
-    }
-    // Direction = the sign of the strongest horizontal component (fingers
-    // left => negative).
-    let direction: i8 = if state.last_87 < 0 { -1 } else { 1 };
-    state.last_fire_ms = now_ms;
+
+    let mask: CGEventMask = (1u64 << dock_swipe::K_CGS_EVENT_GESTURE)
+        | (1u64 << dock_swipe::K_CGS_EVENT_DOCK_CONTROL)
+        | (1u64 << 62)
+        | (1u64 << 63);
+
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+
+    let builder = std::thread::Builder::new().name("dock-swipe-tap".into());
+    builder
+        .spawn(move || unsafe {
+            let ctx = Box::new(dock_swipe::DockSwipeContext {
+                armed,
+                tx,
+                state: Mutex::new(dock_swipe::DockSwipeState {
+                    in_gesture: false,
+                    last_progress: 0.0,
+                    max_abs_progress: 0.0,
+                    events: 0,
+                    dumped: 0,
+                    last_fire_ms: 0,
+                }),
+                tap_port: AtomicUsize::new(0),
+            });
+            let user_info_ptr =
+                &*ctx as *const dock_swipe::DockSwipeContext as *mut std::ffi::c_void;
+            // The context must outlive this function; the runloop below never
+            // returns, so leaking is unnecessary — but the callback holds the
+            // raw pointer, so keep the Box alive by forgetting it. The tap is
+            // torn down only at process exit.
+            std::mem::forget(ctx);
+
+            let tap = CGEvent::tap_create(
+                CGEventTapLocation::SessionEventTap,
+                CGEventTapPlacement::HeadInsertEventTap,
+                CGEventTapOptions::Default,
+                mask,
+                Some(dock_swipe::dock_swipe_callback),
+                user_info_ptr,
+            );
+            let port = match tap {
+                Some(p) => p,
+                None => {
+                    let _ = ready_tx.send(Err(
+                        "CGEventTapCreate(session) returned null (Accessibility required)".into(),
+                    ));
+                    return;
+                }
+            };
+            let rl_source = match CFMachPort::new_run_loop_source(None, Some(&port), 0) {
+                Some(s) => s,
+                None => {
+                    let _ = ready_tx.send(Err("CFMachPortCreateRunLoopSource failed".into()));
+                    return;
+                }
+            };
+            if let Some(rl) = CFRunLoop::current() {
+                rl.add_source(Some(&rl_source), kCFRunLoopCommonModes);
+                CGEvent::tap_enable(&port, true);
+                // The context was leaked (still valid): update its tap port
+                // through the same pointer the callback uses.
+                let ctx_ref = &*(user_info_ptr as *const dock_swipe::DockSwipeContext);
+                ctx_ref
+                    .tap_port
+                    .store(&*port as *const CFMachPort as usize, Ordering::SeqCst);
+                let _ = ready_tx.send(Ok(()));
+                CFRunLoop::run();
+            } else {
+                let _ = ready_tx.send(Err("CFRunLoopGetCurrent returned null".into()));
+            }
+        })
+        .map_err(|e| CoreError::Json(format!("spawn dock-swipe tap thread: {e}")))?;
+
+    ready_rx
+        .recv()
+        .map_err(|e| CoreError::Json(format!("dock-swipe tap ready channel: {e}")))?
+        .map_err(CoreError::Json)?;
     tracing::info!(
-        events = state.events,
-        max_abs_87 = state.max_abs_87,
-        direction,
-        "four-finger swipe finalized; forwarding remote app switch"
+        "dock-swipe tap armed (four-finger swipe → remote app switch while controlling)"
     );
-    let _ = tx.send(crate::platform::RawInput::GestureSwipe { direction });
+    Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[cfg(target_os = "macos")]
 pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookControl, CoreError> {
     use objc2_core_foundation::{kCFRunLoopCommonModes, CFMachPort, CFRunLoop};
@@ -1810,10 +1809,6 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
         CGEventTapPlacement, CGEventTapProxy, CGEventType,
     };
     use std::sync::atomic::Ordering;
-
-    // Register the channel the four-finger swipe monitor forwards through
-    // (the monitor itself is installed on the tray main thread).
-    let _ = GESTURE_RAW_TX.set(tx.clone());
 
     if !is_accessibility_trusted() {
         return Err(CoreError::Json(
@@ -1825,6 +1820,24 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
     let tap_port = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let pressed_modifiers =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+
+    // Dock-swipe tap (session level): intercepts the private type-30
+    // kIOHIDEventTypeDockSwipe stream BEFORE the Dock sees it. While this
+    // node controls a remote desktop the horizontal swipe is suppressed
+    // locally (no macOS Spaces switch) and forwarded as the remote app
+    // switch; vertical gestures and everything else pass through.
+    {
+        let armed = std::sync::Arc::clone(&keyboard_armed);
+        let tx = tx.clone();
+        std::thread::Builder::new()
+            .name("dock-swipe-tap".into())
+            .spawn(move || {
+                if let Err(e) = start_dock_swipe_tap(armed, tx) {
+                    tracing::warn!("dock-swipe tap unavailable: {e}");
+                }
+            })
+            .ok();
+    }
 
     let control = HookControl {
         keyboard_armed: std::sync::Arc::clone(&keyboard_armed),
@@ -1860,18 +1873,6 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
             CGEvent::integer_value_field(Some(cg_event), CGEventField::EventSourceUserData);
         if user_data == TETHERLY_INJECTED_MAGIC {
             return event.as_ptr();
-        }
-
-        // Raw trackpad gesture stream (kCGEventGesture = 29, not in the
-        // CGEventType enum). The window server consumes system gesture
-        // actions (Spaces switching) BEFORE app-level delivery, so the
-        // NSEvent monitor never sees them — the HID tap is the only
-        // interception point. While the local capture is armed (this node
-        // is controlling a remote desktop), a horizontal four-finger swipe
-        // is forwarded as the remote virtual-desktop switch and the event
-        // is DROPPED so macOS does not also switch the local Space.
-        if event_type.0 == 29 {
-            return handle_gesture_tap_event(cg_event, ctx);
         }
 
         match event_type {
@@ -2253,9 +2254,6 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 keyboard_armed: keyboard_armed_thread,
                 pressed_modifiers: pressed_modifiers_thread,
                 tap_port: tap_port_thread,
-                gesture_state: std::sync::Arc::new(std::sync::Mutex::new(
-                    GestureTapState::default(),
-                )),
                 _retained_port: std::sync::Mutex::new(None),
             });
 
@@ -2274,7 +2272,6 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 | (1u64 << CGEventType::KeyUp.0)
                 | (1u64 << CGEventType::FlagsChanged.0)
                 | (1u64 << 14) // NX_SYSDEFINED = 14 (media keys, volume up/down/mute, etc.)
-                | (1u64 << 29) // kCGEventGesture = 29 (raw trackpad gestures)
                 // kCGEventTapDisabledByTimeout (0xFFFFFFFE) and
                 // kCGEventTapDisabledByUserInput (0xFFFFFFFF) land on mask
                 // bits 62/63 on 64-bit (CGEventMaskBit wraps the shift).
