@@ -622,7 +622,6 @@ impl Node {
             session_heartbeat_paused: std::sync::atomic::AtomicBool::new(false),
             gesture_swipe_last_ignored_ms: std::sync::atomic::AtomicU64::new(0),
             screen_seq_trace: Mutex::new(Vec::new()),
-            reverse_edge_escape_armed: std::sync::atomic::AtomicBool::new(false),
             screen_channel_gen: std::sync::atomic::AtomicU64::new(0),
             screen_client_gen: std::sync::atomic::AtomicU64::new(0),
             input_client_task: Mutex::new(None),

@@ -2558,12 +2558,8 @@ impl Node {
                 self.disarm_input_capture();
                 crate::platform::warp_mouse_position(local_pos.0, local_pos.1);
             } else {
-                // Becoming the controlled side: the entry placement parks the
-                // cursor ON the shared edge — the push-back escape gate must
-                // re-arm from scratch (leave the edge, come back, dwell).
-                self.shared
-                    .reverse_edge_escape_armed
-                    .store(false, Ordering::SeqCst);
+                // Becoming the controlled side: reset the push-back arming so
+                // the next reverse takeover needs a fresh deliberate push.
                 self.reset_reverse_arming_state();
             }
         }
@@ -2598,21 +2594,10 @@ impl Node {
         self.send_input_events(events, "drive_key")
     }
 
-    /// Forward a LOCAL four-finger horizontal swipe as the remote's virtual
-    /// desktop switch: `Ctrl+Win+Left/Right` on the target (Windows). Codes
-    /// are injected RAW — deliberately NOT passed through the keymap profile
-    /// (`drive_input_key` remaps mac→win; this gesture already targets Win32
-    /// semantics directly).
-    ///
-    /// `direction`: -1 = fingers moved LEFT (content follows fingers → switch
-    /// to the desktop on the RIGHT), 1 = fingers moved RIGHT (switch left).
-    /// Only acts while this node is controlling (seat Remote); otherwise a
-    /// throttled no-op so stray swipes never leak keys to a local session.
     pub fn drive_gesture_swipe(&self, direction: i8) -> Result<(), CoreError> {
-        const VK_LCONTROL: u16 = 0xA2;
-        const VK_LWIN: u16 = 0x5B;
-        const VK_LEFT: u16 = 0x25;
-        const VK_RIGHT: u16 = 0x27;
+        const VK_LMENU: u16 = 0xA4;
+        const VK_LSHIFT: u16 = 0xA0;
+        const VK_TAB: u16 = 0x09;
         const GESTURE_LOG_THROTTLE_MS: u64 = 30_000;
 
         let events = {
@@ -2634,25 +2619,37 @@ impl Node {
                 }
                 return Ok(());
             }
-            let arrow = if direction < 0 { VK_RIGHT } else { VK_LEFT };
+            // One Alt+Tab tap per swipe: Alt down -> (Shift down) -> Tab
+            // down/up -> (Shift up) -> Alt up. A quick tap switches to the
+            // adjacent app in the MRU cycle without holding the switcher
+            // overlay open.
             let base = server.next_seq();
-            let events = vec![
-                InputEvent::key(base, VK_LCONTROL, true, 0),
-                InputEvent::key(base + 1, VK_LWIN, true, 0),
-                InputEvent::key(base + 2, arrow, true, 0),
-                InputEvent::key(base + 3, arrow, false, 0),
-                InputEvent::key(base + 4, VK_LWIN, false, 0),
-                InputEvent::key(base + 5, VK_LCONTROL, false, 0),
-            ];
+            let events = if direction < 0 {
+                vec![
+                    InputEvent::key(base, VK_LMENU, true, 0),
+                    InputEvent::key(base + 1, VK_TAB, true, 0),
+                    InputEvent::key(base + 2, VK_TAB, false, 0),
+                    InputEvent::key(base + 3, VK_LMENU, false, 0),
+                ]
+            } else {
+                vec![
+                    InputEvent::key(base, VK_LMENU, true, 0),
+                    InputEvent::key(base + 1, VK_LSHIFT, true, 0),
+                    InputEvent::key(base + 2, VK_TAB, true, 0),
+                    InputEvent::key(base + 3, VK_TAB, false, 0),
+                    InputEvent::key(base + 4, VK_LSHIFT, false, 0),
+                    InputEvent::key(base + 5, VK_LMENU, false, 0),
+                ]
+            };
             server.note_seq(base + 5);
             events
         };
         let len = events.len();
-        self.send_input_events(events, "gesture_vdesk")?;
+        self.send_input_events(events, "gesture_app_switch")?;
         tracing::info!(
             direction,
             events = len,
-            "four-finger swipe forwarded as remote virtual-desktop switch"
+            "four-finger swipe forwarded as remote app switch"
         );
         Ok(())
     }
@@ -2763,34 +2760,7 @@ impl Node {
             tetherly_core::ScreenEdge::Top if y <= 2 || (y <= 8 && dy < 0) => (x, 0),
             tetherly_core::ScreenEdge::Left if x <= 2 || (x <= 8 && dx < 0) => (0, y),
             _ => {
-                // Cursor away from the edge zone. Only a REAL escape — far
-                // enough that the user demonstrably left the shared edge —
-                // arms the next push-back dwell. The entry placement parks
-                // the cursor ON the edge; without this gate, residual local
-                // motion dwelt there and the target snatched control back
-                // seconds after every takeover. The escape distance scales
-                // with the edge-normal dimension (1/7th, min 8px) so tiny
-                // virtual screens in tests behave like real ones.
-                let normal_dim = match edge {
-                    tetherly_core::ScreenEdge::Right | tetherly_core::ScreenEdge::Left => width,
-                    tetherly_core::ScreenEdge::Top | tetherly_core::ScreenEdge::Bottom => height,
-                } as i64;
-                let escape_px = (normal_dim / 7).max(8);
-                let escaped = match edge {
-                    tetherly_core::ScreenEdge::Right => {
-                        (width.saturating_sub(1)).saturating_sub(x.max(0)) as i64
-                    }
-                    tetherly_core::ScreenEdge::Bottom => {
-                        (height.saturating_sub(1)).saturating_sub(y.max(0)) as i64
-                    }
-                    tetherly_core::ScreenEdge::Top => y.max(0) as i64,
-                    tetherly_core::ScreenEdge::Left => x.max(0) as i64,
-                };
-                if escaped >= escape_px {
-                    self.shared
-                        .reverse_edge_escape_armed
-                        .store(true, Ordering::SeqCst);
-                }
+                // Cursor away from the edge zone: the push is over.
                 *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
                 *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
                 return;
@@ -2805,7 +2775,7 @@ impl Node {
 
         // Distance gate: an un-armed mouse (freshly plugged in, or bumped
         // without real traversal) can never start the takeover dwell.
-        if !distance_armed || !self.shared.reverse_edge_escape_armed.load(Ordering::SeqCst) {
+        if !distance_armed {
             // Diagnostic (v0.1.81): an edge push blocked by the distance gate
             // is invisible to the user ("push does nothing") — log it, at most
             // once per second, so the block is attributable.
@@ -2837,8 +2807,21 @@ impl Node {
         // the edge for longer than TOUCH_GAP_MS disarms the dwell.
         const TOUCH_GAP_MS: u64 = 150;
         let now = std::time::Instant::now();
-        let fired = if !crossed {
-            // Left the edge: the push is over, reset the dwell.
+        // Direction discipline (v0.1.97): the event must push INTO the edge
+        // to sustain the dwell. The entry placement parks the cursor ON the
+        // shared edge; horizontal drift along that edge (dy==0 for a
+        // top/bottom edge) used to keep the dwell alive and the target
+        // snatched control back seconds after every takeover. Only deltas
+        // with an into-the-edge component count as "still pushing".
+        let pushing_in = match edge {
+            tetherly_core::ScreenEdge::Right => dx > 0,
+            tetherly_core::ScreenEdge::Bottom => dy > 0,
+            tetherly_core::ScreenEdge::Top => dy < 0,
+            tetherly_core::ScreenEdge::Left => dx < 0,
+        };
+        let fired = if !crossed || !pushing_in {
+            // Left the edge (or slid along it without pushing in): the push
+            // is over, reset the dwell.
             *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
             *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
             false
@@ -2880,11 +2863,6 @@ impl Node {
             return;
         }
         *self.shared.last_auto_reverse.lock().expect("last_flip") = Some(now);
-        // The takeover is consumed: the next one needs a fresh deliberate
-        // escape-and-push cycle.
-        self.shared
-            .reverse_edge_escape_armed
-            .store(false, Ordering::SeqCst);
 
         let Some(peer) = self
             .shared

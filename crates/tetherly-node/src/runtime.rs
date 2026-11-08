@@ -913,13 +913,6 @@ struct Shared {
     /// Receiver seq-decision ring `(seq, accepted)` mirrored from the
     /// client-loop receiver for diagnostics (cliff-vs-duplicate triage).
     pub(crate) screen_seq_trace: Mutex<Vec<(u64, bool)>>,
-    /// Auto-reverse escape gate: while this node is a roaming TARGET, the
-    /// local push-back takeover may only arm after the cursor has been seen
-    /// far enough away from the shared edge. Without it, the ENTRY placement
-    /// parks the cursor ON the edge and any residual local motion dwells
-    /// there — the target snatched control back seconds after every
-    /// takeover (the "Windows mouse cannot stay on the Mac" bug).
-    pub(crate) reverse_edge_escape_armed: std::sync::atomic::AtomicBool,
     /// Monotonic generation of the active 45720 server channel. Each
     /// `attach_screen_server` increments it; a pump loop may only run the
     /// engine-level `on_peer_gone` reset when its generation is still the

@@ -1644,9 +1644,13 @@ struct MacTapContext {
 #[cfg(target_os = "macos")]
 #[derive(Default)]
 struct GestureTapState {
-    /// Observed non-zero values per candidate field, from the gesture's
-    /// begin to its end (keyed by CGEventField number).
-    sums: std::collections::HashMap<u32, i64>,
+    /// Horizontal gesture field (CGEventField 87, empirically identified —
+    /// all other candidate fields stay 0 during a horizontal swipe). Its
+    /// 32-bit value is the swipe's horizontal velocity/delta component;
+    /// negative = fingers moving left.
+    last_87: i64,
+    max_abs_87: i64,
+    events: u64,
     /// Events dumped so far (field discovery is logged only initially).
     dumped: u32,
     /// True while a gesture is in progress (begin seen, end not yet).
@@ -1655,6 +1659,8 @@ struct GestureTapState {
     last_event_ms: u128,
     /// Generation counter for the deferred finalize threads.
     generation: u64,
+    /// Milliseconds timestamp of the last fired swipe (cooldown).
+    last_fire_ms: u128,
 }
 
 /// Handle one raw kCGEventGesture (type 29) event inside the HID tap.
@@ -1710,9 +1716,17 @@ unsafe fn handle_gesture_tap_event(
         finalize_gesture(&mut state, &ctx.tx, SWIPE_SUM_THRESHOLD);
     }
     state.in_gesture = true;
-    for f in CANDIDATE_FIELDS {
-        let v = CGEvent::integer_value_field(Some(cg_event), CGEventField(f));
-        *state.sums.entry(f).or_insert(0) += v;
+    state.events += 1;
+    let mut v87 = CGEvent::integer_value_field(Some(cg_event), CGEventField(87));
+    // Gesture delta fields are 32-bit two's complement stored in the low 32
+    // bits: 4294970251 is -7045 (fingers moving LEFT), not +4.29e9. Without
+    // the wrap the sign — and therefore the direction — inverts.
+    if v87 > i32::MAX as i64 {
+        v87 -= 1i64 << 32;
+    }
+    state.last_87 = v87;
+    if v87.abs() > state.max_abs_87 {
+        state.max_abs_87 = v87.abs();
     }
 
     // Schedule the finalize: a quiet period after this event ends the
@@ -1749,28 +1763,43 @@ unsafe fn handle_gesture_tap_event(
 fn finalize_gesture(
     state: &mut GestureTapState,
     tx: &std::sync::mpsc::Sender<RawInput>,
-    threshold: i64,
+    _threshold: i64,
 ) {
-    let sums = std::mem::take(&mut state.sums);
     state.in_gesture = false;
-    // Dominant field = the one that accumulated the most horizontal-looking
-    // travel. Its sign is the swipe direction (fingers left => negative).
-    let dominant = sums
-        .iter()
-        .max_by_key(|(_, v)| v.abs())
-        .map(|(f, v)| (*f, *v));
-    if let Some((field, sum)) = dominant {
-        if sum.abs() >= threshold {
-            let direction: i8 = if sum < 0 { -1 } else { 1 };
-            tracing::info!(
-                field,
-                sum,
-                direction,
-                "four-finger swipe finalized; forwarding remote virtual-desktop switch"
-            );
-            let _ = tx.send(crate::platform::RawInput::GestureSwipe { direction });
-        }
+    // One action per swipe: a finalize landing right after a fired one (the
+    // 250ms gap can occur mid-gesture) must not fire again.
+    const FIRE_COOLDOWN_MS: u128 = 800;
+    // A real four-finger swipe delivers a burst of gesture events carrying a
+    // strong horizontal component; hand noise near the pad produces few
+    // events with near-zero velocity.
+    const MIN_EVENTS: u64 = 5;
+    const MIN_PEAK_VELOCITY: i64 = 1000;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if now_ms.saturating_sub(state.last_fire_ms) < FIRE_COOLDOWN_MS {
+        return;
     }
+    if state.events < MIN_EVENTS || state.max_abs_87 < MIN_PEAK_VELOCITY {
+        tracing::debug!(
+            events = state.events,
+            max_abs_87 = state.max_abs_87,
+            "gesture below swipe threshold"
+        );
+        return;
+    }
+    // Direction = the sign of the strongest horizontal component (fingers
+    // left => negative).
+    let direction: i8 = if state.last_87 < 0 { -1 } else { 1 };
+    state.last_fire_ms = now_ms;
+    tracing::info!(
+        events = state.events,
+        max_abs_87 = state.max_abs_87,
+        direction,
+        "four-finger swipe finalized; forwarding remote app switch"
+    );
+    let _ = tx.send(crate::platform::RawInput::GestureSwipe { direction });
 }
 
 #[cfg(target_os = "macos")]
