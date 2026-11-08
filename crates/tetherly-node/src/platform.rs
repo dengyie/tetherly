@@ -1527,7 +1527,6 @@ mod dock_swipe {
 
     pub struct DockSwipeState {
         pub in_gesture: bool,
-        pub last_progress: f64,
         pub max_abs_progress: f64,
         pub events: u64,
         pub dumped: u32,
@@ -1626,67 +1625,67 @@ mod dock_swipe {
                 "dock-swipe event"
             );
         }
-        match phase {
-            PHASE_BEGAN => {
+        // Field 132 is a BIT MASK (began=1, changed=2, ended=4, cancelled=8)
+        // — combined values (e.g. 6 = changed|ended on the terminal event)
+        // are legal. Test bits; exact equality misses real gestures.
+        let began = phase & PHASE_BEGAN != 0;
+        let changed = phase & PHASE_CHANGED != 0;
+        let ended = phase & PHASE_ENDED != 0;
+        let cancelled = phase & PHASE_CANCELLED != 0;
+        if began {
+            state.in_gesture = true;
+            state.events = 1;
+            state.max_abs_progress = progress.abs();
+        } else if changed || (state.in_gesture && !ended && !cancelled) {
+            if !state.in_gesture {
                 state.in_gesture = true;
-                state.last_progress = progress;
+                state.events = 0;
+                state.max_abs_progress = 0.0;
+            }
+            state.events += 1;
+            if progress.abs() > state.max_abs_progress {
                 state.max_abs_progress = progress.abs();
-                state.events = 1;
             }
-            PHASE_CHANGED => {
-                if !state.in_gesture {
-                    state.in_gesture = true;
-                    state.events = 0;
-                    state.max_abs_progress = 0.0;
+        }
+        if ended || cancelled {
+            state.in_gesture = false;
+            if progress.abs() > state.max_abs_progress {
+                state.max_abs_progress = progress.abs();
+            }
+            // Finalize: fire the app switch when the swipe was deliberate.
+            if armed
+                && ended
+                && !cancelled
+                && state.events >= 2
+                && state.max_abs_progress >= SWIPE_MIN_PROGRESS
+            {
+                let mut direction: i8 = if progress < 0.0 { -1 } else { 1 };
+                if os_major() >= 26 {
+                    direction = -direction;
                 }
-                state.events += 1;
-                state.last_progress = progress;
-                if progress.abs() > state.max_abs_progress {
-                    state.max_abs_progress = progress.abs();
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                if now_ms.saturating_sub(state.last_fire_ms) >= 400 {
+                    state.last_fire_ms = now_ms;
+                    tracing::info!(
+                        progress = format!("{progress:.4}"),
+                        direction,
+                        "dock swipe suppressed locally; forwarding remote app switch"
+                    );
+                    let _ = ctx
+                        .tx
+                        .send(crate::platform::RawInput::GestureSwipe { direction });
                 }
             }
-            PHASE_ENDED | PHASE_CANCELLED => {
-                state.in_gesture = false;
-                state.last_progress = progress;
-                if progress.abs() > state.max_abs_progress {
-                    state.max_abs_progress = progress.abs();
-                }
-                // Finalize: fire the app switch when the swipe was deliberate.
-                if armed
-                    && phase == PHASE_ENDED
-                    && state.events >= 2
-                    && state.max_abs_progress >= SWIPE_MIN_PROGRESS
-                {
-                    let mut direction: i8 = if progress < 0.0 { -1 } else { 1 };
-                    if os_major() >= 26 {
-                        direction = -direction;
-                    }
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    if now_ms.saturating_sub(state.last_fire_ms) >= 400 {
-                        state.last_fire_ms = now_ms;
-                        tracing::info!(
-                            progress = format!("{progress:.4}"),
-                            direction,
-                            "dock swipe suppressed locally; forwarding remote app switch"
-                        );
-                        let _ = ctx
-                            .tx
-                            .send(crate::platform::RawInput::GestureSwipe { direction });
-                    }
-                }
-                *state = DockSwipeState {
-                    in_gesture: false,
-                    last_progress: 0.0,
-                    max_abs_progress: 0.0,
-                    events: 0,
-                    dumped: state.dumped,
-                    last_fire_ms: state.last_fire_ms,
-                };
-            }
-            _ => {}
+            *state = DockSwipeState {
+                in_gesture: false,
+                max_abs_progress: 0.0,
+                events: 0,
+                dumped: state.dumped,
+                last_fire_ms: state.last_fire_ms,
+            };
         }
 
         if armed {
@@ -1733,7 +1732,6 @@ pub fn start_dock_swipe_tap(
                 tx,
                 state: Mutex::new(dock_swipe::DockSwipeState {
                     in_gesture: false,
-                    last_progress: 0.0,
                     max_abs_progress: 0.0,
                     events: 0,
                     dumped: 0,

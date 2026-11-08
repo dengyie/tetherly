@@ -2654,7 +2654,8 @@ impl Node {
                     InputEvent::key(base + 5, VK_LMENU, false, 0),
                 ]
             };
-            server.note_seq(base + 5);
+            let len = events.len();
+            server.note_seq(base + len as u64 - 1);
             events
         };
         let len = events.len();
