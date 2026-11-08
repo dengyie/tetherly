@@ -2597,7 +2597,7 @@ impl Node {
     pub fn drive_gesture_swipe(&self, direction: i8) -> Result<(), CoreError> {
         const VK_LMENU: u16 = 0xA4;
         const VK_LSHIFT: u16 = 0xA0;
-        const VK_TAB: u16 = 0x09;
+        const VK_ESCAPE: u16 = 0x1B;
         const GESTURE_LOG_THROTTLE_MS: u64 = 30_000;
 
         let events = {
@@ -2625,33 +2625,43 @@ impl Node {
                     self.shared
                         .gesture_swipe_last_ignored_ms
                         .store(now, std::sync::atomic::Ordering::Relaxed);
-                    tracing::debug!(
+                    tracing::info!(
                         direction,
+                        seat = ?server.seat(),
+                        tunnel_role = ?self.active_tunnel_role(),
+                        session_receiving = self
+                            .shared
+                            .remote_session
+                            .lock()
+                            .expect("remote_session")
+                            .as_ref()
+                            .is_some_and(|s| s.role.is_receiving()),
                         "four-finger swipe ignored: not controlling a remote desktop"
                     );
                 }
                 return Ok(());
             }
-            // One Alt+Tab tap per swipe: Alt down -> (Shift down) -> Tab
-            // down/up -> (Shift up) -> Alt up. A quick tap switches to the
-            // adjacent app in the MRU cycle without holding the switcher
-            // overlay open.
+            // One Alt+Esc tap per swipe. Alt+Tab's task switcher is a UI
+            // state machine that routinely ignores back-to-back SYNTHETIC
+            // key events (they arrive microseconds apart over the wire);
+            // Alt+Esc is handled directly by the window manager — an
+            // instant, injection-reliable window switch with no overlay.
             let base = server.next_seq();
             let events = if direction < 0 {
                 vec![
                     InputEvent::key(base, VK_LMENU, true, 0),
-                    InputEvent::key(base + 1, VK_TAB, true, 0),
-                    InputEvent::key(base + 2, VK_TAB, false, 0),
+                    InputEvent::key(base + 1, VK_ESCAPE, true, 0),
+                    InputEvent::key(base + 2, VK_ESCAPE, false, 0),
                     InputEvent::key(base + 3, VK_LMENU, false, 0),
                 ]
             } else {
                 vec![
-                    InputEvent::key(base, VK_LMENU, true, 0),
-                    InputEvent::key(base + 1, VK_LSHIFT, true, 0),
-                    InputEvent::key(base + 2, VK_TAB, true, 0),
-                    InputEvent::key(base + 3, VK_TAB, false, 0),
-                    InputEvent::key(base + 4, VK_LSHIFT, false, 0),
-                    InputEvent::key(base + 5, VK_LMENU, false, 0),
+                    InputEvent::key(base, VK_LSHIFT, true, 0),
+                    InputEvent::key(base + 1, VK_LMENU, true, 0),
+                    InputEvent::key(base + 2, VK_ESCAPE, true, 0),
+                    InputEvent::key(base + 3, VK_ESCAPE, false, 0),
+                    InputEvent::key(base + 4, VK_LMENU, false, 0),
+                    InputEvent::key(base + 5, VK_LSHIFT, false, 0),
                 ]
             };
             let len = events.len();
