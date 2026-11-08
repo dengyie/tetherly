@@ -2595,12 +2595,16 @@ impl Node {
     }
 
     pub fn drive_gesture_swipe(&self, direction: i8) -> Result<(), CoreError> {
-        const VK_LMENU: u16 = 0xA4;
-        const VK_LSHIFT: u16 = 0xA0;
-        const VK_ESCAPE: u16 = 0x1B;
-        const VK_LWIN: u16 = 0x5B;
-        const VK_TAB: u16 = 0x09;
         const GESTURE_LOG_THROTTLE_MS: u64 = 30_000;
+
+        // The gesture the tap observed, in the same content-follows-fingers
+        // convention the platform layer documents. `direction` 0 is the
+        // vertical (Mission Control) swipe.
+        let gesture = match direction {
+            0 => tetherly_core::gesture_map::GestureId::Swipe4Up,
+            d if d < 0 => tetherly_core::gesture_map::GestureId::Swipe4Left,
+            _ => tetherly_core::gesture_map::GestureId::Swipe4Right,
+        };
 
         let events = {
             let mut server = self.shared.input_engine.lock().expect("engine");
@@ -2635,6 +2639,7 @@ impl Node {
                         .store(now, std::sync::atomic::Ordering::Relaxed);
                     tracing::info!(
                         direction,
+                        gesture = gesture.as_str(),
                         seat = ?server.seat(),
                         tunnel_role = ?self.active_tunnel_role(),
                         session_receiving = self
@@ -2649,52 +2654,43 @@ impl Node {
                 }
                 return Ok(());
             }
-            // One Alt+Esc tap per swipe. Alt+Tab's task switcher is a UI
-            // state machine that routinely ignores back-to-back SYNTHETIC
-            // key events (they arrive microseconds apart over the wire);
-            // Alt+Esc is handled directly by the window manager — an
-            // instant, injection-reliable window switch with no overlay.
-            //
-            // direction == 0 (vertical swipe): Win+Tab — Task View, the
-            // Mission Control counterpart. It is a RegisterHotKey owned by
-            // explorer, consumed off the message queue, so synthetic input
-            // triggers it reliably (unlike the Alt+Tab overlay state
-            // machine). Direction-agnostic: swipe again to dismiss, exactly
-            // like Mission Control's toggle. The raw VK pair must NOT go
-            // through the keymap: mac_to_windows remaps Meta->Ctrl, which
-            // would turn it into Ctrl+Tab (browser tab switch).
+            // Resolve through the gesture map: gesture → intent → raw VK
+            // sequence for the target platform. Sequences are deliberately
+            // OUTSIDE the keymap (mac_to_windows remaps Meta→Ctrl, which
+            // would turn Win+Tab into a browser tab switch). Empty result =
+            // the gesture is mapped to `none`; that is a configured no-op,
+            // not an error.
+            let target_platform = self.input_peer_platform().unwrap_or_default();
+            let map = self.gesture_map();
+            let action = map.action_for(gesture);
+            let steps = map.sequence_for(gesture, &target_platform);
             let base = server.next_seq();
-            let events = if direction == 0 {
-                vec![
-                    InputEvent::key(base, VK_LWIN, true, 0),
-                    InputEvent::key(base + 1, VK_TAB, true, 0),
-                    InputEvent::key(base + 2, VK_TAB, false, 0),
-                    InputEvent::key(base + 3, VK_LWIN, false, 0),
-                ]
-            } else if direction < 0 {
-                vec![
-                    InputEvent::key(base, VK_LMENU, true, 0),
-                    InputEvent::key(base + 1, VK_ESCAPE, true, 0),
-                    InputEvent::key(base + 2, VK_ESCAPE, false, 0),
-                    InputEvent::key(base + 3, VK_LMENU, false, 0),
-                ]
-            } else {
-                vec![
-                    InputEvent::key(base, VK_LSHIFT, true, 0),
-                    InputEvent::key(base + 1, VK_LMENU, true, 0),
-                    InputEvent::key(base + 2, VK_ESCAPE, true, 0),
-                    InputEvent::key(base + 3, VK_ESCAPE, false, 0),
-                    InputEvent::key(base + 4, VK_LMENU, false, 0),
-                    InputEvent::key(base + 5, VK_LSHIFT, false, 0),
-                ]
-            };
+            let events: Vec<InputEvent> = steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| InputEvent::key(base + i as u64, s.code, s.down, 0))
+                .collect();
             let len = events.len();
-            server.note_seq(base + len as u64 - 1);
+            if len > 0 {
+                server.note_seq(base + len as u64 - 1);
+            } else {
+                server.note_seq(base);
+            }
+            tracing::info!(
+                gesture = gesture.as_str(),
+                action = action.as_str(),
+                target_platform = %target_platform,
+                events = len,
+                "four-finger swipe resolved via gesture map"
+            );
             events
         };
         let len = events.len();
+        if len == 0 {
+            return Ok(());
+        }
         if let Err(e) = self.send_input_events(events, "gesture_app_switch") {
-            tracing::warn!(direction, error = %e, "four-finger swipe app switch failed to send");
+            tracing::warn!(direction, error = %e, "four-finger swipe gesture failed to send");
             return Err(e);
         }
         tracing::info!(
@@ -2703,6 +2699,13 @@ impl Node {
             "four-finger swipe forwarded as remote gesture"
         );
         Ok(())
+    }
+
+    /// The active gesture→intent map. Config override when the user (or the
+    /// UI) has saved one, otherwise the defaults that mirror macOS trackpad
+    /// semantics.
+    fn gesture_map(&self) -> tetherly_core::gesture_map::GestureMap {
+        self.shared.gesture_map.lock().expect("gesture_map").clone()
     }
 
     /// Best-effort platform string for the current input peer (from the live
@@ -4141,6 +4144,60 @@ mod tests {
                 }
             ),
             "second event must be Tab down, got {:?}",
+            ev.kind
+        );
+    }
+
+    // Rewriting the gesture map changes what a swipe injects: remapping the
+    // vertical swipe to `none` must silence it (no frames), and remapping a
+    // horizontal swipe to `desktop_right` must emit Win+Ctrl+Right.
+    #[tokio::test]
+    async fn test_gesture_map_remap_changes_injected_sequence() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("gesture-remap");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("gesture-rpeer");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+        *node.shared.input_peer.lock().unwrap() = Some(other.identity().device_id().clone());
+
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.local_move_delta(100, 50, 2, 0);
+            assert_eq!(engine.seat(), CursorSeat::Remote);
+        }
+
+        // Silenced: map the vertical swipe to `none`.
+        {
+            let mut map = node.shared.gesture_map.lock().unwrap();
+            map.swipe4_up = tetherly_core::gesture_map::GestureAction::None;
+        }
+        node.drive_gesture_swipe(0)
+            .expect("no-op swipe is not an error");
+        assert!(
+            rx.try_recv().is_err(),
+            "a `none`-mapped gesture must inject nothing"
+        );
+
+        // Remapped: map the right-swipe to desktop_right (Win+Ctrl+Right).
+        {
+            let mut map = node.shared.gesture_map.lock().unwrap();
+            map.swipe4_right = tetherly_core::gesture_map::GestureAction::DesktopRight;
+        }
+        node.drive_gesture_swipe(1)
+            .expect("remapped swipe must forward");
+        let first = rx.recv().await.expect("Win down queued");
+        let ev = InputEvent::from_frame(&first).expect("frame is an input event");
+        assert!(
+            matches!(
+                ev.kind,
+                InputKind::Key {
+                    code: 0x5B,
+                    down: true,
+                    ..
+                }
+            ),
+            "desktop_right must start with Win down, got {:?}",
             ev.kind
         );
     }

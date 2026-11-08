@@ -20,6 +20,7 @@ pub mod error;
 pub mod filexfer;
 pub mod focus;
 pub mod frame;
+pub mod gesture_map;
 pub mod handoff;
 pub mod hello;
 pub mod input;

@@ -9,9 +9,9 @@ use crate::sidecar::{OverlaySource, OverlayStatus};
 use crate::store::{
     load_action_policy, load_audio_routing_policy, load_bandwidth_profiles, load_battery_policy,
     load_bench_policy, load_camera_policy, load_clipboard_policy, load_focus_policy,
-    load_handoff_inbox, load_handoff_policy, load_input_policy, load_local_actions,
-    load_locator_policy, load_media_policy, load_microphone_policy, load_topology_layout,
-    load_topology_policy, load_trust, load_virtual_display_policy,
+    load_gesture_map, load_handoff_inbox, load_handoff_policy, load_input_policy,
+    load_local_actions, load_locator_policy, load_media_policy, load_microphone_policy,
+    load_topology_layout, load_topology_policy, load_trust, load_virtual_display_policy,
 };
 use crate::telemetry::TrafficTelemetry;
 use std::collections::{HashMap, VecDeque};
@@ -192,6 +192,7 @@ impl Node {
         let initial_microphone_policy = load_microphone_policy(&cfg.data_dir);
         let initial_bench_policy = load_bench_policy(&cfg.data_dir);
         let initial_bandwidth_profiles = load_bandwidth_profiles(&cfg.data_dir);
+        let initial_gesture_map = load_gesture_map(&cfg.data_dir);
         let shared = Arc::new(Shared {
             identity,
             cfg,
@@ -621,6 +622,7 @@ impl Node {
             remote_session_auto_allowed: std::sync::atomic::AtomicBool::new(false),
             session_heartbeat_paused: std::sync::atomic::AtomicBool::new(false),
             gesture_swipe_last_ignored_ms: std::sync::atomic::AtomicU64::new(0),
+            gesture_map: Mutex::new(initial_gesture_map),
             screen_seq_trace: Mutex::new(Vec::new()),
             screen_channel_gen: std::sync::atomic::AtomicU64::new(0),
             screen_client_gen: std::sync::atomic::AtomicU64::new(0),

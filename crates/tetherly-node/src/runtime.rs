@@ -910,6 +910,9 @@ struct Shared {
     /// Last time a four-finger swipe was dropped for "not controlling"
     /// (throttles the debug log so stray swipes don't spam).
     pub(crate) gesture_swipe_last_ignored_ms: std::sync::atomic::AtomicU64,
+    /// Active gesture→intent table for the gesture forwarding layer.
+    /// Defaults mirror macOS trackpad semantics; a saved config overrides.
+    pub(crate) gesture_map: Mutex<tetherly_core::gesture_map::GestureMap>,
     /// Receiver seq-decision ring `(seq, accepted)` mirrored from the
     /// client-loop receiver for diagnostics (cliff-vs-duplicate triage).
     pub(crate) screen_seq_trace: Mutex<Vec<(u64, bool)>>,

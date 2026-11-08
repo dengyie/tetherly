@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 pub use tetherly_core::battery::{BatteryStateFrame, BatteryValidator, PowerSource};
 pub use tetherly_core::focus::{FocusMode, FocusStateFrame, FocusSyncReqFrame, FocusValidator};
+pub use tetherly_core::gesture_map::GestureId;
 pub use tetherly_core::media::{MediaCommand, MediaControlMode, MediaStateFrame, PlaybackState};
 pub use tetherly_core::topology::{
     DisplayEdge, DisplayRect, EdgeCrossingConfig, EdgeNeighbor, TopologyStateFrame,
@@ -43,6 +44,7 @@ pub const CAMERA_POLICY_FILE: &str = "camera_policy.json";
 pub const MICROPHONE_POLICY_FILE: &str = "microphone_policy.json";
 pub const BENCH_POLICY_FILE: &str = "bench_policy.json";
 pub const BANDWIDTH_PROFILES_FILE: &str = "bandwidth_profiles.json";
+pub const GESTURE_MAP_FILE: &str = "gesture_map.json";
 pub const DEFAULT_MAX_HANDOFF_INBOX_ENTRIES: usize = 100;
 
 pub fn default_data_dir() -> PathBuf {
@@ -1756,6 +1758,30 @@ pub fn save_input_policy(dir: &Path, policy: &InputTunnelPolicy) -> Result<(), N
     atomic_write(
         &dir.join(INPUT_POLICY_FILE),
         &serde_json::to_vec_pretty(policy)?,
+    )?;
+    Ok(())
+}
+
+/// Load the gesture→intent table. A missing or unreadable file falls back
+/// to the defaults silently — the table is an operator preference, and the
+/// shipped defaults are always a valid configuration.
+pub fn load_gesture_map(dir: &Path) -> tetherly_core::gesture_map::GestureMap {
+    let path = dir.join(GESTURE_MAP_FILE);
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the gesture→intent table (atomic, same as every other policy).
+pub fn save_gesture_map(
+    dir: &Path,
+    map: &tetherly_core::gesture_map::GestureMap,
+) -> Result<(), NodeStoreError> {
+    ensure_dir(dir)?;
+    atomic_write(
+        &dir.join(GESTURE_MAP_FILE),
+        &serde_json::to_vec_pretty(map)?,
     )?;
     Ok(())
 }
@@ -3616,6 +3642,41 @@ mod tests {
             ..Default::default()
         };
         assert!(!disabled_inbound.is_peer_eligible(&prof_ok));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gesture_map_roundtrip_and_default_fallback() {
+        let dir = std::env::temp_dir().join(format!("tetherly-gmap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir).unwrap();
+
+        // 1. Missing file = shipped defaults, silently.
+        let def = load_gesture_map(&dir);
+        assert_eq!(def, tetherly_core::gesture_map::GestureMap::default());
+
+        // 2. Custom table persists verbatim.
+        use tetherly_core::gesture_map::GestureAction;
+        let custom = tetherly_core::gesture_map::GestureMap {
+            swipe4_down: GestureAction::ShowDesktop,
+            swipe4_left: GestureAction::None,
+            ..tetherly_core::gesture_map::GestureMap::default()
+        };
+        save_gesture_map(&dir, &custom).unwrap();
+        let loaded = load_gesture_map(&dir);
+        assert_eq!(loaded, custom);
+        assert_eq!(
+            loaded.sequence_for(GestureId::Swipe4Down, "windows").len(),
+            4,
+            "Win+D is 4 key events"
+        );
+        assert!(
+            loaded
+                .sequence_for(GestureId::Swipe4Left, "windows")
+                .is_empty(),
+            "a none-mapped gesture yields no events"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
