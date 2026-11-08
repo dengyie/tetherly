@@ -2659,7 +2659,10 @@ impl Node {
             events
         };
         let len = events.len();
-        self.send_input_events(events, "gesture_app_switch")?;
+        if let Err(e) = self.send_input_events(events, "gesture_app_switch") {
+            tracing::warn!(direction, error = %e, "four-finger swipe app switch failed to send");
+            return Err(e);
+        }
         tracing::info!(
             direction,
             events = len,
