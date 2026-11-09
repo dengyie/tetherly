@@ -1257,6 +1257,14 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
     const WM_HOOK_KB_ON: u32 = 0x8000 + 1; // WM_APP + 1
     const WM_HOOK_KB_OFF: u32 = 0x8000 + 2; // WM_APP + 2
 
+    // Previous physical mouse position on the hook thread (LL hooks deliver
+    // on one thread). Consecutive-position differences feed RawInput::Move
+    // deltas — see mouse_proc.
+    thread_local! {
+        static LAST_HOOK_MOVE_POS: std::cell::RefCell<Option<(i32, i32)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
     static SENDER: std::sync::OnceLock<std::sync::mpsc::Sender<RawInput>> =
         std::sync::OnceLock::new();
     SENDER
@@ -1284,11 +1292,29 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                         if take_warp_echo(mi.pt.x, mi.pt.y) {
                             return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
                         }
+                        // MSLLHOOKSTRUCT carries no deltas (macOS CGEvent
+                        // does via MouseEventDeltaX/Y). Derive them from the
+                        // previous hook position: LL hooks observe every
+                        // physical move, so the consecutive-position
+                        // difference IS the real displacement. The roaming
+                        // engine's remote-roam arithmetic and the reverse
+                        // takeover's direction discipline (`Bottom => dy > 0`)
+                        // both consume these — hard zeros here silently dead
+                        // the Windows→Mac takeover (production regression).
+                        let (dx, dy) = LAST_HOOK_MOVE_POS.with(|p| {
+                            let mut p = p.borrow_mut();
+                            let (dx, dy) = match *p {
+                                Some((lx, ly)) => (mi.pt.x - lx, mi.pt.y - ly),
+                                None => (0, 0),
+                            };
+                            *p = Some((mi.pt.x, mi.pt.y));
+                            (dx, dy)
+                        });
                         push(RawInput::Move {
                             x: mi.pt.x,
                             y: mi.pt.y,
-                            dx: 0,
-                            dy: 0,
+                            dx,
+                            dy,
                         })
                     }
                     WM_LBUTTONDOWN => push(RawInput::Button {

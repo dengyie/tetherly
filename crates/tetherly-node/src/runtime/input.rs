@@ -2867,11 +2867,27 @@ impl Node {
         // top/bottom edge) used to keep the dwell alive and the target
         // snatched control back seconds after every takeover. Only deltas
         // with an into-the-edge component count as "still pushing".
+        //
+        // Zero-delta leniency (win→mac reverse takeover fix): the Windows
+        // hook may still report dx=dy=0 at the boundary — the OS clamps the
+        // cursor to height-1 so consecutive hook positions stop changing
+        // even while the hand keeps pushing (the delta-deriving fix removed
+        // most of these, but clamped tails remain). A boundary-touching
+        // event that arrived CONTIGUOUSLY during an active dwell continues
+        // it; only when no dwell is armed does a zero delta need positive
+        // direction proof. Without this, `pushing_in` was always false on
+        // Windows and the takeover could never fire (silent, no log).
+        let dwell_active = self
+            .shared
+            .reverse_arm_since
+            .lock()
+            .expect("reverse_arm")
+            .is_some();
         let pushing_in = match edge {
-            tetherly_core::ScreenEdge::Right => dx > 0,
-            tetherly_core::ScreenEdge::Bottom => dy > 0,
-            tetherly_core::ScreenEdge::Top => dy < 0,
-            tetherly_core::ScreenEdge::Left => dx < 0,
+            tetherly_core::ScreenEdge::Right => dx > 0 || (dx == 0 && dwell_active),
+            tetherly_core::ScreenEdge::Bottom => dy > 0 || (dy == 0 && dwell_active),
+            tetherly_core::ScreenEdge::Top => dy < 0 || (dy == 0 && dwell_active),
+            tetherly_core::ScreenEdge::Left => dx < 0 || (dx == 0 && dwell_active),
         };
         let fired = if !crossed || !pushing_in {
             // Left the edge (or slid along it without pushing in): the push
@@ -3741,7 +3757,9 @@ impl Node {
 mod tests {
     use super::*;
     use tetherly_core::InputKind;
-    use tetherly_core::{TrustStore, TrustedPeer, TYPE_INPUT_CLIP_HINT};
+    use tetherly_core::{
+        EdgeNeighbor, TopologyStateFrame, TrustStore, TrustedPeer, TYPE_INPUT_CLIP_HINT,
+    };
 
     #[tokio::test]
     async fn test_input_grace_period_buffering() {
@@ -4274,6 +4292,175 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "receiving-session swipe must not queue any injected key"
+        );
+    }
+
+    // Regression (win→mac reverse takeover dead): the Windows low-level mouse
+    // hook reports WM_MOUSEMOVE with dx=0/dy=0 (MSLLHOOKSTRUCT carries no
+    // deltas), while `maybe_auto_reverse`'s direction discipline requires an
+    // into-the-edge delta (`Bottom => dy > 0`) and its boundary leniency
+    // requires `dy > 0` outside the last 2px. With both fed zeros the dwell
+    // resets on every boundary event and the takeover never fires — silently.
+    // The hook now derives real deltas from consecutive hook positions, so a
+    // sustained downward push into the bottom edge must arm, dwell, and fire
+    // the polite takeover toward the topology neighbor.
+    #[tokio::test]
+    async fn test_auto_reverse_fires_with_zero_deltas_via_position_series() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("rev-zero-d");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("rev-zero-peer");
+        let peer_id = other.identity().device_id().clone();
+
+        // Seed the peer as live so resolve_peer inside the takeover's
+        // input_tunnel_attach can find it (unreachable addr is fine: the
+        // attach's send fails asynchronously, but the Controller flip
+        // happens before any wire I/O).
+        node.shared.live.lock().unwrap().insert(
+            peer_id.clone(),
+            crate::runtime::trust::LivePeer {
+                device_id: peer_id.clone(),
+                name: "peer".into(),
+                platform: "test".into(),
+                addr: "127.0.0.1:1".parse().unwrap(),
+                handshake_hash: [0u8; 32],
+                file_port: None,
+                input_port: Some(45719),
+                screen_port: None,
+                caps: Vec::new(),
+                path: tetherly_core::PathKind::Lan,
+                rtt_ms: None,
+                last_seen_ms: 0,
+            },
+        );
+
+        // Windows-like setup: 1920x1080, neighbor on the BOTTOM edge (win's
+        // topology points down at the mac) and the node's own edge policy
+        // "bottom" — exactly what the production Windows input_policy.json
+        // carries. maybe_auto_reverse reads the ENGINE edge, which
+        // set_input_policy mirrors.
+        node.shared.topology_layout.lock().unwrap().display = DisplayRect::new(1920, 1080, 1.0);
+        node.set_input_policy(crate::store::InputTunnelPolicy {
+            edge: Some("bottom".into()),
+            ..crate::store::InputTunnelPolicy::default()
+        })
+        .expect("policy set");
+        node.shared
+            .topology_layout
+            .lock()
+            .unwrap()
+            .neighbors
+            .insert(
+                DisplayEdge::Bottom,
+                EdgeNeighbor {
+                    peer_id: peer_id.to_string(),
+                    peer_edge: DisplayEdge::Top,
+                    offset: 0,
+                },
+            );
+        node.shared.peer_topologies.lock().unwrap().insert(
+            peer_id.to_string(),
+            TopologyStateFrame {
+                device_id: peer_id.to_string(),
+                display: DisplayRect::new(1920, 1080, 1.0),
+                neighbors: HashMap::new(),
+                config: tetherly_core::EdgeCrossingConfig::default(),
+                timestamp_ms: 0,
+            },
+        );
+
+        // A live Controller tunnel session toward that peer (exactly the
+        // state left behind after a mac→win forward roam: session survives
+        // the peer's Leave on this side).
+        let now = node.shared.clock.unix_ms();
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_rev_test".into(),
+            peer_id: peer_id.to_string(),
+            role: InputTunnelRole::Target,
+            requested_edge: Some(DisplayEdge::Top),
+            entry_x: Some(960),
+            entry_y: Some(1079),
+            capture_width: Some(1920),
+            capture_height: Some(1080),
+            started_at_ms: now,
+            last_activity_ms: now,
+        });
+
+        // Distance arming: ~1/4 screen of real traversal first (the same
+        // sequence a real push produces), THEN dwell at the boundary. The
+        // approach models the FIXED Windows hook: deltas derived from
+        // consecutive hook positions (dy>0 while descending). The clamped
+        // tail at height-1 models the OS clamp: the position stops so the
+        // derived delta collapses to ZERO even though the hand keeps
+        // pushing — those zero-delta boundary events must still sustain the
+        // dwell via the engine-layer leniency (`dy == 0 && dwell_active`).
+        // Before both fixes the hook fed hard zeros: pushing_in was always
+        // false and the takeover never fired (silent, no log).
+        let positions = [
+            (960, 700), // far from bottom edge; arms the accumulator
+            (960, 650),
+            (960, 600),
+            (960, 550),
+            (960, 500),
+            (960, 450),
+            (960, 400),
+            (960, 350),  // 350px total — REVERSE_ARM_MIN_PX reached
+            (960, 1070), // boundary approach (not yet in the 2px gate)
+            (960, 1078), // inside the y >= height-2 gate with zero delta
+            (960, 1079), // OS clamp point
+            (960, 1079), // clamped: position stops, hand keeps pushing
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+            (960, 1079),
+        ];
+        let mut prev: Option<(i32, i32)> = None;
+        for (i, (x, y)) in positions.iter().enumerate() {
+            let (dx, dy) = match prev {
+                Some((lx, ly)) => (x - lx, y - ly),
+                None => (0, 0),
+            };
+            prev = Some((*x, *y));
+            let _ = node
+                .drive_input_delta(*x, *y, dx, dy, 1920, 1080)
+                .expect("reverse path must not error");
+            // The dwell needs `delay_ms` (topology config; min 50 — the
+            // default layout carries 100) of CONTIGUOUS boundary events.
+            // Pacing the clamped tail at 12ms lets the elapsed time cross
+            // 100ms while every inter-event gap stays well inside the
+            // 150ms TOUCH_GAP_MS continuity window.
+            if i >= 10 {
+                std::thread::sleep(std::time::Duration::from_millis(12));
+            }
+        }
+
+        // The takeover must have FIRED: `last_auto_reverse` is stamped at
+        // the exact moment the dwell completes, before the (network-
+        // dependent) attach attempt. Watching the tunnel slot for a role
+        // flip would test the network, not the bug: with an unreachable
+        // test peer the attach's send_to legitimately errors, but the
+        // pre-fix code never even reached this stamp because the dwell
+        // reset on every zero-delta boundary event.
+        let fired = std::iter::repeat_n((), 100)
+            .find(|_| node.shared.last_auto_reverse.lock().unwrap().is_some())
+            .is_some();
+        assert!(
+            fired,
+            "sustained boundary push must fire the auto-reverse takeover (dwell must survive the zero-delta clamped tail)"
         );
     }
 }
