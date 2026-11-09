@@ -418,6 +418,15 @@ pub struct InputServer {
     tb_band_px: u32,
     tb_slow_dwell_ms: u32,
     tb_fast_push_delta_px: u32,
+    /// Fractional remainders of the remote-seat per-event delta
+    /// normalization (units of `delta * SCREEN_UNITS / dimension`).
+    /// Without these, integer truncation makes the remote displacement
+    /// depend on how the same physical gesture is chunked into events:
+    /// small deltas were forced to ±1 (over-moving) while larger ones
+    /// repeatedly dropped the fraction (under-moving). Kept in i64 so
+    /// `delta * SCREEN_UNITS` never overflows i32 for any real delta.
+    rem_frac_x: i64,
+    rem_frac_y: i64,
 }
 
 impl InputServer {
@@ -442,6 +451,8 @@ impl InputServer {
             tb_band_px: 0,
             tb_slow_dwell_ms: 120,
             tb_fast_push_delta_px: 6,
+            rem_frac_x: 0,
+            rem_frac_y: 0,
         }
     }
 
@@ -518,6 +529,8 @@ impl InputServer {
             self.seat = CursorSeat::Local;
             self.remote_interior = false;
             self.buttons_down = 0;
+            self.rem_frac_x = 0;
+            self.rem_frac_y = 0;
             self.pending.clear();
         }
     }
@@ -528,6 +541,8 @@ impl InputServer {
         if self.seat == CursorSeat::Remote {
             self.seat = CursorSeat::Local;
             self.remote_interior = false;
+            self.rem_frac_x = 0;
+            self.rem_frac_y = 0;
             self.push(InputKind::Leave);
             // Park on the crossed edge, but map the free axis back from the
             // last remote position so an emergency return lands at the
@@ -558,6 +573,11 @@ impl InputServer {
     pub fn resize(&mut self, width: i32, height: i32) {
         self.width = width.max(1);
         self.height = height.max(1);
+        // The accumulator is denominated in `delta * SCREEN_UNITS /
+        // dimension`; keeping it across a dimension change would apply the
+        // old geometry's fraction against new normalization.
+        self.rem_frac_x = 0;
+        self.rem_frac_y = 0;
     }
 
     pub fn next_seq(&self) -> u64 {
@@ -676,26 +696,42 @@ impl InputServer {
         let x_clamped = x.clamp(0, self.width.saturating_sub(1));
         if self.seat == CursorSeat::Remote {
             let crossed_edge = self.last_crossed_edge;
-            let delta_x = if dx != 0 {
-                let d = (dx as i64 * SCREEN_UNITS as i64 / self.width.max(1) as i64) as i32;
-                if d == 0 {
-                    dx.signum()
+            // Fractional-accumulator normalization: keep the exact
+            // `delta * SCREEN_UNITS / dimension` remainder between events so
+            // the applied remote displacement depends on the total physical
+            // motion, not on how it was chunked into events. Applied units
+            // come from the accumulator; truncation error is carried, never
+            // dropped and never invented (a zero delta still applies zero).
+            let (delta_x, new_frac_x) = if dx != 0 {
+                let scaled = dx as i64 * SCREEN_UNITS as i64 + self.rem_frac_x;
+                let d = (scaled / self.width.max(1) as i64) as i32;
+                let frac = scaled.rem_euclid(self.width.max(1) as i64);
+                // Sign-correct: rem_euclid is non-negative; keep the fraction
+                // alongside the direction it belongs to.
+                let frac = if scaled < 0 {
+                    frac - self.width.max(1) as i64
                 } else {
-                    d
-                }
+                    frac
+                };
+                (d, frac)
             } else {
-                0
+                (0, self.rem_frac_x)
             };
-            let delta_y = if dy != 0 {
-                let d = (dy as i64 * SCREEN_UNITS as i64 / self.height.max(1) as i64) as i32;
-                if d == 0 {
-                    dy.signum()
+            let (delta_y, new_frac_y) = if dy != 0 {
+                let scaled = dy as i64 * SCREEN_UNITS as i64 + self.rem_frac_y;
+                let d = (scaled / self.height.max(1) as i64) as i32;
+                let frac = scaled.rem_euclid(self.height.max(1) as i64);
+                let frac = if scaled < 0 {
+                    frac - self.height.max(1) as i64
                 } else {
-                    d
-                }
+                    frac
+                };
+                (d, frac)
             } else {
-                0
+                (0, self.rem_frac_y)
             };
+            self.rem_frac_x = new_frac_x;
+            self.rem_frac_y = new_frac_y;
 
             let next_rem_x = (self.rem_x + delta_x).clamp(0, SCREEN_UNITS);
             let next_rem_y = (self.rem_y + delta_y).clamp(0, SCREEN_UNITS);
@@ -935,6 +971,8 @@ impl InputServer {
         self.seat = CursorSeat::Local;
         self.remote_interior = false;
         self.buttons_down = 0;
+        self.rem_frac_x = 0;
+        self.rem_frac_y = 0;
         match self.last_crossed_edge {
             ScreenEdge::Right => self.x = self.width.saturating_sub(1),
             ScreenEdge::Left => self.x = 1.min(self.width.saturating_sub(1)),
@@ -949,6 +987,8 @@ impl InputServer {
         self.seat = CursorSeat::Local;
         self.remote_interior = false;
         self.buttons_down = 0;
+        self.rem_frac_x = 0;
+        self.rem_frac_y = 0;
         self.x = self.width / 2;
         self.y = self.height / 2;
     }
@@ -1363,6 +1403,97 @@ mod tests {
         }
         assert_eq!(sink.applied.len(), INPUT_SINK_TRACE_MAX);
         assert_eq!(sink.cursor, (INPUT_SINK_TRACE_MAX as i32 + 49, 0));
+    }
+
+    /// Same total physical displacement, different event chunking, must land
+    /// the remote cursor at (approximately) the same place when no boundary
+    /// is involved. Per-event integer normalization with no fractional
+    /// accumulator violates this: small per-event deltas are promoted to a
+    /// forced ±1, so many tiny events outrun one coalesced event carrying
+    /// the same total displacement (production: Windows→Mac roaming speed
+    /// depends on the mouse report rate and queue coalescing).
+    #[test]
+    fn remote_displacement_is_chunking_invariant_interior() {
+        // width 1920: dx=1 normalizes to 1000/1920 = 0 -> forced signum(+1).
+        let mut tiny = InputServer::new(1920, 1080);
+        assert_eq!(
+            tiny.local_move_delta(1920, 540, 1, 0),
+            Some(ScreenEdge::Right)
+        );
+        let _ = tiny.drain(); // [Enter, Move{entry}]
+        for _ in 0..192 {
+            tiny.local_move_delta(1919, 540, 1, 0);
+            let _ = tiny.drain();
+        }
+        let (tx, _) = tiny.remote_pos();
+
+        let mut one = InputServer::new(1920, 1080);
+        assert_eq!(
+            one.local_move_delta(1920, 540, 1, 0),
+            Some(ScreenEdge::Right)
+        );
+        let _ = one.drain();
+        one.local_move_delta(1919, 540, 192, 0);
+        let _ = one.drain();
+        let (ox, _) = one.remote_pos();
+
+        assert!(
+            (tx - ox).abs() <= 2,
+            "same total displacement must land equally: 192×dx=1 -> rem_x={tx}, 1×dx=192 -> rem_x={ox}"
+        );
+    }
+
+    /// Windows twin: the hook derives deltas from consecutive cursor
+    /// positions, and on entering Remote the cursor is parked AT the shared
+    /// screen edge. If the OS clamps the cursor to the boundary while the
+    /// user keeps pushing, every subsequent event reports dy=0 and the
+    /// remote cursor freezes at the entry edge. The CORE contract pinned
+    /// here: a zero-delta tail must never invent motion nor strand the
+    /// seat, and once the hook recenter path supplies real inward deltas
+    /// again, motion must resume from the held position.
+    #[test]
+    fn remote_seat_survives_zero_delta_tail_and_resumes_on_motion() {
+        // 1920x1080, cross Bottom: remote entry (500, 0). band_px=0 keeps
+        // the gate pass-through (set_tb_redundancy_band idempotent mirror);
+        // into_edge still requires y within the last 8 rows, so drive the
+        // cursor to the bottom edge with a fast dy first.
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Bottom);
+        srv.set_tb_redundancy_band(0, 120, 6);
+        assert_eq!(
+            srv.local_move_delta(960, 1072, 0, 40),
+            Some(ScreenEdge::Bottom)
+        );
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+        let _ = srv.drain();
+
+        // OS-clamped tail: hook reports the same edge position, zero delta.
+        for _ in 0..10 {
+            srv.local_move_delta(960, 1079, 0, 0);
+            let _ = srv.drain();
+        }
+        let (_, fy) = srv.remote_pos();
+        assert_eq!(fy, 0, "zero-delta tail must not invent motion");
+        assert_eq!(
+            srv.seat(),
+            CursorSeat::Remote,
+            "tail must not strand the seat"
+        );
+
+        // Hook recentered the cursor to mid-screen; the first real event
+        // after the settle reports zero delta (baseline forgotten), then
+        // real inward motion resumes and MUST reach the interior.
+        srv.local_move_delta(960, 540, 0, 0);
+        let _ = srv.drain();
+        for _ in 0..30 {
+            srv.local_move_delta(960, 570, 0, 30);
+            let _ = srv.drain();
+        }
+        let (_, ry) = srv.remote_pos();
+        assert!(
+            ry > 200,
+            "real inward motion after the zero tail must advance the remote cursor, got rem_y={ry}"
+        );
     }
 
     #[test]

@@ -796,6 +796,19 @@ mod hook_move_state {
     }
 }
 
+/// Test-only serialization of the process-global warp marker state. The
+/// warp-echo unit tests touch `PENDING_WARP_*` statics that production
+/// serializes on the single hook thread; under parallel `cargo test` two
+/// such tests can interleave mark/take pairs and steal each other's echo
+/// slots (observed once as a flaky `edge_park_recenter` failure). Holding
+/// this guard for the duration of each test restores the production
+/// single-thread ordering. No-op outside tests.
+#[cfg(test)]
+fn warp_state_test_gate() -> std::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(target_os = "macos")]
 pub fn warp_mouse_position(x: i32, y: i32) {
     let point = objc2_core_foundation::CGPoint {
@@ -917,6 +930,68 @@ pub fn warp_mouse_position(x: i32, y: i32) {
 
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn warp_mouse_position(_x: i32, _y: i32) {}
+
+/// Recenter decision for the controller side while roaming the Remote seat
+/// (pure geometry; callers own the seat check and the actual warp).
+///
+/// While roaming, the physical cursor stays where the hand is: at the shared
+/// edge the OS clamps it, consecutive hook positions stop changing, and the
+/// derived delta chain reports zeros forever — the remote cursor strands at
+/// its entry edge until the user physically drags the hand back inward. To
+/// keep roaming continuous the runtime must pull the physical cursor off the
+/// saturated edge BEFORE the user reaches it again, and the resulting warp
+/// flows through the pending-warp echo gate (swallowed + baseline reset, see
+/// `hook_move_state`).
+///
+/// Returns `Some((target_x, target_y))` when the observed hook position sits
+/// on the dead-zone band of the edge being roamed THROUGH (the axis that
+/// saturates), with the free axis preserved; `None` when interior or when the
+/// roamed edge does not govern this position. `band` is the dead-zone depth
+/// in px (production: 8, matching the TB band and edge normalization bands).
+pub(crate) fn remote_roam_recenter_target(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    band: i32,
+    crossed: tetherly_core::ScreenEdge,
+) -> Option<(i32, i32)> {
+    use tetherly_core::ScreenEdge;
+    let (w, h) = (width.max(1), height.max(1));
+    let band = band.max(1);
+    match crossed {
+        // Roaming RIGHT: the saturating axis is X at the right edge (the
+        // cursor entered through Right and parks clamped at x = w-1).
+        ScreenEdge::Right => {
+            if x >= w - band {
+                Some((w - band * 4, y))
+            } else {
+                None
+            }
+        }
+        ScreenEdge::Left => {
+            if x <= band {
+                Some((band * 4, y))
+            } else {
+                None
+            }
+        }
+        ScreenEdge::Bottom => {
+            if y >= h - band {
+                Some((x, h - band * 4))
+            } else {
+                None
+            }
+        }
+        ScreenEdge::Top => {
+            if y <= band {
+                Some((x, band * 4))
+            } else {
+                None
+            }
+        }
+    }
+}
 
 #[cfg(windows)]
 fn inject_mouse(flags: u32, dx: i32, dy: i32, mouse_data: u32) {
@@ -2490,6 +2565,7 @@ mod input_tests {
         use super::hook_move_state;
 
         // 1. Real user motion: baseline established at (500, 400).
+        let _gate = super::warp_state_test_gate();
         assert_eq!(hook_move_state::advance(500, 400), (0, 0)); // cold start: no baseline
         assert_eq!(hook_move_state::advance(510, 404), (10, 4));
 
@@ -2521,6 +2597,114 @@ mod input_tests {
         assert_eq!(hook_move_state::advance(5030, 5040), (20, 30));
         assert!(hook_move_state::take_warp_echo_reset_baseline(20, 30));
         assert_eq!(hook_move_state::advance(26, 33), (0, 0));
+    }
+
+    /// Edge-saturation replay (synthetic positions, no OS): the controller
+    /// parks at the shared edge on entering Remote, and deltas come from
+    /// consecutive hook positions. When the OS clamps the cursor at the
+    /// boundary, the position-difference chain reports dy=0 forever, and
+    /// the remote cursor strands at the entry edge. A recenter warp to
+    /// mid-screen must (a) be swallowed as a warp echo, (b) reset the
+    /// delta baseline so the first settled event is zero-delta, and (c)
+    /// let subsequent real inward motion advance the chain again.
+    #[cfg(all(target_os = "macos", test))]
+    #[test]
+    fn edge_park_recenter_keeps_delta_chain_alive() {
+        use super::hook_move_state;
+
+        // Approach the bottom edge with real motion.
+        let _gate = super::warp_state_test_gate();
+        assert_eq!(hook_move_state::advance(960, 1060), (0, 0)); // cold start
+        assert_eq!(hook_move_state::advance(960, 1072), (0, 12));
+        assert_eq!(hook_move_state::advance(960, 1079), (0, 7));
+
+        // The runtime warps the cursor mid-screen while the seat goes
+        // Remote (park/rescue path). The hook sees the echo and must
+        // swallow it with a baseline reset.
+        super::mark_pending_warp(960, 540);
+        assert!(hook_move_state::take_warp_echo_reset_baseline(960, 540));
+
+        // Hand still pressed down at the physical edge: first settled event
+        // reports the CLAMPED position again. Baseline was forgotten, so
+        // this event is zero-delta (no teleport yank).
+        assert_eq!(hook_move_state::advance(960, 1079), (0, 0));
+
+        // More clamped pushes: dy stays 0 (the saturation chain), which is
+        // exactly the condition that strands remote motion upstream.
+        assert_eq!(hook_move_state::advance(960, 1079), (0, 0));
+        assert_eq!(hook_move_state::advance(960, 1079), (0, 0));
+
+        // The recenter cycle repeats BEFORE the user reaches the boundary
+        // again: echo swallowed, baseline reset, zero-delta settle.
+        super::mark_pending_warp(960, 540);
+        assert!(hook_move_state::take_warp_echo_reset_baseline(960, 540));
+        assert_eq!(hook_move_state::advance(960, 1079), (0, 0));
+
+        // Hand moves inward: the first post-settle inward event re-derives
+        // from the re-established baseline at the edge (960,1079), so it
+        // carries the full hand travel since the settle — NOT zero, and
+        // NOT the warp displacement (that was swallowed). This is the
+        // cursor-following contract: deltas track real motion again, which
+        // is what keeps the remote cursor movable.
+        assert_eq!(hook_move_state::advance(960, 600), (0, -479));
+        assert_eq!(hook_move_state::advance(970, 610), (10, 10));
+    }
+
+    /// Recenter decision while roaming Remote (plan §2.1): the runtime must
+    /// move the physical cursor off the shared edge BEFORE the user reaches
+    /// it again, because a clamped position feeds the delta chain zeros
+    /// forever (the saturation replay above) and strands the remote cursor.
+    /// Pure geometry — no OS effect — so the runtime can consult it per event
+    /// and warp only when it says so (warp targets then flow through the
+    /// echo/settle gate replayed above).
+    ///
+    /// Contract:
+    /// - seat-local (not roaming): no recenter decision — Local movement
+    ///   owns the whole screen including its edges;
+    /// - roaming and observed position inside the edge dead-zone: recenter
+    ///   target strictly off the roamed edge, on the roamed edge's own axis
+    ///   (the clamped axis is the one saturating);
+    /// - roaming but interior: no decision (nothing saturates yet);
+    /// - the free axis of the cursor is preserved (only the saturating axis
+    ///   is pulled in).
+    #[cfg(all(target_os = "macos", test))]
+    #[test]
+    fn remote_roam_recenter_target_pulls_off_saturated_edge() {
+        use tetherly_core::ScreenEdge;
+        let (w, h) = (1920_i32, 1080_i32);
+        let band = 8; // matches the TB band and the Right/Left normalize band
+
+        // Bottom edge (shared-edge park at y = h-1 while roaming Remote):
+        // saturated position must produce a target pulled up (inward).
+        let t = remote_roam_recenter_target(w - 1, h - 1, w, h, band, ScreenEdge::Bottom)
+            .expect("saturated bottom edge must recenter");
+        assert!(
+            t.1 < h - 1 - band,
+            "target must be clearly off the bottom edge, got {t:?}"
+        );
+        assert_eq!(t.0, w - 1, "free axis must be preserved");
+
+        // Interior of the screen: nothing saturates, no recenter.
+        assert_eq!(
+            remote_roam_recenter_target(960, 540, w, h, band, ScreenEdge::Bottom),
+            None,
+            "interior position must not recenter"
+        );
+
+        // Right edge saturation: target pulled left, free axis preserved.
+        let t = remote_roam_recenter_target(w - 1, 400, w, h, band, ScreenEdge::Right)
+            .expect("saturated right edge must recenter");
+        assert!(t.0 < w - 1 - band, "target must be off the right edge");
+        assert_eq!(t.1, 400, "free axis must be preserved");
+
+        // Local seat: the roaming path is the only consumer — a Local-seat
+        // edge value must never be forwarded here; document the contract by
+        // asserting the function stays silent for an interior edge anyway.
+        assert_eq!(
+            remote_roam_recenter_target(w - 1, h - 1, w, h, band, ScreenEdge::Top),
+            None,
+            "roaming through Top never parks on Bottom"
+        );
     }
 
     #[cfg(target_os = "macos")]

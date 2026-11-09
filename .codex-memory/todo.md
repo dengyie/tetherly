@@ -1,27 +1,38 @@
 # TODO
-## In Progress
-- [ ] 规划并进入下一个功能迭代（v1.61 / ADR-054：节点系统指标深度遥测、进程资源可观测性画像与性能监控闭环 / 或根据项目发展方向推进）
 
-## Next
-- [ ] libfuzzer / `cargo-fuzz` coverage-guided fuzz of the decoders (needs nightly) — Manual-required; the stable-toolchain deterministic mutation driver landed v1.16, extended to state-machine op-programs in v1.17, as the honest substitute
-- [ ] DXGI-side real pixel capture + Windows cross-desktop p95 verification (AdbSource cross-device loop landed+verified v1.8) — Manual-required
-- [ ] Real open screen encoder (OpenH264 / rav1e) as `ScreenCodec` port impl — Manual-required
-- [ ] macOS screen **present** (AppKit `NSWindow`) + Wayland portal capture — Manual-required; macOS/Linux **capture** backends landed compile-verified v1.19 (`MacSource` CoreGraphics, `X11Source` MIT-SHM + `PutImage`), real capture on a real display/permission still Manual-required
-- [ ] Android MediaProjection capture node (aarch64-linux-android cross + JNI) — candidate new 立项, superseded by AdbSource for now
-- [ ] Hardware encoder / real injection (M5.5) — not started
-- [ ] Real ANCS BLE transport: Windows (`windows` GATT) **landed v1.23**, macOS (`objc2-core-bluetooth`) **landed v1.57 (ADR-050)**, Linux (BlueZ D-Bus) **landed v1.58 (ADR-051)** — Manual-required against a physical iPhone
-- [ ] Physical iPhone ANCS p95 < 2s + Bluetooth off-30s-on re-pop check (M4.1/M4.3 device)
-- [ ] M4.4 / M4.5 optional iOS App (LAN 50MB sha256, no VPN / Network Extension)
-- [ ] Physical Android M1.1 **8h soak** + LAN-direct dual-physical round-trip (p95 now measured v1.18 over the `adb reverse` cloud-phone tunnel: `p50≈17.9ms / p95≈56.9ms`; LAN same-model ≈15–16ms)
-- [ ] Physical Android cellular M2.1 p95 and Wi-Fi→overlay failover
-- [ ] Real OS cursor/key injection (Win SendInput / macOS / Wayland portal+libei) + 100 dual-desktop round-trips (M3.1 device)
-- [ ] notify.reply on-device RemoteInput fire (protocol+inbox CI-verified v1.11; firing the notification's own reply action needs system permission/foreground, device-manual)
-- [ ] True Notepad UIA insert (M1.3 device)
-- [ ] Tauri/React `src-tauri` desktop shell (next UI iteration)
-- [ ] macOS M1.1(mac 下一迭代)
-- [ ] Phase 6 backlog: Android controlled device, WinFsp mount, embedded EasyTier FFI
+## 当前接手基线（截至 2026-11-10）
 
-## Done
+> **v0.2.7 / e3d35a1；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。此次为本地未发布修改，验证证据见下。
+
+## 当前修复与验证
+- [x] **Windows 鼠标控 Mac "部分屏幕到不了/乱跳/被拉回" 三根因已按证据逐项本地修复（未提交）。** (1) **core 位移分包敏感（red→green）**：`InputServer::local_move_delta` 逐事件整除且把微小非零 delta 强制 ±1、无小数余量，同一 192px 总位移拆成 192 个 1px 事件走 192 单位、单个 192px 事件只走 100 单位——与"乱跳/到不了"直接相关。修复为 `rem_frac_x/rem_frac_y` i64 余量累加器（TIN1 `0..=1000` 线格式不变），在 `clear_stale_remote`/`force_local`/`resize`/`on_remote_leave`/`on_peer_gone` 五处状态转换重置；新增分包不变性回归（red 证据 192 vs 100，修复后一致）与零尾契约 pin（零 delta 尾不虚构运动、不搁浅 seat）。
+- [x] (2) **Mac `input_stop` 立即 disarm（回归 green）**：接管降级后原实现仅清引擎/seat，macOS 侧去关联鼠标/隐藏光标/遮罩的 armed 状态残留到下一次本地物理事件（注入远端 Move 不触发 worker 对齐尾）。`input_stop` 现在同步调用 `disarm_input_capture()`；新增回归断言 engine/shared seat/armed 三边界一致。
+- [x] (3) **Windows Remote 期间安全回中（plan §2.1，red→green）**：控制器进入 Remote 后物理光标停在共享边缘被 OS 夹限，hook 位置差链持续 dy=0（饱和链），远端光标搁浅在入口边缘。新增纯几何 `remote_roam_recenter_target`（按漫游 edge 判定死区带、保留自由轴）与 `Node::maybe_recenter_roaming_cursor`（Remote-seat 限定），capture worker 在每事件 `drive_input_delta` 后查询并经 `warp_mouse_position` 回中——echo 吞噬+baseline 重置在单一 hook 线程串行（`edge_park_recenter_keeps_delta_chain_alive` 回放固定该契约）。Local/Target 永不回中。
+- [x] 附带修复：两个 warp-echo 测试共享进程级 `PENDING_WARP_*` 静态态，并行 `cargo test` 下偶发互相偷 echo 槽（复现一次失败）；新增测试期互斥 gate 串行化，5 轮并行复验稳定。
+- [x] 2026-11-10 本机 macOS 验证：`cargo fmt` 已跑、`cargo clippy -p tetherly-core -p tetherly-node --all-targets --locked` **0 警告**；`tetherly-core` 310+28 全通过、`tetherly-node --lib` **184 passed / 0 failed**（含 input_ 全组与新增回归）。本轮不跑全量 workspace 测试（部分 node/phase/cursor-shield 测试会触发真实平台效果，未经隔离）。
+- [ ] **Windows 原生验收缺失：** 条件编译代码（hook 线程回中、SetCursorPos echo 顺序）未在真实 Windows 上编译运行；物理长距离移动、四角到达、共享边返回、双向接管均 Manual-required。离线回放不能替代。
+- [ ] Linux/Windows/Android CI：本轮未提交、未推送，尚未验证新改动；不把历史 tag CI 成功当成修复后的 CI 证据。
+
+## 文档基线同步
+- [x] ADR-137 增加当前状态，确认 macOS / Windows 托盘 dropzone 与 popover / 面板已有实现；与 Edge Strip、Ghost Overlay、被动跨屏拖拽及完整原生能力分开，保留历史设计。
+- [x] ADR-138 将“未实施”校准为部分实施：remote session 协议 / runtime / API / 测试代码已落地；viewer 为 macOS-only，Windows viewer、H.264 viewer decode、clip session、lock-to-screen 按证据分别列明边界，不以历史 Phase 标签代替实现核对。
+- [x] 本清单替换过时迭代入口；保留下方历史 Done，但其版本、测试数量和全绿描述均为原记录，不是本次复验结果。
+- [x] 同步 `docs/DEVELOPMENT.md`、Obsidian 主手册、AI-DOC-ROUTER 与项目索引；保留历史演进，当前摘要统一为 v0.2.7 / e3d35a1，并分别记录本机验证与跨平台 / 真机边界。
+- [x] `doc-lookup tetherly` 返回更新后的 canonical 入口；`scan-stale-docs` 检查 2374 份文档，RESULT=OK（stale_hits=0、ops_missing_status=0；另有两份无关文档缺速读提示，本轮不扩展修改）。
+
+## 后续方向（待排期，不构成已批准开发承诺）
+- [ ] 根据主 agent 修复及接手结论确定下一迭代；不预设版本号、新 ADR 或发布成功。
+- [ ] **输入链路已登记未修项（本轮明确范围控制，不顺带修）：** auto-reverse `last_tick` 不推进（dwell>150ms 的 push 无法 fire）；tb dwell 跨离边保留；冷启动 `spawn_input_capture` 未把持久化 edge 镜像进 engine；`evaluate_cursor_crossing` 与 `drive_input_delta` 两套 crossing 路径未统一；ADR-138 session 的 `force_remote_center` 不同步 rem 坐标；release/abort 生命周期审计；滚轮 120x 单位错配；拖动事件类型（Dragged）；多显示器为**能力缺口**（注入仅寻址主屏），不本轮扩展。
+- [ ] 远控：Windows session viewer；核对 H.264 viewer 解码、clip 会话联动、lock-to-screen 的实际缺口，再决定设计 / 实施顺序；屏幕 codec、clip hub 或无漫游边界不能替代这些能力的闭环证据。
+- [ ] 文件投递：核对 Edge Strip / 真实 Ghost Overlay / 被动跨屏拖拽与原生落点语义，已落地托盘 UI 不代表这些全功能完成。
+- [ ] 其他历史 backlog（fuzz、Android / iOS、Wayland、硬件编码与桌面外壳等）需重新核对现有实现与优先级后立项，不沿用旧版“未开始 / 已验证”标签。
+
+## 真机验收（Manual-required）
+- [ ] 物理 Mac 控 Windows：实际画面、窗口输入捕获与 IPC、鼠标 / 键盘 / 滚轮 / keymap、Esc / 关窗 / 断线 / idle 后输入释放、权限与保护进程检查，逐项保留设备和结果证据。
+- [ ] Mac / Windows 托盘文件拖入、popover / 面板交互、传输与落盘、MOTW / reveal，以及适用的跨屏行为，逐项验收；不得用模拟测试替代真机结果。
+- [ ] 其他物理验收仍需独立记录：iPhone ANCS / 蓝牙恢复、Android 长稳与蜂窝切换、真实桌面注入 / UIA；旧延迟数据不等于当前设备已通过。
+
+## Done（历史记录，未在本次复验）
 - [x] **跨端收件箱生命周期治理、已接收文件多维检索与安全审计清除全闭环 (v1.60 / ADR-053)**: (1) 收件箱生命周期治理与强类型 DTO 抽象 (`crates/tetherly-node/src/runtime.rs` & `lib.rs`)：设计 `InboxFileDto`、`InboxReport`、`InboxDeleteReport` 与 `InboxClearReport`，支持单遍扫描 `<data_dir>/inbox/` 目录，单文件尺寸提取、UNIX 时间戳、扩展名解析与合规安全性校验；(2) 安全单文件删除与批量审计清空原语：实现 `Node::delete_inbox_file` 与 `Node::clear_inbox`，严格执行路径穿越红线守卫（坚决拦截 `..`、`/`、`\`、NUL、隐藏文件等恶意路径，返回 `CoreError::UnsafeFileName`），并支持按 `before_secs` 截断安全清除过期文件；(3) 事件总线生命周期闭环与零明文审计：在 `UiEvent` 中扩展 `InboxFileDeleted` 与 `InboxCleared` 事件变体，严格践行 Zero-Plaintext 铁律（仅传输安全文件名、释放字节数与时间戳，严禁携带敏感正文与路径），实现 SSE 实时推送；(4) 回环控制面端点群全闭环 (`crates/tetherly-node/src/uihttp.rs`)：新增 `GET /api/file/inbox`（别名 `/api/inbox`）、`POST /api/file/inbox/delete`（别名 `DELETE /api/file/inbox`）与 `POST /api/file/inbox/clear`（别名 `DELETE /api/file/inbox/all`），全量执行 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 403 Forbidden 强阻断校验；(5) 双端 CLI 完整同构升级 (`bins/tetherly-cli` 与 `crates/tetherly-node/src/bin/tetherly.rs`)：增设 `inbox` 子命令族（`inbox list [--search] [--limit] [--json]`、`inbox delete <name>`、`inbox clear [--yes] [--before-secs]`），并增强 SSE 事件监听器高亮输出；(6) Web UI 已收文件治理交互面板 (`ui/index.html`)：新增「已接收文件与收件箱治理 (Inbox)」卡片，支持实时搜索过滤、单项删除、一键清空与 SSE 联动即时局部重绘；(7) 端到端集成测试与全量安全基线全绿：`tests/phase1.rs` 增设完整集成测试覆盖空收件箱查询、多文件排序、关键字过滤与 limit 截断、路径穿越攻击阻断、单项物理删除与 SSE 事件、批量清空与保留分块侧车、Host 403 恶意头阻断，全工作区 342+ 项测试、Linux 跨端交叉编译、Clippy 零告警与 Cargo Deny 100% 通过，确立 ADR-053，SSOT 升至 v1.60。
 - [x] **跨端多文件批量发送提议、断点续传可观测性画像与传输治理全闭环 (v1.59 / ADR-052)**: (1) 批量文件提议核心模型与原子流式管道 (`crates/tetherly-node/src/runtime.rs`)：定义 `BatchSendRequest`、`BatchSendItem`、`BatchSendReport` 与 `BatchTransferItemReport`，引入全局唯一批次标识 `tbt_<hex12>`，支持物理路径与 Base64 内存缓冲混合提议，严格执行 $O(1)$ 内存流式分块哈希（64 KiB 增量 SHA-256 计算）与总字节数、成功/失败计数原子回报；(2) 深度断点续传可观测性画像与互斥锁安全解耦 (`crates/tetherly-node/src/runtime.rs`)：定义 `ResumeMarkerDto` 与 `ResumeMarkersReport`，计算块对齐特征（`offset_bytes % 65536 == 0`）与精确完成百分比（`progress_percent`），实现 `Node::resume_markers_report`，双重检索内存 `ResumeTable` 与磁盘 `inbox/` 目录中的 `.<transfer_id>.resume.json` 与 `.part` 实体，反解对端友好别名；精准解耦 `storage_report()` 互斥锁作用域，根除自死锁隐患；(3) 轻量级回环控制面端点升级 (`crates/tetherly-node/src/uihttp.rs`)：新增 `POST /api/file/send-batch`（别名 `/api/file/batch`）与 `GET /api/file/resume`（别名 `/api/storage/resume`），全量执行 127.0.0.1 回环绑定与 `Host: 127.0.0.1|localhost` 403 严格校验；(4) CLI 双端全同构升级 (`bins/tetherly-cli/src/main.rs` 与 `crates/tetherly-node/src/bin/tetherly.rs`)：升级 `send` 子命令支持原生接收多个路径（`paths: Vec<PathBuf>`），以格式化表格展示批次聚合统计；新增 `resume` 命令支持 ASCII 进度表格排版与 `--json` 原生管道输出；(5) Web UI 多文件提议与续传状态画像 (`ui/index.html`)：`<input id="sendfile" multiple>` 升级原生支持批量文件选择与多任务 Base64 聚合提议，传输卡片增设断点续传绿色徽标（`Resumed`）画像；(6) 端到端集成测试全覆盖 (`tests/phase1.rs`)：新增 `batch_file_offer_pipeline_and_resume_observability_via_loopback_api` 完备验证单测/集成测试，全部 341+ 项测试 100% 全绿，确立 ADR-052，SSOT 升至 v1.59。
 - [x] **Linux BlueZ D-Bus GATT 传输栈架构与跨平台三端 ANCS 全闭环 (v1.58 / ADR-051)**: (1) 零 Lockfile 扰动纯 Rust D-Bus 依赖架构 (`crates/tetherly-node/Cargo.toml`)：在 `[target.'cfg(unix)'.dependencies]` 中配置 `zbus 4`，彻底复用 `Cargo.lock` 已锁定的 `zbus 4.4.0`，无额外 C/C++ 依赖与 AGPL 风险；(2) 前端契约与线程隔离架构 (`crates/tetherly-node/src/ancs/bluez.rs`)：前端 `BluezAncsTransport` 满足 `Send + Sync` 契约，单次响应通道并在 10s 内同步等待，后台独立专用线程 `"tetherly-ancs-bluez"` 持有单线程 Tokio Runtime，避免与全局运行时死锁；(3) BlueZ D-Bus 对象树拓扑与 48 位 MAC 寻址 (`dev_path_from_mac`)：通过 `dev_path_from_mac` 将 48 位 MAC 映射为 `/org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX`，检索 `ObjectManager` 解析 ANCS 服务与 3 个特征；(4) 严格恪守 SSOT §9.4 硬约束：先订阅 Data Source 再订阅 Notification Source，监听 `PropertiesChanged` 信号单向流式推送解包入 `AncsInbound`（严禁回调反向写入 Control Point），`WriteValue` 携带 `{"type": "request"}` 严格串行写入并等待 ATT 确认，监听 `Connected == false` 推入 `AncsInbound::Disconnected` 触发指数退避；(5) 跨平台三端 ANCS 全闭环 (`crates/tetherly-node/src/ancs.rs`)：Linux 平台 (`#[cfg(all(unix, not(target_os = "macos")))]`) 正式路由至 `bluez::open`，实现 Windows (WinRT) / macOS (CoreBluetooth) / Linux (BlueZ D-Bus) 三端 100% 同构全闭环，全工作区 325+ 测试全绿通过，SSOT 升至 v1.58。

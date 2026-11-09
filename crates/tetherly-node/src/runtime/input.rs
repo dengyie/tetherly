@@ -1994,7 +1994,15 @@ impl Node {
     }
 
     /// Controller: stop forwarding local input to the remote seat and release
-    /// the channel. The capture hooks stay armed (they are cheap while local).
+    /// the channel. The mouse capture hook stays installed (it is cheap and
+    /// needed for edge-crossing detection while local), but the REMOTE-seat
+    /// arming must be released immediately: on macOS `arm_input_capture` is
+    /// what disassociated the hardware mouse and hid the cursor behind
+    /// shields, so leaving it armed after a takeover demotion keeps this
+    /// machine in "controlling someone" state (hidden cursor, unassociated
+    /// mouse) while it is now the controlled target. The capture worker's
+    /// tail only realigns armed-state on the next LOCAL physical event,
+    /// which may never come while injected remote moves pass the tap.
     pub async fn input_stop(&self) -> Result<(), CoreError> {
         *self
             .shared
@@ -2014,6 +2022,7 @@ impl Node {
             .expect("engine")
             .on_peer_gone();
         *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        self.disarm_input_capture();
         self.emit(UiEvent::input_seat_changed(
             "local",
             false,
@@ -2123,6 +2132,21 @@ impl Node {
                                     crate::platform::warp_mouse_position(cx, cy);
                                     node.emit(UiEvent::input_seat_changed("local", false, None));
                                 }
+                            }
+                            // Plan §2.1: while roaming Remote, pull the physical
+                            // cursor off a saturated shared edge BEFORE the user
+                            // reaches it again — a clamped position feeds the
+                            // delta chain zeros forever and strands the remote
+                            // cursor at its entry edge. Only the decision runs
+                            // here; the warp goes through `warp_mouse_position`,
+                            // whose echo this same hook thread swallows with a
+                            // baseline reset (single-thread serialization, see
+                            // hook_move_state). Remote-scoped inside the
+                            // decision method; the returned target already
+                            // cleared the interior/local/axis guards.
+                            if let Some((rx, ry)) = node.maybe_recenter_roaming_cursor(x, y, w, h) {
+                                tracing::info!(hook_x = x, hook_y = y, to_x = rx, to_y = ry, "roaming recenter: pulling physical cursor off saturated shared edge");
+                                crate::platform::warp_mouse_position(rx, ry);
                             }
                             if let Some(other) = next_non_move {
                                 cur_ev = other;
@@ -3076,6 +3100,34 @@ impl Node {
 
     pub fn input_engine_seat(&self) -> CursorSeat {
         self.shared.input_engine.lock().expect("engine").seat()
+    }
+
+    /// Plan §2.1: recenter decision for the capture worker while roaming the
+    /// Remote seat. A hook position inside the roamed edge's dead zone is
+    /// OS-clamped there: the position-difference delta chain reports zeros
+    /// forever and the remote cursor strands at its entry edge until the
+    /// hand physically leaves the boundary. Returns the warp target pulled
+    /// off the saturated edge (free axis preserved) when the caller should
+    /// warp, `None` otherwise. The caller executes the warp through
+    /// `warp_mouse_position`, whose echo is swallowed and whose baseline
+    /// reset is serialized on the single hook thread (replayed in
+    /// `edge_park_recenter_keeps_delta_chain_alive`). Seat-scoped: Local
+    /// movement owns the whole screen and is never recentred.
+    pub fn maybe_recenter_roaming_cursor(
+        &self,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Option<(i32, i32)> {
+        if self.input_engine_seat() != CursorSeat::Remote {
+            return None;
+        }
+        let crossed = {
+            let engine = self.shared.input_engine.lock().expect("engine");
+            engine.last_crossed_edge()
+        };
+        crate::platform::remote_roam_recenter_target(x, y, width, height, 8, crossed)
     }
 
     /// The engine's parked local cursor position (pixels). Used by tests to
@@ -4478,6 +4530,109 @@ mod tests {
         assert!(
             fired,
             "sustained boundary push must fire the auto-reverse takeover (dwell must survive the zero-delta clamped tail)"
+        );
+    }
+
+    /// Takeover demotion must immediately release the REMOTE-seat capture
+    /// arming. On macOS `arm_input_capture` disassociated the hardware mouse
+    /// and hid the cursor behind shields; `input_stop` used to leave that
+    /// armed state in place, so a demoted controller stayed "controlling" —
+    /// hidden cursor, unassociated mouse — while receiving inbound control.
+    /// The capture worker only realigns armed-state on the next LOCAL
+    /// physical event, which injected remote moves never produce (they pass
+    /// the tap via the injected magic). Regression: after a takeover
+    /// handoff, `input_stop` must drive the armed flag down right away.
+    #[tokio::test]
+    async fn test_input_stop_releases_remote_capture_arming() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("stop-disarm");
+
+        // Arm state without a real hook: HookControl::set_keyboard on the
+        // stub platform is a no-op, so simulate the macOS armed state the
+        // runtime actually tracks: the seat flipped Remote arms capture
+        // through the worker tail; here we assert the demotion contract at
+        // the observable boundary — engine seat, shared seat and the armed
+        // query agreeing on "local, disarmed" after input_stop.
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.set_edge(tetherly_core::ScreenEdge::Right);
+            engine.local_move_delta(1920, 540, 10, 0); // cross right edge -> Remote
+            assert_eq!(engine.seat(), CursorSeat::Remote);
+        }
+        *node.shared.input_seat.lock().unwrap() = Some(CursorSeat::Remote);
+
+        let stopped = node.input_stop().await;
+        assert!(stopped.is_ok());
+        assert_eq!(
+            node.input_engine_seat(),
+            CursorSeat::Local,
+            "engine must be forced local by input_stop"
+        );
+        assert_eq!(
+            *node.shared.input_seat.lock().unwrap(),
+            Some(CursorSeat::Local),
+            "shared seat must return to local on takeover demotion"
+        );
+        assert!(
+            !node.is_keyboard_armed(),
+            "remote-seat arming must be released immediately by input_stop (no cursor-hidden/mouse-unassociated residue)"
+        );
+    }
+
+    /// Plan §2.1: while roaming the Remote seat, the capture worker must
+    /// consult the recenter decision on every hook move — a hook position
+    /// inside the roamed edge's dead-zone band (the OS clamps there, the
+    /// delta chain reports zeros, remote motion strands) must produce a
+    /// warp DECISION; interior positions, Local seat, and the non-roaming
+    /// axes must not. The method returns the decision; the caller executes
+    /// the warp through the echo-gated `warp_mouse_position` (whose
+    /// hook-side contract is replayed in platform tests). Asserted at the
+    /// decision boundary so the test never warps a real cursor.
+    #[tokio::test]
+    async fn test_roaming_recenter_decision_scoped_to_remote_dead_zone() {
+        use tetherly_core::ScreenEdge;
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("roam-recenter");
+
+        // Local seat: never decide.
+        assert_eq!(
+            node.maybe_recenter_roaming_cursor(1919, 1079, 1920, 1080),
+            None,
+            "local seat owns its edges — no recenter decision"
+        );
+
+        // Enter Remote through the Right edge (crossing event x >= width).
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.set_edge(ScreenEdge::Right);
+            engine.local_move_delta(1920, 540, 10, 0);
+            assert_eq!(engine.seat(), CursorSeat::Remote);
+        }
+
+        // Roaming, but interior: no decision.
+        assert_eq!(
+            node.maybe_recenter_roaming_cursor(960, 540, 1920, 1080),
+            None,
+            "interior roaming must not recenter"
+        );
+
+        // Roaming and parked in the roamed edge's dead zone (Right: x near
+        // width): must decide — the returned target is pulled off the edge
+        // with the free axis preserved.
+        let (tx, ty) = node
+            .maybe_recenter_roaming_cursor(1919, 400, 1920, 1080)
+            .expect("saturated roamed edge must decide a recenter");
+        assert!(
+            tx < 1920 - 8,
+            "target must be clearly off the right edge, got ({tx}, {ty})"
+        );
+        assert_eq!(ty, 400, "free axis must be preserved");
+
+        // Roaming through Right but the position saturates on the OTHER
+        // axis (bottom corner): the roamed edge governs — no decision (the
+        // bottom axis belongs to a different edge contract).
+        assert_eq!(
+            node.maybe_recenter_roaming_cursor(960, 1079, 1920, 1080),
+            None,
+            "only the roamed edge's own dead zone decides"
         );
     }
 }

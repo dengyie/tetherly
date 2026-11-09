@@ -98,3 +98,14 @@ pub enum ScreenEdge {
    - `cargo fmt --all -- --check` 100% 格式对齐；
    - `cargo clippy --workspace --all-targets -- -D warnings` 零警告；
    - `cargo test --workspace` 全量 650+ 项单元测试与集成测试全部通过。
+
+---
+
+## 增补（2026-11-10，本地未发布）：Windows 控 Mac 漫游链路三根因修复
+
+用户现场症状："Windows 鼠标控 Mac 部分屏幕到不了、乱跳或被拉回"。按证据驱动逐项 red→green，**Windows 条件编译代码未经真实 Windows 编译运行，物理验收仍 Manual-required**：
+
+1. **core 位移分包敏感（`InputServer::local_move_delta`）**：逐事件 `delta * 1000 / dimension` 整除丢弃小数余量，且微小非零 delta 被强制 ±1——同一 192px 物理位移拆成 192 个 1px 事件映射 192 单位、单个 192px 事件仅映射 100 单位（red 证据），应用结果取决于事件分包方式，与"乱跳/到不了"直接相关。修复：`rem_frac_x/rem_frac_y`（i64）小数余量累加器，余量跨事件保留、随方向符号校正；`clear_stale_remote` / `force_local` / `resize` / `on_remote_leave` / `on_peer_gone` 五处状态转换重置余量，边界不积累隐形超额位移。**TIN1 `0..=1000` 绝对坐标线格式不变。** 回归：`remote_displacement_is_chunking_invariant_interior`（分包不变性）+ `remote_seat_survives_zero_delta_tail_and_resumes_on_motion`（零 delta 尾不虚构运动、真实运动恢复推进）。
+2. **Mac `input_stop` 立即解除 armed**：接管降级原实现仅清引擎与 seat，macOS 侧 `arm_input_capture` 的鼠标去关联/光标隐藏/遮罩残留到下一次本地物理事件（注入远端 Move 经 magic 放行、不触发 capture worker 对齐尾）。`input_stop` 现同步调用 `disarm_input_capture()`；回归 `test_input_stop_releases_remote_capture_arming`。
+3. **控制器漫游期共享边安全回中（本轮新增，Deskflow 无直接对应）**：控制器进入 Remote 后物理光标停在共享边缘（Windows 非中心停车），OS 将其夹限在 `y=height-1`（如 Bottom），LL hook 连续位置差恒为零——delta 链报告零位移，远端光标搁浅在入口边缘，直到手物理离开边界。新增纯几何 `platform::remote_roam_recenter_target`（按 `last_crossed_edge` 判定死区带、保留自由轴）与 `Node::maybe_recenter_roaming_cursor`（仅 Remote seat），capture worker 于每事件 `drive_input_delta` 后查询，命中即经 `warp_mouse_position` 回中；回中 echo 在同一 hook 线程被 pending-warp 门吞噬并重置 delta baseline（契约回放 `edge_park_recenter_keeps_delta_chain_alive`：饱和链→回中 echo 吞噬→零 delta settle→真实入内运动恢复推进）。Local / Target 永不回中。
+4. **验证边界（如实记录）**：本机 macOS `cargo clippy -p tetherly-core -p tetherly-node --all-targets --locked` 零警告；`tetherly-core` 310+28 全通过；`tetherly-node --lib` 184/184（含上述新回归）。两处 warp-echo 测试共享进程级 `PENDING_WARP_*` 静态态在并行测试下偶发互偷 echo 槽，已加测试期互斥 gate。**未跑全量 workspace 测试**（部分 node/phase/cursor-shield 测试触发真实平台效果，未经隔离）；Windows hook 线程回中与 SetCursorPos echo 顺序需 Windows 原生 CI 与真机验收。已登记未修项：auto-reverse `last_tick` 不推进、双 crossing 路径未统一、滚轮 120x 单位、拖动事件类型、多显示器能力缺口（注入仅寻址主屏）等，见 `.codex-memory/todo.md`。

@@ -8893,6 +8893,62 @@ async fn policy_based_clipboard_auto_sync_and_sensitive_leak_guard_via_loopback_
     peer.shutdown();
 }
 
+async fn wait_handoff_received(ui_port: u16, handoff_id: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let (code, body) = tetherly_node::loopback_get(ui_port, "/api/handoff/inbox")
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        let inbox: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        if inbox["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == handoff_id)
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "handoff {handoff_id} never received: {inbox}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn handoff_multicast_clear_waits_for_receiver_delivery() {
+    let (host, peer, _g1, _g2) = pair_phone_desktop().await;
+    let peer_ui = peer.spawn_ui().await.unwrap();
+    let report = host
+        .handoff_send_multi(
+            &tetherly_node::TargetSelector::AllOnline,
+            "https://github.com/tetherly/tetherly",
+            Some("Tetherly Repo"),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.success_count, 1);
+    let handoff_id = report.dispatches[0].handoff_id.as_deref().unwrap();
+
+    // On this single-thread runtime, dispatch only queues the frame: the
+    // session tasks cannot deliver it until this task yields.
+    assert!(peer.handoff_inbox_list(None).is_empty());
+    wait_handoff_received(peer_ui, handoff_id).await;
+    let (code, body) = tetherly_node::loopback_post(peer_ui, "/api/handoff/inbox/clear", b"{}")
+        .await
+        .unwrap();
+    assert_eq!(code, 200);
+    let cleared: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(cleared["cleared"], 1);
+    assert!(peer.handoff_inbox_list(None).is_empty());
+
+    host.shutdown();
+    peer.shutdown();
+}
+
 /// ADR-065: Cross-Device Secure Resource & URL Handoff Pipeline, Controlled Open Governance,
 /// Ingress Policy Scoping, Handoff Inbox Lifecycle, Zero-Plaintext SSE, and Host 403 Isolation.
 #[tokio::test(flavor = "multi_thread")]
@@ -9293,6 +9349,17 @@ async fn resource_and_url_handoff_pipeline_and_governance_via_loopback_api() {
     assert!(multi_rep["ok"].as_bool().unwrap_or(false));
     assert!(multi_rep["target_count"].as_u64().unwrap_or(0) >= 1);
     assert!(multi_rep["success_count"].as_u64().unwrap_or(0) >= 1);
+    let peer_dispatch = multi_rep["dispatches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|dispatch| dispatch["peer"] == peer_id.as_str())
+        .expect("multicast must target the connected peer");
+    assert_eq!(peer_dispatch["success"], true);
+    let multi_id = peer_dispatch["handoff_id"].as_str().unwrap();
+    // Dispatch success is local enqueue, not receiver delivery. Clear only
+    // after every handoff under test has actually reached the peer's inbox.
+    wait_handoff_received(peer_ui, multi_id).await;
 
     // 9. Inbox Dismiss & Clear Lifecycle:
     // Dismiss unscoped entry
@@ -9332,25 +9399,14 @@ async fn resource_and_url_handoff_pipeline_and_governance_via_loopback_api() {
     assert!(clr_rep["ok"].as_bool().unwrap_or(false));
     assert!(clr_rep["cleared"].as_u64().unwrap_or(0) >= 1);
 
-    // After clear, total entries in inbox is 0. Clearing runs asynchronously
-    // on the peer node, so poll instead of asserting immediately (CI race).
-    let wait_empty = std::time::Instant::now();
-    loop {
-        let (_, b_empty) = tetherly_node::loopback_get(peer_ui, "/api/handoff/inbox")
-            .await
-            .unwrap();
-        let empty_rep: serde_json::Value = serde_json::from_slice(&b_empty).unwrap();
-        if empty_rep["total"].as_u64() == Some(0)
-            && empty_rep["entries"].as_array().map(|a| a.is_empty()) == Some(true)
-        {
-            break;
-        }
-        assert!(
-            wait_empty.elapsed() < std::time::Duration::from_secs(5),
-            "handoff inbox never drained after clear: {empty_rep}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    // Clear is synchronous; it does not cancel handoffs still in flight.
+    let (c_empty, b_empty) = tetherly_node::loopback_get(peer_ui, "/api/handoff/inbox")
+        .await
+        .unwrap();
+    assert_eq!(c_empty, 200);
+    let empty_rep: serde_json::Value = serde_json::from_slice(&b_empty).unwrap();
+    assert_eq!(empty_rep["total"], 0, "inbox after clear: {empty_rep}");
+    assert!(empty_rep["entries"].as_array().unwrap().is_empty());
 
     // 10. Atomic Persistence & POSIX 0o600 Permissions Check
     let peer_pol_file = g2.path().join("handoff_policy.json");

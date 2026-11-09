@@ -1,14 +1,27 @@
 # ADR-137: 跨端文件传输双引擎（系统托盘 Popover / 灵动悬浮岛与跨屏穿透拖拽）开发设计规范
 
-状态: 部分实施（见下方"实施状态"）  
-版本: v0.1.76 / v2.57  
-日期: 2026-11-05  
+状态: 部分实施（以“当前状态”为准，不代表原生全功能完成）
+当前基线: v0.2.7 / e3d35a1；最高 ADR-138
+原设计版本: v0.1.76 / v2.57（2026-11-05）
 
 ---
 
-## 0. 实施状态（Implementation Status，2026-11-05 校准）
+## 当前状态（截至 2026-11-10）
 
-为避免文档与代码脱节，明确本期已落地与未实施的边界：
+> **旧版“原生 UI 外壳未实施”已过时。以下为本次静态核对所得，不是新增测试或真机通过记录；后文保留历史规划与原设计，发生冲突时以本区为准。**
+
+- **已实现：拖拽控制面与托盘 dropzone / popover。** macOS `platform/tray.rs` 的 `NSDraggingDestination` 回调、文件 URL 接收及 `intent → confirm` REST 投递链已接线；点击托盘调用 `platform/popover.rs` 的 AppKit `NSPopover`，读取 peers / transfers。Windows 同文件内已有托盘面板、COM STA / OLE `IDropTarget` / `RegisterDragDrop` 注册及投递链，不能继续整体标作“未实施”。
+- **不等于原生全功能完成。** 托盘投递与状态面板不能证明 Edge Strip 灵动悬浮岛、真实 Ghost Overlay 窗口、被动跨屏拖拽手势识别或任意应用落点语义完成；本次未取得这些能力的实现闭环证据，保留为待核对/后续项，不将原设计效果图视为现状。
+- **真机验收：Manual-required。** Mac / Windows 实际托盘拖入、面板交互、文件落盘与跨屏原生行为仍需物理设备验收。2026-11-10 本机 macOS 的 workspace 自动化回归为 776 passed / 0 failed / 0 ignored；不代表本 ADR 的 GUI / 真实拖放体验已通过，也不重申历史跨平台全绿结论。
+- **证据入口：** `crates/tetherly-node/src/platform/tray.rs`（macOS dropzone / popover、Windows 面板及 OLE drop target）；`crates/tetherly-node/src/platform/popover.rs`（AppKit 面板及 loopback 数据源）。配套 `docs/MODULE_FILE_TRANSFER_UI_AND_DRAG_DROP.md` 仍为 2026-11-05 原设计，不作为新增验收证据。
+
+---
+
+## 0. 历史实施状态（2026-11-05，保留原记录）
+
+**以下“本期”均指历史阶段；原生 UI 缺口已部分被上述实现覆盖，不代表当前缺口清单。历史测试描述未在本次复验。**
+
+为避免文档与代码脱节，明确当时已落地与未实施的边界：
 
 **本期已实施（代码已上线并经测试）：**
 - 域层：`DragControlMsg` / `DragPhase` / `DragSession` / `DragStateMachine` / 归一化坐标（`tetherly-core/src/drag.rs`），1 KiB 线长上限 + `TYPE_DRAG_CONTROL` 帧注册。

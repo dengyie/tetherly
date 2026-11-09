@@ -1,10 +1,32 @@
 # ADR-138: 远程桌面控制（Remote Desktop Control）开发设计规范
 
-状态: 规划（开发文档，未实施）
-版本: v0.1.90 规划 / v2.60
-日期: 2026-11-07
+状态: 部分实施（协议 / runtime / API / 测试代码已落地；平台与真机边界见下）
+当前基线: v0.2.7 / e3d35a1；最高 ADR-138
+原设计版本: v0.1.90 规划 / v2.60（2026-11-07）
 
 ---
+
+## 当前状态（截至 2026-11-10）
+
+> **原“规划、未实施”已过时，但不能据此宣称跨平台远控全功能完成。以下区分静态代码核对、本机自动化回归与物理真机验收。后文保留原始规划、接口草案与里程碑；其中“新增 / 缺失 / Phase 2”须结合本区理解。**
+
+| 范围 | 当前事实与证据边界 |
+|---|---|
+| Remote session 协议 / 状态机 | **已实现。** `crates/tetherly-core/src/remote_session.rs` 定义 Request / Resp / Close、校验与状态机，并包含编解码和状态迁移测试。 |
+| Runtime / 输入接线 | **已实现。** `crates/tetherly-node/src/runtime/remote_session.rs` 有 start / stop / report、屏幕启动与失败清理、viewer 启动和心跳；`runtime/input.rs` 有 `enter_session`、请求 / 响应 / 关闭处理。实现存在不等于全部异常路径已验收。 |
+| REST API | **已实现。** `uihttp/api_remote_session.rs` 提供 start / stop / status 处理器，`uihttp.rs` 路由 `/api/remote/session/start`、`/stop`、`/api/remote/session`（含 `/status` 别名）。 |
+| Tests | **测试代码已实现，本机自动化回归通过。** 2026-11-10 macOS 的 `cargo test --workspace --locked` 为 776 passed / 0 failed / 0 ignored；其中 `tests/phase5.rs` 65/65，包括 m6_1 请求接受与 Enter、m6_2 策略拒绝、m6_3 漫游守卫、m6_4 idle 释放、m6_5 屏幕失败回退、m6_6 keymap、m6_7 teardown 撤销自动许可及 m6_8–m6_10 通道复用 / 心跳 / 鼠标 delta。新改动未提交推送，不代表跨平台 CI 或真机已通过。 |
+| macOS viewer | **已有 macOS-only AppKit / BGRA 查看器和 session viewer 启动入口。** `src/bin/tetherly_viewer.rs` 与 `platform.rs::spawn_remote_session_viewer` 为证；窗口输入捕获、IPC、关窗释放的完整真机体验不能仅凭启动入口判为通过。 |
+| Windows viewer | **当前无可用 session viewer 启动实现。** `platform.rs` 的非 macOS 分支明确返回“no session viewer on this platform; session continues wire-side only”；Windows 受控端能力与 Windows 查看窗不是同一项。保留后续方向。 |
+| H.264 viewer decode | **本次未证实 viewer 解码闭环，保留后续核对 / 排期。** 已核对查看器的输入是 BGRA；既有屏幕 H.264 codec 不等于 viewer H.264 解码完成，也不据原规划推断已强制协商降档。 |
+| Clip session 联动 | **本次未取得会话级联动闭环证据，保留后续方向。** 既有 clip hub 不足以证明进入 / 退出远控会话时的剪贴板联动已完成。 |
+| Lock-to-screen | **本次未取得物理输入锁定实现证据，保留后续方向。** Session 模式无漫游边界或跳过 takeover，不等于锁定受控端物理键鼠。 |
+
+**物理真机仍为 Manual-required：** Mac 控 Windows 的画面、鼠标 / 键盘 / 滚轮与 keymap、Esc / 关窗 / 断线释放、权限及保护进程检查，均需记录实际物理设备验收结果。上述本机自动化通过不替代物理 GUI 验收；本轮新改动尚未经跨平台 CI 验证。
+
+---
+
+## 以下为历史规划与原设计（2026-11-07，保留）
 
 ## 0. 摘要与开发范围（Scope）
 
