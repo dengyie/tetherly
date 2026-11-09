@@ -466,9 +466,20 @@ impl InputServer {
         slow_dwell_ms: u32,
         fast_push_delta_px: u32,
     ) {
+        let slow_dwell_ms = slow_dwell_ms.max(1);
+        let fast_push_delta_px = fast_push_delta_px.max(1);
+        // Idempotent when unchanged: callers mirror persisted config on every
+        // mouse event, and resetting the dwell timestamp here would make the
+        // slow-glide gate unreachable (the dwell could never accumulate).
+        if self.tb_band_px == band_px
+            && self.tb_slow_dwell_ms == slow_dwell_ms
+            && self.tb_fast_push_delta_px == fast_push_delta_px
+        {
+            return;
+        }
         self.tb_band_px = band_px;
-        self.tb_slow_dwell_ms = slow_dwell_ms.max(1);
-        self.tb_fast_push_delta_px = fast_push_delta_px.max(1);
+        self.tb_slow_dwell_ms = slow_dwell_ms;
+        self.tb_fast_push_delta_px = fast_push_delta_px;
         self.tb_band_quiet_since = None;
     }
 
@@ -1656,6 +1667,49 @@ mod tests {
             bottom_fast.local_move_delta(960, 1075, 0, 8),
             Some(ScreenEdge::Bottom),
             "fast push must cross immediately"
+        );
+    }
+
+    #[test]
+    fn tb_band_config_mirror_is_idempotent() {
+        // The node mirrors persisted band config into the engine on every
+        // mouse event (drive_input_delta). Re-asserting identical values must
+        // NOT reset the quiet-dwell timestamp — otherwise the 120ms dwell
+        // could never accumulate and a resting hand at the OS-clamped edge
+        // (y=height-1, dy=0) could never cross. Regression for the Windows
+        // bottom-edge dead band after v0.2.6.
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Bottom);
+        srv.set_tb_redundancy_band(24, 120, 6);
+
+        // First in-band event arms the dwell...
+        assert_eq!(srv.local_move_delta(960, 1079, 0, 1), None);
+        // ...and repeated identical config mirrors (one per event) must leave
+        // the armed dwell intact. Before the fix each mirror reset it.
+        for _ in 0..50 {
+            srv.set_tb_redundancy_band(24, 120, 6);
+        }
+        assert_eq!(srv.local_move_delta(960, 1079, 0, 0), None);
+        srv.set_tb_redundancy_band(24, 120, 6);
+        std::thread::sleep(std::time::Duration::from_millis(140));
+        srv.set_tb_redundancy_band(24, 120, 6);
+        assert_eq!(
+            srv.local_move_delta(960, 1079, 0, 0),
+            Some(ScreenEdge::Bottom),
+            "identical config mirrors must not starve the slow dwell"
+        );
+
+        // A genuine config change must still reset the dwell.
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Bottom);
+        srv.set_tb_redundancy_band(24, 120, 6);
+        assert_eq!(srv.local_move_delta(960, 1079, 0, 1), None);
+        srv.set_tb_redundancy_band(24, 120, 300);
+        std::thread::sleep(std::time::Duration::from_millis(140));
+        assert_eq!(
+            srv.local_move_delta(960, 1079, 0, 0),
+            None,
+            "changed dwell config must re-arm the quiet timer"
         );
     }
 
