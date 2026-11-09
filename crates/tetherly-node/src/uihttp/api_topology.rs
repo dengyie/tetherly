@@ -160,6 +160,34 @@ pub(super) async fn post_topology_config(
                 .and_then(|s| s.parse::<bool>().ok())
         });
 
+    let redundancy_band_px = parsed_body
+        .as_ref()
+        .and_then(|b| b.redundancy_band_px)
+        .or_else(|| {
+            qmap.get("redundancy_band_px")
+                .or_else(|| qmap.get("redundancy_band"))
+                .or_else(|| qmap.get("band"))
+                .and_then(|s| s.parse::<u32>().ok())
+        });
+
+    let slow_dwell_ms = parsed_body
+        .as_ref()
+        .and_then(|b| b.slow_dwell_ms)
+        .or_else(|| {
+            qmap.get("slow_dwell_ms")
+                .or_else(|| qmap.get("slow_dwell"))
+                .and_then(|s| s.parse::<u32>().ok())
+        });
+
+    let fast_push_delta_px = parsed_body
+        .as_ref()
+        .and_then(|b| b.fast_push_delta_px)
+        .or_else(|| {
+            qmap.get("fast_push_delta_px")
+                .or_else(|| qmap.get("fast_push_delta"))
+                .and_then(|s| s.parse::<u32>().ok())
+        });
+
     let width = parsed_body
         .as_ref()
         .and_then(|b| b.width)
@@ -188,6 +216,9 @@ pub(super) async fn post_topology_config(
             width,
             height,
             scale_factor,
+            redundancy_band_px,
+            slow_dwell_ms,
+            fast_push_delta_px,
         )
         .await
     {

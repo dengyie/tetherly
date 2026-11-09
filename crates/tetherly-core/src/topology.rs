@@ -117,6 +117,20 @@ pub struct EdgeCrossingConfig {
     pub corner_lock_size_px: u32,
     #[serde(default)]
     pub wrap_around: bool,
+    /// Speed-aware edge redundancy band (px): crossing the Top/Bottom edge
+    /// requires EITHER a fast push (single-event |delta| >=
+    /// `fast_push_delta_px`) OR the cursor to settle inside the first
+    /// `band_px` of the edge for `slow_dwell_ms` without further into-edge
+    /// motion. Left/Right keep the legacy instant behavior. The band keeps a
+    /// slow glide into the macOS menu bar / Windows task bar on the local
+    /// screen instead of teleporting the seat across (production complaint:
+    /// trackpad glide toward the menu bar never stopped).
+    #[serde(default = "default_redundancy_band_px")]
+    pub redundancy_band_px: u32,
+    #[serde(default = "default_slow_dwell_ms")]
+    pub slow_dwell_ms: u32,
+    #[serde(default = "default_fast_push_delta_px")]
+    pub fast_push_delta_px: u32,
 }
 
 fn default_resistance() -> u32 {
@@ -131,6 +145,18 @@ fn default_corner_lock() -> u32 {
     30
 }
 
+fn default_redundancy_band_px() -> u32 {
+    24
+}
+
+fn default_slow_dwell_ms() -> u32 {
+    120
+}
+
+fn default_fast_push_delta_px() -> u32 {
+    6
+}
+
 impl Default for EdgeCrossingConfig {
     fn default() -> Self {
         Self {
@@ -138,6 +164,9 @@ impl Default for EdgeCrossingConfig {
             delay_ms: 100,
             corner_lock_size_px: 30,
             wrap_around: false,
+            redundancy_band_px: 24,
+            slow_dwell_ms: 120,
+            fast_push_delta_px: 6,
         }
     }
 }
@@ -147,6 +176,9 @@ impl EdgeCrossingConfig {
         self.resistance_px = TopologyValidator::clamp_resistance(self.resistance_px);
         self.delay_ms = TopologyValidator::clamp_delay(self.delay_ms);
         self.corner_lock_size_px = TopologyValidator::clamp_corner_lock(self.corner_lock_size_px);
+        self.redundancy_band_px = TopologyValidator::clamp_redundancy_band(self.redundancy_band_px);
+        self.slow_dwell_ms = TopologyValidator::clamp_slow_dwell(self.slow_dwell_ms);
+        self.fast_push_delta_px = TopologyValidator::clamp_fast_push_delta(self.fast_push_delta_px);
     }
 }
 
@@ -222,6 +254,9 @@ impl TopologyValidator {
     pub const MAX_RESISTANCE_PX: u32 = 100;
     pub const MAX_DELAY_MS: u32 = 1000;
     pub const MAX_CORNER_LOCK_PX: u32 = 100;
+    pub const MAX_REDUNDANCY_BAND_PX: u32 = 200;
+    pub const MAX_SLOW_DWELL_MS: u32 = 2000;
+    pub const MAX_FAST_PUSH_DELTA_PX: u32 = 100;
 
     pub fn clamp_dimension(val: u32, is_width: bool) -> u32 {
         if is_width {
@@ -259,6 +294,18 @@ impl TopologyValidator {
 
     pub fn clamp_corner_lock(val: u32) -> u32 {
         val.min(Self::MAX_CORNER_LOCK_PX)
+    }
+
+    pub fn clamp_redundancy_band(val: u32) -> u32 {
+        val.min(Self::MAX_REDUNDANCY_BAND_PX)
+    }
+
+    pub fn clamp_slow_dwell(val: u32) -> u32 {
+        val.min(Self::MAX_SLOW_DWELL_MS)
+    }
+
+    pub fn clamp_fast_push_delta(val: u32) -> u32 {
+        val.min(Self::MAX_FAST_PUSH_DELTA_PX)
     }
 
     pub fn sanitize_peer_id(peer_id: &str) -> Result<String, CoreError> {

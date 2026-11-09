@@ -330,6 +330,9 @@ impl Node {
         width: Option<u32>,
         height: Option<u32>,
         scale_factor: Option<f32>,
+        redundancy_band_px: Option<u32>,
+        slow_dwell_ms: Option<u32>,
+        fast_push_delta_px: Option<u32>,
     ) -> Result<TopologyConfigReport, CoreError> {
         let now = self.shared.clock.unix_ms();
         let (display, config, neighbors_count) = {
@@ -345,6 +348,15 @@ impl Node {
             }
             if let Some(wrap) = wrap_around {
                 layout.config.wrap_around = wrap;
+            }
+            if let Some(band) = redundancy_band_px {
+                layout.config.redundancy_band_px = TopologyValidator::clamp_redundancy_band(band);
+            }
+            if let Some(dwell) = slow_dwell_ms {
+                layout.config.slow_dwell_ms = TopologyValidator::clamp_slow_dwell(dwell);
+            }
+            if let Some(fpd) = fast_push_delta_px {
+                layout.config.fast_push_delta_px = TopologyValidator::clamp_fast_push_delta(fpd);
             }
             if let Some(w) = width {
                 layout.display.width = TopologyValidator::clamp_width(w);
@@ -374,9 +386,10 @@ impl Node {
             "topology_config_updated",
             None::<String>,
             format!(
-                "Updated topology config: display={}x{}@{:.2}, resistance={}px, delay={}ms, corner_lock={}px, wrap={}",
+                "Updated topology config: display={}x{}@{:.2}, resistance={}px, delay={}ms, corner_lock={}px, wrap={}, band={}px, slow_dwell={}ms, fast_push={}px",
                 display.width, display.height, display.scale_factor,
-                config.resistance_px, config.delay_ms, config.corner_lock_size_px, config.wrap_around
+                config.resistance_px, config.delay_ms, config.corner_lock_size_px, config.wrap_around,
+                config.redundancy_band_px, config.slow_dwell_ms, config.fast_push_delta_px
             ),
             true,
         );

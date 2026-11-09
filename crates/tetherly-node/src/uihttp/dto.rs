@@ -668,6 +668,12 @@ pub(super) struct TopologyConfigBody {
     pub(super) corner_lock_size_px: Option<u32>,
     #[serde(default, alias = "wrap")]
     pub(super) wrap_around: Option<bool>,
+    #[serde(default, alias = "redundancy_band", alias = "band")]
+    pub(super) redundancy_band_px: Option<u32>,
+    #[serde(default, alias = "slow_dwell")]
+    pub(super) slow_dwell_ms: Option<u32>,
+    #[serde(default, alias = "fast_push_delta")]
+    pub(super) fast_push_delta_px: Option<u32>,
     #[serde(default)]
     pub(super) width: Option<u32>,
     #[serde(default)]

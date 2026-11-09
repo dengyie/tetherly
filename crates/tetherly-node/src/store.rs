@@ -3464,6 +3464,9 @@ mod tests {
                 delay_ms: 150,
                 corner_lock_size_px: 40,
                 wrap_around: true,
+                redundancy_band_px: 24,
+                slow_dwell_ms: 120,
+                fast_push_delta_px: 6,
             },
         };
         save_topology_layout(&dir, &custom_layout).unwrap();

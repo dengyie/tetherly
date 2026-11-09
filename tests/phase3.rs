@@ -133,6 +133,28 @@ async fn pair() -> (Node, Node, DirGuard, DirGuard) {
     (a, b, ga, gb)
 }
 
+/// Disable the speed-aware Top/Bottom redundancy band for legacy positional
+/// crossing assertions. The band defaults to 24px (config default), which
+/// turns a dy=0 positional event at the boundary into a dwell-wait instead
+/// of an instant cross — tests that assert the instant cross must opt out
+/// explicitly (this also exercises the new config field's plumbing).
+async fn disable_tb_redundancy_band(node: &tetherly_node::Node) {
+    node.topology_update_config(
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(0),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn unpaired_45719_refuses_pairing() {
     let (dir, _g) = temp_dir("unpaired");
@@ -350,6 +372,10 @@ async fn m3_4_input_keymap_remapping() {
 async fn m3_5_four_directional_edge_roaming() {
     let (server, client, _ga, _gb) = pair().await;
 
+    // Legacy positional crossing assertions: opt out of the speed-aware
+    // Top/Bottom redundancy band (positional events carry no deltas).
+    disable_tb_redundancy_band(&server).await;
+
     // 1. Configure policy to Top edge roaming (e.g. laptop below monitor/desktop)
     let mut policy = server.input_policy();
     policy.edge = Some("top".to_string());
@@ -473,6 +499,10 @@ async fn m3_6_left_edge_roaming() {
 async fn m3_7_physical_boundary_touch_crossing() {
     let (server, client, _ga, _gb) = pair().await;
 
+    // Legacy positional crossing assertions: opt out of the speed-aware
+    // Top/Bottom redundancy band (positional events carry no deltas).
+    disable_tb_redundancy_band(&server).await;
+
     // Test Right edge physical touch at width - 1 (e.g. 1919 on a 1920 display)
     let mut policy = server.input_policy();
     policy.edge = Some("right".to_string());
@@ -548,6 +578,10 @@ async fn m3_8_wheel_speed_policy_mutation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn m3_9_reverse_control_takeover_flips_roles_cleanly() {
     let (server, client, _ga, _gb) = pair().await;
+
+    // Legacy positional crossing assertions (the step-4 drive_input is
+    // positional, dy=0): opt out of the speed-aware redundancy band.
+    disable_tb_redundancy_band(&client).await;
 
     // 1. Forward direction: server (Mac) attaches as controller.
     server
@@ -677,7 +711,10 @@ async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
             .unwrap();
     }
     for _ in 0..8 {
-        client.drive_input_delta(50, 49, 0, 5, 100, 50).unwrap();
+        // dy=8 is a FAST push (>= fast_push_delta_px=6): crosses the engine
+        // band gate immediately, so the takeover push still carries the
+        // seat remote in the same breath.
+        client.drive_input_delta(50, 49, 0, 8, 100, 50).unwrap();
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
 
@@ -723,6 +760,9 @@ async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
     //    that the Mac's sink receives the motion, polled below.
     // Downward (deeper into the Mac): the entry parked at the Mac's top
     // edge (rem_y = 0), pushing up would auto-return to Windows.
+    // dy=10 is a fast push (>= 6): crosses the target's Top band gate
+    // immediately (the incoming event is dy=10 with the target engine's
+    // own mirror of the defaults).
     client.drive_input_delta(50, 40, 0, 10, 100, 50).unwrap();
     let start = std::time::Instant::now();
     loop {

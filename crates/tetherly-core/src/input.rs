@@ -407,6 +407,17 @@ pub struct InputServer {
     buttons_down: u8,
     next_seq: u64,
     pending: VecDeque<InputEvent>,
+    /// Speed-aware Top/Bottom redundancy band: start of the current quiet
+    /// period inside the band (None while the cursor moves into the edge
+    /// faster than `fast_push_delta_px` per event, or sits outside the
+    /// band). A slow glide must stay quiet for `slow_dwell_ms` before the
+    /// seat may flip; a fast push crosses immediately.
+    tb_band_quiet_since: Option<std::time::Instant>,
+    /// Active band settings (defaults from EdgeCrossingConfig; a 0 band
+    /// disables the gate entirely, restoring the legacy instant cross).
+    tb_band_px: u32,
+    tb_slow_dwell_ms: u32,
+    tb_fast_push_delta_px: u32,
 }
 
 impl InputServer {
@@ -427,6 +438,10 @@ impl InputServer {
             buttons_down: 0,
             next_seq: 1,
             pending: VecDeque::with_capacity(INPUT_BATCH_MAX),
+            tb_band_quiet_since: None,
+            tb_band_px: 0,
+            tb_slow_dwell_ms: 120,
+            tb_fast_push_delta_px: 6,
         }
     }
 
@@ -440,6 +455,21 @@ impl InputServer {
 
     pub fn set_edge(&mut self, edge: ScreenEdge) {
         self.edge = edge;
+    }
+
+    /// Configure the speed-aware Top/Bottom redundancy band (see
+    /// [`EdgeCrossingConfig`]). `band_px == 0` disables the gate (legacy
+    /// instant cross on every edge).
+    pub fn set_tb_redundancy_band(
+        &mut self,
+        band_px: u32,
+        slow_dwell_ms: u32,
+        fast_push_delta_px: u32,
+    ) {
+        self.tb_band_px = band_px;
+        self.tb_slow_dwell_ms = slow_dwell_ms.max(1);
+        self.tb_fast_push_delta_px = fast_push_delta_px.max(1);
+        self.tb_band_quiet_since = None;
     }
 
     pub fn last_crossed_edge(&self) -> ScreenEdge {
@@ -591,8 +621,45 @@ impl InputServer {
         self.pending.push_back(InputEvent { seq, kind });
     }
 
-    /// Motion with relative displacement deltas. When the seat is remote,
-    /// deltas drive smooth free roaming on the target screen without cursor locking.
+    /// Speed-aware gate for Top/Bottom edge crossings (menu bar / task bar
+    /// redundancy). Returns true when the crossing may proceed:
+    ///
+    /// - a fast push (this event's into-edge |delta| >= fast_push_delta_px)
+    ///   crosses immediately;
+    /// - a slow glide must be inside the redundancy band (`in_band`) and
+    ///   have stayed quiet (no further into-edge motion) for
+    ///   `slow_dwell_ms` before the seat may flip;
+    /// - a slow glide outside the band never crosses (and drops any dwell).
+    ///
+    /// Always true when the band is disabled (`band_px == 0`).
+    ///
+    /// Mutates quiet-period bookkeeping, hence `&mut self`.
+    fn tb_band_gate(&mut self, in_band: bool, into_delta: i32) -> bool {
+        if self.tb_band_px == 0 {
+            return true;
+        }
+        if into_delta.abs() >= self.tb_fast_push_delta_px as i32 {
+            // Deliberate push: cross now and forget any dwell.
+            self.tb_band_quiet_since = None;
+            return true;
+        }
+        if !in_band {
+            // Outside the redundancy band (and not fast): keep waiting.
+            self.tb_band_quiet_since = None;
+            return false;
+        }
+        let now = std::time::Instant::now();
+        match self.tb_band_quiet_since {
+            Some(started) => {
+                now.duration_since(started).as_millis() as u32 >= self.tb_slow_dwell_ms
+            }
+            None => {
+                self.tb_band_quiet_since = Some(now);
+                false
+            }
+        }
+    }
+
     pub fn local_move_delta(&mut self, x: i32, y: i32, dx: i32, dy: i32) -> Option<ScreenEdge> {
         let y_clamped = y.clamp(0, self.height.saturating_sub(1));
         let x_clamped = x.clamp(0, self.width.saturating_sub(1));
@@ -757,7 +824,21 @@ impl InputServer {
                 }
             }
             ScreenEdge::Top => {
-                if y <= 0 || (y <= 4 && dy < 0) {
+                // Speed-aware redundancy: EVERY into-edge motion (dy <= 0,
+                // including the OS-clamped y==0 tail with dy==0) goes through
+                // the band gate — a fast push (|dy| >= fast_push_delta_px)
+                // crosses immediately, a slow glide must settle inside the
+                // band for slow_dwell_ms first. Outgoing motion (dy > 0) and
+                // interior positions never cross. Without gating the clamped
+                // y==0 tail, a slow trackpad glide toward the macOS menu bar
+                // teleports the seat across (production complaint).
+                let into_edge = dy <= 0 && y <= 8;
+                let may_cross = if into_edge {
+                    self.tb_band_gate(y <= self.tb_band_px as i32, dy)
+                } else {
+                    false
+                };
+                if may_cross {
                     self.x = x_clamped;
                     self.y = 0;
                     self.rem_x = self.norm_x();
@@ -786,7 +867,19 @@ impl InputServer {
                 }
             }
             ScreenEdge::Bottom => {
-                if y >= self.height {
+                // Win-side twin of the Top redundancy band: EVERY into-edge
+                // motion (dy >= 0 near the bottom, including the OS-clamped
+                // y==height-1 tail with dy==0) goes through the band gate —
+                // a fast push crosses immediately, a slow glide toward the
+                // Windows task bar must settle inside the band first.
+                let into_edge = dy >= 0 && y >= self.height.saturating_sub(8);
+                let may_cross = if into_edge {
+                    let depth = self.height.saturating_sub(y);
+                    self.tb_band_gate(depth <= self.tb_band_px as i32, dy)
+                } else {
+                    false
+                };
+                if may_cross {
                     self.x = x_clamped;
                     self.y = self.height.saturating_sub(1);
                     self.rem_x = self.norm_x();
@@ -1460,6 +1553,110 @@ mod tests {
         // trip returns exactly to the origin — the truncating chain
         // (750 -> 749) walked a pixel per emergency return.
         assert_eq!(lx, 750, "force_local x = denorm(rem_x)");
+    }
+
+    #[test]
+    fn tb_redundancy_band_speed_semantics() {
+        // Defaults in InputServer::new keep the legacy instant cross (band
+        // disabled, band_px=0) — the pre-gate behavior all existing tests
+        // assert.
+        let mut disabled = InputServer::new(1920, 1080);
+        disabled.set_edge(ScreenEdge::Top);
+        assert_eq!(
+            disabled.local_move_delta(960, 0, 0, 0),
+            Some(ScreenEdge::Top)
+        );
+        assert_eq!(disabled.seat(), CursorSeat::Remote);
+
+        // Enabled band: slow glide (|dy| < fast threshold) inside the band
+        // must NOT cross on the first event; after the quiet dwell elapses
+        // the next boundary event crosses. A fast push crosses immediately.
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Top);
+        srv.set_tb_redundancy_band(24, 120, 6);
+
+        // Slow glide toward the menu bar: no crossing while dwell arms.
+        assert_eq!(
+            srv.local_move_delta(960, 3, 0, -1),
+            None,
+            "slow glide into the band must not cross instantly"
+        );
+        assert_eq!(srv.seat(), CursorSeat::Local);
+        assert_eq!(srv.local_move_delta(960, 1, 0, -1), None);
+        assert_eq!(
+            srv.local_move_delta(960, 0, 0, 0),
+            None,
+            "clamped tail with zero delta still waits out the dwell"
+        );
+        assert_eq!(srv.seat(), CursorSeat::Local);
+
+        // Quiet dwell completed (test sleeps past slow_dwell_ms): the very
+        // next boundary event honors the rest and crosses.
+        std::thread::sleep(std::time::Duration::from_millis(140));
+        assert_eq!(
+            srv.local_move_delta(960, 0, 0, 0),
+            Some(ScreenEdge::Top),
+            "settled slow glide crosses after the quiet dwell"
+        );
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+        srv.on_remote_leave();
+        assert_eq!(srv.seat(), CursorSeat::Local);
+
+        // Fast push: crosses on the first event without any dwell.
+        let mut fast = InputServer::new(1920, 1080);
+        fast.set_edge(ScreenEdge::Top);
+        fast.set_tb_redundancy_band(24, 120, 6);
+        assert_eq!(
+            fast.local_move_delta(960, 5, 0, -8),
+            Some(ScreenEdge::Top),
+            "fast push must cross immediately"
+        );
+        assert_eq!(fast.seat(), CursorSeat::Remote);
+
+        // Outside the band a slow glide never crosses (and resets dwell):
+        // y=30 is deeper than the 24px band.
+        let mut outside = InputServer::new(1920, 1080);
+        outside.set_edge(ScreenEdge::Top);
+        outside.set_tb_redundancy_band(24, 120, 6);
+        assert_eq!(
+            outside.local_move_delta(960, 30, 0, -1),
+            None,
+            "slow glide outside the band must not arm"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(140));
+        assert_eq!(
+            outside.local_move_delta(960, 30, 0, 0),
+            None,
+            "dwelling outside the band never crosses"
+        );
+        assert_eq!(outside.seat(), CursorSeat::Local);
+
+        // Bottom mirror: slow glide toward the task bar waits; fast push
+        // crosses instantly.
+        let mut bottom = InputServer::new(1920, 1080);
+        bottom.set_edge(ScreenEdge::Bottom);
+        bottom.set_tb_redundancy_band(24, 120, 6);
+        assert_eq!(
+            bottom.local_move_delta(960, 1079, 0, 1),
+            None,
+            "slow glide into the bottom band must not cross instantly"
+        );
+        assert_eq!(bottom.seat(), CursorSeat::Local);
+        std::thread::sleep(std::time::Duration::from_millis(140));
+        assert_eq!(
+            bottom.local_move_delta(960, 1079, 0, 0),
+            Some(ScreenEdge::Bottom),
+            "settled slow glide crosses after dwell"
+        );
+
+        let mut bottom_fast = InputServer::new(1920, 1080);
+        bottom_fast.set_edge(ScreenEdge::Bottom);
+        bottom_fast.set_tb_redundancy_band(24, 120, 6);
+        assert_eq!(
+            bottom_fast.local_move_delta(960, 1075, 0, 8),
+            Some(ScreenEdge::Bottom),
+            "fast push must cross immediately"
+        );
     }
 
     #[test]

@@ -2451,6 +2451,23 @@ impl Node {
                 edge_from_topology.unwrap_or(tetherly_core::ScreenEdge::Right)
             };
             server.set_edge(active_edge);
+            // Speed-aware Top/Bottom redundancy band (macOS menu bar /
+            // Windows task bar): mirror the persisted topology config into
+            // the engine on every event (cheap copy; keeps the engine
+            // current with live config edits).
+            {
+                let cfg = self
+                    .shared
+                    .topology_layout
+                    .lock()
+                    .expect("topology_layout")
+                    .config;
+                server.set_tb_redundancy_band(
+                    cfg.redundancy_band_px,
+                    cfg.slow_dwell_ms,
+                    cfg.fast_push_delta_px,
+                );
+            }
             // On physical displays, OS cursor coordinates are clamped to [0, width - 1] and [0, height - 1].
             // To reliably trigger boundary crossings when touching the physical screen boundary,
             // normalize boundary-touch coordinates to the engine's edge thresholds.
