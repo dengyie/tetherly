@@ -802,8 +802,10 @@ mod hook_move_state {
 /// such tests can interleave mark/take pairs and steal each other's echo
 /// slots (observed once as a flaky `edge_park_recenter` failure). Holding
 /// this guard for the duration of each test restores the production
-/// single-thread ordering. No-op outside tests.
-#[cfg(test)]
+/// single-thread ordering. Compiled only where its callers exist (the
+/// macOS-test warp replays); on other targets the caller-less helper would
+/// be dead code under `-D warnings`.
+#[cfg(all(target_os = "macos", test))]
 fn warp_state_test_gate() -> std::sync::MutexGuard<'static, ()> {
     static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
