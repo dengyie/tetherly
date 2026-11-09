@@ -752,6 +752,50 @@ fn take_warp_echo(x: i32, y: i32) -> bool {
     false
 }
 
+// Delta baseline of the Windows mouse hook (LL hooks deliver cursor
+// position only — see `mouse_proc`). Thread-local: LL hooks deliver every
+// event on one dedicated thread.
+//
+// Compiled outside Windows only under `cfg(test)` on macOS, so the
+// warp-echo/baseline coupling stays unit-tested where development happens;
+// production macOS never touches this (its tap consumes CGEvent deltas,
+// not positions).
+#[cfg(any(windows, all(target_os = "macos", test)))]
+mod hook_move_state {
+    thread_local! {
+        static LAST_MOVE_POS: std::cell::RefCell<Option<(i32, i32)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// One WM_MOUSEMOVE through the warp-echo gate. Returns true when the
+    /// event is the echo of a pending programmatic warp and was swallowed;
+    /// the delta baseline is forgotten with it, so the first real event
+    /// after the warp settles with zero motion instead of reporting the
+    /// teleport displacement (the Windows twin of macOS Root-fix F).
+    pub(super) fn take_warp_echo_reset_baseline(x: i32, y: i32) -> bool {
+        if super::take_warp_echo(x, y) {
+            LAST_MOVE_POS.with(|p| *p.borrow_mut() = None);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Derive the (dx, dy) of a move to (x, y) from the previous hook
+    /// position and advance the baseline to it.
+    pub(super) fn advance(x: i32, y: i32) -> (i32, i32) {
+        LAST_MOVE_POS.with(|p| {
+            let mut p = p.borrow_mut();
+            let (dx, dy) = match *p {
+                Some((lx, ly)) => (x - lx, y - ly),
+                None => (0, 0),
+            };
+            *p = Some((x, y));
+            (dx, dy)
+        })
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn warp_mouse_position(x: i32, y: i32) {
     let point = objc2_core_foundation::CGPoint {
@@ -1257,14 +1301,10 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
     const WM_HOOK_KB_ON: u32 = 0x8000 + 1; // WM_APP + 1
     const WM_HOOK_KB_OFF: u32 = 0x8000 + 2; // WM_APP + 2
 
-    // Previous physical mouse position on the hook thread (LL hooks deliver
-    // on one thread). Consecutive-position differences feed RawInput::Move
-    // deltas — see mouse_proc.
-    thread_local! {
-        static LAST_HOOK_MOVE_POS: std::cell::RefCell<Option<(i32, i32)>> =
-            const { std::cell::RefCell::new(None) };
-    }
-
+    // Previous physical mouse position + warp gate live in hook_move_state
+    // (module level) so the warp-echo/baseline coupling is unit-testable;
+    // LL hooks deliver every event on one thread, so thread-local state
+    // there is safe.
     static SENDER: std::sync::OnceLock<std::sync::mpsc::Sender<RawInput>> =
         std::sync::OnceLock::new();
     SENDER
@@ -1288,8 +1328,12 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 match ev {
                     WM_MOUSEMOVE => {
                         // Drop the echo of a programmatic SetCursorPos warp
-                        // before it can reach the roaming engine.
-                        if take_warp_echo(mi.pt.x, mi.pt.y) {
+                        // before it can reach the roaming engine; forgetting
+                        // the delta baseline with it makes the first real
+                        // event settle with dx=dy=0 instead of reporting the
+                        // warp displacement (Windows twin of macOS Root-fix
+                        // F).
+                        if hook_move_state::take_warp_echo_reset_baseline(mi.pt.x, mi.pt.y) {
                             return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
                         }
                         // MSLLHOOKSTRUCT carries no deltas (macOS CGEvent
@@ -1301,15 +1345,7 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                         // takeover's direction discipline (`Bottom => dy > 0`)
                         // both consume these — hard zeros here silently dead
                         // the Windows→Mac takeover (production regression).
-                        let (dx, dy) = LAST_HOOK_MOVE_POS.with(|p| {
-                            let mut p = p.borrow_mut();
-                            let (dx, dy) = match *p {
-                                Some((lx, ly)) => (mi.pt.x - lx, mi.pt.y - ly),
-                                None => (0, 0),
-                            };
-                            *p = Some((mi.pt.x, mi.pt.y));
-                            (dx, dy)
-                        });
+                        let (dx, dy) = hook_move_state::advance(mi.pt.x, mi.pt.y);
                         push(RawInput::Move {
                             x: mi.pt.x,
                             y: mi.pt.y,
@@ -2438,6 +2474,53 @@ mod input_tests {
             assert!(abs >= prev);
             prev = abs;
         }
+    }
+
+    // Runs on macOS only under `cfg(test)` (hook_move_state is compiled
+    // outside Windows just for this): proves the Windows hook's warp echo
+    // swallows the teleport displacement instead of letting the next real
+    // move report it as its delta. Without the baseline reset the first
+    // post-warp event carries the full warp displacement and jumps the
+    // remote cursor — the Windows twin of macOS Root-fix F (production:
+    // Windows→Mac reverse takeover worked, then the first warp-poisoned
+    // move yanked the Mac cursor).
+    #[cfg(all(target_os = "macos", test))]
+    #[test]
+    fn warp_echo_resets_delta_baseline() {
+        use super::hook_move_state;
+
+        // 1. Real user motion: baseline established at (500, 400).
+        assert_eq!(hook_move_state::advance(500, 400), (0, 0)); // cold start: no baseline
+        assert_eq!(hook_move_state::advance(510, 404), (10, 4));
+
+        // 2. Programmatic warp to the edge-entry point; the hook sees the
+        //    echo at the warp target and must swallow it (not (dx, dy) it).
+        super::mark_pending_warp(1800, 900);
+        assert!(hook_move_state::take_warp_echo_reset_baseline(1800, 900));
+
+        // 3. The next REAL event (hand moved on to (1806, 903)) must settle
+        //    with dx=dy=0 — the baseline was forgotten with the echo. The
+        //    buggy path would report the whole teleport (1296, 499) as
+        //    one move and yank the remote cursor.
+        assert_eq!(hook_move_state::advance(1806, 903), (0, 0));
+
+        // 4. Baseline re-established: deltas track again.
+        assert_eq!(hook_move_state::advance(1816, 907), (10, 4));
+
+        // 5. A position that is NOT the warp target never matches the
+        //    marker: no echo, and the baseline is left alone (reset happens
+        //    only when an echo is actually consumed).
+        super::mark_pending_warp(100, 100);
+        assert!(!hook_move_state::take_warp_echo_reset_baseline(5000, 5000));
+        assert_eq!(hook_move_state::advance(5010, 5010), (3194, 4103));
+
+        // 6. Only the echo at the marker's target consumes it and resets
+        //    the baseline; misses in between don't.
+        super::mark_pending_warp(20, 30);
+        assert!(!hook_move_state::take_warp_echo_reset_baseline(5020, 5030));
+        assert_eq!(hook_move_state::advance(5030, 5040), (20, 30));
+        assert!(hook_move_state::take_warp_echo_reset_baseline(20, 30));
+        assert_eq!(hook_move_state::advance(26, 33), (0, 0));
     }
 
     #[cfg(target_os = "macos")]
