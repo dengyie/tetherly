@@ -1256,6 +1256,14 @@ pub struct HookControl {
 }
 
 #[cfg(windows)]
+// Deskflow kHOOK_RELAY_EVENTS: true while this node controls a remote
+// seat — the mouse hook swallows physical motion/button events (local
+// cursor frozen, local UI blind to the hand) and only relays deltas.
+// Toggled from the runtime via WM_HOOK_KB_ON/OFF on the hook pump
+// thread; read lock-free in the LL callback and by `HookControl`.
+static MOUSE_RELAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
 impl HookControl {
     pub fn is_armed(&self) -> bool {
         MOUSE_RELAY.load(std::sync::atomic::Ordering::SeqCst)
@@ -1387,13 +1395,6 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
     SCREEN_W.store(unsafe { GetSystemMetrics(SM_CXSCREEN) }, Ordering::Relaxed);
     SCREEN_H.store(unsafe { GetSystemMetrics(SM_CYSCREEN) }, Ordering::Relaxed);
-
-    // Deskflow kHOOK_RELAY_EVENTS: true while this node controls a remote
-    // seat — the mouse hook swallows physical motion/button events (local
-    // cursor frozen, local UI blind to the hand) and only relays deltas.
-    // Toggled from the runtime via WM_HOOK_RELAY_ON/OFF on the hook pump
-    // thread; read lock-free in the LL callback.
-    static MOUSE_RELAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     // WM_MOUSEMOVE plus the button/wheel events the roaming engine relays:
     // everything the physical mouse generates that must not reach local
