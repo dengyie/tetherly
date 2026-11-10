@@ -1597,16 +1597,9 @@ impl Node {
         let reason_str = reason.unwrap_or("user requested release");
         let sanitized_reason = InputTunnelValidator::sanitize_reason(reason_str);
 
-        let active_opt = {
-            let mut guard = self
-                .shared
-                .active_input_tunnel
-                .lock()
-                .expect("active_input_tunnel");
-            guard.take()
-        };
+        let session = self.release_input_tunnel_local(&sanitized_reason);
 
-        if let Some(session) = active_opt {
+        if let Some(session) = session {
             let peer_id = DeviceId::parse(&session.peer_id).ok();
 
             let rel_frame = InputTunnelReleaseFrame {
@@ -1623,39 +1616,6 @@ impl Node {
                     let _ = self.send_to(&peer, inner).await;
                 }
             }
-
-            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
-            self.disarm_input_capture();
-            self.reset_reverse_arming_state();
-            let alias = DeviceId::parse(&session.peer_id)
-                .ok()
-                .and_then(|id| self.peer_alias(&id))
-                .unwrap_or_else(|| session.peer_id.clone());
-
-            self.emit(UiEvent::input_seat_changed(
-                "local",
-                false,
-                Some(session.peer_id.clone()),
-            ));
-            self.emit(UiEvent::input_tunnel_session_closed(
-                &session.session_id,
-                &session.peer_id,
-                &alias,
-                &sanitized_reason,
-                now_ms,
-            ));
-
-            self.record_audit(
-                AuditCategory::Security,
-                AuditSeverity::Notice,
-                "input_tunnel_closed",
-                Some(session.peer_id.clone()),
-                format!(
-                    "Input tunnel session {} released: {}",
-                    session.session_id, sanitized_reason
-                ),
-                true,
-            );
 
             Ok(InputTunnelDecisionReport {
                 ok: true,
@@ -1677,6 +1637,68 @@ impl Node {
                 timestamp_ms: now_ms,
             })
         }
+    }
+
+    /// Synchronously end the active input tunnel grant (if any) and restore
+    /// the local seat. No frame is sent to the peer — callers that must
+    /// notify the peer use the async [`Self::input_tunnel_release`]; the
+    /// session-end paths (engine return, inbound Leave, peer gone, input
+    /// stop) call this one because they run on sync hot paths and the peer
+    /// learns of the end through its own Leave/release handling.
+    ///
+    /// Production 2026-11-11: the target's tunnel survived the control
+    /// session's end (edge return processed the Leave, seat went Local, but
+    /// `active_input_tunnel` kept role Target). Every local mouse event was
+    /// then routed into the reverse-takeover arming branch — the normal
+    /// edge-crossing path never ran and Windows could not cross into the
+    /// Mac until the tunnel was manually released.
+    pub fn release_input_tunnel_local(&self, reason: &str) -> Option<ActiveInputTunnelSession> {
+        let session = {
+            let mut guard = self
+                .shared
+                .active_input_tunnel
+                .lock()
+                .expect("active_input_tunnel");
+            guard.take()
+        };
+        let session = session?;
+
+        let now_ms = self.shared.clock.unix_ms();
+        let sanitized_reason = InputTunnelValidator::sanitize_reason(reason);
+        *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        self.disarm_input_capture();
+        self.reset_reverse_arming_state();
+        let alias = DeviceId::parse(&session.peer_id)
+            .ok()
+            .and_then(|id| self.peer_alias(&id))
+            .unwrap_or_else(|| session.peer_id.clone());
+
+        self.emit(UiEvent::input_seat_changed(
+            "local",
+            false,
+            Some(session.peer_id.clone()),
+        ));
+        self.emit(UiEvent::input_tunnel_session_closed(
+            &session.session_id,
+            &session.peer_id,
+            &alias,
+            &sanitized_reason,
+            now_ms,
+        ));
+
+        self.record_audit(
+            AuditCategory::Security,
+            AuditSeverity::Notice,
+            "input_tunnel_closed",
+            Some(session.peer_id.clone()),
+            format!(
+                "Input tunnel session {} released: {}",
+                session.session_id, sanitized_reason
+            ),
+            true,
+        );
+
+        Some(session)
     }
 
     /// Returns the current input tunneling and virtual peripheral sharing policy.
@@ -2022,6 +2044,10 @@ impl Node {
             .expect("engine")
             .on_peer_gone();
         *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        // An operator-ordered stop ends the tunnel grant too — a stale
+        // Target role would keep hijacking local mouse events into the
+        // reverse-arming branch after the stop (production 2026-11-11).
+        self.release_input_tunnel_local("input stopped");
         self.disarm_input_capture();
         self.emit(UiEvent::input_seat_changed(
             "local",
@@ -2128,6 +2154,7 @@ impl Node {
                                     let _ = node.send_input_events(events, "hook_rescue");
                                     *node.shared.input_seat.lock().expect("seat") =
                                         Some(CursorSeat::Local);
+                                    node.release_input_tunnel_local("emergency rescue to local");
                                     node.disarm_input_capture();
                                     crate::platform::warp_mouse_position(cx, cy);
                                     node.emit(UiEvent::input_seat_changed("local", false, None));
@@ -2194,6 +2221,7 @@ impl Node {
                             };
                             let _ = node.send_input_events(events, "guard_force_local");
                             *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                            node.release_input_tunnel_local("emergency rescue to local");
                             node.disarm_input_capture();
                             crate::platform::warp_mouse_position(cx, cy);
                             node.emit(UiEvent::input_seat_changed("local", true, None));
@@ -2430,6 +2458,7 @@ impl Node {
                 server.force_local();
                 let (cx, cy) = server.local_pos();
                 *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                self.release_input_tunnel_local("input channel disconnected");
                 self.disarm_input_capture();
                 crate::platform::warp_mouse_position(cx, cy);
                 self.emit(UiEvent::input_seat_changed("local", false, None));
@@ -2577,6 +2606,7 @@ impl Node {
                     server.force_local();
                     let (cx, cy) = server.local_pos();
                     *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                    self.release_input_tunnel_local("input channel disconnected");
                     self.disarm_input_capture();
                     crate::platform::warp_mouse_position(cx, cy);
                     self.emit(UiEvent::input_seat_changed("local", false, None));
@@ -2600,6 +2630,12 @@ impl Node {
             };
             self.emit(UiEvent::input_seat_changed(seat_str, true, peer));
             if current_seat == CursorSeat::Local {
+                // The roaming control stint is over (sustained-push return);
+                // the tunnel grant must die with it or the stale Target role
+                // hijacks every local mouse event into the reverse-arming
+                // branch and the normal edge crossing never runs again
+                // (production 2026-11-11).
+                self.release_input_tunnel_local("roaming returned to local seat");
                 self.disarm_input_capture();
                 crate::platform::warp_mouse_position(local_pos.0, local_pos.1);
             } else {
@@ -3365,6 +3401,7 @@ impl Node {
                                     if matches!(ev.kind, tetherly_core::InputKind::Leave) {
                                         node.shared.input_engine.lock().expect("engine").on_remote_leave();
                                         *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                                        node.release_input_tunnel_local("target returned to its local seat");
                                         node.disarm_input_capture();
                                         let (cx, cy) = node.shared.input_engine.lock().expect("engine").local_pos();
                                         crate::platform::warp_mouse_position(cx, cy);
@@ -3499,6 +3536,7 @@ impl Node {
                             .force_local();
                         *retry_node.shared.input_seat.lock().expect("seat") =
                             Some(CursorSeat::Local);
+                        retry_node.release_input_tunnel_local("input grace period expired");
                         retry_node.disarm_input_capture();
                         let (cx, cy) = retry_node
                             .shared
@@ -3528,6 +3566,7 @@ impl Node {
                     .expect("engine")
                     .on_peer_gone();
                 *node.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                node.release_input_tunnel_local("peer session gone");
                 node.disarm_input_capture();
                 let (cx, cy) = node.shared.input_engine.lock().expect("engine").local_pos();
                 crate::platform::warp_mouse_position(cx, cy);
@@ -3604,7 +3643,19 @@ impl Node {
                                     // the cursor scalars are synced; the trace is
                                     // refreshed on every other event kind.
                                     let is_move = matches!(ev.kind, InputKind::Move { .. });
+                                    let is_leave = matches!(ev.kind, InputKind::Leave);
                                     if let Ok(leave_opt) = client.apply(ev) {
+                                        if is_leave {
+                                            // The controller ended the roaming stint
+                                            // (its sustained-push return ships a
+                                            // Leave). The tunnel grant must end with
+                                            // it — a stale Target role routes every
+                                            // local mouse event into the
+                                            // reverse-arming branch and blocks the
+                                            // target's own edge crossings
+                                            // (production 2026-11-11).
+                                            node.release_input_tunnel_local("controller left roaming");
+                                        }
                                         if let Some(leave) = leave_opt {
                                             if let Ok(f) = leave.to_frame() {
                                                 let l_len = (f.payload.len() + 12) as u64;
@@ -3825,6 +3876,74 @@ impl Node {
 mod tests {
     use super::*;
     use tetherly_core::InputKind;
+
+    /// Regression (production 2026-11-11): the target-side input tunnel
+    /// survived the control session's end. With a stale
+    /// `active_input_tunnel` of role Target, every local drive event was
+    /// routed into the reverse-takeover arming branch — the normal edge
+    /// crossing never ran and Windows could not cross into the Mac until
+    /// the tunnel was manually released. Every session end (operator stop
+    /// here; engine return / inbound Leave / peer gone elsewhere) must
+    /// release the grant.
+    #[tokio::test]
+    async fn session_end_releases_stale_input_tunnel_grant() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("tunnel-release");
+
+        let stale = ActiveInputTunnelSession {
+            session_id: "tun_test".to_string(),
+            peer_id: "tdev_peer".to_string(),
+            role: InputTunnelRole::Target,
+            requested_edge: None,
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: 0,
+            last_activity_ms: 0,
+        };
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(stale);
+
+        // Mid-screen motion (no edge involved) must NOT touch the
+        // reverse-arming accumulator on the normal local path. Two events:
+        // the arming accumulator diffs against the previous event position,
+        // so the first event after a reset contributes nothing.
+        let _ = node.drive_input_delta(956, 540, 4, 0, 1920, 1080).unwrap();
+        let _ = node.drive_input_delta(960, 540, 4, 0, 1920, 1080).unwrap();
+        let hijacked = node
+            .shared
+            .reverse_move_accum_px
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            hijacked > 0,
+            "stale Target tunnel must be demonstrably hijacking the drive path"
+        );
+
+        // Session end: the operator-ordered stop must clear the grant.
+        node.input_stop().await.unwrap();
+        assert!(
+            node.active_tunnel_role().is_none(),
+            "input_stop must release the input tunnel grant"
+        );
+        assert!(
+            node.release_input_tunnel_local("idempotent second call")
+                .is_none(),
+            "releasing an already-cleared tunnel is a no-op"
+        );
+
+        // With the grant gone, local motion runs the normal path again —
+        // the accumulator stays untouched.
+        let _ = node.drive_input_delta(956, 540, 4, 0, 1920, 1080).unwrap();
+        let _ = node.drive_input_delta(960, 540, 4, 0, 1920, 1080).unwrap();
+        let after = node
+            .shared
+            .reverse_move_accum_px
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            after, 0,
+            "without a Target tunnel, local motion must not feed reverse arming"
+        );
+    }
+
     use tetherly_core::{
         EdgeNeighbor, TopologyStateFrame, TrustStore, TrustedPeer, TYPE_INPUT_CLIP_HINT,
     };
