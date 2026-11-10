@@ -951,6 +951,12 @@ struct Shared {
     /// it may take over; its last cursor position feeds the coordinate-delta
     /// accumulation (Windows hooks report no per-event deltas).
     reverse_move_accum_px: std::sync::atomic::AtomicI64,
+    /// Set when the DRIVE path itself crossed Local->Remote (this node
+    /// started roaming as the controller with its own edge crossing). The
+    /// target's engine also sits in Remote while being controlled
+    /// (`resume_remote`) — an engine Remote->Local oscillation there must
+    /// not be mistaken for a roaming-stint end.
+    roaming_own_crossing: std::sync::atomic::AtomicBool,
     reverse_last_move: Mutex<Option<std::time::Instant>>,
     reverse_last_pos: Mutex<Option<(i32, i32)>>,
     /// Async runtime handle captured at startup: the capture-hook thread has

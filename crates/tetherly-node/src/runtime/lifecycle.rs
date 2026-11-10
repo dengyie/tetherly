@@ -632,6 +632,7 @@ impl Node {
             reverse_arm_since: Mutex::new(None),
             reverse_last_tick: Mutex::new(None),
             reverse_move_accum_px: std::sync::atomic::AtomicI64::new(0),
+            roaming_own_crossing: std::sync::atomic::AtomicBool::new(false),
             reverse_last_move: Mutex::new(None),
             reverse_last_pos: Mutex::new(None),
             rt_handle: Mutex::new(tokio::runtime::Handle::try_current().ok()),
