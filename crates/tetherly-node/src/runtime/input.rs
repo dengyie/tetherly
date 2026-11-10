@@ -2295,6 +2295,64 @@ impl Node {
         Ok(())
     }
 
+    /// Watcher reconciliation for a stranded remote seat (1s tick, no user
+    /// input required).
+    ///
+    /// Production 2026-11-11: after a control stint ended, the peer pushed
+    /// its OWN edge crossing (reverse roaming) — but the persistent channel
+    /// belonged to the old controller's loop, so this node had no
+    /// `input_out`: the push frames buffered into the 2.5s grace window and
+    /// then the user's hand stopped. No further local events means the
+    /// drive-path guard never runs again: the engine sat Remote with
+    /// MOUSE_RELAY armed, swallowing the physical mouse indefinitely
+    /// ("Windows 鼠标都动不了了"). Force the seat back to local and let the
+    /// watcher's reconnect dial rebuild the channel; the arming alignment
+    /// loop revives the mouse on the next tick.
+    ///
+    /// A genuinely controlled target is never rescued: its engine
+    /// legitimately rides Remote while the peer drives it (role receiving /
+    /// active session). A pending takeover is protected by the grace
+    /// deadline check — its ACCEPT resp re-places the seat.
+    pub fn reconcile_stranded_remote_seat(&self) -> bool {
+        if self.input_engine_seat() != CursorSeat::Remote {
+            return false;
+        }
+        if self.input_channel_open_sync() {
+            return false;
+        }
+        let in_grace = {
+            let dl = self
+                .shared
+                .input_reconnect_deadline
+                .lock()
+                .expect("deadline");
+            dl.map(|d| std::time::Instant::now() < d).unwrap_or(false)
+        };
+        if in_grace {
+            return false;
+        }
+        if self.remote_session_active()
+            || self.active_tunnel_role().is_some_and(|r| r.is_receiving())
+        {
+            return false;
+        }
+        let (cx, cy) = {
+            let mut engine = self.shared.input_engine.lock().expect("engine");
+            engine.force_local();
+            let pos = engine.local_pos();
+            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+            self.release_input_tunnel_local("stranded remote seat rescued");
+            self.disarm_input_capture();
+            pos
+        };
+        crate::platform::warp_mouse_position(cx, cy);
+        self.emit(UiEvent::input_seat_changed("local", false, None));
+        tracing::info!(
+            "watcher: stranded remote seat rescued (remote seat with no outbound channel and no grace)"
+        );
+        true
+    }
+
     /// Check if low-level input capture hooks are currently active.
     pub fn is_input_capture_active(&self) -> bool {
         self.shared.input_capture_active.load(Ordering::SeqCst)
@@ -3954,6 +4012,64 @@ mod tests {
     /// the tunnel was manually released. Every session end (operator stop
     /// here; engine return / inbound Leave / peer gone elsewhere) must
     /// release the grant.
+    /// Regression (production 2026-11-11): the drive path crossed into
+    /// Remote while this node owned no outbound channel; with no further
+    /// local events the seat sat Remote and MOUSE_RELAY kept swallowing the
+    /// physical mouse. The watcher reconciliation must force the seat back
+    /// to local — and must never rescue a genuinely controlled target.
+    #[tokio::test]
+    async fn stranded_remote_seat_is_reconciled_without_user_events() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("stranded-seat");
+
+        // Cross into Remote the way the drive path does.
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.set_edge(tetherly_core::ScreenEdge::Right);
+            let crossed = engine.local_move_delta(1919, 500, 4, 0);
+            assert_eq!(crossed, Some(tetherly_core::ScreenEdge::Right));
+            engine.drain();
+        }
+        assert_eq!(node.input_engine_seat(), CursorSeat::Remote);
+        assert!(
+            !node.input_channel_open_sync(),
+            "no channel in the stranded case"
+        );
+
+        // A genuinely controlled target must be spared.
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_ctl".to_string(),
+            peer_id: "tdev_peer".to_string(),
+            role: InputTunnelRole::Target,
+            requested_edge: None,
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: 0,
+            last_activity_ms: 0,
+        });
+        assert!(
+            !node.reconcile_stranded_remote_seat(),
+            "a controlled target's remote seat is legitimate"
+        );
+        assert_eq!(node.input_engine_seat(), CursorSeat::Remote);
+
+        // Grant gone (the stale-tunnel scenario): reconcile rescues the seat.
+        *node.shared.active_input_tunnel.lock().unwrap() = None;
+        assert!(
+            node.reconcile_stranded_remote_seat(),
+            "stranded remote seat must be rescued"
+        );
+        assert_eq!(node.input_engine_seat(), CursorSeat::Local);
+        assert_eq!(
+            *node.shared.input_seat.lock().unwrap(),
+            Some(CursorSeat::Local)
+        );
+        assert!(!node.is_keyboard_armed(), "arming must be released");
+        // Idempotent: nothing left to rescue.
+        assert!(!node.reconcile_stranded_remote_seat());
+    }
+
     #[tokio::test]
     async fn session_end_releases_stale_input_tunnel_grant() {
         let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("tunnel-release");

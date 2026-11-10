@@ -435,6 +435,17 @@ pub(crate) async fn run(
                 continue;
             }
 
+            // 2b. Stranded remote seat reconciliation: the drive path can
+            // cross into Remote with no viable outbound channel (reverse-roam
+            // push over a channel the peer holds); when the user's hand then
+            // stops, no local event ever runs the drive-path guard and the
+            // seat sits Remote with MOUSE_RELAY swallowing the physical mouse
+            // (production 2026-11-11). Rescue it on the tick — no user input
+            // required.
+            if link_watcher.reconcile_stranded_remote_seat() {
+                continue;
+            }
+
             // Recycle stale optimistic attach sessions: `input_tunnel_attach`
             // records role=Controller when SENDING the request; if the peer
             // vanished before answering, the session lingers as a Controller
