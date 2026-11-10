@@ -102,10 +102,16 @@ fn main() -> Result<()> {
     // silently via the panic-in-println path. Detach the parent-inherited
     // console (present when launched from a terminal or when the scheduled
     // task grants one) so writes become harmless no-ops, mirroring the unix
-    // SIGPIPE defaulting below.
+    // SIGPIPE defaulting below. Declared locally instead of via the
+    // windows-sys feature tree: kernel32 has exported FreeConsole since
+    // forever, and one extern beats a whole extra crate feature gate.
     #[cfg(all(windows, not(debug_assertions)))]
     unsafe {
-        windows_sys::Win32::System_Console::FreeConsole();
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn FreeConsole() -> i32;
+        }
+        FreeConsole();
     }
     // A closed downstream pipe (`tetherly accept | head`) must end the
     // process quietly like any classic tool, not panic in println!.
