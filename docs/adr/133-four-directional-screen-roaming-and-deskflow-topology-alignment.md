@@ -109,3 +109,22 @@ pub enum ScreenEdge {
 2. **Mac `input_stop` 立即解除 armed**：接管降级原实现仅清引擎与 seat，macOS 侧 `arm_input_capture` 的鼠标去关联/光标隐藏/遮罩残留到下一次本地物理事件（注入远端 Move 经 magic 放行、不触发 capture worker 对齐尾）。`input_stop` 现同步调用 `disarm_input_capture()`；回归 `test_input_stop_releases_remote_capture_arming`。
 3. **控制器漫游期共享边安全回中（本轮新增，Deskflow 无直接对应）**：控制器进入 Remote 后物理光标停在共享边缘（Windows 非中心停车），OS 将其夹限在 `y=height-1`（如 Bottom），LL hook 连续位置差恒为零——delta 链报告零位移，远端光标搁浅在入口边缘，直到手物理离开边界。新增纯几何 `platform::remote_roam_recenter_target`（按 `last_crossed_edge` 判定死区带、保留自由轴）与 `Node::maybe_recenter_roaming_cursor`（仅 Remote seat），capture worker 于每事件 `drive_input_delta` 后查询，命中即经 `warp_mouse_position` 回中；回中 echo 在同一 hook 线程被 pending-warp 门吞噬并重置 delta baseline（契约回放 `edge_park_recenter_keeps_delta_chain_alive`：饱和链→回中 echo 吞噬→零 delta settle→真实入内运动恢复推进）。Local / Target 永不回中。
 4. **验证边界（如实记录）**：本机 macOS `cargo clippy -p tetherly-core -p tetherly-node --all-targets --locked` 零警告；`tetherly-core` 310+28 全通过；`tetherly-node --lib` 184/184（含上述新回归）。两处 warp-echo 测试共享进程级 `PENDING_WARP_*` 静态态在并行测试下偶发互偷 echo 槽，已加测试期互斥 gate。**未跑全量 workspace 测试**（部分 node/phase/cursor-shield 测试触发真实平台效果，未经隔离）；Windows hook 线程回中与 SetCursorPos echo 顺序需 Windows 原生 CI 与真机验收。已登记未修项：auto-reverse `last_tick` 不推进、双 crossing 路径未统一、滚轮 120x 单位、拖动事件类型、多显示器能力缺口（注入仅寻址主屏）等，见 `.codex-memory/todo.md`。
+
+---
+
+## 增补二（2026-11-10，v0.2.9）：废弃边缘停车+带回中，对齐 Deskflow 独立光标模型
+
+v0.2.8 真机反馈："鼠标局限在 Mac 中下部、无法往上滑"。根因：v0.2.8 的边缘死区带回中与手压夹限边形成**极限环**——手顶死边缘（dy=0）→ 回中 warp 内移 32px → echo 吞噬+baseline 清空 → 手的下一次真实移动被整体算成一个大 delta → 立即再夹限 → 循环。每循环远端仅前进约 32 单位且带跳变，无法连续滑动。
+
+对照 Deskflow 源码（deskflow/deskflow，逐行核实）后按其模型重构：
+
+1. **Deskflow 证据链**：`Server::onMouseMoveSecondary` 控制端维护虚拟坐标 `m_x += dx; m_y += dy` 绝对下发，运动学不依赖自身物理光标；`MSWindowsComputer::onMouseMove`（line 1228）位置差分取 delta 后**每事件 warp 回屏幕中心**（line 1255 `warpCursorNoFlush(m_xCenter, m_yCenter)`），泄漏的 warp 位移用 bogus 几何过滤器丢弃（跨"中心到边距-10px"的 delta 判 bogus，line 1262），warp echo 用 `DESKFLOW_MSG_PRE_WARP/POST_WARP` 消息配对丢弃并 `saveMousePosition` 锚定 baseline（`onPreDispatchPrimary` line 904）；`MSWindowsComputer::leave()` 停车屏幕**中心**（非边缘）+ hook 切 `kHOOK_RELAY_EVENTS`。macOS 端 `CGAssociateMouseAndMouseCursorPosition(false)` 解耦硬件鼠标读 raw delta，Tetherly Mac 已对齐。
+2. **Tetherly 对齐实施（全部 Windows 端，行为变更）**：
+   - 非 mac 停车从共享边缘改为**屏幕中心**（`runtime/input.rs` park 块，与 macOS 统一）；入口状态=稳态。
+   - capture worker 每消费一个 Move 批次、seat 仍为 Remote 时 `roaming_recenter_target()` 决策回中（跳过入口批——park 已回中）；决策方法 seat-scoped 纯几何（`platform::roaming_recenter_target` 返回 `(w/2, h/2)`）。
+   - `hook_move_state::take_warp_echo_reset_baseline` 语义从"baseline 清空（下一事件 settle 0）"改为"**baseline 锚定在 warp 目标**"（Deskflow PRE_WARP `saveMousePosition` 对齐）——回中不再丢一份真实运动；这正是 v0.2.8 极限环的机制来源之一。
+   - Windows `mouse_proc` 接入 `hook_delta_is_bogus`（Deskflow `bogusZoneSize=10` 同几何）：锚定 baseline 后，warp 与 hook FIFO 竞态泄漏的跨屏位移被丢弃，位置链保留。
+   - pending-warp marker TTL 从 macOS 扩展到 Windows（`WARP_MARKER_MAX_AGE_MS=250`）：每批回中使 warp 频率大增，丢失 echo 的 marker 若永不过期会吞掉未来经过回中目标（屏幕中心）的真实事件。
+   - 删除 v0.2.8 的 `remote_roam_recenter_target`（带状决策）与 `Node::maybe_recenter_roaming_cursor`。
+3. **回归**（红绿）：`warp_echo_resets_delta_baseline`（锚定语义）、`hook_bogus_filter_drops_teleport_span_deltas`（纯几何）、`roaming_recenter_target_is_screen_center`、`test_roaming_recenter_decision_is_center_in_remote_seat`（Remote 决策/Local 静默/force_local 后静默）。
+4. **验证边界**：本机 macOS core 310 全通过、node lib 184/184、phase1 68/68、clippy 两 crate 0 警告；**Windows 侧每批回中的 SetCursorPos 频率、hook FIFO 顺序与 bogus 过滤需 Windows 原生 CI + 真机验收**；本地光标可视化表现（回中致可见抖动）与 Deskflow Windows 端一致，真机确认可接受性。

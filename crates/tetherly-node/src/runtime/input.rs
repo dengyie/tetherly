@@ -2133,20 +2133,23 @@ impl Node {
                                     node.emit(UiEvent::input_seat_changed("local", false, None));
                                 }
                             }
-                            // Plan §2.1: while roaming Remote, pull the physical
-                            // cursor off a saturated shared edge BEFORE the user
-                            // reaches it again — a clamped position feeds the
-                            // delta chain zeros forever and strands the remote
-                            // cursor at its entry edge. Only the decision runs
-                            // here; the warp goes through `warp_mouse_position`,
-                            // whose echo this same hook thread swallows with a
-                            // baseline reset (single-thread serialization, see
-                            // hook_move_state). Remote-scoped inside the
-                            // decision method; the returned target already
-                            // cleared the interior/local/axis guards.
-                            if let Some((rx, ry)) = node.maybe_recenter_roaming_cursor(x, y, w, h) {
-                                tracing::info!(hook_x = x, hook_y = y, to_x = rx, to_y = ry, "roaming recenter: pulling physical cursor off saturated shared edge");
-                                crate::platform::warp_mouse_position(rx, ry);
+                            // Deskflow MSWindowsComputer::onMouseMove
+                            // alignment: while roaming Remote on the Windows
+                            // hook-diff pipeline, pull the physical cursor
+                            // back to screen center after every consumed
+                            // motion batch, so the delta chain — anchored at
+                            // the warp target by the echo gate — always
+                            // measures genuine hand motion from center and
+                            // can never saturate at a screen boundary (the
+                            // controller hand and the remote cursor own
+                            // independent positions). The entry batch is
+                            // covered by the park warp below; the decision
+                            // is seat-scoped inside the method.
+                            #[cfg(windows)]
+                            if prev_seat == Some(CursorSeat::Remote) {
+                                if let Some((rx, ry)) = node.roaming_recenter_target(w, h) {
+                                    crate::platform::warp_mouse_position(rx, ry);
+                                }
                             }
                             if let Some(other) = next_non_move {
                                 cur_ev = other;
@@ -2453,7 +2456,7 @@ impl Node {
             return Ok(None);
         }
 
-        let (edge, events, current_seat, local_pos, active_edge) = {
+        let (edge, events, current_seat, local_pos, _active_edge) = {
             let mut server = self.shared.input_engine.lock().expect("engine");
             server.resize(width, height);
             let active_edge = if let Some(e) = self.policy_edge_str().as_deref() {
@@ -2533,23 +2536,21 @@ impl Node {
         let prev_seat = *self.shared.input_seat.lock().expect("seat");
         if current_seat == CursorSeat::Remote {
             if prev_seat != Some(CursorSeat::Remote) {
-                // Deskflow OSXScreen::leave & PR-10231 alignment:
-                // 1) On macOS, WindowServer enforces cursor visibility over the Menu Bar (y = 0) and Dock (y = height - 1),
-                //    refusing hide requests when the cursor sits at the display boundary.
-                //    Parking at screen center moves the pointer into neutral content space away from Menu Bar and Dock.
-                // 2) Warp to safe neutral position BEFORE arming input capture / hiding the cursor.
-                #[cfg(target_os = "macos")]
-                let (park_x, park_y) = {
-                    let _ = active_edge;
-                    (width / 2, height / 2)
-                };
-                #[cfg(not(target_os = "macos"))]
-                let (park_x, park_y) = match active_edge {
-                    tetherly_core::ScreenEdge::Top => (local_pos.0, 0),
-                    tetherly_core::ScreenEdge::Bottom => (local_pos.0, height.saturating_sub(1)),
-                    tetherly_core::ScreenEdge::Left => (0, local_pos.1),
-                    tetherly_core::ScreenEdge::Right => (width.saturating_sub(1), local_pos.1),
-                };
+                // Deskflow OSXScreen::leave & MSWindowsComputer::leave
+                // alignment — park the physical cursor at screen CENTER on
+                // entering Remote, on every platform:
+                // 1) macOS: WindowServer enforces cursor visibility over the
+                //    Menu Bar (y = 0) and Dock (y = height - 1), refusing
+                //    hide requests at display boundaries; center sits in
+                //    neutral content space.
+                // 2) Windows: per-batch roaming recenter anchors the delta
+                //    chain at center anyway, and a center park means the
+                //    entry state equals the steady state (no first-batch
+                //    pull-off); parking at the shared edge instead is what
+                //    stranded the delta chain at saturation (v0.2.8 limit
+                //    cycle).
+                // 3) Warp BEFORE arming input capture / dissociating.
+                let (park_x, park_y) = (width / 2, height / 2);
                 tracing::info!(park_x, park_y, "park warp before remote roaming");
                 crate::platform::warp_mouse_position(park_x, park_y);
                 self.arm_input_capture();
@@ -3102,32 +3103,27 @@ impl Node {
         self.shared.input_engine.lock().expect("engine").seat()
     }
 
-    /// Plan §2.1: recenter decision for the capture worker while roaming the
-    /// Remote seat. A hook position inside the roamed edge's dead zone is
-    /// OS-clamped there: the position-difference delta chain reports zeros
-    /// forever and the remote cursor strands at its entry edge until the
-    /// hand physically leaves the boundary. Returns the warp target pulled
-    /// off the saturated edge (free axis preserved) when the caller should
-    /// warp, `None` otherwise. The caller executes the warp through
-    /// `warp_mouse_position`, whose echo is swallowed and whose baseline
-    /// reset is serialized on the single hook thread (replayed in
-    /// `edge_park_recenter_keeps_delta_chain_alive`). Seat-scoped: Local
-    /// movement owns the whole screen and is never recentred.
-    pub fn maybe_recenter_roaming_cursor(
-        &self,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-    ) -> Option<(i32, i32)> {
+    /// Per-batch roaming recenter decision for the capture worker (Deskflow
+    /// MSWindowsComputer::onMouseMove alignment): while roaming the Remote
+    /// seat, every consumed motion batch pulls the physical cursor back to
+    /// screen center. The delta chain — anchored at the warp target by the
+    /// echo gate — then always measures genuine hand motion from center and
+    /// can never saturate at a screen boundary: the controller's hand and
+    /// the remote cursor own independent positions. Seat-scoped: Local
+    /// movement owns the whole screen and is never recentred. The caller
+    /// executed the warp through `warp_mouse_position`, whose echo is
+    /// swallowed with the baseline anchored at the target (replayed in the
+    /// platform warp-echo tests). Production callers are Windows-only:
+    /// macOS needs no recenter, its capture is dissociated from the
+    /// hardware mouse (`CGAssociateMouseAnd...`) and reads raw CGEvent
+    /// deltas — the method stays seat-agnostic so the decision logic is
+    /// unit-testable on any platform.
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    pub fn roaming_recenter_target(&self, width: i32, height: i32) -> Option<(i32, i32)> {
         if self.input_engine_seat() != CursorSeat::Remote {
             return None;
         }
-        let crossed = {
-            let engine = self.shared.input_engine.lock().expect("engine");
-            engine.last_crossed_edge()
-        };
-        crate::platform::remote_roam_recenter_target(x, y, width, height, 8, crossed)
+        Some(crate::platform::roaming_recenter_target(width, height))
     }
 
     /// The engine's parked local cursor position (pixels). Used by tests to
@@ -4578,23 +4574,23 @@ mod tests {
         );
     }
 
-    /// Plan §2.1: while roaming the Remote seat, the capture worker must
-    /// consult the recenter decision on every hook move — a hook position
-    /// inside the roamed edge's dead-zone band (the OS clamps there, the
-    /// delta chain reports zeros, remote motion strands) must produce a
-    /// warp DECISION; interior positions, Local seat, and the non-roaming
-    /// axes must not. The method returns the decision; the caller executes
-    /// the warp through the echo-gated `warp_mouse_position` (whose
-    /// hook-side contract is replayed in platform tests). Asserted at the
-    /// decision boundary so the test never warps a real cursor.
+    /// Deskflow MSWindowsComputer::onMouseMove alignment: while roaming the
+    /// Remote seat, the capture worker must pull the physical cursor back to
+    /// screen center after every consumed motion batch — the delta chain is
+    /// anchored at the warp target by the echo gate, so it always measures
+    /// genuine hand motion from center and never saturates at a screen
+    /// boundary (the controller hand and the remote cursor own independent
+    /// positions). The method returns the decision; the caller executes the
+    /// warp through the echo-gated `warp_mouse_position` (whose hook-side
+    /// contract is replayed in platform tests). Asserted at the decision
+    /// boundary so the test never warps a real cursor.
     #[tokio::test]
-    async fn test_roaming_recenter_decision_scoped_to_remote_dead_zone() {
-        use tetherly_core::ScreenEdge;
+    async fn test_roaming_recenter_decision_is_center_in_remote_seat() {
         let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("roam-recenter");
 
-        // Local seat: never decide.
+        // Local seat: never decide — local movement owns the whole screen.
         assert_eq!(
-            node.maybe_recenter_roaming_cursor(1919, 1079, 1920, 1080),
+            node.roaming_recenter_target(1920, 1080),
             None,
             "local seat owns its edges — no recenter decision"
         );
@@ -4602,37 +4598,36 @@ mod tests {
         // Enter Remote through the Right edge (crossing event x >= width).
         {
             let mut engine = node.shared.input_engine.lock().unwrap();
-            engine.set_edge(ScreenEdge::Right);
+            engine.set_edge(tetherly_core::ScreenEdge::Right);
             engine.local_move_delta(1920, 540, 10, 0);
             assert_eq!(engine.seat(), CursorSeat::Remote);
         }
 
-        // Roaming, but interior: no decision.
+        // Roaming: every consumed batch decides a center pull — the target
+        // is exactly the screen center and is INDEPENDENT of the hook
+        // position (the decision consumes no position at all: entry-edge,
+        // interior and clamped-corner states all converge to the same
+        // steady-state center park).
         assert_eq!(
-            node.maybe_recenter_roaming_cursor(960, 540, 1920, 1080),
-            None,
-            "interior roaming must not recenter"
+            node.roaming_recenter_target(1920, 1080),
+            Some((960, 540)),
+            "roaming batch must recenter to screen center"
+        );
+        assert_eq!(
+            node.roaming_recenter_target(2560, 1440),
+            Some((1280, 720)),
+            "decision scales with the engine's screen geometry"
         );
 
-        // Roaming and parked in the roamed edge's dead zone (Right: x near
-        // width): must decide — the returned target is pulled off the edge
-        // with the free axis preserved.
-        let (tx, ty) = node
-            .maybe_recenter_roaming_cursor(1919, 400, 1920, 1080)
-            .expect("saturated roamed edge must decide a recenter");
-        assert!(
-            tx < 1920 - 8,
-            "target must be clearly off the right edge, got ({tx}, {ty})"
-        );
-        assert_eq!(ty, 400, "free axis must be preserved");
-
-        // Roaming through Right but the position saturates on the OTHER
-        // axis (bottom corner): the roamed edge governs — no decision (the
-        // bottom axis belongs to a different edge contract).
+        // After the seat returns Local, the decision must go silent again.
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.force_local();
+        }
         assert_eq!(
-            node.maybe_recenter_roaming_cursor(960, 1079, 1920, 1080),
+            node.roaming_recenter_target(1920, 1080),
             None,
-            "only the roamed edge's own dead zone decides"
+            "returned local seat must not recenter"
         );
     }
 }

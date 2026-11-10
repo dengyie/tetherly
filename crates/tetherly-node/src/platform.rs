@@ -664,14 +664,17 @@ static PENDING_WARP_ECHOES: std::sync::atomic::AtomicU32 = std::sync::atomic::At
 // their deltas zeroed for this many events (see the macOS tap below).
 #[cfg(target_os = "macos")]
 static WARP_SETTLE_EVENTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-// Time bound for both warp counters. If the post-warp events never surface
-// (tap disabled by timeout, events lost), the counters would otherwise hang
-// and silently zero the deltas of the user's next real motions. The marker
-// expires after this window; a warp that delivered no events within it is
-// indistinguishable from a warp that delivered them all.
-#[cfg(target_os = "macos")]
+// Time bound for the warp marker (both platforms). If the post-warp events
+// never surface (tap disabled by timeout, events lost, SetCursorPos failed,
+// or the echo consumed by another window's LL hook), the marker would
+// otherwise stay armed forever and swallow a future REAL event that happens
+// to land on the warp target — with per-batch roaming recenters, the target
+// is screen center, where the roaming hand is most of the time. The marker
+// expires after this window; a warp that delivered no echo within it is
+// indistinguishable from a warp that delivered it.
+#[cfg(any(windows, target_os = "macos"))]
 const WARP_MARKER_MAX_AGE_MS: u64 = 250;
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 static WARP_MARKED_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -680,17 +683,17 @@ fn mark_pending_warp(x: i32, y: i32) {
     PENDING_WARP_X.store(x, Ordering::SeqCst);
     PENDING_WARP_Y.store(y, Ordering::SeqCst);
     PENDING_WARP_VALID.store(true, Ordering::SeqCst);
+    WARP_MARKED_AT_MS.store(now_mono_ms(), Ordering::SeqCst);
     #[cfg(target_os = "macos")]
     {
         PENDING_WARP_ECHOES.store(2, Ordering::SeqCst);
         // Zero the deltas of the first few post-warp events: macOS computes
         // them across the teleport, so they carry the park displacement.
         WARP_SETTLE_EVENTS.store(4, Ordering::SeqCst);
-        WARP_MARKED_AT_MS.store(now_mono_ms(), Ordering::SeqCst);
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 fn now_mono_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -703,7 +706,7 @@ fn now_mono_ms() -> u64 {
 /// marker older than [`WARP_MARKER_MAX_AGE_MS`] is dropped on read: its
 /// events never surfaced (lost or tap disabled), so letting the counters hang
 /// would zero the deltas of the user's next real motions.
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 fn warp_marker_fresh() -> bool {
     use std::sync::atomic::Ordering;
     let marked = WARP_MARKED_AT_MS.load(Ordering::SeqCst);
@@ -721,17 +724,18 @@ fn take_warp_echo(x: i32, y: i32) -> bool {
     if !PENDING_WARP_VALID.load(Ordering::SeqCst) {
         return false;
     }
-    #[cfg(target_os = "macos")]
-    {
-        // Expired marker: its events never surfaced (tap disabled or lost).
-        // Drop the whole marker instead of letting stale echo/settle counters
-        // eat later real events.
-        if !warp_marker_fresh() {
-            PENDING_WARP_VALID.store(false, Ordering::SeqCst);
+    // Expired marker: its events never surfaced (tap disabled, events lost,
+    // SetCursorPos failed, or the echo eaten by another LL hook). Drop the
+    // whole marker instead of letting a stale echo slot eat a future REAL
+    // event that happens to land on the warp target.
+    if !warp_marker_fresh() {
+        PENDING_WARP_VALID.store(false, Ordering::SeqCst);
+        #[cfg(target_os = "macos")]
+        {
             PENDING_WARP_ECHOES.store(0, Ordering::SeqCst);
             WARP_SETTLE_EVENTS.store(0, Ordering::SeqCst);
-            return false;
         }
+        return false;
     }
     let wx = PENDING_WARP_X.load(Ordering::SeqCst);
     let wy = PENDING_WARP_Y.load(Ordering::SeqCst);
@@ -769,12 +773,14 @@ mod hook_move_state {
 
     /// One WM_MOUSEMOVE through the warp-echo gate. Returns true when the
     /// event is the echo of a pending programmatic warp and was swallowed;
-    /// the delta baseline is forgotten with it, so the first real event
-    /// after the warp settles with zero motion instead of reporting the
-    /// teleport displacement (the Windows twin of macOS Root-fix F).
+    /// the delta baseline is ANCHORED at the echo position (the warp target)
+    /// with it — Deskflow PRE_WARP `saveMousePosition` alignment. The next
+    /// real motion is then measured from wherever the cursor actually is, so
+    /// per-batch roaming recenters never lose motion; the pre-warp in-flight
+    /// hazard of the anchored baseline is covered by `hook_delta_is_bogus`.
     pub(super) fn take_warp_echo_reset_baseline(x: i32, y: i32) -> bool {
         if super::take_warp_echo(x, y) {
-            LAST_MOVE_POS.with(|p| *p.borrow_mut() = None);
+            LAST_MOVE_POS.with(|p| *p.borrow_mut() = Some((x, y)));
             true
         } else {
             false
@@ -933,66 +939,48 @@ pub fn warp_mouse_position(x: i32, y: i32) {
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn warp_mouse_position(_x: i32, _y: i32) {}
 
-/// Recenter decision for the controller side while roaming the Remote seat
-/// (pure geometry; callers own the seat check and the actual warp).
+/// Per-batch roaming recenter target (Deskflow MSWindowsComputer
+/// alignment): while roaming the Remote seat on the Windows hook-diff
+/// pipeline, the runtime pulls the physical cursor back to screen center
+/// after every consumed motion batch (Deskflow: `onMouseMove` warps to
+/// `m_xCenter`/`m_yCenter` after every secondary motion). The delta chain
+/// — anchored at the warp target by the echo gate (`hook_move_state`) —
+/// then always measures genuine hand motion from center and can never
+/// saturate at a screen boundary: the Windows hand and the Mac cursor own
+/// independent positions, exactly as in Deskflow.
 ///
-/// While roaming, the physical cursor stays where the hand is: at the shared
-/// edge the OS clamps it, consecutive hook positions stop changing, and the
-/// derived delta chain reports zeros forever — the remote cursor strands at
-/// its entry edge until the user physically drags the hand back inward. To
-/// keep roaming continuous the runtime must pull the physical cursor off the
-/// saturated edge BEFORE the user reaches it again, and the resulting warp
-/// flows through the pending-warp echo gate (swallowed + baseline reset, see
-/// `hook_move_state`).
+/// Pure geometry; callers own the seat check and the actual warp.
+pub(crate) fn roaming_recenter_target(width: i32, height: i32) -> (i32, i32) {
+    ((width.max(1)) / 2, (height.max(1)) / 2)
+}
+
+/// Deskflow bogus-motion filter (MSWindowsComputer::onMouseMove
+/// `bogusZoneSize`): with the delta baseline anchored at screen center by
+/// the roaming recenter, a delta spanning roughly the center-to-edge
+/// distance cannot be a hand motion — it is the leaked displacement of a
+/// cursor warp racing the hook FIFO (an in-flight pre-warp event consumed
+/// after the echo anchored the baseline at center). Deskflow drops motion
+/// beyond the center-to-edge distance minus a 10px tolerance; same
+/// geometry here, on the Windows hook only (macOS reads raw CGEvent
+/// deltas and never derives them from positions).
 ///
-/// Returns `Some((target_x, target_y))` when the observed hook position sits
-/// on the dead-zone band of the edge being roamed THROUGH (the axis that
-/// saturates), with the free axis preserved; `None` when interior or when the
-/// roamed edge does not govern this position. `band` is the dead-zone depth
-/// in px (production: 8, matching the TB band and edge normalization bands).
-pub(crate) fn remote_roam_recenter_target(
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    band: i32,
-    crossed: tetherly_core::ScreenEdge,
-) -> Option<(i32, i32)> {
-    use tetherly_core::ScreenEdge;
+/// Returns true when the delta must be dropped (zeroed) as bogus.
+#[cfg(any(windows, all(target_os = "macos", test)))]
+pub(crate) fn hook_delta_is_bogus(dx: i32, dy: i32, width: i32, height: i32) -> bool {
+    const BOGUS_ZONE_PX: i32 = 10;
     let (w, h) = (width.max(1), height.max(1));
-    let band = band.max(1);
-    match crossed {
-        // Roaming RIGHT: the saturating axis is X at the right edge (the
-        // cursor entered through Right and parks clamped at x = w-1).
-        ScreenEdge::Right => {
-            if x >= w - band {
-                Some((w - band * 4, y))
-            } else {
-                None
-            }
-        }
-        ScreenEdge::Left => {
-            if x <= band {
-                Some((band * 4, y))
-            } else {
-                None
-            }
-        }
-        ScreenEdge::Bottom => {
-            if y >= h - band {
-                Some((x, h - band * 4))
-            } else {
-                None
-            }
-        }
-        ScreenEdge::Top => {
-            if y <= band {
-                Some((x, band * 4))
-            } else {
-                None
-            }
-        }
-    }
+    let (cx, cy) = (w / 2, h / 2);
+    let bogus_x = if dx > 0 {
+        dx + BOGUS_ZONE_PX > w - cx
+    } else {
+        -dx + BOGUS_ZONE_PX > cx
+    };
+    let bogus_y = if dy > 0 {
+        dy + BOGUS_ZONE_PX > h - cy
+    } else {
+        -dy + BOGUS_ZONE_PX > cy
+    };
+    bogus_x || bogus_y
 }
 
 #[cfg(windows)]
@@ -1388,6 +1376,18 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
         .set(tx)
         .map_err(|_| CoreError::Json("input hooks already started".into()))?;
 
+    // Hook-side screen geometry for the bogus-motion filter
+    // (`hook_delta_is_bogus`), read once at hook install. A display
+    // change mid-session re-resizes the engine elsewhere; a stale filter
+    // bound only loosens/tightens by the size delta and stays correct
+    // within the ±10px bogus zone against plausible hand motions.
+    static SCREEN_W: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+    static SCREEN_H: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+    use std::sync::atomic::Ordering;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+    SCREEN_W.store(unsafe { GetSystemMetrics(SM_CXSCREEN) }, Ordering::Relaxed);
+    SCREEN_H.store(unsafe { GetSystemMetrics(SM_CYSCREEN) }, Ordering::Relaxed);
+
     unsafe fn push(ev: RawInput) {
         if let Some(tx) = SENDER.get() {
             // Best effort under a stalled consumer: the system unhooks a slow
@@ -1422,7 +1422,22 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                         // takeover's direction discipline (`Bottom => dy > 0`)
                         // both consume these — hard zeros here silently dead
                         // the Windows→Mac takeover (production regression).
-                        let (dx, dy) = hook_move_state::advance(mi.pt.x, mi.pt.y);
+                        let (mut dx, mut dy) = hook_move_state::advance(mi.pt.x, mi.pt.y);
+                        // Deskflow bogus-motion filter: a delta spanning the
+                        // center-to-edge distance is the leaked displacement
+                        // of a recenter/park warp racing this hook's FIFO
+                        // (in-flight pre-warp event consumed after the echo
+                        // anchored the baseline at the warp target) — drop
+                        // the motion, keep the position chain.
+                        if hook_delta_is_bogus(
+                            dx,
+                            dy,
+                            SCREEN_W.load(Ordering::Relaxed),
+                            SCREEN_H.load(Ordering::Relaxed),
+                        ) {
+                            dx = 0;
+                            dy = 0;
+                        }
                         push(RawInput::Move {
                             x: mi.pt.x,
                             y: mi.pt.y,
@@ -2555,12 +2570,13 @@ mod input_tests {
 
     // Runs on macOS only under `cfg(test)` (hook_move_state is compiled
     // outside Windows just for this): proves the Windows hook's warp echo
-    // swallows the teleport displacement instead of letting the next real
-    // move report it as its delta. Without the baseline reset the first
-    // post-warp event carries the full warp displacement and jumps the
-    // remote cursor — the Windows twin of macOS Root-fix F (production:
-    // Windows→Mac reverse takeover worked, then the first warp-poisoned
-    // move yanked the Mac cursor).
+    // swallows the teleport displacement and ANCHORS the delta baseline at
+    // the warp target (Deskflow PRE_WARP saveMousePosition alignment) — the
+    // next real motion is measured from wherever the cursor actually is, so
+    // per-batch roaming recenters never lose motion. The one hazard of the
+    // anchored baseline (a pre-warp in-flight event consumed after the echo
+    // reporting a teleport-spanning delta) is covered by the bogus filter in
+    // `hook_delta_is_bogus`.
     #[cfg(all(target_os = "macos", test))]
     #[test]
     fn warp_echo_resets_delta_baseline() {
@@ -2571,142 +2587,90 @@ mod input_tests {
         assert_eq!(hook_move_state::advance(500, 400), (0, 0)); // cold start: no baseline
         assert_eq!(hook_move_state::advance(510, 404), (10, 4));
 
-        // 2. Programmatic warp to the edge-entry point; the hook sees the
-        //    echo at the warp target and must swallow it (not (dx, dy) it).
-        super::mark_pending_warp(1800, 900);
-        assert!(hook_move_state::take_warp_echo_reset_baseline(1800, 900));
+        // 2. Programmatic warp to screen center (roaming recenter); the hook
+        //    sees the echo at the warp target and must swallow it (not
+        //    (dx, dy) it).
+        super::mark_pending_warp(960, 540);
+        assert!(hook_move_state::take_warp_echo_reset_baseline(960, 540));
 
-        // 3. The next REAL event (hand moved on to (1806, 903)) must settle
-        //    with dx=dy=0 — the baseline was forgotten with the echo. The
-        //    buggy path would report the whole teleport (1296, 499) as
-        //    one move and yank the remote cursor.
-        assert_eq!(hook_move_state::advance(1806, 903), (0, 0));
+        // 3. The next REAL event (hand moved on to (966, 544)) is measured
+        //    from the anchored baseline at the warp target: delta = the
+        //    genuine hand motion since the warp — not zero, and not the
+        //    teleport displacement.
+        assert_eq!(hook_move_state::advance(966, 544), (6, 4));
 
         // 4. Baseline re-established: deltas track again.
-        assert_eq!(hook_move_state::advance(1816, 907), (10, 4));
+        assert_eq!(hook_move_state::advance(976, 548), (10, 4));
 
         // 5. A position that is NOT the warp target never matches the
-        //    marker: no echo, and the baseline is left alone (reset happens
+        //    marker: no echo, and the baseline is left alone (anchor happens
         //    only when an echo is actually consumed).
         super::mark_pending_warp(100, 100);
         assert!(!hook_move_state::take_warp_echo_reset_baseline(5000, 5000));
-        assert_eq!(hook_move_state::advance(5010, 5010), (3194, 4103));
+        assert_eq!(hook_move_state::advance(5000, 5004), (4024, 4456));
 
-        // 6. Only the echo at the marker's target consumes it and resets
+        // 6. Only the echo at the marker's target consumes it and anchors
         //    the baseline; misses in between don't.
         super::mark_pending_warp(20, 30);
         assert!(!hook_move_state::take_warp_echo_reset_baseline(5020, 5030));
-        assert_eq!(hook_move_state::advance(5030, 5040), (20, 30));
+        assert_eq!(hook_move_state::advance(5030, 5040), (30, 36));
         assert!(hook_move_state::take_warp_echo_reset_baseline(20, 30));
-        assert_eq!(hook_move_state::advance(26, 33), (0, 0));
+        assert_eq!(hook_move_state::advance(26, 33), (6, 3));
     }
 
-    /// Edge-saturation replay (synthetic positions, no OS): the controller
-    /// parks at the shared edge on entering Remote, and deltas come from
-    /// consecutive hook positions. When the OS clamps the cursor at the
-    /// boundary, the position-difference chain reports dy=0 forever, and
-    /// the remote cursor strands at the entry edge. A recenter warp to
-    /// mid-screen must (a) be swallowed as a warp echo, (b) reset the
-    /// delta baseline so the first settled event is zero-delta, and (c)
-    /// let subsequent real inward motion advance the chain again.
+    /// Deskflow bogus-motion filter (MSWindowsComputer::onMouseMove): with
+    /// the delta baseline anchored at screen center by the roaming recenter,
+    /// a delta that spans roughly the center-to-edge distance cannot be a
+    /// hand motion — it is the leaked displacement of a warp racing the hook
+    /// FIFO (in-flight pre-warp event consumed after the echo anchored the
+    /// baseline at center). The filter must drop exactly those and keep all
+    /// plausible hand motions. Pure geometry, replayed synthetically.
     #[cfg(all(target_os = "macos", test))]
     #[test]
-    fn edge_park_recenter_keeps_delta_chain_alive() {
-        use super::hook_move_state;
-
-        // Approach the bottom edge with real motion.
-        let _gate = super::warp_state_test_gate();
-        assert_eq!(hook_move_state::advance(960, 1060), (0, 0)); // cold start
-        assert_eq!(hook_move_state::advance(960, 1072), (0, 12));
-        assert_eq!(hook_move_state::advance(960, 1079), (0, 7));
-
-        // The runtime warps the cursor mid-screen while the seat goes
-        // Remote (park/rescue path). The hook sees the echo and must
-        // swallow it with a baseline reset.
-        super::mark_pending_warp(960, 540);
-        assert!(hook_move_state::take_warp_echo_reset_baseline(960, 540));
-
-        // Hand still pressed down at the physical edge: first settled event
-        // reports the CLAMPED position again. Baseline was forgotten, so
-        // this event is zero-delta (no teleport yank).
-        assert_eq!(hook_move_state::advance(960, 1079), (0, 0));
-
-        // More clamped pushes: dy stays 0 (the saturation chain), which is
-        // exactly the condition that strands remote motion upstream.
-        assert_eq!(hook_move_state::advance(960, 1079), (0, 0));
-        assert_eq!(hook_move_state::advance(960, 1079), (0, 0));
-
-        // The recenter cycle repeats BEFORE the user reaches the boundary
-        // again: echo swallowed, baseline reset, zero-delta settle.
-        super::mark_pending_warp(960, 540);
-        assert!(hook_move_state::take_warp_echo_reset_baseline(960, 540));
-        assert_eq!(hook_move_state::advance(960, 1079), (0, 0));
-
-        // Hand moves inward: the first post-settle inward event re-derives
-        // from the re-established baseline at the edge (960,1079), so it
-        // carries the full hand travel since the settle — NOT zero, and
-        // NOT the warp displacement (that was swallowed). This is the
-        // cursor-following contract: deltas track real motion again, which
-        // is what keeps the remote cursor movable.
-        assert_eq!(hook_move_state::advance(960, 600), (0, -479));
-        assert_eq!(hook_move_state::advance(970, 610), (10, 10));
-    }
-
-    /// Recenter decision while roaming Remote (plan §2.1): the runtime must
-    /// move the physical cursor off the shared edge BEFORE the user reaches
-    /// it again, because a clamped position feeds the delta chain zeros
-    /// forever (the saturation replay above) and strands the remote cursor.
-    /// Pure geometry — no OS effect — so the runtime can consult it per event
-    /// and warp only when it says so (warp targets then flow through the
-    /// echo/settle gate replayed above).
-    ///
-    /// Contract:
-    /// - seat-local (not roaming): no recenter decision — Local movement
-    ///   owns the whole screen including its edges;
-    /// - roaming and observed position inside the edge dead-zone: recenter
-    ///   target strictly off the roamed edge, on the roamed edge's own axis
-    ///   (the clamped axis is the one saturating);
-    /// - roaming but interior: no decision (nothing saturates yet);
-    /// - the free axis of the cursor is preserved (only the saturating axis
-    ///   is pulled in).
-    #[cfg(all(target_os = "macos", test))]
-    #[test]
-    fn remote_roam_recenter_target_pulls_off_saturated_edge() {
-        use tetherly_core::ScreenEdge;
+    fn hook_bogus_filter_drops_teleport_span_deltas() {
         let (w, h) = (1920_i32, 1080_i32);
-        let band = 8; // matches the TB band and the Right/Left normalize band
+        let (cx, cy) = (w / 2, h / 2);
 
-        // Bottom edge (shared-edge park at y = h-1 while roaming Remote):
-        // saturated position must produce a target pulled up (inward).
-        let t = remote_roam_recenter_target(w - 1, h - 1, w, h, band, ScreenEdge::Bottom)
-            .expect("saturated bottom edge must recenter");
-        assert!(
-            t.1 < h - 1 - band,
-            "target must be clearly off the bottom edge, got {t:?}"
-        );
-        assert_eq!(t.0, w - 1, "free axis must be preserved");
+        // Ordinary hand motions from the center baseline: never bogus.
+        assert!(!hook_delta_is_bogus(6, 4, w, h));
+        assert!(!hook_delta_is_bogus(-200, 150, w, h));
+        assert!(!hook_delta_is_bogus(0, 0, w, h));
 
-        // Interior of the screen: nothing saturates, no recenter.
-        assert_eq!(
-            remote_roam_recenter_target(960, 540, w, h, band, ScreenEdge::Bottom),
-            None,
-            "interior position must not recenter"
-        );
+        // A violent flick stays far below the center-to-edge distance.
+        assert!(!hook_delta_is_bogus(-300, 250, w, h));
 
-        // Right edge saturation: target pulled left, free axis preserved.
-        let t = remote_roam_recenter_target(w - 1, 400, w, h, band, ScreenEdge::Right)
-            .expect("saturated right edge must recenter");
-        assert!(t.0 < w - 1 - band, "target must be off the right edge");
-        assert_eq!(t.1, 400, "free axis must be preserved");
+        // A leaked teleport displacement (edge position consumed after the
+        // center anchor): spans the FULL center-to-edge distance — only
+        // deltas that reach past (span - 10px) are bogus, so the fixture
+        // must go beyond the span itself, exactly like the in-flight
+        // pre-warp event it models (edge → center anchor).
+        assert!(hook_delta_is_bogus(cx - 5, 0, w, h));
+        assert!(hook_delta_is_bogus(-(cx - 5), 0, w, h));
+        assert!(hook_delta_is_bogus(0, cy - 5, w, h));
+        assert!(hook_delta_is_bogus(0, -(cy - 5), w, h));
 
-        // Local seat: the roaming path is the only consumer — a Local-seat
-        // edge value must never be forwarded here; document the contract by
-        // asserting the function stays silent for an interior edge anyway.
-        assert_eq!(
-            remote_roam_recenter_target(w - 1, h - 1, w, h, band, ScreenEdge::Top),
-            None,
-            "roaming through Top never parks on Bottom"
-        );
+        // Mixed motion: one axis spanning, the other genuine — still bogus.
+        assert!(hook_delta_is_bogus(cx - 5, 4, w, h));
+
+        // Tiny screens keep the margin: a flick-size delta stays legit.
+        assert!(!hook_delta_is_bogus(300, 250, 800, 600));
+    }
+
+    /// Per-batch roaming recenter (Deskflow MSWindowsComputer::onMouseMove):
+    /// while roaming the Remote seat, the physical cursor is pulled back to
+    /// screen center after every consumed motion batch, so the delta chain —
+    /// anchored at center by the echo gate — always measures genuine hand
+    /// motion and can never saturate at a screen boundary. Pure geometry —
+    /// the target is the screen center; the caller owns the seat check and
+    /// the actual warp.
+    #[cfg(all(target_os = "macos", test))]
+    #[test]
+    fn roaming_recenter_target_is_screen_center() {
+        let (w, h) = (1920_i32, 1080_i32);
+        assert_eq!(roaming_recenter_target(w, h), (960, 540));
+        assert_eq!(roaming_recenter_target(800, 600), (400, 300));
+        // Degenerate dimensions stay inside the screen.
+        assert_eq!(roaming_recenter_target(1, 1), (0, 0));
     }
 
     #[cfg(target_os = "macos")]
