@@ -664,9 +664,11 @@ impl Node {
                 .lock()
                 .expect("active_input_tunnel");
             let Some(session) = guard.as_mut() else {
+                tracing::info!(session_id = %frame.session_id, peer = %peer_str, "input tunnel resp: no armed session; dropping stale resp");
                 return;
             };
             if session.session_id != frame.session_id {
+                tracing::info!(session_id = %frame.session_id, armed = %session.session_id, "input tunnel resp: session id mismatch; dropping stale resp");
                 return;
             }
             if frame.accepted {
@@ -1499,8 +1501,10 @@ impl Node {
             });
         }
         let inner = req_frame.to_frame()?;
+        tracing::info!(session_id = %session_id, peer = %peer_str, "input tunnel attach: controller session pre-armed");
         if let Err(e) = self.send_to(&peer_id, inner).await {
             // Roll the pre-arm back — no request on the wire, no grant.
+            warn!(session_id = %session_id, peer = %peer_str, %e, "input tunnel attach: send failed; pre-arm rolled back");
             let mut guard = self
                 .shared
                 .active_input_tunnel
