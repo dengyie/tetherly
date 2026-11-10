@@ -103,3 +103,18 @@ v0.1.74 引入距离武装后的生产代码审查暴露了时钟域与状态生
    - 提取 `reset_reverse_arming_state()`，在入站隧道建立（`receive_input_tunnel_req`）、隧道主动注销（`input_tunnel_release`）与入站通道退出清理（`attach_input_client`）时显式清零距离累加与驻留起点，杜绝前序会话未过 2s 窗口留存的累加距离击穿新会话防御。
 3. **物理活跃心跳扩展（Physical Activity Heartbeat）**：
    - 在 `drive_input_button` 与 `drive_input_wheel` 中植入 `note_reverse_physical_activity()`，在原地点击或滚动时刷新最近物理活跃时间，防止误判为静止超时。
+
+---
+
+## 增补（2026-11-11，v0.2.12）：控制会话结束必须同步释放 input tunnel 授权
+
+v0.2.11 真机反馈："Mac 控制 Windows 一切正常，但 Windows 鼠标到不了 Mac"。根因：Mac→Windows 控制会话经 input tunnel 建立（目标端 `active_input_tunnel` role=Target）；v0.2.11 持续推挤返回成功后（席位回 Local、Leave 已处理），**目标端的 tunnel 授权从未释放**。此后 Windows 每个本地鼠标事件都被 `drive_input_delta` 的 Target 分支劫持进反接管 arming（`maybe_auto_reverse`，含 300px 距离门与 2s 空闲重置），**正常越边路径完全不执行**——Windows 推底边永远无效，直到手工调用 release API。日志证据：`auto-reverse blocked: distance gate not armed accum_px=32 gate_px=300 edge=bottom`。
+
+修复（`runtime/input.rs`，行为变更）：
+
+1. 新增同步助手 `release_input_tunnel_local(reason)`：take 授权 + 席位回 Local + disarm + 重置反接管 arming + 发出关闭事件与审计；不发对端帧（对端经各自 Leave/release 路径同步）。`input_tunnel_release`（显式 API）复用该助手并保留对端 ReleaseFrame 发送。
+2. **所有会话结束点接线**：控制端自身引擎返回（持续推挤返回的席位切换块）、控制端收到对端 Leave、目标端收到 Leave（`attach_input_client` 循环）、`input_stop`、双 peer-gone 清理、grace 过期清理、两处紧急救援（hook_rescue/guard_force_local）、两处 channel 断连守卫。规则：**凡运行时因会话结束强制回 Local 席之处，tunnel 授权同死**。
+3. 回归：`session_end_releases_stale_input_tunnel_grant`——伪造 role=Target 残留授权，断言驱动路径被劫持（reverse arming 累积 >0）；`input_stop` 后授权清空、再次驱动不进 arming 分支（累积保持 0）；二次 release 幂等。
+4. 目标端物理反推（auto-reverse）语义不变：仅在授权活跃时参与；MOUSE_RELAY 期间 Windows 物理事件被吞、该路径在其上天然沉默（ADR-133 增补四的既定边界）。
+
+验证边界：本机 node lib 185/185、clippy 0 警告；真机验收项：Mac→Windows 控制往返之后，Windows 立即可推底边进入 Mac（无需任何手工 API 调用）。
