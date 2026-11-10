@@ -2143,10 +2143,13 @@ impl Node {
                             // can never saturate at a screen boundary (the
                             // controller hand and the remote cursor own
                             // independent positions). The entry batch is
-                            // covered by the park warp below; the decision
-                            // is seat-scoped inside the method.
+                            // covered by the park warp in
+                            // `drive_input_delta`; the decision method is
+                            // seat-scoped (Remote-only) and the skip below
+                            // only short-circuits a redundant same-position
+                            // warp on the entry batch itself.
                             #[cfg(windows)]
-                            if prev_seat == Some(CursorSeat::Remote) {
+                            if node.input_engine_seat() == CursorSeat::Remote {
                                 if let Some((rx, ry)) = node.roaming_recenter_target(w, h) {
                                     crate::platform::warp_mouse_position(rx, ry);
                                 }
