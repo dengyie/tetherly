@@ -2458,7 +2458,9 @@ impl Node {
                 server.force_local();
                 let (cx, cy) = server.local_pos();
                 *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
-                self.release_input_tunnel_local("input channel disconnected");
+                // Transient, NOT a session end: a pending takeover's pre-armed
+                // Controller grant must survive so the peer's late ACCEPT still
+                // matches (releasing here dead-ends the takeover, CI m3_11).
                 self.disarm_input_capture();
                 crate::platform::warp_mouse_position(cx, cy);
                 self.emit(UiEvent::input_seat_changed("local", false, None));
@@ -2606,7 +2608,9 @@ impl Node {
                     server.force_local();
                     let (cx, cy) = server.local_pos();
                     *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
-                    self.release_input_tunnel_local("input channel disconnected");
+                    // Transient, NOT a session end: a pending takeover's pre-armed
+                    // Controller grant must survive so the peer's late ACCEPT still
+                    // matches (releasing here dead-ends the takeover, CI m3_11).
                     self.disarm_input_capture();
                     crate::platform::warp_mouse_position(cx, cy);
                     self.emit(UiEvent::input_seat_changed("local", false, None));
@@ -3536,7 +3540,8 @@ impl Node {
                             .force_local();
                         *retry_node.shared.input_seat.lock().expect("seat") =
                             Some(CursorSeat::Local);
-                        retry_node.release_input_tunnel_local("input grace period expired");
+                        // Transient, NOT a session end: a pending takeover's grant must
+                        // survive the grace window (its ACCEPT resp re-opens the channel).
                         retry_node.disarm_input_capture();
                         let (cx, cy) = retry_node
                             .shared
