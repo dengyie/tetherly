@@ -2680,8 +2680,15 @@ impl Node {
                 // the tunnel grant must die with it or the stale Target role
                 // hijacks every local mouse event into the reverse-arming
                 // branch and the normal edge crossing never runs again
-                // (production 2026-11-11).
-                self.release_input_tunnel_local("roaming returned to local seat");
+                // (production 2026-11-11). A genuine stint end ships its
+                // Leave over a LIVE channel — an engine oscillation while a
+                // takeover is pending (channel not yet open) must NOT kill
+                // the just-pre-armed grant (CI m3_11 2026-11-11: the target
+                // engine sits in Remote while being controlled, and the
+                // oscillation dropped the takeover's resp).
+                if self.input_channel_open_sync() {
+                    self.release_input_tunnel_local("roaming returned to local seat");
+                }
                 self.disarm_input_capture();
                 crate::platform::warp_mouse_position(local_pos.0, local_pos.1);
             } else {
