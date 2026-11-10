@@ -1472,11 +1472,13 @@ impl Node {
             timestamp_ms: now_ms,
         };
 
-        let inner = req_frame.to_frame()?;
-        self.send_to(&peer_id, inner).await.map_err(|e| {
-            CoreError::InvalidPayload(format!("failed to send input tunnel request to peer: {e}"))
-        })?;
-
+        // Pre-arm BEFORE the request hits the wire. The comment above the
+        // callee always promised this ("pre-arms the controller session
+        // before the request is answered"), but the arm actually happened
+        // after `send_to` — on a loaded runtime the peer's ACCEPTED resp can
+        // be processed before this task resumes, and `receive_input_tunnel_resp`
+        // drops a resp that finds no armed session, dead-ending the takeover
+        // (m3_11, ubuntu CI 2026-11-11: server=Some(Target), client=None).
         {
             let mut guard = self
                 .shared
@@ -1495,6 +1497,21 @@ impl Node {
                 started_at_ms: now_ms,
                 last_activity_ms: now_ms,
             });
+        }
+        let inner = req_frame.to_frame()?;
+        if let Err(e) = self.send_to(&peer_id, inner).await {
+            // Roll the pre-arm back — no request on the wire, no grant.
+            let mut guard = self
+                .shared
+                .active_input_tunnel
+                .lock()
+                .expect("active_input_tunnel");
+            if guard.as_ref().is_some_and(|s| s.session_id == session_id) {
+                *guard = None;
+            }
+            return Err(CoreError::InvalidPayload(format!(
+                "failed to send input tunnel request to peer: {e}"
+            )));
         }
 
         let effective_edge: tetherly_core::ScreenEdge = if let Some(e) = edge {

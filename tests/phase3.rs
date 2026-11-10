@@ -869,7 +869,10 @@ async fn m3_11_auto_reverse_gates_block_accidental_flips() {
     }
     let start = std::time::Instant::now();
     while client.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Controller) {
-        if start.elapsed() > Duration::from_secs(3) {
+        // 10s: the takeover rides the request/response round-trip and the
+        // demotion on the old controller — the same loaded-runner budget
+        // m3_10 uses; 3s flaked on ubuntu CI (runs 42866567283/42870492694).
+        if start.elapsed() > Duration::from_secs(10) {
             panic!(
                 "sustained push never took over; server={:?}, client={:?}",
                 server.active_tunnel_role(),
