@@ -520,6 +520,9 @@ impl Node {
         // exactly what broke reverse (Windows -> Mac) control.
         if self.active_tunnel_role() == Some(InputTunnelRole::Controller) {
             info!(peer = %peer_str, "input tunnel takeover: releasing local controller session");
+            eprintln!(
+                "[takeover] demote: releasing local controller session toward peer={peer_str}"
+            );
             let _ = self.input_stop().await;
             self.record_audit(
                 AuditCategory::Config,
@@ -665,10 +668,18 @@ impl Node {
                 .expect("active_input_tunnel");
             let Some(session) = guard.as_mut() else {
                 tracing::info!(session_id = %frame.session_id, peer = %peer_str, "input tunnel resp: no armed session; dropping stale resp");
+                eprintln!(
+                    "[takeover] resp: NO ARMED SESSION, dropped session={}",
+                    frame.session_id
+                );
                 return;
             };
             if session.session_id != frame.session_id {
                 tracing::info!(session_id = %frame.session_id, armed = %session.session_id, "input tunnel resp: session id mismatch; dropping stale resp");
+                eprintln!(
+                    "[takeover] resp: SESSION ID MISMATCH dropped={} armed={}",
+                    frame.session_id, session.session_id
+                );
                 return;
             }
             if frame.accepted {
@@ -681,6 +692,10 @@ impl Node {
         }
 
         if frame.accepted {
+            eprintln!(
+                "[takeover] resp: ACCEPTED session={} peer={peer_str}",
+                frame.session_id
+            );
             let _ = self.ensure_input_capture();
             if !self.input_channel_open().await {
                 if let Err(e) = self.open_input(peer).await {
@@ -1502,9 +1517,11 @@ impl Node {
         }
         let inner = req_frame.to_frame()?;
         tracing::info!(session_id = %session_id, peer = %peer_str, "input tunnel attach: controller session pre-armed");
+        eprintln!("[takeover] attach: pre-armed session={session_id} peer={peer_str}");
         if let Err(e) = self.send_to(&peer_id, inner).await {
             // Roll the pre-arm back — no request on the wire, no grant.
             warn!(session_id = %session_id, peer = %peer_str, %e, "input tunnel attach: send failed; pre-arm rolled back");
+            eprintln!("[takeover] attach: SEND FAILED, rolled back session={session_id} err={e}");
             let mut guard = self
                 .shared
                 .active_input_tunnel
@@ -1683,6 +1700,10 @@ impl Node {
             guard.take()
         };
         let session = session?;
+        eprintln!(
+            "[takeover] release: tunnel grant released reason={reason} role={:?} peer={}",
+            session.role, session.peer_id
+        );
 
         let now_ms = self.shared.clock.unix_ms();
         let sanitized_reason = InputTunnelValidator::sanitize_reason(reason);
@@ -3051,6 +3072,7 @@ impl Node {
             return;
         };
         info!(peer = %peer, %edge, "auto-reverse: sustained edge push; requesting polite takeover");
+        eprintln!("[takeover] fire: requesting takeover peer={peer} edge={edge}");
         self.record_audit(
             AuditCategory::Config,
             AuditSeverity::Info,
