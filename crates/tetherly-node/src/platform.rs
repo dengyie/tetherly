@@ -1258,7 +1258,7 @@ pub struct HookControl {
 #[cfg(windows)]
 impl HookControl {
     pub fn is_armed(&self) -> bool {
-        true
+        MOUSE_RELAY.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn set_keyboard(&self, on: bool) -> Result<(), CoreError> {
@@ -1388,6 +1388,32 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
     SCREEN_W.store(unsafe { GetSystemMetrics(SM_CXSCREEN) }, Ordering::Relaxed);
     SCREEN_H.store(unsafe { GetSystemMetrics(SM_CYSCREEN) }, Ordering::Relaxed);
 
+    // Deskflow kHOOK_RELAY_EVENTS: true while this node controls a remote
+    // seat — the mouse hook swallows physical motion/button events (local
+    // cursor frozen, local UI blind to the hand) and only relays deltas.
+    // Toggled from the runtime via WM_HOOK_RELAY_ON/OFF on the hook pump
+    // thread; read lock-free in the LL callback.
+    static MOUSE_RELAY: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    // WM_MOUSEMOVE plus the button/wheel events the roaming engine relays:
+    // everything the physical mouse generates that must not reach local
+    // apps while controlling.
+    fn is_mouse_motion_event(ev: u32) -> bool {
+        matches!(
+            ev,
+            WM_MOUSEMOVE
+                | WM_LBUTTONDOWN
+                | WM_LBUTTONUP
+                | WM_RBUTTONDOWN
+                | WM_RBUTTONUP
+                | WM_MBUTTONDOWN
+                | WM_MBUTTONUP
+                | WM_MOUSEWHEEL
+                | WM_MOUSEHWHEEL
+        )
+    }
+
     unsafe fn push(ev: RawInput) {
         if let Some(tx) = SENDER.get() {
             // Best effort under a stalled consumer: the system unhooks a slow
@@ -1402,6 +1428,18 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
             // Never re-capture this node's own injected input.
             if mi.flags & LLMHF_INJECTED == 0 {
                 let ev = wparam as u32;
+                // Deskflow kHOOK_RELAY_EVENTS alignment: while this node
+                // controls a remote seat, the physical mouse belongs to the
+                // REMOTE machine — swallow the physical events here so the
+                // local UI never sees them (local cursor frozen at the
+                // roaming center; the v0.2.9 visible center jitter and the
+                // "controlling two devices at once" symptom both came from
+                // letting physical moves through). Deltas are still derived
+                // and relayed below; local apps get nothing. Local seat
+                // (relay off) passes everything through untouched.
+                if MOUSE_RELAY.load(Ordering::SeqCst) && is_mouse_motion_event(ev) {
+                    return 1;
+                }
                 match ev {
                     WM_MOUSEMOVE => {
                         // Drop the echo of a programmatic SetCursorPos warp
@@ -1534,6 +1572,10 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 }
                 match msg.message {
                     WM_HOOK_KB_ON => {
+                        // Remote seat: arm the keyboard hook AND switch the
+                        // mouse hook into relay mode (swallow physical mouse
+                        // events; Deskflow kHOOK_RELAY_EVENTS).
+                        MOUSE_RELAY.store(true, Ordering::SeqCst);
                         if keyboard.is_null() {
                             keyboard = SetWindowsHookExW(
                                 WH_KEYBOARD_LL,
@@ -1543,9 +1585,13 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                             );
                         }
                     }
-                    WM_HOOK_KB_OFF if !keyboard.is_null() => {
-                        UnhookWindowsHookEx(keyboard);
-                        keyboard = std::ptr::null_mut();
+                    WM_HOOK_KB_OFF => {
+                        // Local seat: pass everything through again.
+                        MOUSE_RELAY.store(false, Ordering::SeqCst);
+                        if !keyboard.is_null() {
+                            UnhookWindowsHookEx(keyboard);
+                            keyboard = std::ptr::null_mut();
+                        }
                     }
                     _ => {}
                 }

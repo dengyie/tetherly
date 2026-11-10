@@ -128,3 +128,18 @@ v0.2.8 真机反馈："鼠标局限在 Mac 中下部、无法往上滑"。根因
    - 删除 v0.2.8 的 `remote_roam_recenter_target`（带状决策）与 `Node::maybe_recenter_roaming_cursor`。
 3. **回归**（红绿）：`warp_echo_resets_delta_baseline`（锚定语义）、`hook_bogus_filter_drops_teleport_span_deltas`（纯几何）、`roaming_recenter_target_is_screen_center`、`test_roaming_recenter_decision_is_center_in_remote_seat`（Remote 决策/Local 静默/force_local 后静默）。
 4. **验证边界**：本机 macOS core 310 全通过、node lib 184/184、phase1 68/68、clippy 两 crate 0 警告；**Windows 侧每批回中的 SetCursorPos 频率、hook FIFO 顺序与 bogus 过滤需 Windows 原生 CI + 真机验收**；本地光标可视化表现（回中致可见抖动）与 Deskflow Windows 端一致，真机确认可接受性。
+
+---
+
+## 增补三（2026-11-10，v0.2.10）：Windows 控制端吞掉物理鼠标事件（kHOOK_RELAY_EVENTS 对齐）
+
+v0.2.9 真机反馈："Windows 鼠标同时控制了两个设备"——控制 Mac 期间 Windows 本机光标跟手动（每批回中令其可见抖动）。根因：Tetherly 的 `WH_MOUSE_LL` 回调**只采集、从不吞事件**（始终 `CallNextHookEx`），物理 Move/按钮继续抵达本机 UI；Deskflow 控制端处于 `kHOOK_RELAY_EVENTS` 模式时把物理事件**吃掉**（`mouseHookHandler` 返回 true），本机光标完全冻结，只有 delta 被转发。
+
+对齐实施（Windows 端，行为变更）：
+
+1. `start_input_hooks` 新增 `MOUSE_RELAY` 原子态 + `is_mouse_motion_event`（Move/三键/双滚轮全集）；`mouse_proc` 在 relay 开启且事件为物理鼠标事件时直接 `return 1` 吞掉——本机 UI 收不到、光标冻结在回中中心，delta 链照常采集转发。
+2. 状态切换复用现有 arm/disarm 管道：`WM_HOOK_KB_ON/OFF`（Remote 席位进入/退出时 runtime 已发）现在同时翻转 `MOUSE_RELAY`——键盘 hook 安装/卸载与鼠标吞事件同步切换，无第二套状态。
+3. `HookControl::is_armed`（Windows）从恒 `true` 改为读 `MOUSE_RELAY` 真实态——runtime 的 `remote != is_armed` 对齐循环由此获得真实反馈，重复 arm/disarm 不再误判。
+4. 注入事件（`LLMHF_INJECTED`）在吞事件检查之前放行判断序不变：本机自己的注入（如远端回显）永远不受 relay 影响。
+
+验证边界：本机 macOS node 184/184、phase1 68/68、clippy 0 警告；**Windows 吞事件行为（本机光标冻结、拖拽/滚轮被拦截、relay 边界时序）需 Windows 真机验收**；`return 1` 在 LL hook 的语义（阻止事件继续传播）与低完整性 UI 交互需现场确认。
