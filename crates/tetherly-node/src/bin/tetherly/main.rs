@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Desktop CLI: LAN + optional EasyTier sidecar overlay.
 
+// GUI subsystem on Windows: `tetherly run` is a tray-resident daemon, not a
+// console tool. Without this the console host (conhost) opens a visible
+// window whenever the binary is launched by the autostart scheduled task or
+// Explorer — the TUI-equivalent of a stray black rectangle next to the tray
+// icon. `tetherly-cli` and the other CLI bins stay console-subsystem: they
+// are piping tools. The DualLogWriter still mirrors logs to the file (see
+// windows_daemon_console_quirk below for why stdout writes are harmless).
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::io::Write;
@@ -84,6 +96,17 @@ mod util;
 use dispatch::dispatch;
 
 fn main() -> Result<()> {
+    // GUI-subsystem binaries have no console at all; stdout/stderr writes
+    // would fail outright on Windows (ERROR_INVALID_HANDLE) and every
+    // eprintln! diagnostic — the whole [takeover] chain — would panic
+    // silently via the panic-in-println path. Detach the parent-inherited
+    // console (present when launched from a terminal or when the scheduled
+    // task grants one) so writes become harmless no-ops, mirroring the unix
+    // SIGPIPE defaulting below.
+    #[cfg(all(windows, not(debug_assertions)))]
+    unsafe {
+        windows_sys::Win32::System_Console::FreeConsole();
+    }
     // A closed downstream pipe (`tetherly accept | head`) must end the
     // process quietly like any classic tool, not panic in println!.
     #[cfg(unix)]
