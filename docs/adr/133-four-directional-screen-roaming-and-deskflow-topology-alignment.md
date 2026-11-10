@@ -143,3 +143,19 @@ v0.2.9 真机反馈："Windows 鼠标同时控制了两个设备"——控制 Ma
 4. 注入事件（`LLMHF_INJECTED`）在吞事件检查之前放行判断序不变：本机自己的注入（如远端回显）永远不受 relay 影响。
 
 验证边界：本机 macOS node 184/184、phase1 68/68、clippy 0 警告；**Windows 吞事件行为（本机光标冻结、拖拽/滚轮被拦截、relay 边界时序）需 Windows 真机验收**；`return 1` 在 LL hook 的语义（阻止事件继续传播）与低完整性 UI 交互需现场确认。
+
+---
+
+## 增补四（2026-11-11，v0.2.11）：共享边返回改为持续推挤累积，废弃单事件 flick 门槛
+
+v0.2.10 真机反馈："Mac 鼠标可以控制 Windows，但推回时两端全部卡死在 Remote 席"——Mac 控制端引擎的远边返回条件是 `rem_y 饱和 && 单个 hook 事件原始 |dy| > 4`。现代鼠标报告率 125-1000Hz（真机日志实测 ~2ms/事件），一次刻意的持续推挤每事件只有 1-3px——`|dy|>4` 等价于要求 >2000px/s 的猛甩，正常推回**永远无法触发**。雪上加霜：v0.2.10 的 MOUSE_RELAY 吞掉了目标端物理鼠标事件，把旧的 fallback（目标侧物理反推接管 `maybe_auto_reverse`）也一并关闭，两条返回路全断；Leave 帧不出、目标端 relay 不解除、光标隐藏不恢复。
+
+对齐 Deskflow 语义修正（`tetherly-core/src/input.rs`，行为变更）：
+
+1. **持续推挤累积器**：远边（crossed_edge 的共享边）饱和期间，向边方向的原始位移逐事件累加；累计 ≥ `FAR_PUSH_RETURN_PX=12` 且距上次贡献 ≤ `FAR_PUSH_WINDOW=600ms` 即返回。单事件猛甩天然覆盖（一个事件贡献全部 delta）。与进入侧 `resistance_px=15` 对称，双向手感一致。
+2. **重置规则**：方向反转（toward < 0）、离开共享边（`at_shared_edge=false`）、窗口过期、`buttons_down != 0`（拖拽保护，累积同时冻结）四路清零；返回触发、`force_local`、`clear_stale_remote` 亦重置。
+3. `remote_interior` 迟滞门槛保留——进入后未漫游 20 单位不触发返回，杜绝入口弹回。
+4. 目标端自主 Leave（`autonomous_leave`，y 饱和 + interior）保持现状作为并行通路；MOUSE_RELAY 期间目标端物理反推接管不再可用为**有意行为**（Deskflow 客户端物理鼠标同样静止），控制端推回是唯一漫游返回路径。
+5. 回归（红绿）：`sustained_slow_push_at_shared_edge_returns_to_local`（2px/事件×~86 次必须返回，旧码红）、`single_flick_at_shared_edge_still_returns`（保真守卫）、`shared_edge_push_accum_resets_on_reverse_direction`、`shared_edge_push_window_expires`（650ms 后陈旧累积不得与新推合并）、`button_held_blocks_shared_edge_return`（拖拽保护 + 释放恢复）。
+
+验证边界：本机 macOS core 349 全绿（lib 310 + 集成 39）、node lib 184/184、clippy 0 警告；**真机验收项：Mac→Windows 漫游后在 Windows 共享边正常速度推回（≤200ms 内返回）、返回后 Windows 光标/物理鼠标立即恢复、拖拽中推边不返回**。
