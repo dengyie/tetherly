@@ -120,3 +120,11 @@ v0.2.11 真机反馈："Mac 控制 Windows 一切正常，但 Windows 鼠标到�
 6. 目标端物理反推（auto-reverse）语义不变：仅在授权活跃时参与；MOUSE_RELAY 期间 Windows 物理事件被吞、该路径在其上天然沉默（ADR-133 增补四的既定边界）。
 
 验证边界：本机 node lib 185/185、phase3 12/12（多次）、core 349、clippy 0 警告、CI 5/5 绿（run 42880364388）；真机验收项：Mac→Windows 控制往返之后，Windows 立即可推底边进入 Mac（无需任何手工 API 调用）。
+
+---
+
+## 增补二（2026-11-11，v0.2.13）：watcher 对账 stranded remote seat——无用户事件自救
+
+v0.2.12 真机反馈"Windows 鼠标都动不了了"。双向日志拼接出完整事故链：Mac 进入 Windows（22:09:50）→ 用户推回成功（通道归还）→ **Windows 推下边缘越边成功**（22:09:53 `engine crossing fired edge=Bottom`，反向漫游触发本身已通）→ 但持久通道仍属旧控制端（Mac）的循环，Windows 无 `input_out`，push 帧全部缓冲进 2.5s grace → 用户手停 → **无本地事件再触发驱动路径守卫** → Windows 引擎永久卡 Remote、MOUSE_RELAY 持续吞物理鼠标；同时 Mac 22:10:28 再越边进 Windows，形成单向"假接管"。
+
+修复：1s link watcher（`cmd_core.rs`）新增 stranded remote seat 对账——`input_engine_seat()==Remote && !input_channel_open_sync() && 无 grace deadline && 非被控(role receiving)/无 remote session` → `force_local` + 释放残留授权 + disarm + warp + 事件；被控目标（引擎经 resume_remote 合法骑 Remote）与待定接管（grace 窗口内）明确豁免。`reconcile_stranded_remote_seat` 放在 runtime 层可单测；回归 `stranded_remote_seat_is_reconciled_without_user_events`（被控豁免 → 授权清除后救援 → 幂等）。
