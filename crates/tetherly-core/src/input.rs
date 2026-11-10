@@ -427,6 +427,15 @@ pub struct InputServer {
     /// `delta * SCREEN_UNITS` never overflows i32 for any real delta.
     rem_frac_x: i64,
     rem_frac_y: i64,
+    /// Sustained-push switch-back accumulator (raw px contributed toward the
+    /// shared edge while the remote cursor sits saturated on it). Replaces
+    /// the old per-event `|delta| > 4` flick gate, which at real report
+    /// rates (125-1000 Hz, 1-3 px per event) demanded a >2000 px/s jerk and
+    /// stranded both nodes in Remote seat (production 2026-11-11).
+    far_push_accum: i32,
+    /// Last event that contributed to `far_push_accum`; pushes older than
+    /// [`Self::FAR_PUSH_WINDOW`] no longer count.
+    far_push_last: Option<std::time::Instant>,
 }
 
 impl InputServer {
@@ -453,8 +462,18 @@ impl InputServer {
             tb_fast_push_delta_px: 6,
             rem_frac_x: 0,
             rem_frac_y: 0,
+            far_push_accum: 0,
+            far_push_last: None,
         }
     }
+
+    /// Sustained push (raw px) at the shared edge required to switch back to
+    /// the local seat. Mirrors the entry-side resistance so both directions
+    /// feel symmetric.
+    const FAR_PUSH_RETURN_PX: i32 = 12;
+    /// A return push older than this no longer counts toward the threshold;
+    /// a fresh deliberate push must re-accumulate.
+    const FAR_PUSH_WINDOW: std::time::Duration = std::time::Duration::from_millis(600);
 
     pub fn seat(&self) -> CursorSeat {
         self.seat
@@ -531,6 +550,8 @@ impl InputServer {
             self.buttons_down = 0;
             self.rem_frac_x = 0;
             self.rem_frac_y = 0;
+            self.far_push_accum = 0;
+            self.far_push_last = None;
             self.pending.clear();
         }
     }
@@ -543,6 +564,8 @@ impl InputServer {
             self.remote_interior = false;
             self.rem_frac_x = 0;
             self.rem_frac_y = 0;
+            self.far_push_accum = 0;
+            self.far_push_last = None;
             self.push(InputKind::Leave);
             // Park on the crossed edge, but map the free axis back from the
             // last remote position so an emergency return lands at the
@@ -747,29 +770,44 @@ impl InputServer {
                 self.remote_interior = true;
             }
 
-            // Do not switch screen back to local while holding down a mouse button (prevent drag interruption)
+            // Do not switch screen back to local while holding down a mouse
+            // button (prevent drag interruption).
+            //
+            // Deskflow-style sustained-push switch-back: the shared edge (the
+            // entry edge on the target) must receive an ACCUMULATED push of
+            // FAR_PUSH_RETURN_PX raw px within FAR_PUSH_WINDOW — not a
+            // per-event flick. The old per-event `|delta| > 4` gate demanded
+            // a >2000 px/s jerk at 500 Hz report rates, so a deliberate slow
+            // push never returned and both nodes were stranded in Remote
+            // seat (production 2026-11-11). Fast flicks still return
+            // instantly: one event contributes its whole delta.
+            let (push_toward_edge, at_shared_edge) = match crossed_edge {
+                ScreenEdge::Top => (dy, next_rem_y >= SCREEN_UNITS),
+                ScreenEdge::Bottom => (-dy, next_rem_y <= 0),
+                ScreenEdge::Left => (dx, next_rem_x >= SCREEN_UNITS),
+                ScreenEdge::Right => (-dx, next_rem_x <= 0),
+            };
+            let now = std::time::Instant::now();
+            let window_expired = self
+                .far_push_last
+                .map(|t| now.duration_since(t) > Self::FAR_PUSH_WINDOW)
+                .unwrap_or(true);
+            if window_expired || !at_shared_edge || push_toward_edge < 0 {
+                self.far_push_accum = 0;
+            }
+            if at_shared_edge && push_toward_edge > 0 && self.buttons_down == 0 {
+                self.far_push_accum = self.far_push_accum.saturating_add(push_toward_edge);
+                self.far_push_last = Some(now);
+            }
             let returning_local = self.remote_interior
                 && (self.buttons_down == 0)
-                && match crossed_edge {
-                    ScreenEdge::Top => {
-                        (self.rem_y >= SCREEN_UNITS && dy > 4)
-                            || (self.rem_y + delta_y >= SCREEN_UNITS && dy > 4)
-                    }
-                    ScreenEdge::Bottom => {
-                        (self.rem_y <= 0 && dy < -4) || (self.rem_y + delta_y <= 0 && dy < -4)
-                    }
-                    ScreenEdge::Left => {
-                        (self.rem_x >= SCREEN_UNITS && dx > 4)
-                            || (self.rem_x + delta_x >= SCREEN_UNITS && dx > 4)
-                    }
-                    ScreenEdge::Right => {
-                        (self.rem_x <= 0 && dx < -4) || (self.rem_x + delta_x <= 0 && dx < -4)
-                    }
-                };
+                && self.far_push_accum >= Self::FAR_PUSH_RETURN_PX;
 
             if returning_local {
                 self.seat = CursorSeat::Local;
                 self.remote_interior = false;
+                self.far_push_accum = 0;
+                self.far_push_last = None;
                 self.pending.clear();
                 self.push(InputKind::Leave);
                 // Deskflow OSXScreen semantics: the return parks on the

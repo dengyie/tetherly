@@ -193,3 +193,200 @@ fn crossing_batch_carries_no_stale_frames() {
         other => panic!("expected Move, got {other:?}"),
     }
 }
+
+// v0.2.11 regression: the far-edge (shared-edge) return used to require raw
+// |dy| > 4 within a SINGLE event. At real mouse report rates (125-1000 Hz,
+// 1-3 px per event) a deliberate sustained push never fires that gate —
+// production 2026-11-11: the user pushed the remote cursor at the shared
+// edge repeatedly and BOTH nodes were stranded in Remote seat (the Leave
+// frame never shipped, the target's MOUSE_RELAY stayed on, its physical
+// mouse stayed dead). The return must respond to ACCUMULATED push at the
+// shared edge instead of per-event flicks.
+
+fn enter_remote_via_top(srv: &mut InputServer) {
+    let x = 300;
+    let mut y = 500;
+    for _ in 0..200 {
+        y -= 4;
+        if srv.local_move_delta(x, y, 0, -4).is_some() {
+            srv.drain();
+            assert_eq!(srv.seat(), CursorSeat::Remote);
+            return;
+        }
+        srv.drain();
+    }
+    panic!("never crossed into remote seat");
+}
+
+fn roam_into_interior(srv: &mut InputServer) {
+    // 20 events of dy=-8 drop rem_y far below the 20-unit entry hysteresis.
+    for _ in 0..20 {
+        srv.local_move_delta(300, 500, 0, -8);
+        srv.drain();
+    }
+    assert_eq!(srv.seat(), CursorSeat::Remote, "roam must stay remote");
+}
+
+#[test]
+fn sustained_slow_push_at_shared_edge_returns_to_local() {
+    let mut srv = InputServer::new(1512, 982);
+    srv.set_edge(ScreenEdge::Top);
+    enter_remote_via_top(&mut srv);
+    roam_into_interior(&mut srv);
+
+    // Deliberate sustained push back at the shared edge: 2 px per event at
+    // ~500 Hz (a real report rate). Must return well before 120 events.
+    let mut returned = false;
+    for _ in 0..120 {
+        if srv.local_move_delta(300, 600, 0, 2).is_some() {
+            returned = true;
+            break;
+        }
+        srv.drain();
+    }
+    assert!(
+        returned,
+        "sustained 2px/event push at the shared edge must switch back to local"
+    );
+    assert_eq!(srv.seat(), CursorSeat::Local);
+    let evs = srv.drain();
+    assert!(
+        evs.iter().any(|ev| matches!(ev.kind, InputKind::Leave)),
+        "return must emit a Leave frame for the target to disarm"
+    );
+}
+
+#[test]
+fn single_flick_at_shared_edge_still_returns() {
+    let mut srv = InputServer::new(1512, 982);
+    srv.set_edge(ScreenEdge::Top);
+    enter_remote_via_top(&mut srv);
+    roam_into_interior(&mut srv);
+
+    let mut returned = false;
+    for _ in 0..90 {
+        if srv.local_move_delta(300, 600, 0, 30).is_some() {
+            returned = true;
+            break;
+        }
+        srv.drain();
+    }
+    assert!(
+        returned,
+        "a hard flick at the shared edge must still return"
+    );
+    assert_eq!(srv.seat(), CursorSeat::Local);
+}
+
+/// Push +2px per event until the remote cursor sits saturated on the shared
+/// edge (rem_y == SCREEN_UNITS). Events before saturation never accumulate.
+fn push_until_shared_edge(srv: &mut InputServer) {
+    for _ in 0..200 {
+        if srv.remote_pos().1 >= SCREEN_UNITS {
+            return;
+        }
+        srv.local_move_delta(300, 600, 0, 2);
+        srv.drain();
+    }
+    panic!("never reached the shared edge");
+}
+
+#[test]
+fn shared_edge_push_accum_resets_on_reverse_direction() {
+    let mut srv = InputServer::new(1512, 982);
+    srv.set_edge(ScreenEdge::Top);
+    enter_remote_via_top(&mut srv);
+    roam_into_interior(&mut srv);
+
+    push_until_shared_edge(&mut srv);
+    // Build 10px of accumulated push at the edge (reaching event + 4 more).
+    for i in 0..4 {
+        let fired = srv.local_move_delta(300, 600, 0, 2).is_some();
+        assert!(!fired, "10px must stay under threshold (event {i})");
+        srv.drain();
+    }
+    // One reverse event must discard the accumulation, so the fresh 6px
+    // that follow stay under the 12px threshold.
+    srv.local_move_delta(300, 600, 0, -4);
+    srv.drain();
+    for i in 0..3 {
+        let fired = srv.local_move_delta(300, 600, 0, 2).is_some();
+        assert!(
+            !fired,
+            "reverse direction must reset the push accumulator (event {i})"
+        );
+        srv.drain();
+    }
+    // Continuing the push still returns once it re-accumulates.
+    let mut returned = false;
+    for _ in 0..10 {
+        if srv.local_move_delta(300, 600, 0, 2).is_some() {
+            returned = true;
+            break;
+        }
+        srv.drain();
+    }
+    assert!(returned, "fresh sustained push after reverse must return");
+}
+
+#[test]
+fn shared_edge_push_window_expires() {
+    let mut srv = InputServer::new(1512, 982);
+    srv.set_edge(ScreenEdge::Top);
+    enter_remote_via_top(&mut srv);
+    roam_into_interior(&mut srv);
+
+    push_until_shared_edge(&mut srv);
+    // Accumulate 10px at the edge (stays under the 12px threshold).
+    for i in 0..4 {
+        let fired = srv.local_move_delta(300, 600, 0, 2).is_some();
+        assert!(!fired, "10px must stay under threshold (event {i})");
+        srv.drain();
+    }
+    // Let the window lapse: the stale accumulation must not combine with a
+    // fresh push (10px + 6px would fire; fresh 6px must not).
+    std::thread::sleep(std::time::Duration::from_millis(650));
+    for i in 0..3 {
+        let fired = srv.local_move_delta(300, 600, 0, 2).is_some();
+        assert!(!fired, "stale push accumulation must expire (event {i})");
+        srv.drain();
+    }
+    // A continuous fresh push still returns.
+    let mut returned = false;
+    for _ in 0..10 {
+        if srv.local_move_delta(300, 600, 0, 2).is_some() {
+            returned = true;
+            break;
+        }
+        srv.drain();
+    }
+    assert!(returned, "fresh sustained push after expiry must return");
+}
+
+#[test]
+fn button_held_blocks_shared_edge_return() {
+    let mut srv = InputServer::new(1512, 982);
+    srv.set_edge(ScreenEdge::Top);
+    enter_remote_via_top(&mut srv);
+    roam_into_interior(&mut srv);
+
+    srv.note_button(1, true);
+    for i in 0..120 {
+        let fired = srv.local_move_delta(300, 600, 0, 2).is_some();
+        assert!(
+            !fired,
+            "holding a button must block the return (drag protection, event {i})"
+        );
+        srv.drain();
+    }
+    srv.note_button(1, false);
+    let mut returned = false;
+    for _ in 0..20 {
+        if srv.local_move_delta(300, 600, 0, 2).is_some() {
+            returned = true;
+            break;
+        }
+        srv.drain();
+    }
+    assert!(returned, "release must re-arm the return");
+}
