@@ -143,9 +143,17 @@ fn grant_identity_file_system_read(path: &Path) {
     // Read the CURRENT DACL first: SetEntriesInAclW merges the explicit
     // entries into the given old ACL, and passing NULL would REPLACE the
     // whole DACL — dropping the owner's own access on the identity file.
+    //
+    // GetNamedSecurityInfoW contract: the returned pDacl points INSIDE the
+    // SECURITY_DESCRIPTOR it also allocates. Freeing the DACL pointer itself
+    // (an interior pointer) corrupts the heap — production 0xc0000374 crash
+    // three seconds after the v0.2.20 hot-restart, once atomic_write began
+    // hitting this path on every state file. Only the descriptor out-param
+    // may go to LocalFree.
     let mut old_acl: *mut ACL = std::ptr::null_mut();
-    // SAFETY: path_w is NUL-terminated; the out DACL pointer is freed below
-    // via LocalFree on success.
+    let mut old_sd: *mut std::ffi::c_void = std::ptr::null_mut();
+    // SAFETY: path_w is NUL-terminated; the returned descriptor is freed via
+    // LocalFree on every exit path below, never the interior DACL pointer.
     let rc = unsafe {
         GetNamedSecurityInfoW(
             path_w.as_ptr() as *mut u16,
@@ -155,7 +163,7 @@ fn grant_identity_file_system_read(path: &Path) {
             std::ptr::null_mut(),
             &mut old_acl,
             std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            &mut old_sd,
         )
     };
     if rc != ERROR_SUCCESS {
@@ -198,11 +206,9 @@ fn grant_identity_file_system_read(path: &Path) {
     let rc = unsafe { SetEntriesInAclW(2, entries.as_ptr(), old_acl, &mut new_acl) };
     if rc != ERROR_SUCCESS || new_acl.is_null() {
         // SAFETY: on SetEntriesInAclW failure there is nothing new to free;
-        // old_acl from GetNamedSecurityInfoW must still be freed.
+        // the descriptor from GetNamedSecurityInfoW must still be freed.
         unsafe {
-            if !old_acl.is_null() {
-                let _ = LocalFree(old_acl as *mut _);
-            }
+            let _ = LocalFree(old_sd as *mut _);
         }
         tracing::warn!(rc = rc, "merging SYSTEM read ACEs failed");
         return;
@@ -220,11 +226,12 @@ fn grant_identity_file_system_read(path: &Path) {
             std::ptr::null_mut(),
         )
     };
-    // SAFETY: both ACLs were allocated by the ACL API and must be freed
-    // with LocalFree per their contracts.
+    // SAFETY: new_acl was allocated by SetEntriesInAclW (its own heap block,
+    // LocalFree per its contract); old_sd was allocated by
+    // GetNamedSecurityInfoW and frees the DACL that lives inside it.
     unsafe {
         let _ = LocalFree(new_acl as *mut _);
-        let _ = LocalFree(old_acl as *mut _);
+        let _ = LocalFree(old_sd as *mut _);
     }
     if rc2 != ERROR_SUCCESS {
         tracing::warn!(rc = rc2, "SYSTEM read grant on identity file failed");
