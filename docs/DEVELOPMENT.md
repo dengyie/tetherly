@@ -8192,3 +8192,17 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 4. **取证教训**：日志"停在 08:12"是误判——08:40 有一次进程重启，之后多轮正常漫游；`~/Library/Logs/DiagnosticReports/` 无 Tetherly 崩溃报告。定位 stuck-key 类问题应先查 CGEventSource 修饰键状态与 armed 翻转时间窗的相关性，而不是进程存活。
 
 5. **部署注意（两次部署实测）**：`/api/daemon/restart` 现在要求 replacement binary 位于 `C:\Users\mango\AppData\Local\tetherly\updates\`（守护进程校验 staging 目录，E: 盘路径被拒）——deploy.sh 尚未跟进，手动复制后再调 restart 即可。
+
+## 95. 生产 review 修复批次：救援统一 + attach CAS 去重 + armed 决策纯函数 (v0.2.17 / 4455dad)
+
+1. **背景**：v0.2.16 发布链完成后对 v0.2.14..v0.2.16 变更做生产级 code review，产出 P2×3 + P3×3 + Delete List；本批次全部修复（793 workspace tests / clippy 零警告 / fmt）。
+
+2. **修复清单**：
+   - **rescue_seat_to_local 统一**：五处 stranded-seat 救援块（reconcile / 通道关守卫 / ghost 守卫 / send 失败 / grace 重试）合并为一个 helper。语义分化：reconcile 属会话终态→`release_grant=true`；其余四处是瞬时故障（"Transient, NOT a session end (CI m3_11)"）→保留授权等重连。
+   - **kick 防抖 Instant 化**：ghost 守卫 kick 防抖从 SystemTime 改 `Instant`（单调时钟）——NTP 步进不得卡死救援路径。
+   - **input_attaching CAS 去重**：watcher 1s tick 的 auto-attach 与 drive 路径的 kick-attach 共用一个 `AtomicBool` CAS 槽，消除双 attach 竞态窗口（原靠 session_id mismatch 兜底）。
+   - **armed_key_decision 纯函数**：KeyDown/KeyUp/FlagsChanged 三个 armed 分支统一走 `armed_key_decision(mac_code)` → `Forward{vk}` / `PassThrough`；决策矩阵单测（mapped→vk、0x3F/0x34→放行、CapsLock 0x39 特殊分支可见性）。tap 行为与 v0.2.16 完全一致，只是可测化。
+   - **死代码删除**：`evaluate_cursor_crossing`（214 行）、`CursorCrossingDecision`、无主字段 `cursor_edge_dwell` / `cursor_edge_resistance_acc`、phase1 §8 对应护栏块（覆盖已由 phase3 m3_5/m3_7 + tb_band_gate 承担）。
+   - **deploy.sh C 盘镜像 + 版本门**：Windows restart 前自动把 E: 盘 staging 二进制镜像到 `C:\Users\mango\AppData\Local\tetherly\updates\`（守护进程 staging 白名单，见 §94.5）；health check 后断言 `/api/health` version == tag，不匹配 exit 3。
+
+3. **发布**：0.2.17 bump → CI release → 双机部署（deploy.sh 已含 C 盘路径，本批次应首次零手工干预过 restart 门）。
