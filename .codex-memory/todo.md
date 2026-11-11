@@ -29,7 +29,8 @@
 
 ## 后续方向（待排期，不构成已批准开发承诺）
 - [ ] 根据主 agent 修复及接手结论确定下一迭代；不预设版本号、新 ADR 或发布成功。
-- [ ] **输入链路已登记未修项（本轮明确范围控制，不顺带修）：** auto-reverse `last_tick` 不推进（dwell>150ms 的 push 无法 fire）；tb dwell 跨离边保留；冷启动 `spawn_input_capture` 未把持久化 edge 镜像进 engine；`evaluate_cursor_crossing` 与 `drive_input_delta` 两套 crossing 路径未统一；ADR-138 session 的 `force_remote_center` 不同步 rem 坐标；release/abort 生命周期审计；滚轮 120x 单位错配；拖动事件类型（Dragged）；多显示器为**能力缺口**（注入仅寻址主屏），不本轮扩展。
+- [ ] **输入链路已登记未修项（本轮明确范围控制，不顺带修）：** auto-reverse `last_tick` 不推进（dwell>150ms 的 push 无法 fire）；tb dwell 跨离边保留；冷启动 `spawn_input_capture` 未把持久化 edge 镜像进 engine；~~`evaluate_cursor_crossing` 与 `drive_input_delta` 两套 crossing 路径未统一~~（v0.2.15：evaluate_cursor_crossing 生产无调用点已核实，其 attach 职责已移入 drive 路径 ghost-roam 守卫——越界无 Controller 授权时 debounced attach 补会话，9d7eef2）；ADR-138 session 的 `force_remote_center` 不同步 rem 坐标；release/abort 生命周期审计；滚轮 120x 单位错配；拖动事件类型（Dragged）；多显示器为**能力缺口**（注入仅寻址主屏），不本轮扩展。
+- [x] v0.2.15 幽灵漫游卡死（production 2026-11-11 23:47）：persistent channel 在 session release 后仍开放 → drive 路径无授权越界进 Remote（双端引擎对漂、物理鼠标冻结）+ reconcile 被通道开挡住不救。修复：reconcile 只豁免活 Controller 授权；drive 越界需授权（grace / ADR-138 session / tunnel grant），无授权就地 debounced attach 补会话；pre_arm_epoch 防旧通道 pump teardown 误杀新预置授权（9d7eef2）。m3_1..m3_7 更新为 attach 契约并等双端会话就位。
 - [ ] 远控：Windows session viewer；核对 H.264 viewer 解码、clip 会话联动、lock-to-screen 的实际缺口，再决定设计 / 实施顺序；屏幕 codec、clip hub 或无漫游边界不能替代这些能力的闭环证据。
 - [ ] 文件投递：核对 Edge Strip / 真实 Ghost Overlay / 被动跨屏拖拽与原生落点语义，已落地托盘 UI 不代表这些全功能完成。
 - [ ] 其他历史 backlog（fuzz、Android / iOS、Wayland、硬件编码与桌面外壳等）需重新核对现有实现与优先级后立项，不沿用旧版“未开始 / 已验证”标签。

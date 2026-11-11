@@ -8163,3 +8163,20 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
    - 严禁任何 UI/拖拽钩子干扰 Windows 生产环境（`SRBMiner-MULTI.exe`、`verge-mihomo.exe`、`komari-agent.exe`）；
    - 任何中途中断或 ESC 取消由状态机自动销毁虚影与临时句柄，杜绝文件碎片与僵尸会话。
 
+
+## 93. 幽灵漫游卡死修复：漫游必须持活授权 (v0.2.15 / 9d7eef2)
+
+1. **生产事故（2026-11-11 23:47 UTC，v0.2.14 双机验收中）**：
+   - Mac 端 Leave 释放 Windows 的 Target 会话后，persistent channel（`input_out`）仍开放——`release_input_tunnel_local` 只撤销会话不撕通道（by design，避免重连抖动）；
+   - 用户推 Windows 下边时，drive 路径守卫只检查"通道开着"→ 无任何 Controller 授权即越界进 Remote：物理鼠标被 `arm_input_capture` 拆除、位移经残留通道直发 Mac；数秒后 Mac 侧同样越界，两台引擎全部悬空 Remote 互发帧（幽灵漫游）；
+   - watcher 对账 `reconcile_stranded_remote_seat` 以"通道开着"为不救援代理条件 → 永不触发；无 send 失败（通道活着）→ drive 路径 force_local 兜底也不触发；两端物理鼠标冻结直至人工 `/api/input/stop`。
+
+2. **三项修复（crates/tetherly-node/src/runtime/input.rs）**：
+   - **reconcile 改判**：豁免条件从"通道开着"收紧为"存在活 Controller 授权（`active_tunnel_role()==Controller`）且通道开着"；通道开而无授权正是幽灵态，watcher 1s tick 即救援；
+   - **drive 越界守卫**：进入 Remote 需三选一授权——tunnel Controller grant / 2.5s grace / ADR-138 session（本机非接收角色，m6_10 契约）；无授权则保持 Local，并以 1s 防抖 spawn `input_tunnel_attach` 补会话（该函数同步预置 Controller，下一事件即合法越界；一次死推替代无授权漫游或冻结）；
+   - **pre_arm_epoch**：`ActiveInputTunnelSession` 增单调 epoch，attach 预置/目标接受时自增；通道 pump 起跑时快照 epoch，teardown 仅释放自己 epoch 的授权——修复旧 pump 的 "peer session gone" teardown 误杀新预置授权导致对端 ACCEPTED resp 落空死锁（m3_11 同类竞态）。
+
+3. **测试**：
+   - 新增 `ghost_roam_remote_seat_is_reconciled_despite_open_channel`（先红后绿）与 `drive_crossing_without_controller_grant_stays_local`（先红后绿）；
+   - phase3 m3_1..m3_7 更新为 attach 契约：`attach_and_wait_session` 等双端（target role + 通道开）就位再推边，消除 entry placement 竞态 flake（entry x 497/1000 vs 505）；
+   - 全 workspace 绿（含 phase5 65/65，m6_10 经 ADR-138 session 豁免保持绿）；fmt + clippy 0 error。
