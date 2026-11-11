@@ -628,6 +628,7 @@ impl Node {
             screen_client_gen: std::sync::atomic::AtomicU64::new(0),
             input_client_task: Mutex::new(None),
             input_dialing: std::sync::atomic::AtomicBool::new(false),
+            input_attach_kick_ms: std::sync::atomic::AtomicU64::new(0),
             last_auto_reverse: Mutex::new(None),
             reverse_arm_since: Mutex::new(None),
             reverse_last_tick: Mutex::new(None),

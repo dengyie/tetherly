@@ -21,6 +21,16 @@ use tracing::{info, warn};
 /// Monotonic generation counter for outbound input channels.
 static INPUT_CHANNEL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Monotonic epoch for pre-armed input tunnel grants. Bumped on every
+/// grant construction (controller pre-arm AND target accept) so a stale
+/// channel pump can tell its own grant from a newer one (see
+/// `ActiveInputTunnelSession::pre_arm_epoch`).
+static INPUT_PRE_ARM_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_pre_arm_epoch() -> u64 {
+    INPUT_PRE_ARM_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
 /// Result of an edge crossing decision on cursor movement.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CursorCrossingDecision {
@@ -55,6 +65,15 @@ pub struct ActiveInputTunnelSession {
     pub capture_height: Option<u32>,
     pub started_at_ms: u64,
     pub last_activity_ms: u64,
+    /// Monotonic pre-arm generation. `input_tunnel_attach` bumps this when
+    /// it overwrites the grant slot; a dying channel pump captured the
+    /// epoch it started under, and its teardown may only release a grant
+    /// whose epoch matches. Without this, a takeover's fresh pre-arm is
+    /// released by the OLD pump's "peer session gone" teardown — the peer's
+    /// ACCEPTED resp then finds no armed session and the takeover dead-ends
+    /// (production 2026-11-11 23:47 race + phase3 m3_* 2026-11-11).
+    #[serde(default)]
+    pub pre_arm_epoch: u64,
 }
 
 /// Active ADR-138 remote desktop session metadata (controller or target side).
@@ -566,6 +585,7 @@ impl Node {
             capture_height: Some(height),
             started_at_ms: now_ms,
             last_activity_ms: now_ms,
+            pre_arm_epoch: next_pre_arm_epoch(),
         };
 
         *self
@@ -1513,6 +1533,7 @@ impl Node {
                 capture_height: None,
                 started_at_ms: now_ms,
                 last_activity_ms: now_ms,
+                pre_arm_epoch: next_pre_arm_epoch(),
             });
         }
         let inner = req_frame.to_frame()?;
@@ -2317,7 +2338,16 @@ impl Node {
         if self.input_engine_seat() != CursorSeat::Remote {
             return false;
         }
-        if self.input_channel_open_sync() {
+        // A live Controller grant means roaming is authorized and the
+        // remote seat is legitimate. The persistent channel survives
+        // session releases, so "channel open" alone is NOT that: the
+        // ghost-roam freeze (production 2026-11-11 23:47, both engines
+        // Remote, frames flowing, no session anywhere, both physical mice
+        // dead until an operator stop) passed exactly this check. Skip
+        // only when the grant exists; rescue open-channel-without-grant.
+        if self.input_channel_open_sync()
+            && self.active_tunnel_role() == Some(tetherly_core::InputTunnelRole::Controller)
+        {
             return false;
         }
         let in_grace = {
@@ -2582,6 +2612,94 @@ impl Node {
                         handle.spawn(async move {
                             if let Err(e) = node.open_input(&peer).await {
                                 tracing::debug!(%peer, %e, "crossing-guard self-heal dial failed");
+                            }
+                        });
+                    }
+                }
+            }
+            return Ok(None);
+        }
+
+        // Ghost-roam guard: a channel WITHOUT a Controller grant must not
+        // enter remote roaming. The persistent channel survives session
+        // releases, so after the peer's Leave (or any grant end) the next
+        // physical edge push would otherwise cross into Remote with no
+        // authorization: the physical mouse dissociates, deltas ship to the
+        // peer over the leftover channel, and the watcher reconcile skipped
+        // rescuing because "the channel is open" (production 2026-11-11
+        // 23:47:46, both engines stranded Remote, both mice frozen).
+        //
+        // The missing grant is repaired HERE, on the push itself, the same
+        // way the (production-dead) evaluate_cursor_crossing auto-link used
+        // to: spawn input_tunnel_attach. It pre-arms the Controller grant
+        // synchronously before its first await, so the very next event
+        // passes this guard and roams; this push stays local — one dead
+        // push instead of an unauthenticated roam or a freeze.
+        //
+        // ADR-138 session exemption: a session this node CONTROLS (role not
+        // receiving) is its own authorization — the session controller's
+        // deltas are the session's input stream (m6_10: guarding them
+        // dead-ended the session mouse, the "Windows mouse cannot control
+        // the Mac" bug class).
+        let session_drives_this_node_ctrl = self
+            .shared
+            .remote_session
+            .lock()
+            .expect("remote_session")
+            .as_ref()
+            .is_some_and(|s| !s.role.is_receiving());
+        if !in_grace
+            && !session_drives_this_node_ctrl
+            && self.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Controller)
+        {
+            {
+                let mut server = self.shared.input_engine.lock().expect("engine");
+                if server.seat() == CursorSeat::Remote {
+                    server.force_local();
+                    let (cx, cy) = server.local_pos();
+                    *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+                    // Transient, NOT a session end: a pending takeover's pre-armed
+                    // Controller grant must survive so the peer's late ACCEPT still
+                    // matches (releasing here dead-ends the takeover, CI m3_11) —
+                    // and this branch only runs when no grant exists at all.
+                    self.disarm_input_capture();
+                    crate::platform::warp_mouse_position(cx, cy);
+                    self.emit(UiEvent::input_seat_changed("local", false, None));
+                }
+            }
+            // Attach-kick debounce: the hook feeds this path up to 1000 Hz.
+            // One kick per second is plenty (the pre-arm lands in ms) and a
+            // storm would overwrite the just-pre-armed session — the resp of
+            // a dropped pre-arm dead-ends the takeover (CI m3_11 class).
+            let now_ms = self.shared.clock.unix_ms();
+            let last_kick = self
+                .shared
+                .input_attach_kick_ms
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if now_ms.saturating_sub(last_kick) > 1000
+                && self
+                    .shared
+                    .input_attach_kick_ms
+                    .compare_exchange(
+                        last_kick,
+                        now_ms,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+            {
+                if let Some(peer) = self.reconnect_target_peer() {
+                    let rt = tokio::runtime::Handle::try_current()
+                        .ok()
+                        .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
+                    if let Some(handle) = rt {
+                        let node = self.clone_handle();
+                        handle.spawn(async move {
+                            if let Err(e) = node
+                                .input_tunnel_attach(&peer.to_string(), None, None, None)
+                                .await
+                            {
+                                tracing::debug!(%peer, %e, "ghost-roam guard attach kick failed");
                             }
                         });
                     }
@@ -3497,6 +3615,18 @@ impl Node {
         ));
         let mut stop = self.shared.shutdown.subscribe();
         let node = self.clone_handle();
+        // Epoch the grant slot had when THIS pump took over: the teardown
+        // below may only release a grant this pump actually served. A newer
+        // pre-arm (takeover attach overwrites the slot synchronously) must
+        // survive this pump's death — the peer's ACCEPTED resp matches it
+        // (CI m3_11 / production 2026-11-11).
+        let grant_epoch = self
+            .shared
+            .active_input_tunnel
+            .lock()
+            .expect("active_input_tunnel")
+            .as_ref()
+            .map(|s| s.pre_arm_epoch);
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -3572,19 +3702,24 @@ impl Node {
             // where the demoted side's dying task flipped the freshly
             // rebuilt session back to Local.
             let still_current = {
-                let role_now = node
-                    .shared
-                    .active_input_tunnel
-                    .lock()
-                    .expect("active_input_tunnel")
-                    .as_ref()
-                    .map(|s| s.role)
-                    // Bare input channels (no tunnel session) keep the legacy
-                    // controller-side cleanup; only an actual demotion
-                    // (role = Target) suppresses it.
-                    .unwrap_or(InputTunnelRole::Controller);
+                let (role_now, epoch_now) = {
+                    let guard = node
+                        .shared
+                        .active_input_tunnel
+                        .lock()
+                        .expect("active_input_tunnel");
+                    let role = guard
+                        .as_ref()
+                        .map(|s| s.role)
+                        // Bare input channels (no tunnel session) keep the legacy
+                        // controller-side cleanup; only an actual demotion
+                        // (role = Target) suppresses it.
+                        .unwrap_or(InputTunnelRole::Controller);
+                    (role, guard.as_ref().map(|s| s.pre_arm_epoch))
+                };
                 let peer_now = node.shared.input_peer.lock().expect("input_peer").clone();
                 role_now == InputTunnelRole::Controller
+                    && epoch_now == grant_epoch
                     && peer_now.as_ref().map(|d| d.to_string()).as_deref() == Some(peer_id.as_str())
             };
             if !still_current {
@@ -4047,6 +4182,7 @@ mod tests {
             capture_height: None,
             started_at_ms: 0,
             last_activity_ms: 0,
+            pre_arm_epoch: next_pre_arm_epoch(),
         });
         assert!(
             !node.reconcile_stranded_remote_seat(),
@@ -4070,6 +4206,132 @@ mod tests {
         assert!(!node.reconcile_stranded_remote_seat());
     }
 
+    /// Regression (production 2026-11-11 23:47, v0.2.14): both engines sat
+    /// Remote, frames flowed over the persistent channel, and NO session
+    /// existed on either side — the reconcile guard used "channel open" as
+    /// the skip proxy, and the persistent channel survives session releases,
+    /// so the rescue never fired and both physical mice froze until an
+    /// operator stop. "Channel open" is not authorization: only a live
+    /// Controller grant is.
+    #[tokio::test]
+    async fn ghost_roam_remote_seat_is_reconciled_despite_open_channel() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("ghost-seat");
+
+        // Cross into Remote the way the drive path does.
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.set_edge(tetherly_core::ScreenEdge::Right);
+            let crossed = engine.local_move_delta(1919, 500, 4, 0);
+            assert_eq!(crossed, Some(tetherly_core::ScreenEdge::Right));
+            engine.drain();
+        }
+        assert_eq!(node.input_engine_seat(), CursorSeat::Remote);
+
+        // The persistent channel survives a session release: simulate it
+        // with a live queue so `input_channel_open_sync()` is true while no
+        // grant exists at all — the exact ghost-roam state.
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            let mut rx = rx;
+            while rx.recv().await.is_some() {}
+        });
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+
+        // A live Controller grant is legitimate roaming: spare the seat.
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_ctl".to_string(),
+            peer_id: "tdev_peer".to_string(),
+            role: InputTunnelRole::Controller,
+            requested_edge: None,
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: 0,
+            last_activity_ms: 0,
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+        assert!(
+            !node.reconcile_stranded_remote_seat(),
+            "a live Controller grant must spare the seat"
+        );
+
+        // Grant gone: channel still open, no session anywhere. This is the
+        // frozen state the watcher tick must rescue.
+        *node.shared.active_input_tunnel.lock().unwrap() = None;
+        assert!(
+            node.reconcile_stranded_remote_seat(),
+            "ghost roam (open channel, no grant) must be rescued"
+        );
+        assert_eq!(node.input_engine_seat(), CursorSeat::Local);
+        assert!(!node.reconcile_stranded_remote_seat(), "idempotent");
+    }
+
+    /// Regression (production 2026-11-11 23:47:46, v0.2.14): with the
+    /// persistent channel open but no Controller grant, the drive path
+    /// crossed into Remote anyway — physical mouse dissociated, deltas
+    /// shipped to the peer, no session anywhere. Entering remote roaming
+    /// requires a grant; without one the crossing must stay local.
+    #[tokio::test]
+    async fn drive_crossing_without_controller_grant_stays_local() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("ghost-drive");
+
+        // Persistent channel open (session released underneath it), no
+        // grant, no grace deadline. Pair the bottom edge like the incident
+        // (Windows bottom <-> Mac top); fast pushes (|dy| >= 6) cross the
+        // redundancy band immediately.
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            let mut rx = rx;
+            while rx.recv().await.is_some() {}
+        });
+        *node.shared.input_out.lock().unwrap() = Some((1, tx));
+        node.shared.input_policy.lock().unwrap().edge = Some("bottom".to_string());
+
+        // Mirror the incident: the user pushes toward the paired edge.
+        let _ = node
+            .drive_input_delta(960, 1080, 2, 10, 1920, 1080)
+            .unwrap();
+
+        assert_eq!(
+            node.input_engine_seat(),
+            CursorSeat::Local,
+            "no grant, no remote seat"
+        );
+        assert_ne!(
+            *node.shared.input_seat.lock().unwrap(),
+            Some(CursorSeat::Remote),
+            "shared seat must not read remote without a grant"
+        );
+        assert!(
+            !node.is_keyboard_armed(),
+            "capture must stay disarmed without a grant"
+        );
+
+        // Now arm a Controller grant and push again: roaming works.
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_ctl".to_string(),
+            peer_id: "tdev_peer".to_string(),
+            role: InputTunnelRole::Controller,
+            requested_edge: Some(tetherly_core::DisplayEdge::Bottom),
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: 0,
+            last_activity_ms: 0,
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+        let _ = node
+            .drive_input_delta(960, 1080, 2, 10, 1920, 1080)
+            .unwrap();
+        assert_eq!(
+            node.input_engine_seat(),
+            CursorSeat::Remote,
+            "with a grant the push roams"
+        );
+    }
+
     #[tokio::test]
     async fn session_end_releases_stale_input_tunnel_grant() {
         let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("tunnel-release");
@@ -4085,6 +4347,7 @@ mod tests {
             capture_height: None,
             started_at_ms: 0,
             last_activity_ms: 0,
+            pre_arm_epoch: 1,
         };
         *node.shared.active_input_tunnel.lock().unwrap() = Some(stale);
 
@@ -4618,6 +4881,7 @@ mod tests {
             capture_height: None,
             started_at_ms: now,
             last_activity_ms: now,
+            pre_arm_epoch: next_pre_arm_epoch(),
         });
 
         node.drive_gesture_swipe(1)
@@ -4755,6 +5019,7 @@ mod tests {
             capture_height: Some(1080),
             started_at_ms: now,
             last_activity_ms: now,
+            pre_arm_epoch: next_pre_arm_epoch(),
         });
 
         // Distance arming: ~1/4 screen of real traversal first (the same

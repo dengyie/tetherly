@@ -938,6 +938,11 @@ struct Shared {
     /// same peer: the loser's session would become a zombie and flip
     /// `input_out` back and forth.
     input_dialing: std::sync::atomic::AtomicBool,
+    /// Unix-ms of the last ghost-roam attach kick. The drive-path guard
+    /// fires per input event; without this gate a 1000 Hz hook stream would
+    /// spawn a request storm and each pre-arm would overwrite the previous
+    /// session (the resp of the dropped session then dead-ends, CI m3_11).
+    input_attach_kick_ms: std::sync::atomic::AtomicU64,
     /// Instant of the last automatic direction flip (cooldown between flips).
     last_auto_reverse: Mutex<Option<std::time::Instant>>,
     /// Auto-reverse dwell state: start of the current sustained edge push and

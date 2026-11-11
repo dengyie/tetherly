@@ -200,6 +200,9 @@ async fn m3_1_edge_and_key_follow_on_45719() {
         .open_input(client.identity().device_id())
         .await
         .unwrap();
+    // Roaming requires a Controller grant, not just an open channel (the
+    // ghost-roam guard); wait for the session to register on both sides.
+    attach_and_wait_session(&server, &client, tetherly_core::DisplayEdge::Right).await;
     tokio::time::sleep(Duration::from_millis(80)).await;
 
     let edge = server.drive_input(100, 10, 100, 50).unwrap();
@@ -239,6 +242,7 @@ async fn m3_2_peer_gone_returns_cursor() {
         .open_input(client.identity().device_id())
         .await
         .unwrap();
+    attach_and_wait_session(&server, &client, tetherly_core::DisplayEdge::Right).await;
     server.drive_input(80, 5, 80, 40).unwrap();
     assert_eq!(server.input_engine_seat(), CursorSeat::Remote);
     client.shutdown();
@@ -264,6 +268,7 @@ async fn m3_3_clip_still_works_while_input_focused() {
         .open_input(client.identity().device_id())
         .await
         .unwrap();
+    attach_and_wait_session(&server, &client, tetherly_core::DisplayEdge::Right).await;
     server.drive_input(120, 20, 120, 60).unwrap();
     let start = std::time::Instant::now();
     while client.input_seat() != Some(CursorSeat::Remote) {
@@ -300,6 +305,7 @@ async fn m3_4_input_keymap_remapping() {
         .open_input(client.identity().device_id())
         .await
         .unwrap();
+    attach_and_wait_session(&server, &client, tetherly_core::DisplayEdge::Top).await;
     tokio::time::sleep(Duration::from_millis(80)).await;
 
     // Cross edge to set seat to Remote
@@ -397,6 +403,7 @@ async fn m3_5_four_directional_edge_roaming() {
         .open_input(client.identity().device_id())
         .await
         .unwrap();
+    attach_and_wait_session(&server, &client, tetherly_core::DisplayEdge::Top).await;
     tokio::time::sleep(Duration::from_millis(80)).await;
 
     // Moving to y <= 0 crosses the Top boundary
@@ -467,6 +474,7 @@ async fn m3_6_left_edge_roaming() {
         .open_input(client.identity().device_id())
         .await
         .unwrap();
+    attach_and_wait_session(&server, &client, tetherly_core::DisplayEdge::Left).await;
     tokio::time::sleep(Duration::from_millis(80)).await;
 
     // Moving to x <= 0 crosses the Left boundary
@@ -512,6 +520,7 @@ async fn m3_7_physical_boundary_touch_crossing() {
         .open_input(client.identity().device_id())
         .await
         .unwrap();
+    attach_and_wait_session(&server, &client, tetherly_core::DisplayEdge::Right).await;
     tokio::time::sleep(Duration::from_millis(80)).await;
 
     // Moving to width - 1 (1919) must trigger crossing
@@ -531,6 +540,7 @@ async fn m3_7_physical_boundary_touch_crossing() {
         .open_input(client.identity().device_id())
         .await
         .unwrap();
+    attach_and_wait_session(&server, &client, tetherly_core::DisplayEdge::Bottom).await;
     tokio::time::sleep(Duration::from_millis(80)).await;
 
     let crossed = server.drive_input(500, 1079, 1920, 1080).unwrap();
@@ -573,6 +583,36 @@ async fn m3_8_wheel_speed_policy_mutation() {
     assert!((server.input_policy().wheel_speed - 2.5).abs() < f64::EPSILON);
 
     server.shutdown();
+}
+
+/// Attach as controller and wait until BOTH sides have registered the
+/// session (target role on the peer, open channel here). Roaming frames
+/// shipped before that window land on a half-built session — the entry
+/// placement races the target's own Enter/Leave bookkeeping (m3_5 flake
+/// 2026-11-11: entry x 497/1000 instead of 505).
+async fn attach_and_wait_session(
+    server: &tetherly_node::Node,
+    client: &tetherly_node::Node,
+    edge: tetherly_core::DisplayEdge,
+) {
+    server
+        .input_tunnel_attach(
+            client.identity().device_id().to_string().as_str(),
+            Some(edge),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let start = std::time::Instant::now();
+    while client.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target)
+        || !server.input_channel_open_sync()
+    {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("session did not register (target role + channel open) in time");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
