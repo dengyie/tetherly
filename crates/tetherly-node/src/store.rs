@@ -268,7 +268,11 @@ fn sid_from_string(s: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + 4 * subs.len());
     out.push(1); // revision
     out.push(subs.len() as u8);
-    out.extend_from_slice(&authority.to_be_bytes()); // 48-bit big-endian
+    // IdentifierAuthority is a 48-bit (6-byte) big-endian field; u64::to_be_bytes
+    // yields 8, so drop the two leading zero bytes. Writing all 8 shifts every
+    // following byte and produces an invalid SID (production 2026-11-12: the
+    // granted ACEs showed up as unresolvable S-1-0-* trustees).
+    out.extend_from_slice(&authority.to_be_bytes()[2..]);
     for sub in subs {
         out.extend_from_slice(&sub.to_le_bytes());
     }
