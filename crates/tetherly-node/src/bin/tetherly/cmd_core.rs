@@ -472,6 +472,25 @@ pub(crate) async fn run(
                 }
             }
 
+            // Pending-session debounce (production 2026-11-12): a live
+            // Controller session with no channel yet is an attach whose
+            // request/resp is still in flight — the peer accepts it on its
+            // own clock (or has already REJECTED our pre-arm and the resp is
+            // undelivered). Re-attaching every tick from the edge policy
+            // re-armed a fresh session each second; on the peer each re-arm
+            // arrived as a same-peer takeover request that (before the
+            // receive-side guard) killed the roaming we were trying to
+            // resume, and after the guard it is pure request spam. A session
+            // younger than 10s is in flight: leave it alone. The stale
+            // recycle above (5s + peer-gone) covers the dead-peer case.
+            if let Some(s) = status.session.as_ref() {
+                if s.role == tetherly_core::InputTunnelRole::Controller
+                    && status.timestamp_ms.saturating_sub(s.started_at_ms) < 10_000
+                {
+                    continue;
+                }
+            }
+
             if (status.active || policy.edge.is_some())
                 && !being_controlled
                 && !link_watcher.input_channel_open().await

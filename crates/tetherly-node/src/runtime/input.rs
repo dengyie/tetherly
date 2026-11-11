@@ -308,6 +308,15 @@ impl Node {
         // outbound channel and both cursors are driven simultaneously (two
         // controllers fighting), which is unreachable-to-debug drift and is
         // exactly what broke reverse (Windows -> Mac) control.
+        //
+        // NOTE (production 2026-11-12): a same-peer request here is
+        // ambiguous — the peer watcher's stale redial (which must NOT demote
+        // a live roaming session) and the peer user's explicit reverse
+        // takeover (which must) are wire-identical. The demotion stays, and
+        // the fix lives on the requesting side: the watcher debounces a
+        // pending (<10s) Controller session instead of re-arming every tick
+        // (cmd_core watcher loop), so a stale redial never reaches this
+        // branch while the user's roaming is alive.
         if self.active_tunnel_role() == Some(InputTunnelRole::Controller) {
             info!(peer = %peer_str, "input tunnel takeover: releasing local controller session");
             eprintln!(

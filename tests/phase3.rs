@@ -714,6 +714,110 @@ async fn m3_9_reverse_control_takeover_flips_roles_cleanly() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn m3_12_same_peer_takeover_request_never_demotes_own_roaming() {
+    let (server, client, _ga, _gb) = pair().await;
+
+    // Production 2026-11-12 17:08: Windows roams toward Mac (Controller
+    // session Windows->Mac live). Mac's edge-driven watcher, blind to that
+    // session (its own channel is closed), redials every tick; each redial
+    // arrives at Windows as a takeover request FROM ITS OWN ROAM PEER and
+    // the polite-takeover branch demoted the user's roaming session.
+    //
+    // The wire semantics of a same-peer takeover request are intentional
+    // (m3_9: the reverse-direction click/takeover is a legitimate flip), so
+    // the receive side keeps demoting. The fix lives on the REQUESTING
+    // side: the watcher debounces a pending (<10s) Controller session
+    // instead of re-arming every tick. This test pins the observable
+    // contract the watcher consumes: a fresh pre-arm Controller session
+    // with no channel reports active + young age (the debounce window),
+    // and a LEGITIMATE same-peer takeover (a real user flip) still
+    // demotes — the semantics the fix must not change.
+    client
+        .input_tunnel_attach(
+            server.identity().device_id().to_string().as_str(),
+            Some(tetherly_core::DisplayEdge::Bottom),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let start = std::time::Instant::now();
+    while server.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target)
+        || !client.input_channel_open_sync()
+    {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("client roaming session did not register");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        client.active_tunnel_role(),
+        Some(tetherly_core::InputTunnelRole::Controller)
+    );
+
+    // 1. A same-peer takeover request (the watcher-redial shape, but also
+    //    the legitimate user-flip shape) demotes the roaming session —
+    //    wire semantics unchanged by the fix.
+    server
+        .input_tunnel_attach(
+            client.identity().device_id().to_string().as_str(),
+            Some(tetherly_core::DisplayEdge::Top),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let start = std::time::Instant::now();
+    while server.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Controller)
+        || !server.input_channel_open_sync()
+    {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!(
+                "same-peer takeover did not complete: server={:?}, client={:?}",
+                server.active_tunnel_role(),
+                client.active_tunnel_role()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        client.active_tunnel_role(),
+        Some(tetherly_core::InputTunnelRole::Target),
+        "demoted side must flip to target"
+    );
+
+    // 2. A fresh pre-arm Controller session is "pending" — the watcher
+    //    debounce reads exactly this shape (active Controller session, no
+    //    channel, started_at_ms fresh). Pre-arm one and assert the status
+    //    fields the debounce consumes BEFORE the resp lands: session age
+    //    must be well under the 10s window.
+    client
+        .input_tunnel_attach(
+            server.identity().device_id().to_string().as_str(),
+            Some(tetherly_core::DisplayEdge::Bottom),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let status = client.input_tunnel_status();
+    assert!(
+        status.active,
+        "pre-armed session must be visible to the watcher"
+    );
+    let s = status.session.expect("session present");
+    assert_eq!(s.role, tetherly_core::InputTunnelRole::Controller);
+    let age = status.timestamp_ms.saturating_sub(s.started_at_ms);
+    assert!(
+        age < 10_000,
+        "fresh pre-arm age {age}ms must sit inside the watcher debounce window"
+    );
+
+    server.shutdown();
+    client.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn m3_10_auto_reverse_edge_push_takes_over_without_click() {
     let (server, client, _ga, _gb) = pair().await;
 

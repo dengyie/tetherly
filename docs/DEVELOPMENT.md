@@ -8206,3 +8206,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
    - **deploy.sh C 盘镜像 + 版本门**：Windows restart 前自动把 E: 盘 staging 二进制镜像到 `C:\Users\mango\AppData\Local\tetherly\updates\`（守护进程 staging 白名单，见 §94.5）；health check 后断言 `/api/health` version == tag，不匹配 exit 3。
 
 3. **发布**：0.2.17 bump → CI release → 双机部署（deploy.sh 已含 C 盘路径，本批次应首次零手工干预过 restart 门）。
+
+## 96. Windows→Mac 越边失效：Mac watcher 永动重拨杀掉漫游会话 (v0.2.18)
+
+1. **现象（2026-11-11 全天，v0.2.16/v0.2.17 双版本复现）**：Mac→Windows 方向完全正常；Windows→Mac 推边零响应。Windows 日志 09:38Z 后零 `engine crossing fired`、零 pre-arm；两端空闲时 Windows API 显示大量 `role=target` churn。
+
+2. **根因（两端日志 17:08 窗口直接实证）**：Mac 策略持久存有 `edge: "top"`（input_policy.json），watcher 每秒 tick 的重拨条件 `status.active || policy.edge.is_some()` 永真（cmd_core.rs）→ Mac 无用户动作时每 10-60s 重拨 `open_input` + `input_tunnel_attach`。每次请求抵达 Windows，`receive_input_tunnel_request` 的 polite-takeover 分支把 Windows 侧任何 Controller 会话降级成 Target（input.rs:311）。Windows→Mac 漫游从未在 Mac 侧建立成功（Mac 角色永远变不成 Target→being_controlled 永远 false→重拨永动），形成死循环。实证：Windows 17:08:38.912 pre-arm tun_...918875（手动 CLI attach）→ 17:08:49.002 "input tunnel takeover: releasing local controller session"。用户推边后事件掉进 guard 1（role==Target）的 reverse-arming 分支（300px 距离武装 + 100ms dwell，正常推边不满足）被静默吃掉，且该分支无 INFO 日志（"silent, no log"）。
+
+3. **修复（cmd_core.rs watcher 循环）**：pending 防抖——`status.session` 为 Controller 角色且 age <10s（请求/resp 在途）时 `continue` 跳过本轮重拨。resp 往返 <100ms，10s 窗口充足；resp accepted 后 Mac 变 Target → `being_controlled=true` → watcher 自然静默。**receive 侧语义保持不变**：同 peer 接管请求与合法反向接管（m3_9 用户主动 flip）在网络层同形，无法在协议层区分，故修在请求侧。5s stale 回收（peer gone）继续覆盖死对端场景。
+
+4. **测试**：新增 phase3 `m3_12_same_peer_takeover_request_never_demotes_own_roaming`（锁定同 peer 接管 wire 语义不变 + pending 会话对 watcher 的可见形状：active + Controller + age<10s）。曾尝试 receive 侧同 peer 拒绝方案，m3_9/10/11 全红（合法反向接管被拦）后回滚——教训：takeover 请求无意图字段，协议层区分"用户 flip"与"watcher 重拨"不可行。workspace 794 passed / 0 failed，clippy 零警告，fmt。
+
+5. **部署验证要点**：Windows→Mac 推边应立即生效（首次推边若遇 pending 窗口最多等 1s 防抖刷新）；Mac 日志不再出现无 crossing 配对的周期性 pre-arm 风暴。
