@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Identity and trust persistence. Temp file + rename. Unix 0600; Windows
-//! lives under %LOCALAPPDATA% (user ACL). Never logs secret bytes.
+//! lives under %LOCALAPPDATA% (user ACL) with an explicit read grant for
+//! LocalSystem/Administrators so a SYSTEM-launched daemon loads the same
+//! identity (`cred::load_or_create_identity` dual-store). Never logs secret
+//! bytes.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -89,7 +92,180 @@ fn restrict_file(path: &Path) {
             let _ = fs::set_permissions(path, p);
         }
     }
+    #[cfg(windows)]
+    grant_identity_file_system_read(path);
     let _ = path;
+}
+
+/// Grant `NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators` read access on
+/// `path` (Windows only), preserving the existing DACL.
+///
+/// The daemon runs under two privilege chains that must load the same
+/// identity (production 2026-11-12): the interactive user's scheduled tasks
+/// (vault-readable, file co-held) and the SYSTEM `TetherlySystemLauncher`
+/// task (vault invisible by design — Credential Manager is per-logon-session
+/// — so the file side is its only store). Without this grant the SYSTEM
+/// process hits "access denied" on the user-profile file and, with the vault
+/// opt-out in `cred::vault_enabled_for`, has no fallback: the service chain
+/// would refuse to start or (before the `VaultUnavailable` guard) silently
+/// mint a new identity and destroy every pairing.
+///
+/// Idempotent and best effort: on any Win32 error the file keeps its current
+/// ACL; the interactive-user chain still works and the failure is visible as
+/// a SYSTEM-side startup error, not a corruption.
+#[cfg(windows)]
+fn grant_identity_file_system_read(path: &Path) {
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{
+        GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W,
+        SET_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_W,
+    };
+    use windows_sys::Win32::Security::ACL;
+
+    // Canonical FILE_GENERIC_READ: READ_CONTROL | FILE_READ_DATA |
+    // FILE_READ_ATTRIBUTES | FILE_READ_EA | SYNCHRONIZE.
+    const FILE_GENERIC_READ: u32 =
+        0x0002_0000 | 0x0000_0001 | 0x0000_0080 | 0x0000_0008 | 0x0010_0000;
+    const DACL_SECURITY_INFORMATION: u32 = 4;
+
+    let Some(path_str) = path.to_str() else {
+        return;
+    };
+    let path_w: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // SID strings avoid name-lookup flakiness on non-English Windows.
+    let system_sid = sid_from_string("S-1-5-18");
+    let admins_sid = sid_from_string("S-1-5-32-544");
+    if system_sid.len() < 8 || admins_sid.len() < 8 {
+        return;
+    }
+
+    // Read the CURRENT DACL first: SetEntriesInAclW merges the explicit
+    // entries into the given old ACL, and passing NULL would REPLACE the
+    // whole DACL — dropping the owner's own access on the identity file.
+    let mut old_acl: *mut ACL = std::ptr::null_mut();
+    // SAFETY: path_w is NUL-terminated; the out DACL pointer is freed below
+    // via LocalFree on success.
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            path_w.as_ptr() as *mut u16,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut old_acl,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        tracing::warn!(rc = rc, "reading identity file DACL failed");
+        return;
+    }
+
+    let system_trustee = TRUSTEE_W {
+        pMultipleTrustee: std::ptr::null_mut(),
+        MultipleTrusteeOperation: 0,
+        TrusteeForm: TRUSTEE_IS_SID,
+        TrusteeType: 0,
+        ptstrName: system_sid.as_ptr() as *mut u16,
+    };
+    let admins_trustee = TRUSTEE_W {
+        pMultipleTrustee: std::ptr::null_mut(),
+        MultipleTrusteeOperation: 0,
+        TrusteeForm: TRUSTEE_IS_SID,
+        TrusteeType: 0,
+        ptstrName: admins_sid.as_ptr() as *mut u16,
+    };
+    let entries = [
+        EXPLICIT_ACCESS_W {
+            grfAccessPermissions: FILE_GENERIC_READ,
+            grfAccessMode: SET_ACCESS,
+            grfInheritance: 0,
+            Trustee: system_trustee,
+        },
+        EXPLICIT_ACCESS_W {
+            grfAccessPermissions: FILE_GENERIC_READ,
+            grfAccessMode: SET_ACCESS,
+            grfInheritance: 0,
+            Trustee: admins_trustee,
+        },
+    ];
+    let mut new_acl: *mut ACL = std::ptr::null_mut();
+    // SAFETY: entries is a valid array of two EXPLICIT_ACCESS_W; old_acl is
+    // the DACL fetched above (possibly NULL when the file had none) and the
+    // merged result is allocated by the API.
+    let rc = unsafe { SetEntriesInAclW(2, entries.as_ptr(), old_acl, &mut new_acl) };
+    if rc != ERROR_SUCCESS || new_acl.is_null() {
+        // SAFETY: on SetEntriesInAclW failure there is nothing new to free;
+        // old_acl from GetNamedSecurityInfoW must still be freed.
+        unsafe {
+            if !old_acl.is_null() {
+                let _ = LocalFree(old_acl as *mut _);
+            }
+        }
+        tracing::warn!(rc = rc, "merging SYSTEM read ACEs failed");
+        return;
+    }
+    // SAFETY: path_w is NUL-terminated; new_acl is a valid ACL from
+    // SetEntriesInAclW; owner/group/SACL params are unused (null).
+    let rc2 = unsafe {
+        SetNamedSecurityInfoW(
+            path_w.as_ptr() as *mut u16,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            new_acl,
+            std::ptr::null_mut(),
+        )
+    };
+    // SAFETY: both ACLs were allocated by the ACL API and must be freed
+    // with LocalFree per their contracts.
+    unsafe {
+        let _ = LocalFree(new_acl as *mut _);
+        let _ = LocalFree(old_acl as *mut _);
+    }
+    if rc2 != ERROR_SUCCESS {
+        tracing::warn!(rc = rc2, "SYSTEM read grant on identity file failed");
+    }
+}
+
+/// Parse a minimal `S-1-5-<a>` style SID string into its binary form.
+/// Returns an empty vec on malformed input. Only authority value 5 (NT) is
+/// supported — that covers LocalSystem (S-1-5-18) and builtin groups.
+#[cfg(windows)]
+fn sid_from_string(s: &str) -> Vec<u8> {
+    let parts: Vec<&str> = s.split('-').collect();
+    // S-1-<authority>-<sub>...
+    if parts.len() < 4 || parts[0] != "S" || parts[1] != "1" {
+        return Vec::new();
+    }
+    let authority: u64 = match parts[2].parse() {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    if authority > u32::MAX as u64 {
+        return Vec::new();
+    }
+    let mut subs = Vec::new();
+    for p in &parts[3..] {
+        match p.parse::<u32>() {
+            Ok(v) => subs.push(v),
+            Err(_) => return Vec::new(),
+        }
+    }
+    if subs.is_empty() || subs.len() > 15 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(8 + 4 * subs.len());
+    out.push(1); // revision
+    out.push(subs.len() as u8);
+    out.extend_from_slice(&authority.to_be_bytes()); // 48-bit big-endian
+    for sub in subs {
+        out.extend_from_slice(&sub.to_le_bytes());
+    }
+    out
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

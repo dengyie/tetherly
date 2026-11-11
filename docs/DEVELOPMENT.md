@@ -8230,3 +8230,22 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 4. **测试**：input.rs `test_tunnel_accept_sets_engine_edge_for_reverse_takeover`——无 policy edge + Bottom 邻居 + Toprequested_edge 的 accept 断言 engine.edge==Bottom 且 input_peer 已 seed；随后完整驱动序列（350px 距离武装 + clamped tail dwell）断言 `last_auto_reverse` 落章（takeover 触发）。红→绿双向验证：注释掉 set_edge/input_peer 块测试红，恢复后绿。串行 workspace 795 passed / 0 failed，clippy 零警告，fmt。
 
 5. **教训**：Controller 侧与 Target 侧是两条对称的状态武装路径（edge、input_peer、engine resize、reverse-arming 状态），新增会话字段时两侧必须同时检查——v0.2.18 只修了请求侧（防抖），Target 侧的武装缺失直到部署后才暴露。测试坑：`(700..=350).rev()` 是空 range（start>end），静默产出 0 个位置导致距离门永不满——用 `--nocapture` + 状态探针两分钟定位。
+
+## 98. UAC/登录界面点击失效：启动特权漂移 × 身份存储与特权的隐性耦合 (v0.2.20)
+
+1. **现象（v0.2.19 部署后用户反馈）**：Mac 控制 Windows 时，UAC 提权对话框（"是否允许应用对设备更改"）与 Windows 密码输入界面的鼠标点击失效；普通窗口一切正常。
+
+2. **取证（生产机实测）**：`PromptOnSecureDesktop=0`（UAC 在普通桌面，排除 Secure Desktop 隔离）；daemon `TokenElevation=1`（mango 提权，计划任务 RunLevel Highest）；consent.exe/winlogon 以 **SYSTEM** 运行。UIPI 规定 lower-IL 进程不能向更高 IL 窗口注入 —— high（提权 mango）< SYSTEM，点击被内核静默丢弃。**这不是 v0.2.19 的回归**：`scripts/launch_system.ps1` 文件头注释明确记载了原始设计 —— daemon 由 `TetherlySystemLauncher` SYSTEM 任务启动、置于交互桌面最高特权、"so it can inject into elevated (UAC) windows"。失效原因是**启动链漂移**：部署热重启（`/api/daemon/restart` 继承当前进程 token）+ 手工用 mango 任务启动过，SYSTEM 特权丢了。
+
+3. **恢复 SYSTEM 时的结构性矛盾（本节核心）**：直接用 SYSTEM 任务重启后 device_id 变了 —— tdev_rguu 的 64 字节密钥在 11-10 23:42 被 v1.13 迁移进 **mango 用户的 Credential Manager**（identity.bin 已删、identity.ref 留下），而 **SYSTEM logon session 天然读不到其他用户的凭据库条目**。于是特权（SYSTEM 注入 UAC）与身份（mango vault）被锁死在两个不同的进程上下文里，只能二选一。排查期间的两次误判必须记录：**SSH 会话 CredReadW 探测 vault 得 err=203/1312 是假阴性**（SSH 是网络式 logon session，读凭据库本就受限），换计划任务在交互 session 探测才得真值 `ok=True`——生产排查时凡涉凭据库探测，绝不能用 SSH 上下文下结论。期间 daemon 曾因 `identity.ref` 存在 + vault 读失败被启动守卫拒绝（`VaultUnavailable`），这正是 §d 修复的死锁态。
+
+4. **修复（身份与特权解耦，v0.2.20）**：
+   - **双形态共存**（`cred.rs::load_or_create_identity` 重构）：identity.bin 与凭据库都是权威存储，指向同一身份；当前上下文读得到哪个就用哪个，缺失的一侧从另一侧幂等修复（`repair_other_store`）。**永不删除 identity.bin**——旧"迁移成功即删文件"的行为在 vault 条目事后丢失（机器凭据清理、profile 重置）时把 ref 变成死指针，是 §3 死锁的根源。
+   - **SYSTEM 上下文检测**（`cred.rs::process_runs_as_local_system`）：OpenProcessToken+TokenUser，SID=S-1-5-18 判定；`vault_enabled_for` 对 SYSTEM 直接走文件路径（vault 对它必然不可见，opt-in 只会触发死锁）。
+   - **SYSTEM 可读 ACL**（`store.rs::grant_identity_file_system_read`，restrict_file 在 Windows 分支自动调用）：GetNamedSecurityInfoW 取现有 DACL → SetEntriesInAclW **合并**（不可传 NULL 旧 ACL，那会整表替换把 mango 自己踢掉）SYSTEM+Administrators 的 FILE_GENERIC_READ → SetNamedSecurityInfoW 写回。SID 用 `sid_from_string` 字符串解析，避免非英文 Windows 的名字查找。
+   - **启动链统一**：四个计划任务与 `run_tetherly_system.bat` 全部指向默认 data-dir（`C:\Users\mango\AppData\Local\tetherly`）；bat 里注明 E:\code\tetherly\data 是已退役的旧身份目录。`deploy.sh` 部署后新增 daemon owner 检查：非 SYSTEM 打 WARN 并给出恢复命令（不自动切换，部署脚本不杀进程）。
+   - 修复后两条启动链（mango 任务 / SYSTEM 任务）完全等价：同一身份、同一数据目录，特权漂移不再引起身份漂移，SYSTEM 链恢复 UAC/登录界面注入。
+
+5. **测试**：`cred::tests` 6 条全绿——新增 `ref_without_vault_entry_recovers_from_identity_bin`（§3 死锁态从文件侧恢复）、`dual_store_repairs_missing_sides_idempotently`（删 bin→vault 恢复、清 vault→文件恢复，`TETHERLY_VAULT_TEST=1` 门控）、`file_only_path_keeps_ref_pointer_coherent`（无 vault 平台的指针修复）；`vault_roundtrips_via_the_ref_pointer` 的"vault 在用则 bin 必不存在"断言已随双形态语义更新。macOS 单测+Windows mingw-w64 交叉编译零警告+双目标 clippy+fmt+串行 workspace 回归全绿。
+
+6. **教训**：(a) 特权链与数据链是两条独立的"漂移面"——启动方式（计划任务/热重启/手工）决定特权，数据目录与存储形态决定身份，任意一条漂移都足以让"之前修好的问题"复现，生产检查必须两条都看；(b) Credential Manager 的 logon-session 隔离使凭据库不能作为跨特权身份存储，跨身份共享必须走文件+显式 ACL；(c) 排查时对"系统级存储读不到"的探测结论要先审视探测者自身的会话上下文。

@@ -222,6 +222,17 @@ deploy_windows() {
         fi
     done
     echo "Protected processes 100% intact: $WIN_POST_AUDIT"
+    # Privilege-drift guard (v0.2.20): the /api/daemon/restart hot-restart
+    # inherits the running daemon's token, so privilege only degrades when a
+    # non-SYSTEM chain (TetherlyApp/autostart) was last used. A mango-owned
+    # daemon cannot inject into UAC/secure windows (UIPI) — warn, don't block.
+    WIN_OWNER=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$p = Get-CimInstance Win32_Process -Filter \\\"Name='tetherly.exe'\\\" | Select-Object -First 1; if (\$p) { (Invoke-CimMethod -InputObject \$p -MethodName GetOwner).User }\"" 2>/dev/null || true)
+    if [ -n "${WIN_OWNER}" ] && ! [ "${WIN_OWNER}" = "SYSTEM" ]; then
+        echo "WARN: tetherly daemon runs as ${WIN_OWNER}, not SYSTEM — UAC/elevated-window clicks will be dropped by UIPI." >&2
+        echo "WARN: restore with: ssh ${REMOTE_HOST} \"powershell -NoProfile -Command 'Start-ScheduledTask -TaskName TetherlySystemLauncher'\"" >&2
+    else
+        echo "Daemon privilege: SYSTEM (UAC/elevated-window injection OK)"
+    fi
     echo "==> Windows deployment complete."
 }
 
