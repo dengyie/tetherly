@@ -2314,8 +2314,14 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                             code: vk,
                             down: true,
                         });
+                        std::ptr::null_mut()
+                    } else {
+                        // Unmapped key (Fn/globe 0x3F etc.) is not shared
+                        // across the tunnel; swallowing it here would strand
+                        // its press state locally (observed as a stuck Fn
+                        // flag in CGEventSource after a roam).
+                        event.as_ptr()
                     }
-                    std::ptr::null_mut()
                 } else {
                     event.as_ptr()
                 }
@@ -2332,8 +2338,10 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                             code: vk,
                             down: false,
                         });
+                        std::ptr::null_mut()
+                    } else {
+                        event.as_ptr()
                     }
-                    std::ptr::null_mut()
                 } else {
                     event.as_ptr()
                 }
@@ -2403,8 +2411,13 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                             code: vk,
                             down: is_down,
                         });
+                        std::ptr::null_mut()
+                    } else {
+                        // Same unmapped-key rule as KeyDown/KeyUp: Fn flags
+                        // transitions must not be swallowed locally, or the
+                        // OS keeps the Fn latch asserted.
+                        event.as_ptr()
                     }
-                    std::ptr::null_mut()
                 } else {
                     event.as_ptr()
                 }
@@ -2595,6 +2608,18 @@ mod input_tests {
         assert_eq!(win_vk_to_mac_keycode(0x10), Some(0x38)); // VK_SHIFT -> Left Shift
         assert_eq!(win_vk_to_mac_keycode(0x11), Some(0x3B)); // VK_CONTROL -> Left Control
         assert_eq!(win_vk_to_mac_keycode(0x12), Some(0x3A)); // VK_MENU -> Left Option
+    }
+
+    #[test]
+    fn fn_globe_key_is_unmapped_by_design() {
+        // The Fn / globe key (0x3F) intentionally has no Windows VK mapping:
+        // it is a local-only key. The tap must therefore PASS IT THROUGH when
+        // armed (regression guard for the stuck-Fn bug where the callback
+        // swallowed its FlagsChanged and the OS kept the Fn latch asserted).
+        // If someone ever adds a 0x3F mapping, the pass-through rule for it
+        // must be re-evaluated together with the remote Fn semantics.
+        assert_eq!(mac_keycode_to_win_vk(0x3F), None);
+        assert_eq!(mac_keycode_to_win_vk(0x34), None); // globe/Fn on some layouts
     }
 
     #[cfg(windows)]
