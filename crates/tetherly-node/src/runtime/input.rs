@@ -374,6 +374,47 @@ impl Node {
             .lock()
             .expect("active_input_tunnel") = Some(session);
 
+        // Production 2026-11-12 (v0.2.18): the TARGET side never told the
+        // engine which shared edge this session sits on. The controller side
+        // resolves its edge in `input_tunnel_attach` (policy → topology →
+        // Right); here nothing did, so a target that has no policy edge
+        // (Windows production box) kept the engine's default Right while the
+        // real pair is bottom. The user's push at the bottom edge then
+        // matched no zone in `maybe_auto_reverse` / the drive normalization
+        // (both read `engine.edge()`) and was silently swallowed — "Windows
+        // bottom cannot reach the Mac", with zero crossing logs. Resolve the
+        // same ladder on accept: the controller's requested edge (the edge
+        // IT crossed = this side's shared edge), then local policy, then the
+        // topology neighbor for this peer, then Right. Also seed
+        // `input_peer` so the drive path's topology fallback resolves while
+        // the session lives (the channel may not be dialed yet).
+        let target_edge: tetherly_core::ScreenEdge = if let Some(e) = frame.requested_edge {
+            e.into()
+        } else if let Some(e) = policy.edge.as_deref() {
+            e.parse::<tetherly_core::ScreenEdge>()
+                .unwrap_or(tetherly_core::ScreenEdge::Right)
+        } else {
+            let layout = self.shared.topology_layout.lock().expect("topology_layout");
+            layout
+                .neighbors
+                .iter()
+                .find_map(|(de, n)| {
+                    if n.peer_id == peer_str {
+                        Some((*de).into())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(tetherly_core::ScreenEdge::Right)
+        };
+        *self.shared.input_peer.lock().expect("input_peer") = Some(peer.clone());
+        {
+            let mut engine = self.shared.input_engine.lock().expect("engine");
+            engine.set_edge(target_edge);
+            let (ew, eh) = crate::platform::screen_size();
+            engine.resize(ew.max(1), eh.max(1));
+        }
+
         // Reset any leftover arming/dwell state from an earlier session.
         self.reset_reverse_arming_state();
 
@@ -4375,6 +4416,138 @@ mod tests {
             node.shared.input_sink.lock().unwrap().cursor,
             (exp_x, exp_y),
             "cursor must be placed at the controller-mapped entry"
+        );
+    }
+
+    // Regression (production 2026-11-12, v0.2.18): the TARGET side never
+    // told the engine which shared edge the session sits on. A Windows box
+    // with no input_policy.json kept the engine's default Right edge while
+    // the real pair is bottom — the user's sustained push at the bottom
+    // edge matched no zone in `maybe_auto_reverse` (which reads
+    // `engine.edge()`) and was silently swallowed: zero crossing logs, zero
+    // takeover attempts. The accept path must arm the engine with the
+    // session's edge, so a sustained push at that edge fires the reverse
+    // takeover.
+    #[tokio::test]
+    async fn test_tunnel_accept_sets_engine_edge_for_reverse_takeover() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("target-edge");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("target-edge-peer");
+        let peer_id = other.identity().device_id().clone();
+
+        // Windows production shape: 1920x1080, NO policy edge, topology
+        // neighbor on the BOTTOM edge (win's neighbor below is the mac).
+        node.shared.topology_layout.lock().unwrap().display = DisplayRect::new(1920, 1080, 1.0);
+        node.shared
+            .topology_layout
+            .lock()
+            .unwrap()
+            .neighbors
+            .insert(
+                DisplayEdge::Bottom,
+                EdgeNeighbor {
+                    peer_id: peer_id.to_string(),
+                    peer_edge: DisplayEdge::Top,
+                    offset: 0,
+                },
+            );
+        assert!(
+            node.input_policy().edge.is_none(),
+            "test models the no-policy-edge production box"
+        );
+
+        // Seed the peer as live so the takeover attach can resolve it
+        // (unreachable addr is fine — the Controller flip in the pre-arm
+        // happens before any wire I/O).
+        node.shared.live.lock().unwrap().insert(
+            peer_id.clone(),
+            crate::runtime::trust::LivePeer {
+                device_id: peer_id.clone(),
+                name: "peer".into(),
+                platform: "test".into(),
+                addr: "127.0.0.1:1".parse().unwrap(),
+                handshake_hash: [0u8; 32],
+                file_port: None,
+                input_port: Some(45719),
+                screen_port: None,
+                caps: Vec::new(),
+                path: tetherly_core::PathKind::Lan,
+                rtt_ms: None,
+                last_seen_ms: 0,
+            },
+        );
+
+        // The mac's takeover request names the edge IT crossed INTO windows
+        // — windows' bottom = the mac's Top request edge.
+        let frame = InputTunnelRequestFrame {
+            session_id: "tun_target_edge".into(),
+            client_device_id: peer_id.to_string(),
+            requested_edge: Some(DisplayEdge::Bottom),
+            entry_x: None,
+            entry_y: None,
+            timestamp_ms: 1,
+        };
+        node.receive_input_tunnel_request(&peer_id, frame).await;
+
+        {
+            let guard = node.shared.active_input_tunnel.lock().unwrap();
+            let session = guard.as_ref().expect("tunnel session accepted");
+            assert_eq!(session.role, InputTunnelRole::Target);
+        }
+        // The engine edge must now be the request's edge — NOT the default
+        // Right.
+        {
+            let engine = node.shared.input_engine.lock().unwrap();
+            assert_eq!(
+                engine.edge(),
+                tetherly_core::ScreenEdge::Bottom,
+                "accept must arm the engine with the session's shared edge"
+            );
+        }
+        assert_eq!(
+            node.shared.input_peer.lock().unwrap().as_ref(),
+            Some(&peer_id),
+            "input_peer must be seeded so the drive-path topology fallback resolves"
+        );
+
+        // End-to-end drive check: with the engine armed for Bottom, a
+        // sustained push into the BOTTOM edge must fire the reverse
+        // takeover. Distance arming first (~1/4 screen of traversal, the
+        // same sequence a real hand produces), then a dwell at the boundary
+        // — one into-edge event opens the dwell, the OS-clamped zero-delta
+        // tail continues it (win hook clamp behavior).
+        let mut positions: Vec<(i32, i32)> = (350..=700).rev().map(|y| (960, y)).collect();
+        positions.push((960, 1070)); // boundary approach
+        positions.push((960, 1079)); // into-edge event (dy>0): opens the dwell
+        for _ in 0..20 {
+            positions.push((960, 1079)); // clamped tail: zero-delta, dwell continues
+        }
+        let mut prev: Option<(i32, i32)> = None;
+        for (i, (x, y)) in positions.iter().enumerate() {
+            let (dx, dy) = match prev {
+                Some((lx, ly)) => (x - lx, y - ly),
+                None => (0, 0),
+            };
+            prev = Some((*x, *y));
+            let _ = node
+                .drive_input_delta(*x, *y, dx, dy, 1920, 1080)
+                .expect("reverse path must not error");
+            // Pace the clamped tail so the dwell crosses delay_ms (100ms
+            // default) while every gap stays inside TOUCH_GAP_MS (150ms).
+            if i >= positions.len() - 22 {
+                std::thread::sleep(std::time::Duration::from_millis(12));
+            }
+        }
+        // The takeover must have FIRED (same observable as the win→mac
+        // zero-delta regression): the stamp happens the instant the dwell
+        // completes. On the pre-fix code the engine edge was Right, the
+        // bottom push matched no zone, and the dwell never armed.
+        let fired = std::iter::repeat_n((), 100)
+            .find(|_| node.shared.last_auto_reverse.lock().unwrap().is_some())
+            .is_some();
+        assert!(
+            fired,
+            "with the accept-armed edge, the sustained bottom-edge push must fire the reverse takeover"
         );
     }
 

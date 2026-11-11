@@ -8218,3 +8218,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 4. **测试**：新增 phase3 `m3_12_same_peer_takeover_request_never_demotes_own_roaming`（锁定同 peer 接管 wire 语义不变 + pending 会话对 watcher 的可见形状：active + Controller + age<10s）。曾尝试 receive 侧同 peer 拒绝方案，m3_9/10/11 全红（合法反向接管被拦）后回滚——教训：takeover 请求无意图字段，协议层区分"用户 flip"与"watcher 重拨"不可行。workspace 794 passed / 0 failed，clippy 零警告，fmt。
 
 5. **部署验证要点**：Windows→Mac 推边应立即生效（首次推边若遇 pending 窗口最多等 1s 防抖刷新）；Mac 日志不再出现无 crossing 配对的周期性 pre-arm 风暴。
+
+## 97. Windows→Mac 越边失效（续）：Target 侧从不武装 engine edge，底边推边静默失败 (v0.2.19)
+
+1. **现象（v0.2.18 部署后复验）**：防抖已生效（Mac 无 pre-arm 风暴、Windows 无 churn），但 Windows 底边推边依然进不了 Mac。Windows 18:05-18:08 窗口零 `engine crossing fired`、零 pre-arm、零 `auto-reverse blocked`——全静默。
+
+2. **根因（双向实证）**：Windows 常驻 Target 角色（Mac 的反控会话活着），此时 Windows 拿回控制权走 `maybe_auto_reverse` 反向接管路径，而该路径读 **engine 的 edge**。Target 侧接受会话的 `receive_input_tunnel_request` 只建会话槽、从不 `set_edge` 也从不 seed `input_peer`：Windows 无 input_policy.json（policy_edge_str=None）→ topology 回退靠 input_peer（None）→ engine edge 永远是默认 **Right**，而真实拓扑是 **Bottom**。用户推底边，`maybe_auto_reverse` 的 edge-zone 匹配（`Bottom if y >= height-2 || (y >= height-8 && dy > 0)`）不命中 → `_` 分支静默 return（此分支恰好无日志）。历史日志佐证：11-10 的 crossing/block 日志 `edge=Bottom`（当时是 Controller 且刚 attach，attach 路径会正确 set_edge）；11-11 12:16 唯一一条 blocked 日志 `edge=right`（Target 常驻后）。`tetherly.exe input status` 显示 `Edge: right (default)` 直接实锤。
+
+3. **修复（input.rs `receive_input_tunnel_request`）**：accept 路径按与 Controller 侧 `input_tunnel_attach` 相同的解析梯子武装 engine——requested_edge（对端宣告的进入边=本机共享边）→ 本机 policy edge → topology 邻居 → Right；同时 seed `input_peer`（通道可能尚未拨号，drive 路径的拓扑回退必须有它）并 resize engine 到本机屏幕。会话终止路径（input_stop / release / peer-gone teardown）本就恢复/重设 engine 状态，无需改。
+
+4. **测试**：input.rs `test_tunnel_accept_sets_engine_edge_for_reverse_takeover`——无 policy edge + Bottom 邻居 + Toprequested_edge 的 accept 断言 engine.edge==Bottom 且 input_peer 已 seed；随后完整驱动序列（350px 距离武装 + clamped tail dwell）断言 `last_auto_reverse` 落章（takeover 触发）。红→绿双向验证：注释掉 set_edge/input_peer 块测试红，恢复后绿。串行 workspace 795 passed / 0 failed，clippy 零警告，fmt。
+
+5. **教训**：Controller 侧与 Target 侧是两条对称的状态武装路径（edge、input_peer、engine resize、reverse-arming 状态），新增会话字段时两侧必须同时检查——v0.2.18 只修了请求侧（防抖），Target 侧的武装缺失直到部署后才暴露。测试坑：`(700..=350).rev()` 是空 range（start>end），静默产出 0 个位置导致距离门永不满——用 `--nocapture` + 状态探针两分钟定位。
