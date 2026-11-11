@@ -1183,6 +1183,31 @@ pub fn mac_keycode_to_win_vk(mac_code: u16) -> Option<u16> {
     None
 }
 
+/// What the HID tap's keyboard branches must do with a physical key event
+/// while capture is ARMED. Pure decision — the tap closure only executes it
+/// — so the matrix (mapped/unmapped × KeyDown/KeyUp/FlagsChanged) is unit
+/// testable without CGEvent infrastructure.
+///
+/// Swallowing an unmapped key (Fn/globe 0x3F etc.) strands its press state
+/// locally: the observed production failure was a stuck `MaskSecondaryFn`
+/// latch in CGEventSource after a roam (the tap is a `Default`-option tap,
+/// so a swallowed FlagsChanged never reaches the OS). Unmapped keys are
+/// local-only by definition — pass them through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmedKeyDecision {
+    /// Forward to the peer as `RawInput::Key { vk, down }` and swallow locally.
+    Forward { vk: u16 },
+    /// No cross-end semantics: let the OS see the event untouched.
+    PassThrough,
+}
+
+pub fn armed_key_decision(mac_code: u16) -> ArmedKeyDecision {
+    match mac_keycode_to_win_vk(mac_code) {
+        Some(vk) => ArmedKeyDecision::Forward { vk },
+        None => ArmedKeyDecision::PassThrough,
+    }
+}
+
 pub fn win_vk_to_mac_keycode(vk_code: u16) -> Option<u16> {
     match vk_code {
         0x10 => return Some(0x38), // VK_SHIFT -> Left Shift
@@ -2309,18 +2334,15 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 }
 
                 if armed {
-                    if let Some(vk) = mac_keycode_to_win_vk(keycode) {
-                        let _ = ctx.tx.send(RawInput::Key {
-                            code: vk,
-                            down: true,
-                        });
-                        std::ptr::null_mut()
-                    } else {
-                        // Unmapped key (Fn/globe 0x3F etc.) is not shared
-                        // across the tunnel; swallowing it here would strand
-                        // its press state locally (observed as a stuck Fn
-                        // flag in CGEventSource after a roam).
-                        event.as_ptr()
+                    match armed_key_decision(keycode) {
+                        ArmedKeyDecision::Forward { vk } => {
+                            let _ = ctx.tx.send(RawInput::Key {
+                                code: vk,
+                                down: true,
+                            });
+                            std::ptr::null_mut()
+                        }
+                        ArmedKeyDecision::PassThrough => event.as_ptr(),
                     }
                 } else {
                     event.as_ptr()
@@ -2333,14 +2355,15 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                         Some(cg_event),
                         CGEventField::KeyboardEventKeycode,
                     ) as u16;
-                    if let Some(vk) = mac_keycode_to_win_vk(keycode) {
-                        let _ = ctx.tx.send(RawInput::Key {
-                            code: vk,
-                            down: false,
-                        });
-                        std::ptr::null_mut()
-                    } else {
-                        event.as_ptr()
+                    match armed_key_decision(keycode) {
+                        ArmedKeyDecision::Forward { vk } => {
+                            let _ = ctx.tx.send(RawInput::Key {
+                                code: vk,
+                                down: false,
+                            });
+                            std::ptr::null_mut()
+                        }
+                        ArmedKeyDecision::PassThrough => event.as_ptr(),
                     }
                 } else {
                     event.as_ptr()
@@ -2406,17 +2429,18 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 };
 
                 if armed {
-                    if let Some(vk) = mac_keycode_to_win_vk(keycode) {
-                        let _ = ctx.tx.send(RawInput::Key {
-                            code: vk,
-                            down: is_down,
-                        });
-                        std::ptr::null_mut()
-                    } else {
+                    match armed_key_decision(keycode) {
+                        ArmedKeyDecision::Forward { vk } => {
+                            let _ = ctx.tx.send(RawInput::Key {
+                                code: vk,
+                                down: is_down,
+                            });
+                            std::ptr::null_mut()
+                        }
                         // Same unmapped-key rule as KeyDown/KeyUp: Fn flags
                         // transitions must not be swallowed locally, or the
                         // OS keeps the Fn latch asserted.
-                        event.as_ptr()
+                        ArmedKeyDecision::PassThrough => event.as_ptr(),
                     }
                 } else {
                     event.as_ptr()
@@ -2620,6 +2644,28 @@ mod input_tests {
         // must be re-evaluated together with the remote Fn semantics.
         assert_eq!(mac_keycode_to_win_vk(0x3F), None);
         assert_eq!(mac_keycode_to_win_vk(0x34), None); // globe/Fn on some layouts
+    }
+
+    #[test]
+    fn armed_key_decision_matrix() {
+        use ArmedKeyDecision::{Forward, PassThrough};
+
+        // Mapped keys forward with the right VK, for every branch the tap
+        // consults the decision (the branch itself does not re-filter).
+        assert_eq!(armed_key_decision(0x00), Forward { vk: 0x41 }); // A
+        assert_eq!(armed_key_decision(0x37), Forward { vk: 0x5B }); // Left Cmd
+        assert_eq!(armed_key_decision(0x3B), Forward { vk: 0xA2 }); // Left Ctrl
+        assert_eq!(armed_key_decision(0x7A), Forward { vk: 0x70 }); // F1
+
+        // Unmapped keys pass through — the stuck-Fn regression contract.
+        assert_eq!(armed_key_decision(0x3F), PassThrough); // Fn / globe
+        assert_eq!(armed_key_decision(0x34), PassThrough);
+
+        // Caps Lock is decided by the dedicated 0x39 branch BEFORE the
+        // decision fn (synthetic press+release pair, not Forward semantics) —
+        // pin that the decision fn itself would forward it, so the special
+        // branch stays necessary and visible.
+        assert_eq!(armed_key_decision(0x39), Forward { vk: 0x14 });
     }
 
     #[cfg(windows)]

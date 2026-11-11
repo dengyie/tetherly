@@ -7,12 +7,14 @@ use crate::store::{save_input_policy, DeviceType, InputTunnelPolicy};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use tetherly_core::frame::InnerFrame;
+#[cfg(test)]
+use tetherly_core::DisplayRect;
 use tetherly_core::{
-    map_edge_exit_to_entry, CoreError, CursorSeat, DeviceId, DisplayEdge, DisplayRect, InputClient,
-    InputEvent, InputKind, InputSink, InputTunnelHeartbeatFrame, InputTunnelReleaseFrame,
+    map_edge_exit_to_entry, CoreError, CursorSeat, DeviceId, DisplayEdge, InputClient, InputEvent,
+    InputKind, InputSink, InputTunnelHeartbeatFrame, InputTunnelReleaseFrame,
     InputTunnelRequestFrame, InputTunnelRespFrame, InputTunnelRole, InputTunnelValidator,
     MemorySink, RemoteSessionCloseFrame, RemoteSessionRejectReason, RemoteSessionRequestFrame,
-    RemoteSessionRespFrame, RemoteSessionStateMachine, ScreenState, TopologyValidator,
+    RemoteSessionRespFrame, RemoteSessionStateMachine, ScreenState,
 };
 use tetherly_net::session::{accept_session, dial_session, ActiveSession};
 use tokio::net::TcpStream;
@@ -29,22 +31,6 @@ static INPUT_PRE_ARM_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 
 fn next_pre_arm_epoch() -> u64 {
     INPUT_PRE_ARM_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
-}
-
-/// Result of an edge crossing decision on cursor movement.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CursorCrossingDecision {
-    pub crossed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_peer: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub edge: Option<DisplayEdge>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entry_x: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entry_y: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub blocked_reason: Option<String>,
 }
 
 /// Active virtual input tunnel session metadata.
@@ -255,221 +241,6 @@ impl InputSink for DualInputSink {
 }
 
 impl Node {
-    /// Evaluates cursor position against 2D spatial display topology, anti-misclick corner zones,
-    /// edge resistance, and dwell delay. Computes proportional remote coordinates if crossing criteria are satisfied.
-    pub fn evaluate_cursor_crossing(&self, x: i32, y: i32) -> CursorCrossingDecision {
-        let policy = self.topology_policy();
-        if !policy.enabled {
-            return CursorCrossingDecision {
-                crossed: false,
-                target_peer: None,
-                edge: None,
-                entry_x: None,
-                entry_y: None,
-                blocked_reason: Some("topology coordination disabled".to_string()),
-            };
-        }
-
-        let now = self.shared.clock.unix_ms();
-        let (display, neighbors, config) = {
-            let layout = self.shared.topology_layout.lock().expect("topology_layout");
-            (layout.display, layout.neighbors.clone(), layout.config)
-        };
-
-        let width = display.width as i32;
-        let height = display.height as i32;
-
-        // 1. Anti-misclick corner lock exclusion zone check
-        if TopologyValidator::is_in_corner_zone(
-            x,
-            y,
-            display.width,
-            display.height,
-            config.corner_lock_size_px,
-        ) {
-            return CursorCrossingDecision {
-                crossed: false,
-                target_peer: None,
-                edge: None,
-                entry_x: None,
-                entry_y: None,
-                blocked_reason: Some("corner anti-misclick exclusion zone".to_string()),
-            };
-        }
-
-        // 2. Identify active edge boundary touch
-        let active_edge = if x <= 0 {
-            Some(DisplayEdge::Left)
-        } else if x >= width - 1 {
-            Some(DisplayEdge::Right)
-        } else if y <= 0 {
-            Some(DisplayEdge::Top)
-        } else if y >= height - 1 {
-            Some(DisplayEdge::Bottom)
-        } else {
-            None
-        };
-
-        let Some(edge) = active_edge else {
-            // Not touching any edge: reset dwell and resistance
-            self.shared.cursor_edge_dwell.lock().expect("dwell").clear();
-            self.shared
-                .cursor_edge_resistance_acc
-                .lock()
-                .expect("res")
-                .clear();
-            *self.shared.cursor_last_pos.lock().expect("pos") = (x, y);
-            return CursorCrossingDecision {
-                crossed: false,
-                target_peer: None,
-                edge: None,
-                entry_x: None,
-                entry_y: None,
-                blocked_reason: None,
-            };
-        };
-
-        // 3. Check if neighbor is configured at this edge
-        let Some(neighbor) = neighbors.get(&edge) else {
-            return CursorCrossingDecision {
-                crossed: false,
-                target_peer: None,
-                edge: Some(edge),
-                entry_x: None,
-                entry_y: None,
-                blocked_reason: Some(format!("no neighbor configured at {:?}", edge)),
-            };
-        };
-
-        // 4. Check dwell delay
-        {
-            let mut dwell_map = self.shared.cursor_edge_dwell.lock().expect("dwell");
-            let dwell_start = dwell_map.entry(edge).or_insert(now);
-            if now.saturating_sub(*dwell_start) < config.delay_ms as u64 {
-                return CursorCrossingDecision {
-                    crossed: false,
-                    target_peer: Some(neighbor.peer_id.clone()),
-                    edge: Some(edge),
-                    entry_x: None,
-                    entry_y: None,
-                    blocked_reason: Some(format!(
-                        "dwell delay not reached ({}ms / {}ms)",
-                        now.saturating_sub(*dwell_start),
-                        config.delay_ms
-                    )),
-                };
-            }
-        }
-
-        // 5. Check edge resistance
-        let (last_x, last_y) = *self.shared.cursor_last_pos.lock().expect("pos");
-        let push_distance = match edge {
-            DisplayEdge::Left => (last_x - x).max(1) as u32,
-            DisplayEdge::Right => (x - last_x).max(1) as u32,
-            DisplayEdge::Top => (last_y - y).max(1) as u32,
-            DisplayEdge::Bottom => (y - last_y).max(1) as u32,
-        };
-
-        {
-            let mut res_map = self.shared.cursor_edge_resistance_acc.lock().expect("res");
-            let accumulated = res_map.entry(edge).or_insert(0);
-            *accumulated = accumulated.saturating_add(push_distance);
-            if *accumulated < config.resistance_px {
-                return CursorCrossingDecision {
-                    crossed: false,
-                    target_peer: Some(neighbor.peer_id.clone()),
-                    edge: Some(edge),
-                    entry_x: None,
-                    entry_y: None,
-                    blocked_reason: Some(format!(
-                        "edge resistance not overcome ({}px / {}px)",
-                        *accumulated, config.resistance_px
-                    )),
-                };
-            }
-        }
-
-        // 6. Resolve target peer display geometry
-        let remote_display = {
-            let peers = self.shared.peer_topologies.lock().expect("peer_topologies");
-            peers
-                .get(&neighbor.peer_id)
-                .map(|p| p.display)
-                .unwrap_or_else(|| {
-                    // Default fallback: 1920x1080@1.0
-                    DisplayRect::new(1920, 1080, 1.0)
-                })
-        };
-
-        // 7. Calculate proportional entrance coordinate
-        let (entry_x, entry_y) = map_edge_exit_to_entry(
-            &display,
-            edge,
-            (x, y),
-            &remote_display,
-            neighbor.peer_edge,
-            neighbor.offset,
-        );
-
-        // Reset resistance and dwell after successful crossing trigger
-        self.shared
-            .cursor_edge_dwell
-            .lock()
-            .expect("dwell")
-            .remove(&edge);
-        self.shared
-            .cursor_edge_resistance_acc
-            .lock()
-            .expect("res")
-            .remove(&edge);
-        *self.shared.cursor_last_pos.lock().expect("pos") = (x, y);
-
-        let my_id = self.shared.identity.device_id().to_string();
-        self.emit(UiEvent::cursor_edge_crossed(
-            &my_id,
-            &neighbor.peer_id,
-            edge.as_str(),
-            entry_x,
-            entry_y,
-            now,
-        ));
-
-        self.record_audit(
-            AuditCategory::Security,
-            AuditSeverity::Info,
-            "topology_edge_crossed",
-            Some(neighbor.peer_id.clone()),
-            format!(
-                "Cursor crossed edge {:?} to peer {} at ({}, {})",
-                edge, neighbor.peer_id, entry_x, entry_y
-            ),
-            true,
-        );
-
-        let decision = CursorCrossingDecision {
-            crossed: true,
-            target_peer: Some(neighbor.peer_id.clone()),
-            edge: Some(edge),
-            entry_x: Some(entry_x),
-            entry_y: Some(entry_y),
-            blocked_reason: None,
-        };
-
-        if policy.auto_link_paired_peers && self.input_policy().enabled {
-            let node = self.clone_handle();
-            let target_peer = neighbor.peer_id.clone();
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    let _ = node
-                        .input_tunnel_attach(&target_peer, Some(edge), Some(entry_x), Some(entry_y))
-                        .await;
-                });
-            }
-        }
-
-        decision
-    }
-
     /// Ingest and process an inbound InputTunnelRequestFrame from a controller peer.
     pub async fn receive_input_tunnel_request(
         &self,
@@ -2334,6 +2105,63 @@ impl Node {
     /// legitimately rides Remote while the peer drives it (role receiving /
     /// active session). A pending takeover is protected by the grace
     /// deadline check — its ACCEPT resp re-places the seat.
+    /// Pull a stranded Remote seat back to Local: engine force_local + seat
+    /// write + capture disarm + cursor warp + UI event. Shared by every
+    /// rescue path (channel-closed guard, ghost-roam guard, send-failure,
+    /// watcher reconcile) so a change to the rescue semantics can never be
+    /// applied to one path and missed by another (m6_10 lesson).
+    ///
+    /// `release_grant` is ONLY for the watcher reconcile: it already proved
+    /// the grant is unrescuable (no channel, no grace, no receiving role).
+    /// The drive-path rescues must keep a pending takeover's pre-armed grant
+    /// alive — the peer's late ACCEPT still matches it (CI m3_11); releasing
+    /// there dead-ends the takeover.
+    fn rescue_seat_to_local(&self, release_grant: bool) -> (i32, i32) {
+        let mut engine = self.shared.input_engine.lock().expect("engine");
+        engine.force_local();
+        let (cx, cy) = engine.local_pos();
+        *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        if release_grant {
+            self.release_input_tunnel_local("stranded remote seat rescued");
+        }
+        self.disarm_input_capture();
+        crate::platform::warp_mouse_position(cx, cy);
+        self.emit(UiEvent::input_seat_changed("local", false, None));
+        (cx, cy)
+    }
+
+    /// CAS the ghost-roam attach mutex. `true` means the caller owns the
+    /// attach and MUST clear `input_attaching` when its spawned task
+    /// settles; `false` means another attach (drive kick or watcher
+    /// auto-attach) is already in flight — skip, its pre-arm will serve.
+    fn kick_attach(&self, _peer: &DeviceId) -> bool {
+        self.claim_attach()
+    }
+
+    /// Watcher-side attach claim (pub wrapper; same slot as the drive kick).
+    pub fn watcher_attach_claim(&self, _peer: &DeviceId) -> bool {
+        self.claim_attach()
+    }
+
+    /// Release the watcher-side attach claim after its awaited attach.
+    pub fn watcher_attach_clear(&self) {
+        self.shared
+            .input_attaching
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn claim_attach(&self) -> bool {
+        self.shared
+            .input_attaching
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
     pub fn reconcile_stranded_remote_seat(&self) -> bool {
         if self.input_engine_seat() != CursorSeat::Remote {
             return false;
@@ -2366,15 +2194,7 @@ impl Node {
         {
             return false;
         }
-        let (cx, cy) = {
-            let mut engine = self.shared.input_engine.lock().expect("engine");
-            engine.force_local();
-            let pos = engine.local_pos();
-            *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
-            self.release_input_tunnel_local("stranded remote seat rescued");
-            self.disarm_input_capture();
-            pos
-        };
+        let (cx, cy) = self.rescue_seat_to_local(true);
         crate::platform::warp_mouse_position(cx, cy);
         self.emit(UiEvent::input_seat_changed("local", false, None));
         tracing::info!(
@@ -2583,19 +2403,14 @@ impl Node {
             dl.map(|d| std::time::Instant::now() < d).unwrap_or(false)
         };
         if !self.input_channel_open_sync() && !in_grace {
-            let mut server = self.shared.input_engine.lock().expect("engine");
-            if server.seat() == CursorSeat::Remote {
-                server.force_local();
-                let (cx, cy) = server.local_pos();
-                *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
-                // Transient, NOT a session end: a pending takeover's pre-armed
-                // Controller grant must survive so the peer's late ACCEPT still
-                // matches (releasing here dead-ends the takeover, CI m3_11).
-                self.disarm_input_capture();
-                crate::platform::warp_mouse_position(cx, cy);
-                self.emit(UiEvent::input_seat_changed("local", false, None));
+            {
+                let remote = self.input_engine_seat() == CursorSeat::Remote;
+                if remote {
+                    // Transient, NOT a session end: a pending takeover's
+                    // pre-armed grant must survive (CI m3_11).
+                    self.rescue_seat_to_local(false);
+                }
             }
-            drop(server);
             // Self-heal: the watcher reconnects on its own tick, but a push
             // landing inside that gap is silently eaten — the user experiences
             // "occasionally can't cross". Kick a dial right here (deduped by
@@ -2653,55 +2468,49 @@ impl Node {
             && self.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Controller)
         {
             {
-                let mut server = self.shared.input_engine.lock().expect("engine");
-                if server.seat() == CursorSeat::Remote {
-                    server.force_local();
-                    let (cx, cy) = server.local_pos();
-                    *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
-                    // Transient, NOT a session end: a pending takeover's pre-armed
-                    // Controller grant must survive so the peer's late ACCEPT still
-                    // matches (releasing here dead-ends the takeover, CI m3_11) —
-                    // and this branch only runs when no grant exists at all.
-                    self.disarm_input_capture();
-                    crate::platform::warp_mouse_position(cx, cy);
-                    self.emit(UiEvent::input_seat_changed("local", false, None));
+                if self.input_engine_seat() == CursorSeat::Remote {
+                    // Transient, NOT a session end — and this branch only
+                    // runs when no grant exists at all.
+                    self.rescue_seat_to_local(false);
                 }
             }
             // Attach-kick debounce: the hook feeds this path up to 1000 Hz.
             // One kick per second is plenty (the pre-arm lands in ms) and a
             // storm would overwrite the just-pre-armed session — the resp of
             // a dropped pre-arm dead-ends the takeover (CI m3_11 class).
-            let now_ms = self.shared.clock.unix_ms();
-            let last_kick = self
-                .shared
-                .input_attach_kick_ms
-                .load(std::sync::atomic::Ordering::SeqCst);
-            if now_ms.saturating_sub(last_kick) > 1000
-                && self
-                    .shared
-                    .input_attach_kick_ms
-                    .compare_exchange(
-                        last_kick,
-                        now_ms,
-                        std::sync::atomic::Ordering::SeqCst,
-                        std::sync::atomic::Ordering::SeqCst,
-                    )
-                    .is_ok()
-            {
+            // Monotonic Instant, not wall clock: an NTP step must not stall
+            // the rescue.
+            let now = std::time::Instant::now();
+            let due = {
+                let mut last = self.shared.input_attach_kick_at.lock().expect("kick_at");
+                let due = last
+                    .map(|t| now.duration_since(t) > std::time::Duration::from_millis(1000))
+                    .unwrap_or(true);
+                if due {
+                    *last = Some(now);
+                }
+                due
+            };
+            if due {
                 if let Some(peer) = self.reconnect_target_peer() {
-                    let rt = tokio::runtime::Handle::try_current()
-                        .ok()
-                        .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
-                    if let Some(handle) = rt {
-                        let node = self.clone_handle();
-                        handle.spawn(async move {
-                            if let Err(e) = node
-                                .input_tunnel_attach(&peer.to_string(), None, None, None)
-                                .await
-                            {
-                                tracing::debug!(%peer, %e, "ghost-roam guard attach kick failed");
-                            }
-                        });
+                    if self.kick_attach(&peer) {
+                        let rt = tokio::runtime::Handle::try_current()
+                            .ok()
+                            .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
+                        if let Some(handle) = rt {
+                            let node = self.clone_handle();
+                            handle.spawn(async move {
+                                if let Err(e) = node
+                                    .input_tunnel_attach(&peer.to_string(), None, None, None)
+                                    .await
+                                {
+                                    tracing::debug!(%peer, %e, "ghost-roam guard attach kick failed");
+                                }
+                                node.shared
+                                    .input_attaching
+                                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                            });
+                        }
                     }
                 }
             }
@@ -2821,17 +2630,10 @@ impl Node {
                 dl.map(|d| std::time::Instant::now() < d).unwrap_or(false)
             };
             if !in_grace {
-                let mut server = self.shared.input_engine.lock().expect("engine");
-                if server.seat() == CursorSeat::Remote {
-                    server.force_local();
-                    let (cx, cy) = server.local_pos();
-                    *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
-                    // Transient, NOT a session end: a pending takeover's pre-armed
-                    // Controller grant must survive so the peer's late ACCEPT still
-                    // matches (releasing here dead-ends the takeover, CI m3_11).
-                    self.disarm_input_capture();
-                    crate::platform::warp_mouse_position(cx, cy);
-                    self.emit(UiEvent::input_seat_changed("local", false, None));
+                if self.input_engine_seat() == CursorSeat::Remote {
+                    // Transient, NOT a session end: a pending takeover's
+                    // pre-armed grant must survive (CI m3_11).
+                    self.rescue_seat_to_local(false);
                 }
                 return Err(e);
             }
@@ -3789,25 +3591,9 @@ impl Node {
                             .expect("buffered")
                             .clear();
                         *retry_node.shared.input_peer.lock().expect("input_peer") = None;
-                        retry_node
-                            .shared
-                            .input_engine
-                            .lock()
-                            .expect("engine")
-                            .force_local();
-                        *retry_node.shared.input_seat.lock().expect("seat") =
-                            Some(CursorSeat::Local);
                         // Transient, NOT a session end: a pending takeover's grant must
                         // survive the grace window (its ACCEPT resp re-opens the channel).
-                        retry_node.disarm_input_capture();
-                        let (cx, cy) = retry_node
-                            .shared
-                            .input_engine
-                            .lock()
-                            .expect("engine")
-                            .local_pos();
-                        crate::platform::warp_mouse_position(cx, cy);
-                        retry_node.emit(UiEvent::input_seat_changed("local", false, None));
+                        retry_node.rescue_seat_to_local(false);
                     }
                 });
             } else {

@@ -11044,59 +11044,13 @@ async fn topology_multi_display_spatial_layout_borderless_cursor_and_governance_
     assert_eq!(h_entry["display"]["width"], 2560);
     assert_eq!(h_entry["display"]["height"], 1440);
 
-    // 8. Test Edge Crossing Engine & Anti-Misclick Corner Lock Guardrails
-    // Corner lock zone test: cursor movement in corner (e.g., x=2550, y=10, corner_lock=30)
-    let corner_cross = host.evaluate_cursor_crossing(2550, 10);
-    assert!(
-        !corner_cross.crossed,
-        "Cursor motion in corner lock zone must not cross boundary"
-    );
-    assert_eq!(
-        corner_cross.blocked_reason.as_deref(),
-        Some("corner anti-misclick exclusion zone")
-    );
-
-    // Position cursor near right edge inside bounds to prime last_pos
-    let _ = host.evaluate_cursor_crossing(2550, 720);
-
-    // Insufficient resistance test: push distance = 2559 - 2550 = 9px < 25px
-    let weak_cross = host.evaluate_cursor_crossing(2559, 720);
-    assert!(
-        !weak_cross.crossed,
-        "Cursor motion below resistance threshold must not cross boundary"
-    );
-
-    // Host tunes config with delay_ms = 0 to test pure resistance crossing
-    let cfg_fast = serde_json::json!({
-        "resistance_px": 10,
-        "delay_ms": 0
-    });
-    let (code_cfg2, _) = tetherly_node::loopback_post(
-        host_ui,
-        "/api/topology/config",
-        &serde_json::to_vec(&cfg_fast).unwrap(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(code_cfg2, 200);
-
-    // Prime last pos again
-    let _ = host.evaluate_cursor_crossing(2540, 720);
-    // Push past right edge: 2559 - 2540 = 19px >= 10px, delay = 0
-    let valid_cross = host.evaluate_cursor_crossing(2559, 720);
-    assert!(
-        valid_cross.crossed,
-        "Cursor pushing past resistance must trigger crossing: {:?}",
-        valid_cross.blocked_reason
-    );
-    assert_eq!(
-        valid_cross.edge,
-        Some(tetherly_core::topology::DisplayEdge::Right)
-    );
-    assert_eq!(valid_cross.target_peer, Some(peer_id.to_string()));
-    assert!(valid_cross.entry_x.is_some());
-    assert!(valid_cross.entry_y.is_some());
-
+    // 8. Anti-misclick corner lock / edge resistance guardrails: the
+    // evaluate_cursor_crossing decision method was removed with v0.2.17 —
+    // production roaming is driven exclusively by the drive-path edge
+    // engine (drive_input_delta) with its own dwell/resistance band, and
+    // the duplicated decision path had no production call site. The
+    // guardrail behaviors are covered by the engine tests in phase3
+    // (m3_5/m3_7) and tb_band_gate defaults.
     // 9. Host unlinks right edge via POST /api/topology/unlink
     let unlink_req = serde_json::json!({
         "edge": "right"

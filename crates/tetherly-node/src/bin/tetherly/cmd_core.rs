@@ -511,18 +511,25 @@ pub(crate) async fn run(
                                         .edge
                                         .as_deref()
                                         .and_then(|e| e.parse::<tetherly_core::DisplayEdge>().ok());
-                                    if let Err(e) = link_watcher
-                                        .input_tunnel_attach(
-                                            &peer_id.to_string(),
-                                            edge_opt,
-                                            None,
-                                            None,
-                                        )
-                                        .await
-                                    {
-                                        // Silent swallow here previously hid
-                                        // attach races from operators entirely.
-                                        tracing::warn!(%peer_id, %e, "input tunnel auto-attach failed; will retry next tick");
+                                    // Same attach CAS the drive-kick uses: an
+                                    // attach spawned between the drive path's
+                                    // pre-arm and its channel open would
+                                    // otherwise overwrite that pre-arm.
+                                    if link_watcher.watcher_attach_claim(&peer_id) {
+                                        let result = link_watcher
+                                            .input_tunnel_attach(
+                                                &peer_id.to_string(),
+                                                edge_opt,
+                                                None,
+                                                None,
+                                            )
+                                            .await;
+                                        link_watcher.watcher_attach_clear();
+                                        if let Err(e) = result {
+                                            // Silent swallow here previously hid
+                                            // attach races from operators entirely.
+                                            tracing::warn!(%peer_id, %e, "input tunnel auto-attach failed; will retry next tick");
+                                        }
                                     }
                                 }
                             }

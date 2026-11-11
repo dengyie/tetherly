@@ -28,9 +28,9 @@ use tetherly_core::ports::{Clip, Clock, Rng};
 use tetherly_core::session::LockoutTable;
 use tetherly_core::{
     ActionItem, ActionResultFrame, AncsIngress, AncsTransport, BatteryStateFrame, BenchReportFrame,
-    ClipHub, ControlMsg, CoreError, CursorSeat, DeviceId, DisplayEdge, FileHub, FocusStateFrame,
-    InputServer, InputSink, MediaStateFrame, MemoryScreenSink, MemorySink, MemoryTrustStore,
-    Notifier, NotifyHub, OpenAllowlist, ScreenAudioSyncMode, ScreenAudioSyncStats, ScreenCodec,
+    ClipHub, ControlMsg, CoreError, CursorSeat, DeviceId, FileHub, FocusStateFrame, InputServer,
+    InputSink, MediaStateFrame, MemoryScreenSink, MemorySink, MemoryTrustStore, Notifier,
+    NotifyHub, OpenAllowlist, ScreenAudioSyncMode, ScreenAudioSyncStats, ScreenCodec,
     ScreenCursorMode, ScreenCursorStats, ScreenDamageTracker, ScreenFecMode, ScreenFrame,
     ScreenHarqMode, ScreenLatencyReport, ScreenPacerMode, ScreenPlayoutMode, ScreenPlayoutStats,
     ScreenProbeMode, ScreenProbeStats, ScreenProfilerMode, ScreenSender, ScreenSink, ScreenSource,
@@ -885,8 +885,6 @@ struct Shared {
     topology_policy: Mutex<TopologyPolicy>,
     peer_topologies: Mutex<HashMap<String, TopologyStateFrame>>,
     cursor_last_pos: Mutex<(i32, i32)>,
-    cursor_edge_dwell: Mutex<HashMap<DisplayEdge, u64>>,
-    cursor_edge_resistance_acc: Mutex<HashMap<DisplayEdge, u32>>,
     input_policy: Mutex<InputTunnelPolicy>,
     active_input_tunnel: Mutex<Option<ActiveInputTunnelSession>>,
     /// ADR-138 remote desktop session — single slot. In-memory only: a crash
@@ -938,11 +936,18 @@ struct Shared {
     /// same peer: the loser's session would become a zombie and flip
     /// `input_out` back and forth.
     input_dialing: std::sync::atomic::AtomicBool,
-    /// Unix-ms of the last ghost-roam attach kick. The drive-path guard
+    /// Instant of the last ghost-roam attach kick. The drive-path guard
     /// fires per input event; without this gate a 1000 Hz hook stream would
     /// spawn a request storm and each pre-arm would overwrite the previous
     /// session (the resp of the dropped session then dead-ends, CI m3_11).
-    input_attach_kick_ms: std::sync::atomic::AtomicU64,
+    /// `Instant` (monotonic), not wall clock: an NTP step must not stall the
+    /// rescue path.
+    input_attach_kick_at: Mutex<Option<std::time::Instant>>,
+    /// Ghost-roam attach in flight: CAS-dedupes drive-kick and watcher
+    /// auto-attach so two attaches within the pre-arm-to-open window do not
+    /// overwrite each other's pre-arm (the loser's resp is then dropped by
+    /// session-id mismatch — safe but wasteful and audit-noisy).
+    input_attaching: std::sync::atomic::AtomicBool,
     /// Instant of the last automatic direction flip (cooldown between flips).
     last_auto_reverse: Mutex<Option<std::time::Instant>>,
     /// Auto-reverse dwell state: start of the current sustained edge push and

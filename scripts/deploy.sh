@@ -193,15 +193,25 @@ deploy_windows() {
     echo "==> Performing preflight --help on remote staged binary..."
     ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"& 'E:\code\tetherly\data\updates\\${REMOTE_STAGING_NAME}' --help | Select-Object -First 3\""
 
+    # /api/daemon/restart enforces its own staging allowlist on C:; binaries
+    # staged anywhere else are rejected (production 2026-11-11, twice).
+    echo "==> Mirroring staged binary into daemon update staging dir (C:)..."
+    ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path 'C:\Users\mango\AppData\Local\tetherly\updates' | Out-Null; Copy-Item 'E:\code\tetherly\data\updates\\${REMOTE_STAGING_NAME}' 'C:\Users\mango\AppData\Local\tetherly\updates\\${REMOTE_STAGING_NAME}' -Force\""
+
     echo "==> Initiating NTFS in-use atomic hot-restart via /api/daemon/restart..."
-    RESTART_RESP=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/daemon/restart -Method Post -Body (ConvertTo-Json @{replacement_path='E:\code\tetherly\data\updates\\${REMOTE_STAGING_NAME}'}) -ContentType 'application/json' | ConvertTo-Json -Compress\"")
+    RESTART_RESP=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Invoke-RestMethod -Uri http://127.0.0.1:45716/api/daemon/restart -Method Post -Body (ConvertTo-Json @{replacement_path='C:\Users\mango\AppData\Local\tetherly\updates\\${REMOTE_STAGING_NAME}'}) -ContentType 'application/json' | ConvertTo-Json -Compress\"")
     echo "Restart response: $RESTART_RESP"
 
     echo "==> Waiting 3s for daemon handoff..."
     sleep 3
 
-    echo "==> Verifying Windows node health..."
-    ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/health | ConvertTo-Json\""
+    echo "==> Verifying Windows node health (version gate)..."
+    HEALTH_JSON=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Invoke-RestMethod -Uri http://127.0.0.1:${REMOTE_PORT}/api/health | ConvertTo-Json -Compress\"")
+    echo "$HEALTH_JSON"
+    if [ -n "${TAG}" ] && ! echo "$HEALTH_JSON" | grep -q "\"version\":\"${TAG#v}\""; then
+        echo "FATAL: deployed version does not match ${TAG}!" >&2
+        exit 3
+    fi
 
     echo "==> Post-checking protected production processes on ${REMOTE_HOST}..."
     WIN_POST_AUDIT=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Get-Process ${PROTECT_PROCS} -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, SessionId | ConvertTo-Json -Compress\"" 2>/dev/null || true)
