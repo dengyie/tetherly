@@ -8180,3 +8180,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
    - 新增 `ghost_roam_remote_seat_is_reconciled_despite_open_channel`（先红后绿）与 `drive_crossing_without_controller_grant_stays_local`（先红后绿）；
    - phase3 m3_1..m3_7 更新为 attach 契约：`attach_and_wait_session` 等双端（target role + 通道开）就位再推边，消除 entry placement 竞态 flake（entry x 497/1000 vs 505）；
    - 全 workspace 绿（含 phase5 65/65，m6_10 经 ADR-138 session 豁免保持绿）；fmt + clippy 0 error。
+
+## 94. Fn 卡死修复：armed 时未映射键必须放行 (v0.2.16 / 0782c78)
+
+1. **现象（2026-11-11 16:15，v0.2.15 验收中）**：Mac CGEventSource（`.hidSystemState` 与 `.combinedSessionState`）Fn（keyCode 0x3F，标志 `0x800000 MaskSecondaryFn`）锁死——功能键行反转、部分快捷键异常。手工复测确认锁存可自行恢复，非硬件/系统设置问题（fnState=0、hidutil 映射为空、慢速键/粘滞键关闭）。
+
+2. **根因（crates/tetherly-node/src/platform.rs HIDEventTap）**：`0x3F`（Fn/地球仪）在 `MAC_TO_WIN_KEYS` 表中无映射（by design，本地专用键）→ armed 状态下 FlagsChanged 分支 `mac_keycode_to_win_vk(0x3F)==None` → 回调返回 null **吞掉事件**。可拦截型 tap（`CGEventTapOptions::Default`）吞掉 Fn 抬起 → 系统永不清除 Fn 锁存。KeyDown/KeyUp 分支有同类缺口（任何未映射键跨 armed 翻转均会本地卡键）。触发窗口：越界/返回导致 armed 翻转瞬间 Fn 按下或残留。
+
+3. **修复（0782c78）**：三处分支（KeyDown/KeyUp/FlagsChanged）armed 时对未映射键**放行**（`event.as_ptr()`），不再吞；映射键转发行为不变。Fn 本就不参与跨端共享，无吞它的理由。新增回归测试 `fn_globe_key_is_unmapped_by_design` 锁定"0x3F 必须无映射"前提——若未来加入映射须同步重评放行规则。
+
+4. **取证教训**：日志"停在 08:12"是误判——08:40 有一次进程重启，之后多轮正常漫游；`~/Library/Logs/DiagnosticReports/` 无 Tetherly 崩溃报告。定位 stuck-key 类问题应先查 CGEventSource 修饰键状态与 armed 翻转时间窗的相关性，而不是进程存活。
+
+5. **部署注意（两次部署实测）**：`/api/daemon/restart` 现在要求 replacement binary 位于 `C:\Users\mango\AppData\Local\tetherly\updates\`（守护进程校验 staging 目录，E: 盘路径被拒）——deploy.sh 尚未跟进，手动复制后再调 restart 即可。
