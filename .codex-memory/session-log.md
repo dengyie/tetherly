@@ -1028,6 +1028,6 @@
   4. 版本 bump 0.2.31（Cargo.toml + `cargo update --workspace --offline`）。
   5. 验证：fmt、clippy -D warnings 0 错误；core 315、node 211；loopback 11 / phase2 8 / phase3 13 / phase5 65；phase1 68 并行跑 3 次：2 次各有 1 个无关用例负载抖动（input_tunnel release 即时断言、quick_actions 落盘 5 s），单跑各 3 次全过，1 次全绿。
   6. 文档：DEVELOPMENT.md 顶部基线 → v0.2.31 + §103；`.codex-memory` 四文件同步。
-- Results: 代码/测试/文档完成；待 commit + tag v0.2.31 → release CI → `scripts/deploy.sh --target all --tag v0.2.31` → 双端 health 0.2.31 与 `/api/input` 新字段 → 用户真机点击对账（`tx_buttons`/`rx_buttons`/`dropped`、`push_button`/`apply_button`）。
+- Results: commit `c41af3d` + tag v0.2.31，release run 43327674466 五作业全绿；`scripts/deploy.sh --target all --tag v0.2.31` EXIT=0（Mac pid 97956→51476 accessibility_trusted=true；home-win 298224→310648 SYSTEM/SessionId=2；受保护进程 100% 不动）；双端 `/api/input` 新字段全 0 待漫游。新埋点首批取证：attach 双拨号（gen=N 被 gen=N+1 顶掉 → 第一条 pump `outbound slot dropped`），记为 `m3_12` 候选实证（§103.8）。原计划：待 commit + tag v0.2.31 → release CI → `scripts/deploy.sh --target all --tag v0.2.31` → 双端 health 0.2.31 与 `/api/input` 新字段 → 用户真机点击对账（`tx_buttons`/`rx_buttons`/`dropped`、`push_button`/`apply_button`）。
 - Next: 部署后真机验收 §103.8 四项；若 Windows 侧 `tx_buttons` 不增则查 LL hook Button 分发；`m3_12` windows 红用 `pump_exit` 取证。
 - Blockers: None.

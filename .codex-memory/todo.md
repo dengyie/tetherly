@@ -11,7 +11,8 @@
 - [x] **D · Button 链路可观测**：`/api/input` 新增 `applied/dropped/rx_buttons/rx_wheel/rx_keys/tx_buttons`；trace 新 kind `push_button/apply_button/apply_reject/channel_open/pump_exit/zone_gate`（§102.7 `m3_12` 取证前置）。测试 `drive_input_button_counts_and_traces_push`、`input_status_report_exposes_apply_counters`。
 - [x] 选项 iii（Mac 再预臂延迟）按 §102.4 不做。
 - [x] 本机验证：core 315、node 211、loopback 11 / phase2 8 / phase3 13 / phase5 65；phase1 68 并行有 2 个与本轮无关的负载抖动（单跑均过，§103.7）；clippy -D warnings 0 错误。
-- [ ] 发布部署 v0.2.31：tag → release CI → `scripts/deploy.sh --target all --tag v0.2.31` → 双端 health 0.2.31 + `/api/input` 新字段。
+- [x] 2026-11-13 部署 v0.2.31（commit `c41af3d`，release run 43327674466 全绿，deploy EXIT=0）：Mac 0.2.31 pid 51476 accessibility_trusted=true；home-win 298224→310648 SYSTEM/SessionId=2；受保护进程 100% 不动；双端 `/api/input` 新字段可见。
+- [ ] **attach 双拨号（新埋点实证，§103.8）**：每次 attach 控制器 ~20 ms 内 `channel_open gen=N` → `pump_exit: outbound slot dropped` → `gen=N+1`（attach 末尾 `open_input` 与 resp 侧 `!input_channel_open()` 兜底拨号竞态）。生产无感，但是 `m3_12` windows 红的候选实证；下一轮让 resp 侧只在 attach 拨号失败时补拨。
 - [ ] 真机验收 v0.2.31：回归后立即再顶边一次进入（trace `zone_gate open: pre-arm accept` → `apply_enter`）；进入 1 s 内不弹回；点击时双端 `tx_buttons`/`rx_buttons` 同步、`dropped` 不增、`push_button`/`apply_button` 成对；按住左键能选字/拖窗。
 - [ ] `m3_12` windows 红：v0.2.31 已埋 `pump_exit`/`channel_open`，下一次 windows CI 红灯时直接读 `[takeover]` 之后的 trace 取证再修。
 
