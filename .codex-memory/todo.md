@@ -10,6 +10,9 @@
 - [x] **C · 输入引擎决策环**（§102.3）：`Shared.input_trace` 64 条环 + `GET /api/input/trace` + 双 CLI `tetherly input trace`；node/uihttp 各 1 新测试。
 - [x] **B · 回归后 attach-kick 冷却——明确不做**（§102.4）：预拨号是设计行为，冷却会制造死越边。
 - [x] 本机验证：core 313、node 205、loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65、clippy -D warnings 0 错误。
+- [x] 2026-11-13 部署 v0.2.30：双端 `/api/health` 0.2.30；home-win 302340→298224 SYSTEM/SessionId=2；受保护进程 100% 不动；Mac 无需 TCC reset；双端 `/api/input/trace` 可用。
+- [x] `m3_12` ubuntu 红（phase3.rs:786）：测试构造性竞态，改为等待 client 异步 demotion（测试改动）。
+- [ ] `m3_12` windows 红（phase3.rs:756，v0.2.29 起）：controller pump 开通即死 → `peer session gone`；根因未定。下一步：两侧 pump 加 `trace_input("pump_exit", reason)` + 通道开通事件，在 windows CI 取证后再修（DEVELOPMENT §102.7）。
 - [ ] 真机验收（部署 v0.2.30 后）：`push: lone edge-clamp move` 四连消失；`/api/metrics` tx_frames 增速下降；`tetherly input trace` 能回放越边→停车→回归链。
 
 ## 当前修复与验证

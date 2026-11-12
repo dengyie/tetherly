@@ -1015,6 +1015,6 @@
   5. 版本 bump 0.2.30（Cargo.toml + `cargo update --workspace --offline` 同步 Cargo.lock 8 行）。
   6. 验证：fmt、clippy -D warnings 0 错误；core 313、node 205、loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65。
   7. 文档：DEVELOPMENT.md 顶部基线刷新（v0.2.7 → v0.2.30，标记 Windows→Mac 已解决）+ §102；`.codex-memory` 四文件同步；Obsidian 速读 / projects 子路由 / 生产变更速记同步并跑治理三检。
-- Results: 代码、测试、文档就绪；commit + tag v0.2.30 + release CI + `scripts/deploy.sh --target all --tag v0.2.30`（结果见生产变更速记）。
-- Next: 真机验收 v0.2.30（`lone edge-clamp move` 四连消失、tx_frames 增速下降、`tetherly input trace` 回放）；后续候选优化见 todo "后续方向"。
+- Results: commit `f7337e2` + tag v0.2.30；release CI 9 资产全绿；`scripts/deploy.sh --target all --tag v0.2.30` EXIT=0——Mac 0.2.30（pid 97956，accessibility_trusted=true 无需 TCC reset）、home-win 0.2.30（302340→298224，SYSTEM，SessionId=2），受保护进程 100% 不动；双端 `/api/input/trace` 可用。ci 工作流 ubuntu/windows 红在既有 `m3_12`：ubuntu 为测试构造性竞态（已改等待环，测试改动）；windows 为 pump 开通即死（根因未定，见 DEVELOPMENT §102.7）。
+- Next: 真机验收 v0.2.30（`lone edge-clamp move` 四连消失、tx_frames 增速下降、`tetherly input trace` 回放）；v0.2.31 候选：pump 开通/退出原因进决策环 → windows CI 取证 `m3_12`；后续候选优化见 todo "后续方向"。
 - Blockers: None.

@@ -783,11 +783,19 @@ async fn m3_12_same_peer_takeover_request_never_demotes_own_roaming() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(
-        client.active_tunnel_role(),
-        Some(tetherly_core::InputTunnelRole::Target),
-        "demoted side must flip to target"
-    );
+    // The server flips to Controller synchronously at pre-arm and its channel
+    // opens via its own direct dial; the client's demotion rides the control
+    // channel and can land later (CI ubuntu 2026-11-12). Wait for it.
+    let start = std::time::Instant::now();
+    while client.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target) {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!(
+                "demoted side must flip to target: client={:?}",
+                client.active_tunnel_role()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // 2. A fresh pre-arm Controller session is "pending" — the watcher
     //    debounce reads exactly this shape (active Controller session, no
