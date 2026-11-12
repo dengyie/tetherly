@@ -161,7 +161,6 @@ impl GestureAction {
 /// through keymap remapping, so the layer stays self-contained).
 mod vk {
     pub const TAB: u16 = 0x09;
-    pub const ESCAPE: u16 = 0x1B;
     pub const LWIN: u16 = 0x5B;
     pub const LSHIFT: u16 = 0xA0;
     pub const LMENU: u16 = 0xA4;
@@ -183,9 +182,24 @@ pub struct GestureKeyStep {
 /// Gesture sequences for a WINDOWS target. Raw Win32 VKs, deliberately
 /// outside the keymap: mac_to_windows remaps Meta→Ctrl, which would turn
 /// Win+Tab into a browser tab switch. Hotkeys backed by RegisterHotKey or
-/// direct window-manager handling (Win+Tab, Alt+Esc, Win+Ctrl+Arrow,
-/// Win+D) consume synthetic input reliably; the Alt+Tab overlay state
-/// machine is the one known-unreliable surface and is avoided.
+/// direct window-manager handling (Win+Tab, Win+Ctrl+Arrow, Win+D) consume
+/// synthetic input reliably.
+///
+/// Alt+Tab for the app switch (v0.2.27): the previous Alt+Esc sequence
+/// looked "window-manager handled" but is NOT a RegisterHotKey — Alt+Esc is
+/// consumed by the FOREGROUND window's `DefWindowProc`, so the ESC tap is
+/// delivered to the focused app as `WM_SYSKEYDOWN` before the switch
+/// happens. A browser in HTML5 fullscreen reacts to that ESC by leaving
+/// fullscreen: the switch still completed, but the video dropped out
+/// (production 2026-11-13, Mac→Windows swipe with a fullscreen browser
+/// video; a physical Alt+Esc on the Windows keyboard does not reproduce it,
+/// and deactivation itself is proven safe — the switch moves focus away and
+/// the fullscreen survives). Alt+Tab removes ESC from the sequence entirely:
+/// the overlay selects on the Tab tap and commits when Alt is released, so
+/// the switch is the only observable effect. The Alt+Tab overlay state
+/// machine concern that originally avoided this combo is bounded by the
+/// same shape as the physical key: Alt release always commits, there is no
+/// lingering state.
 pub fn windows_backend(action: GestureAction) -> Vec<GestureKeyStep> {
     /// helper: modifier-tap-modifier shape
     fn tap(mods_down: &[u16], taps: &[u16]) -> Vec<GestureKeyStep> {
@@ -215,10 +229,13 @@ pub fn windows_backend(action: GestureAction) -> Vec<GestureKeyStep> {
         seq
     }
     match action {
-        // Alt+Esc: window-manager handled, no overlay.
-        GestureAction::AppSwitchNext => tap(&[vk::LMENU], &[vk::ESCAPE]),
-        // Shift+Alt+Esc: the reverse cycle.
-        GestureAction::AppSwitchPrev => tap(&[vk::LSHIFT, vk::LMENU], &[vk::ESCAPE]),
+        // Alt+Tab: switch to the next window. No ESC in the sequence — the
+        // ESC tap of the old Alt+Esc shape reached the focused app as
+        // WM_SYSKEYDOWN (DefWindowProc-mediated, not a RegisterHotKey) and
+        // exited browser HTML5 fullscreen on arrival.
+        GestureAction::AppSwitchNext => tap(&[vk::LMENU], &[vk::TAB]),
+        // Shift+Alt+Tab: the reverse cycle.
+        GestureAction::AppSwitchPrev => tap(&[vk::LSHIFT, vk::LMENU], &[vk::TAB]),
         // Win+Tab: Task View toggle (explorer RegisterHotKey).
         GestureAction::OverviewToggle => tap(&[vk::LWIN], &[vk::TAB]),
         // Win+Ctrl+Left/Right: virtual desktop switch.
@@ -358,9 +375,12 @@ mod tests {
     }
 
     #[test]
-    fn win_sequences_match_v023_hardcoded_behavior() {
+    fn win_sequences_match_shipped_behavior() {
         let m = GestureMap::default();
-        // Left swipe == old direction<0: Alt down, Esc tap, Alt up.
+        // Left swipe == Alt down, Tab tap, Alt up. v0.2.27 replaced the old
+        // Alt+Esc shape: its ESC tap reached the focused app as
+        // WM_SYSKEYDOWN (Alt+Esc is DefWindowProc-mediated, NOT a
+        // RegisterHotKey) and exited browser HTML5 fullscreen on arrival.
         assert_eq!(
             m.sequence_for(GestureId::Swipe4Left, "windows"),
             vec![
@@ -369,11 +389,11 @@ mod tests {
                     down: true
                 },
                 GestureKeyStep {
-                    code: 0x1B,
+                    code: 0x09,
                     down: true
                 },
                 GestureKeyStep {
-                    code: 0x1B,
+                    code: 0x09,
                     down: false
                 },
                 GestureKeyStep {
@@ -382,7 +402,7 @@ mod tests {
                 },
             ]
         );
-        // Right swipe == old direction>0: Shift+Alt down, Esc tap, ups.
+        // Right swipe == Shift+Alt down, Tab tap, ups.
         assert_eq!(
             m.sequence_for(GestureId::Swipe4Right, "windows"),
             vec![
@@ -395,11 +415,11 @@ mod tests {
                     down: true
                 },
                 GestureKeyStep {
-                    code: 0x1B,
+                    code: 0x09,
                     down: true
                 },
                 GestureKeyStep {
-                    code: 0x1B,
+                    code: 0x09,
                     down: false
                 },
                 GestureKeyStep {
@@ -434,6 +454,14 @@ mod tests {
                 },
             ]
         );
+        // The app-switch sequence must never contain ESC: the whole point of
+        // the v0.2.27 swap is that no Esc may reach the focused fullscreen
+        // app.
+        for gesture in [GestureId::Swipe4Left, GestureId::Swipe4Right] {
+            for step in m.sequence_for(gesture, "windows") {
+                assert_ne!(step.code, 0x1B, "gesture {gesture:?} must not send ESC");
+            }
+        }
     }
 
     #[test]

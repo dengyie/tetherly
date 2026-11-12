@@ -5369,7 +5369,7 @@ mod tests {
         node.drive_gesture_swipe(1)
             .expect("controller swipe must forward");
 
-        // direction>0 = Shift+Alt+Esc: Shift down is the first event.
+        // direction>0 = Shift+Alt+Tab: Shift down is the first event.
         let key_down = rx.recv().await.expect("Shift down queued");
         let ev = InputEvent::from_frame(&key_down).expect("frame is an input event");
         assert!(
