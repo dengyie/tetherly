@@ -2939,6 +2939,20 @@ impl Node {
     /// Idle gap that resets the movement accumulator (and absorbs the
     /// plug-in/unplug position jump).
     const REVERSE_RESET_AFTER_MS: u64 = 2000;
+    /// Dwell required when the distance gate IS armed (real traversal
+    /// happened): the topology `delay_ms` floor, ~100ms.
+    const REVERSE_DWELL_ARMED_MS: u64 = 100;
+    /// Dwell required when the distance gate is NOT armed. Production
+    /// 2026-11-12 (v0.2.23): the entry placement parks the cursor ON the
+    /// shared edge, so the most natural reverse gesture — push down from
+    /// where the cursor already sits — accumulates near-zero coordinate
+    /// travel (the OS clamps at height-1, dy collapses) and the 300px gate
+    /// never armed: every push died in the blocked branch with accum_px≈0,
+    /// silently. Instead of a hard veto there, an un-armed push must now
+    /// dwell CONTIGUOUSLY (gaps <= TOUCH_GAP_MS) for this long to fire. A
+    /// real hand holds the push far longer; plug-in jitter / desk bumps are
+    /// isolated spikes that reset the dwell long before 600ms.
+    const REVERSE_DWELL_UNARMED_MS: u64 = 600;
 
     /// Deskflow "switch at the shared edge" for the controlled side.
     ///
@@ -2947,12 +2961,15 @@ impl Node {
     /// reverse direction (e.g. Windows -> Mac) needs no UI click. Accidental
     /// flips are fenced by three gates:
     ///
-    /// 1. the node's own `edge` policy must be configured (a direction must
-    ///    be declared before it can be triggered); the engine already mirrors
-    ///    this edge (`set_edge` on attach and policy change), so it is read
-    ///    lock-only here — no policy clone on the per-move hot path;
+    /// 1. a two-tier distance gate: a mouse with 300px of real traversal
+    ///    behind it fires after the short dwell (`REVERSE_DWELL_ARMED_MS`);
+    ///    a mouse with zero travel — the entry placement parks it ON the
+    ///    shared edge — must instead hold the long contiguous dwell
+    ///    (`REVERSE_DWELL_UNARMED_MS`); the engine already mirrors the
+    ///    declared edge (`set_edge` on accept and policy change), so it is
+    ///    read lock-only here — no policy clone on the per-move hot path;
     /// 2. gap-continuity dwell: boundary-touching events must keep arriving
-    ///    (gap <= 150ms) for the topology `delay_ms` (default 100ms). A
+    ///    (gap <= 150ms) for the tier's dwell length. A
     ///    sustained push emits a dense event stream and fires; two isolated
     ///    bumps any timespan apart never do, because the second bump's gap
     ///    since the previous touch event resets the dwell. (A plain
@@ -3015,12 +3032,14 @@ impl Node {
             tetherly_core::ScreenEdge::Left => target_x <= 0,
         };
 
-        // Distance gate: an un-armed mouse (freshly plugged in, or bumped
-        // without real traversal) can never start the takeover dwell.
+        // Distance gate, two-tier (production 2026-11-12, v0.2.23): an
+        // ARMED mouse (300px of real traversal) keeps the short delay_ms
+        // dwell. An UN-armed mouse no longer gets a hard veto — the entry
+        // placement parks the cursor ON the shared edge, so the natural
+        // "push from where it sits" gesture accumulates ~0px and was
+        // structurally dead — it instead needs the long contiguous dwell
+        // below. The blocked log stays, once per second, for attribution.
         if !distance_armed {
-            // Diagnostic (v0.1.81): an edge push blocked by the distance gate
-            // is invisible to the user ("push does nothing") — log it, at most
-            // once per second, so the block is attributable.
             static LAST_BLOCK_LOG: std::sync::Mutex<Option<std::time::Instant>> =
                 std::sync::Mutex::new(None);
             let mut last = LAST_BLOCK_LOG.lock().expect("blocklog");
@@ -3033,12 +3052,9 @@ impl Node {
                     accum_px = self.shared.reverse_move_accum_px.load(Ordering::SeqCst),
                     gate_px = Self::REVERSE_ARM_MIN_PX,
                     %edge,
-                    "auto-reverse blocked: distance gate not armed"
+                    "auto-reverse: distance gate not armed; requiring long dwell"
                 );
             }
-            *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
-            *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
-            return;
         }
 
         // Gap-continuity dwell: touch events must keep arriving within
@@ -3071,11 +3087,43 @@ impl Node {
             .lock()
             .expect("reverse_arm")
             .is_some();
+        // Pinned-open leniency (v0.2.24): the entry placement parks the
+        // cursor ON the shared edge, and the OS clamps it there — pushing
+        // straight into the edge from the parked spot produces a dy==0
+        // event stream (positions never change; the hook's derived delta is
+        // zero), so requiring dy>0 to OPEN the dwell made the natural
+        // gesture dead (production: the only reverse log lines were
+        // "distance gate not armed"). An un-armed mouse at the exact clamp
+        // boundary may open the dwell on a zero-delta touch; the long
+        // un-armed dwell is the misfire fence. The armed tier keeps the
+        // v0.1.97 discipline: dy>0 opens, dy==0 only sustains.
+        let pinned_at_clamp = match edge {
+            tetherly_core::ScreenEdge::Right => x >= width.saturating_sub(2),
+            tetherly_core::ScreenEdge::Bottom => y >= height.saturating_sub(2),
+            tetherly_core::ScreenEdge::Top => y <= 2,
+            tetherly_core::ScreenEdge::Left => x <= 2,
+        };
         let pushing_in = match edge {
-            tetherly_core::ScreenEdge::Right => dx > 0 || (dx == 0 && dwell_active),
-            tetherly_core::ScreenEdge::Bottom => dy > 0 || (dy == 0 && dwell_active),
-            tetherly_core::ScreenEdge::Top => dy < 0 || (dy == 0 && dwell_active),
-            tetherly_core::ScreenEdge::Left => dx < 0 || (dx == 0 && dwell_active),
+            tetherly_core::ScreenEdge::Right => {
+                dx > 0
+                    || (dx == 0 && dwell_active)
+                    || (dx == 0 && pinned_at_clamp && !distance_armed)
+            }
+            tetherly_core::ScreenEdge::Bottom => {
+                dy > 0
+                    || (dy == 0 && dwell_active)
+                    || (dy == 0 && pinned_at_clamp && !distance_armed)
+            }
+            tetherly_core::ScreenEdge::Top => {
+                dy < 0
+                    || (dy == 0 && dwell_active)
+                    || (dy == 0 && pinned_at_clamp && !distance_armed)
+            }
+            tetherly_core::ScreenEdge::Left => {
+                dx < 0
+                    || (dx == 0 && dwell_active)
+                    || (dx == 0 && pinned_at_clamp && !distance_armed)
+            }
         };
         let fired = if !crossed || !pushing_in {
             // Left the edge (or slid along it without pushing in): the push
@@ -3084,9 +3132,17 @@ impl Node {
             *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
             false
         } else {
-            let delay_ms = {
-                let layout = self.shared.topology_layout.lock().expect("topology_layout");
-                layout.config.delay_ms.max(50) as u64
+            let delay_ms = if distance_armed {
+                Self::REVERSE_DWELL_ARMED_MS.max(
+                    self.shared
+                        .topology_layout
+                        .lock()
+                        .expect("topology_layout")
+                        .config
+                        .delay_ms as u64,
+                )
+            } else {
+                Self::REVERSE_DWELL_UNARMED_MS
             };
             let mut arm = self.shared.reverse_arm_since.lock().expect("reverse_arm");
             let mut last_tick = self.shared.reverse_last_tick.lock().expect("reverse_tick");
@@ -3101,6 +3157,10 @@ impl Node {
                         true
                     } else if contiguous {
                         // Still pushing: keep accumulating towards delay_ms.
+                        // Refresh the continuity anchor — otherwise the gap
+                        // check keeps measuring from the very first touch and
+                        // any dwell longer than TOUCH_GAP_MS resets forever.
+                        *last_tick = Some(now);
                         false
                     } else {
                         // Gap too long: a fresh push, not a continuation.
@@ -4564,6 +4624,115 @@ mod tests {
         assert!(
             fired,
             "with the accept-armed edge, the sustained bottom-edge push must fire the reverse takeover"
+        );
+    }
+
+    // Production 2026-11-12 (v0.2.23): the entry placement parks the cursor
+    // ON the shared edge, so the natural reverse gesture — push straight
+    // down from where the cursor already sits — accumulates ~0 coordinate
+    // travel (the OS clamps at height-1; dy collapses to zero) and the 300px
+    // distance gate never armed. The old code hard-vetoed there AND reset
+    // the dwell: every push died in the blocked branch, silently. The
+    // two-tier gate lets an UN-ARMED mouse fire after a LONG contiguous
+    // dwell, so this exact production shape must now trigger.
+    #[tokio::test]
+    async fn test_auto_reverse_fires_unarmed_long_dwell_from_parked_edge() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("rev-unarmed");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("rev-unarmed-peer");
+        let peer_id = other.identity().device_id().clone();
+
+        node.shared.live.lock().unwrap().insert(
+            peer_id.clone(),
+            crate::runtime::trust::LivePeer {
+                device_id: peer_id.clone(),
+                name: "peer".into(),
+                platform: "test".into(),
+                addr: "127.0.0.1:1".parse().unwrap(),
+                handshake_hash: [0u8; 32],
+                file_port: None,
+                input_port: Some(45719),
+                screen_port: None,
+                caps: Vec::new(),
+                path: tetherly_core::PathKind::Lan,
+                rtt_ms: None,
+                last_seen_ms: 0,
+            },
+        );
+        node.shared.topology_layout.lock().unwrap().display = DisplayRect::new(1920, 1080, 1.0);
+        node.set_input_policy(crate::store::InputTunnelPolicy {
+            edge: Some("bottom".into()),
+            ..crate::store::InputTunnelPolicy::default()
+        })
+        .expect("policy set");
+        node.shared
+            .topology_layout
+            .lock()
+            .unwrap()
+            .neighbors
+            .insert(
+                DisplayEdge::Bottom,
+                EdgeNeighbor {
+                    peer_id: peer_id.to_string(),
+                    peer_edge: DisplayEdge::Top,
+                    offset: 0,
+                },
+            );
+        let now = node.shared.clock.unix_ms();
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_unarmed".into(),
+            peer_id: peer_id.to_string(),
+            role: InputTunnelRole::Target,
+            requested_edge: Some(DisplayEdge::Top),
+            entry_x: Some(960),
+            entry_y: Some(1079),
+            capture_width: Some(1920),
+            capture_height: Some(1080),
+            started_at_ms: now,
+            last_activity_ms: now,
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+
+        // Phase 1 — production dead shape: push at the parked edge with NO
+        // traversal first. Short burst (4 events, ~40ms): under the old
+        // code this died in the blocked branch; under the new code the
+        // un-armed dwell needs 600ms, so the takeover must NOT fire yet.
+        let mut prev: Option<(i32, i32)> = None;
+        for (x, y) in [(960, 1079), (960, 1079), (960, 1079), (960, 1079)] {
+            let (dx, dy) = match prev {
+                Some((lx, ly)) => (x - lx, y - ly),
+                None => (0, 0),
+            };
+            prev = Some((x, y));
+            let _ = node
+                .drive_input_delta(x, y, dx, dy, 1920, 1080)
+                .expect("reverse path must not error");
+            std::thread::sleep(std::time::Duration::from_millis(12));
+        }
+        assert!(
+            node.shared.last_auto_reverse.lock().unwrap().is_none(),
+            "a brief un-armed push must not fire the takeover (long-dwell gate)"
+        );
+
+        // Phase 2 — same gesture, held: keep the contiguous boundary
+        // stream going until the 600ms un-armed dwell completes.
+        for _ in 0..70 {
+            let (x, y) = (960, 1079);
+            let (dx, dy) = match prev {
+                Some((lx, ly)) => (x - lx, y - ly),
+                None => (0, 0),
+            };
+            prev = Some((x, y));
+            let _ = node
+                .drive_input_delta(x, y, dx, dy, 1920, 1080)
+                .expect("reverse path must not error");
+            std::thread::sleep(std::time::Duration::from_millis(12));
+            if node.shared.last_auto_reverse.lock().unwrap().is_some() {
+                return;
+            }
+        }
+        panic!(
+            "a sustained un-armed push from the parked edge must fire the takeover after the long dwell"
         );
     }
 
