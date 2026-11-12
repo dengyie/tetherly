@@ -581,15 +581,35 @@ impl InputServer {
                     self.y = self.denorm_y(self.rem_y);
                 }
                 ScreenEdge::Top => {
-                    self.y = 16.min(self.height.saturating_sub(1));
+                    // v0.2.26: dock OUTSIDE the Top/Bottom redundancy band.
+                    // The old y=16 sat inside the 24px band, where the
+                    // band gate's slow-dwell path (quiet >= slow_dwell_ms,
+                    // trivially true when nobody touches the mouse) turned
+                    // any residual dy<=0 event — e.g. a warp echo that
+                    // missed the echo gate — into an immediate re-crossing
+                    // (production: ghost-controller bounce loop, rescue ->
+                    // pre-arm -> crossing every ~13s while the target's
+                    // physical mouse was silently swallowed).
+                    self.y = self.band_safe_dock_y();
                     self.x = self.denorm_x(self.rem_x);
                 }
                 ScreenEdge::Bottom => {
-                    self.y = self.height.saturating_sub(17).max(0);
+                    self.y = self
+                        .height
+                        .saturating_sub(1)
+                        .saturating_sub(self.band_safe_dock_y());
                     self.x = self.denorm_x(self.rem_x);
                 }
             }
         }
+    }
+
+    /// Vertical dock offset that keeps a Top/Bottom park clear of the
+    /// redundancy band: `band_px + 24` (24px of margin above the band so
+    /// an OS clamp or a stray 1-2px event cannot fall back inside).
+    fn band_safe_dock_y(&self) -> i32 {
+        let band = self.tb_band_px as i32;
+        (band.max(24) + 24).min(self.height.saturating_sub(1))
     }
 
     /// Change the logical screen without resetting `seq`.
@@ -820,11 +840,17 @@ impl InputServer {
                 match crossed_edge {
                     ScreenEdge::Top => {
                         self.x = self.denorm_x(self.rem_x);
-                        self.y = 16.min(self.height.saturating_sub(1));
+                        // v0.2.26: same band-safe dock as force_local — the
+                        // old y=16 parked inside the redundancy band and
+                        // re-crossed on the next stray dy<=0 event.
+                        self.y = self.band_safe_dock_y();
                     }
                     ScreenEdge::Bottom => {
                         self.x = self.denorm_x(self.rem_x);
-                        self.y = self.height.saturating_sub(17).max(0);
+                        self.y = self
+                            .height
+                            .saturating_sub(1)
+                            .saturating_sub(self.band_safe_dock_y());
                     }
                     ScreenEdge::Left => {
                         self.x = 16.min(self.width.saturating_sub(1));
@@ -1666,7 +1692,15 @@ mod tests {
         assert_eq!(srv.seat(), CursorSeat::Local);
         let events = srv.drain();
         assert_eq!(events[0].kind, InputKind::Leave);
-        assert_eq!(srv.local_pos().1, 16);
+        // v0.2.26: the return dock must sit OUTSIDE the redundancy band
+        // (band_px=0 here -> band_safe_dock_y floors at 48); the old y=16
+        // parked inside the band and re-crossed on the next stray dy<=0
+        // event (production ghost-controller bounce loop).
+        assert_eq!(
+            srv.local_pos().1,
+            48,
+            "far-push return dock outside the band"
+        );
 
         // Test force_local
         srv.local_move_delta(960, 0, 0, -10);
@@ -1700,14 +1734,14 @@ mod tests {
         assert_eq!(srv.seat(), CursorSeat::Remote);
 
         // 3. Return home: the local landing x must be the inverse mapping of
-        // the last remote x (Deskflow OSXScreen semantics), parked 16px below
-        // the crossed edge — NOT the raw hook position (which sits wherever
-        // the parked local cursor was left).
+        // the last remote x (Deskflow OSXScreen semantics), parked just
+        // outside the redundancy band — NOT the raw hook position (which
+        // sits wherever the parked local cursor was left).
         assert_eq!(srv.local_move_delta(250, 0, 0, 50), Some(ScreenEdge::Top));
         let _ = srv.drain();
         assert_eq!(srv.seat(), CursorSeat::Local);
         let (lx, ly) = srv.local_pos();
-        assert_eq!(ly, 16);
+        assert_eq!(ly, 48, "band-safe dock (band_px=0 -> floor 48)");
         // denorm(250) = 250 with round-to-nearest; the old truncating map
         // gave 249 and sheared every round trip.
         assert_eq!(lx, 250, "return x = denorm(rem_x)");
@@ -1728,11 +1762,80 @@ mod tests {
         srv.force_local();
         assert_eq!(srv.seat(), CursorSeat::Local);
         let (lx, ly) = srv.local_pos();
-        assert_eq!(ly, 16);
+        assert_eq!(ly, 48, "force_local dock outside the band");
         // norm(750) = 751 (rounded), denorm(751) = 750 (rounded): the round
         // trip returns exactly to the origin — the truncating chain
         // (750 -> 749) walked a pixel per emergency return.
         assert_eq!(lx, 750, "force_local x = denorm(rem_x)");
+    }
+
+    #[test]
+    fn tb_band_dock_never_recrosses_from_a_stray_quiet_event() {
+        // v0.2.26 ghost-controller bounce loop regression: the rescue /
+        // far-push return used to dock at y=16, INSIDE the 24px redundancy
+        // band. There the band gate's slow-dwell path (quiet >= 120ms —
+        // trivially true when nobody touches the mouse) turned any stray
+        // dy<=0 event (a warp echo that missed the echo gate) into an
+        // instant re-crossing: the node became a ghost controller, the
+        // target's physical mouse was swallowed, and the watcher
+        // rescue->pre-arm->crossing loop ran every ~13s.
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Top);
+        srv.set_tb_redundancy_band(24, 120, 6);
+
+        // Enter remote, then emergency-rescue back to local.
+        assert_eq!(srv.local_move_delta(960, 4, 0, -10), Some(ScreenEdge::Top));
+        let _ = srv.drain();
+        srv.force_local();
+        let _ = srv.drain();
+        let (lx, ly) = srv.local_pos();
+        assert_eq!(lx, 960);
+        assert!(ly > 24, "dock y={ly} must sit outside the 24px band");
+
+        // The exact production ghost event: a single stray dy<=0 event at
+        // the dock, after a long quiet period (no arm, no dwell history).
+        // From OUTSIDE the band it must NOT cross — even as a "fast push" —
+        // because the position is not at the edge (y > 8).
+        assert_eq!(
+            srv.local_move_delta(lx, ly, 0, -2),
+            None,
+            "stray quiet event at the band-safe dock must not re-cross"
+        );
+        assert_eq!(srv.seat(), CursorSeat::Local);
+        let _ = srv.drain();
+
+        // And a real user approach still crosses: glide into the band, then
+        // hold quiet past the 120ms dwell. (The -6 in-band arrival itself is
+        // a fast push and crosses immediately — assert that path too.)
+        assert_eq!(
+            srv.local_move_delta(960, 40, 0, -10),
+            None,
+            "glide outside the band stays local"
+        );
+        assert_eq!(
+            srv.local_move_delta(960, 6, 0, -6),
+            Some(ScreenEdge::Top),
+            "fast in-band push crosses immediately"
+        );
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+        let _ = srv.drain();
+        srv.force_local();
+        let _ = srv.drain();
+        // Slow-dwell path: land in the band gently (dy < fast push), then
+        // hold quiet past the 120ms dwell.
+        assert_eq!(srv.local_move_delta(960, 40, 0, -4), None);
+        assert_eq!(
+            srv.local_move_delta(960, 6, 0, -4),
+            None,
+            "slow in-band arrival waits"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(140));
+        assert_eq!(
+            srv.local_move_delta(960, 6, 0, 0),
+            Some(ScreenEdge::Top),
+            "real sustained edge push still crosses after the dwell"
+        );
+        assert_eq!(srv.seat(), CursorSeat::Remote);
     }
 
     #[test]

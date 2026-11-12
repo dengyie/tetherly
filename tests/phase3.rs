@@ -444,14 +444,17 @@ async fn m3_5_four_directional_edge_roaming() {
     // returns), then push back down through the shared edge. The local
     // cursor must land at the inverse-proportional x (denorm(505) = 50
     // with round-to-nearest — the truncating map gave 49, shearing every
-    // round trip one pixel), parked 16px below the top edge — not at the
-    // parked hook position.
+    // round trip one pixel), parked just OUTSIDE the redundancy band — not
+    // at the parked hook position. v0.2.26: the old y=16 dock sat inside
+    // the band and re-crossed on a stray dy<=0 event (ghost controller
+    // bounce loop). 50px screen -> band_safe_dock_y floors at 48 but the
+    // screen is only 50px tall -> band_safe_dock_y = min(48, 49) = 48.
     server.drive_input_delta(50, 30, 0, -40, 100, 50).unwrap();
     assert_eq!(server.input_engine_seat(), CursorSeat::Remote);
     server.drive_input_delta(50, 30, 0, 50, 100, 50).unwrap();
     assert_eq!(server.input_engine_seat(), CursorSeat::Local);
     let (lx, ly) = server.input_engine_local_pos();
-    assert_eq!(ly, 16);
+    assert_eq!(ly, 48);
     assert_eq!(lx, 50, "return x = denorm(remote x), round-trip stable");
 
     server.shutdown();

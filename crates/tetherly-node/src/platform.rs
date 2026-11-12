@@ -955,17 +955,25 @@ pub(crate) fn roaming_recenter_target(width: i32, height: i32) -> (i32, i32) {
 }
 
 /// Deskflow bogus-motion filter (MSWindowsComputer::onMouseMove
-/// `bogusZoneSize`): with the delta baseline anchored at screen center by
-/// the roaming recenter, a delta spanning roughly the center-to-edge
-/// distance cannot be a hand motion — it is the leaked displacement of a
-/// cursor warp racing the hook FIFO (an in-flight pre-warp event consumed
-/// after the echo anchored the baseline at center). Deskflow drops motion
-/// beyond the center-to-edge distance minus a 10px tolerance; same
-/// geometry here, on the Windows hook only (macOS reads raw CGEvent
-/// deltas and never derives them from positions).
+/// `bogusZoneSize`): on the Windows hook the delta baseline is anchored at
+/// screen center by the roaming recenter, so a delta spanning roughly the
+/// center-to-edge distance cannot be a hand motion — it is the leaked
+/// displacement of a cursor warp racing the hook FIFO (an in-flight
+/// pre-warp event consumed after the echo anchored the baseline at
+/// center). Deskflow drops motion beyond the center-to-edge distance
+/// minus a 10px tolerance.
+///
+/// v0.2.26: applied on the macOS tap as well. The macOS tap reads raw
+/// CGEvent deltas, but a WARP's echo event carries exactly such a
+/// displacement as its raw delta; the settle-counter (Root-fix F) only
+/// covers the first few post-warp events inside its 250ms marker window,
+/// and an echo that surfaces after that fed the roaming engine a "fast
+/// push" that instantly re-crossed the shared edge (production:
+/// ghost-controller bounce loop, rescue docked inside the redundancy
+/// band, Windows target's physical mouse swallowed every ~13s).
 ///
 /// Returns true when the delta must be dropped (zeroed) as bogus.
-#[cfg(any(windows, all(target_os = "macos", test)))]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn hook_delta_is_bogus(dx: i32, dy: i32, width: i32, height: i32) -> bool {
     const BOGUS_ZONE_PX: i32 = 10;
     let (w, h) = (width.max(1), height.max(1));
@@ -1722,6 +1730,12 @@ struct MacTapContext {
     keyboard_armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pressed_modifiers: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u16>>>,
     tap_port: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Logical screen size, snapshotted at tap install for the
+    /// `hook_delta_is_bogus` filter (v0.2.26): a display change only
+    /// loosens/tightens the bogus zone by the size delta, same trade the
+    /// Windows hook makes with its `SCREEN_W`/`SCREEN_H` snapshot.
+    screen_w: i32,
+    screen_h: i32,
     _retained_port: std::sync::Mutex<
         Option<objc2_core_foundation::CFRetained<objc2_core_foundation::CFMachPort>>,
     >,
@@ -2160,7 +2174,7 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 // WARP_MARKER_MAX_AGE_MS it is dropped rather than eating
                 // later real motion.
                 let settle = WARP_SETTLE_EVENTS.load(Ordering::SeqCst);
-                let (dx, dy) = if settle > 0 && warp_marker_fresh() {
+                let (mut dx, mut dy) = if settle > 0 && warp_marker_fresh() {
                     WARP_SETTLE_EVENTS.store(settle - 1, Ordering::SeqCst);
                     (0, 0)
                 } else {
@@ -2169,6 +2183,22 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                     }
                     (dx, dy)
                 };
+                // v0.2.26: Deskflow bogus-motion filter, macOS twin of the
+                // Windows hook's `hook_delta_is_bogus`. The settle counter
+                // above only covers the FIRST events after a warp while its
+                // 250ms marker is fresh; an echo event that surfaces later
+                // (or a second echo macOS coalesces past the gate) still
+                // carries the whole warp displacement — hundreds of px. Fed
+                // to the roaming engine it is a "fast push" that instantly
+                // re-crosses the shared edge (production: ghost-controller
+                // bounce loop — rescue docked inside the redundancy band,
+                // the rescue-warp echo re-crossed Top, and the Windows
+                // target's physical mouse was swallowed every ~13s). A real
+                // hand cannot span center-to-edge in one event; drop it.
+                if hook_delta_is_bogus(dx, dy, ctx.screen_w, ctx.screen_h) {
+                    dx = 0;
+                    dy = 0;
+                }
                 let _ = ctx.tx.send(RawInput::Move {
                     x: loc.x as i32,
                     y: loc.y as i32,
@@ -2512,11 +2542,14 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
     std::thread::Builder::new()
         .name("tetherly-input-tap".into())
         .spawn(move || {
+            let (ctx_w, ctx_h) = screen_size();
             let ctx = Box::new(MacTapContext {
                 tx,
                 keyboard_armed: keyboard_armed_thread,
                 pressed_modifiers: pressed_modifiers_thread,
                 tap_port: tap_port_thread,
+                screen_w: ctx_w,
+                screen_h: ctx_h,
                 _retained_port: std::sync::Mutex::new(None),
             });
 
