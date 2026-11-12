@@ -965,6 +965,18 @@ struct Shared {
     /// feeds the dwell state machine from this anchor while the hand holds
     /// the push, until the cursor actually moves off the clamp band.
     reverse_pinned_touch: Mutex<Option<(std::time::Instant, i32, i32)>>,
+    /// Zone-entered gate (v0.2.27): set once a physical event places the
+    /// cursor OUTSIDE the reverse-trigger zone during the current Target
+    /// session. The entry placement parks the incoming cursor ON the shared
+    /// edge — inside that zone — so until the cursor demonstrably moves
+    /// into the screen, no reverse dwell may arm: micro hand jitter at the
+    /// parked position (or a late entry-warp echo) must not bounce the
+    /// session back seconds after entry (production 18:16: entry parked at
+    /// py=0, accum_px=0, a jitter sequence armed the dwell and the pinned
+    /// heartbeat completed it — control snapped back to Windows 7s after
+    /// the user's push had landed). Reset per session by
+    /// `reset_reverse_arming_state` on accept.
+    reverse_zone_dirty: std::sync::atomic::AtomicBool,
     /// Distance arming for auto-reverse: accumulated physical movement (px)
     /// since the mouse was last idle for REVERSE_RESET_AFTER_MS. A freshly
     /// plugged-in or merely bumped mouse must traverse a real range before

@@ -2381,6 +2381,12 @@ impl Node {
     /// Clear all distance arming, dwell, and movement tracking state for auto-reverse.
     fn reset_reverse_arming_state(&self) {
         self.shared.reverse_move_accum_px.store(0, Ordering::SeqCst);
+        // v0.2.27 zone gate: a fresh Target session starts with the cursor
+        // parked at the entry edge (inside the reverse-trigger zone), so the
+        // gate closes until an event proves the cursor entered the screen.
+        self.shared
+            .reverse_zone_dirty
+            .store(false, Ordering::SeqCst);
         *self.shared.reverse_last_move.lock().expect("reverse_move") = None;
         *self.shared.reverse_last_pos.lock().expect("reverse_pos") = None;
         *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
@@ -3055,6 +3061,11 @@ impl Node {
             tetherly_core::ScreenEdge::Left if x <= 2 || (x <= 8 && dx < 0) => (0, y),
             _ => {
                 // Cursor away from the edge zone: the push is over.
+                // v0.2.27 zone gate: this event also PROVES the cursor has
+                // been outside the reverse-trigger zone during this Target
+                // session — the user has entered the screen, so a later
+                // deliberate push back to the shared edge may arm the dwell.
+                self.shared.reverse_zone_dirty.store(true, Ordering::SeqCst);
                 *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
                 *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
                 return;
@@ -3066,6 +3077,35 @@ impl Node {
             tetherly_core::ScreenEdge::Top => target_y <= 0,
             tetherly_core::ScreenEdge::Left => target_x <= 0,
         };
+
+        // v0.2.27 zone gate: the entry placement parks the incoming cursor
+        // ON the shared edge — inside the reverse-trigger zone — so from the
+        // parked position a single micro jitter toward the edge would arm
+        // the dwell and the pinned heartbeat (v0.2.25) would carry it to
+        // completion, bouncing the session back within seconds of entry
+        // (production 18:16: entry parked at py=0, accum_px=0, control
+        // snapped back to Windows 7s after the push had landed). A session
+        // whose cursor never left the trigger zone has no "into the screen"
+        // yet, hence no "push back" — gate the dwell until an event proves
+        // interior presence. Applies regardless of the distance tier: a
+        // slide ALONG the shared edge accumulates arming distance without
+        // ever leaving the zone.
+        if !self.shared.reverse_zone_dirty.load(Ordering::SeqCst) {
+            static LAST_ZONE_GATE_LOG: std::sync::Mutex<Option<std::time::Instant>> =
+                std::sync::Mutex::new(None);
+            let mut last = LAST_ZONE_GATE_LOG.lock().expect("zonelog");
+            if last
+                .map(|t| t.elapsed() >= std::time::Duration::from_millis(1000))
+                .unwrap_or(true)
+            {
+                *last = Some(std::time::Instant::now());
+                tracing::info!(
+                    %edge,
+                    "auto-reverse: cursor never entered the screen interior; dwell gated"
+                );
+            }
+            return;
+        }
 
         // Distance gate, two-tier (production 2026-11-12, v0.2.23): an
         // ARMED mouse (300px of real traversal) keeps the short delay_ms
@@ -3209,6 +3249,14 @@ impl Node {
         y: i32,
     ) -> bool {
         const TOUCH_GAP_MS: u64 = 150;
+        // v0.2.27 zone gate (also covers the pinned heartbeat, which feeds
+        // this same state machine): a Target session whose cursor never
+        // left the reverse-trigger zone cannot arm or sustain a dwell —
+        // the parked entry position must not be able to bounce itself
+        // back via heartbeat-completed jitter dwells.
+        if !self.shared.reverse_zone_dirty.load(Ordering::SeqCst) {
+            return false;
+        }
         let mut arm = self.shared.reverse_arm_since.lock().expect("reverse_arm");
         let mut last_tick = self.shared.reverse_last_tick.lock().expect("reverse_tick");
         match (*arm, *last_tick) {
@@ -5112,6 +5160,25 @@ mod tests {
             pre_arm_epoch: next_pre_arm_epoch(),
         });
 
+        // Zone warmup (v0.2.27): one interior event proves the cursor
+        // entered the screen — the fixed production flow is enter → move
+        // into the screen → push back to the edge. Without it the zone
+        // gate would (correctly) hold the dwell disarmed. The accumulator
+        // is zeroed afterwards so the gesture stays in the UN-ARMED tier
+        // the test exists to pin.
+        let _ = node
+            .drive_input_delta(960, 400, 0, -679, 1920, 1080)
+            .expect("reverse path must not error");
+        assert!(
+            node.shared.reverse_zone_dirty.load(Ordering::SeqCst),
+            "an interior event must open the zone gate"
+        );
+        node.shared.reverse_move_accum_px.store(0, Ordering::SeqCst);
+        // The warmup's 679px jump also lands in the position accumulator;
+        // drop it so the boundary push below stays in the UN-ARMED tier
+        // this test pins (a fresh session carries no traversal).
+        *node.shared.reverse_last_pos.lock().unwrap() = None;
+
         // Phase 1 — production dead shape: push at the parked edge with NO
         // traversal first. Short burst (4 events, ~40ms): under the old
         // code this died in the blocked branch; under the new code the
@@ -5226,6 +5293,23 @@ mod tests {
         // exactly as the runtime starts it.
         node.spawn_reverse_pinned_heartbeat();
 
+        // Zone warmup (v0.2.27): one interior event proves the cursor
+        // entered the screen (the fixed production flow: enter → move into
+        // the screen → push back). Without it the zone gate would
+        // (correctly) keep the heartbeat from completing the dwell.
+        let _ = node
+            .drive_input_delta(960, 400, 0, -679, 1920, 1080)
+            .expect("reverse path must not error");
+        assert!(
+            node.shared.reverse_zone_dirty.load(Ordering::SeqCst),
+            "an interior event must open the zone gate"
+        );
+        // The warmup's 679px jump would arm the distance gate and kill the
+        // zero-delta pinned leniency at the clamp; drop the traversal so
+        // the pinned touch below stays in the UN-ARMED tier this test pins.
+        node.shared.reverse_move_accum_px.store(0, Ordering::SeqCst);
+        *node.shared.reverse_last_pos.lock().unwrap() = None;
+
         // Phase 1 — the production shape verbatim: ONE pinned boundary event
         // (dy=0 inside the clamp band). It opens the dwell and records the
         // heartbeat anchor; the takeover must not fire yet.
@@ -5255,6 +5339,97 @@ mod tests {
                 "the pinned heartbeat must complete the dwell with no further physical events"
             );
         }
+    }
+
+    // v0.2.27 regression (production 18:16): the entry placement parks the
+    // incoming cursor ON the shared edge — inside the reverse-trigger zone.
+    // Micro hand jitter at the parked position armed the gap-continuity
+    // dwell and the pinned heartbeat (v0.2.25) carried it to completion,
+    // bouncing the session back to Windows 7s after the user's push had
+    // landed (accum_px=0). The zone gate must hold the dwell disarmed for
+    // the whole un-armed dwell window when the cursor never entered the
+    // screen — jitter stays inside the y>=height-2 clamp core here, so no
+    // event ever proves interior presence.
+    #[tokio::test]
+    async fn test_entry_parked_edge_micro_jitter_cannot_arm_reverse_dwell() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("rev-jitter");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("rev-jitter-peer");
+        let peer_id = other.identity().device_id().clone();
+
+        node.shared.live.lock().unwrap().insert(
+            peer_id.clone(),
+            crate::runtime::trust::LivePeer {
+                device_id: peer_id.clone(),
+                name: "peer".into(),
+                platform: "test".into(),
+                addr: "127.0.0.1:1".parse().unwrap(),
+                handshake_hash: [0u8; 32],
+                file_port: None,
+                input_port: Some(45721),
+                screen_port: None,
+                caps: Vec::new(),
+                path: tetherly_core::PathKind::Lan,
+                rtt_ms: None,
+                last_seen_ms: 0,
+            },
+        );
+        node.shared.topology_layout.lock().unwrap().display = DisplayRect::new(1920, 1080, 1.0);
+        node.set_input_policy(crate::store::InputTunnelPolicy {
+            edge: Some("bottom".into()),
+            ..crate::store::InputTunnelPolicy::default()
+        })
+        .expect("policy set");
+        node.shared
+            .topology_layout
+            .lock()
+            .unwrap()
+            .neighbors
+            .insert(
+                DisplayEdge::Bottom,
+                EdgeNeighbor {
+                    peer_id: peer_id.to_string(),
+                    peer_edge: DisplayEdge::Top,
+                    offset: 0,
+                },
+            );
+        let now = node.shared.clock.unix_ms();
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_jitter".into(),
+            peer_id: peer_id.to_string(),
+            role: InputTunnelRole::Target,
+            requested_edge: Some(DisplayEdge::Top),
+            entry_x: Some(960),
+            entry_y: Some(1079),
+            capture_width: Some(1920),
+            capture_height: Some(1080),
+            started_at_ms: now,
+            last_activity_ms: now,
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+        node.spawn_reverse_pinned_heartbeat();
+
+        // Sustained ±1px jitter at the parked clamp point (1079 stays in the
+        // y>=height-2 core on every event), paced past the 600ms un-armed
+        // dwell. Async sleep so the heartbeat task keeps ticking alongside.
+        let jitter = [(0, 0), (0, -1), (0, 1), (0, -1), (0, 1), (0, -1), (0, 1)];
+        for _ in 0..8 {
+            for (jx, jy) in jitter {
+                let (x, y) = (960 + jx, (1079 + jy).clamp(0, 1079));
+                let _ = node
+                    .drive_input_delta(x, y, 0, jy, 1920, 1080)
+                    .expect("reverse path must not error");
+                tokio::time::sleep(std::time::Duration::from_millis(12)).await;
+            }
+            assert!(
+                node.shared.last_auto_reverse.lock().unwrap().is_none(),
+                "jitter at the parked entry position must never arm the reverse dwell"
+            );
+        }
+        assert!(
+            !node.shared.reverse_zone_dirty.load(Ordering::SeqCst),
+            "no event left the trigger zone, so the gate must still be closed"
+        );
     }
 
     // Inversion symmetry (production 2026-11-12, v0.2.22): the accept path
