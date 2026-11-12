@@ -1249,7 +1249,23 @@ impl Node {
             .expect("active_input_tunnel");
 
         let is_timed_out = if let Some(ref session) = *guard {
-            if policy.idle_timeout_secs == 0 {
+            // An engine seat parked in Remote IS active use, even when not a
+            // single event flows: the operator is sitting on the remote
+            // machine (Deskflow model — you stay controlling until you push
+            // back). Reaping a roaming stint here didn't just drop a slot —
+            // the 1s watcher immediately re-armed a fresh session, each re-arm
+            // ships a same-peer takeover request, and the target's
+            // polite-takeover branch DEMOTED the live stint (production
+            // 2026-11-13, v0.2.27: perpetual started→idle_timeout→started
+            // loop every ~11s in the audit trail, keyboard dead mid-stint;
+            // the strandings then rescue the seat and the operator is bounced
+            // to the local machine). The idle clock therefore governs
+            // LEFTOVER slots (seat Local); a roaming stint ends through the
+            // roaming machinery (push-back / Leave / rescue), not the sweep.
+            // Stranded Remote seats are still cleaned by the watcher's
+            // reconcile (it keys on channel state, not this slot).
+            let roaming = self.input_engine_seat() == CursorSeat::Remote;
+            if policy.idle_timeout_secs == 0 || roaming {
                 false
             } else {
                 let timeout_ms = (policy.idle_timeout_secs as u64) * 1000;
@@ -4384,6 +4400,69 @@ mod tests {
         assert!(
             status.session.is_none(),
             "a silent tunnel is reaped by design"
+        );
+    }
+
+    /// Regression (production 2026-11-13, v0.2.27): the idle sweep reaped a
+    /// ROAMING stint whose operator simply paused — the 1s watcher then
+    /// re-armed a fresh session every ~11s and each re-arm's same-peer
+    /// takeover request demoted the live stint on the target (keyboard dead
+    /// mid-control; audit showed a perpetual started→idle_timeout→started
+    /// loop). A Remote engine seat IS active use: the sweep must skip it and
+    /// let the roaming machinery end the stint instead.
+    #[tokio::test]
+    async fn roaming_stint_survives_the_idle_sweep_while_seat_is_remote() {
+        let (node, _dir, clock) =
+            crate::runtime::clipboard_policy_tests::temp_test_node_manual_clock(
+                "roaming-idle",
+                10_000,
+            );
+        node.update_input_policy(InputTunnelPolicyUpdate {
+            idle_timeout_secs: Some(10),
+            ..Default::default()
+        })
+        .unwrap();
+        node.shared
+            .input_capture_active
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // Roaming: engine seat Remote, controller grant armed.
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.set_edge(tetherly_core::ScreenEdge::Right);
+            let crossed = engine.local_move_delta(1919, 500, 4, 0);
+            assert_eq!(crossed, Some(tetherly_core::ScreenEdge::Right));
+            engine.drain();
+        }
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_roaming".to_string(),
+            peer_id: "tdev_peer".to_string(),
+            role: InputTunnelRole::Controller,
+            requested_edge: None,
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: 10_000,
+            last_activity_ms: 10_000,
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+
+        // 11s of TOTAL silence (no events at all) — the seat is still Remote.
+        clock.set(21_000);
+        let status = node.input_tunnel_status();
+        assert!(
+            status.session.is_some(),
+            "a roaming stint must survive the idle sweep no matter how idle it is"
+        );
+
+        // The stint ends through the roaming machinery (engine return) —
+        // afterwards the same stale slot is sweepable again.
+        node.shared.input_engine.lock().unwrap().force_local();
+        let status = node.input_tunnel_status();
+        assert!(
+            status.session.is_none(),
+            "once the seat is back Local the stale slot is reaped by design"
         );
     }
 
