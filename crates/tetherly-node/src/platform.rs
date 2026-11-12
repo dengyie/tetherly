@@ -1397,11 +1397,11 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, HOOKPROC,
-        KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
-        WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-        WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-        WM_SYSKEYDOWN, WM_SYSKEYUP,
+        CallNextHookEx, GetCursorPos, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
+        HOOKPROC, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
+        WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+        WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     };
 
     const WM_HOOK_KB_ON: u32 = 0x8000 + 1; // WM_APP + 1
@@ -1463,14 +1463,85 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                 let ev = wparam as u32;
                 // Deskflow kHOOK_RELAY_EVENTS alignment: while this node
                 // controls a remote seat, the physical mouse belongs to the
-                // REMOTE machine — swallow the physical events here so the
-                // local UI never sees them (local cursor frozen at the
-                // roaming center; the v0.2.9 visible center jitter and the
-                // "controlling two devices at once" symptom both came from
-                // letting physical moves through). Deltas are still derived
-                // and relayed below; local apps get nothing. Local seat
-                // (relay off) passes everything through untouched.
+                // REMOTE machine — the local UI must never see physical
+                // motion (local cursor frozen at the roaming center; the
+                // v0.2.9 visible center jitter and the "controlling two
+                // devices at once" symptom both came from letting physical
+                // moves through). Local seat (relay off) passes everything
+                // through untouched.
+                //
+                // Feed-then-swallow (macOS tap twin: tap_callback sends the
+                // RawInput BEFORE the armed-swallow check). Relay is armed
+                // exactly while this node is the CONTROLLER — its physical
+                // deltas are the remote seat's input stream, so the events
+                // must reach the roaming engine even though the local UI is
+                // blocked. Swallowing without feeding starves the engine:
+                // the takeover flips the seat but not a single delta streams
+                // and the remote cursor never moves (production 2026-11-13:
+                // Windows→Mac mouse dead — Win input_tx_frames=6 over 26min
+                // vs Mac tx=20822; every controller stint ended before any
+                // delta reached the peer).
+                //
+                // Delta source while frozen: the hook blocks the motion, so
+                // `pt` is the system's proposal = frozen_position +
+                // hardware_delta for EVERY event — differencing consecutive
+                // proposals is flat. The frozen actual cursor position is
+                // the stable reference: delta = pt - GetCursorPos() (the
+                // Barrier center-warp trick, without the warp — the cursor
+                // never moves). A proposal equal to the frozen position is
+                // a clamped tail or an echo, not motion. Buttons/wheel
+                // carry no position state and forward unchanged.
                 if MOUSE_RELAY.load(Ordering::SeqCst) && is_mouse_motion_event(ev) {
+                    if ev == WM_MOUSEMOVE {
+                        let mut cur = POINT { x: 0, y: 0 };
+                        GetCursorPos(&mut cur);
+                        let dx = mi.pt.x - cur.x;
+                        let dy = mi.pt.y - cur.y;
+                        if dx != 0 || dy != 0 {
+                            push(RawInput::Move {
+                                x: mi.pt.x,
+                                y: mi.pt.y,
+                                dx,
+                                dy,
+                            });
+                        }
+                    } else {
+                        match ev {
+                            WM_LBUTTONDOWN => push(RawInput::Button {
+                                mask: tetherly_core::BTN_LEFT,
+                                down: true,
+                            }),
+                            WM_LBUTTONUP => push(RawInput::Button {
+                                mask: tetherly_core::BTN_LEFT,
+                                down: false,
+                            }),
+                            WM_RBUTTONDOWN => push(RawInput::Button {
+                                mask: tetherly_core::BTN_RIGHT,
+                                down: true,
+                            }),
+                            WM_RBUTTONUP => push(RawInput::Button {
+                                mask: tetherly_core::BTN_RIGHT,
+                                down: false,
+                            }),
+                            WM_MBUTTONDOWN => push(RawInput::Button {
+                                mask: tetherly_core::BTN_MIDDLE,
+                                down: true,
+                            }),
+                            WM_MBUTTONUP => push(RawInput::Button {
+                                mask: tetherly_core::BTN_MIDDLE,
+                                down: false,
+                            }),
+                            WM_MOUSEWHEEL => push(RawInput::Wheel {
+                                dx: 0,
+                                dy: (mi.mouseData >> 16) as i16,
+                            }),
+                            WM_MOUSEHWHEEL => push(RawInput::Wheel {
+                                dx: (mi.mouseData >> 16) as i16,
+                                dy: 0,
+                            }),
+                            _ => {}
+                        }
+                    }
                     return 1;
                 }
                 match ev {
