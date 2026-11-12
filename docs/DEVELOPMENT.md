@@ -8259,3 +8259,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 3. **部署链杂项**：deploy.sh owner 检查字符串比较写 `! [ "$X" = "SYSTEM" ]` 时 PowerShell 输出带回车导致偶发误报，改 `!=`；v0.2.20/21 写入的 `S-1-0-*` 死 ACE 用 `Get-Acl | PurgeAccessRules | Set-Acl` 清除，随后 hot-restart 触发 v0.2.22 重写 routes/trusted.json，ACL 中出现正确的 `NT AUTHORITY\SYSTEM` + `BUILTIN\Administrators` Read ACE（修复生效实锤）。identity.bin 因继承 ACE 已含 FullControl 且 repair 幂等未重写，其正确 ACE 在下次身份变更时写入。
 
 4. **v0.2.22 终态**：Windows daemon pid 284648，**owner=SYSTEM + device_id=tdev_rguu 不变 + Mac 隧道 peers=1**，三个目标同时达成；保护进程 3/3 完好；Mac 端 0.2.21→未动（`--target windows` 单独部署）。待用户实测 UAC 弹窗点击验收。
+
+## 100. Windows→Mac 反向漫游静默失效：requested_edge 的几何语义错误 (v0.2.23)
+
+1. **现象**：v0.2.19-0.2.22 生产机上，Mac→Windows 漫游正常，但 Windows 鼠标推底边永远出不去——光标在 Windows 正常移动、无任何错误，Windows 侧日志零记录（无 crossing、无 `auto-reverse blocked`、无 `[takeover] fire`）。
+
+2. **取证（双端日志交叉）**：Mac 日志 `engine crossing fired edge=Top` 后立刻 attach——控制器发送的 `requested_edge` 是**它自己越过的边**（Mac 的 Top；Mac 在下、Windows 在上）。Windows 接受侧（v0.2.19 引入的 ladder）第一优先级把这条边**原样** `engine.set_edge(Top)`。而共享物理边界在两块屏幕上是**相对的两条边**：Mac 的 Top ↔ Windows 的 Bottom。于是 Windows 引擎的共享边被永久钉死在 Top，用户在底边的每一次推挤都落进 `maybe_auto_reverse`/`local_move_delta` 的 `_` 兜底分支——**静默吞掉，无任何日志**（`blocked` 诊断线只在边匹配后才可达）。v0.2.19 的配套测试用相反的线上语义自证通过（发 Bottom、断言 Bottom），掩盖了缺陷。UI 手动 attach 不带 edge、走 topology 兜底（Bottom，正确），所以 UI 路径一直是好的——只有"控制器真实越边/反转接管"携带 requested_edge 的路径中毒。
+
+3. **修复（v0.2.23）**：接受侧 `frame.requested_edge` 先 `ScreenEdge::opposite()` 再设引擎（Top 请求 → Bottom 本侧）。反转在两个方向对称成立：反向接管时 Windows 发自己的 Bottom（引擎边），Mac 接受反转回自己的 Top。`opposite()` 已存在于 tetherly-core（无需新代码）；更新 v0.2.19 测试为真实线上语义（发 Top、断言 Bottom）+ 新增反向对称性测试（发 Bottom → 断言 Top）。回归 799/0。
+
+4. **同场加映——SYSTEM 任务的 Session 0 陷阱**：v0.2.22 部署后 Windows daemon 以 SYSTEM 运行但 `SessionId=0`（Session 0 无交互桌面）：低级输入钩子收不到物理鼠标（W→M 漫游看似"隧道通但鼠标死"）、`SendInput` 注入作用在不可见桌面上（Mac 光标消失但 Windows 不出现）。原始设计（`launch_system.ps1` 注释 + 代码）用 `CreateProcessAsUser + SetTokenInformation(TokenSessionId=活动会话) + lpDesktop=winsta0\default` 把 SYSTEM 进程放进交互桌面，但计划任务的动作在历史漂移中变成了直接跑 exe。修复：任务动作改回 `powershell -File E:\code\launch_system.ps1`（默认命令即 `run_tetherly_system.bat`），验证 `session=2 + owner=SYSTEM` 同时成立。**教训：特权验收必须查三个独立维度——owner（谁能注入）、SessionId（钩子/注入作用在哪块桌面）、身份（对端配对不失效）；v0.2.22 只查了第一个。**
+
+5. **杂项**：deploy.sh owner 比较前 `tr -d '\r\n'` 剥离 PowerShell CRLF（"runs as SYSTEM, not SYSTEM" 误报）。生产机 E:\code\run_tetherly_system.bat 与仓库 scripts/run_tetherly_system.bat 内容一致（指向默认 data-dir）。
