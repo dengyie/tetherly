@@ -379,6 +379,22 @@ mod tests {
         {
             assert!(vault_enabled_for(&crate::store::default_data_dir()));
         }
+        // Windows opt-in is privilege-context-based since v0.2.20 (LocalSystem
+        // never opts in; the interactive user always does) — `vault_enabled_for`
+        // does NOT consult the dir on Windows, so a temp dir is exactly as
+        // vault-eligible as the default data dir. The old dir-based opt-out
+        // assertion (Phase 1-5 era) was unsatisfiable there: it contradicted
+        // the default-dir assertion above whenever the vault was healthy, and
+        // failed every Windows CI run that reached it (production 2026-11-12,
+        // PR #23; main's runs never hit it because phase3 aborted earlier).
+        // Linux keeps the real dir gate (non-default dirs never opt in).
+        #[cfg(windows)]
+        assert_eq!(
+            vault_enabled_for(&std::env::temp_dir().join("tetherly-x")),
+            vault_enabled_for(&crate::store::default_data_dir()),
+            "windows vault opt-in is privilege-context-based, not dir-based"
+        );
+        #[cfg(not(any(target_os = "macos", windows)))]
         assert!(!vault_enabled_for(&std::env::temp_dir().join("tetherly-x")));
     }
 
