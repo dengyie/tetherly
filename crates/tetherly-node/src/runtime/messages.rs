@@ -82,10 +82,7 @@ impl MessageEngine {
                         return false;
                     }
                 }
-                if unread_only && m.read {
-                    return false;
-                }
-                true
+                !(unread_only && m.read)
             })
             .take(lim)
             .cloned()
