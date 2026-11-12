@@ -1516,6 +1516,16 @@ pub(crate) mod clipboard_policy_tests {
     use tetherly_core::{ClipSyncMode, ManualClock};
 
     pub(crate) fn temp_test_node(tag: &str) -> (Node, std::path::PathBuf) {
+        let (node, dir, _clock) = temp_test_node_manual_clock(tag, 1000);
+        (node, dir)
+    }
+
+    /// Same harness with a retained `ManualClock` handle so tests can drive
+    /// the node's wall clock deterministically (idle sweeps, TTLs, backoff).
+    pub(crate) fn temp_test_node_manual_clock(
+        tag: &str,
+        start_ms: u64,
+    ) -> (Node, std::path::PathBuf, Arc<ManualClock>) {
         let dir = std::env::temp_dir().join(format!(
             "tetherly-clip-test-{tag}-{}-{}",
             std::process::id(),
@@ -1572,9 +1582,9 @@ pub(crate) mod clipboard_policy_tests {
             screen_sink: None,
             input_sink: None,
         };
-        let clock = Arc::new(ManualClock::new(1000));
-        let node = Node::start_with_clock(cfg, clock).unwrap();
-        (node, dir)
+        let clock = Arc::new(ManualClock::new(start_ms));
+        let node = Node::start_with_clock(cfg, clock.clone()).unwrap();
+        (node, dir, clock)
     }
 
     #[tokio::test]

@@ -710,6 +710,23 @@ impl Node {
         }
     }
 
+    /// The 45719 receive pump calls this for every inbound input frame:
+    /// frames flowing on the tunnel ARE operator activity. Heartbeats are
+    /// ADR-138-session-only, so a plain roaming target has no other
+    /// keepalive — without this touch its slot goes stale during active
+    /// control and the target's own watcher sweep reaps it mid-use (the
+    /// controller-side counterpart lives in `send_input_events`).
+    pub fn note_inbound_tunnel_activity(&self, peer: &str) {
+        let now_ms = self.shared.clock.unix_ms();
+        if let Ok(mut guard) = self.shared.active_input_tunnel.lock() {
+            if let Some(session) = guard.as_mut() {
+                if session.peer_id == peer {
+                    session.last_activity_ms = now_ms;
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // ADR-138 remote desktop session mode.
     //
@@ -2756,11 +2773,8 @@ impl Node {
                 self.reset_reverse_arming_state();
             }
         }
-        if let Ok(mut guard) = self.shared.active_input_tunnel.lock() {
-            if let Some(ref mut session) = *guard {
-                session.last_activity_ms = self.shared.clock.unix_ms();
-            }
-        }
+        // Activity accounting moved into `send_input_events` so every input
+        // kind (not just mouse moves) counts as operator activity.
         Ok(edge)
     }
 
@@ -3503,6 +3517,20 @@ impl Node {
         if events.is_empty() {
             return Ok(());
         }
+        // Operator activity: every attempted delivery (keys, moves, buttons,
+        // wheel, gestures) keeps the roaming tunnel's idle clock fresh. Only
+        // mouse moves used to count (drive_input_delta touched the slot
+        // directly), so a pure typing stretch looked idle and the watcher's
+        // `input_tunnel_status()` sweep reaped the tunnel mid-use — the same
+        // 1s watcher tick then rescued the now role-less Remote seat and the
+        // keyboard snapped back to the local machine (production 2026-11-12:
+        // 86 `input_tunnel_idle_timeout` reaps in one day under
+        // `idle_timeout_secs=10`, each one an interrupted typing stint).
+        if let Ok(mut guard) = self.shared.active_input_tunnel.lock() {
+            if let Some(ref mut session) = *guard {
+                session.last_activity_ms = self.shared.clock.unix_ms();
+            }
+        }
         // Diagnostic (v0.1.83): name every push batch — enter-carrying ones
         // AND lone edge-clamp Moves (rem_y==1000) — so the ghost
         // re-placement frame's producer is attributable.
@@ -3922,6 +3950,7 @@ impl Node {
                             Ok(frame) => {
                                 let f_len = (frame.payload.len() + 12) as u64;
                                 node.shared.telemetry.record_input_rx(f_len);
+                                node.note_inbound_tunnel_activity(peer_id.as_str());
                                 if let Ok(ev) = InputEvent::from_frame(&frame) {
                                     // Diagnostic (v0.1.81): log the entry placement
                                     // moment — Enter and the first Move after it —
@@ -4202,6 +4231,161 @@ impl Node {
 mod tests {
     use super::*;
     use tetherly_core::InputKind;
+
+    /// Regression (production 2026-11-12): while the operator typed on the
+    /// remote machine, the roaming tunnel's `last_activity_ms` was refreshed
+    /// only by mouse moves (the touch lived at the tail of
+    /// `drive_input_delta`), so a pure typing stretch looked idle. The 1s
+    /// link watcher calls `input_tunnel_status()` every tick, whose inline
+    /// sweep reaps the tunnel once `idle_timeout_secs` passes without a
+    /// MOUSE event — and the same tick's `reconcile_stranded_remote_seat()`
+    /// then finds seat==Remote with no Controller grant and rescues the seat
+    /// to Local: the keyboard snaps back to the local machine mid-typing
+    /// (86 `input_tunnel_idle_timeout` reaps recorded in one production day
+    /// under `idle_timeout_secs=10`; watcher tick phase aligned with every
+    /// reap timestamp). Typing — and every other delivered input kind — must
+    /// count as tunnel activity.
+    #[tokio::test]
+    async fn typing_keeps_the_roaming_tunnel_alive_through_the_watcher_idle_sweep() {
+        let (node, _dir, clock) =
+            crate::runtime::clipboard_policy_tests::temp_test_node_manual_clock(
+                "typing-idle",
+                10_000,
+            );
+        node.update_input_policy(InputTunnelPolicyUpdate {
+            // The sanitizer floors this at 10s (clamp(10, 86400)) — the same
+            // aggressive value the production node runs.
+            idle_timeout_secs: Some(10),
+            ..Default::default()
+        })
+        .unwrap();
+        // Never auto-arm the real input-capture hooks inside a test host
+        // (this machine may have accessibility granted).
+        node.shared
+            .input_capture_active
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // Enter the Remote seat the way the drive path does.
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.set_edge(tetherly_core::ScreenEdge::Right);
+            let crossed = engine.local_move_delta(1919, 500, 4, 0);
+            assert_eq!(crossed, Some(tetherly_core::ScreenEdge::Right));
+            engine.drain();
+        }
+        // Arm the controller grant the way the attach path does.
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_typing".to_string(),
+            peer_id: "tdev_peer".to_string(),
+            role: InputTunnelRole::Controller,
+            requested_edge: None,
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: clock.unix_ms(),
+            last_activity_ms: clock.unix_ms(),
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+        // A live outbound channel so the keystrokes are really delivered.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<tetherly_core::InnerFrame>(64);
+        *node.shared.input_out.lock().unwrap() = Some((0, tx));
+
+        // Type: down/up keystrokes with the clock advancing between them.
+        for ms in [10_200u64, 10_600, 11_000] {
+            clock.set(ms);
+            node.drive_input_key(0x04, true).unwrap();
+            node.drive_input_key(0x04, false).unwrap();
+        }
+        // The keystrokes really crossed the outbound channel.
+        assert!(rx.try_recv().is_ok(), "keystrokes must be delivered");
+
+        // The last keystroke refreshed the slot to the clock's now.
+        let last = node
+            .shared
+            .active_input_tunnel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .last_activity_ms;
+        assert_eq!(last, 11_000, "typing must refresh the tunnel's idle clock");
+
+        // Advance 9.5s past the last keystroke (inside the 10s window, but
+        // 10.5s past the arm time) and run the watcher's exact tick:
+        // `input_tunnel_status()` (sweep) then the stranded-seat reconcile.
+        // Without the typing refresh the sweep reaps here and the reconcile
+        // rescues the seat — the production interruption, deterministically.
+        clock.set(20_500);
+        let status = node.input_tunnel_status();
+        assert!(
+            status.session.is_some(),
+            "a tunnel kept alive by typing must survive the idle sweep"
+        );
+        assert!(
+            !node.reconcile_stranded_remote_seat(),
+            "an actively-typed roaming stint must not be rescued"
+        );
+        assert_eq!(node.input_engine_seat(), CursorSeat::Remote);
+    }
+
+    /// The roaming TARGET has no heartbeat keepalive (heartbeats are
+    /// ADR-138-session-only), so inbound input frames are its only activity
+    /// signal. Without the pump touch its slot goes stale during active
+    /// control and the target's own watcher sweep reaps it mid-use — the
+    /// reconcile no longer sees the receiving role and the controlled side
+    /// self-rescues while the operator is typing.
+    #[tokio::test]
+    async fn inbound_frames_keep_the_target_tunnel_alive_through_the_idle_sweep() {
+        let (node, _dir, clock) =
+            crate::runtime::clipboard_policy_tests::temp_test_node_manual_clock(
+                "target-idle",
+                10_000,
+            );
+        node.update_input_policy(InputTunnelPolicyUpdate {
+            // The sanitizer floors this at 10s (clamp(10, 86400)).
+            idle_timeout_secs: Some(10),
+            ..Default::default()
+        })
+        .unwrap();
+        node.shared
+            .input_capture_active
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_target".to_string(),
+            peer_id: "tdev_peer".to_string(),
+            role: InputTunnelRole::Target,
+            requested_edge: None,
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: 10_000,
+            last_activity_ms: 10_000,
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+
+        // Frames flowing (the controller is actively typing) must refresh
+        // the slot even though this side sends nothing.
+        clock.set(11_600);
+        node.note_inbound_tunnel_activity("tdev_peer");
+        clock.set(18_000);
+        let status = node.input_tunnel_status();
+        assert!(
+            status.session.is_some(),
+            "an actively driven target tunnel must survive the idle sweep"
+        );
+
+        // Control: with NO inbound activity the same window reaps the slot
+        // (the governance semantics are unchanged — idle still releases).
+        clock.set(25_000);
+        let status = node.input_tunnel_status();
+        assert!(
+            status.session.is_none(),
+            "a silent tunnel is reaped by design"
+        );
+    }
 
     /// Regression (production 2026-11-11): the target-side input tunnel
     /// survived the control session's end. With a stale
