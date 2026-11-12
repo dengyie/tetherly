@@ -1054,7 +1054,7 @@ pub enum RawInput {
     /// Four-finger swipe on the LOCAL trackpad, observed while this node is
     /// controlling a remote desktop.
     ///
-    /// Horizontal: forwarded as the remote's app switch (Alt+Esc on a
+    /// Horizontal: forwarded as the remote's app switch (Alt+Tab on a
     /// Windows target). `direction`: -1 = fingers moved left (next window),
     /// 1 = fingers moved right (previous window) — the same
     /// content-follows-fingers convention macOS Spaces uses.
