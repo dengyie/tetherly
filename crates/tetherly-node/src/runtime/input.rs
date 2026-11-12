@@ -2352,6 +2352,11 @@ impl Node {
         *self.shared.reverse_last_pos.lock().expect("reverse_pos") = None;
         *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
         *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
+        *self
+            .shared
+            .reverse_pinned_touch
+            .lock()
+            .expect("reverse_pinned") = None;
     }
 
     /// Refresh physical activity timestamp without accumulating movement distance.
@@ -3062,8 +3067,9 @@ impl Node {
         // as sustained. Real mice report at 8-16ms intervals, so 150ms
         // means the pushing hand actually paused; two isolated accidental
         // bumps (typically >=300ms apart) reset the dwell instead. Leaving
-        // the edge for longer than TOUCH_GAP_MS disarms the dwell.
-        const TOUCH_GAP_MS: u64 = 150;
+        // the edge for longer than TOUCH_GAP_MS disarms the dwell. The
+        // constant now lives in `reverse_dwell_advance` (shared with the
+        // pinned-dwell heartbeat).
         let now = std::time::Instant::now();
         // Direction discipline (v0.1.97): the event must push INTO the edge
         // to sustain the dwell. The entry placement parks the cursor ON the
@@ -3127,9 +3133,15 @@ impl Node {
         };
         let fired = if !crossed || !pushing_in {
             // Left the edge (or slid along it without pushing in): the push
-            // is over, reset the dwell.
+            // is over, reset the dwell — and the pinned-heartbeat anchor with
+            // it, or the heartbeat would keep feeding a dead push.
             *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
             *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
+            *self
+                .shared
+                .reverse_pinned_touch
+                .lock()
+                .expect("reverse_pinned") = None;
             false
         } else {
             let delay_ms = if distance_armed {
@@ -3144,42 +3156,187 @@ impl Node {
             } else {
                 Self::REVERSE_DWELL_UNARMED_MS
             };
-            let mut arm = self.shared.reverse_arm_since.lock().expect("reverse_arm");
-            let mut last_tick = self.shared.reverse_last_tick.lock().expect("reverse_tick");
-            match (*arm, *last_tick) {
-                (Some(started), Some(prev_tick)) => {
-                    let sustained = now.duration_since(started).as_millis() as u64 >= delay_ms;
-                    let contiguous =
-                        now.duration_since(prev_tick).as_millis() as u64 <= TOUCH_GAP_MS;
-                    if sustained && contiguous {
-                        *arm = None;
-                        *last_tick = None;
-                        true
-                    } else if contiguous {
-                        // Still pushing: keep accumulating towards delay_ms.
-                        // Refresh the continuity anchor — otherwise the gap
-                        // check keeps measuring from the very first touch and
-                        // any dwell longer than TOUCH_GAP_MS resets forever.
-                        *last_tick = Some(now);
-                        false
-                    } else {
-                        // Gap too long: a fresh push, not a continuation.
-                        *arm = Some(now);
-                        *last_tick = Some(now);
-                        false
-                    }
-                }
-                _ => {
-                    // First touch of a new push.
-                    *arm = Some(now);
-                    *last_tick = Some(now);
-                    false
-                }
-            }
+            self.reverse_dwell_advance(now, delay_ms, pinned_at_clamp, x, y)
         };
         if !fired {
             return;
         }
+        self.fire_reverse_takeover(edge, x, y, width, height);
+    }
+
+    /// Advance the gap-continuity dwell state machine by one tick. Shared by
+    /// the physical-event path (`maybe_auto_reverse`) and the pinned-dwell
+    /// heartbeat (`spawn_reverse_pinned_heartbeat`) so both feed exactly the
+    /// same arm/continuity rules. Returns true when the dwell completed and
+    /// the takeover should fire. TOUCH_GAP_MS lives on the caller side (used
+    /// in log wording there); the heartbeat passes the same constant.
+    fn reverse_dwell_advance(
+        &self,
+        now: std::time::Instant,
+        delay_ms: u64,
+        record_anchor: bool,
+        x: i32,
+        y: i32,
+    ) -> bool {
+        const TOUCH_GAP_MS: u64 = 150;
+        let mut arm = self.shared.reverse_arm_since.lock().expect("reverse_arm");
+        let mut last_tick = self.shared.reverse_last_tick.lock().expect("reverse_tick");
+        match (*arm, *last_tick) {
+            (Some(started), Some(prev_tick)) => {
+                let sustained = now.duration_since(started).as_millis() as u64 >= delay_ms;
+                let contiguous = now.duration_since(prev_tick).as_millis() as u64 <= TOUCH_GAP_MS;
+                if sustained && contiguous {
+                    *arm = None;
+                    *last_tick = None;
+                    *self
+                        .shared
+                        .reverse_pinned_touch
+                        .lock()
+                        .expect("reverse_pinned") = None;
+                    true
+                } else if contiguous {
+                    // Still pushing: keep accumulating towards delay_ms.
+                    // Refresh the continuity anchor — otherwise the gap
+                    // check keeps measuring from the very first touch and
+                    // any dwell longer than TOUCH_GAP_MS resets forever.
+                    *last_tick = Some(now);
+                    false
+                } else {
+                    // Gap too long: a fresh push, not a continuation.
+                    *arm = Some(now);
+                    *last_tick = Some(now);
+                    if record_anchor {
+                        *self
+                            .shared
+                            .reverse_pinned_touch
+                            .lock()
+                            .expect("reverse_pinned") = Some((now, x, y));
+                    }
+                    false
+                }
+            }
+            _ => {
+                // First touch of a new push. When the cursor sits in the
+                // clamp band, record the heartbeat anchor: the OS will
+                // stop reporting moves while the hand keeps pushing
+                // (Windows LL hooks fire only on cursor movement), and
+                // the heartbeat task must then carry the dwell.
+                if record_anchor {
+                    *self
+                        .shared
+                        .reverse_pinned_touch
+                        .lock()
+                        .expect("reverse_pinned") = Some((now, x, y));
+                }
+                *arm = Some(now);
+                *last_tick = Some(now);
+                false
+            }
+        }
+    }
+
+    /// Pinned-dwell heartbeat (v0.2.25): Windows LL mouse hooks fire only
+    /// when the cursor MOVES. The entry placement parks the cursor ON the
+    /// shared edge and the OS clamps it there, so a continued physical push
+    /// into the edge produces NO further WM_MOUSEMOVE after the first
+    /// boundary touch — the gap-continuity dwell starves on its first tick
+    /// and no dwell target beyond that single touch is reachable (production
+    /// 2026-11-12 09:34: each push logged exactly one "requiring long dwell"
+    /// line; the 600ms gate never had a chance to accumulate). This task
+    /// carries the dwell from the heartbeat anchor: while the anchor is
+    /// fresh (TOUCH_GAP_MS since the last heartbeat tick — i.e. "the hand
+    /// never demonstrably left"), it re-runs the same dwell state machine
+    /// every HEARTBEAT_PERIOD_MS. Any physical event that moves the cursor
+    /// off the clamp band re-enters maybe_auto_reverse with
+    /// !crossed/!pushing_in and clears the anchor; the heartbeat also stops
+    /// once the dwell fires or the anchor ages out (PUSH_ABANDON_MS).
+    pub fn spawn_reverse_pinned_heartbeat(&self) {
+        const HEARTBEAT_PERIOD_MS: u64 = 30;
+        const PUSH_ABANDON_MS: u64 = 3000;
+        let node = self.clone_handle();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(HEARTBEAT_PERIOD_MS)).await;
+                let now = std::time::Instant::now();
+                // Feed only while an anchor exists and is fresh enough to
+                // still plausibly represent "the hand is holding the push".
+                // A hand-held push leaves the cursor pinned, so the anchor
+                // position must also match where the cursor was last seen.
+                let anchor = *node
+                    .shared
+                    .reverse_pinned_touch
+                    .lock()
+                    .expect("reverse_pinned");
+                let Some((touched_at, ax, ay)) = anchor else {
+                    continue;
+                };
+                if now.duration_since(touched_at).as_millis() as u64 > PUSH_ABANDON_MS {
+                    // Stale anchor: the push was abandoned (hand lifted; any
+                    // new push would re-record a fresh anchor). Clear it.
+                    *node
+                        .shared
+                        .reverse_pinned_touch
+                        .lock()
+                        .expect("reverse_pinned") = None;
+                    continue;
+                }
+                // Same role gate as maybe_auto_reverse: the heartbeat only
+                // exists to complete a Target-side reverse takeover.
+                if node.active_tunnel_role() != Some(tetherly_core::InputTunnelRole::Target) {
+                    continue;
+                }
+                // Cooldown gate mirrors the physical path.
+                {
+                    let last_flip = node.shared.last_auto_reverse.lock().expect("last_flip");
+                    if let Some(t) = *last_flip {
+                        if now.duration_since(t).as_millis() < 3000 {
+                            continue;
+                        }
+                    }
+                }
+                let distance_armed = node.shared.reverse_move_accum_px.load(Ordering::SeqCst)
+                    >= Node::REVERSE_ARM_MIN_PX;
+                let delay_ms = if distance_armed {
+                    Node::REVERSE_DWELL_ARMED_MS.max(
+                        node.shared
+                            .topology_layout
+                            .lock()
+                            .expect("topology_layout")
+                            .config
+                            .delay_ms as u64,
+                    )
+                } else {
+                    Node::REVERSE_DWELL_UNARMED_MS
+                };
+                // Anchor is NOT re-recorded from the heartbeat (record_anchor
+                // = false): the physical first-touch event owns the anchor;
+                // the heartbeat only advances the clock.
+                if node.reverse_dwell_advance(now, delay_ms, false, ax, ay) {
+                    let edge = {
+                        let server = node.shared.input_engine.lock().expect("engine");
+                        server.edge()
+                    };
+                    info!(
+                        "auto-reverse: pinned heartbeat completed the dwell; requesting takeover"
+                    );
+                    node.fire_reverse_takeover(edge, ax, ay, 0, 0);
+                }
+            }
+        });
+    }
+
+    /// The takeover half of maybe_auto_reverse (post-dwell): cooldown stamp,
+    /// peer resolution, proportional entry mapping, and the polite-attach
+    /// spawn. Split out so the pinned heartbeat can fire the identical path.
+    fn fire_reverse_takeover(
+        &self,
+        edge: tetherly_core::ScreenEdge,
+        x: i32,
+        y: i32,
+        _width: i32,
+        _height: i32,
+    ) {
+        let now = std::time::Instant::now();
         *self.shared.last_auto_reverse.lock().expect("last_flip") = Some(now);
 
         let Some(peer) = self
@@ -3193,7 +3350,6 @@ impl Node {
             return;
         };
         info!(peer = %peer, %edge, "auto-reverse: sustained edge push; requesting polite takeover");
-        eprintln!("[takeover] fire: requesting takeover peer={peer} edge={edge}");
         self.record_audit(
             AuditCategory::Config,
             AuditSeverity::Info,
@@ -4734,6 +4890,108 @@ mod tests {
         panic!(
             "a sustained un-armed push from the parked edge must fire the takeover after the long dwell"
         );
+    }
+
+    // Production dead shape (2026-11-12, v0.2.24 postmortem): the Windows
+    // LL mouse hook fires only when the cursor MOVES. Entry placement parks
+    // the cursor ON the shared edge, the OS clamps it there, and a continued
+    // physical push produces NO further events — every push logged exactly
+    // one dwell tick ("requiring long dwell") and the 600ms gate starved.
+    // The v0.2.24 test above drives a synthetic event stream, which the real
+    // OS never delivers; THIS test reproduces the true shape: ONE physical
+    // event opens the dwell and records the anchor, then total silence from
+    // the OS. The pinned heartbeat must carry the dwell to completion alone.
+    #[tokio::test]
+    async fn test_auto_reverse_pinned_heartbeat_fires_from_single_pinned_touch() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("rev-hb");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("rev-hb-peer");
+        let peer_id = other.identity().device_id().clone();
+
+        node.shared.live.lock().unwrap().insert(
+            peer_id.clone(),
+            crate::runtime::trust::LivePeer {
+                device_id: peer_id.clone(),
+                name: "peer".into(),
+                platform: "test".into(),
+                addr: "127.0.0.1:1".parse().unwrap(),
+                handshake_hash: [0u8; 32],
+                file_port: None,
+                input_port: Some(45720),
+                screen_port: None,
+                caps: Vec::new(),
+                path: tetherly_core::PathKind::Lan,
+                rtt_ms: None,
+                last_seen_ms: 0,
+            },
+        );
+        node.shared.topology_layout.lock().unwrap().display = DisplayRect::new(1920, 1080, 1.0);
+        node.set_input_policy(crate::store::InputTunnelPolicy {
+            edge: Some("bottom".into()),
+            ..crate::store::InputTunnelPolicy::default()
+        })
+        .expect("policy set");
+        node.shared
+            .topology_layout
+            .lock()
+            .unwrap()
+            .neighbors
+            .insert(
+                DisplayEdge::Bottom,
+                EdgeNeighbor {
+                    peer_id: peer_id.to_string(),
+                    peer_edge: DisplayEdge::Top,
+                    offset: 0,
+                },
+            );
+        let now = node.shared.clock.unix_ms();
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_hb".into(),
+            peer_id: peer_id.to_string(),
+            role: InputTunnelRole::Target,
+            requested_edge: Some(DisplayEdge::Top),
+            entry_x: Some(960),
+            entry_y: Some(1079),
+            capture_width: Some(1920),
+            capture_height: Some(1080),
+            started_at_ms: now,
+            last_activity_ms: now,
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+
+        // temp_test_node never runs run(), so the heartbeat must be started
+        // exactly as the runtime starts it.
+        node.spawn_reverse_pinned_heartbeat();
+
+        // Phase 1 — the production shape verbatim: ONE pinned boundary event
+        // (dy=0 inside the clamp band). It opens the dwell and records the
+        // heartbeat anchor; the takeover must not fire yet.
+        let _ = node
+            .drive_input_delta(960, 1079, 0, 0, 1920, 1080)
+            .expect("reverse path must not error");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(
+            node.shared.last_auto_reverse.lock().unwrap().is_none(),
+            "a single pinned touch must not fire immediately (dwell gate)"
+        );
+
+        // Phase 2 — OS silence: the cursor is clamped, NO further physical
+        // events exist. Only the 30ms heartbeat keeps the dwell contiguous
+        // across the 600ms un-armed gate; it must fire the takeover from
+        // the anchor. (Async sleep so the current-thread runtime keeps
+        // polling the heartbeat task — the production task runs beside the
+        // hook thread the same way.)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if node.shared.last_auto_reverse.lock().unwrap().is_some() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pinned heartbeat must complete the dwell with no further physical events"
+            );
+        }
     }
 
     // Inversion symmetry (production 2026-11-12, v0.2.22): the accept path

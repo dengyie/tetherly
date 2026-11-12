@@ -955,6 +955,16 @@ struct Shared {
     /// a push counts as sustained only while touch events keep arriving).
     reverse_arm_since: Mutex<Option<std::time::Instant>>,
     reverse_last_tick: Mutex<Option<std::time::Instant>>,
+    /// Pinned dwell heartbeat (v0.2.25): the instant the LAST dwell-opening
+    /// physical event arrived, plus the pinned position it reported. Windows
+    /// LL hooks fire only when the cursor MOVES — with the entry placement
+    /// parked ON the shared edge, a continued push into the clamp produces
+    /// NO further WM_MOUSEMOVE, so the gap-continuity dwell starves on its
+    /// first tick (production 2026-11-12 09:34: each push logged exactly one
+    /// "requiring long dwell" line and nothing else). The heartbeat task
+    /// feeds the dwell state machine from this anchor while the hand holds
+    /// the push, until the cursor actually moves off the clamp band.
+    reverse_pinned_touch: Mutex<Option<(std::time::Instant, i32, i32)>>,
     /// Distance arming for auto-reverse: accumulated physical movement (px)
     /// since the mouse was last idle for REVERSE_RESET_AFTER_MS. A freshly
     /// plugged-in or merely bumped mouse must traverse a real range before

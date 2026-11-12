@@ -631,6 +631,7 @@ impl Node {
             last_auto_reverse: Mutex::new(None),
             reverse_arm_since: Mutex::new(None),
             reverse_last_tick: Mutex::new(None),
+            reverse_pinned_touch: Mutex::new(None),
             reverse_move_accum_px: std::sync::atomic::AtomicI64::new(0),
             roaming_own_crossing: std::sync::atomic::AtomicBool::new(false),
             reverse_last_move: Mutex::new(None),
@@ -680,6 +681,9 @@ impl Node {
                 anyhow::anyhow!("ui port {} unavailable: {e}", self.shared.cfg.ui_port)
             })?;
         }
+        // Pinned-dwell heartbeat: completes the reverse-takeover dwell while
+        // the OS stops reporting moves on a clamped edge push (v0.2.25).
+        self.spawn_reverse_pinned_heartbeat();
         info!(
             device_id = %self.shared.identity.device_id(),
             "node running"
