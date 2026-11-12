@@ -664,11 +664,7 @@ impl AutoAcceptPolicy {
         }
 
         // Match device type
-        if self.allowed_types.contains(&profile.device_type) {
-            return true;
-        }
-
-        false
+        self.allowed_types.contains(&profile.device_type)
     }
 }
 
@@ -796,11 +792,7 @@ impl ClipboardPolicy {
         }
 
         // Match device type
-        if self.allowed_types.contains(&profile.device_type) {
-            return true;
-        }
-
-        false
+        self.allowed_types.contains(&profile.device_type)
     }
 }
 
@@ -922,11 +914,7 @@ impl HandoffPolicy {
         }
 
         // Match device type
-        if self.allowed_types.contains(&profile.device_type) {
-            return true;
-        }
-
-        false
+        self.allowed_types.contains(&profile.device_type)
     }
 }
 
@@ -1081,11 +1069,7 @@ impl MediaControlPolicy {
         }
 
         // Match device type
-        if self.allowed_types.contains(&profile.device_type) {
-            return true;
-        }
-
-        false
+        self.allowed_types.contains(&profile.device_type)
     }
 
     /// Clamps command volume to policy limit.
