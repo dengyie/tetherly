@@ -983,6 +983,18 @@ struct Shared {
     /// the user's push had landed). Reset per session by
     /// `reset_reverse_arming_state` on accept.
     reverse_zone_dirty: std::sync::atomic::AtomicBool,
+    /// Target-side input apply counters (v0.2.31, mirrored from the pump's
+    /// `InputClient` after every frame so `GET /api/input` can show them
+    /// without reaching into the pump task): frames applied, frames
+    /// silently dropped by the seq monotonic check, and inbound
+    /// Button/Wheel/Key frames received. Process lifetime, never reset.
+    input_rx_applied: std::sync::atomic::AtomicU64,
+    input_rx_dropped: std::sync::atomic::AtomicU64,
+    input_rx_buttons: std::sync::atomic::AtomicU64,
+    input_rx_wheel: std::sync::atomic::AtomicU64,
+    input_rx_keys: std::sync::atomic::AtomicU64,
+    /// Controller-side Button frames handed to the send path.
+    input_tx_buttons: std::sync::atomic::AtomicU64,
     /// Distance arming for auto-reverse: accumulated physical movement (px)
     /// since the mouse was last idle for REVERSE_RESET_AFTER_MS. A freshly
     /// plugged-in or merely bumped mouse must traverse a real range before

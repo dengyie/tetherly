@@ -436,6 +436,18 @@ pub struct InputServer {
     /// Last event that contributed to `far_push_accum`; pushes older than
     /// [`Self::FAR_PUSH_WINDOW`] no longer count.
     far_push_last: Option<std::time::Instant>,
+    /// Entry return grace (v0.2.31): for this long after the seat crossed
+    /// INTO Remote, the sustained-push return is suppressed and the push
+    /// accumulator stays empty. Production 2026-11-13 22:28: with the
+    /// entry placement parked ON the mac's top edge (menu bar zone) and
+    /// only 20 units of interior hysteresis, the hand's residual push
+    /// after the crossing accumulated 12 px within 600 ms and bounced the
+    /// seat straight back 0.9-3.3 s after entry. Zero (the core default)
+    /// keeps the legacy instant return; the node configures it from
+    /// `EdgeCrossingConfig::entry_return_grace_ms`.
+    entry_return_grace: std::time::Duration,
+    /// Instant the seat last crossed into Remote (anchor of the grace).
+    remote_entered_at: Option<std::time::Instant>,
 }
 
 impl InputServer {
@@ -464,6 +476,8 @@ impl InputServer {
             rem_frac_y: 0,
             far_push_accum: 0,
             far_push_last: None,
+            entry_return_grace: std::time::Duration::ZERO,
+            remote_entered_at: None,
         }
     }
 
@@ -485,6 +499,22 @@ impl InputServer {
 
     pub fn set_edge(&mut self, edge: ScreenEdge) {
         self.edge = edge;
+    }
+
+    /// Configure the entry return grace (see the field doc). `ZERO`
+    /// disables it (legacy instant return).
+    pub fn set_entry_return_grace(&mut self, grace: std::time::Duration) {
+        self.entry_return_grace = grace;
+    }
+
+    /// True while the entry return grace since the last crossing into
+    /// Remote is still running.
+    fn in_entry_return_grace(&self, now: std::time::Instant) -> bool {
+        !self.entry_return_grace.is_zero()
+            && self
+                .remote_entered_at
+                .map(|t| now.duration_since(t) < self.entry_return_grace)
+                .unwrap_or(false)
     }
 
     /// Configure the speed-aware Top/Bottom redundancy band (see
@@ -659,6 +689,7 @@ impl InputServer {
     /// the caller has already validated the transition.
     pub fn force_remote_center(&mut self) {
         self.seat = CursorSeat::Remote;
+        self.remote_entered_at = Some(std::time::Instant::now());
         self.remote_interior = false;
         self.buttons_down = 0;
         self.pending.clear();
@@ -815,11 +846,19 @@ impl InputServer {
             if window_expired || !at_shared_edge || push_toward_edge < 0 {
                 self.far_push_accum = 0;
             }
-            if at_shared_edge && push_toward_edge > 0 && self.buttons_down == 0 {
+            // v0.2.31 entry return grace: a push landing within the grace
+            // after the crossing is the hand's residual momentum, not a
+            // deliberate return — it neither counts nor returns.
+            let in_grace = self.in_entry_return_grace(now);
+            if in_grace {
+                self.far_push_accum = 0;
+                self.far_push_last = None;
+            } else if at_shared_edge && push_toward_edge > 0 && self.buttons_down == 0 {
                 self.far_push_accum = self.far_push_accum.saturating_add(push_toward_edge);
                 self.far_push_last = Some(now);
             }
             let returning_local = self.remote_interior
+                && !in_grace
                 && (self.buttons_down == 0)
                 && self.far_push_accum >= Self::FAR_PUSH_RETURN_PX;
 
@@ -894,6 +933,7 @@ impl InputServer {
                     self.rem_x = 0;
                     self.rem_y = self.norm_y();
                     self.seat = CursorSeat::Remote;
+                    self.remote_entered_at = Some(std::time::Instant::now());
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Right;
                     // Root-fix E: drop any stale frame lingering in the
@@ -923,6 +963,7 @@ impl InputServer {
                     self.rem_x = SCREEN_UNITS;
                     self.rem_y = self.norm_y();
                     self.seat = CursorSeat::Remote;
+                    self.remote_entered_at = Some(std::time::Instant::now());
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Left;
                     // Root-fix E: drop any stale frame lingering in the
@@ -966,6 +1007,7 @@ impl InputServer {
                     self.rem_x = self.norm_x();
                     self.rem_y = SCREEN_UNITS;
                     self.seat = CursorSeat::Remote;
+                    self.remote_entered_at = Some(std::time::Instant::now());
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Top;
                     // Root-fix E: drop any stale frame lingering in the
@@ -1007,6 +1049,7 @@ impl InputServer {
                     self.rem_x = self.norm_x();
                     self.rem_y = 0;
                     self.seat = CursorSeat::Remote;
+                    self.remote_entered_at = Some(std::time::Instant::now());
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Bottom;
                     // Root-fix E: drop any stale frame lingering in the
@@ -1791,6 +1834,52 @@ mod tests {
         assert_eq!(srv.seat(), CursorSeat::Local);
         let events = srv.drain();
         assert_eq!(events[events.len() - 1].kind, InputKind::Leave);
+    }
+
+    /// v0.2.31: a return push inside the entry grace is residual momentum
+    /// and must neither return the seat nor pre-fill the accumulator; the
+    /// same push after the grace returns normally.
+    #[test]
+    fn entry_return_grace_blocks_immediate_return_then_allows_it() {
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Top);
+        srv.set_entry_return_grace(std::time::Duration::from_millis(300));
+
+        assert_eq!(srv.local_move_delta(960, 0, 0, -10), Some(ScreenEdge::Top));
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+        srv.drain();
+        // Interior move, then a hard push back at the shared edge within
+        // the grace: the legacy engine would return here (12 px >= 12).
+        assert_eq!(srv.local_move_delta(960, 0, 0, -100), None);
+        assert_eq!(srv.local_move_delta(960, 0, 0, 300), None);
+        assert_eq!(
+            srv.seat(),
+            CursorSeat::Remote,
+            "grace must block the return"
+        );
+        assert_eq!(
+            srv.far_push_accum, 0,
+            "grace pushes must not pre-fill the accumulator"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(320));
+        assert_eq!(srv.local_move_delta(960, 0, 0, 300), Some(ScreenEdge::Top));
+        assert_eq!(srv.seat(), CursorSeat::Local);
+        let events = srv.drain();
+        assert_eq!(events.last().unwrap().kind, InputKind::Leave);
+    }
+
+    /// The core default keeps the legacy instant return (every existing
+    /// crossing test relies on it); only an explicit grace changes it.
+    #[test]
+    fn entry_return_grace_defaults_to_zero() {
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Top);
+        assert_eq!(srv.local_move_delta(960, 0, 0, -10), Some(ScreenEdge::Top));
+        srv.drain();
+        assert_eq!(srv.local_move_delta(960, 0, 0, -100), None);
+        assert_eq!(srv.local_move_delta(960, 0, 0, 300), Some(ScreenEdge::Top));
+        assert_eq!(srv.seat(), CursorSeat::Local);
     }
 
     #[test]

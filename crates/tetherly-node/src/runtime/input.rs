@@ -165,6 +165,22 @@ pub struct InputStatusReport {
     pub seat: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_peer: Option<String>,
+    /// v0.2.31 apply counters (Target side): frames applied to the sink and
+    /// frames dropped by the seq monotonic check since process start.
+    #[serde(default)]
+    pub applied: u64,
+    #[serde(default)]
+    pub dropped: u64,
+    /// Inbound Button / Wheel / Key frames received (Target side).
+    #[serde(default)]
+    pub rx_buttons: u64,
+    #[serde(default)]
+    pub rx_wheel: u64,
+    #[serde(default)]
+    pub rx_keys: u64,
+    /// Button frames this node pushed as Controller.
+    #[serde(default)]
+    pub tx_buttons: u64,
 }
 
 /// Capacity of the input-engine decision ring behind `GET /api/input/trace`.
@@ -174,8 +190,9 @@ pub const INPUT_TRACE_CAP: usize = 64;
 
 /// One input-engine decision (v0.2.30). `kind` is a short stable token
 /// (`crossing`, `park_warp`, `seat`, `release`, `rescue`, `reconcile`,
-/// `attach_kick`, `apply_enter`, `push_enter`, `push_clamp`); `detail` is
-/// free text for the operator.
+/// `attach_kick`, `apply_enter`, `push_enter`, `push_clamp`; v0.2.31 adds
+/// `push_button`, `apply_button`, `apply_reject`, `pump_exit`,
+/// `channel_open`, `zone_gate`); `detail` is free text for the operator.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct InputTraceEntry {
     pub ts_ms: u64,
@@ -456,6 +473,23 @@ impl Node {
 
         // Reset any leftover arming/dwell state from an earlier session.
         self.reset_reverse_arming_state();
+        // v0.2.31: a pre-arm accept carries no entry placement — the
+        // controller has not crossed, the cursor on this screen is still
+        // the local user's, so there is no parked entry position for the
+        // zone gate to protect. Leave the gate OPEN: production 2026-11-13
+        // 22:28 the peer returned home, re-pre-armed within ms, and this
+        // node's user — cursor already resting on the shared edge where
+        // the peer's stint had left it — pushed into the edge for 8 s
+        // against a closed gate ("dwell gated") before moving interior
+        // and back. The gate closes again when the controller's Enter
+        // actually arrives (`note_controller_entered`).
+        if clamped_entry_x.is_none() || clamped_entry_y.is_none() {
+            self.shared.reverse_zone_dirty.store(true, Ordering::SeqCst);
+            self.trace_input(
+                "zone_gate",
+                format!("open: pre-arm accept without entry placement peer={peer_str}"),
+            );
+        }
 
         // Apply the controller's proportional entry placement: without this
         // the cursor on this screen stays parked wherever the previous
@@ -2437,6 +2471,27 @@ impl Node {
             .expect("reverse_pinned") = None;
     }
 
+    /// The controller's Enter was applied: its first Move parks the cursor
+    /// on this screen's shared edge (inside the reverse-trigger zone), so
+    /// every arming state restarts and the zone gate closes until a
+    /// physical event proves the cursor moved into the screen (v0.2.27
+    /// semantics, anchored at the Enter instead of the accept since
+    /// v0.2.31 — a pre-arm accept has no parked cursor yet).
+    pub(crate) fn note_controller_entered(&self) {
+        self.reset_reverse_arming_state();
+        self.trace_input("zone_gate", "close: controller entered");
+    }
+
+    /// The controller's Leave was applied: the cursor on this screen is the
+    /// local user's again. The grant release above has already reset the
+    /// arming state (closing the gate); re-open it so a push at the edge
+    /// where the stint ended can arm a takeover without a detour into the
+    /// interior first.
+    pub(crate) fn note_controller_left(&self) {
+        self.shared.reverse_zone_dirty.store(true, Ordering::SeqCst);
+        self.trace_input("zone_gate", "open: controller left");
+    }
+
     /// Refresh physical activity timestamp without accumulating movement distance.
     fn note_reverse_physical_activity(&self) {
         *self.shared.reverse_last_move.lock().expect("reverse_move") =
@@ -2704,6 +2759,9 @@ impl Node {
                     cfg.slow_dwell_ms,
                     cfg.fast_push_delta_px,
                 );
+                server.set_entry_return_grace(std::time::Duration::from_millis(
+                    cfg.entry_return_grace_ms as u64,
+                ));
             }
             // On physical displays, OS cursor coordinates are clamped to [0, width - 1] and [0, height - 1].
             // To reliably trigger boundary crossings when touching the physical screen boundary,
@@ -3572,6 +3630,14 @@ impl Node {
             server.note_seq(seq);
             vec![InputEvent::button(seq, mask, down)]
         };
+        self.shared.input_tx_buttons.fetch_add(1, Ordering::SeqCst);
+        self.trace_input(
+            "push_button",
+            format!(
+                "mask={mask} down={down} seq={}",
+                events.first().map(|e| e.seq).unwrap_or(0)
+            ),
+        );
         self.send_input_events(events, "drive_button")
     }
 
@@ -3846,6 +3912,10 @@ impl Node {
         let channel_gen = INPUT_CHANNEL_SEQ.fetch_add(1, Ordering::SeqCst);
         *self.shared.input_out.lock().expect("input_out") = Some((channel_gen, tx));
         *self.shared.input_peer.lock().expect("input_peer") = Some(peer_id.clone());
+        self.trace_input(
+            "channel_open",
+            format!("input channel to {peer_id} gen={channel_gen}"),
+        );
         let current_seat = self.input_seat_str();
         self.emit(UiEvent::input_seat_changed(
             current_seat,
@@ -3880,11 +3950,21 @@ impl Node {
                                 let f_len = (frame.payload.len() + 12) as u64;
                                 if sess.send_bounded(frame).await.is_err() {
                                     tracing::warn!("input server: peer send failed; closing");
+                                    node.trace_input(
+                                        "pump_exit",
+                                        format!("controller pump send failed peer={peer_id}"),
+                                    );
                                     break;
                                 }
                                 node.shared.telemetry.record_input_tx(f_len);
                             }
-                            None => break,
+                            None => {
+                                node.trace_input(
+                                    "pump_exit",
+                                    format!("controller pump outbound slot dropped peer={peer_id}"),
+                                );
+                                break;
+                            }
                         }
                     }
                     inbound = sess.recv_inner() => {
@@ -3918,6 +3998,10 @@ impl Node {
                                 } else {
                                     tracing::warn!(%e, "input server: session recv ended; closing");
                                 }
+                                node.trace_input(
+                                    "pump_exit",
+                                    format!("controller pump recv error peer={peer_id}: {err_s}"),
+                                );
                                 break;
                             }
                         }
@@ -4097,7 +4181,31 @@ impl Node {
                                                 "apply_enter",
                                                 format!("controller {peer_id} entered this screen"),
                                             );
+                                            node.note_controller_entered();
                                             entry_moves_logged.store(0, Ordering::SeqCst);
+                                        }
+                                        InputKind::Button { mask, down } => {
+                                            node.shared
+                                                .input_rx_buttons
+                                                .fetch_add(1, Ordering::SeqCst);
+                                            node.trace_input(
+                                                "apply_button",
+                                                format!(
+                                                    "mask={mask} down={down} seq={} focused={}",
+                                                    ev.seq,
+                                                    client.focused()
+                                                ),
+                                            );
+                                        }
+                                        InputKind::Wheel { .. } => {
+                                            node.shared
+                                                .input_rx_wheel
+                                                .fetch_add(1, Ordering::SeqCst);
+                                        }
+                                        InputKind::Key { .. } => {
+                                            node.shared
+                                                .input_rx_keys
+                                                .fetch_add(1, Ordering::SeqCst);
                                         }
                                         InputKind::Move { x, y }
                                             if entry_moves_logged.fetch_add(1, Ordering::SeqCst)
@@ -4134,7 +4242,17 @@ impl Node {
                                     // refreshed on every other event kind.
                                     let is_move = matches!(ev.kind, InputKind::Move { .. });
                                     let is_leave = matches!(ev.kind, InputKind::Leave);
-                                    if let Ok(leave_opt) = client.apply(ev) {
+                                    let ev_seq = ev.seq;
+                                    let apply_res = client.apply(ev);
+                                    // v0.2.31: mirror the client's counters so
+                                    // `GET /api/input` shows applied vs dropped.
+                                    node.shared
+                                        .input_rx_applied
+                                        .store(client.applied(), Ordering::SeqCst);
+                                    node.shared
+                                        .input_rx_dropped
+                                        .store(client.dropped(), Ordering::SeqCst);
+                                    if let Ok(leave_opt) = apply_res {
                                         if is_leave {
                                             // The controller ended the roaming stint
                                             // (its sustained-push return ships a
@@ -4145,6 +4263,7 @@ impl Node {
                                             // target's own edge crossings
                                             // (production 2026-11-11).
                                             node.release_input_tunnel_local("controller left roaming");
+                                            node.note_controller_left();
                                         }
                                         if let Some(leave) = leave_opt {
                                             if let Ok(f) = leave.to_frame() {
@@ -4203,6 +4322,10 @@ impl Node {
                                         // desyncs stay diagnosable instead of
                                         // silently disappearing.
                                         tracing::warn!("input client rejected event (seq jump or invalid state)");
+                                        node.trace_input(
+                                            "apply_reject",
+                                            format!("seq={ev_seq} dropped={}", client.dropped()),
+                                        );
                                     }
                                 } else if let Err(e) = InputEvent::from_frame(&frame) {
                                     tracing::warn!(%e, "input client: bad frame");
@@ -4218,6 +4341,10 @@ impl Node {
                                 } else {
                                     tracing::warn!(%e, "input client: session recv ended; closing");
                                 }
+                                node.trace_input(
+                                    "pump_exit",
+                                    format!("target pump recv error peer={peer_id}: {err_s}"),
+                                );
                                 break;
                             }
                         }
@@ -4321,6 +4448,12 @@ impl Node {
             channel_open,
             seat: self.input_seat_str().to_string(),
             active_peer,
+            applied: self.shared.input_rx_applied.load(Ordering::SeqCst),
+            dropped: self.shared.input_rx_dropped.load(Ordering::SeqCst),
+            rx_buttons: self.shared.input_rx_buttons.load(Ordering::SeqCst),
+            rx_wheel: self.shared.input_rx_wheel.load(Ordering::SeqCst),
+            rx_keys: self.shared.input_rx_keys.load(Ordering::SeqCst),
+            tx_buttons: self.shared.input_tx_buttons.load(Ordering::SeqCst),
         }
     }
 
@@ -6265,5 +6398,180 @@ mod tests {
             None,
             "returned local seat must not recenter"
         );
+    }
+
+    /// v0.2.31 (production 2026-11-13 22:28, 8 s first entry): a pre-arm
+    /// accept carries no entry placement, so the cursor on this screen is
+    /// still the local user's and the zone gate must stay OPEN — a push at
+    /// the shared edge right after the peer returned home must be able to
+    /// arm the takeover without an interior detour. An accept WITH entry
+    /// placement (a real crossing) keeps the v0.2.27 closed gate.
+    #[tokio::test]
+    async fn pre_arm_accept_without_entry_keeps_zone_gate_open() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("prearm-gate");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("prearm-gate-peer");
+        let peer_id = other.identity().device_id().clone();
+        node.shared.topology_layout.lock().unwrap().display = DisplayRect::new(1920, 1080, 1.0);
+
+        node.receive_input_tunnel_request(
+            &peer_id,
+            InputTunnelRequestFrame {
+                session_id: "tun_prearm".into(),
+                client_device_id: peer_id.to_string(),
+                requested_edge: None,
+                entry_x: None,
+                entry_y: None,
+                timestamp_ms: 1,
+            },
+        )
+        .await;
+        assert_eq!(
+            node.shared
+                .active_input_tunnel
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|s| s.role),
+            Some(InputTunnelRole::Target)
+        );
+        assert!(
+            node.shared.reverse_zone_dirty.load(Ordering::SeqCst),
+            "pre-arm accept (no entry placement) must leave the zone gate open"
+        );
+        assert!(
+            node.input_trace_snapshot()
+                .iter()
+                .any(|e| e.kind == "zone_gate" && e.detail.starts_with("open: pre-arm")),
+            "the gate decision must be traced"
+        );
+
+        // A real crossing accept (entry placement present) closes it again.
+        node.receive_input_tunnel_request(
+            &peer_id,
+            InputTunnelRequestFrame {
+                session_id: "tun_cross".into(),
+                client_device_id: peer_id.to_string(),
+                requested_edge: Some(DisplayEdge::Top),
+                entry_x: Some(960),
+                entry_y: Some(1079),
+                timestamp_ms: 2,
+            },
+        )
+        .await;
+        assert!(
+            !node.shared.reverse_zone_dirty.load(Ordering::SeqCst),
+            "an accept with entry placement parks the cursor on the edge: gate closed"
+        );
+    }
+
+    /// v0.2.31: the controller's applied Enter parks the cursor (gate
+    /// closes, arming state restarts); its applied Leave hands the cursor
+    /// back to the local user (gate re-opens).
+    #[tokio::test]
+    async fn controller_enter_closes_zone_gate_and_leave_reopens_it() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("gate-enter");
+        node.shared.reverse_zone_dirty.store(true, Ordering::SeqCst);
+        node.shared
+            .reverse_move_accum_px
+            .store(500, Ordering::SeqCst);
+
+        node.note_controller_entered();
+        assert!(!node.shared.reverse_zone_dirty.load(Ordering::SeqCst));
+        assert_eq!(
+            node.shared.reverse_move_accum_px.load(Ordering::SeqCst),
+            0,
+            "Enter restarts every arming state"
+        );
+
+        node.note_controller_left();
+        assert!(node.shared.reverse_zone_dirty.load(Ordering::SeqCst));
+        let kinds: Vec<String> = node
+            .input_trace_snapshot()
+            .iter()
+            .filter(|e| e.kind == "zone_gate")
+            .map(|e| e.detail.clone())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["close: controller entered", "open: controller left"]
+        );
+    }
+
+    /// v0.2.31 instrumentation: a Button pushed from the Remote seat is
+    /// counted and traced (`push_button`) so a "left click does nothing on
+    /// the mac" report can be split into controller-never-sent vs
+    /// target-never-applied without RUST_LOG.
+    #[tokio::test]
+    async fn drive_input_button_counts_and_traces_push() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("push-button");
+        node.shared
+            .input_capture_active
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.set_edge(tetherly_core::ScreenEdge::Right);
+            assert_eq!(
+                engine.local_move_delta(1919, 500, 4, 0),
+                Some(tetherly_core::ScreenEdge::Right)
+            );
+            engine.drain();
+        }
+        assert_eq!(node.input_engine_seat(), CursorSeat::Remote);
+
+        let _ = node.drive_input_button(tetherly_core::BTN_LEFT, true);
+        let _ = node.drive_input_button(tetherly_core::BTN_LEFT, false);
+        assert_eq!(node.shared.input_tx_buttons.load(Ordering::SeqCst), 2);
+        let pushes: Vec<String> = node
+            .input_trace_snapshot()
+            .iter()
+            .filter(|e| e.kind == "push_button")
+            .map(|e| e.detail.clone())
+            .collect();
+        assert_eq!(pushes.len(), 2);
+        assert!(pushes[0].starts_with("mask=1 down=true seq="), "{pushes:?}");
+        assert!(
+            pushes[1].starts_with("mask=1 down=false seq="),
+            "{pushes:?}"
+        );
+
+        // Local seat: nothing is pushed, nothing is counted.
+        node.shared.input_engine.lock().unwrap().force_local();
+        let _ = node.drive_input_button(tetherly_core::BTN_LEFT, true);
+        assert_eq!(node.shared.input_tx_buttons.load(Ordering::SeqCst), 2);
+    }
+
+    /// v0.2.31: `GET /api/input` exposes the apply counters mirrored from
+    /// the target pump plus the controller's button pushes.
+    #[tokio::test]
+    async fn input_status_report_exposes_apply_counters() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("status-ctr");
+        node.shared.input_rx_applied.store(40, Ordering::SeqCst);
+        node.shared.input_rx_dropped.store(2, Ordering::SeqCst);
+        node.shared.input_rx_buttons.store(6, Ordering::SeqCst);
+        node.shared.input_rx_wheel.store(3, Ordering::SeqCst);
+        node.shared.input_rx_keys.store(9, Ordering::SeqCst);
+        node.shared.input_tx_buttons.store(1, Ordering::SeqCst);
+
+        let rep = node.input_status_report().await;
+        assert_eq!(
+            (
+                rep.applied,
+                rep.dropped,
+                rep.rx_buttons,
+                rep.rx_wheel,
+                rep.rx_keys,
+                rep.tx_buttons
+            ),
+            (40, 2, 6, 3, 9, 1)
+        );
+        let json = serde_json::to_value(&rep).unwrap();
+        assert_eq!(json["applied"], 40);
+        assert_eq!(json["dropped"], 2);
+        // Older CLIs deserialize reports without the new fields.
+        let legacy: InputStatusReport =
+            serde_json::from_str(r#"{"ok":true,"channel_open":false,"seat":"local"}"#).unwrap();
+        assert_eq!(legacy.applied, 0);
+        assert_eq!(legacy.tx_buttons, 0);
     }
 }

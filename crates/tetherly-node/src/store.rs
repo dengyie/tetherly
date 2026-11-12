@@ -3638,6 +3638,7 @@ mod tests {
                 redundancy_band_px: 24,
                 slow_dwell_ms: 120,
                 fast_push_delta_px: 6,
+                entry_return_grace_ms: 1000,
             },
         };
         save_topology_layout(&dir, &custom_layout).unwrap();

@@ -188,6 +188,15 @@ pub(super) async fn post_topology_config(
                 .and_then(|s| s.parse::<u32>().ok())
         });
 
+    let entry_return_grace_ms = parsed_body
+        .as_ref()
+        .and_then(|b| b.entry_return_grace_ms)
+        .or_else(|| {
+            qmap.get("entry_return_grace_ms")
+                .or_else(|| qmap.get("entry_return_grace"))
+                .and_then(|s| s.parse::<u32>().ok())
+        });
+
     let width = parsed_body
         .as_ref()
         .and_then(|b| b.width)
@@ -219,6 +228,7 @@ pub(super) async fn post_topology_config(
             redundancy_band_px,
             slow_dwell_ms,
             fast_push_delta_px,
+            entry_return_grace_ms,
         )
         .await
     {

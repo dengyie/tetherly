@@ -583,6 +583,11 @@ async fn screen_and_input_lifecycle_and_peer_targeting_via_loopback_api() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["channel_open"], false);
     assert_eq!(v["seat"], "local");
+    // v0.2.31 apply/push counters ride on the same report.
+    assert_eq!(v["applied"], 0);
+    assert_eq!(v["dropped"], 0);
+    assert_eq!(v["rx_buttons"], 0);
+    assert_eq!(v["tx_buttons"], 0);
 
     // Open screen channel from visitor to host so host enters requested state.
     visitor.open_screen(&host_id).await.unwrap();

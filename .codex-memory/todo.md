@@ -2,7 +2,18 @@
 
 ## 当前接手基线（截至 2026-11-13）
 
-> **v0.2.30（本轮发版）；上一基线 v0.2.29 / a6990ef 双端已部署；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.29 均已 CI 发布并部署。
+> **v0.2.31（本轮发版）；上一基线 v0.2.30 / 6057fb9 双端已部署；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+
+## v0.2.31 真机症状修复（2026-11-13，DEVELOPMENT.md §103）
+- [x] **A · 反向闸门锚定 Enter**：预臂 accept（无 entry 坐标）不关闸、Enter 关闸、Leave 重开；修"Windows 鼠标首次进入 Mac 要 8 s（dwell gated）"。测试 `pre_arm_accept_without_entry_keeps_zone_gate_open`、`controller_enter_closes_zone_gate_and_leave_reopens_it`。
+- [x] **B · 进入回归宽限**：core `entry_return_grace`（默认 0）+ `EdgeCrossingConfig.entry_return_grace_ms`（默认 1000，≤5000，`POST /api/topology/config`）；修"进入后 0.9–3.3 s 弹回"。测试 `entry_return_grace_blocks_immediate_return_then_allows_it`、`entry_return_grace_defaults_to_zero`；phase3 `disable_tb_redundancy_band` 显式传 `Some(0)`。
+- [x] **C · macOS 注入拖拽类型**：`INJECTED_BUTTONS_DOWN` + `move_abs` 按住期间发 `*MouseDragged`；修"左键能点不能选字/拖窗"。测试 `injected_move_kind_follows_held_buttons`、`injected_button_tracker_sets_and_clears_masks`。
+- [x] **D · Button 链路可观测**：`/api/input` 新增 `applied/dropped/rx_buttons/rx_wheel/rx_keys/tx_buttons`；trace 新 kind `push_button/apply_button/apply_reject/channel_open/pump_exit/zone_gate`（§102.7 `m3_12` 取证前置）。测试 `drive_input_button_counts_and_traces_push`、`input_status_report_exposes_apply_counters`。
+- [x] 选项 iii（Mac 再预臂延迟）按 §102.4 不做。
+- [x] 本机验证：core 315、node 211、loopback 11 / phase2 8 / phase3 13 / phase5 65；phase1 68 并行有 2 个与本轮无关的负载抖动（单跑均过，§103.7）；clippy -D warnings 0 错误。
+- [ ] 发布部署 v0.2.31：tag → release CI → `scripts/deploy.sh --target all --tag v0.2.31` → 双端 health 0.2.31 + `/api/input` 新字段。
+- [ ] 真机验收 v0.2.31：回归后立即再顶边一次进入（trace `zone_gate open: pre-arm accept` → `apply_enter`）；进入 1 s 内不弹回；点击时双端 `tx_buttons`/`rx_buttons` 同步、`dropped` 不增、`push_button`/`apply_button` 成对；按住左键能选字/拖窗。
+- [ ] `m3_12` windows 红：v0.2.31 已埋 `pump_exit`/`channel_open`，下一次 windows CI 红灯时直接读 `[takeover]` 之后的 trace 取证再修。
 
 ## v0.2.30 优化迭代（2026-11-13）
 - [x] **🟢 Windows→Mac 鼠标方向已解决（v0.2.29 `7b71531` zone-entered gate，DEVELOPMENT.md §101）**：用户真机确认 Windows 鼠标可接入 Mac；双端 health version=v0.2.29。2026-11-13 早间"🔴 移交"状态作废。
@@ -12,7 +23,7 @@
 - [x] 本机验证：core 313、node 205、loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65、clippy -D warnings 0 错误。
 - [x] 2026-11-13 部署 v0.2.30：双端 `/api/health` 0.2.30；home-win 302340→298224 SYSTEM/SessionId=2；受保护进程 100% 不动；Mac 无需 TCC reset；双端 `/api/input/trace` 可用。
 - [x] `m3_12` ubuntu 红（phase3.rs:786）：测试构造性竞态，改为等待 client 异步 demotion（测试改动）。
-- [ ] `m3_12` windows 红（phase3.rs:756，v0.2.29 起）：controller pump 开通即死 → `peer session gone`；根因未定。下一步：两侧 pump 加 `trace_input("pump_exit", reason)` + 通道开通事件，在 windows CI 取证后再修（DEVELOPMENT §102.7）。
+- [x] `m3_12` windows 红取证前置：两侧 pump `trace_input("pump_exit", reason)` + `channel_open` 已在 v0.2.31 落地（§103.5）；根因仍未定，见上方 v0.2.31 条目。
 - [ ] 真机验收（部署 v0.2.30 后）：`push: lone edge-clamp move` 四连消失；`/api/metrics` tx_frames 增速下降；`tetherly input trace` 能回放越边→停车→回归链。
 
 ## 当前修复与验证

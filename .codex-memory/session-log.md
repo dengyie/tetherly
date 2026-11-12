@@ -1018,3 +1018,16 @@
 - Results: commit `f7337e2` + tag v0.2.30；release CI 9 资产全绿；`scripts/deploy.sh --target all --tag v0.2.30` EXIT=0——Mac 0.2.30（pid 97956，accessibility_trusted=true 无需 TCC reset）、home-win 0.2.30（302340→298224，SYSTEM，SessionId=2），受保护进程 100% 不动；双端 `/api/input/trace` 可用。ci 工作流 ubuntu/windows 红在既有 `m3_12`：ubuntu 为测试构造性竞态（已改等待环，测试改动）；windows 为 pump 开通即死（根因未定，见 DEVELOPMENT §102.7）。
 - Next: 真机验收 v0.2.30（`lone edge-clamp move` 四连消失、tx_frames 增速下降、`tetherly input trace` 回放）；v0.2.31 候选：pump 开通/退出原因进决策环 → windows CI 取证 `m3_12`；后续候选优化见 todo "后续方向"。
 - Blockers: None.
+
+## 2026-11-13（第二轮）
+- Task: 用户反馈"Windows 鼠标首次进入 Mac 很久进不来；在 Mac 里左键好像点不了"，深度看日志诊断并落地 v0.2.31。
+- Actions:
+  1. 复核 22:28 双端日志 + `/api/input/trace`：首次进入 8 s 是预臂 accept 关闸（屏幕上却是本机用户光标）→ 顶边全被 `dwell gated`；进入后 0.9–3.3 s 弹回是顶边停车 + 20 单位滞回 + 残余推力累满 12 px。左键问题日志零 Button 记录（埋点盲区）；代码复核发现 macOS `move_abs` 恒 `MouseMoved`，按住期间不发 Dragged。
+  2. TDD 落地 A（闸门锚定 Enter：`note_controller_entered/left`、预臂 accept 开闸）、B（core `entry_return_grace` + `EdgeCrossingConfig.entry_return_grace_ms` 默认 1000 + `topology_update_config` 第 11 参 + API body/query）、C（`INJECTED_BUTTONS_DOWN` + `injected_move_kind` + `move_abs` Dragged 类型）、D（`/api/input` 六计数字段 + trace 六新 kind + 双 pump `pump_exit`/`channel_open`）。
+  3. 选项 iii（Mac 再预臂延迟）按 §102.4 不做。
+  4. 版本 bump 0.2.31（Cargo.toml + `cargo update --workspace --offline`）。
+  5. 验证：fmt、clippy -D warnings 0 错误；core 315、node 211；loopback 11 / phase2 8 / phase3 13 / phase5 65；phase1 68 并行跑 3 次：2 次各有 1 个无关用例负载抖动（input_tunnel release 即时断言、quick_actions 落盘 5 s），单跑各 3 次全过，1 次全绿。
+  6. 文档：DEVELOPMENT.md 顶部基线 → v0.2.31 + §103；`.codex-memory` 四文件同步。
+- Results: 代码/测试/文档完成；待 commit + tag v0.2.31 → release CI → `scripts/deploy.sh --target all --tag v0.2.31` → 双端 health 0.2.31 与 `/api/input` 新字段 → 用户真机点击对账（`tx_buttons`/`rx_buttons`/`dropped`、`push_button`/`apply_button`）。
+- Next: 部署后真机验收 §103.8 四项；若 Windows 侧 `tx_buttons` 不增则查 LL hook Button 分发；`m3_12` windows 红用 `pump_exit` 取证。
+- Blockers: None.

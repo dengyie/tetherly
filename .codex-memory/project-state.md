@@ -1,10 +1,11 @@
 # Project State
 
 ## Release Baseline (2026-11-13)
-- **v0.2.30** 本轮发版（Cargo.toml 0.2.30；上一基线 v0.2.29 / `a6990ef` 双端已部署）。SSOT：`docs/DEVELOPMENT.md` 顶部"当前接手基线"+ §101/§102。
+- **v0.2.31** 本轮发版（Cargo.toml 0.2.31；上一基线 v0.2.30 / `6057fb9` 双端已部署）。SSOT：`docs/DEVELOPMENT.md` 顶部"当前接手基线"+ §101/§102/§103。
 - 🟢 Windows→Mac 鼠标方向已解决（v0.2.29 `7b71531` zone-entered gate，用户真机确认）。
 - v0.2.30：core Remote 座位冗余 Move 帧抑制（A）；输入引擎 64 条决策环 `GET /api/input/trace` + `tetherly input trace`（C）；attach-kick 冷却明确不做（B）。
-- 本机验证：core 313、node 205、loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65、clippy -D warnings 0 错误。
+- v0.2.31（§103）：反向闸门锚定控制器 Enter（预臂 accept 不关闸）修首次进入 8 s；core `entry_return_grace` + `EdgeCrossingConfig.entry_return_grace_ms`（默认 1000）修进入后弹回；macOS `move_abs` 按住期间发 `*MouseDragged` 修左键不能选字/拖窗；`/api/input` 新增 applied/dropped/rx_buttons/rx_wheel/rx_keys/tx_buttons，trace 新 kind push_button/apply_button/apply_reject/channel_open/pump_exit/zone_gate。
+- 本机验证：core 315、node 211、loopback 11 / phase1 68（并行偶发负载抖动，单跑全过）/ phase2 8 / phase3 13 / phase5 65、clippy -D warnings 0 错误。
 - 下文 `Objective` 起为 v1.x 历史设计文档时期的状态记录，版本号不代表当前二进制。
 
 ## Objective

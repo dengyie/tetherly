@@ -504,9 +504,21 @@ impl tetherly_core::InputSink for SystemInputSink {
             .round();
         let pt = CGPoint { x: px, y: py };
 
-        if let Some(event) =
-            CGEvent::new_mouse_event(None, CGEventType::MouseMoved, pt, CGMouseButton::Left)
-        {
+        // v0.2.31: a move while an injected button is held is a DRAG to
+        // AppKit — `MouseMoved` with a button down never selects text or
+        // drags a window.
+        let held = INJECTED_BUTTONS_DOWN.load(std::sync::atomic::Ordering::SeqCst);
+        let (ev_type, btn) = match injected_move_kind(held) {
+            InjectedMoveKind::Moved => (CGEventType::MouseMoved, CGMouseButton::Left),
+            InjectedMoveKind::LeftDragged => (CGEventType::LeftMouseDragged, CGMouseButton::Left),
+            InjectedMoveKind::RightDragged => {
+                (CGEventType::RightMouseDragged, CGMouseButton::Right)
+            }
+            InjectedMoveKind::OtherDragged => {
+                (CGEventType::OtherMouseDragged, CGMouseButton::Center)
+            }
+        };
+        if let Some(event) = CGEvent::new_mouse_event(None, ev_type, pt, btn) {
             CGEvent::set_integer_value_field(
                 Some(&event),
                 CGEventField::EventSourceUserData,
@@ -548,6 +560,11 @@ impl tetherly_core::InputSink for SystemInputSink {
             ),
             _ => return,
         };
+        let held = INJECTED_BUTTONS_DOWN.load(std::sync::atomic::Ordering::SeqCst);
+        INJECTED_BUTTONS_DOWN.store(
+            next_injected_buttons(held, mask, down),
+            std::sync::atomic::Ordering::SeqCst,
+        );
 
         let (cx, cy) = cursor_pos();
         let pt = objc2_core_foundation::CGPoint {
@@ -612,6 +629,47 @@ impl tetherly_core::InputSink for SystemInputSink {
             }
             INJECTED_MODIFIER_FLAGS.store(new_state, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+}
+
+/// Mouse buttons currently held by the INJECTED pointer stream on this mac
+/// target (`BTN_*` mask). A `MouseMoved` posted while a button is down is
+/// not a drag to AppKit: selections, window drags and drag-and-drop need
+/// `LeftMouseDragged` / `RightMouseDragged` / `OtherMouseDragged`, so
+/// `move_abs` picks the event type from this state (v0.2.31). Process
+/// global for the same reason as `INJECTED_MODIFIER_FLAGS`.
+#[cfg(target_os = "macos")]
+static INJECTED_BUTTONS_DOWN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Which pointer-motion event an injected move must be, given the injected
+/// buttons currently held. Precedence Left > Right > Middle mirrors
+/// `SystemInputSink::button`'s mask decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InjectedMoveKind {
+    Moved,
+    LeftDragged,
+    RightDragged,
+    OtherDragged,
+}
+
+fn injected_move_kind(buttons_down: u8) -> InjectedMoveKind {
+    if buttons_down & tetherly_core::BTN_LEFT != 0 {
+        InjectedMoveKind::LeftDragged
+    } else if buttons_down & tetherly_core::BTN_RIGHT != 0 {
+        InjectedMoveKind::RightDragged
+    } else if buttons_down & tetherly_core::BTN_MIDDLE != 0 {
+        InjectedMoveKind::OtherDragged
+    } else {
+        InjectedMoveKind::Moved
+    }
+}
+
+/// Next value of the injected-button tracker after a button event.
+fn next_injected_buttons(state: u8, mask: u8, down: bool) -> u8 {
+    if down {
+        state | mask
+    } else {
+        state & !mask
     }
 }
 
@@ -2774,6 +2832,46 @@ pub fn start_input_hooks(_tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookC
 #[cfg(test)]
 mod input_tests {
     use super::*;
+
+    /// v0.2.31: an injected move while a button is held must be posted as
+    /// the matching *Dragged event, else AppKit never sees a drag (mac
+    /// target: no text selection / window drag from the Windows mouse).
+    #[test]
+    fn injected_move_kind_follows_held_buttons() {
+        assert_eq!(injected_move_kind(0), InjectedMoveKind::Moved);
+        assert_eq!(
+            injected_move_kind(tetherly_core::BTN_LEFT),
+            InjectedMoveKind::LeftDragged
+        );
+        assert_eq!(
+            injected_move_kind(tetherly_core::BTN_RIGHT),
+            InjectedMoveKind::RightDragged
+        );
+        assert_eq!(
+            injected_move_kind(tetherly_core::BTN_MIDDLE),
+            InjectedMoveKind::OtherDragged
+        );
+        // Left wins when several are held (same precedence as button()).
+        assert_eq!(
+            injected_move_kind(tetherly_core::BTN_LEFT | tetherly_core::BTN_RIGHT),
+            InjectedMoveKind::LeftDragged
+        );
+    }
+
+    #[test]
+    fn injected_button_tracker_sets_and_clears_masks() {
+        let s = next_injected_buttons(0, tetherly_core::BTN_LEFT, true);
+        assert_eq!(s, tetherly_core::BTN_LEFT);
+        let s = next_injected_buttons(s, tetherly_core::BTN_RIGHT, true);
+        assert_eq!(s, tetherly_core::BTN_LEFT | tetherly_core::BTN_RIGHT);
+        let s = next_injected_buttons(s, tetherly_core::BTN_LEFT, false);
+        assert_eq!(s, tetherly_core::BTN_RIGHT);
+        // Releasing an un-held button is a no-op.
+        let s = next_injected_buttons(s, tetherly_core::BTN_MIDDLE, false);
+        assert_eq!(s, tetherly_core::BTN_RIGHT);
+        let s = next_injected_buttons(s, tetherly_core::BTN_RIGHT, false);
+        assert_eq!(s, 0);
+    }
 
     #[test]
     fn mac_win_keycodes_bidirectional() {
