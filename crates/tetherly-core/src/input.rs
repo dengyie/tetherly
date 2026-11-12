@@ -864,14 +864,25 @@ impl InputServer {
                 return Some(crossed_edge);
             }
 
+            // Wire economy (v0.2.30): only a CHANGED normalized position is
+            // information for the target — the previous Move already parked
+            // its cursor there. The OS-clamped zero-delta tail (Windows), the
+            // post-warp settle events whose deltas the macOS tap zeroes (4
+            // per park warp) and sub-unit deltas still carrying their
+            // fraction all used to push one redundant Move per event (the
+            // `push: lone edge-clamp move` quadruplets in production logs).
+            // Bookkeeping (fraction carry, local x/y) still updates.
+            let rem_changed = next_rem_x != self.rem_x || next_rem_y != self.rem_y;
             self.rem_x = next_rem_x;
             self.rem_y = next_rem_y;
             self.x = x_clamped;
             self.y = y_clamped;
-            self.push(InputKind::Move {
-                x: self.rem_x,
-                y: self.rem_y,
-            });
+            if rem_changed {
+                self.push(InputKind::Move {
+                    x: self.rem_x,
+                    y: self.rem_y,
+                });
+            }
             return None;
         }
 
@@ -1558,6 +1569,77 @@ mod tests {
             ry > 200,
             "real inward motion after the zero tail must advance the remote cursor, got rem_y={ry}"
         );
+    }
+
+    /// v0.2.30 wire economy: a Remote-seat event that leaves the normalized
+    /// remote position unchanged carries no information for the target —
+    /// the previous Move already placed the cursor there. Such events come
+    /// from the OS-clamped zero-delta tail (Windows), the post-warp settle
+    /// events whose deltas the macOS tap zeroes (4 per park warp), and
+    /// sub-unit deltas whose fraction is still accumulating. They must
+    /// still update the engine's bookkeeping (fraction carry, local x/y)
+    /// but must NOT push a redundant Move frame; the first event that does
+    /// change the remote position pushes exactly one.
+    #[test]
+    fn remote_seat_suppresses_move_frames_when_remote_position_unchanged() {
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Bottom);
+        srv.set_tb_redundancy_band(0, 120, 6);
+        assert_eq!(
+            srv.local_move_delta(960, 1072, 0, 40),
+            Some(ScreenEdge::Bottom)
+        );
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+        let entry = srv.drain();
+        assert!(
+            matches!(entry.as_slice(), [a, b]
+                if matches!(a.kind, InputKind::Enter)
+                    && matches!(b.kind, InputKind::Move { .. })),
+            "entry must still push enter+move, got {entry:?}"
+        );
+        let before = srv.remote_pos();
+
+        // Zero-delta tail / settle events: nothing changes, nothing pushed.
+        for _ in 0..4 {
+            assert_eq!(srv.local_move_delta(960, 540, 0, 0), None);
+            let drained = srv.drain();
+            assert!(
+                drained.is_empty(),
+                "zero-delta event must not push a redundant Move, got {drained:?}"
+            );
+        }
+        assert_eq!(srv.remote_pos(), before);
+        assert_eq!(srv.seat(), CursorSeat::Remote);
+
+        // Sub-unit delta: 1 px on a 1920 px screen is 0.52 units — the first
+        // event carries the fraction without moving, the second crosses the
+        // unit boundary and pushes exactly one Move.
+        assert_eq!(srv.local_move_delta(961, 540, 1, 0), None);
+        assert!(
+            srv.drain().is_empty(),
+            "sub-unit delta with unchanged rem must not push a Move"
+        );
+        assert_eq!(srv.remote_pos(), before);
+        assert_eq!(srv.local_move_delta(962, 540, 1, 0), None);
+        let moved = srv.drain();
+        assert_eq!(
+            moved.len(),
+            1,
+            "unit-crossing delta pushes exactly one Move"
+        );
+        match moved[0].kind {
+            InputKind::Move { x, y } => {
+                assert_eq!((x, y), (before.0 + 1, before.1));
+            }
+            ref other => panic!("expected Move, got {other:?}"),
+        }
+
+        // A real inward delta still pushes one Move per event.
+        assert_eq!(srv.local_move_delta(962, 570, 0, 30), None);
+        let moved = srv.drain();
+        assert_eq!(moved.len(), 1);
+        let (_, ry) = srv.remote_pos();
+        assert!(ry > before.1, "real inward motion must advance rem_y");
     }
 
     #[test]

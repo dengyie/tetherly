@@ -458,3 +458,11 @@
 
 
 
+
+## 2026-11-13 - v0.2.30：Remote 座位冗余 Move 帧抑制 + 输入引擎决策环 `/api/input/trace`（DEVELOPMENT.md §102）
+- Decision: (A) `InputServer::local_move_delta` Remote 分支仅在归一化 `rem_x/rem_y` 发生变化时 `push(Move)`，状态与小数余量照常推进；(C) node runtime 新增 64 条内存决策环 `Shared.input_trace`（crossing / seat / attach_kick / park_warp / release / rescue / reconcile / apply_enter / push_enter / push_clamp），暴露 `GET /api/input/trace` 与双 CLI `tetherly input trace`；(B) 不给会话回归后的 ghost-roam attach-kick 加冷却。
+- Rationale: v0.2.29 真机走通后日志显示 macOS `WARP_SETTLE_EVENTS=4` 每次回中产生 4 帧坐标完全相同的 `lone edge-clamp move`，且 1920 宽屏 1px 事件不进位也发帧——约一半 Move 帧是重复坐标，纯浪费加密通道与对端 apply；Windows 守护进程以 SYSTEM/Session 2 运行，排障依赖 ssh 翻日志与 RUST_LOG 级别，缺少无侵入的决策回放手段。attach-kick 预拨号是让用户立刻再越边无需等拨号的设计行为，冷却会制造死越边，收益只是少一行日志，故不做。
+- Alternatives considered: (a) 在 node `send_input_events` 层去重——晚了一层，core 已 push 进队列，且 core 是唯一知道"归一化坐标是否变化"的地方；(b) 把 settle 事件在 macOS capture worker 丢弃——平台特判，掩盖 core 普遍的 1px 不进位问题；(c) 决策环持久化到磁盘——SYSTEM 进程写盘路径与权限复杂，内存环 + HTTP 已满足排障需求。
+- Impact: 远端 Move 帧数在停车/微动场景显著下降（零位移帧归零，1px 帧约减半），TIN1 线格式与 `0..=1000` 契约不变，Target 侧无改动；排障从"ssh + grep 日志"变为"curl :45716/api/input/trace"。core 313 / node 205 / 五组集成测试全绿，clippy -D warnings 0 错误。
+- Rollback trigger: 真机出现远端光标"丢位移"（亚单位累积未进位导致的拖尾）或 trace 环锁争用影响 hook 线程时延——前者回退 A（恢复无条件 push），后者把 `trace_input` 改为 try_lock 丢弃。
+- Related files: `crates/tetherly-core/src/input.rs`, `crates/tetherly-node/src/runtime.rs`, `crates/tetherly-node/src/runtime/{input.rs,lifecycle.rs}`, `crates/tetherly-node/src/{lib.rs,uihttp.rs,uihttp/api_input.rs}`, `crates/tetherly-node/src/bin/tetherly/{cli_device.rs,cmd_input.rs}`, `bins/tetherly-cli/src/{cli_device.rs,cmd_input.rs}`, `Cargo.toml`, `Cargo.lock`, `docs/DEVELOPMENT.md` §102

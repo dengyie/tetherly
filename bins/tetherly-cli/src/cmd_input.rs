@@ -123,8 +123,74 @@ pub(crate) async fn input(action: InputCmd) -> Result<()> {
         InputCmd::Watch { json, ui_port } => {
             do_input_watch(ui_port, json).await?;
         }
+        InputCmd::Trace {
+            limit,
+            json,
+            ui_port,
+        } => {
+            do_input_trace(ui_port, limit, json).await?;
+        }
     }
     Ok(())
+}
+
+/// `tetherly-cli input trace` -- dump the node's input-engine decision ring.
+pub(crate) async fn do_input_trace(ui_port: u16, limit: usize, json: bool) -> Result<()> {
+    let (code, body) = loopback_get(ui_port, "/api/input/trace")
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no running node reachable on 127.0.0.1:{ui_port} ({e}); \
+                 start one with `tetherly --data-dir <dir> run` first"
+            )
+        })?;
+    if code != 200 {
+        anyhow::bail!(
+            "failed to query input trace (HTTP {code}): {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    if json {
+        println!("{}", String::from_utf8_lossy(&body).trim());
+        return Ok(());
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+    print_input_trace(&v, limit);
+    Ok(())
+}
+
+pub(crate) fn print_input_trace(v: &serde_json::Value, limit: usize) {
+    let entries = v["entries"].as_array().cloned().unwrap_or_default();
+    println!(
+        "Input engine trace: seat={} channel_open={} entries={}/{}",
+        v["seat"].as_str().unwrap_or("unknown"),
+        v["channel_open"].as_bool().unwrap_or(false),
+        entries.len(),
+        v["capacity"].as_u64().unwrap_or(0)
+    );
+    let skip = if limit == 0 {
+        0
+    } else {
+        entries.len().saturating_sub(limit)
+    };
+    if skip > 0 {
+        println!("  ... {skip} older entries omitted (--limit 0 shows all)");
+    }
+    let mut prev_ts: Option<u64> = None;
+    for e in entries.iter().skip(skip) {
+        let ts = e["ts_ms"].as_u64().unwrap_or(0);
+        let gap = match prev_ts {
+            Some(p) => format!("+{:>6}ms", ts.saturating_sub(p)),
+            None => "         ".to_string(),
+        };
+        println!(
+            "  {ts:>13} {gap}  {:<11} {}",
+            e["kind"].as_str().unwrap_or(""),
+            e["detail"].as_str().unwrap_or("")
+        );
+        prev_ts = Some(ts);
+    }
 }
 
 pub(crate) async fn do_input_attach(

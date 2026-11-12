@@ -1,5 +1,12 @@
 # Project State
 
+## Release Baseline (2026-11-13)
+- **v0.2.30** 本轮发版（Cargo.toml 0.2.30；上一基线 v0.2.29 / `a6990ef` 双端已部署）。SSOT：`docs/DEVELOPMENT.md` 顶部"当前接手基线"+ §101/§102。
+- 🟢 Windows→Mac 鼠标方向已解决（v0.2.29 `7b71531` zone-entered gate，用户真机确认）。
+- v0.2.30：core Remote 座位冗余 Move 帧抑制（A）；输入引擎 64 条决策环 `GET /api/input/trace` + `tetherly input trace`（C）；attach-kick 冷却明确不做（B）。
+- 本机验证：core 313、node 205、loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65、clippy -D warnings 0 错误。
+- 下文 `Objective` 起为 v1.x 历史设计文档时期的状态记录，版本号不代表当前二进制。
+
 ## Objective
 - Personal LAN-first device mesh (Tetherly): pairing + Noise, local OTP, EasyTier sidecar only;
   computer-side ANCS ingress for iPhone notifications (Phase 4 CI slice landed);

@@ -622,6 +622,7 @@ impl Node {
             gesture_swipe_last_ignored_ms: std::sync::atomic::AtomicU64::new(0),
             gesture_map: Mutex::new(initial_gesture_map),
             screen_seq_trace: Mutex::new(Vec::new()),
+            input_trace: Mutex::new(VecDeque::with_capacity(super::input::INPUT_TRACE_CAP)),
             screen_channel_gen: std::sync::atomic::AtomicU64::new(0),
             screen_client_gen: std::sync::atomic::AtomicU64::new(0),
             input_client_task: Mutex::new(None),

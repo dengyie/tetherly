@@ -1,8 +1,16 @@
 # TODO
 
-## 当前接手基线（截至 2026-11-10）
+## 当前接手基线（截至 2026-11-13）
 
-> **v0.2.7 / e3d35a1；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。此次为本地未发布修改，验证证据见下。
+> **v0.2.30（本轮发版）；上一基线 v0.2.29 / a6990ef 双端已部署；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.29 均已 CI 发布并部署。
+
+## v0.2.30 优化迭代（2026-11-13）
+- [x] **🟢 Windows→Mac 鼠标方向已解决（v0.2.29 `7b71531` zone-entered gate，DEVELOPMENT.md §101）**：用户真机确认 Windows 鼠标可接入 Mac；双端 health version=v0.2.29。2026-11-13 早间"🔴 移交"状态作废。
+- [x] **A · core Remote 座位冗余 Move 帧抑制**（§102.2）：归一化远端坐标不变不发帧；回归 `remote_seat_suppresses_move_frames_when_remote_position_unchanged`。
+- [x] **C · 输入引擎决策环**（§102.3）：`Shared.input_trace` 64 条环 + `GET /api/input/trace` + 双 CLI `tetherly input trace`；node/uihttp 各 1 新测试。
+- [x] **B · 回归后 attach-kick 冷却——明确不做**（§102.4）：预拨号是设计行为，冷却会制造死越边。
+- [x] 本机验证：core 313、node 205、loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65、clippy -D warnings 0 错误。
+- [ ] 真机验收（部署 v0.2.30 后）：`push: lone edge-clamp move` 四连消失；`/api/metrics` tx_frames 增速下降；`tetherly input trace` 能回放越边→停车→回归链。
 
 ## 当前修复与验证
 - [x] **Windows 鼠标控 Mac "部分屏幕到不了/乱跳/被拉回" 三根因已按证据逐项本地修复（未提交）。** (1) **core 位移分包敏感（red→green）**：`InputServer::local_move_delta` 逐事件整除且把微小非零 delta 强制 ±1、无小数余量，同一 192px 总位移拆成 192 个 1px 事件走 192 单位、单个 192px 事件只走 100 单位——与"乱跳/到不了"直接相关。修复为 `rem_frac_x/rem_frac_y` i64 余量累加器（TIN1 `0..=1000` 线格式不变），在 `clear_stale_remote`/`force_local`/`resize`/`on_remote_leave`/`on_peer_gone` 五处状态转换重置；新增分包不变性回归（red 证据 192 vs 100，修复后一致）与零尾契约 pin（零 delta 尾不虚构运动、不搁浅 seat）。

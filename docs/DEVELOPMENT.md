@@ -1,8 +1,10 @@
 # Tetherly 开发文档
 
-## 当前接手基线（维护于 2026-11-10）
+## 当前接手基线（维护于 2026-11-13）
 
-- **发布基线：v0.2.7 / `e3d35a1`，最高 ADR-138。** `Cargo.toml` 与已发布 tag 为版本依据；下文 v1.x / v2.x 是历史设计文档版本，不能作为当前二进制版本。
+- **发布基线：v0.2.30（本轮发版，继承 v0.2.29 / `a6990ef` 双端已部署），最高 ADR-138。** `Cargo.toml` 与已发布 tag 为版本依据；下文 v1.x / v2.x 是历史设计文档版本，不能作为当前二进制版本。本块下方 2026-11-10 起的逐版本条目保留为历史演进记录，其中"未发布/未提交"措辞均为当时状态，v0.2.8–v0.2.29 已全部经 CI tag 发布并经 `scripts/deploy.sh --target all --tag vX.Y.Z` 部署。
+- **🟢 Windows→Mac 鼠标方向已解决（v0.2.29，2026-11-13 真机验收）：** 2026-11-13 早间移交时的"Windows 物理鼠标不能驱动 Mac 光标"根因是 §101 的 7 秒弹回（entry placement 落在反向触发区 + pinned heartbeat 自动完成驻留）；`7b71531` zone-entered gate 修复后双端 `/api/health` version=v0.2.29，Mac 日志 `apply: enter` → 稳定 Remote 会话 → 用户正常推回，无弹回。生产机验收由用户实测确认（"Windows 鼠标已经可以接入 mac 了"）。
+- **v0.2.30（§102）：** (A) core Remote 座位冗余 Move 帧抑制（归一化远端坐标不变就不发帧，消灭 `lone edge-clamp move` 四连与零位移抖动帧）；(C) 输入引擎决策环 `GET /api/input/trace` + 双 CLI `tetherly input trace`（64 条内存环，覆盖 crossing / seat / attach_kick / park_warp / release / rescue / reconcile / apply_enter / push_*），SYSTEM 守护进程排障不再依赖 RUST_LOG 与 ssh 翻日志；(B) 回归后 attach-kick 冷却**明确不做**（理由见 §102）。
 - **现有能力：** Rust workspace 分层、Noise/SPAKE2、活节点 loopback、双向键鼠接管与跨平台手势映射；Web 控制台、macOS/Windows 原生托盘与文件传输 Popover/面板已存在，macOS 有 AppKit viewer。Tauri/React 外壳尚未落地，不再把已实现的原生能力列为新开发。
 - **实现与验收分开：** ADR-137 文件拖拽控制面与托盘 UI 部分实施，ADR-138 remote session 协议/runtime/API/测试代码已实现；Windows session viewer、H.264 viewer 解码、clip session 联动、lock-to-screen 等按对应 ADR 的当前状态核对，不能直接沿用历史“未实施”列表。物理双桌面、GUI/TCC、ANCS/Android 长稳仍为 **Manual-required**。
 - **handoff CI 根因与本地修复（未发布）：** main CI [42666608674](https://github.com/dengyie/tetherly/actions/runs/42666608674) 在 clear 后残留最后 multicast 的 `Tetherly Repo`（`ho_1794246105545_3`）；同提交 tag CI 与 release 成功不代表 main 全绿。`send_to()` 成功仅是入发送队列；`handoff_inbox_clear()` 同步清当前条目、不取消在途消息。测试未等待 multicast 接收入箱，晚到消息会重新填充 inbox。`tests/phase1.rs` 现按 dispatch 的 peer/handoff ID 等接收后再 clear，并恢复即时空断言；新增 current-thread 受控回归先证明“clear 早于接收”会失败，再验证接收屏障。
@@ -8283,3 +8285,17 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 4. **测试**：新增 `test_entry_parked_edge_micro_jitter_cannot_arm_reverse_dwell`（停驻点 ±1px 抖动 8 轮 + heartbeat 在场，永不 fire、门保持关闭）；`test_auto_reverse_fires_unarmed_long_dwell_from_parked_edge` 与 pinned-heartbeat 测试各加一次内部热身事件（zone 开门）+ 清 accum/last_pos（保持 un-armed tier 语义——热身的 679px 跳变会误开距离武装并杀死 dy=0 pinned leniency）。workspace 15 组全绿。
 
 5. **教训**：(a) 修复一个"静默饿死"问题时，若同时给了它自动完成机制（heartbeat），必须重审所有能喂进状态机的事件源——放置回声、手部微抖都从"无效"变成了"有毒"；(b) 驻留/触发类状态机的输入必须先过"位置合法性"门：停在触发区内的位置本身不应能武装触发（v0.2.26 band-safe dock 同一哲学在 Target 侧的对偶）；(c) 两个 session 并行发版时版本号会被占用——发版前 `git log` 确认最新 bump，顺延下一个号。
+
+## 102. Remote 座位冗余 Move 帧抑制 + 输入引擎决策环 `/api/input/trace` (v0.2.30)
+
+1. **背景**：v0.2.29 让 Windows→Mac 方向真机走通后，复核双端日志发现两类非阻塞噪音：(a) macOS 侧 `WARP_SETTLE_EVENTS=4` 让每次停车回中后的 4 个零位移 hook 事件各自产出一帧 `push: lone edge-clamp move`（远端坐标完全没变）；1920 宽屏上 1px 事件只走 0.52 单位，`rem_x` 不进位的事件也照样发帧——约一半的 Move 帧是重复坐标。(b) 一次控制会话结束后 ~1 ms，ghost-roam 守卫的 `attach_kick` 预拨号又把持久通道重新拉起（日志上像"刚放下又抓起"）。本轮按"收益最高、风险最低"原则落地 A、C，明确拒绝 B。
+
+2. **A：core 层帧经济（`InputServer::local_move_delta` Remote 分支）**：改为先计算 `next_rem_x/y`，仅当二者之一与当前 `rem_x/y` 不同才 `push(Move)`；状态（`rem_*`、钳位后的 `x/y`、小数余量累加器）照常推进，所以亚单位位移会累积到下一帧而不是丢失。新增回归 `remote_seat_suppresses_move_frames_when_remote_position_unchanged`：1920x1080 底边越界后 4 次零位移 drain 为空；`dx=1` 第一次 drain 为空（0.52 单位不进位）、第二次恰好一帧且 x 正好 +1；`dy=30` 一帧且 `rem_y` 前进。red 证据：改前零位移事件推出 `Move { x: 500, y: 0 }`。副作用核对：`send_input_events` 对空事件向量早返回，`last_activity_ms` 不刷新——零位移本来就不是操作者活动，idle 语义不变；TIN1 线格式与 `0..=1000` 契约不变；Target 侧 `apply` 路径不受影响（少收重复帧而已）。
+
+3. **C：输入引擎决策环（node runtime）**：`Shared.input_trace: Mutex<VecDeque<InputTraceEntry>>`，容量 `INPUT_TRACE_CAP = 64`，`Node::trace_input(kind, detail)` 用 `shared.clock.unix_ms()` 打时间戳（测试可用 manual clock）；满了丢最旧。埋点覆盖输入状态机的全部决策点：`crossing`（edge/hook/delta/rem）、`seat`（prev → next + peer）、`attach_kick`（ghost-roam 预拨号）、`park_warp`、`release`（reason/role/peer/session）、`rescue`（release_grant + 停车坐标）、`reconcile`（stranded remote seat 对账）、`apply_enter`（Target 侧控制器进入）、`push_enter` / `push_clamp`（控制器出帧）。暴露 `GET /api/input/trace` → `InputTraceReport { ok, seat, channel_open, capacity, entries }`；双 CLI 同构 `tetherly input trace [--limit N] [--json] [--ui-port]`，表格列 `ts_ms  +gap_ms  kind  detail`，`--limit 0` 全量。测试：node `input_trace_ring_is_bounded_and_records_rescue`（CAP+6 条后长度 64、最旧为 entry 6；`rescue_seat_to_local(false)` 记 `rescue` 并含 `release_grant=false`）、uihttp `test_input_trace_endpoint`（空环报告形状 + 两条埋点后 kinds 顺序）。价值：Windows 守护进程以 SYSTEM 在 Session 2 运行，之前任何输入链路排障都要 ssh 翻 `tetherly_system.log` 并指望 RUST_LOG 级别够；现在双端 `curl :45716/api/input/trace` 一眼看到最近 64 个决策与毫秒间隔。
+
+4. **B：回归后 attach-kick 冷却——不做**。预拨号是设计行为：会话一结束就把持久通道预热，用户立即再越边不需要等拨号；加冷却会让快速再越边吃一次"死越边"，换来的只是少一行日志。决策环（C）已把这个 kick 记成 `attach_kick` 条目，噪音从日志挪进可按需查看的环里，本身不再构成排障干扰。
+
+5. **验证（2026-11-13 本机 macOS）**：`cargo fmt --all`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 0 错误（仅既有 manifest unused-dep 提示）；`tetherly-core` 313 通过（含新回归）、`tetherly-node` lib 205 通过（+2 新测试）；集成 `loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65` 全通过。版本 bump：`Cargo.toml` 0.2.30 + `cargo update --workspace --offline` 同步 `Cargo.lock`（8 行），满足 release CI `--locked`。
+
+6. **部署与验收口径**：`scripts/deploy.sh --target all --tag v0.2.30`；双端 `/api/health` version=0.2.30；Windows 守护进程 owner=SYSTEM + SessionId=活动会话（§100 三维度）；SRBMiner-MULTI / verge-mihomo / komari-agent 前后 100% 不动；Mac 换二进制后 TCC 重授权 + `POST /api/input/ensure`（§“2026-11-11 部署事故”）。真机预期：`push: lone edge-clamp move` 四连消失，`/api/metrics` `input.tx_frames` 增速明显低于 v0.2.29，`tetherly input trace` 可回放一次越边→停车→回归的完整决策链。

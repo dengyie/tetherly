@@ -128,6 +128,19 @@ pub(crate) enum InputCmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Show the input-engine decision ring (crossings, seat changes, park warps,
+    /// releases, rescues, attach kicks) kept in memory by the running node.
+    Trace {
+        /// Show only the newest N entries (0 = all, ring holds 64).
+        #[arg(long, default_value_t = 32)]
+        limit: usize,
+        /// Output raw JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]

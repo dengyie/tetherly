@@ -13,6 +13,17 @@ pub(super) async fn get_input(
     json_ok(&rep)
 }
 
+/// `GET /api/input/trace` — the input-engine decision ring (v0.2.30).
+pub(super) async fn get_input_trace(
+    _method: &str,
+    _query_str: Option<&str>,
+    _body: &[u8],
+    node: &Node,
+) -> UiResponse {
+    let rep = node.input_trace_report().await;
+    json_ok(&rep)
+}
+
 pub(super) async fn post_input_start(
     _method: &str,
     _query_str: Option<&str>,

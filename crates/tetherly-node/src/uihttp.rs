@@ -1179,6 +1179,9 @@ async fn route(method: &str, path: &str, body: &[u8], node: &Node) -> UiResponse
             api_screen_tile::post_screen_tile_motion_reset(method, query_str, body, node).await
         }
         ("GET", "/api/input") => api_input::get_input(method, query_str, body, node).await,
+        ("GET", "/api/input/trace") => {
+            api_input::get_input_trace(method, query_str, body, node).await
+        }
         ("POST", "/api/input/start") => {
             api_input::post_input_start(method, query_str, body, node).await
         }
@@ -2524,6 +2527,37 @@ mod tests {
         stream.read_to_end(&mut raw).await.unwrap();
         let (resp_code, _) = parse_http_response(&raw);
         assert_eq!(resp_code, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v0.2.30: `GET /api/input/trace` serves the input-engine decision
+    /// ring so a roaming stint can be triaged over the loopback API.
+    #[tokio::test]
+    async fn test_input_trace_endpoint() {
+        let (node, dir) = temp_test_node("input_trace");
+        let port = bind_and_spawn(node.clone(), 0).await.unwrap();
+
+        let (code, body) = loopback_get(port, "/api/input/trace").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], true);
+        assert_eq!(rep["seat"], "local");
+        assert_eq!(rep["channel_open"], false);
+        assert_eq!(rep["capacity"], crate::runtime::INPUT_TRACE_CAP);
+        assert_eq!(rep["entries"], serde_json::json!([]));
+
+        node.trace_input("crossing", "edge=Right hook=(1919,500)");
+        node.trace_input("seat", "local -> remote peer=tdev_x");
+        let (code, body) = loopback_get(port, "/api/input/trace").await.unwrap();
+        assert_eq!(code, 200);
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entries = rep["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["kind"], "crossing");
+        assert_eq!(entries[0]["detail"], "edge=Right hook=(1919,500)");
+        assert_eq!(entries[1]["kind"], "seat");
+        assert!(entries[1]["ts_ms"].as_u64().is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

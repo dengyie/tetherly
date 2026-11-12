@@ -914,6 +914,12 @@ struct Shared {
     /// Receiver seq-decision ring `(seq, accepted)` mirrored from the
     /// client-loop receiver for diagnostics (cliff-vs-duplicate triage).
     pub(crate) screen_seq_trace: Mutex<Vec<(u64, bool)>>,
+    /// Input-engine decision ring (v0.2.30): the last
+    /// [`input::INPUT_TRACE_CAP`] seat/crossing/attach/release decisions,
+    /// served by `GET /api/input/trace`. Lets an operator triage a roaming
+    /// stint on a daemon whose log level cannot be raised (the Windows
+    /// SYSTEM service) without SSH'ing into its log file.
+    pub(crate) input_trace: Mutex<VecDeque<input::InputTraceEntry>>,
     /// Monotonic generation of the active 45720 server channel. Each
     /// `attach_screen_server` increments it; a pump loop may only run the
     /// engine-level `on_peer_gone` reset when its generation is still the

@@ -1004,3 +1004,17 @@
 - Blockers: None.
 
 
+
+## 2026-11-13
+- Task: 接手 tetherly；确认 Windows→Mac 鼠标方向已在 v0.2.29 解决；按"你优化迭代本项目"做 v0.2.30 优化迭代并发版部署。
+- Actions:
+  1. 复核 v0.2.29（HEAD a6990ef）双端日志：`7b71531` zone-entered gate 修复 §101 的 7 秒弹回，用户真机确认 Windows 鼠标可接入 Mac；记录两处非阻塞噪音（回归后 ~1 ms attach_kick 预拨号；macOS `WARP_SETTLE_EVENTS=4` 产生 4 帧重复坐标的 `lone edge-clamp move`）。
+  2. TDD 落地 A：core `local_move_delta` Remote 分支 `rem_changed` 门控（red：零位移事件推出 `Move { x: 500, y: 0 }` → green）；新增回归 `remote_seat_suppresses_move_frames_when_remote_position_unchanged`。
+  3. 落地 C：`Shared.input_trace` 64 条环 + `trace_input` 埋点 10 类决策点 + `GET /api/input/trace` + 双 CLI `tetherly input trace`；新增 `input_trace_ring_is_bounded_and_records_rescue`、`test_input_trace_endpoint`。
+  4. 明确拒绝 B（attach-kick 冷却），理由写入 §102.4 与 decisions。
+  5. 版本 bump 0.2.30（Cargo.toml + `cargo update --workspace --offline` 同步 Cargo.lock 8 行）。
+  6. 验证：fmt、clippy -D warnings 0 错误；core 313、node 205、loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65。
+  7. 文档：DEVELOPMENT.md 顶部基线刷新（v0.2.7 → v0.2.30，标记 Windows→Mac 已解决）+ §102；`.codex-memory` 四文件同步；Obsidian 速读 / projects 子路由 / 生产变更速记同步并跑治理三检。
+- Results: 代码、测试、文档就绪；commit + tag v0.2.30 + release CI + `scripts/deploy.sh --target all --tag v0.2.30`（结果见生产变更速记）。
+- Next: 真机验收 v0.2.30（`lone edge-clamp move` 四连消失、tx_frames 增速下降、`tetherly input trace` 回放）；后续候选优化见 todo "后续方向"。
+- Blockers: None.

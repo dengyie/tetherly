@@ -167,6 +167,33 @@ pub struct InputStatusReport {
     pub active_peer: Option<String>,
 }
 
+/// Capacity of the input-engine decision ring behind `GET /api/input/trace`.
+/// 64 entries cover several roaming stints (a stint is ~6 decisions:
+/// crossing, park warp, seat change, return seat change, release, kick).
+pub const INPUT_TRACE_CAP: usize = 64;
+
+/// One input-engine decision (v0.2.30). `kind` is a short stable token
+/// (`crossing`, `park_warp`, `seat`, `release`, `rescue`, `reconcile`,
+/// `attach_kick`, `apply_enter`, `push_enter`, `push_clamp`); `detail` is
+/// free text for the operator.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InputTraceEntry {
+    pub ts_ms: u64,
+    pub kind: String,
+    pub detail: String,
+}
+
+/// `GET /api/input/trace` report: current seat/channel plus the decision
+/// ring, oldest first.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InputTraceReport {
+    pub ok: bool,
+    pub seat: String,
+    pub channel_open: bool,
+    pub capacity: usize,
+    pub entries: Vec<InputTraceEntry>,
+}
+
 /// Control result report for input sharing actions (start, stop).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct InputControlReport {
@@ -1591,6 +1618,13 @@ impl Node {
             "[takeover] release: tunnel grant released reason={reason} role={:?} peer={}",
             session.role, session.peer_id
         );
+        self.trace_input(
+            "release",
+            format!(
+                "{reason} role={:?} peer={} session={}",
+                session.role, session.peer_id, session.session_id
+            ),
+        );
 
         let now_ms = self.shared.clock.unix_ms();
         let sanitized_reason = InputTunnelValidator::sanitize_reason(reason);
@@ -2222,6 +2256,10 @@ impl Node {
         self.disarm_input_capture();
         crate::platform::warp_mouse_position(cx, cy);
         self.emit(UiEvent::input_seat_changed("local", false, None));
+        self.trace_input(
+            "rescue",
+            format!("seat forced local release_grant={release_grant} park=({cx},{cy})"),
+        );
         (cx, cy)
     }
 
@@ -2295,6 +2333,7 @@ impl Node {
         tracing::info!(
             "watcher: stranded remote seat rescued (remote seat with no outbound channel and no grace)"
         );
+        self.trace_input("reconcile", "watcher rescued stranded remote seat");
         true
     }
 
@@ -2600,6 +2639,10 @@ impl Node {
             if due {
                 if let Some(peer) = self.reconnect_target_peer() {
                     if self.kick_attach(&peer) {
+                        self.trace_input(
+                            "attach_kick",
+                            format!("ghost-roam guard pre-arm -> {peer}"),
+                        );
                         let rt = tokio::runtime::Handle::try_current()
                             .ok()
                             .or_else(|| self.shared.rt_handle.lock().expect("rt_handle").clone());
@@ -2690,6 +2733,11 @@ impl Node {
                     hook_x = x, hook_y = y, edge = ?e,
                     "engine crossing fired"
                 );
+                let (rx, ry) = server.remote_pos();
+                self.trace_input(
+                    "crossing",
+                    format!("edge={e:?} hook=({x},{y}) delta=({dx},{dy}) rem=({rx},{ry})"),
+                );
             }
             (
                 edge,
@@ -2719,6 +2767,7 @@ impl Node {
                 // 3) Warp BEFORE arming input capture / dissociating.
                 let (park_x, park_y) = (width / 2, height / 2);
                 tracing::info!(park_x, park_y, "park warp before remote roaming");
+                self.trace_input("park_warp", format!("({park_x},{park_y})"));
                 crate::platform::warp_mouse_position(park_x, park_y);
                 self.arm_input_capture();
             } else if !self.is_keyboard_armed() {
@@ -2758,6 +2807,18 @@ impl Node {
                 CursorSeat::Local => "local",
                 CursorSeat::Remote => "remote",
             };
+            self.trace_input(
+                "seat",
+                format!(
+                    "{} -> {seat_str} peer={}",
+                    match prev_seat {
+                        Some(CursorSeat::Remote) => "remote",
+                        Some(CursorSeat::Local) => "local",
+                        None => "none",
+                    },
+                    peer.as_deref().unwrap_or("none")
+                ),
+            );
             self.emit(UiEvent::input_seat_changed(seat_str, true, peer));
             if current_seat == CursorSeat::Local {
                 // The roaming control stint is over (sustained-push return);
@@ -3607,8 +3668,10 @@ impl Node {
                     }) = events.get(idx + 1)
                     {
                         tracing::info!(source, rem_x = x, rem_y = y, "push: enter+move");
+                        self.trace_input("push_enter", format!("rem=({x},{y}) src={source}"));
                     } else {
                         tracing::info!(source, "push: enter");
+                        self.trace_input("push_enter", format!("no move src={source}"));
                     }
                 }
                 tetherly_core::InputKind::Move { x, y }
@@ -3619,6 +3682,10 @@ impl Node {
                         rem_x = x,
                         seq = ev.seq,
                         "push: lone edge-clamp move"
+                    );
+                    self.trace_input(
+                        "push_clamp",
+                        format!("rem_x={x} seq={} src={source}", ev.seq),
                     );
                 }
                 _ => {}
@@ -4026,6 +4093,10 @@ impl Node {
                                             tracing::info!(
                                                 "apply: enter (crossing placement begins)"
                                             );
+                                            node.trace_input(
+                                                "apply_enter",
+                                                format!("controller {peer_id} entered this screen"),
+                                            );
                                             entry_moves_logged.store(0, Ordering::SeqCst);
                                         }
                                         InputKind::Move { x, y }
@@ -4196,6 +4267,45 @@ impl Node {
         drop(guard);
     }
 
+    /// Append one decision to the input-engine trace ring (drops the oldest
+    /// past [`INPUT_TRACE_CAP`]). Cheap: one short lock, no allocation
+    /// beyond the entry itself; callers are per-decision, never per-frame.
+    pub(crate) fn trace_input(&self, kind: &'static str, detail: impl Into<String>) {
+        let entry = InputTraceEntry {
+            ts_ms: self.shared.clock.unix_ms(),
+            kind: kind.to_string(),
+            detail: detail.into(),
+        };
+        let mut ring = self.shared.input_trace.lock().expect("input_trace");
+        while ring.len() >= INPUT_TRACE_CAP {
+            ring.pop_front();
+        }
+        ring.push_back(entry);
+    }
+
+    /// Snapshot of the input-engine trace ring, oldest first.
+    pub fn input_trace_snapshot(&self) -> Vec<InputTraceEntry> {
+        self.shared
+            .input_trace
+            .lock()
+            .expect("input_trace")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// `GET /api/input/trace` report.
+    pub async fn input_trace_report(&self) -> InputTraceReport {
+        let channel_open = self.input_channel_open().await;
+        InputTraceReport {
+            ok: true,
+            seat: self.input_seat_str().to_string(),
+            channel_open,
+            capacity: INPUT_TRACE_CAP,
+            entries: self.input_trace_snapshot(),
+        }
+    }
+
     /// Comprehensive status report for input sharing.
     pub async fn input_status_report(&self) -> InputStatusReport {
         let channel_open = self.input_channel_open().await;
@@ -4295,6 +4405,54 @@ impl Node {
 mod tests {
     use super::*;
     use tetherly_core::InputKind;
+
+    /// v0.2.30 input-engine trace ring: bounded at `INPUT_TRACE_CAP`
+    /// (oldest dropped), timestamps from the node clock, and the seat
+    /// rescue path records itself so a stranded-seat triage no longer
+    /// needs the daemon log.
+    #[tokio::test]
+    async fn input_trace_ring_is_bounded_and_records_rescue() {
+        let (node, _dir, clock) =
+            crate::runtime::clipboard_policy_tests::temp_test_node_manual_clock(
+                "input-trace",
+                10_000,
+            );
+        node.shared
+            .input_capture_active
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let empty = node.input_trace_report().await;
+        assert!(empty.ok);
+        assert_eq!(empty.capacity, INPUT_TRACE_CAP);
+        assert_eq!(empty.seat, "local");
+        assert!(empty.entries.is_empty());
+
+        for i in 0..(INPUT_TRACE_CAP + 6) {
+            clock.set(10_000 + i as u64);
+            node.trace_input("seat", format!("entry {i}"));
+        }
+        let snap = node.input_trace_snapshot();
+        assert_eq!(snap.len(), INPUT_TRACE_CAP, "ring must drop the oldest");
+        assert_eq!(snap[0].detail, "entry 6");
+        assert_eq!(snap[0].ts_ms, 10_006);
+        assert_eq!(
+            snap[INPUT_TRACE_CAP - 1].detail,
+            format!("entry {}", INPUT_TRACE_CAP + 5)
+        );
+
+        clock.set(20_000);
+        node.rescue_seat_to_local(false);
+        let snap = node.input_trace_snapshot();
+        let last = snap.last().expect("rescue entry");
+        assert_eq!(last.kind, "rescue");
+        assert_eq!(last.ts_ms, 20_000);
+        assert!(
+            last.detail.contains("release_grant=false"),
+            "rescue detail must name the grant decision, got {:?}",
+            last.detail
+        );
+        assert_eq!(snap.len(), INPUT_TRACE_CAP);
+    }
 
     /// Regression (production 2026-11-12): while the operator typed on the
     /// remote machine, the roaming tunnel's `last_activity_ms` was refreshed
