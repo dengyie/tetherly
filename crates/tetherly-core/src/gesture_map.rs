@@ -168,6 +168,8 @@ mod vk {
     pub const D: u16 = 0x44;
     pub const LEFT: u16 = 0x25;
     pub const RIGHT: u16 = 0x27;
+    /// ` / ~ key (VK_OEM_3) — the backtick of the macOS Cmd+` cycle.
+    pub const OEM_3: u16 = 0xC0;
 }
 
 /// One key event of an injected sequence: modifier or normal key, down or
@@ -248,27 +250,33 @@ pub fn windows_backend(action: GestureAction) -> Vec<GestureKeyStep> {
 }
 
 /// Gesture sequences for a macOS target (this node controlling another Mac).
-/// macOS targets receive re-interpreted system shortcuts via the ordinary
-/// key transport; QC widgets and Spotlight equivalents are reachable, but
-/// Mission Control itself is not a hotkey-injectable surface on modern
-/// macOS, so the overview maps to its keyboard surrogate.
+/// VK codes here are the wire convention (Win32 VK) — the target's platform
+/// layer translates them to mac keycodes on arrival and, since v0.2.27,
+/// tracks injected modifier state to set the matching `CGEventFlags`. That
+/// flag tracking is what makes these sequences land as real shortcuts: a
+/// synthetic Cmd keydown followed by a synthetic grave tap is two unrelated
+/// keys to macOS unless the grave event carries `kCGEventFlagMaskCommand`.
 pub fn macos_backend(action: GestureAction) -> Vec<GestureKeyStep> {
     // VK codes here are the wire convention (Win32 VK) — the target's
     // platform layer translates them to mac keycodes on arrival.
     const VK_CONTROL: u16 = 0xA2;
     const VK_UP: u16 = 0x26;
     match action {
-        // Cmd+` (backtick): cycle windows of the frontmost app...
-        GestureAction::AppSwitchNext => windows_backend(GestureAction::AppSwitchNext),
-        GestureAction::AppSwitchPrev => windows_backend(GestureAction::AppSwitchPrev),
+        // Cmd+` : cycle windows of the frontmost app.
+        GestureAction::AppSwitchNext => tap_mods_macos(&[vk::LWIN], &[vk::OEM_3]),
+        // Cmd+Shift+` : the reverse cycle.
+        GestureAction::AppSwitchPrev => tap_mods_macos(&[vk::LSHIFT, vk::LWIN], &[vk::OEM_3]),
         // Ctrl+Up: Mission Control keyboard surrogate.
         GestureAction::OverviewToggle => tap_mods_macos(&[VK_CONTROL], &[VK_UP]),
-        // Ctrl+Left/Right: Space switch.
-        GestureAction::DesktopLeft => windows_backend(GestureAction::DesktopLeft),
-        GestureAction::DesktopRight => windows_backend(GestureAction::DesktopRight),
-        // F11 surrogate via Win+D keeps parity; HIDE is preferable but not
-        // a VK-reachable hotkey — keep D and let the target's keymap handle it.
-        GestureAction::ShowDesktop => windows_backend(GestureAction::ShowDesktop),
+        // Ctrl+Left/Right: real Space (virtual desktop) switch — the plain
+        // Control form macOS actually binds, NOT the Windows Win+Ctrl+Arrow.
+        GestureAction::DesktopLeft => tap_mods_macos(&[VK_CONTROL], &[vk::LEFT]),
+        GestureAction::DesktopRight => tap_mods_macos(&[VK_CONTROL], &[vk::RIGHT]),
+        // No VK-reachable Show Desktop on macOS (F11 is volume down by
+        // default; delegating to the Windows Win+D backend would arrive as
+        // Cmd+D — "Don't Save" — now that LWIN carries the Command flag on
+        // the target). Intentionally unmapped rather than harmful.
+        GestureAction::ShowDesktop => Vec::new(),
         GestureAction::None => Vec::new(),
     }
 }
@@ -509,6 +517,64 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn step(code: u16, down: bool) -> GestureKeyStep {
+        GestureKeyStep { code, down }
+    }
+
+    /// v0.2.27: the macOS backend ships REAL shortcuts (Cmd+` / Cmd+Shift+`
+    /// / plain Ctrl+Arrow) instead of delegating to the Windows wire
+    /// sequences, whose Alt+Tab shape has no macOS meaning.
+    #[test]
+    fn mac_sequences_are_real_shortcuts() {
+        let m = GestureMap::default();
+        // AppSwitchNext == Cmd+` : LWIN down, grave tap, LWIN up.
+        assert_eq!(
+            m.sequence_for(GestureId::Swipe4Left, "macos"),
+            vec![
+                step(0x5B, true),
+                step(0xC0, true),
+                step(0xC0, false),
+                step(0x5B, false)
+            ]
+        );
+        // AppSwitchPrev == Cmd+Shift+` : downs [Shift, Win], ups [Win, Shift].
+        assert_eq!(
+            m.sequence_for(GestureId::Swipe4Right, "macos"),
+            vec![
+                step(0xA0, true),
+                step(0x5B, true),
+                step(0xC0, true),
+                step(0xC0, false),
+                step(0x5B, false),
+                step(0xA0, false),
+            ]
+        );
+        // Remapped DesktopLeft == plain Ctrl+Left (the Space switch macOS
+        // actually binds — NOT the Windows Win+Ctrl+Left).
+        let remapped = GestureMap {
+            swipe4_down: GestureAction::DesktopLeft,
+            ..GestureMap::default()
+        };
+        assert_eq!(
+            remapped.sequence_for(GestureId::Swipe4Down, "macos"),
+            vec![
+                step(0xA2, true),
+                step(0x25, true),
+                step(0x25, false),
+                step(0xA2, false)
+            ]
+        );
+        // ShowDesktop is honestly unmapped on macOS (F11 is volume down by
+        // default; the old Win+D delegation would arrive as Cmd+D).
+        let remapped = GestureMap {
+            swipe4_down: GestureAction::ShowDesktop,
+            ..GestureMap::default()
+        };
+        assert!(remapped
+            .sequence_for(GestureId::Swipe4Down, "macos")
+            .is_empty());
     }
 
     #[test]

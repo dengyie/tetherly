@@ -589,15 +589,76 @@ impl tetherly_core::InputSink for SystemInputSink {
         use objc2_core_graphics::{CGEvent, CGEventField, CGEventTapLocation};
 
         if let Some(cg_code) = win_vk_to_mac_keycode(code) {
+            // Modifier combos need the CGEventFlags: a synthetic Cmd keydown
+            // followed by a synthetic grave tap is two unrelated keys to
+            // macOS unless the tap carries kCGEventFlagMaskCommand (v0.2.27
+            // — before this, every forwarded combo to a mac target, gestures
+            // and plain typed shortcuts alike, arrived flag-less and macOS
+            // saw none of them). Single transition rule: compute (flags to
+            // post, tracker state to store after the post) in one place.
+            let (post_flags, new_state) = next_injected_flags(
+                INJECTED_MODIFIER_FLAGS.load(std::sync::atomic::Ordering::SeqCst),
+                code,
+                down,
+            );
             if let Some(event) = CGEvent::new_keyboard_event(None, cg_code, down) {
                 CGEvent::set_integer_value_field(
                     Some(&event),
                     CGEventField::EventSourceUserData,
                     TETHERLY_INJECTED_MAGIC,
                 );
+                CGEvent::set_flags(Some(&event), post_flags);
                 CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
             }
+            INJECTED_MODIFIER_FLAGS.store(new_state, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+}
+
+/// Modifier state of the INJECTED keyboard stream on this mac target:
+/// which Win32 modifier VKs are currently held by remote input. Process
+/// global by nature — the real modifier state the system reacts to is
+/// process-global too, and `SystemInputSink` is a stateless unit struct
+/// shared by every node in the process.
+#[cfg(target_os = "macos")]
+static INJECTED_MODIFIER_FLAGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The keyboard-modifier `CGEventFlag` a Win32 VK carries, if any.
+#[cfg(target_os = "macos")]
+fn modifier_event_flag(code: u16) -> Option<objc2_core_graphics::CGEventFlags> {
+    use objc2_core_graphics::CGEventFlags;
+    match code {
+        0x10 | 0xA0 | 0xA1 => Some(CGEventFlags::MaskShift),
+        0x11 | 0xA2 | 0xA3 => Some(CGEventFlags::MaskControl),
+        0x12 | 0xA4 | 0xA5 => Some(CGEventFlags::MaskAlternate),
+        0x5B | 0x5C => Some(CGEventFlags::MaskCommand),
+        _ => None,
+    }
+}
+
+/// One transition of the injected-modifier tracker. Returns the flags the
+/// event must carry and the tracker state to store AFTER the event is
+/// posted, in that order:
+/// - modifier down: the mask joins the state before posting (the keydown
+///   itself must already carry it);
+/// - modifier up: the keyup still carries the mask (hardware behavior) and
+///   the state drops it afterwards;
+/// - any other key: post with the currently held masks, state unchanged.
+#[cfg(target_os = "macos")]
+fn next_injected_flags(
+    state: u64,
+    code: u16,
+    down: bool,
+) -> (objc2_core_graphics::CGEventFlags, u64) {
+    use objc2_core_graphics::CGEventFlags;
+    let current = CGEventFlags::from_bits_truncate(state);
+    match modifier_event_flag(code) {
+        Some(f) if down => {
+            let flags = current | f;
+            (flags, flags.bits())
+        }
+        Some(f) => (current | f, state & !f.bits()),
+        None => (current, state),
     }
 }
 
@@ -3294,4 +3355,50 @@ pub fn spawn_remote_session_viewer() -> Result<u32, tetherly_core::CoreError> {
     Err(tetherly_core::CoreError::ScreenRefused(
         "no session viewer on this platform; session continues wire-side only".into(),
     ))
+}
+
+#[cfg(test)]
+mod vk_translation_tests {
+    use super::*;
+
+    #[test]
+    fn win_vk_to_mac_keycode_resolves_every_gesture_vk() {
+        // The gesture backends ship these wire VKs; each must translate or
+        // the sequence silently injects nothing on a mac target.
+        assert_eq!(win_vk_to_mac_keycode(0x09), Some(0x30)); // Tab
+        assert_eq!(win_vk_to_mac_keycode(0x5B), Some(0x37)); // LWIN -> Command
+        assert_eq!(win_vk_to_mac_keycode(0xA2), Some(0x3B)); // LCONTROL -> Control
+        assert_eq!(win_vk_to_mac_keycode(0xC0), Some(0x32)); // OEM_3 -> grave
+        assert_eq!(win_vk_to_mac_keycode(0x25), Some(0x7B)); // Left arrow
+        assert_eq!(win_vk_to_mac_keycode(0x27), Some(0x7C)); // Right arrow
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn injected_modifier_flags_track_down_up_cycles() {
+        use objc2_core_graphics::CGEventFlags;
+
+        // Cmd down: the keydown carries the mask and the tracker holds it.
+        let (post, state) = next_injected_flags(0, 0x5B, true);
+        assert_eq!(post, CGEventFlags::MaskCommand);
+        assert_eq!(state, CGEventFlags::MaskCommand.bits());
+        // Grave tap while Cmd is held: carries the mask, tracker unchanged.
+        let (post, state) = next_injected_flags(state, 0xC0, true);
+        assert_eq!(post, CGEventFlags::MaskCommand);
+        assert_eq!(state, CGEventFlags::MaskCommand.bits());
+        // Cmd up: the keyup still carries the mask; the tracker drops it.
+        let (post, state) = next_injected_flags(state, 0x5B, false);
+        assert_eq!(post, CGEventFlags::MaskCommand);
+        assert_eq!(state, 0);
+
+        // The Shift+Alt+Tab shape: masks accumulate and release independently
+        // (downs Shift, Alt; ups Alt, Shift — the tap helper's exact order).
+        let (_, s) = next_injected_flags(0, 0xA0, true);
+        let (post, s) = next_injected_flags(s, 0xA4, true);
+        assert_eq!(post, CGEventFlags::MaskShift | CGEventFlags::MaskAlternate);
+        let (_, s) = next_injected_flags(s, 0xA4, false);
+        let (post, s) = next_injected_flags(s, 0xA0, false);
+        assert_eq!(post, CGEventFlags::MaskShift);
+        assert_eq!(s, 0);
+    }
 }
