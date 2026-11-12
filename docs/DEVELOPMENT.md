@@ -8271,3 +8271,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 4. **同场加映——SYSTEM 任务的 Session 0 陷阱**：v0.2.22 部署后 Windows daemon 以 SYSTEM 运行但 `SessionId=0`（Session 0 无交互桌面）：低级输入钩子收不到物理鼠标（W→M 漫游看似"隧道通但鼠标死"）、`SendInput` 注入作用在不可见桌面上（Mac 光标消失但 Windows 不出现）。原始设计（`launch_system.ps1` 注释 + 代码）用 `CreateProcessAsUser + SetTokenInformation(TokenSessionId=活动会话) + lpDesktop=winsta0\default` 把 SYSTEM 进程放进交互桌面，但计划任务的动作在历史漂移中变成了直接跑 exe。修复：任务动作改回 `powershell -File E:\code\launch_system.ps1`（默认命令即 `run_tetherly_system.bat`），验证 `session=2 + owner=SYSTEM` 同时成立。**教训：特权验收必须查三个独立维度——owner（谁能注入）、SessionId（钩子/注入作用在哪块桌面）、身份（对端配对不失效）；v0.2.22 只查了第一个。**
 
 5. **杂项**：deploy.sh owner 比较前 `tr -d '\r\n'` 剥离 PowerShell CRLF（"runs as SYSTEM, not SYSTEM" 误报）。生产机 E:\code\run_tetherly_system.bat 与仓库 scripts/run_tetherly_system.bat 内容一致（指向默认 data-dir）。
+
+## 101. 反向接管 7 秒弹回：entry placement 停在反向触发区内 + pinned heartbeat 自动完成 (v0.2.29)
+
+1. **现象**：v0.2.26 部署后，Windows 底边推入首次走通（auto-reverse 触发、接管 ACCEPTED、光标落进 Mac），但 **7 秒后控制权自动弹回 Windows**，用户体感仍是"过不来"。Mac 侧日志：18:16:15.9 `apply: entry move placed rem_y=0 py=0`（进入放置在 Mac 顶边最边缘）→ 18:16:22.3 `auto-reverse: distance gate not armed; requiring long dwell accum_px=0` → 18:16:23.6 `pinned heartbeat completed the dwell; requesting takeover` —— **进入后 7 秒、几乎零位移（accum_px=0）就被反向收回**。
+
+2. **根因**：entry placement 把进入光标放在共享边的**最边缘**（Mac 顶边 py=0 / Windows 底边 py=1079），而反向接管触发区恰好就是这条边的 8px 带（`y<=2 || y<=8&&dy<0` / `y>=h-2 || y>=h-8&&dy>0`）。光标一落地就在触发区内：手部任何微小白噪声（±1px）都满足归一化条件 → gap-continuity dwell 武装 → **pinned heartbeat（v0.2.25 为 Windows 钳位静默而加）在 30ms tick 上把 dwell 自动带到 600ms 完成** → polite takeover 反向发起 → 会话弹回。v0.2.25 的 heartbeat 解决了"钳位静默饿死 dwell"，但同时也把"单次微抖"升级成了"自动完成的驻留"——放置位置与触发区重叠使两者组合成自毁开关。Mac→Windows 方向对称成立（18:12 的 1-2 秒短会话乒乓）。
+
+3. **修复（zone-entered gate，v0.2.29）**：Target 会话开一个 `reverse_zone_dirty` 门（accept 时 `reset_reverse_arming_state` 关闭）；任何把光标放到触发区**外**的物理事件打开它（证明用户已进入屏幕）；门关闭期间 `maybe_auto_reverse` 与 `reverse_dwell_advance`（heartbeat 共用状态机）都不允许武装/延续 dwell。固定后的生产语义：进入 → 光标移入屏幕（开门）→ 推回共享边 → 驻留接管。门与距离武装**独立**——沿共享边横滑会积累 arming 距离但永不离开触发区，门照样拦。不合法的"停在门口直接弹回"与合法的"进入后再推回"从此可区分。
+
+4. **测试**：新增 `test_entry_parked_edge_micro_jitter_cannot_arm_reverse_dwell`（停驻点 ±1px 抖动 8 轮 + heartbeat 在场，永不 fire、门保持关闭）；`test_auto_reverse_fires_unarmed_long_dwell_from_parked_edge` 与 pinned-heartbeat 测试各加一次内部热身事件（zone 开门）+ 清 accum/last_pos（保持 un-armed tier 语义——热身的 679px 跳变会误开距离武装并杀死 dy=0 pinned leniency）。workspace 15 组全绿。
+
+5. **教训**：(a) 修复一个"静默饿死"问题时，若同时给了它自动完成机制（heartbeat），必须重审所有能喂进状态机的事件源——放置回声、手部微抖都从"无效"变成了"有毒"；(b) 驻留/触发类状态机的输入必须先过"位置合法性"门：停在触发区内的位置本身不应能武装触发（v0.2.26 band-safe dock 同一哲学在 Target 侧的对偶）；(c) 两个 session 并行发版时版本号会被占用——发版前 `git log` 确认最新 bump，顺延下一个号。
