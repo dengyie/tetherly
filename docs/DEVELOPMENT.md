@@ -8249,3 +8249,13 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 5. **测试**：`cred::tests` 6 条全绿——新增 `ref_without_vault_entry_recovers_from_identity_bin`（§3 死锁态从文件侧恢复）、`dual_store_repairs_missing_sides_idempotently`（删 bin→vault 恢复、清 vault→文件恢复，`TETHERLY_VAULT_TEST=1` 门控）、`file_only_path_keeps_ref_pointer_coherent`（无 vault 平台的指针修复）；`vault_roundtrips_via_the_ref_pointer` 的"vault 在用则 bin 必不存在"断言已随双形态语义更新。macOS 单测+Windows mingw-w64 交叉编译零警告+双目标 clippy+fmt+串行 workspace 回归全绿。
 
 6. **教训**：(a) 特权链与数据链是两条独立的"漂移面"——启动方式（计划任务/热重启/手工）决定特权，数据目录与存储形态决定身份，任意一条漂移都足以让"之前修好的问题"复现，生产检查必须两条都看；(b) Credential Manager 的 logon-session 隔离使凭据库不能作为跨特权身份存储，跨身份共享必须走文件+显式 ACL；(c) 排查时对"系统级存储读不到"的探测结论要先审视探测者自身的会话上下文。
+
+## 99. v0.2.20 上线两连崩：Win32 ACL/SID API 契约细节 (v0.2.21/v0.2.22)
+
+1. **崩溃一（v0.2.20，0xc0000374 堆损坏）**：热重启后新 daemon 3.5 秒即崩（事件日志 ntdll!RtlReportCriticalFailure）。根因：`GetNamedSecurityInfoW` 返回的 `pDacl` **指向它同时分配的 SECURITY_DESCRIPTOR 缓冲区内部**，契约只允许 `LocalFree(ppSecurityDescriptor)` 释放整块；`grant_identity_file_system_read` 却 `LocalFree(old_acl)` 释放内部指针 → 每次写状态文件（`restrict_file` 挂在**每个** `atomic_write` 上：identity.bin、trusted.json、routes.json 全走）都破坏堆。教训：Win32 "返回结构内部指针 + 同时返回父缓冲区指针" 的 API，只能 free 父缓冲区；ACL API 的 free 契约要逐条核对（SetEntriesInAclW 的 new_acl 独立分配，free 它是对的）。
+
+2. **崩溃二（v0.2.21，静默失效）**：SID 权限授予从未真正生效。`sid_from_string` 把 6 字节 IdentifierAuthority 用 `u64::to_be_bytes()` 全量 8 字节写入 → SID 结构整体错位 2 字节，产物在注册表里解析成 `S-1-0-*` 垃圾 trustee（Get-Acl 可见但无法映射账户名）。SYSTEM 当时能读文件纯属目录继承 FullControl 兜底。修复：`to_be_bytes()[2..]`（48-bit 高位为零）。教训：手拼二进制结构必须对齐 API 文档的字段宽度；验证要直接读回（Get-Acl 看 trustee 解析），不能只看 `SetNamedSecurityInfoW` 返回 0。
+
+3. **部署链杂项**：deploy.sh owner 检查字符串比较写 `! [ "$X" = "SYSTEM" ]` 时 PowerShell 输出带回车导致偶发误报，改 `!=`；v0.2.20/21 写入的 `S-1-0-*` 死 ACE 用 `Get-Acl | PurgeAccessRules | Set-Acl` 清除，随后 hot-restart 触发 v0.2.22 重写 routes/trusted.json，ACL 中出现正确的 `NT AUTHORITY\SYSTEM` + `BUILTIN\Administrators` Read ACE（修复生效实锤）。identity.bin 因继承 ACE 已含 FullControl 且 repair 幂等未重写，其正确 ACE 在下次身份变更时写入。
+
+4. **v0.2.22 终态**：Windows daemon pid 284648，**owner=SYSTEM + device_id=tdev_rguu 不变 + Mac 隧道 peers=1**，三个目标同时达成；保护进程 3/3 完好；Mac 端 0.2.21→未动（`--target windows` 单独部署）。待用户实测 UAC 弹窗点击验收。
