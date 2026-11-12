@@ -383,13 +383,25 @@ impl Node {
         // matched no zone in `maybe_auto_reverse` / the drive normalization
         // (both read `engine.edge()`) and was silently swallowed — "Windows
         // bottom cannot reach the Mac", with zero crossing logs. Resolve the
-        // same ladder on accept: the controller's requested edge (the edge
-        // IT crossed = this side's shared edge), then local policy, then the
-        // topology neighbor for this peer, then Right. Also seed
-        // `input_peer` so the drive path's topology fallback resolves while
-        // the session lives (the channel may not be dialed yet).
+        // same ladder on accept: the controller's requested edge INVERTED
+        // (the boundary it crossed is this side's OPPOSITE edge — the mac's
+        // Top crossing and windows' Bottom sit on the same physical
+        // boundary), then local policy, then the topology neighbor for this
+        // peer, then Right. Also seed `input_peer` so the drive path's
+        // topology fallback resolves while the session lives (the channel
+        // may not be dialed yet).
+        //
+        // Production 2026-11-12 (v0.2.22): arming the engine with the
+        // controller's edge AS SENT pinned windows' shared edge to Top —
+        // the controller's own side of the boundary. Every bottom-edge
+        // push matched no zone (`_` arm, silent) and the reverse takeover
+        // could never fire: "windows mouse never leaves windows". The
+        // inversion is symmetric: the reverse takeover sends THIS side's
+        // engine edge (Bottom) as requested_edge, and the mac's accept
+        // inverts it back to its own Top.
         let target_edge: tetherly_core::ScreenEdge = if let Some(e) = frame.requested_edge {
-            e.into()
+            let screen_edge: tetherly_core::ScreenEdge = e.into();
+            screen_edge.opposite()
         } else if let Some(e) = policy.edge.as_deref() {
             e.parse::<tetherly_core::ScreenEdge>()
                 .unwrap_or(tetherly_core::ScreenEdge::Right)
@@ -4477,12 +4489,16 @@ mod tests {
             },
         );
 
-        // The mac's takeover request names the edge IT crossed INTO windows
-        // — windows' bottom = the mac's Top request edge.
+        // The mac's takeover request names the edge IT crossed — its own
+        // Top (the mac sits below windows; crossing Top enters windows).
+        // The accept path must INVERT it: windows' shared edge is Bottom,
+        // the opposite side of the same physical boundary (production
+        // 2026-11-12: v0.2.22 armed the engine with Top as sent and the
+        // bottom-edge reverse takeover could never fire).
         let frame = InputTunnelRequestFrame {
             session_id: "tun_target_edge".into(),
             client_device_id: peer_id.to_string(),
-            requested_edge: Some(DisplayEdge::Bottom),
+            requested_edge: Some(DisplayEdge::Top),
             entry_x: None,
             entry_y: None,
             timestamp_ms: 1,
@@ -4494,14 +4510,14 @@ mod tests {
             let session = guard.as_ref().expect("tunnel session accepted");
             assert_eq!(session.role, InputTunnelRole::Target);
         }
-        // The engine edge must now be the request's edge — NOT the default
-        // Right.
+        // The engine edge must now be the INVERTED request edge (Bottom) —
+        // NOT the request as sent (Top) and NOT the default Right.
         {
             let engine = node.shared.input_engine.lock().unwrap();
             assert_eq!(
                 engine.edge(),
                 tetherly_core::ScreenEdge::Bottom,
-                "accept must arm the engine with the session's shared edge"
+                "accept must arm the engine with the target-side shared edge (request inverted)"
             );
         }
         assert_eq!(
@@ -4549,6 +4565,63 @@ mod tests {
             fired,
             "with the accept-armed edge, the sustained bottom-edge push must fire the reverse takeover"
         );
+    }
+
+    // Inversion symmetry (production 2026-11-12, v0.2.22): the accept path
+    // must arm the engine with the request's OPPOSITE edge, whichever
+    // direction the pair runs. The mac→win regression above covers Top
+    // request → Bottom target; this one covers the mirrored Bottom request
+    // → Top target (the reverse takeover's own attach: windows crossed its
+    // Bottom into the mac, whose shared edge is Top). With the request
+    // applied as sent the mac's engine would sit on Bottom and the mac's
+    // own top-edge return push would silently match no zone — the same
+    // freeze one level flipped.
+    #[tokio::test]
+    async fn test_tunnel_accept_inverts_request_edge_bottom_request() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("edge-inv-b");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("edge-inv-b-peer");
+        let peer_id = other.identity().device_id().clone();
+
+        node.shared.topology_layout.lock().unwrap().display = DisplayRect::new(1920, 1080, 1.0);
+        node.shared
+            .topology_layout
+            .lock()
+            .unwrap()
+            .neighbors
+            .insert(
+                DisplayEdge::Top,
+                EdgeNeighbor {
+                    peer_id: peer_id.to_string(),
+                    peer_edge: DisplayEdge::Bottom,
+                    offset: 0,
+                },
+            );
+        assert!(
+            node.input_policy().edge.is_none(),
+            "test models the no-policy-edge production box"
+        );
+
+        // The takeover's request: the controller (windows) crossed ITS
+        // Bottom edge into the mac.
+        let frame = InputTunnelRequestFrame {
+            session_id: "tun_edge_inv".into(),
+            client_device_id: peer_id.to_string(),
+            requested_edge: Some(DisplayEdge::Bottom),
+            entry_x: None,
+            entry_y: None,
+            timestamp_ms: 1,
+        };
+        node.receive_input_tunnel_request(&peer_id, frame).await;
+
+        {
+            let engine = node.shared.input_engine.lock().unwrap();
+            assert_eq!(
+                engine.edge(),
+                tetherly_core::ScreenEdge::Top,
+                "accept must invert the request: Bottom crossed by the controller = Top on this side"
+            );
+        }
     }
 
     // Wire-level regression: the attach frame must carry the entry coords to
