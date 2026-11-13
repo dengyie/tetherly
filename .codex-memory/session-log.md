@@ -1055,3 +1055,10 @@
 - Deploy: ci 43446075823 绿 → tag v0.2.33 → release 43448044509 绿 → deploy EXIT=0；Mac pid 10880 / Windows pid 274908 SYSTEM sid=2；受保护进程不动。
 - Next: 用户真机验收 §105.7。
 - Blockers: None.
+
+## 2026-11-14 - v0.2.34（§106）
+- Context: 用户 v0.2.33 真机反馈：首次进 Mac 仍卡；Mac 遗留光标。
+- Work: 日志定位 16:01:51.142 钉边心跳误抢控制器 → Windows 降级 → 16:03:07–16:03:14 慢反向；新增 `park_target_cursor_after_leave` + macOS idle hide/reveal + `reverse_heartbeat` trace；TDD 两个新测试先红后绿。
+- Results: fmt / clippy 0 错误；core 321、node 220、集成全绿。commit 983c37c。
+- Deploy: ci 43461276452 绿 → tag v0.2.34 → release 43463401787 绿 → deploy EXIT=0；Mac pid 61015 / Windows pid 309292 SYSTEM sid=2；受保护进程不动。
+- Next: 用户按 §106.7 真机验收。

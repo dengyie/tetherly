@@ -489,3 +489,9 @@
 - Decision: (1) 光标顺序按平台：Windows 先隐藏后 warp、先 warp 后恢复；macOS 保持原顺序（解关联/重关联语义已验证）。(2) 新增 `reverse_local_owner` 状态，区分"控制器光标停放在本屏"与"本地用户持有光标"；后者没有停放光标可保护，反向接管与控制器同口径（`fast_push_delta_px` 快推、`delay_ms` 短驻留、1 s 冷却），前者 §101/§103 闸门全部保留。不复用 `zone_gate` 语义，新增 trace kind `reverse_owner` / `reverse_fast`。(3) `pump_exit ... outbound slot dropped` 判定为正常拆除，不作故障指标。
 - Rejected: 缩短全局 600 ms 未武装驻留（会削弱控制器在屏的防误触）；改 Mac watcher 延迟 attach（竞态落回的正是本地持有光标的 Target，快路径已覆盖）。
 - Consequence: phase3 m3_11 的距离门段落（预臂 Target）按新语义删去，控制器在屏防误触由 node 单测 `controller_on_screen_disables_fast_reverse_until_leave` 覆盖。
+
+## 2026-11-14 - v0.2.34：控制器 Leave 时 Mac Target 光标 park 到中心并隐藏（DEVELOPMENT.md §106）
+- Context: v0.2.33 真机：Windows 首次进 Mac 仍卡；回到 Windows 后 Mac 遗留指针。日志 16:01:51.142 Mac 钉边心跳误触发反向接管（无越边跟随），Windows 被降级为 Target。
+- Decision: 根因是 Leave 后 Mac 光标停在共享边钳位带。macOS Target 在 Leave 时 warp 到屏幕中心 + 清钉边锚点 + 隐藏到下一次物理指针事件（tap reveal）或控制器 Enter（reveal）；Windows 不 park（光标是用户主指针）。
+- Rejected: 收紧 §105 本地持有光标的 `pinned_open`/短驻留（会把 Windows 推边快路径一起削弱；光标离开钳位带即可消除误触面）；用 NSCursor setHiddenUntilMouseMoves（后台进程不生效）。
+- Consequence: IDLE_HIDDEN 与 CURSOR_HIDDEN 两套 CGDisplayHide 计数分开配平；seat capture 前先 reveal。

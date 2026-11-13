@@ -2,7 +2,14 @@
 
 ## 当前接手基线（截至 2026-11-13）
 
-> **v0.2.33（31e42ae，2026-11-13 双端已部署）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+> **v0.2.34（983c37c，2026-11-14 双端已部署）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+
+## v0.2.34 真机反馈修复（2026-11-14，DEVELOPMENT.md §106）
+- [x] **A · Mac Target 在控制器 Leave 时 park+hide**：`park_target_cursor_after_leave`（`TARGET_PARK_ON_LEAVE = cfg!(macos)`，warp 中心 + 清钉边锚点 + `hide_cursor_until_local_motion`；tap 物理事件 / 控制器 Enter reveal）。根因：Leave 后光标停在顶边 → 遗留指针 + 16:01:51.142 钉边心跳误抢控制器 → Windows 降级为 Target、下次进入慢。测试 `controller_leave_parks_target_cursor_off_the_shared_edge`、`controller_leave_park_disabled_is_a_no_op`。
+- [x] **B · 心跳 trace**：`reverse_heartbeat`。
+- [x] 本机验证：fmt、clippy 0 错误；core 321、node 220；五组集成测试全绿。
+- [x] ci 43461276452 绿 → tag v0.2.34 → release 43463401787 绿 → deploy EXIT=0：Mac 0.2.34 pid 61015 accessibility_trusted；Windows 0.2.34 pid 309292 SYSTEM sid=2；受保护三进程不动。
+- [ ] 真机验收 v0.2.34（§106.7）：Mac 无遗留光标；无误抢；Windows 推底边直接进入。
 
 ## v0.2.33 真机反馈修复（2026-11-13，DEVELOPMENT.md §105）
 - [x] **A · Windows 先隐藏后 park warp**：`enter_remote_seat_capture` / `leave_remote_seat_capture` + `CURSOR_HIDE_AROUND_WARPS = cfg!(windows)` + `HookControl::hide_cursor`；回归先 warp 回本地再恢复光标。日志根因：warp 13:05:10.998 → hidden 13:05:11.004。测试 `remote_seat_capture_orders_hide_and_restore_around_warps`。
@@ -10,7 +17,7 @@
 - [x] **C · review (d)**：每次 attach 一条 `channel_open` 正确；`pump_exit: controller pump outbound slot dropped` 是回归时上一会话通道的正常拆除；§104.7 (d) 已更正。
 - [x] 本机验证：fmt、clippy -D warnings 0 错误；core 321、node 218；loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65 全绿。
 - [x] ci.yml 43446075823 `31e42ae` 全绿 → tag v0.2.33 → release 43448044509 绿 → deploy EXIT=0：Mac 0.2.33 pid 10880 accessibility_trusted；Windows 0.2.33 pid 274908 SYSTEM sid=2、`[cursor] restored (force=true)`；受保护三进程不动。
-- [ ] 真机验收 v0.2.33（§105.7）：(a) 进入/回归 Windows 中央无光标闪烁；(c) Windows 本地光标推底边一次即进入 Mac，Windows trace 有 `reverse_fast`；(d) 每次 attach 一条 `channel_open`，回归时一条 `pump_exit ... slot dropped` 属正常。
+- [x] 真机验收 v0.2.33（§105.7，用户 2026-11-14 反馈 → §106）：(a)(b)(d) ✓；首次进入仍卡、Mac 遗留光标 ✗ → v0.2.34。原条目：(a) 进入/回归 Windows 中央无光标闪烁；(c) Windows 本地光标推底边一次即进入 Mac，Windows trace 有 `reverse_fast`；(d) 每次 attach 一条 `channel_open`，回归时一条 `pump_exit ... slot dropped` 属正常。
 - [ ] 观察项：Mac watcher 自动重连抢在 Windows 再预臂前 attach（13:05:42）——快路径已使其无感，若仍出现反复抢角色再改 watcher。
 
 ## v0.2.32 真机三症状修复（2026-11-13，DEVELOPMENT.md §104）

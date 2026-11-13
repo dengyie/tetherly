@@ -1,7 +1,8 @@
 # Project State
 
-## Release Baseline (2026-11-13)
-- **v0.2.33**（tag → `31e42ae`，2026-11-13；上一基线 v0.2.32 / `afe2279`）。SSOT：`docs/DEVELOPMENT.md` 顶部"当前接手基线"+ §101–§105。
+## Release Baseline (2026-11-14)
+- **v0.2.34**（tag → `983c37c`，2026-11-14；上一基线 v0.2.33 / `31e42ae`）。SSOT：`docs/DEVELOPMENT.md` 顶部 + §101–§106。v0.2.34（§106）：macOS Target 在控制器 Leave 时光标 warp 到中心、清钉边反向锚点、隐藏直到下一次物理事件/控制器 Enter（修 Mac 遗留指针 + 钉边心跳误抢控制器导致 Windows 首次进入卡）；心跳 trace `reverse_heartbeat`。本机 core 321 / node 220 / 集成全绿。
+- v0.2.33 已部署双端（tag → `31e42ae`，2026-11-13）。
 - v0.2.33（§105）：Windows 进入漫游先 `hide_cursor` 再中心 park warp、回归先 warp 再恢复光标（修中央闪烁）；Target 本地持有光标（`reverse_local_owner`）时反向推边与控制器同口径——快推立即接管、钉边短驻留、冷却 1 s（修底边首次进入 3.6 s 卡顿）；§104.7 (d) 口径更正（`pump_exit ... slot dropped` 为回归正常拆除）。本机 core 321 / node 218 / 集成全绿。
 - v0.2.32 已部署双端（tag → `afe2279`，2026-11-13；Mac pid 86032 / Windows pid 311228 SYSTEM sid=2；上一基线 v0.2.31 / `c41af3d`）。SSOT：`docs/DEVELOPMENT.md` 顶部"当前接手基线"+ §101–§104。
 - 🟢 Windows→Mac 鼠标方向已解决（v0.2.29 `7b71531` zone-entered gate，用户真机确认）。
