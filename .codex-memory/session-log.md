@@ -1090,3 +1090,9 @@
 - Results: fmt / clippy 0 错误；cargo test --workspace 全绿（core 324）。
 - Deploy: ci 43496484032 绿 → tag v0.2.38 → release 43498423490 绿 → deploy EXIT=0；Mac pid 16286；Windows pid 288460 SYSTEM；受保护进程不动。
 - Next: 用户按 §110.7 真机验收。
+
+## 2026-11-14 v0.2.39（诊断版）
+- Context: 用户：Mac 光标先进 Windows 后，Windows 鼠标划向 Mac 要 10–20 s 才能停住。
+- Work: v0.2.38 日志显示 10 次进入均在 0.4–1.2 s 内被 push≈required 送回；原因未定，补 ReturnDiag 笔划统计、relay 状态和 Mac 光标可见性证据（§111）。
+- Deploy: ci 43505914478 → tag v0.2.39 → release 43507848391 → deploy EXIT=0；Mac pid 89356；Windows pid 308452 SYSTEM；受保护进程不动。
+- Next: 用户复现后按 §111.5 判读。
