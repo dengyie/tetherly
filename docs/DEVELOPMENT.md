@@ -2,10 +2,11 @@
 
 ## 当前接手基线（维护于 2026-11-14）
 
-- **发布基线：v0.2.36（tag → `7f709df`，2026-11-14 双端已部署，见 §108），最高 ADR-138。** `Cargo.toml` 与已发布 tag 为版本依据；下文 v1.x / v2.x 是历史设计文档版本，不能作为当前二进制版本。本块下方 2026-11-10 起的逐版本条目保留为历史演进记录，其中"未发布/未提交"措辞均为当时状态，v0.2.8–v0.2.30 已全部经 CI tag 发布并经 `scripts/deploy.sh --target all --tag vX.Y.Z` 部署。
+- **发布基线：v0.2.37（tag → `3a2ac2f`，2026-11-14 双端已部署，见 §109），最高 ADR-138。** `Cargo.toml` 与已发布 tag 为版本依据；下文 v1.x / v2.x 是历史设计文档版本，不能作为当前二进制版本。本块下方 2026-11-10 起的逐版本条目保留为历史演进记录，其中"未发布/未提交"措辞均为当时状态，v0.2.8–v0.2.30 已全部经 CI tag 发布并经 `scripts/deploy.sh --target all --tag vX.Y.Z` 部署。
 - **🟢 Windows→Mac 鼠标方向已解决（v0.2.29，2026-11-13 真机验收）：** 2026-11-13 早间移交时的"Windows 物理鼠标不能驱动 Mac 光标"根因是 §101 的 7 秒弹回（entry placement 落在反向触发区 + pinned heartbeat 自动完成驻留）；`7b71531` zone-entered gate 修复后双端 `/api/health` version=v0.2.29，Mac 日志 `apply: enter` → 稳定 Remote 会话 → 用户正常推回，无弹回。生产机验收由用户实测确认（"Windows 鼠标已经可以接入 mac 了"）。
 - **v0.2.30（§102）：** (A) core Remote 座位冗余 Move 帧抑制（归一化远端坐标不变就不发帧，消灭 `lone edge-clamp move` 四连与零位移抖动帧）；(C) 输入引擎决策环 `GET /api/input/trace` + 双 CLI `tetherly input trace`（64 条内存环，覆盖 crossing / seat / attach_kick / park_warp / release / rescue / reconcile / apply_enter / push_*），SYSTEM 守护进程排障不再依赖 RUST_LOG 与 ssh 翻日志；(B) 回归后 attach-kick 冷却**明确不做**（理由见 §102）。
 - **v0.2.31（§103）：** 针对用户真机两症状——(1) Windows 鼠标首次进入 Mac 要很久（22:28 日志 8 s `dwell gated` + 进入后 0.9–3.3 s 弹回）：反向触发区闸门改锚定在控制器**已应用的 Enter**（预臂 accept 无 entry 坐标时闸门保持开启，Enter 关闸、Leave 重开），core 新增进入回归宽限 `entry_return_grace`（node 由 `EdgeCrossingConfig.entry_return_grace_ms` 配置，默认 1000 ms，`/api/topology/config` 可调，0 为旧即时回归）；(2) Windows 鼠标在 Mac 里左键点不动：macOS 注入 `move_abs` 在按键按住期间改发 `*MouseDragged`（选字/拖窗/拖放此前对 AppKit 不可见），并补 Button 链路埋点 `push_button` / `apply_button` / `apply_reject` 与 `/api/input` 新字段 `applied / dropped / rx_buttons / rx_wheel / rx_keys / tx_buttons`，外加 `channel_open` / `pump_exit` / `zone_gate` 决策环条目（§102.7 `m3_12` 取证前置）。Mac 再预臂冷却（选项 iii）按 §102.4 继续不做。
+- **v0.2.37（§109）：** 针对"Mac 控制 Windows 时被 Windows 接管，之后 Windows 鼠标回 Mac 卡很久"：降级后 Windows 光标进 Mac 时仍是护罩留下的空白 NSCursor，不可见，用户在菜单栏来回弹 8 轮。修复：释放会话、控制器 Enter、光标重新关联时均强制箭头光标并解除残留捕获。
 - **v0.2.36（§108）：** 针对"Mac 鼠标停在 Windows 上时，Windows 鼠标推底边进不了 Mac"：Mac 控制 Windows 期间（17:52:17–17:56:03）Windows 端零条 auto-reverse 日志。真实扫入先在钳位行之前一行进入边带（dy>0 开启驻留，未记钉边锚点），下一帧才落到钳位行（走 contiguous 分支，同样不记锚点），随后 Windows LL hook 静默，心跳无锚可续，驻留饿死。修复：活跃驻留中首次落到钳位行即补记锚点，交给钉边心跳完成。
 - **v0.2.35（§107）：** 针对 v0.2.34 真机"第一次 Windows 鼠标进入 Mac 仍卡很久"：日志 16:55:28.158 `local-owner fast push` → 16:55:31.067 `requesting polite takeover` 之间纯同步代码耗时 2909 ms（常态 <8 ms），同窗口其他同步步骤全线 4–50× 变慢——进程级饥饿而非决策逻辑。home-win 上 tetherly 被计划任务启动链继承为 **BelowNormal**（与 SRBMiner 同级）且工作集被裁到 6.5 MB。修复：守护进程启动自提 `ABOVE_NORMAL_PRIORITY_CLASS`、退出 EcoQoS 节流、`SetProcessWorkingSetSizeEx` 固定 64 MB 常驻下限（日志 `daemon responsiveness`）。
 - **v0.2.34（§106）：** 针对用户 v0.2.33 真机反馈——(1) Windows 鼠标第一次进 Mac 仍卡很久；(2) Windows 鼠标进 Mac 再回 Windows，Mac 遗留一个光标。同一根因：控制器 Leave 后 Mac 光标停在共享顶边（可见遗留），且处在钳位带上、`reverse_local_owner`=true，一次零位移触碰即被钉边心跳在 ~100 ms 内完成短驻留，**Mac 抢走控制器角色**（16:01:51.142 `pinned heartbeat completed the dwell`，其后 60 s 无越边），Windows 降为 Target，下一次进入只能走慢的 Windows 侧反向接管（16:03:07 → 16:03:14）。修复：macOS Target 在控制器 Leave 时把光标 warp 到屏幕中心、清空钉边锚点、隐藏光标直到下一次物理鼠标事件或控制器 Enter；心跳触发补 trace `reverse_heartbeat`。
@@ -8413,3 +8414,19 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 6. **发布与部署（2026-11-14）**：commit `7f709df`；ci 43479518747 三平台 + deny + android 全绿；tag v0.2.36 → release 43481580990 全绿；`deploy.sh --target all --tag v0.2.36` EXIT=0。Mac 0.2.36 pid 23482；Windows 0.2.36 pid 267304（307384 热替换），SYSTEM；受保护进程 PID 不变（komari 263512 / SRBMiner 311184 / mihomo 268016）。
 7. **真机验收口径**：Mac 鼠标停在 Windows 上时，Windows 物理鼠标从屏内往下推底边，约 0.6 s 内进入 Mac；Windows 日志出现 `auto-reverse: pinned heartbeat completed the dwell`（trace `reverse_heartbeat`）。
 8. **遗留观察**：17:56:50–54 Mac 离开后的快推接管之后出现 4 次 0.5–1.1 s 内的往返弹回（Windows `crossing fired at hook (960,538) edge=Bottom`），trace 环已被覆盖，证据不足，留待下次复现时抓 `/api/input/trace`。
+
+
+## 109. Mac 漫游 Windows 被接管后，Windows 鼠标进 Mac 光标不可见、反复弹回 (v0.2.37)
+
+1. **用户反馈（v0.2.36 真机）**：Mac 鼠标在本机时，Windows 鼠标进 Mac 没问题；但如果 Mac 当时正控制 Windows，Windows 鼠标接管后再想回到 Mac，会卡很久。
+2. **日志证据（2026-11-13 18:34:53–18:35:18 UTC，Mac 时钟）**：Mac 先被 Windows 礼貌接管降级（`input tunnel takeover: releasing local controller session`）；随后 25 s 内出现 8 轮 `apply: enter` → `entry move placed rem_y=0..11`（落在菜单栏）→ 0.5–1 s 后 Windows `crossing hook=(960,537) delta=(0,-3)` → `roaming returned to local seat` → `attach_kick` 再进入；期间 Mac 偶尔经 local-owner 快推或长驻留抢回控制。用户看不到光标，只能来回推，表现为"卡很久"。
+3. **根因**：Mac 漫游 Windows 期间，`set_mouse_cursor_associated(false)` 会显示光标护罩（level-1000 透明窗口，并设置空白 `NSCursor`），同时 `CGDisplayHideCursor` 隐藏硬件光标。恢复路径（associate）会撤掉护罩、`CGDisplayShowCursor`、unhide，但**从未把 NSCursor 设回箭头**。被接管降级走的是 `input_stop` → `release_input_tunnel_local`，也没有任何光标恢复的 trace；之后 Windows 驱动的光标在 Mac 上仍是空白图像，看不见。
+4. **修复**：
+   - `cursor_shield::set_arrow_cursor_now()`：在主线程调用 `NSCursor::arrowCursor().set()`，非主线程时经 `DispatchQueue::main()` 异步执行；非 macOS 为空操作。
+   - `set_mouse_cursor_associated(true)` 恢复路径末尾调用它。
+   - `release_input_tunnel_local`：先 `disarm_input_capture()` 再 `restore_arrow_cursor()`；若释放的是 Controller 会话，记 trace `cursor_restore grant released: <reason>`。
+   - `note_controller_entered`：在 `reveal_idle_hidden_cursor` 之后记 trace `cursor_reveal`，`disarm_input_capture()` 清掉降级残留的捕获态，然后强制箭头。
+5. **测试**：`controller_enter_restores_a_visible_cursor`（`note_controller_entered` 后 trace 含 `cursor_reveal`）、`demoted_roaming_controller_restores_the_cursor`（引擎越过 Top 边并持有 Controller 会话，`input_stop` 后 trace 含 `cursor_restore`），两者先 RED 后 GREEN。fmt / clippy `-D warnings` 0 错误；workspace 全量测试全绿（node 226）。
+   - CI 附带修复：`tests/phase3.rs::m3_9_reverse_control_takeover_flips_roles_cleanly` 第 3 步在角色翻转后立刻断言新 controller 的 channel 已打开；但 channel 要等对端 accept 响应才打开，macOS 慢 runner 上会竞态失败（ci 43486556104）。已改为与第 1 步相同的 3 s 轮询。
+6. **发布与部署（2026-11-14）**：commit `ad2ac01`（修复）+ `3a2ac2f`（m3_9 轮询）；ci 43488480812 三平台 + deny + android 全绿；tag v0.2.37 → release 43490201522 全绿；`deploy.sh --target all --tag v0.2.37` EXIT=0。Mac 0.2.37 pid 57798；Windows 0.2.37 pid 308400（267304 热替换），SYSTEM、AboveNormal、MinWS 64 MB；受保护进程 PID 不变（komari 263512 / SRBMiner 311184 / mihomo 268016）。
+7. **真机验收口径**：Mac 鼠标先进 Windows 控制一会儿 → 拿 Windows 鼠标接管 → 推底边进 Mac：Mac 上立即出现可见箭头光标，不再在菜单栏来回弹；Mac trace 依次出现 `cursor_restore grant released: input stopped` 与 `cursor_reveal controller entered`。

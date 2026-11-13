@@ -1076,3 +1076,10 @@
 - Results: fmt / clippy 0 错误；cargo test --workspace 全绿（node 224、core 321）。
 - Deploy: ci 43479518747 绿 → tag v0.2.36 → release 43481580990 绿 → deploy EXIT=0；Mac pid 23482；Windows pid 267304 SYSTEM；受保护进程不动。
 - Next: 用户按 §108.7 真机验收；弹回观察见 §108.8。
+
+## 2026-11-14 - v0.2.37（§109）
+- Context: 用户：Mac 在控制 Windows 时被 Windows 接管，之后 Windows 鼠标回 Mac 会卡很久。
+- Work: Mac 日志定位降级后 8 轮进入→弹回；根因为护罩空白 NSCursor 未恢复；新增 `set_arrow_cursor_now` / `restore_arrow_cursor` 并在三处调用；两条测试 RED→GREEN；phase3 m3_9 第 3 步改轮询（macOS CI 43486556104 竞态红）。
+- Results: fmt / clippy 0 错误；cargo test --workspace 全绿（node 226）；ci 43488480812（3a2ac2f）三平台 + deny + android 全绿。
+- Deploy: tag v0.2.37 → release 43490201522 绿 → deploy EXIT=0；Mac pid 57798；Windows pid 308400 SYSTEM；受保护进程不动。
+- Next: 用户按 §109.7 真机验收。

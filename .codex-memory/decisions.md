@@ -507,3 +507,9 @@
 - Decision: `reverse_dwell_advance` contiguous 分支在 `record_anchor` 且无锚点时补记 `(now,x,y)`，交由既有心跳续驻留。
 - Rejected: 物理穿越即翻 `reverse_local_owner`（会放宽控制端在屏时的快推护栏，`controller_on_screen_disables_fast_reverse_until_leave` 语义被破坏）；缩短驻留/冷却（与根因无关）。
 - Consequence: 驻留时长/区域门/距离门/冷却不变；只修心跳无锚的饿死路径。
+
+## 2026-11-14 - v0.2.37：释放/进入时强制恢复 macOS 箭头光标（DEVELOPMENT.md §109）
+- Context: Mac 漫游 Windows 后被 Windows 接管降级，Windows 驱动的光标进 Mac 不可见，用户在菜单栏来回推 8 次。
+- Decision: 在 associate 恢复路径、会话释放、控制器 Enter 三处统一 `NSCursor::arrowCursor().set()`（主线程或 main queue 异步），并在释放/进入时 `disarm_input_capture`。
+- Rejected: 只在 Windows 引擎加进入后回归迟滞（症状缓解，光标仍不可见）；在护罩隐藏时重置光标（护罩在降级前可能已隐藏，覆盖不全）。
+- Consequence: 多一次幂等的 NSCursor set；非 macOS 无变化。

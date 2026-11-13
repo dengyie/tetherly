@@ -2,7 +2,13 @@
 
 ## 当前接手基线（截至 2026-11-13）
 
-> **v0.2.36（2026-11-14，§108）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+> **v0.2.37（2026-11-14，§109）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+
+## v0.2.37 Mac 漫游被接管后 Windows 光标在 Mac 不可见、反复弹回（2026-11-14，DEVELOPMENT.md §109）
+- [x] 日志：18:34:53 Mac 被接管降级后 25 s 内 8 轮 apply: enter → 菜单栏 rem_y=0..11 → 0.5–1 s 内弹回 Windows。
+- [x] 根因：护罩空白 NSCursor 从未恢复为箭头；降级路径无光标恢复。修复：associate / release_input_tunnel_local / note_controller_entered 强制箭头 + 解除捕获。测试 2 个（RED→GREEN）；phase3 m3_9 改轮询修 CI 竞态。
+- [x] ci 43488480812 绿 → tag v0.2.37（3a2ac2f）→ release 43490201522 绿 → deploy EXIT=0：Mac pid 57798；Windows pid 308400 SYSTEM AboveNormal；受保护三进程不动。
+- [ ] 真机验收：Mac 控制 Windows → Windows 接管 → 推底边进 Mac，立即可见箭头，无弹回循环。
 
 ## v0.2.36 控制端光标在屏时 Windows 推边进不了 Mac（2026-11-14，DEVELOPMENT.md §108）
 - [x] 日志：Mac 控制 Windows 17:52:17–17:56:03 期间 Windows 零条 auto-reverse 日志；Mac 离开后 17:56:50 本地快推即时接管。
