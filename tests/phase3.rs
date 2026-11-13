@@ -692,11 +692,17 @@ async fn m3_9_reverse_control_takeover_flips_roles_cleanly() {
     );
 
     // 3. Exactly one outbound channel exists, and it belongs to the NEW
-    //    controller. The demoted side must have released its own.
-    assert!(
-        client.input_channel_open_sync(),
-        "new controller must hold the outbound channel"
-    );
+    //    controller. The demoted side must have released its own. As in
+    //    step 1, the new controller's channel opens on the peer's accepted
+    //    response, which can land after the role flip on a slow runner
+    //    (macOS CI 2026-11-13 run 43486556104) — poll, don't assert.
+    let start = std::time::Instant::now();
+    while !client.input_channel_open_sync() {
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("new controller must hold the outbound channel");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(
         !server.input_channel_open_sync(),
         "demoted controller must have released its outbound channel"
