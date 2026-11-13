@@ -1,6 +1,7 @@
 # Project State
 
 ## Release Baseline (2026-11-14)
+- **v0.2.35**（§107）：Windows 守护进程启动自提 AboveNormal 优先级、退出 EcoQoS、固定 64 MB 工作集下限。根因：计划任务链继承 BelowNormal + 工作集被裁到 6.5 MB，闲置后首次推边 2.9 s 同步停顿。
 - **v0.2.34**（tag → `983c37c`，2026-11-14；上一基线 v0.2.33 / `31e42ae`）。SSOT：`docs/DEVELOPMENT.md` 顶部 + §101–§106。v0.2.34（§106）：macOS Target 在控制器 Leave 时光标 warp 到中心、清钉边反向锚点、隐藏直到下一次物理事件/控制器 Enter（修 Mac 遗留指针 + 钉边心跳误抢控制器导致 Windows 首次进入卡）；心跳 trace `reverse_heartbeat`。本机 core 321 / node 220 / 集成全绿。
 - v0.2.33 已部署双端（tag → `31e42ae`，2026-11-13）。
 - v0.2.33（§105）：Windows 进入漫游先 `hide_cursor` 再中心 park warp、回归先 warp 再恢复光标（修中央闪烁）；Target 本地持有光标（`reverse_local_owner`）时反向推边与控制器同口径——快推立即接管、钉边短驻留、冷却 1 s（修底边首次进入 3.6 s 卡顿）；§104.7 (d) 口径更正（`pump_exit ... slot dropped` 为回归正常拆除）。本机 core 321 / node 218 / 集成全绿。

@@ -57,6 +57,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_System_Threading",
+    # raise_daemon_responsiveness (platform.rs): hard working-set floor.
+    "Win32_System_Memory",
     # PlatformSysProbe (platform.rs): process RSS/cpu-time, thread snapshot,
     # and host physical memory. Feature flags on the already-present
     # windows-sys crate, so no new package enters the lockfile.

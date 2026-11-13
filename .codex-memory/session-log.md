@@ -1062,3 +1062,8 @@
 - Results: fmt / clippy 0 错误；core 321、node 220、集成全绿。commit 983c37c。
 - Deploy: ci 43461276452 绿 → tag v0.2.34 → release 43463401787 绿 → deploy EXIT=0；Mac pid 61015 / Windows pid 309292 SYSTEM sid=2；受保护进程不动。
 - Next: 用户按 §106.7 真机验收。
+
+## 2026-11-14 - v0.2.35（§107）
+- Context: 用户：第一次 Windows 鼠标进入 Mac 仍卡很久。
+- Work: 日志对比定位 2.9 s 同步停顿为进程级饥饿；只读探针确认 BelowNormal + WS 6.5 MB；新增 `raise_daemon_responsiveness` 及测试。
+- Results: fmt / clippy 0 错误；cargo test --workspace EXIT=0（838 passed, 0 failed）。

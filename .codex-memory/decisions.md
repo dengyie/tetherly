@@ -495,3 +495,9 @@
 - Decision: 根因是 Leave 后 Mac 光标停在共享边钳位带。macOS Target 在 Leave 时 warp 到屏幕中心 + 清钉边锚点 + 隐藏到下一次物理指针事件（tap reveal）或控制器 Enter（reveal）；Windows 不 park（光标是用户主指针）。
 - Rejected: 收紧 §105 本地持有光标的 `pinned_open`/短驻留（会把 Windows 推边快路径一起削弱；光标离开钳位带即可消除误触面）；用 NSCursor setHiddenUntilMouseMoves（后台进程不生效）。
 - Consequence: IDLE_HIDDEN 与 CURSOR_HIDDEN 两套 CGDisplayHide 计数分开配平；seat capture 前先 reveal。
+
+## 2026-11-14 - v0.2.35：守护进程自提调度优先级与常驻工作集（DEVELOPMENT.md §107）
+- Context: v0.2.34 真机首次进入仍卡；日志 fast push → polite takeover 纯同步 2909 ms，同窗口其他同步步骤 4–50× 变慢；home-win tetherly BelowNormal、WS 6.5 MB，与 BelowNormal 的 SRBMiner 同级抢 12 核 64% 负载。
+- Decision: 进程内自提（`SetPriorityClass(ABOVE_NORMAL)`、`ProcessPowerThrottling` 关 EXECUTION_SPEED、`SetProcessWorkingSetSizeEx` 64 MB 硬下限 / 512 MB 软上限），各步 best-effort 并记录结果；不降级 High/Realtime。
+- Rejected: 改 launch_system.ps1 的 CreateProcessAsUser 优先级标志（只修一条启动路径，手动/服务启动仍会继承）；High/Realtime（与输入栈/系统抢占风险）；动受保护的矿机优先级（禁区）。
+- Consequence: Windows 守护进程常驻约 64 MB；非 Windows 无变化。

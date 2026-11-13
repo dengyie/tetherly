@@ -377,6 +377,17 @@ pub(crate) async fn run(
     };
     let ui_port = cfg.ui_port;
     let device_name = cfg.name.clone();
+    // Input sharing is latency-critical: lift the daemon out of the
+    // launcher-inherited BelowNormal class and pin a resident floor before
+    // any hook starts (see platform::raise_daemon_responsiveness).
+    let responsiveness = tetherly_node::platform::raise_daemon_responsiveness();
+    info!(
+        priority_was_low = responsiveness.priority_was_low,
+        priority_ok = responsiveness.priority_ok,
+        throttling_disabled = responsiveness.throttling_disabled,
+        working_set_pinned = responsiveness.working_set_pinned,
+        "daemon responsiveness"
+    );
     let node = Node::start(cfg)?;
     info!(device_id = %node.identity().device_id(), "run");
     info!("ui http://127.0.0.1:45716");

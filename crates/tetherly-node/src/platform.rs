@@ -2114,6 +2114,111 @@ pub fn is_accessibility_trusted() -> bool {
     true
 }
 
+// Win32 priority-class values (winbase.h), spelled out so the pure ordering
+// helper below compiles and is tested on every platform.
+pub const WIN_IDLE_PRIORITY_CLASS: u32 = 0x0000_0040;
+pub const WIN_BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+pub const WIN_NORMAL_PRIORITY_CLASS: u32 = 0x0000_0020;
+pub const WIN_ABOVE_NORMAL_PRIORITY_CLASS: u32 = 0x0000_8000;
+pub const WIN_HIGH_PRIORITY_CLASS: u32 = 0x0000_0080;
+pub const WIN_REALTIME_PRIORITY_CLASS: u32 = 0x0000_0100;
+
+/// Resident working-set floor (hard minimum) for the daemon: keeps the
+/// rarely-run takeover/crossing path from being trimmed out between stints.
+pub const DAEMON_MIN_WORKING_SET: usize = 64 * 1024 * 1024;
+/// Upper bound passed alongside the floor; soft (MAX_DISABLE), so it never
+/// caps legitimate growth (screen capture buffers etc.).
+pub const DAEMON_MAX_WORKING_SET: usize = 512 * 1024 * 1024;
+// The floor must cover the cold takeover path (a trimmed 6.5 MB working set
+// is what stalled) without hoarding host memory.
+const _: () = assert!(
+    DAEMON_MIN_WORKING_SET >= 32 * 1024 * 1024
+        && DAEMON_MIN_WORKING_SET < DAEMON_MAX_WORKING_SET
+        && DAEMON_MAX_WORKING_SET <= 1024 * 1024 * 1024
+);
+
+/// Whether a process running at `class` must be lifted to AboveNormal.
+/// Never demotes High/Realtime; unknown values are treated as needing it.
+pub fn daemon_priority_needs_raise(class: u32) -> bool {
+    !matches!(
+        class,
+        WIN_ABOVE_NORMAL_PRIORITY_CLASS | WIN_HIGH_PRIORITY_CLASS | WIN_REALTIME_PRIORITY_CLASS
+    )
+}
+
+/// What [`raise_daemon_responsiveness`] managed to apply.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DaemonResponsiveness {
+    /// Priority class was below AboveNormal before the call.
+    pub priority_was_low: bool,
+    /// Priority class is AboveNormal or higher after the call.
+    pub priority_ok: bool,
+    /// EcoQoS execution-speed throttling opted out.
+    pub throttling_disabled: bool,
+    /// Hard working-set floor installed.
+    pub working_set_pinned: bool,
+}
+
+/// Production 2026-11-13: the Windows daemon inherited BelowNormal from the
+/// scheduled-task launcher (Task Scheduler default priority 7) and shared it
+/// with a 35-thread CPU miner, while the idle trimmer cut its working set to
+/// 6.5 MB. The first edge push after a quiet spell then paged the cold
+/// takeover path back in under contention — 2.9 s from the fast-push
+/// decision to the takeover request; every later entry was instant. An
+/// input-sharing daemon is latency-critical, so on start it lifts itself to
+/// AboveNormal, opts out of EcoQoS throttling and pins a resident floor.
+/// Each step is best-effort and independent; the report says what held.
+#[cfg(windows)]
+pub fn raise_daemon_responsiveness() -> DaemonResponsiveness {
+    use windows_sys::Win32::System::Memory::{
+        SetProcessWorkingSetSizeEx, QUOTA_LIMITS_HARDWS_MAX_DISABLE, QUOTA_LIMITS_HARDWS_MIN_ENABLE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetPriorityClass, ProcessPowerThrottling, SetPriorityClass,
+        SetProcessInformation, ABOVE_NORMAL_PRIORITY_CLASS,
+        PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE,
+    };
+    let mut report = DaemonResponsiveness::default();
+    unsafe {
+        let process = GetCurrentProcess();
+        let before = GetPriorityClass(process);
+        report.priority_was_low = daemon_priority_needs_raise(before);
+        if report.priority_was_low {
+            SetPriorityClass(process, ABOVE_NORMAL_PRIORITY_CLASS);
+        }
+        report.priority_ok = !daemon_priority_needs_raise(GetPriorityClass(process));
+
+        // ControlMask selects the policy, StateMask=0 turns it OFF.
+        let state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: 0,
+        };
+        report.throttling_disabled = SetProcessInformation(
+            process,
+            ProcessPowerThrottling,
+            &state as *const PROCESS_POWER_THROTTLING_STATE as *const std::ffi::c_void,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        ) != 0;
+
+        report.working_set_pinned = SetProcessWorkingSetSizeEx(
+            process,
+            DAEMON_MIN_WORKING_SET,
+            DAEMON_MAX_WORKING_SET,
+            QUOTA_LIMITS_HARDWS_MIN_ENABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE,
+        ) != 0;
+    }
+    report
+}
+
+/// No CPU-starvation analogue off Windows (the Mac daemon runs at normal
+/// QoS in the user session); honest no-op.
+#[cfg(not(windows))]
+pub fn raise_daemon_responsiveness() -> DaemonResponsiveness {
+    DaemonResponsiveness::default()
+}
+
 pub fn open_accessibility_settings() -> Result<(), CoreError> {
     #[cfg(target_os = "macos")]
     {
@@ -3801,5 +3906,75 @@ mod vk_translation_tests {
         let (post, s) = next_injected_flags(s, 0xA0, false);
         assert_eq!(post, CGEventFlags::MaskShift);
         assert_eq!(s, 0);
+    }
+}
+
+#[cfg(test)]
+mod daemon_responsiveness_tests {
+    use super::*;
+
+    // Production 2026-11-13 (v0.2.34): the scheduled-task launcher hands the
+    // daemon BelowNormal — the same class as the 35-thread SRBMiner on a
+    // 12-core host — and the idle trimmer had cut its working set to 6.5 MB,
+    // so the first edge push after a quiet spell paged the takeover path
+    // back in under CPU contention: 2.9 s between the fast-push decision
+    // and the takeover request. Anything below AboveNormal must be lifted.
+    #[test]
+    fn daemon_priority_lifts_every_class_below_above_normal() {
+        for class in [
+            WIN_IDLE_PRIORITY_CLASS,
+            WIN_BELOW_NORMAL_PRIORITY_CLASS,
+            WIN_NORMAL_PRIORITY_CLASS,
+        ] {
+            assert!(
+                daemon_priority_needs_raise(class),
+                "class {class:#x} must be raised"
+            );
+        }
+    }
+
+    // An operator who already runs the daemon High/Realtime must never be
+    // demoted, and AboveNormal is already the target.
+    #[test]
+    fn daemon_priority_never_lowers_an_equal_or_higher_class() {
+        for class in [
+            WIN_ABOVE_NORMAL_PRIORITY_CLASS,
+            WIN_HIGH_PRIORITY_CLASS,
+            WIN_REALTIME_PRIORITY_CLASS,
+        ] {
+            assert!(
+                !daemon_priority_needs_raise(class),
+                "class {class:#x} must be left alone"
+            );
+        }
+    }
+
+    // Real effect on the Windows CI runner: after the call the process
+    // class is at least AboveNormal and the report says so.
+    #[cfg(windows)]
+    #[test]
+    fn raise_daemon_responsiveness_lifts_this_process_priority() {
+        let report = raise_daemon_responsiveness();
+        let class = unsafe {
+            windows_sys::Win32::System::Threading::GetPriorityClass(
+                windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            )
+        };
+        assert!(
+            !daemon_priority_needs_raise(class),
+            "priority class after raise: {class:#x}"
+        );
+        assert!(report.priority_ok, "{report:?}");
+    }
+
+    // macOS/Linux have no miner-starvation analogue; the call is an honest
+    // no-op that reports nothing applied.
+    #[cfg(not(windows))]
+    #[test]
+    fn raise_daemon_responsiveness_is_a_no_op_off_windows() {
+        assert_eq!(
+            raise_daemon_responsiveness(),
+            DaemonResponsiveness::default()
+        );
     }
 }

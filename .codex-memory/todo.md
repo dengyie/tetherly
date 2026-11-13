@@ -2,7 +2,13 @@
 
 ## 当前接手基线（截至 2026-11-13）
 
-> **v0.2.34（983c37c，2026-11-14 双端已部署）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+> **v0.2.35（2026-11-14，§107）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+
+## v0.2.35 首次进入卡顿：Windows 守护进程饥饿（2026-11-14，DEVELOPMENT.md §107）
+- [x] 日志：16:55:28.158 fast push → 31.067 polite takeover，纯同步 2909 ms（常态 <8 ms），同窗口全线变慢；home-win 探针 tetherly BelowNormal（与 SRBMiner 同级）、WS 6.5 MB、Pages/sec≈7000。
+- [x] `platform::raise_daemon_responsiveness`：AboveNormal + 退出 EcoQoS + 64 MB 工作集硬下限；cmd_core `Node::start` 前调用，日志 `daemon responsiveness`。测试 4 个（Windows 专属 1 个由 CI 跑）。
+- [ ] CI → tag v0.2.35 → release → deploy；部署后核对 PriorityClass=AboveNormal、WS ≥64 MB。
+- [ ] 真机验收：闲置数分钟后第一次推底边即时进入 Mac。
 
 ## v0.2.34 真机反馈修复（2026-11-14，DEVELOPMENT.md §106）
 - [x] **A · Mac Target 在控制器 Leave 时 park+hide**：`park_target_cursor_after_leave`（`TARGET_PARK_ON_LEAVE = cfg!(macos)`，warp 中心 + 清钉边锚点 + `hide_cursor_until_local_motion`；tap 物理事件 / 控制器 Enter reveal）。根因：Leave 后光标停在顶边 → 遗留指针 + 16:01:51.142 钉边心跳误抢控制器 → Windows 降级为 Target、下次进入慢。测试 `controller_leave_parks_target_cursor_off_the_shared_edge`、`controller_leave_park_disabled_is_a_no_op`。
