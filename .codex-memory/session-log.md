@@ -1067,3 +1067,5 @@
 - Context: 用户：第一次 Windows 鼠标进入 Mac 仍卡很久。
 - Work: 日志对比定位 2.9 s 同步停顿为进程级饥饿；只读探针确认 BelowNormal + WS 6.5 MB；新增 `raise_daemon_responsiveness` 及测试。
 - Results: fmt / clippy 0 错误；cargo test --workspace EXIT=0（838 passed, 0 failed）。
+- Deploy: ci 43469993884 绿 → tag v0.2.35 → release 43471801241 绿 → deploy EXIT=0；Windows pid 307384 AboveNormal / MinWS 64 MB / SYSTEM sid=2；`daemon responsiveness` 四项全 true。
+- Next: 用户按 §107.7 真机验收。

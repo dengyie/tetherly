@@ -7,7 +7,7 @@
 ## v0.2.35 首次进入卡顿：Windows 守护进程饥饿（2026-11-14，DEVELOPMENT.md §107）
 - [x] 日志：16:55:28.158 fast push → 31.067 polite takeover，纯同步 2909 ms（常态 <8 ms），同窗口全线变慢；home-win 探针 tetherly BelowNormal（与 SRBMiner 同级）、WS 6.5 MB、Pages/sec≈7000。
 - [x] `platform::raise_daemon_responsiveness`：AboveNormal + 退出 EcoQoS + 64 MB 工作集硬下限；cmd_core `Node::start` 前调用，日志 `daemon responsiveness`。测试 4 个（Windows 专属 1 个由 CI 跑）。
-- [ ] CI → tag v0.2.35 → release → deploy；部署后核对 PriorityClass=AboveNormal、WS ≥64 MB。
+- [x] ci 43469993884 绿 → tag v0.2.35 → release 43471801241 绿 → deploy EXIT=0：Mac pid 87936；Windows pid 307384 SYSTEM sid=2 AboveNormal MinWS 64 MB；受保护三进程不动。
 - [ ] 真机验收：闲置数分钟后第一次推底边即时进入 Mac。
 
 ## v0.2.34 真机反馈修复（2026-11-14，DEVELOPMENT.md §106）
