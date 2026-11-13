@@ -1,6 +1,17 @@
 # Project State
 
 ## Release Baseline (2026-11-14)
+- **v0.2.40**（§112，tag → `2850c67`）：v0.2.39 复现确认根因：Mac 在 idle hide 后被 Enter 时光标仍不可见，用户来回划导致弹回。修复按 Deskflow OSXScreen 重写光标显隐：
+  - 单一隐藏状态 `DeskflowCursorOwners`（Capture/Idle）；
+  - 主屏只调一次 show/hide，然后 `associate(true)`；
+  - 不用 `CGCursorIsVisible` 做决策。
+  
+  真机验收：`scripts/verify_crossing.py`。
+  Deploy：
+  - ci 43518069653 绿（ubuntu m3_2 计时 flake，重跑后通过）→ release 43520857621 绿。
+  - Mac pid 74782。
+  - Windows 旧进程 v0.2.39 自发挂死，hot-restart 卡住，改为手动 dump → stop → 覆盖 CI 产物 → TetherlySystemLauncher；现 pid 310880，SYSTEM。
+  - 受保护进程不动。
 - **v0.2.39**（§111，诊断版，tag → `5710b9f`，2026-11-14 双端已部署）：针对“Mac 先控 Windows 后，Windows 划向 Mac 要 10–20 s”。回程日志新增 away/toward/events/max_toward/relay；Mac cursor_reveal trace 新增可见性。行为不变，等用户复现后判读。
 - **v0.2.38**（§110）：Windows 鼠标进 Mac 后 0.3–0.6 s 连弹。回程推力原把整段位移都算进去，加上进入门槛只有 48 px，手回位一笔就会被误判为甩回。修复：只累计越过共享边的部分，进入门槛提到 120 px 并在 3 s 内回落；新增 `ReturnDiag` 日志 `engine return to local`。
 - **v0.2.37**（§109）：Mac 漫游 Windows 被 Windows 接管降级后，护罩留下的空白 NSCursor 从未恢复为箭头，导致 Windows 驱动的光标在 Mac 上不可见、在菜单栏反复弹回。修复：associate 恢复路径、`release_input_tunnel_local`、`note_controller_entered` 均强制箭头光标并解除残留捕获；trace `cursor_restore` / `cursor_reveal`。

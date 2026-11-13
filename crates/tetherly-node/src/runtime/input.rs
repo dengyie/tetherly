@@ -3302,6 +3302,12 @@ impl Node {
     /// take over. ~1/4 of a 1080p screen height: real use from anywhere on
     /// the screen crosses it, plug-in jitter (a few px) never does.
     const REVERSE_ARM_MIN_PX: i64 = 300;
+    /// v0.2.41 local-hand ownership: physical travel (px, same accumulator)
+    /// after which a hand that also moved the cursor out of the trigger zone
+    /// owns the cursor even though the controller's Enter parked it here.
+    /// Far above a desk bump (a few px), well below a deliberate reach for
+    /// the shared edge (production sweeps: 64-200 px).
+    const REVERSE_HAND_OWNS_PX: i64 = 64;
     /// Idle gap that resets the movement accumulator (and absorbs the
     /// plug-in/unplug position jump).
     const REVERSE_RESET_AFTER_MS: u64 = 2000;
@@ -3387,6 +3393,30 @@ impl Node {
             let server = self.shared.input_engine.lock().expect("engine");
             server.edge()
         };
+        // v0.2.41 local-hand ownership (Deskflow: the physical mouse owns
+        // the cursor it moves). The fences below protect a controller
+        // cursor PARKED on the entry edge; once a local hand has moved it
+        // into the interior (zone gate open) and travelled a real distance,
+        // nothing is parked any more — the hand's push is the same gesture
+        // as a controller-side crossing (production 23:08:15: a 180 px
+        // sweep waited ~7 s behind the 600 ms dwell and 3 s cooldown).
+        let accum_px = self.shared.reverse_move_accum_px.load(Ordering::SeqCst);
+        if !self.shared.reverse_local_owner.load(Ordering::SeqCst)
+            && self.shared.reverse_zone_dirty.load(Ordering::SeqCst)
+            && accum_px >= Self::REVERSE_HAND_OWNS_PX
+        {
+            self.shared
+                .reverse_local_owner
+                .store(true, Ordering::SeqCst);
+            tracing::info!(
+                accum_px,
+                "auto-reverse: local hand moved the cursor; owns it"
+            );
+            self.trace_input(
+                "reverse_owner",
+                format!("local: hand moved accum={accum_px}"),
+            );
+        }
         let local_owner = self.shared.reverse_local_owner.load(Ordering::SeqCst);
         let now = std::time::Instant::now();
         {
@@ -7067,6 +7097,61 @@ mod tests {
         assert!(
             node.shared.last_auto_reverse.lock().unwrap().is_some(),
             "a physical sweep into the shared edge must reverse even while the controller's cursor is on screen"
+        );
+    }
+
+    /// v0.2.41 (production 2026-11-13 23:08:15 → 23:08:22, ~7 s): the Mac
+    /// cursor sat on this Windows Target, the user grabbed the Windows
+    /// mouse and swept ~180 px down into the shared edge. Under 300 px the
+    /// push took the 600 ms un-armed dwell / pinned heartbeat, and repeat
+    /// attempts hit the 3 s storm cooldown. A hand that has demonstrably
+    /// moved the cursor off the controller's parked spot (interior proven +
+    /// real travel) owns it: the push is the controller-parity gesture and
+    /// a fast into-edge delta must hand over at once.
+    #[tokio::test]
+    async fn local_hand_sweep_takes_ownership_and_fast_reverses() {
+        let (node, _d1, _d2) = local_owner_target_fixture("rev-hand-owns").await;
+        node.note_controller_entered();
+        let mut y = 900;
+        while y < 1072 {
+            let _ = node
+                .drive_input_delta(960, y, 0, 12, 1920, 1080)
+                .expect("reverse path must not error");
+            y += 12;
+        }
+        let _ = node
+            .drive_input_delta(960, 1079, 0, 12, 1920, 1080)
+            .expect("reverse path must not error");
+        assert!(
+            node.shared.last_auto_reverse.lock().unwrap().is_some(),
+            "a local hand that swept the cursor into the edge must reverse on the fast push"
+        );
+        assert!(
+            node.input_trace_snapshot()
+                .iter()
+                .any(|e| e.kind == "reverse_owner" && e.detail.contains("hand moved")),
+            "the ownership promotion must be traced"
+        );
+    }
+
+    /// Fence for the promotion above: a desk bump (a few px) after the
+    /// controller entered never promotes, so a single push still waits.
+    #[tokio::test]
+    async fn local_hand_bump_does_not_take_ownership() {
+        let (node, _d1, _d2) = local_owner_target_fixture("rev-hand-bump").await;
+        node.note_controller_entered();
+        let _ = node
+            .drive_input_delta(960, 1040, 0, 4, 1920, 1080)
+            .expect("reverse path must not error");
+        let _ = node
+            .drive_input_delta(960, 1046, 0, 6, 1920, 1080)
+            .expect("reverse path must not error");
+        let _ = node
+            .drive_input_delta(960, 1079, 0, 12, 1920, 1080)
+            .expect("reverse path must not error");
+        assert!(
+            node.shared.last_auto_reverse.lock().unwrap().is_none(),
+            "a bump-sized motion must not hand ownership to the local hand"
         );
     }
 

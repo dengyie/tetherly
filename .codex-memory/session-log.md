@@ -1096,3 +1096,20 @@
 - Work: v0.2.38 日志显示 10 次进入均在 0.4–1.2 s 内被 push≈required 送回；原因未定，补 ReturnDiag 笔划统计、relay 状态和 Mac 光标可见性证据（§111）。
 - Deploy: ci 43505914478 → tag v0.2.39 → release 43507848391 → deploy EXIT=0；Mac pid 89356；Windows pid 308452 SYSTEM；受保护进程不动。
 - Next: 用户复现后按 §111.5 判读。
+
+## 2026-11-14 v0.2.40（§112）
+- Context: v0.2.39 复现。Mac 每次 Enter 都是 `cursor_reveal visible=false->false idle_hidden=true`，用户看不到指针，来回划导致弹回。
+- Work:
+  - 新增 `scripts/verify_crossing.py` 真机验收脚本。
+  - 按用户要求“深度借鉴 deskflow”，重写 macOS 光标显隐：
+    - 单一隐藏状态 `DeskflowCursorOwners`，两个 owner：Capture 和 Idle；
+    - `deskflow_show_cursor/hide_cursor` 对齐 OSXScreen：主屏只调一次，然后 `associate(true)`；
+    - 撤掉依赖 `CGCursorIsVisible` 的补 show。
+- Tests: owner 状态机 2 项 RED→GREEN；fmt / clippy / workspace 全绿。
+- Deploy:
+  - ci 43518069653（ubuntu m3_2 计时 flake，重跑后绿）→ tag v0.2.40 → release 43520857621 → Mac pid 74782。
+  - Windows 旧 v0.2.39 在 22:44:48Z 一次 10053 断开加 auto-reconnect 之后挂死（HTTP 无响应、日志停止），`/api/daemon/restart` 因此卡住。处置：dump（`E:\code\tetherly\data\dumps\`）→ stop 308452 → 覆盖 CI 产物 → TetherlySystemLauncher → pid 310880，SYSTEM，0.2.40 healthy。
+- Next:
+  - 用户运行 verify_crossing.py；
+  - 排查 Windows 挂死：10053 关闭与 reconnect 并发，疑似锁顺序问题；
+  - deploy.sh 在 restart 前先探 health。

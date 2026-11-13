@@ -8492,3 +8492,25 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
      4. 执行 `Start-ScheduledTask TetherlySystemLauncher`。
      结果：v0.2.40 pid 310880 以 SYSTEM 身份运行，受保护进程未动。
    - **待查**：10053 关闭路径和 auto-reconnect 并发时疑似锁顺序死锁（12 个线程 Wait/Unknown，9 个 Wait/Executive）。deploy.sh 应改为 restart 前先探 health，失败时走“dump → stop → 覆盖 → launcher”的兜底流程。
+
+## 113. Mac 光标在 Windows 时，Windows 鼠标划向 Mac 仍有明显切换延迟 (v0.2.41)
+
+**现象**：v0.2.40 后有改善，但「Mac 鼠标先进 Windows → 改用 Windows 鼠标划向 Mac」仍有不可忽视的延迟。
+
+**证据**（双端日志按时钟偏差校正，Windows ≈ Mac + 489 ms）：
+- 网络不是瓶颈：Mac push enter → Windows apply enter 只有 2–5 ms；接管 attach 约 10 ms。
+- 23:08:15.09 Mac 光标进入 Windows（停在 py=1079，随后被拉到 py=1015）→ 23:08:22.43 Windows 才 `pinned heartbeat completed the dwell`，22.62 才越界，中间约 7 s 没有任何 reverse 判定日志。
+- 各版本 Windows 日志中 reverse 主要靠 `pinned heartbeat`（17–18 次/版本），`local-owner fast push` 只有 6–10 次。
+
+**根因**：Target 侧有三道防误触栅栏：zone gate、未满 300 px 时需 600 ms 长 dwell、非本地所有者时 3 s 冷却。这些栅栏原本只为保护「控制端光标被 Enter 停放在共享边上」这一种情况。但用户拿起 Windows 鼠标、把光标拉进内部再推回边缘（通常 64–200 px）时，停放的光标早已不存在，依然被当作「控制端光标在屏」处理：
+- 每次推边都要走 600 ms dwell 或 heartbeat；
+- 一次未成功后，3 s 冷却会吞掉后续推边。
+
+**修复**（Deskflow「物理鼠标拥有它移动的光标」）：在 `maybe_auto_reverse` 中，当 zone gate 已被本地物理事件打开（证明到过内部），且本次活动的物理位移 ≥ `REVERSE_HAND_OWNS_PX`（64 px）时，`reverse_local_owner` 置为 true，trace 记为 `reverse_owner local: hand moved accum=N`。此后的行为与控制端越界一致：
+- ≥6 px 的推边立即接管；
+- 贴边按住时按 100 ms 短 dwell 接管；
+- 冷却改为 1 s。
+
+桌面磕碰只有几 px，不会触发晋升（测试 `local_hand_bump_does_not_take_ownership`）。进入时的停放抖动仍被 zone gate 与 `controller_on_screen_disables_fast_reverse_until_leave` 挡住。
+
+**测试**：`local_hand_sweep_takes_ownership_and_fast_reverses`（RED → GREEN）、`local_hand_bump_does_not_take_ownership`。
