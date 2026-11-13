@@ -2575,15 +2575,22 @@ impl Node {
     pub(crate) fn note_controller_entered(&self) {
         // v0.2.34: the controller's injected events bypass the local tap,
         // so the idle hide from the last Leave is revealed here.
+        let (vis, cap, idle) = crate::platform::cursor_visibility_state();
         crate::platform::reveal_idle_hidden_cursor();
         // v0.2.37: a controller driving this screen means this node is not
         // roaming anywhere — drop any capture a takeover demotion left armed
         // and force the arrow image (a cursor shield's blank NSCursor
         // survived the demotion, so the Windows-driven cursor entered the
         // Mac menu bar invisible; production 2026-11-13 18:34:53).
-        self.trace_input("cursor_reveal", "controller entered");
         self.disarm_input_capture();
         crate::platform::restore_arrow_cursor();
+        let (vis_after, _, _) = crate::platform::cursor_visibility_state();
+        self.trace_input(
+            "cursor_reveal",
+            format!(
+                "controller entered visible={vis}->{vis_after} capture_hidden={cap} idle_hidden={idle}"
+            ),
+        );
         self.reset_reverse_arming_state();
         self.trace_input("zone_gate", "close: controller entered");
     }
@@ -2953,16 +2960,33 @@ impl Node {
                 // threshold) so a bounce is attributable from the log.
                 let ret = match (server.seat(), server.last_return_diag()) {
                     (CursorSeat::Local, Some(d)) => {
+                        // v0.2.39: the stint's stroke balance and whether
+                        // the hook was relaying separate a scrubbing hand
+                        // from a biased delta stream.
+                        let relay_armed = self.is_keyboard_armed();
                         tracing::info!(
                             elapsed_ms = d.elapsed_ms,
                             peak_depth = d.peak_depth,
                             push = d.push,
                             required_push = d.required_push,
+                            away_px = d.away_px,
+                            toward_px = d.toward_px,
+                            events = d.events,
+                            max_toward = d.max_toward,
+                            relay_armed,
                             "engine return to local"
                         );
                         format!(
-                            " return elapsed_ms={} peak_depth={} push={}/{}",
-                            d.elapsed_ms, d.peak_depth, d.push, d.required_push
+                            " return elapsed_ms={} peak_depth={} push={}/{} away={} toward={} events={} max_toward={} relay={}",
+                            d.elapsed_ms,
+                            d.peak_depth,
+                            d.push,
+                            d.required_push,
+                            d.away_px,
+                            d.toward_px,
+                            d.events,
+                            d.max_toward,
+                            relay_armed
                         )
                     }
                     _ => String::new(),

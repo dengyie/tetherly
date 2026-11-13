@@ -405,6 +405,15 @@ pub struct ReturnDiag {
     pub push: i32,
     /// Threshold (local px) in force at the moment of the return.
     pub required_push: i32,
+    /// v0.2.39 stroke balance: raw local px moved away from the shared
+    /// edge (into the remote screen) during the stint.
+    pub away_px: i32,
+    /// Raw local px moved toward the shared edge during the stint.
+    pub toward_px: i32,
+    /// Motion events the stint consumed (excluding the crossing event).
+    pub events: u32,
+    /// Largest single-event toward-edge delta (raw local px).
+    pub max_toward: i32,
 }
 
 /// Server-side capture: local cursor, detect edge leave, encode outbound events.
@@ -474,6 +483,11 @@ pub struct InputServer {
     remote_speed_percent: u32,
     /// Deepest interior travel of the current Remote stint (units).
     remote_peak_depth: i32,
+    /// Stroke balance of the current Remote stint (see [`ReturnDiag`]).
+    stint_away_px: i32,
+    stint_toward_px: i32,
+    stint_events: u32,
+    stint_max_toward: i32,
     /// Evidence of the last sustained-push return (see [`ReturnDiag`]).
     last_return_diag: Option<ReturnDiag>,
 }
@@ -509,6 +523,10 @@ impl InputServer {
             remote_screen: None,
             remote_speed_percent: 100,
             remote_peak_depth: 0,
+            stint_away_px: 0,
+            stint_toward_px: 0,
+            stint_events: 0,
+            stint_max_toward: 0,
             last_return_diag: None,
         }
     }
@@ -616,6 +634,13 @@ impl InputServer {
     /// ramp since the last crossing into Remote (base threshold when no
     /// crossing is recorded).
     /// Evidence of the last sustained-push return to the local seat.
+    fn reset_stint_balance(&mut self) {
+        self.stint_away_px = 0;
+        self.stint_toward_px = 0;
+        self.stint_events = 0;
+        self.stint_max_toward = 0;
+    }
+
     pub fn last_return_diag(&self) -> Option<ReturnDiag> {
         self.last_return_diag
     }
@@ -959,6 +984,13 @@ impl InputServer {
                 ScreenEdge::Right => (-dx, next_rem_x <= 0, self.rem_x, next_rem_x),
             };
             self.remote_peak_depth = self.remote_peak_depth.max(depth_after);
+            self.stint_events = self.stint_events.saturating_add(1);
+            if push_toward_edge > 0 {
+                self.stint_toward_px = self.stint_toward_px.saturating_add(push_toward_edge);
+                self.stint_max_toward = self.stint_max_toward.max(push_toward_edge);
+            } else {
+                self.stint_away_px = self.stint_away_px.saturating_add(-push_toward_edge);
+            }
             // v0.2.38: only the motion that goes PAST the shared edge pushes
             // against it. The travel back to the edge is ordinary roaming —
             // counting the whole event delta let a shallow entry's
@@ -1010,6 +1042,10 @@ impl InputServer {
                     peak_depth: self.remote_peak_depth,
                     push: self.far_push_accum,
                     required_push,
+                    away_px: self.stint_away_px,
+                    toward_px: self.stint_toward_px,
+                    events: self.stint_events,
+                    max_toward: self.stint_max_toward,
                 });
                 self.seat = CursorSeat::Local;
                 self.remote_interior = false;
@@ -1083,6 +1119,7 @@ impl InputServer {
                     self.seat = CursorSeat::Remote;
                     self.remote_entered_at = Some(std::time::Instant::now());
                     self.remote_peak_depth = 0;
+                    self.reset_stint_balance();
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Right;
                     // Root-fix E: drop any stale frame lingering in the
@@ -1114,6 +1151,7 @@ impl InputServer {
                     self.seat = CursorSeat::Remote;
                     self.remote_entered_at = Some(std::time::Instant::now());
                     self.remote_peak_depth = 0;
+                    self.reset_stint_balance();
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Left;
                     // Root-fix E: drop any stale frame lingering in the
@@ -1159,6 +1197,7 @@ impl InputServer {
                     self.seat = CursorSeat::Remote;
                     self.remote_entered_at = Some(std::time::Instant::now());
                     self.remote_peak_depth = 0;
+                    self.reset_stint_balance();
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Top;
                     // Root-fix E: drop any stale frame lingering in the
@@ -1202,6 +1241,7 @@ impl InputServer {
                     self.seat = CursorSeat::Remote;
                     self.remote_entered_at = Some(std::time::Instant::now());
                     self.remote_peak_depth = 0;
+                    self.reset_stint_balance();
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Bottom;
                     // Root-fix E: drop any stale frame lingering in the
@@ -2170,6 +2210,51 @@ mod tests {
         assert_eq!(diag.required_push, InputServer::FAR_PUSH_RETURN_PX);
         assert!(diag.push >= 50 && diag.push <= 60, "push={}", diag.push);
         assert!(diag.elapsed_ms < 1000);
+    }
+
+    /// v0.2.39: the return also reports the raw stroke balance of the
+    /// stint (local px moved away from vs toward the shared edge, event
+    /// count, largest single toward-edge event) so a production bounce
+    /// separates a hand scrubbing back and forth (large away AND toward)
+    /// from a biased delta stream (small away, steady toward).
+    #[test]
+    fn return_records_stint_stroke_balance() {
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Bottom);
+        srv.set_remote_screen(Some((1920, 1080)));
+
+        assert_eq!(
+            srv.local_move_delta(729, 1079, 0, 4),
+            Some(ScreenEdge::Bottom)
+        );
+        assert_eq!(srv.local_move_delta(960, 540, 3, 108), None);
+        assert_eq!(srv.local_move_delta(960, 540, 0, 20), None);
+        assert_eq!(srv.local_move_delta(960, 540, 0, -54), None);
+        assert_eq!(
+            srv.local_move_delta(960, 540, 0, -108),
+            Some(ScreenEdge::Bottom)
+        );
+        let diag = srv.last_return_diag().expect("return diag");
+        assert_eq!(diag.away_px, 128);
+        assert_eq!(diag.toward_px, 162);
+        assert_eq!(diag.events, 4);
+        assert_eq!(diag.max_toward, 108);
+
+        // The next stint starts from a clean balance.
+        assert_eq!(
+            srv.local_move_delta(729, 1079, 0, 4),
+            Some(ScreenEdge::Bottom)
+        );
+        assert_eq!(srv.local_move_delta(960, 540, 0, 108), None);
+        assert_eq!(
+            srv.local_move_delta(960, 540, 0, -400),
+            Some(ScreenEdge::Bottom)
+        );
+        let diag = srv.last_return_diag().expect("second return diag");
+        assert_eq!(diag.away_px, 108);
+        assert_eq!(diag.toward_px, 400);
+        assert_eq!(diag.events, 2);
+        assert_eq!(diag.max_toward, 400);
     }
 
     /// v0.2.32: with the peer's screen known, remote-seat deltas normalize

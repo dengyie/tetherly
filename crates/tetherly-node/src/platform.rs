@@ -1111,6 +1111,25 @@ pub fn reveal_idle_hidden_cursor() {
     }
 }
 
+/// v0.2.39 diagnostics: `(visible, capture_hidden, idle_hidden)` — the
+/// system's own cursor visibility next to both of this node's hide owners,
+/// so a cursor that enters invisible is attributable from the trace.
+#[cfg(target_os = "macos")]
+pub fn cursor_visibility_state() -> (bool, bool, bool) {
+    use std::sync::atomic::Ordering;
+    let visible = unsafe { CGCursorIsVisible() != 0 };
+    (
+        visible,
+        CURSOR_HIDDEN.load(Ordering::SeqCst),
+        IDLE_HIDDEN.load(Ordering::SeqCst),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn cursor_visibility_state() -> (bool, bool, bool) {
+    (true, false, false)
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn hide_cursor_until_local_motion() {}
 
