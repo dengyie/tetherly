@@ -644,6 +644,7 @@ static INJECTED_BUTTONS_DOWN: std::sync::atomic::AtomicU8 = std::sync::atomic::A
 /// Which pointer-motion event an injected move must be, given the injected
 /// buttons currently held. Precedence Left > Right > Middle mirrors
 /// `SystemInputSink::button`'s mask decoding.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InjectedMoveKind {
     Moved,
@@ -652,6 +653,7 @@ enum InjectedMoveKind {
     OtherDragged,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn injected_move_kind(buttons_down: u8) -> InjectedMoveKind {
     if buttons_down & tetherly_core::BTN_LEFT != 0 {
         InjectedMoveKind::LeftDragged
@@ -665,6 +667,7 @@ fn injected_move_kind(buttons_down: u8) -> InjectedMoveKind {
 }
 
 /// Next value of the injected-button tracker after a button event.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn next_injected_buttons(state: u8, mask: u8, down: bool) -> u8 {
     if down {
         state | mask
