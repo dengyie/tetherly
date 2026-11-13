@@ -739,11 +739,6 @@ extern "C" {
     fn CGSetLocalEventsSuppressionInterval(seconds: f64) -> i32;
     fn CGDisplayHideCursor(display: u32) -> i32;
     fn CGDisplayShowCursor(display: u32) -> i32;
-    fn CGGetOnlineDisplayList(
-        max_displays: u32,
-        online_displays: *mut u32,
-        display_count: *mut u32,
-    ) -> i32;
     fn CGCursorIsVisible() -> libc::boolean_t;
     fn _CGSDefaultConnection() -> i32;
     fn CGSSetConnectionProperty(
@@ -754,8 +749,91 @@ extern "C" {
     ) -> i32;
 }
 
+/// Who wants the macOS cursor hidden. Deskflow's OSXScreen keeps a single
+/// `m_cursorHidden`; Tetherly has two reasons to hide (seat capture while
+/// this Mac controls a peer, idle after the controller left this target),
+/// so both map onto one system hide/show transition here.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CursorHideOwner {
+    Capture,
+    Idle,
+}
+
+/// The system call a transition requires.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CursorOp {
+    Hide,
+    Show,
+    None,
+}
+
+/// Deskflow `m_cursorHidden` generalized to two owners: the first owner
+/// issues the one CGDisplayHideCursor, the last one to leave issues the one
+/// CGDisplayShowCursor. The WindowServer hide count therefore never exceeds
+/// one from this process, whatever order the owners come and go in.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DeskflowCursorOwners {
+    capture: bool,
+    idle: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl DeskflowCursorOwners {
+    pub(crate) fn hidden(&self) -> bool {
+        self.capture || self.idle
+    }
+
+    pub(crate) fn holds(&self, owner: CursorHideOwner) -> bool {
+        match owner {
+            CursorHideOwner::Capture => self.capture,
+            CursorHideOwner::Idle => self.idle,
+        }
+    }
+
+    fn slot(&mut self, owner: CursorHideOwner) -> &mut bool {
+        match owner {
+            CursorHideOwner::Capture => &mut self.capture,
+            CursorHideOwner::Idle => &mut self.idle,
+        }
+    }
+
+    pub(crate) fn acquire(&mut self, owner: CursorHideOwner) -> CursorOp {
+        let was_hidden = self.hidden();
+        *self.slot(owner) = true;
+        if was_hidden {
+            CursorOp::None
+        } else {
+            CursorOp::Hide
+        }
+    }
+
+    pub(crate) fn release(&mut self, owner: CursorHideOwner) -> CursorOp {
+        let was_hidden = self.hidden();
+        *self.slot(owner) = false;
+        if was_hidden && !self.hidden() {
+            CursorOp::Show
+        } else {
+            CursorOp::None
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
-static CURSOR_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CURSOR_OWNERS: std::sync::Mutex<DeskflowCursorOwners> =
+    std::sync::Mutex::new(DeskflowCursorOwners {
+        capture: false,
+        idle: false,
+    });
+
+#[cfg(target_os = "macos")]
+fn cursor_owners() -> std::sync::MutexGuard<'static, DeskflowCursorOwners> {
+    CURSOR_OWNERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 // --- Programmatic warp echo suppression (Deskflow OSXScreen warp handling) ---
 //
@@ -988,68 +1066,122 @@ fn enable_background_cursor_ops() {
     }
 }
 
+/// Deskflow OSXScreen::showCursor: background property, ONE
+/// CGDisplayShowCursor on the main display (the display argument is ignored
+/// by WindowServer, so a per-display loop would add one count per display),
+/// then CGAssociateMouseAndMouseCursorPosition(true) — Deskflow: "appears to
+/// fix mouse randomly not showing/hiding bug" — then a visibility log only:
+/// CGCursorIsVisible is unreliable, so nothing is decided from it.
 #[cfg(target_os = "macos")]
-pub fn set_mouse_cursor_associated(associated: bool) {
-    // An idle hide must not stack under the seat-capture hide counter.
-    reveal_idle_hidden_cursor();
+fn deskflow_show_cursor() {
     enable_background_cursor_ops();
     unsafe {
-        let mut displays = [0u32; 16];
-        let mut count = 0u32;
-        let _ = CGGetOnlineDisplayList(16, displays.as_mut_ptr(), &mut count);
-        let count = if count == 0 {
-            displays[0] = objc2_core_graphics::CGMainDisplayID();
-            1
-        } else {
-            count as usize
+        let err = CGDisplayShowCursor(objc2_core_graphics::CGMainDisplayID());
+        if err != 0 {
+            tracing::warn!(err, "deskflow show cursor: CGDisplayShowCursor failed");
+        }
+        let _ = CGAssociateMouseAndMouseCursorPosition(true);
+    }
+    deskflow_log_cursor_visibility("show");
+}
+
+/// Deskflow OSXScreen::hideCursor (same shape as `deskflow_show_cursor`).
+#[cfg(target_os = "macos")]
+fn deskflow_hide_cursor() {
+    enable_background_cursor_ops();
+    unsafe {
+        let err = CGDisplayHideCursor(objc2_core_graphics::CGMainDisplayID());
+        if err != 0 {
+            tracing::warn!(err, "deskflow hide cursor: CGDisplayHideCursor failed");
+        }
+        let _ = CGAssociateMouseAndMouseCursorPosition(true);
+    }
+    deskflow_log_cursor_visibility("hide");
+}
+
+/// Deskflow OSXScreen::logCursorVisibility.
+#[cfg(target_os = "macos")]
+fn deskflow_log_cursor_visibility(op: &str) {
+    let visible = unsafe { CGCursorIsVisible() != 0 };
+    if visible == (op == "hide") {
+        tracing::debug!(
+            op,
+            visible,
+            "deskflow cursor visibility disagrees (CGCursorIsVisible is unreliable)"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_cursor_op(op: CursorOp) {
+    match op {
+        CursorOp::Hide => deskflow_hide_cursor(),
+        CursorOp::Show => deskflow_show_cursor(),
+        CursorOp::None => {}
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn set_mouse_cursor_associated(associated: bool) {
+    enable_background_cursor_ops();
+    if !associated {
+        // Deskflow OSXScreen::leave (primary):
+        // 1. Blank NSCursor before anything moves, then the shield windows
+        //    (NSScreenSaverWindowLevel, ignoresMouseEvents: NO) so no app
+        //    underneath can restore a cursor shape on hover.
+        cursor_shield::set_blank_cursor_now();
+        cursor_shield::show_cursor_shields();
+
+        // 2. hideCursor(): the capture owner takes over from an idle hide
+        //    without stacking a second system hide.
+        let (op, newly_captured) = {
+            let mut owners = cursor_owners();
+            let newly = !owners.holds(CursorHideOwner::Capture);
+            let op = owners.acquire(CursorHideOwner::Capture);
+            let _ = owners.release(CursorHideOwner::Idle);
+            (op, newly)
         };
+        apply_cursor_op(op);
+        if newly_captured {
+            cursor_shield::hide_appkit_cursor();
+        }
 
-        if !associated {
-            // Deskflow OSXScreen::leave & PR-10231:
-            // 1. Immediately switch to blank transparent cursor so cursor is invisible prior to warp
-            cursor_shield::set_blank_cursor_now();
-
-            // 2. Deploy full-screen borderless transparent shield windows at NSScreenSaverWindowLevel (level 1000)
-            //    covering all active displays with ignoresMouseEvents: NO. This completely blocks any
-            //    underlying application or system element from receiving hover and overriding cursor shape.
-            cursor_shield::show_cursor_shields();
-
-            // 3. Hide hardware cursor across all active displays & Cocoa cursor stack
-            if !CURSOR_HIDDEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                for &disp in &displays[..count] {
-                    let _ = CGDisplayHideCursor(disp);
-                }
-                cursor_shield::hide_appkit_cursor();
-            }
-
-            // 4. Set suppression interval and disassociate mouse hardware from screen coordinates
+        unsafe {
+            // 3. avoidHesitatingCursor(), then decouple the hardware mouse
+            //    from the cursor (after hideCursor, which re-associates).
             let _ = CGSetLocalEventsSuppressionInterval(0.0001);
             let _ = CGAssociateMouseAndMouseCursorPosition(false);
 
-            // 5. Deskflow rehide verification: If WindowServer still reports the cursor is visible,
-            //    cycle show/hide once to reset WindowServer's internal hide counter.
+            // 4. Rehide guard: if WindowServer still draws the pointer,
+            //    cycle a count-neutral show/hide pair once.
             if CGCursorIsVisible() != 0 {
-                for &disp in &displays[..count] {
-                    let _ = CGDisplayShowCursor(disp);
-                    let _ = CGDisplayHideCursor(disp);
-                }
+                let main = objc2_core_graphics::CGMainDisplayID();
+                let _ = CGDisplayShowCursor(main);
+                let _ = CGDisplayHideCursor(main);
             }
-        } else {
-            // Deskflow OSXScreen::enter:
-            // 1. Remove all shield windows immediately, restoring native app hover and input
-            cursor_shield::hide_cursor_shields();
+        }
+    } else {
+        // Deskflow OSXScreen::enter (primary):
+        // 1. Remove the shields, restoring native hover and input.
+        cursor_shield::hide_cursor_shields();
 
-            // 2. Show hardware cursor across all active displays & unhide AppKit cursor
-            if CURSOR_HIDDEN.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                for &disp in &displays[..count] {
-                    let _ = CGDisplayShowCursor(disp);
-                }
-                cursor_shield::unhide_appkit_cursor();
-            }
-            // v0.2.37: undo the shield's blank NSCursor as well.
-            cursor_shield::set_arrow_cursor_now();
+        // 2. showCursor() once both owners are gone.
+        let (op, was_captured) = {
+            let mut owners = cursor_owners();
+            let was = owners.holds(CursorHideOwner::Capture);
+            let _ = owners.release(CursorHideOwner::Idle);
+            (owners.release(CursorHideOwner::Capture), was)
+        };
+        apply_cursor_op(op);
+        if was_captured {
+            cursor_shield::unhide_appkit_cursor();
+        }
+        // v0.2.37: undo the shield's blank NSCursor as well.
+        cursor_shield::set_arrow_cursor_now();
 
-            // 3. Re-associate mouse and reset suppression
+        // 3. Re-associate (showCursor already did when it ran) and reset
+        //    the suppression interval.
+        unsafe {
             let _ = CGAssociateMouseAndMouseCursorPosition(true);
             let _ = CGSetLocalEventsSuppressionInterval(0.0);
         }
@@ -1059,109 +1191,22 @@ pub fn set_mouse_cursor_associated(associated: bool) {
 #[cfg(not(target_os = "macos"))]
 pub fn set_mouse_cursor_associated(_associated: bool) {}
 
-/// v0.2.34: set while the cursor is hidden by `hide_cursor_until_local_motion`
-/// (Target idle after the controller left); the tap reveals it on the next
-/// physical mouse event. Separate from `CURSOR_HIDDEN` (seat capture) so the
-/// two CGDisplayHideCursor counters stay balanced.
-#[cfg(target_os = "macos")]
-static IDLE_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(target_os = "macos")]
-fn online_displays() -> Vec<u32> {
-    let mut displays = [0u32; 16];
-    let mut count = 0u32;
-    unsafe {
-        let _ = CGGetOnlineDisplayList(16, displays.as_mut_ptr(), &mut count);
-    }
-    if count == 0 {
-        vec![objc2_core_graphics::CGMainDisplayID()]
-    } else {
-        displays[..count as usize].to_vec()
-    }
-}
-
-/// Hide the macOS cursor until the next physical mouse event (revealed by
-/// the event tap) or the next controller Enter. No-op while the seat
-/// capture already holds it hidden.
+/// v0.2.34: hide the macOS cursor until the next physical mouse event
+/// (revealed by the event tap) or the next controller Enter — Deskflow
+/// OSXScreen::leave on a secondary screen. No system call while the seat
+/// capture already holds the cursor hidden.
 #[cfg(target_os = "macos")]
 pub fn hide_cursor_until_local_motion() {
-    use std::sync::atomic::Ordering;
-    if CURSOR_HIDDEN.load(Ordering::SeqCst) || IDLE_HIDDEN.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    enable_background_cursor_ops();
-    for disp in online_displays() {
-        unsafe {
-            let _ = CGDisplayHideCursor(disp);
-        }
-    }
+    let op = cursor_owners().acquire(CursorHideOwner::Idle);
+    apply_cursor_op(op);
 }
 
-/// Undo `hide_cursor_until_local_motion`; idempotent.
+/// Undo `hide_cursor_until_local_motion` — Deskflow OSXScreen::enter on a
+/// secondary screen. Idempotent.
 #[cfg(target_os = "macos")]
 pub fn reveal_idle_hidden_cursor() {
-    use std::sync::atomic::Ordering;
-    if !IDLE_HIDDEN.swap(false, Ordering::SeqCst) {
-        return;
-    }
-    // Deskflow OSXScreen::showCursor sets the background property before
-    // every show, not only before the hide.
-    enable_background_cursor_ops();
-    for disp in online_displays() {
-        unsafe {
-            let _ = CGDisplayShowCursor(disp);
-        }
-    }
-}
-
-/// Call `show` until `is_visible` holds, at most `max_attempts` times;
-/// returns how many shows were issued. Never shows a cursor that is
-/// already visible, so a hide counter can never be driven below the
-/// visible threshold (a later capture hide still hides with one call).
-#[cfg(any(target_os = "macos", test))]
-pub(crate) fn show_until_visible(
-    mut is_visible: impl FnMut() -> bool,
-    mut show: impl FnMut(),
-    max_attempts: u32,
-) -> u32 {
-    let mut shows = 0;
-    while shows < max_attempts && !is_visible() {
-        show();
-        shows += 1;
-    }
-    shows
-}
-
-/// v0.2.40: a controller Enter means a pointer must be on screen. After the
-/// idle reveal, verify the system actually shows the cursor and issue extra
-/// CGDisplayShowCursor calls while it does not (production 2026-11-13
-/// 21:21:34: `visible=false->false` after the reveal on every re-entry).
-/// Skipped while the seat capture legitimately holds it hidden. Returns
-/// the number of extra shows.
-#[cfg(target_os = "macos")]
-pub fn ensure_cursor_visible() -> u32 {
-    use std::sync::atomic::Ordering;
-    if CURSOR_HIDDEN.load(Ordering::SeqCst) || IDLE_HIDDEN.load(Ordering::SeqCst) {
-        return 0;
-    }
-    enable_background_cursor_ops();
-    let displays = online_displays();
-    show_until_visible(
-        || unsafe { CGCursorIsVisible() != 0 },
-        || {
-            for &disp in &displays {
-                unsafe {
-                    let _ = CGDisplayShowCursor(disp);
-                }
-            }
-        },
-        3,
-    )
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn ensure_cursor_visible() -> u32 {
-    0
+    let op = cursor_owners().release(CursorHideOwner::Idle);
+    apply_cursor_op(op);
 }
 
 /// v0.2.39 diagnostics: `(visible, capture_hidden, idle_hidden)` — the
@@ -1169,12 +1214,12 @@ pub fn ensure_cursor_visible() -> u32 {
 /// so a cursor that enters invisible is attributable from the trace.
 #[cfg(target_os = "macos")]
 pub fn cursor_visibility_state() -> (bool, bool, bool) {
-    use std::sync::atomic::Ordering;
     let visible = unsafe { CGCursorIsVisible() != 0 };
+    let owners = *cursor_owners();
     (
         visible,
-        CURSOR_HIDDEN.load(Ordering::SeqCst),
-        IDLE_HIDDEN.load(Ordering::SeqCst),
+        owners.holds(CursorHideOwner::Capture),
+        owners.holds(CursorHideOwner::Idle),
     )
 }
 
@@ -3280,30 +3325,45 @@ pub fn start_input_hooks(_tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookC
 mod input_tests {
     use super::*;
 
-    /// v0.2.40: the controller-Enter reveal must prove the cursor is
-    /// visible, not trust one CGDisplayShowCursor (production 2026-11-13
-    /// 21:21:34: `cursor_reveal visible=false->false idle_hidden=true` on
-    /// every re-entry — the Windows-driven cursor entered the Mac
-    /// invisible, the user saw no pointer anywhere and swung back).
+    /// v0.2.40 Deskflow OSXComputer alignment: ONE hidden flag
+    /// (`m_cursorHidden`) and exactly one CGDisplayHideCursor /
+    /// CGDisplayShowCursor per transition, whoever asks. Two independent
+    /// owners (seat capture, idle-after-leave) must never stack the global
+    /// hide count — a stacked count left the Mac pointer invisible on the
+    /// next controller Enter (production 2026-11-13 21:21:34
+    /// `cursor_reveal visible=false->false idle_hidden=true`).
     #[test]
-    fn show_until_visible_is_a_noop_when_already_visible() {
-        let mut shows = 0;
-        let extra = show_until_visible(|| true, || shows += 1, 3);
-        assert_eq!((extra, shows), (0, 0));
+    fn deskflow_cursor_owners_issue_one_hide_and_one_show_per_transition() {
+        use super::{CursorHideOwner as O, CursorOp, DeskflowCursorOwners};
+        let mut c = DeskflowCursorOwners::default();
+        assert_eq!(c.acquire(O::Idle), CursorOp::Hide);
+        assert_eq!(c.acquire(O::Idle), CursorOp::None, "re-hide is idempotent");
+        assert_eq!(
+            c.acquire(O::Capture),
+            CursorOp::None,
+            "second owner must not stack"
+        );
+        assert_eq!(c.release(O::Idle), CursorOp::None, "capture still holds it");
+        assert_eq!(c.release(O::Capture), CursorOp::Show);
+        assert_eq!(c.release(O::Capture), CursorOp::None, "show is idempotent");
+        assert!(!c.hidden());
     }
 
     #[test]
-    fn show_until_visible_repeats_show_until_the_cursor_appears() {
-        let shows = std::cell::Cell::new(0u32);
-        let extra = show_until_visible(|| shows.get() >= 2, || shows.set(shows.get() + 1), 3);
-        assert_eq!((extra, shows.get()), (2, 2));
-    }
-
-    #[test]
-    fn show_until_visible_is_bounded_when_the_cursor_never_appears() {
-        let mut shows = 0;
-        let extra = show_until_visible(|| false, || shows += 1, 3);
-        assert_eq!((extra, shows), (3, 3));
+    fn deskflow_cursor_owners_report_each_owner() {
+        use super::{CursorHideOwner as O, DeskflowCursorOwners};
+        let mut c = DeskflowCursorOwners::default();
+        c.acquire(O::Capture);
+        assert_eq!(
+            (c.hidden(), c.holds(O::Capture), c.holds(O::Idle)),
+            (true, true, false)
+        );
+        c.release(O::Capture);
+        c.acquire(O::Idle);
+        assert_eq!(
+            (c.hidden(), c.holds(O::Capture), c.holds(O::Idle)),
+            (true, false, true)
+        );
     }
 
     /// v0.2.32: Windows cursor hiding (Deskflow MSWindowsScreen idiom —
