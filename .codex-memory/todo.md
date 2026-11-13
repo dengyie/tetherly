@@ -2,7 +2,14 @@
 
 ## 当前接手基线（截至 2026-11-13）
 
-> **v0.2.35（2026-11-14，§107）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+> **v0.2.36（2026-11-14，§108）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+
+## v0.2.36 控制端光标在屏时 Windows 推边进不了 Mac（2026-11-14，DEVELOPMENT.md §108）
+- [x] 日志：Mac 控制 Windows 17:52:17–17:56:03 期间 Windows 零条 auto-reverse 日志；Mac 离开后 17:56:50 本地快推即时接管。
+- [x] 根因：扫入先在提升带开驻留（未钳位不记锚点），钳位帧走 contiguous 分支也不记锚点 → hook 静默后心跳无锚，驻留饿死。修复：contiguous 分支首个钳位帧补记锚点。测试 `controller_on_screen_physical_sweep_into_edge_reverses`（RED→GREEN）。
+- [x] ci 43479518747 绿 → tag v0.2.36（7f709df）→ release 43481580990 绿 → deploy EXIT=0：Mac pid 23482；Windows pid 267304 SYSTEM；受保护三进程不动。
+- [ ] 真机验收：Mac 鼠标停在 Windows 上时，Windows 鼠标推底边约 0.6 s 进入 Mac。
+- [ ] 观察：17:56:50–54 快推接管后 4 次 0.5–1.1 s 往返弹回，下次复现抓 `/api/input/trace`。
 
 ## v0.2.35 首次进入卡顿：Windows 守护进程饥饿（2026-11-14，DEVELOPMENT.md §107）
 - [x] 日志：16:55:28.158 fast push → 31.067 polite takeover，纯同步 2909 ms（常态 <8 ms），同窗口全线变慢；home-win 探针 tetherly BelowNormal（与 SRBMiner 同级）、WS 6.5 MB、Pages/sec≈7000。

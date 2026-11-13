@@ -501,3 +501,9 @@
 - Decision: 进程内自提（`SetPriorityClass(ABOVE_NORMAL)`、`ProcessPowerThrottling` 关 EXECUTION_SPEED、`SetProcessWorkingSetSizeEx` 64 MB 硬下限 / 512 MB 软上限），各步 best-effort 并记录结果；不降级 High/Realtime。
 - Rejected: 改 launch_system.ps1 的 CreateProcessAsUser 优先级标志（只修一条启动路径，手动/服务启动仍会继承）；High/Realtime（与输入栈/系统抢占风险）；动受保护的矿机优先级（禁区）。
 - Consequence: Windows 守护进程常驻约 64 MB；非 Windows 无变化。
+
+## 2026-11-14 - v0.2.36：活跃驻留首个钳位帧补记钉边锚点（DEVELOPMENT.md §108）
+- Context: Mac 光标停在 Windows 上时 Windows 推底边无反应，Windows 日志全程无 reverse 行。
+- Decision: `reverse_dwell_advance` contiguous 分支在 `record_anchor` 且无锚点时补记 `(now,x,y)`，交由既有心跳续驻留。
+- Rejected: 物理穿越即翻 `reverse_local_owner`（会放宽控制端在屏时的快推护栏，`controller_on_screen_disables_fast_reverse_until_leave` 语义被破坏）；缩短驻留/冷却（与根因无关）。
+- Consequence: 驻留时长/区域门/距离门/冷却不变；只修心跳无锚的饿死路径。

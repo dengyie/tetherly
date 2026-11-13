@@ -1,6 +1,7 @@
 # Project State
 
 ## Release Baseline (2026-11-14)
+- **v0.2.36**（tag → `7f709df`，§108）：控制端光标停在 Windows Target 时，物理扫入底边的驻留在钳位帧补记钉边心跳锚点（之前只在首次触边/断档重置时记，扫入首帧不在钳位行 → 心跳无锚、驻留无声饿死）。双端已部署。
 - **v0.2.35**（§107）：Windows 守护进程启动自提 AboveNormal 优先级、退出 EcoQoS、固定 64 MB 工作集下限。根因：计划任务链继承 BelowNormal + 工作集被裁到 6.5 MB，闲置后首次推边 2.9 s 同步停顿。
 - **v0.2.34**（tag → `983c37c`，2026-11-14；上一基线 v0.2.33 / `31e42ae`）。SSOT：`docs/DEVELOPMENT.md` 顶部 + §101–§106。v0.2.34（§106）：macOS Target 在控制器 Leave 时光标 warp 到中心、清钉边反向锚点、隐藏直到下一次物理事件/控制器 Enter（修 Mac 遗留指针 + 钉边心跳误抢控制器导致 Windows 首次进入卡）；心跳 trace `reverse_heartbeat`。本机 core 321 / node 220 / 集成全绿。
 - v0.2.33 已部署双端（tag → `31e42ae`，2026-11-13）。

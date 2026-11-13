@@ -1069,3 +1069,10 @@
 - Results: fmt / clippy 0 错误；cargo test --workspace EXIT=0（838 passed, 0 failed）。
 - Deploy: ci 43469993884 绿 → tag v0.2.35 → release 43471801241 绿 → deploy EXIT=0；Windows pid 307384 AboveNormal / MinWS 64 MB / SYSTEM sid=2；`daemon responsiveness` 四项全 true。
 - Next: 用户按 §107.7 真机验收。
+
+## 2026-11-14 - v0.2.36（§108）
+- Context: 用户：Mac 鼠标在 Windows 时 Windows 鼠标进不来 Mac。
+- Work: 日志定位控制端在屏路径无声失败；复现测试 RED；contiguous 分支补记锚点 GREEN。
+- Results: fmt / clippy 0 错误；cargo test --workspace 全绿（node 224、core 321）。
+- Deploy: ci 43479518747 绿 → tag v0.2.36 → release 43481580990 绿 → deploy EXIT=0；Mac pid 23482；Windows pid 267304 SYSTEM；受保护进程不动。
+- Next: 用户按 §108.7 真机验收；弹回观察见 §108.8。
