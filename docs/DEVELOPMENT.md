@@ -8459,3 +8459,15 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 6. **发布与部署（2026-11-14）**：commit `5710b9f`；ci 43505914478 全绿；tag v0.2.39 → release 43507848391 全绿；`deploy.sh --target all --tag v0.2.39` EXIT=0。Mac 0.2.39 pid 89356；Windows 0.2.39 pid 308452，SYSTEM；受保护进程 PID 不变。
 7. **下一步**：用户复现一次，拉两端日志和 trace，按第 5 条定位后再修。
 
+
+## 112. Windows 鼠标进 Mac 后光标不可见，用户来回划导致弹回 (v0.2.40)
+
+1. **复现（v0.2.39，2026-11-13 21:21:33–47 UTC）**：Windows 侧 5 次进入，分别在 286–1139 ms 后回程。按 §111 第 5 条判读：`away_px` 与 `toward_px` 都大且接近（457/465、283/326、925/1441），`max_toward` 只有 8–10，`relay=true`，说明是手在来回划，排除 relay 偏差 (b) 和 capture 错位 (c)。有一次 stint 先深入 Mac 264 px 再回到边缘继续上推 107 px，这是真实的大幅回划，不是回声抵消（回声只会让净位移为 0）。
+2. **根因证据（Mac trace）**：每次重新进入都是 `cursor_reveal controller entered visible=false->false capture_hidden=false idle_hidden=true`（894571、895341、907102）。也就是 v0.2.34 的 idle hide（controller 离开时 park + 隐藏）在下次 Enter 时 `reveal_idle_hidden_cursor` 只调一次 `CGDisplayShowCursor`，光标仍不可见。唯一 `visible=true` 的那次，前面是 Mac 本地动过鼠标（tap 已 reveal）。此时 Windows 光标本身已隐藏并冻结，Mac 光标也不可见，用户两边都看不到指针，只能来回划，划回去后 Windows 光标在底边重新出现，看起来就像“划不过去”，直到某次 Mac 本地事件把光标 reveal 出来（10–20 s）。
+3. **修复（`crates/tetherly-node/src/platform.rs`、`runtime/input.rs`）**：
+   - `reveal_idle_hidden_cursor` 在 show 前重设 `SetsCursorInBackground`，与 Deskflow `OSXScreen::showCursor` 对齐：每次 show 都设，而不只在 hide 前设。
+   - 新增纯函数 `show_until_visible(is_visible, show, max)` 和 macOS 下的 `ensure_cursor_visible()`：如果 seat capture 或 idle hide 都没有持有隐藏，而 `CGCursorIsVisible` 仍为假，最多再补 3 轮 `CGDisplayShowCursor`。光标已可见时绝不再 show，所以隐藏计数不会被压到可见阈值以下，后续 capture hide 一次即可生效。
+   - `note_controller_entered` 在 reveal、disarm、restore_arrow 之后调用 `ensure_cursor_visible`。trace 追加 `extra_shows=N`。
+4. **测试**：`show_until_visible_is_a_noop_when_already_visible`、`..._repeats_show_until_the_cursor_appears`、`..._is_bounded_when_the_cursor_never_appears`，先 RED（函数不存在）后 GREEN。fmt / clippy `-D warnings` 0 错误；workspace 全量测试全绿。
+5. **判读（下次）**：Mac trace `cursor_reveal ... visible=false->true extra_shows≥1` 说明补 show 生效。如果仍是 `->false extra_shows=3`，说明隐藏来自别的计数器（AppKit `NSCursor hide` 异步、系统“打字隐藏”等），下一步改成在主线程 `NSCursor unhide`，或取消 idle hide、改为把光标 park 到屏幕角落。
+6. **真机验收脚本 `scripts/verify_crossing.py`**（只读：只发 GET 请求，Windows 侧通过 ssh 调 curl.exe）：先打印两端版本和 pid，再给 N 秒（`--seconds`，默认 30）做手势，然后拉两端 `/api/input/trace` 判定。判定规则：Mac 每次 `cursor_reveal` 都必须以 `->true` 结束；Windows 每个 controller stint 按时长和划动方向标成 `OK / STAYED / BOUNCE / BOUNCE(wiggle)`，至少要有一次停留超过 `--bounce-ms`（默认 1500）。退出码 0 PASS / 1 FAIL / 2 无数据或采集失败。也可以用 `--mac-trace/--win-trace` 离线复判已保存的 trace：用 v0.2.39 复现数据回放，得到 3 次 `BOUNCE(wiggle)`、3 次 `visible=False->False`，结果 FAIL，与人工结论一致。
