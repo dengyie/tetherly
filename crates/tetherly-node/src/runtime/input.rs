@@ -3601,6 +3601,25 @@ impl Node {
                     // check keeps measuring from the very first touch and
                     // any dwell longer than TOUCH_GAP_MS resets forever.
                     *last_tick = Some(now);
+                    // v0.2.36: a real sweep opens the dwell one row SHORT
+                    // of the clamp (y in the promotion band, dy>0) and only
+                    // the NEXT event lands on the clamp row — after which
+                    // the OS goes silent. Recording the anchor only on the
+                    // first touch left that dwell with no heartbeat to
+                    // carry it (production 2026-11-13 17:52–17:56: the Mac
+                    // cursor parked here, the Windows hand pushed into the
+                    // edge repeatedly, zero reverse log lines). Adopt the
+                    // anchor on the first clamped tick of an active dwell.
+                    if record_anchor {
+                        let mut pinned = self
+                            .shared
+                            .reverse_pinned_touch
+                            .lock()
+                            .expect("reverse_pinned");
+                        if pinned.is_none() {
+                            *pinned = Some((now, x, y));
+                        }
+                    }
                     false
                 } else {
                     // Gap too long: a fresh push, not a continuation.
@@ -6899,6 +6918,45 @@ mod tests {
         assert!(
             fired_after < std::time::Duration::from_millis(400),
             "the local-owner dwell must be the short controller-parity one, took {fired_after:?}"
+        );
+    }
+    /// v0.2.36 (production 2026-11-13 17:52:17 → 17:56:03): while the
+    /// Mac's cursor sat on this Windows Target, the user moved the
+    /// Windows mouse down into the shared edge and nothing happened for
+    /// minutes — no reverse log line at all. The realistic gesture is a
+    /// sweep from the interior whose last pre-clamp event lands inside the
+    /// promotion band (y >= height-8) but NOT on the clamp row, then one
+    /// clamped event, then OS silence (LL hooks only fire on movement).
+    /// That push must still hand over promptly.
+    #[tokio::test]
+    async fn controller_on_screen_physical_sweep_into_edge_reverses() {
+        let (node, _d1, _d2) = local_owner_target_fixture("rev-sweep").await;
+        node.spawn_reverse_pinned_heartbeat();
+        node.note_controller_entered();
+        let mut y = 600;
+        while y < 1072 {
+            let _ = node
+                .drive_input_delta(900, y, 0, 24, 1920, 1080)
+                .expect("reverse path must not error");
+            y += 24;
+            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        }
+        let _ = node
+            .drive_input_delta(900, 1074, 0, 24, 1920, 1080)
+            .expect("reverse path must not error");
+        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        let _ = node
+            .drive_input_delta(900, 1079, 0, 5, 1920, 1080)
+            .expect("reverse path must not error");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        while node.shared.last_auto_reverse.lock().unwrap().is_none()
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            node.shared.last_auto_reverse.lock().unwrap().is_some(),
+            "a physical sweep into the shared edge must reverse even while the controller's cursor is on screen"
         );
     }
 
