@@ -454,9 +454,13 @@ async fn m3_5_four_directional_edge_roaming() {
     // the band and re-crossed on a stray dy<=0 event (ghost controller
     // bounce loop). 50px screen -> band_safe_dock_y floors at 48 but the
     // screen is only 50px tall -> band_safe_dock_y = min(48, 49) = 48.
+    //
+    // v0.2.38: only the push PAST the shared edge counts, and right after
+    // entry the threshold is 10x the base (default 3 s grace), so the
+    // return is a deliberate flick: 40 px back to the edge + 140 beyond.
     server.drive_input_delta(50, 30, 0, -40, 100, 50).unwrap();
     assert_eq!(server.input_engine_seat(), CursorSeat::Remote);
-    server.drive_input_delta(50, 30, 0, 50, 100, 50).unwrap();
+    server.drive_input_delta(50, 30, 0, 180, 100, 50).unwrap();
     assert_eq!(server.input_engine_seat(), CursorSeat::Local);
     let (lx, ly) = server.input_engine_local_pos();
     assert_eq!(ly, 48);

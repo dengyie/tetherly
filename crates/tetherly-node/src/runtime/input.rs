@@ -2948,9 +2948,28 @@ impl Node {
                     "engine crossing fired"
                 );
                 let (rx, ry) = server.remote_pos();
+                // v0.2.38: a return carries its own evidence (time since
+                // entry, deepest interior travel, push past the edge vs the
+                // threshold) so a bounce is attributable from the log.
+                let ret = match (server.seat(), server.last_return_diag()) {
+                    (CursorSeat::Local, Some(d)) => {
+                        tracing::info!(
+                            elapsed_ms = d.elapsed_ms,
+                            peak_depth = d.peak_depth,
+                            push = d.push,
+                            required_push = d.required_push,
+                            "engine return to local"
+                        );
+                        format!(
+                            " return elapsed_ms={} peak_depth={} push={}/{}",
+                            d.elapsed_ms, d.peak_depth, d.push, d.required_push
+                        )
+                    }
+                    _ => String::new(),
+                };
                 self.trace_input(
                     "crossing",
-                    format!("edge={e:?} hook=({x},{y}) delta=({dx},{dy}) rem=({rx},{ry})"),
+                    format!("edge={e:?} hook=({x},{y}) delta=({dx},{dy}) rem=({rx},{ry}){ret}"),
                 );
             }
             (

@@ -392,6 +392,21 @@ impl InputSink for MemorySink {
     }
 }
 
+/// Evidence of the last sustained-push return to the local seat (v0.2.38):
+/// lets a production bounce be attributed from the log alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReturnDiag {
+    /// Milliseconds between the crossing into Remote and the return.
+    pub elapsed_ms: u64,
+    /// Deepest interior travel (0..=1000 units) away from the shared edge
+    /// during the stint.
+    pub peak_depth: i32,
+    /// Accumulated push (local px) beyond the shared edge that returned.
+    pub push: i32,
+    /// Threshold (local px) in force at the moment of the return.
+    pub required_push: i32,
+}
+
 /// Server-side capture: local cursor, detect edge leave, encode outbound events.
 pub struct InputServer {
     width: i32,
@@ -457,6 +472,10 @@ pub struct InputServer {
     /// Remote delta multiplier in percent (100 = 1:1 against the peer
     /// screen); clamped to `REMOTE_SPEED_PERCENT_RANGE`.
     remote_speed_percent: u32,
+    /// Deepest interior travel of the current Remote stint (units).
+    remote_peak_depth: i32,
+    /// Evidence of the last sustained-push return (see [`ReturnDiag`]).
+    last_return_diag: Option<ReturnDiag>,
 }
 
 impl InputServer {
@@ -489,6 +508,8 @@ impl InputServer {
             remote_entered_at: None,
             remote_screen: None,
             remote_speed_percent: 100,
+            remote_peak_depth: 0,
+            last_return_diag: None,
         }
     }
 
@@ -499,7 +520,7 @@ impl InputServer {
     /// Entry-time multiplier of `FAR_PUSH_RETURN_PX`: the return push
     /// required right after the crossing, decaying linearly to the base
     /// threshold over the entry return grace (v0.2.32).
-    const ENTRY_RETURN_PUSH_MULTIPLIER: i32 = 4;
+    const ENTRY_RETURN_PUSH_MULTIPLIER: i32 = 10;
     /// A return push older than this no longer counts toward the threshold;
     /// a fresh deliberate push must re-accumulate.
     const FAR_PUSH_WINDOW: std::time::Duration = std::time::Duration::from_millis(600);
@@ -594,6 +615,11 @@ impl InputServer {
     /// Return push (raw px) required at `now`, given the entry return
     /// ramp since the last crossing into Remote (base threshold when no
     /// crossing is recorded).
+    /// Evidence of the last sustained-push return to the local seat.
+    pub fn last_return_diag(&self) -> Option<ReturnDiag> {
+        self.last_return_diag
+    }
+
     fn current_return_push_px(&self, now: std::time::Instant) -> i32 {
         self.remote_entered_at
             .map(|t| Self::required_return_push_px(now.duration_since(t), self.entry_return_grace))
@@ -916,11 +942,38 @@ impl InputServer {
             // push never returned and both nodes were stranded in Remote
             // seat (production 2026-11-11). Fast flicks still return
             // instantly: one event contributes its whole delta.
-            let (push_toward_edge, at_shared_edge) = match crossed_edge {
-                ScreenEdge::Top => (dy, next_rem_y >= SCREEN_UNITS),
-                ScreenEdge::Bottom => (-dy, next_rem_y <= 0),
-                ScreenEdge::Left => (dx, next_rem_x >= SCREEN_UNITS),
-                ScreenEdge::Right => (-dx, next_rem_x <= 0),
+            let (push_toward_edge, at_shared_edge, depth_before, depth_after) = match crossed_edge {
+                ScreenEdge::Top => (
+                    dy,
+                    next_rem_y >= SCREEN_UNITS,
+                    SCREEN_UNITS - self.rem_y,
+                    SCREEN_UNITS - next_rem_y,
+                ),
+                ScreenEdge::Bottom => (-dy, next_rem_y <= 0, self.rem_y, next_rem_y),
+                ScreenEdge::Left => (
+                    dx,
+                    next_rem_x >= SCREEN_UNITS,
+                    SCREEN_UNITS - self.rem_x,
+                    SCREEN_UNITS - next_rem_x,
+                ),
+                ScreenEdge::Right => (-dx, next_rem_x <= 0, self.rem_x, next_rem_x),
+            };
+            self.remote_peak_depth = self.remote_peak_depth.max(depth_after);
+            // v0.2.38: only the motion that goes PAST the shared edge pushes
+            // against it. The travel back to the edge is ordinary roaming —
+            // counting the whole event delta let a shallow entry's
+            // lift-and-reset stroke clear the return threshold (production
+            // 2026-11-13 19:27: five bounces 0.34-0.63 s after entry).
+            let push_beyond_edge = if at_shared_edge && push_toward_edge > 0 {
+                let div = match crossed_edge {
+                    ScreenEdge::Top | ScreenEdge::Bottom => div_y,
+                    ScreenEdge::Left | ScreenEdge::Right => div_x,
+                };
+                let px_to_edge =
+                    (depth_before.max(0) as i64 * div / (SCREEN_UNITS as i64 * pct.max(1))) as i32;
+                (push_toward_edge - px_to_edge).max(0)
+            } else {
+                0
             };
             let now = std::time::Instant::now();
             let window_expired = self
@@ -930,14 +983,16 @@ impl InputServer {
             if window_expired || !at_shared_edge || push_toward_edge < 0 {
                 self.far_push_accum = 0;
             }
-            if at_shared_edge && push_toward_edge > 0 && self.buttons_down == 0 {
-                self.far_push_accum = self.far_push_accum.saturating_add(push_toward_edge);
+            if push_beyond_edge > 0 && self.buttons_down == 0 {
+                self.far_push_accum = self.far_push_accum.saturating_add(push_beyond_edge);
                 self.far_push_last = Some(now);
             }
             // v0.2.32 entry return ramp (replaces the v0.2.31 hard grace):
             // right after the crossing the hand's residual momentum lands
             // small pushes on the shared edge, so the required push starts
-            // at 4x the base and decays to it over the grace. A deliberate
+            // at 10x the base (v0.2.38; 4x in v0.2.32 let a shallow entry's
+            // reset stroke bounce the seat) and decays to it over the grace.
+            // A deliberate
             // flick clears the ramp at any time; a hard cut instead bounced
             // the seat the instant the grace expired (production
             // 2026-11-13: five bounces in one 3-minute session).
@@ -947,6 +1002,15 @@ impl InputServer {
                 && self.far_push_accum >= required_push;
 
             if returning_local {
+                self.last_return_diag = Some(ReturnDiag {
+                    elapsed_ms: self
+                        .remote_entered_at
+                        .map(|t| now.duration_since(t).as_millis() as u64)
+                        .unwrap_or(0),
+                    peak_depth: self.remote_peak_depth,
+                    push: self.far_push_accum,
+                    required_push,
+                });
                 self.seat = CursorSeat::Local;
                 self.remote_interior = false;
                 self.far_push_accum = 0;
@@ -1018,6 +1082,7 @@ impl InputServer {
                     self.rem_y = self.norm_y();
                     self.seat = CursorSeat::Remote;
                     self.remote_entered_at = Some(std::time::Instant::now());
+                    self.remote_peak_depth = 0;
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Right;
                     // Root-fix E: drop any stale frame lingering in the
@@ -1048,6 +1113,7 @@ impl InputServer {
                     self.rem_y = self.norm_y();
                     self.seat = CursorSeat::Remote;
                     self.remote_entered_at = Some(std::time::Instant::now());
+                    self.remote_peak_depth = 0;
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Left;
                     // Root-fix E: drop any stale frame lingering in the
@@ -1092,6 +1158,7 @@ impl InputServer {
                     self.rem_y = SCREEN_UNITS;
                     self.seat = CursorSeat::Remote;
                     self.remote_entered_at = Some(std::time::Instant::now());
+                    self.remote_peak_depth = 0;
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Top;
                     // Root-fix E: drop any stale frame lingering in the
@@ -1134,6 +1201,7 @@ impl InputServer {
                     self.rem_y = 0;
                     self.seat = CursorSeat::Remote;
                     self.remote_entered_at = Some(std::time::Instant::now());
+                    self.remote_peak_depth = 0;
                     self.remote_interior = false;
                     self.last_crossed_edge = ScreenEdge::Bottom;
                     // Root-fix E: drop any stale frame lingering in the
@@ -1965,7 +2033,8 @@ mod tests {
     }
 
     /// v0.2.32: the return push required at the shared edge decays linearly
-    /// from 4x the base threshold at the instant of entry down to the base
+    /// from 10x (v0.2.38; 4x in v0.2.32) the base threshold at the instant
+    /// of entry down to the base
     /// threshold when the grace ends; with no grace (or after it) the base
     /// threshold applies.
     #[test]
@@ -1975,11 +2044,11 @@ mod tests {
         let base = InputServer::FAR_PUSH_RETURN_PX;
         assert_eq!(
             InputServer::required_return_push_px(Duration::ZERO, g),
-            base * 4
+            base * 10
         );
         assert_eq!(
             InputServer::required_return_push_px(Duration::from_millis(1500), g),
-            base * 4 - (base * 3) / 2
+            base * 10 - (base * 9) / 2
         );
         assert_eq!(InputServer::required_return_push_px(g, g), base);
         assert_eq!(InputServer::required_return_push_px(g * 2, g), base);
@@ -2019,6 +2088,88 @@ mod tests {
         assert_eq!(srv.seat(), CursorSeat::Local);
         let events = srv.drain();
         assert_eq!(events.last().unwrap().kind, InputKind::Leave);
+    }
+
+    /// v0.2.38 (production 2026-11-13 19:27, five Windows→Mac bounces each
+    /// 0.34–0.63 s after entry): the user strokes down, the cursor crosses
+    /// late in the stroke and only travels a shallow distance into the
+    /// peer, then the hand's lift-and-reset stroke drags it back up. Only
+    /// the motion that goes PAST the shared edge is a push against it; the
+    /// travel back to the edge is not. Counting the whole event delta made
+    /// a ~50 px reset stroke clear the entry-time threshold.
+    #[test]
+    fn shallow_entry_reset_stroke_does_not_bounce_the_seat_back() {
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Bottom);
+        srv.set_remote_screen(Some((1920, 1080)));
+        srv.set_entry_return_grace(std::time::Duration::from_millis(3000));
+
+        assert_eq!(
+            srv.local_move_delta(729, 1079, 0, 4),
+            Some(ScreenEdge::Bottom)
+        );
+        srv.drain();
+        // Residual stroke momentum: 40 px into the peer (past hysteresis).
+        assert_eq!(srv.local_move_delta(960, 540, 0, 40), None);
+        // Lift-and-reset stroke: 10 x 9 px upward (90 px, ~50 px of it
+        // beyond the shared edge).
+        for _ in 0..10 {
+            assert_eq!(srv.local_move_delta(960, 531, 0, -9), None);
+        }
+        assert_eq!(
+            srv.seat(),
+            CursorSeat::Remote,
+            "a reset stroke right after a shallow entry must not return"
+        );
+    }
+
+    /// The deliberate return right after an accidental crossing still works
+    /// inside the entry grace: a real flick back pushes far past the edge.
+    #[test]
+    fn deliberate_flick_back_right_after_entry_still_returns() {
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Bottom);
+        srv.set_remote_screen(Some((1920, 1080)));
+        srv.set_entry_return_grace(std::time::Duration::from_millis(3000));
+
+        assert_eq!(
+            srv.local_move_delta(729, 1079, 0, 4),
+            Some(ScreenEdge::Bottom)
+        );
+        srv.drain();
+        assert_eq!(srv.local_move_delta(960, 540, 0, 40), None);
+        assert_eq!(
+            srv.local_move_delta(960, 340, 0, -200),
+            Some(ScreenEdge::Bottom)
+        );
+        assert_eq!(srv.seat(), CursorSeat::Local);
+    }
+
+    /// The return reports its own evidence (time since entry, deepest
+    /// interior travel, the push that cleared the threshold) so a
+    /// production bounce can be attributed from the log alone.
+    #[test]
+    fn return_records_entry_elapsed_peak_depth_and_push() {
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Bottom);
+        srv.set_remote_screen(Some((1920, 1080)));
+
+        assert!(srv.last_return_diag().is_none());
+        assert_eq!(
+            srv.local_move_delta(729, 1079, 0, 4),
+            Some(ScreenEdge::Bottom)
+        );
+        assert_eq!(srv.local_move_delta(960, 540, 0, 108), None);
+        assert_eq!(srv.local_move_delta(960, 540, 0, -54), None);
+        assert_eq!(
+            srv.local_move_delta(960, 540, 0, -108),
+            Some(ScreenEdge::Bottom)
+        );
+        let diag = srv.last_return_diag().expect("return diag");
+        assert_eq!(diag.peak_depth, 100);
+        assert_eq!(diag.required_push, InputServer::FAR_PUSH_RETURN_PX);
+        assert!(diag.push >= 50 && diag.push <= 60, "push={}", diag.push);
+        assert!(diag.elapsed_ms < 1000);
     }
 
     /// v0.2.32: with the peer's screen known, remote-seat deltas normalize
@@ -2100,8 +2251,10 @@ mod tests {
         // 3. Return home: the local landing x must be the inverse mapping of
         // the last remote x (Deskflow OSXScreen semantics), parked just
         // outside the redundancy band — NOT the raw hook position (which
-        // sits wherever the parked local cursor was left).
-        assert_eq!(srv.local_move_delta(250, 0, 0, 50), Some(ScreenEdge::Top));
+        // sits wherever the parked local cursor was left). 60 px: 40 back
+        // to the shared edge plus a 20 px push past it (v0.2.38 counts only
+        // the overshoot).
+        assert_eq!(srv.local_move_delta(250, 0, 0, 60), Some(ScreenEdge::Top));
         let _ = srv.drain();
         assert_eq!(srv.seat(), CursorSeat::Local);
         let (lx, ly) = srv.local_pos();
