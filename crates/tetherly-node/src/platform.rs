@@ -1118,6 +1118,7 @@ pub fn reveal_idle_hidden_cursor() {
 /// returns how many shows were issued. Never shows a cursor that is
 /// already visible, so a hide counter can never be driven below the
 /// visible threshold (a later capture hide still hides with one call).
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn show_until_visible(
     mut is_visible: impl FnMut() -> bool,
     mut show: impl FnMut(),
