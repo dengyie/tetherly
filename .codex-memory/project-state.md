@@ -1,12 +1,12 @@
 # Project State
 
 ## Release Baseline (2026-11-13)
-- **v0.2.32** 本轮发版（Cargo.toml 0.2.32；上一基线 v0.2.31 / `c41af3d` 双端已部署）。SSOT：`docs/DEVELOPMENT.md` 顶部"当前接手基线"+ §101–§104。
+- **v0.2.32** 已部署双端（tag → `afe2279`，2026-11-13；Mac pid 86032 / Windows pid 311228 SYSTEM sid=2；上一基线 v0.2.31 / `c41af3d`）。SSOT：`docs/DEVELOPMENT.md` 顶部"当前接手基线"+ §101–§104。
 - 🟢 Windows→Mac 鼠标方向已解决（v0.2.29 `7b71531` zone-entered gate，用户真机确认）。
 - v0.2.30：core Remote 座位冗余 Move 帧抑制（A）；输入引擎 64 条决策环 `GET /api/input/trace` + `tetherly input trace`（C）；attach-kick 冷却明确不做（B）。
 - v0.2.31（§103）：反向闸门锚定控制器 Enter（预臂 accept 不关闸）修首次进入 8 s；core `entry_return_grace` + `EdgeCrossingConfig.entry_return_grace_ms`（默认 1000）修进入后弹回；macOS `move_abs` 按住期间发 `*MouseDragged` 修左键不能选字/拖窗；`/api/input` 新增 applied/dropped/rx_buttons/rx_wheel/rx_keys/tx_buttons，trace 新 kind push_button/apply_button/apply_reject/channel_open/pump_exit/zone_gate。
 - v0.2.32（§104）：Windows 系统光标隐藏（`system_cursor`：14 个 OCR_* 换空白光标，`SPI_SETCURSORS` 恢复，hook 启动 force restore）；Remote 位移按对端屏幕尺寸归一化（accept 的 `capture_width/height` → `set_remote_screen`，release 清空）+ `EdgeCrossingConfig.remote_speed_percent`（默认 100，25–400）；进入回归斜坡 `required_return_push_px` 48→12 px，`entry_return_grace_ms` 默认 3000；relay 分支 `hook_delta_is_bogus`；attach `input_out` 清空提前到 `send_to` 前（§103.8 双拨号关闭）。
-- 本机验证（v0.2.32）：core 321、node 214、loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65 一次全绿、clippy -D warnings 0 错误。Windows 交叉编译本机不可行，ci.yml windows 作业为门禁。
+- 本机验证（v0.2.32）：core 321、node 214、loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65 一次全绿、clippy -D warnings 0 错误。ci.yml `afe2279` 三平台全绿（含 windows check 首绿；`b133f6b` 之前 ubuntu/windows 自 v0.2.31 起因 macOS-only 辅助函数 dead_code 连红，已 cfg_attr 补修）。ubuntu `m3_2` 偶发一次超时（rerun 绿）。
 - 下文 `Objective` 起为 v1.x 历史设计文档时期的状态记录，版本号不代表当前二进制。
 
 ## Objective

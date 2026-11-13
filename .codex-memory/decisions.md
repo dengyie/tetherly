@@ -482,4 +482,4 @@
 - Impact: Windows 漫游时屏上无光标、回归恢复（自定义光标主题用户回归后变 Windows 默认主题，已知偏差）；Mac 里 1:1 跟手且水平垂直手感一致；底边首次进入不再弹跳；每次 attach 一条 `channel_open`。core 321 / node 214 / 五组集成测试一次全绿，clippy -D warnings 0 错误。
 - Rollback trigger: Windows 回归后光标不恢复→`restore(force)` 已在 hook 启动兜底，手工 `tetherly` 重启守护进程即恢复；用户觉得 Mac 里过快/过慢→`remote_speed_percent` 调整；想回 Windows 推不回→`entry_return_grace_ms` 调小；attach 后通道打不开→检查 drop 提前后 resp 路径 `!input_channel_open()` 兜底是否仍拨号。
 - Related files: `crates/tetherly-core/src/{input.rs,topology.rs}`, `crates/tetherly-node/src/{platform.rs,store.rs}`, `crates/tetherly-node/src/runtime/{input.rs,topology.rs}`, `crates/tetherly-node/src/uihttp/{api_topology.rs,dto.rs}`, `tests/phase3.rs`, `Cargo.toml`, `Cargo.lock`, `docs/DEVELOPMENT.md` §104
-
+- Deploy record: 2026-11-13 tag v0.2.32 → afe2279；release 43426215702；双端部署成功（Mac pid 86032，Windows pid 311228 SYSTEM sid=2）。附带决定：v0.2.31 macOS-only 注入辅助函数以 `cfg_attr(not(macos), allow(dead_code))` 保留而非 cfg 删除，保证其单测跨平台执行。

@@ -1040,7 +1040,7 @@
   3. 版本 bump 0.2.32 + `cargo update --workspace --offline`。
   4. 验证：fmt；clippy -D warnings 0 错误；core 321、node 214；loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65 一次全绿。Windows 交叉编译本机失败于 openh264-sys2 build script（缺 Windows C 头），Win32 签名对照 windows-sys 0.59.0 源码核对，编译门禁交 ci.yml windows 作业。
   5. 文档：DEVELOPMENT.md 顶部基线 → v0.2.32 + §104；`.codex-memory` 四文件同步。
-- Results: 待 commit + push → ci.yml windows 绿 → tag v0.2.32 → release.yml → `scripts/deploy.sh --target all --tag v0.2.32` → 双端 health 0.2.32 → 真机验收 §104.7 四项。
-- Next: 部署后看 Windows 日志 `[cursor] hidden/restored`、Windows trace `remote_screen peer=1470x956`、每次 attach 单条 `channel_open`。
+- Results: `b133f6b` 功能提交 + `afe2279` ci dead_code 补修（v0.2.31 遗留，ubuntu/windows 连红根因）；ci.yml 三平台全绿（m3_12 windows 连红随双拨号修复消失；ubuntu m3_2 偶发一次超时，rerun 绿）；tag v0.2.32 → release 43426215702 成功 → deploy.sh exit 0；Mac/Windows health 0.2.32，Windows SYSTEM sid=2 + `[cursor] restored (force=true)`，受保护进程不动，rtt 61–64 ms。
+- Next: 用户真机 3 分钟实测 §104.7 (a)–(d)；手感不对调 `POST /api/topology/config {"remote_speed_percent":N}`；m3_2 若再超时查 `open_input` 重试循环的无超时 await。
 - Blockers: None.
 

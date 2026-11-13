@@ -2,7 +2,7 @@
 
 ## 当前接手基线（截至 2026-11-13）
 
-> **v0.2.32（本轮发版）；上一基线 v0.2.31 / c41af3d 双端已部署；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+> **v0.2.32（afe2279，2026-11-13 双端已部署）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
 
 ## v0.2.32 真机三症状修复（2026-11-13，DEVELOPMENT.md §104）
 - [x] **A · Windows 系统光标隐藏**：`platform.rs::system_cursor`（14 个 OCR_* + 空白光标 `SetSystemCursor(CopyIcon(blank))`，`SPI_SETCURSORS` 恢复；`HookControl::set_keyboard` on→hide / off→restore；`start_input_hooks` 开头 force restore）。测试 `system_cursor_ids_cover_every_oem_cursor_and_blank_planes_are_transparent`。修"Windows 屏中央留一个光标"。
@@ -10,7 +10,10 @@
 - [x] **C · 进入回归斜坡**：`required_return_push_px` 48→12 px 线性衰减；累加器宽限内照常累加；`entry_return_grace_ms` 默认 3000。测试 `return_push_threshold_decays_linearly_over_the_entry_grace`、`entry_return_ramp_ignores_residual_push_but_honors_deliberate_flick`、`entry_return_grace_blocks_residual_return_then_allows_it`、`entry_return_grace_defaults_to_three_seconds`。修"第一次底边进入有点卡"。
 - [x] **D · relay 分支 bogus 过滤 + attach 双拨号**：relay `WM_MOUSEMOVE` 套 `hook_delta_is_bogus`；`input_tunnel_attach` 的 `input_out=None` 提前到 `send_to` 之前。测试 `attach_drops_stale_outbound_channel_before_the_request_hits_the_wire`。关闭 §103.8 待办。
 - [x] 本机验证：fmt、clippy -D warnings 0 错误；core 321、node 214；loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65 一次全绿。Windows 交叉编译本机不可行（openh264-sys2 需 Windows C 头），以 ci.yml windows 作业为门禁。
-- [ ] push → ci.yml windows 绿 → tag v0.2.32 → release.yml → `scripts/deploy.sh --target all --tag v0.2.32` → 双端 health 0.2.32 / SYSTEM SessionId=2 / 受保护进程不动。
+- [x] ci.yml 跨平台 dead_code 补修 `afe2279`（v0.2.31 macOS-only 注入辅助函数在 ubuntu/windows clippy 红；加 cfg_attr allow(dead_code)）。
+- [x] ci.yml `afe2279` 三平台全绿（windows check 首次绿：§103.8 的 m3_12 windows 连红在 attach 双拨号修复后消失，佐证根因）；ubuntu 首跑 `m3_2_peer_gone_returns_cursor` 超 5 s 一次（"cursor did not return home"，历史首见，rerun 绿；本机 3 次时间线：grace 到期 rescue ≈2.55 s，macOS 本机另有真实 hook 产生的 crossing 更早回归）→ 记为偶发，下一轮若复现再查 `open_input` 重试循环无超时 await。
+- [x] `git tag v0.2.32`（指向 afe2279）→ release.yml run 43426215702。
+- [x] release.yml 43426215702 绿 → `scripts/deploy.sh --target all --tag v0.2.32` exit 0：Mac health 0.2.32 / accessibility_trusted；Windows health 0.2.32、pid 311228、SYSTEM、SessionId=2、`[cursor] restored (force=true)`；受保护三进程不动；双端 rtt 61–64 ms；两端 `remote_speed_percent=100`、`entry_return_grace_ms=3000`。
 - [ ] 真机验收 v0.2.32（§104.7）：(a) 漫游时 Windows 无光标、回归后恢复（`[cursor] hidden: replaced 14/14` / `[cursor] restored`）；(b) Windows trace `remote_screen peer=1470x956`，Mac 里 1:1 跟手；(c) 底边首次进入不卡、3 s 内只有刻意甩回才回归；(d) 每次 attach 只一条 `channel_open`，无 `outbound slot dropped`。
 - [ ] 若用户仍觉得慢/快：`POST /api/topology/config {"remote_speed_percent":N}`（25–400）；自定义光标主题用户回归后变默认主题属已知偏差。
 
