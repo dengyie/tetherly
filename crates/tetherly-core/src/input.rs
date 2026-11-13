@@ -448,6 +448,15 @@ pub struct InputServer {
     entry_return_grace: std::time::Duration,
     /// Instant the seat last crossed into Remote (anchor of the grace).
     remote_entered_at: Option<std::time::Instant>,
+    /// Peer screen size (px/pt) learnt from the tunnel accept (v0.2.32).
+    /// When known, remote-seat deltas normalize by the REMOTE dimension so
+    /// one local px moves one remote px/pt on both axes; `None` falls back
+    /// to the local dimension (legacy: a 1920x1080 controller moved a
+    /// 1470x956 mac cursor 0.77 / 0.89 pt per px, slow and anisotropic).
+    remote_screen: Option<(i32, i32)>,
+    /// Remote delta multiplier in percent (100 = 1:1 against the peer
+    /// screen); clamped to `REMOTE_SPEED_PERCENT_RANGE`.
+    remote_speed_percent: u32,
 }
 
 impl InputServer {
@@ -478,16 +487,91 @@ impl InputServer {
             far_push_last: None,
             entry_return_grace: std::time::Duration::ZERO,
             remote_entered_at: None,
+            remote_screen: None,
+            remote_speed_percent: 100,
         }
     }
 
     /// Sustained push (raw px) at the shared edge required to switch back to
     /// the local seat. Mirrors the entry-side resistance so both directions
     /// feel symmetric.
-    const FAR_PUSH_RETURN_PX: i32 = 12;
+    pub const FAR_PUSH_RETURN_PX: i32 = 12;
+    /// Entry-time multiplier of `FAR_PUSH_RETURN_PX`: the return push
+    /// required right after the crossing, decaying linearly to the base
+    /// threshold over the entry return grace (v0.2.32).
+    const ENTRY_RETURN_PUSH_MULTIPLIER: i32 = 4;
     /// A return push older than this no longer counts toward the threshold;
     /// a fresh deliberate push must re-accumulate.
     const FAR_PUSH_WINDOW: std::time::Duration = std::time::Duration::from_millis(600);
+    /// Accepted `remote_speed_percent` range.
+    pub const REMOTE_SPEED_PERCENT_RANGE: std::ops::RangeInclusive<u32> = 25..=400;
+
+    /// Return push (raw px) required `elapsed` after the crossing into
+    /// Remote with an entry return grace of `grace`: decays linearly from
+    /// `ENTRY_RETURN_PUSH_MULTIPLIER x FAR_PUSH_RETURN_PX` at the crossing
+    /// to `FAR_PUSH_RETURN_PX` when the grace ends; the base threshold
+    /// applies with no grace or after it. Replaces the v0.2.31 hard cut,
+    /// which blocked every return inside the grace and then let the hand's
+    /// residual momentum bounce the seat the instant it expired.
+    pub fn required_return_push_px(
+        elapsed: std::time::Duration,
+        grace: std::time::Duration,
+    ) -> i32 {
+        let base = Self::FAR_PUSH_RETURN_PX;
+        if grace.is_zero() || elapsed >= grace {
+            return base;
+        }
+        let extra = base * (Self::ENTRY_RETURN_PUSH_MULTIPLIER - 1);
+        let decayed =
+            (extra as i128 * elapsed.as_nanos() as i128 / grace.as_nanos() as i128) as i32;
+        base + extra - decayed
+    }
+
+    /// Set (or clear with `None`) the peer screen size used to normalize
+    /// remote-seat deltas (see the field doc). Changing the divisor resets
+    /// the fraction carry, which is denominated in the old geometry.
+    pub fn set_remote_screen(&mut self, screen: Option<(i32, i32)>) {
+        let screen = screen.map(|(w, h)| (w.max(1), h.max(1)));
+        if self.remote_screen != screen {
+            self.remote_screen = screen;
+            self.rem_frac_x = 0;
+            self.rem_frac_y = 0;
+        }
+    }
+
+    /// Remote delta multiplier in percent (100 = 1:1 against the peer
+    /// screen); out-of-range values clamp, so the remote cursor can never
+    /// freeze.
+    pub fn set_remote_speed_percent(&mut self, percent: u32) {
+        let percent = percent.clamp(
+            *Self::REMOTE_SPEED_PERCENT_RANGE.start(),
+            *Self::REMOTE_SPEED_PERCENT_RANGE.end(),
+        );
+        if self.remote_speed_percent != percent {
+            self.remote_speed_percent = percent;
+            self.rem_frac_x = 0;
+            self.rem_frac_y = 0;
+        }
+    }
+
+    /// Peer screen size currently used for remote-seat normalization.
+    pub fn remote_screen(&self) -> Option<(i32, i32)> {
+        self.remote_screen
+    }
+
+    /// Effective (clamped) remote speed percent.
+    pub fn remote_speed_percent(&self) -> u32 {
+        self.remote_speed_percent
+    }
+
+    /// Normalization divisors for remote-seat deltas: `(dim * 100)` of the
+    /// peer screen when known, else of the local screen (legacy).
+    fn remote_delta_divisors(&self) -> (i64, i64) {
+        let (w, h) = self
+            .remote_screen
+            .unwrap_or((self.width.max(1), self.height.max(1)));
+        (w as i64 * 100, h as i64 * 100)
+    }
 
     pub fn seat(&self) -> CursorSeat {
         self.seat
@@ -507,14 +591,13 @@ impl InputServer {
         self.entry_return_grace = grace;
     }
 
-    /// True while the entry return grace since the last crossing into
-    /// Remote is still running.
-    fn in_entry_return_grace(&self, now: std::time::Instant) -> bool {
-        !self.entry_return_grace.is_zero()
-            && self
-                .remote_entered_at
-                .map(|t| now.duration_since(t) < self.entry_return_grace)
-                .unwrap_or(false)
+    /// Return push (raw px) required at `now`, given the entry return
+    /// ramp since the last crossing into Remote (base threshold when no
+    /// crossing is recorded).
+    fn current_return_push_px(&self, now: std::time::Instant) -> i32 {
+        self.remote_entered_at
+            .map(|t| Self::required_return_push_px(now.duration_since(t), self.entry_return_grace))
+            .unwrap_or(Self::FAR_PUSH_RETURN_PX)
     }
 
     /// Configure the speed-aware Top/Bottom redundancy band (see
@@ -771,35 +854,36 @@ impl InputServer {
         if self.seat == CursorSeat::Remote {
             let crossed_edge = self.last_crossed_edge;
             // Fractional-accumulator normalization: keep the exact
-            // `delta * SCREEN_UNITS / dimension` remainder between events so
-            // the applied remote displacement depends on the total physical
-            // motion, not on how it was chunked into events. Applied units
-            // come from the accumulator; truncation error is carried, never
-            // dropped and never invented (a zero delta still applies zero).
+            // `delta * SCREEN_UNITS * speed% / (dimension * 100)` remainder
+            // between events so the applied remote displacement depends on
+            // the total physical motion, not on how it was chunked into
+            // events. Applied units come from the accumulator; truncation
+            // error is carried, never dropped and never invented (a zero
+            // delta still applies zero).
+            //
+            // v0.2.32: the dimension is the PEER screen's when known (the
+            // tunnel accept carries it), so 1 local px moves 1 remote px at
+            // 100 %. Dividing by the local size (legacy) made a 1920x1080
+            // controller move only 0.77 pt per px on a 1470x956 Mac and
+            // made X and Y speeds differ.
+            let (div_x, div_y) = self.remote_delta_divisors();
+            let pct = self.remote_speed_percent as i64;
             let (delta_x, new_frac_x) = if dx != 0 {
-                let scaled = dx as i64 * SCREEN_UNITS as i64 + self.rem_frac_x;
-                let d = (scaled / self.width.max(1) as i64) as i32;
-                let frac = scaled.rem_euclid(self.width.max(1) as i64);
+                let scaled = dx as i64 * SCREEN_UNITS as i64 * pct + self.rem_frac_x;
+                let d = (scaled / div_x) as i32;
+                let frac = scaled.rem_euclid(div_x);
                 // Sign-correct: rem_euclid is non-negative; keep the fraction
                 // alongside the direction it belongs to.
-                let frac = if scaled < 0 {
-                    frac - self.width.max(1) as i64
-                } else {
-                    frac
-                };
+                let frac = if scaled < 0 { frac - div_x } else { frac };
                 (d, frac)
             } else {
                 (0, self.rem_frac_x)
             };
             let (delta_y, new_frac_y) = if dy != 0 {
-                let scaled = dy as i64 * SCREEN_UNITS as i64 + self.rem_frac_y;
-                let d = (scaled / self.height.max(1) as i64) as i32;
-                let frac = scaled.rem_euclid(self.height.max(1) as i64);
-                let frac = if scaled < 0 {
-                    frac - self.height.max(1) as i64
-                } else {
-                    frac
-                };
+                let scaled = dy as i64 * SCREEN_UNITS as i64 * pct + self.rem_frac_y;
+                let d = (scaled / div_y) as i32;
+                let frac = scaled.rem_euclid(div_y);
+                let frac = if scaled < 0 { frac - div_y } else { frac };
                 (d, frac)
             } else {
                 (0, self.rem_frac_y)
@@ -846,21 +930,21 @@ impl InputServer {
             if window_expired || !at_shared_edge || push_toward_edge < 0 {
                 self.far_push_accum = 0;
             }
-            // v0.2.31 entry return grace: a push landing within the grace
-            // after the crossing is the hand's residual momentum, not a
-            // deliberate return — it neither counts nor returns.
-            let in_grace = self.in_entry_return_grace(now);
-            if in_grace {
-                self.far_push_accum = 0;
-                self.far_push_last = None;
-            } else if at_shared_edge && push_toward_edge > 0 && self.buttons_down == 0 {
+            if at_shared_edge && push_toward_edge > 0 && self.buttons_down == 0 {
                 self.far_push_accum = self.far_push_accum.saturating_add(push_toward_edge);
                 self.far_push_last = Some(now);
             }
+            // v0.2.32 entry return ramp (replaces the v0.2.31 hard grace):
+            // right after the crossing the hand's residual momentum lands
+            // small pushes on the shared edge, so the required push starts
+            // at 4x the base and decays to it over the grace. A deliberate
+            // flick clears the ramp at any time; a hard cut instead bounced
+            // the seat the instant the grace expired (production
+            // 2026-11-13: five bounces in one 3-minute session).
+            let required_push = self.current_return_push_px(now);
             let returning_local = self.remote_interior
-                && !in_grace
                 && (self.buttons_down == 0)
-                && self.far_push_accum >= Self::FAR_PUSH_RETURN_PX;
+                && self.far_push_accum >= required_push;
 
             if returning_local {
                 self.seat = CursorSeat::Local;
@@ -1836,11 +1920,11 @@ mod tests {
         assert_eq!(events[events.len() - 1].kind, InputKind::Leave);
     }
 
-    /// v0.2.31: a return push inside the entry grace is residual momentum
-    /// and must neither return the seat nor pre-fill the accumulator; the
-    /// same push after the grace returns normally.
+    /// v0.2.32 ramp: a residual push inside the entry grace (below the
+    /// raised threshold) must not return the seat; the same push after the
+    /// grace clears the base threshold and returns normally.
     #[test]
-    fn entry_return_grace_blocks_immediate_return_then_allows_it() {
+    fn entry_return_grace_blocks_residual_return_then_allows_it() {
         let mut srv = InputServer::new(1920, 1080);
         srv.set_edge(ScreenEdge::Top);
         srv.set_entry_return_grace(std::time::Duration::from_millis(300));
@@ -1848,22 +1932,20 @@ mod tests {
         assert_eq!(srv.local_move_delta(960, 0, 0, -10), Some(ScreenEdge::Top));
         assert_eq!(srv.seat(), CursorSeat::Remote);
         srv.drain();
-        // Interior move, then a hard push back at the shared edge within
-        // the grace: the legacy engine would return here (12 px >= 12).
-        assert_eq!(srv.local_move_delta(960, 0, 0, -100), None);
-        assert_eq!(srv.local_move_delta(960, 0, 0, 300), None);
+        // Interior move (973 units, past the 20-unit hysteresis), then a
+        // 30 px push back onto the shared edge within the grace: the legacy
+        // engine would return here (30 px >= 12), the ramp demands up to
+        // 48 px this early.
+        assert_eq!(srv.local_move_delta(960, 0, 0, -30), None);
+        assert_eq!(srv.local_move_delta(960, 0, 0, 30), None);
         assert_eq!(
             srv.seat(),
             CursorSeat::Remote,
-            "grace must block the return"
-        );
-        assert_eq!(
-            srv.far_push_accum, 0,
-            "grace pushes must not pre-fill the accumulator"
+            "ramp must block the residual return"
         );
 
         std::thread::sleep(std::time::Duration::from_millis(320));
-        assert_eq!(srv.local_move_delta(960, 0, 0, 300), Some(ScreenEdge::Top));
+        assert_eq!(srv.local_move_delta(960, 0, 0, 30), Some(ScreenEdge::Top));
         assert_eq!(srv.seat(), CursorSeat::Local);
         let events = srv.drain();
         assert_eq!(events.last().unwrap().kind, InputKind::Leave);
@@ -1880,6 +1962,117 @@ mod tests {
         assert_eq!(srv.local_move_delta(960, 0, 0, -100), None);
         assert_eq!(srv.local_move_delta(960, 0, 0, 300), Some(ScreenEdge::Top));
         assert_eq!(srv.seat(), CursorSeat::Local);
+    }
+
+    /// v0.2.32: the return push required at the shared edge decays linearly
+    /// from 4x the base threshold at the instant of entry down to the base
+    /// threshold when the grace ends; with no grace (or after it) the base
+    /// threshold applies.
+    #[test]
+    fn return_push_threshold_decays_linearly_over_the_entry_grace() {
+        use std::time::Duration;
+        let g = Duration::from_millis(3000);
+        let base = InputServer::FAR_PUSH_RETURN_PX;
+        assert_eq!(
+            InputServer::required_return_push_px(Duration::ZERO, g),
+            base * 4
+        );
+        assert_eq!(
+            InputServer::required_return_push_px(Duration::from_millis(1500), g),
+            base * 4 - (base * 3) / 2
+        );
+        assert_eq!(InputServer::required_return_push_px(g, g), base);
+        assert_eq!(InputServer::required_return_push_px(g * 2, g), base);
+        assert_eq!(
+            InputServer::required_return_push_px(Duration::ZERO, Duration::ZERO),
+            base
+        );
+    }
+
+    /// v0.2.32: inside the grace a RESIDUAL push (above the legacy 12 px but
+    /// below the ramped threshold) must not return, while a DELIBERATE flick
+    /// returns immediately — the v0.2.31 hard cut blocked both and then let
+    /// the residual momentum bounce the seat the instant the grace expired
+    /// (production 2026-11-13: five bounces each ~1.0 s after entry).
+    #[test]
+    fn entry_return_ramp_ignores_residual_push_but_honors_deliberate_flick() {
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Top);
+        srv.set_entry_return_grace(std::time::Duration::from_millis(3000));
+
+        assert_eq!(srv.local_move_delta(960, 0, 0, -10), Some(ScreenEdge::Top));
+        srv.drain();
+        // Shallow interior (rem_y 1000 -> 972, past the 20-unit hysteresis).
+        assert_eq!(srv.local_move_delta(960, 0, 0, -30), None);
+        // Residual drift back onto the shared edge: 20 px (not at edge yet)
+        // then 15 px (saturated at the edge, counted). Legacy threshold 12
+        // would return on the second event.
+        assert_eq!(srv.local_move_delta(960, 0, 0, 20), None);
+        assert_eq!(srv.local_move_delta(960, 0, 0, 15), None);
+        assert_eq!(
+            srv.seat(),
+            CursorSeat::Remote,
+            "residual 15 px push inside the grace must not return"
+        );
+        // A deliberate flick clears even the entry-time threshold.
+        assert_eq!(srv.local_move_delta(960, 0, 0, 300), Some(ScreenEdge::Top));
+        assert_eq!(srv.seat(), CursorSeat::Local);
+        let events = srv.drain();
+        assert_eq!(events.last().unwrap().kind, InputKind::Leave);
+    }
+
+    /// v0.2.32: with the peer's screen known, remote-seat deltas normalize
+    /// by the REMOTE dimension so one local px moves one remote px/pt on
+    /// both axes. Normalizing by the local 1920x1080 against a 1470x956
+    /// peer gave 0.77 / 0.89 pt per px (slow and anisotropic).
+    #[test]
+    fn remote_screen_normalizes_deltas_by_peer_dimensions() {
+        let mut srv = InputServer::new(1920, 1080);
+        srv.set_edge(ScreenEdge::Bottom);
+        srv.set_remote_screen(Some((1470, 956)));
+        assert_eq!(
+            srv.local_move_delta(960, 1080, 0, 10),
+            Some(ScreenEdge::Bottom)
+        );
+        srv.drain();
+        let (rx0, ry0) = srv.remote_pos();
+        // 147 px = 10% of the remote width = 100 units.
+        assert_eq!(srv.local_move_delta(960, 540, 147, 0), None);
+        // 478 px = 50% of the remote height = 500 units.
+        assert_eq!(srv.local_move_delta(960, 540, 0, 478), None);
+        let (rx1, ry1) = srv.remote_pos();
+        assert_eq!((rx1 - rx0, ry1 - ry0), (100, 500));
+
+        // Clearing the peer screen falls back to the local normalization
+        // (192 px = 10% of the local width).
+        srv.set_remote_screen(None);
+        assert_eq!(srv.local_move_delta(960, 540, 192, 0), None);
+        let (rx2, _) = srv.remote_pos();
+        assert_eq!(rx2 - rx1, 100);
+    }
+
+    /// v0.2.32: `remote_speed_percent` scales the normalized remote delta
+    /// (100 = 1:1 against the peer screen; 150 = 1.5x).
+    #[test]
+    fn remote_speed_percent_scales_remote_deltas() {
+        let mut srv = InputServer::new(1000, 1000);
+        srv.set_edge(ScreenEdge::Bottom);
+        srv.set_remote_screen(Some((1000, 1000)));
+        srv.set_remote_speed_percent(150);
+        assert_eq!(
+            srv.local_move_delta(500, 1000, 0, 10),
+            Some(ScreenEdge::Bottom)
+        );
+        srv.drain();
+        let (rx0, _) = srv.remote_pos();
+        assert_eq!(srv.local_move_delta(500, 500, 100, 0), None);
+        let (rx1, _) = srv.remote_pos();
+        assert_eq!(rx1 - rx0, 150);
+        // 0 is not a valid speed: it clamps to the minimum, never freezes.
+        srv.set_remote_speed_percent(0);
+        assert_eq!(srv.local_move_delta(500, 500, 100, 0), None);
+        let (rx2, _) = srv.remote_pos();
+        assert!(rx2 > rx1, "a zero speed must not freeze the remote cursor");
     }
 
     #[test]

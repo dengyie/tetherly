@@ -610,6 +610,29 @@ impl Node {
                 "[takeover] resp: ACCEPTED session={} peer={peer_str}",
                 frame.session_id
             );
+            // v0.2.32: the accept carries the target's screen size; hand it
+            // to the engine so remote deltas normalize against the PEER
+            // screen (1 local px = 1 remote px at 100 %) instead of the
+            // local one (0.77/0.89 pt per px and anisotropic on a 1920x1080
+            // controller driving a 1470x956 Mac, production 2026-11-13).
+            let remote_screen = match (frame.capture_width, frame.capture_height) {
+                (Some(w), Some(h)) if w > 0 && h > 0 => {
+                    Some((w.min(i32::MAX as u32) as i32, h.min(i32::MAX as u32) as i32))
+                }
+                _ => None,
+            };
+            self.shared
+                .input_engine
+                .lock()
+                .expect("engine")
+                .set_remote_screen(remote_screen);
+            self.trace_input(
+                "remote_screen",
+                match remote_screen {
+                    Some((w, h)) => format!("peer={peer_str} {w}x{h}"),
+                    None => format!("peer={peer_str} unknown (local-size fallback)"),
+                },
+            );
             let _ = self.ensure_input_capture();
             if !self.input_channel_open().await {
                 if let Err(e) = self.open_input(peer).await {
@@ -1463,6 +1486,19 @@ impl Node {
                 pre_arm_epoch: next_pre_arm_epoch(),
             });
         }
+        // Never reuse an existing outbound channel across an attach: on a
+        // takeover the demoted peer tears its side of the old connection
+        // down (input_stop), so the previous channel is dying by design —
+        // reusing it would leave this controller with a dead channel and no
+        // rebuild. Drop it and dial fresh.
+        //
+        // v0.2.32: dropped BEFORE the request hits the wire. The peer's
+        // ACCEPT resp can be processed while this task is still inside
+        // `send_to`; the resp path then dials channel gen N, and a drop
+        // placed after the send threw that fresh channel away and forced a
+        // second dial (gen N+1) on the first drive — production trace
+        // showed two `channel_open` per takeover and a stalled first entry.
+        *self.shared.input_out.lock().expect("input_out") = None;
         let inner = req_frame.to_frame()?;
         tracing::info!(session_id = %session_id, peer = %peer_str, "input tunnel attach: controller session pre-armed");
         eprintln!("[takeover] attach: pre-armed session={session_id} peer={peer_str}");
@@ -1509,12 +1545,6 @@ impl Node {
             .set_edge(effective_edge);
 
         let _ = self.ensure_input_capture();
-        // Never reuse an existing outbound channel across an attach: on a
-        // takeover the demoted peer tears its side of the old connection
-        // down (input_stop), so the previous channel is dying by design —
-        // reusing it would leave this controller with a dead channel and no
-        // rebuild. Drop it and dial fresh.
-        *self.shared.input_out.lock().expect("input_out") = None;
         // A NEW controller session must not inherit engine state from the
         // previous stint. A leftover Remote seat (a takeover demotes this
         // node mid-roam without resetting the seat) makes attach_input_server
@@ -1663,6 +1693,12 @@ impl Node {
         let now_ms = self.shared.clock.unix_ms();
         let sanitized_reason = InputTunnelValidator::sanitize_reason(reason);
         *self.shared.input_seat.lock().expect("seat") = Some(CursorSeat::Local);
+        // The peer screen belongs to this grant; the next peer may differ.
+        self.shared
+            .input_engine
+            .lock()
+            .expect("engine")
+            .set_remote_screen(None);
         self.disarm_input_capture();
         self.reset_reverse_arming_state();
         let alias = DeviceId::parse(&session.peer_id)
@@ -2762,6 +2798,7 @@ impl Node {
                 server.set_entry_return_grace(std::time::Duration::from_millis(
                     cfg.entry_return_grace_ms as u64,
                 ));
+                server.set_remote_speed_percent(cfg.remote_speed_percent);
             }
             // On physical displays, OS cursor coordinates are clamped to [0, width - 1] and [0, height - 1].
             // To reliably trigger boundary crossings when touching the physical screen boundary,
@@ -6573,5 +6610,156 @@ mod tests {
             serde_json::from_str(r#"{"ok":true,"channel_open":false,"seat":"local"}"#).unwrap();
         assert_eq!(legacy.applied, 0);
         assert_eq!(legacy.tx_buttons, 0);
+    }
+}
+
+#[cfg(test)]
+mod remote_screen_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// v0.2.32: the tunnel ACCEPT already carries the target's screen size
+    /// (`capture_width/height`); the controller must feed it into the engine
+    /// so remote deltas normalize 1:1 against the PEER screen, and the
+    /// grant's end must clear it (the next peer may differ). The persisted
+    /// `remote_speed_percent` is mirrored into the engine on the drive
+    /// path like the other edge-crossing knobs.
+    #[tokio::test]
+    async fn tunnel_accept_feeds_peer_screen_into_engine_and_release_clears_it() {
+        let (node, _dir, clock) =
+            crate::runtime::clipboard_policy_tests::temp_test_node_manual_clock(
+                "peer-screen",
+                10_000,
+            );
+        node.shared
+            .input_capture_active
+            .store(true, Ordering::SeqCst);
+        let peer = DeviceId::from_id_pk(&[44u8; 32]);
+
+        // Pre-armed controller grant (the attach path) and a live outbound
+        // channel so the accept path never dials.
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_screen".to_string(),
+            peer_id: peer.to_string(),
+            role: InputTunnelRole::Controller,
+            requested_edge: None,
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: clock.unix_ms(),
+            last_activity_ms: clock.unix_ms(),
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+        let (tx, _rx) = tokio::sync::mpsc::channel::<tetherly_core::InnerFrame>(64);
+        *node.shared.input_out.lock().unwrap() = Some((0, tx));
+
+        node.receive_input_tunnel_resp(
+            &peer,
+            InputTunnelRespFrame {
+                session_id: "tun_screen".to_string(),
+                accepted: true,
+                reject_reason: None,
+                capture_width: Some(1470),
+                capture_height: Some(956),
+                timestamp_ms: clock.unix_ms(),
+            },
+        )
+        .await;
+        assert_eq!(
+            node.shared.input_engine.lock().unwrap().remote_screen(),
+            Some((1470, 956)),
+            "accept must hand the peer screen to the engine"
+        );
+
+        node.topology_update_config(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(150),
+        )
+        .await
+        .unwrap();
+        // An interior local move runs the config mirror without crossing.
+        assert_eq!(
+            node.drive_input_delta(100, 100, 1, 0, 1920, 1080).unwrap(),
+            None
+        );
+        assert_eq!(
+            node.shared
+                .input_engine
+                .lock()
+                .unwrap()
+                .remote_speed_percent(),
+            150,
+            "drive path must mirror remote_speed_percent into the engine"
+        );
+
+        node.release_input_tunnel_local("test");
+        assert_eq!(
+            node.shared.input_engine.lock().unwrap().remote_screen(),
+            None,
+            "the grant's end must forget the peer screen"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attach_channel_tests {
+    use super::*;
+    use tetherly_core::{TrustStore, TrustedPeer};
+
+    /// v0.2.32: `input_tunnel_attach` must drop the previous outbound input
+    /// channel BEFORE the request hits the wire. Production (v0.2.31 trace):
+    /// the peer's ACCEPT resp was processed while attach was still inside
+    /// `send_to`, so the resp dialed channel gen N, attach then nulled
+    /// `input_out` and the next drive dialed gen N+1 — two dials per
+    /// takeover and the first Mac entry stalled on the dead gen N. Modelled
+    /// with a peer whose `send_to` fails: the stale channel installed before
+    /// attach must be gone even though the request never left, which only
+    /// holds when the drop precedes the send.
+    #[tokio::test]
+    async fn attach_drops_stale_outbound_channel_before_the_request_hits_the_wire() {
+        use crate::runtime::clipboard_policy_tests::temp_test_node;
+
+        let (node, _dir) = temp_test_node("attach_channel_drop");
+        let peer = DeviceId::from_id_pk(&[77u8; 32]);
+        node.shared
+            .trust
+            .lock()
+            .expect("trust")
+            .put(TrustedPeer {
+                device_id: peer.clone(),
+                id_pk: [77u8; 32],
+                n_pk: [78u8; 32],
+                alias: "unreachable".into(),
+                paired_at: 1,
+                revoked: false,
+            })
+            .expect("seed trust");
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<tetherly_core::InnerFrame>(4);
+        *node.shared.input_out.lock().unwrap() = Some((41, tx));
+
+        let err = node
+            .input_tunnel_attach(&peer.to_string(), Some(DisplayEdge::Bottom), None, None)
+            .await
+            .expect_err("peer has no session: send must fail");
+        assert!(
+            err.to_string().contains("not connected"),
+            "unexpected failure: {err}"
+        );
+        assert!(
+            node.shared.input_out.lock().unwrap().is_none(),
+            "stale outbound channel must be dropped before send_to, not after"
+        );
     }
 }

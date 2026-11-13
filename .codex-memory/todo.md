@@ -2,7 +2,17 @@
 
 ## 当前接手基线（截至 2026-11-13）
 
-> **v0.2.31（本轮发版）；上一基线 v0.2.30 / 6057fb9 双端已部署；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+> **v0.2.32（本轮发版）；上一基线 v0.2.31 / c41af3d 双端已部署；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+
+## v0.2.32 真机三症状修复（2026-11-13，DEVELOPMENT.md §104）
+- [x] **A · Windows 系统光标隐藏**：`platform.rs::system_cursor`（14 个 OCR_* + 空白光标 `SetSystemCursor(CopyIcon(blank))`，`SPI_SETCURSORS` 恢复；`HookControl::set_keyboard` on→hide / off→restore；`start_input_hooks` 开头 force restore）。测试 `system_cursor_ids_cover_every_oem_cursor_and_blank_planes_are_transparent`。修"Windows 屏中央留一个光标"。
+- [x] **B · 对端尺寸归一化 + 速度百分比**：core `set_remote_screen` / `set_remote_speed_percent`（25–400）；accept 时 `capture_width/height` 喂入、release 清空、trace `remote_screen`；`EdgeCrossingConfig.remote_speed_percent`（默认 100）+ `topology_update_config` 第 12 参 + API `remote_speed_percent|remote_speed|speed`。测试 `remote_screen_normalizes_deltas_by_peer_dimensions`、`remote_speed_percent_scales_remote_deltas`、`remote_speed_percent_defaults_and_clamps`、`tunnel_accept_feeds_peer_screen_into_engine_and_release_clears_it`。修"不灵敏/延迟/丢数据"。
+- [x] **C · 进入回归斜坡**：`required_return_push_px` 48→12 px 线性衰减；累加器宽限内照常累加；`entry_return_grace_ms` 默认 3000。测试 `return_push_threshold_decays_linearly_over_the_entry_grace`、`entry_return_ramp_ignores_residual_push_but_honors_deliberate_flick`、`entry_return_grace_blocks_residual_return_then_allows_it`、`entry_return_grace_defaults_to_three_seconds`。修"第一次底边进入有点卡"。
+- [x] **D · relay 分支 bogus 过滤 + attach 双拨号**：relay `WM_MOUSEMOVE` 套 `hook_delta_is_bogus`；`input_tunnel_attach` 的 `input_out=None` 提前到 `send_to` 之前。测试 `attach_drops_stale_outbound_channel_before_the_request_hits_the_wire`。关闭 §103.8 待办。
+- [x] 本机验证：fmt、clippy -D warnings 0 错误；core 321、node 214；loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65 一次全绿。Windows 交叉编译本机不可行（openh264-sys2 需 Windows C 头），以 ci.yml windows 作业为门禁。
+- [ ] push → ci.yml windows 绿 → tag v0.2.32 → release.yml → `scripts/deploy.sh --target all --tag v0.2.32` → 双端 health 0.2.32 / SYSTEM SessionId=2 / 受保护进程不动。
+- [ ] 真机验收 v0.2.32（§104.7）：(a) 漫游时 Windows 无光标、回归后恢复（`[cursor] hidden: replaced 14/14` / `[cursor] restored`）；(b) Windows trace `remote_screen peer=1470x956`，Mac 里 1:1 跟手；(c) 底边首次进入不卡、3 s 内只有刻意甩回才回归；(d) 每次 attach 只一条 `channel_open`，无 `outbound slot dropped`。
+- [ ] 若用户仍觉得慢/快：`POST /api/topology/config {"remote_speed_percent":N}`（25–400）；自定义光标主题用户回归后变默认主题属已知偏差。
 
 ## v0.2.31 真机症状修复（2026-11-13，DEVELOPMENT.md §103）
 - [x] **A · 反向闸门锚定 Enter**：预臂 accept（无 entry 坐标）不关闸、Enter 关闸、Leave 重开；修"Windows 鼠标首次进入 Mac 要 8 s（dwell gated）"。测试 `pre_arm_accept_without_entry_keeps_zone_gate_open`、`controller_enter_closes_zone_gate_and_leave_reopens_it`。
@@ -12,7 +22,7 @@
 - [x] 选项 iii（Mac 再预臂延迟）按 §102.4 不做。
 - [x] 本机验证：core 315、node 211、loopback 11 / phase2 8 / phase3 13 / phase5 65；phase1 68 并行有 2 个与本轮无关的负载抖动（单跑均过，§103.7）；clippy -D warnings 0 错误。
 - [x] 2026-11-13 部署 v0.2.31（commit `c41af3d`，release run 43327674466 全绿，deploy EXIT=0）：Mac 0.2.31 pid 51476 accessibility_trusted=true；home-win 298224→310648 SYSTEM/SessionId=2；受保护进程 100% 不动；双端 `/api/input` 新字段可见。
-- [ ] **attach 双拨号（新埋点实证，§103.8）**：每次 attach 控制器 ~20 ms 内 `channel_open gen=N` → `pump_exit: outbound slot dropped` → `gen=N+1`（attach 末尾 `open_input` 与 resp 侧 `!input_channel_open()` 兜底拨号竞态）。生产无感，但是 `m3_12` windows 红的候选实证；下一轮让 resp 侧只在 attach 拨号失败时补拨。
+- [x] **attach 双拨号（新埋点实证，§103.8）→ v0.2.32 §104.5 已修（drop 提前到 send_to 前）**：每次 attach 控制器 ~20 ms 内 `channel_open gen=N` → `pump_exit: outbound slot dropped` → `gen=N+1`（attach 末尾 `open_input` 与 resp 侧 `!input_channel_open()` 兜底拨号竞态）。生产无感，但是 `m3_12` windows 红的候选实证；下一轮让 resp 侧只在 attach 拨号失败时补拨。
 - [ ] 真机验收 v0.2.31：回归后立即再顶边一次进入（trace `zone_gate open: pre-arm accept` → `apply_enter`）；进入 1 s 内不弹回；点击时双端 `tx_buttons`/`rx_buttons` 同步、`dropped` 不增、`push_button`/`apply_button` 成对；按住左键能选字/拖窗。
 - [ ] `m3_12` windows 红：v0.2.31 已埋 `pump_exit`/`channel_open`，下一次 windows CI 红灯时直接读 `[takeover]` 之后的 trace 取证再修。
 

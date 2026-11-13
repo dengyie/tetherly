@@ -197,6 +197,16 @@ pub(super) async fn post_topology_config(
                 .and_then(|s| s.parse::<u32>().ok())
         });
 
+    let remote_speed_percent = parsed_body
+        .as_ref()
+        .and_then(|b| b.remote_speed_percent)
+        .or_else(|| {
+            qmap.get("remote_speed_percent")
+                .or_else(|| qmap.get("remote_speed"))
+                .or_else(|| qmap.get("speed"))
+                .and_then(|s| s.parse::<u32>().ok())
+        });
+
     let width = parsed_body
         .as_ref()
         .and_then(|b| b.width)
@@ -229,6 +239,7 @@ pub(super) async fn post_topology_config(
             slow_dwell_ms,
             fast_push_delta_px,
             entry_return_grace_ms,
+            remote_speed_percent,
         )
         .await
     {

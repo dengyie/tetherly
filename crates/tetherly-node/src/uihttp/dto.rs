@@ -676,6 +676,8 @@ pub(super) struct TopologyConfigBody {
     pub(super) fast_push_delta_px: Option<u32>,
     #[serde(default, alias = "entry_return_grace")]
     pub(super) entry_return_grace_ms: Option<u32>,
+    #[serde(default, alias = "remote_speed", alias = "speed")]
+    pub(super) remote_speed_percent: Option<u32>,
     #[serde(default)]
     pub(super) width: Option<u32>,
     #[serde(default)]

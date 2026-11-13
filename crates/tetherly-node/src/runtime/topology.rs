@@ -334,6 +334,7 @@ impl Node {
         slow_dwell_ms: Option<u32>,
         fast_push_delta_px: Option<u32>,
         entry_return_grace_ms: Option<u32>,
+        remote_speed_percent: Option<u32>,
     ) -> Result<TopologyConfigReport, CoreError> {
         let now = self.shared.clock.unix_ms();
         let (display, config, neighbors_count) = {
@@ -363,6 +364,10 @@ impl Node {
                 layout.config.entry_return_grace_ms =
                     TopologyValidator::clamp_entry_return_grace(grace);
             }
+            if let Some(speed) = remote_speed_percent {
+                layout.config.remote_speed_percent =
+                    TopologyValidator::clamp_remote_speed_percent(speed);
+            }
             if let Some(w) = width {
                 layout.display.width = TopologyValidator::clamp_width(w);
             }
@@ -391,11 +396,11 @@ impl Node {
             "topology_config_updated",
             None::<String>,
             format!(
-                "Updated topology config: display={}x{}@{:.2}, resistance={}px, delay={}ms, corner_lock={}px, wrap={}, band={}px, slow_dwell={}ms, fast_push={}px, entry_return_grace={}ms",
+                "Updated topology config: display={}x{}@{:.2}, resistance={}px, delay={}ms, corner_lock={}px, wrap={}, band={}px, slow_dwell={}ms, fast_push={}px, entry_return_grace={}ms, remote_speed={}%",
                 display.width, display.height, display.scale_factor,
                 config.resistance_px, config.delay_ms, config.corner_lock_size_px, config.wrap_around,
                 config.redundancy_band_px, config.slow_dwell_ms, config.fast_push_delta_px,
-                config.entry_return_grace_ms
+                config.entry_return_grace_ms, config.remote_speed_percent
             ),
             true,
         );

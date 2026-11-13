@@ -1073,6 +1073,141 @@ pub(crate) fn roaming_recenter_target(width: i32, height: i32) -> (i32, i32) {
     ((width.max(1)) / 2, (height.max(1)) / 2)
 }
 
+/// v0.2.32: Windows controller cursor hiding (Deskflow
+/// `MSWindowsScreen::showCursor(false)` idiom). While this node controls a
+/// remote seat the physical cursor is frozen at the recenter point, so
+/// without this the hand "roams" the Mac while a Windows arrow sits parked
+/// at screen center (production symptom 1, v0.2.31 3-minute test). A
+/// process-wide `ShowCursor(FALSE)` only affects windows of the calling
+/// thread, so Deskflow replaces every *system* cursor with a blank one
+/// via `SetSystemCursor(CopyIcon(blank), OCR_*)` and restores the user's
+/// scheme with `SystemParametersInfo(SPI_SETCURSORS)`.
+///
+/// The id table and the blank planes are plain data kept cross-platform
+/// so the unit test pins them on every host; the Win32 calls live in the
+/// `#[cfg(windows)]` block below.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) mod system_cursor {
+    /// Every `OCR_*` id `SetSystemCursor` accepts (WinUser.h). Order is
+    /// irrelevant; the test asserts uniqueness and coverage.
+    pub const SYSTEM_CURSOR_IDS: [u32; 14] = [
+        32512, // OCR_NORMAL
+        32513, // OCR_IBEAM
+        32514, // OCR_WAIT
+        32515, // OCR_CROSS
+        32516, // OCR_UP
+        32642, // OCR_SIZENWSE
+        32643, // OCR_SIZENESW
+        32644, // OCR_SIZEWE
+        32645, // OCR_SIZENS
+        32646, // OCR_SIZEALL
+        32648, // OCR_NO
+        32649, // OCR_HAND
+        32650, // OCR_APPSTARTING
+        32651, // OCR_HELP
+    ];
+
+    /// Blank cursor edge in pixels (monochrome `CreateCursor`).
+    pub const BLANK_CURSOR_SIZE: i32 = 32;
+
+    /// Monochrome cursor planes for a fully transparent cursor: AND mask
+    /// all ones (keep the screen), XOR plane all zeros (draw nothing).
+    pub fn blank_cursor_planes() -> (Vec<u8>, Vec<u8>) {
+        let bytes = (BLANK_CURSOR_SIZE * BLANK_CURSOR_SIZE / 8) as usize;
+        (vec![0xFF; bytes], vec![0x00; bytes])
+    }
+
+    #[cfg(windows)]
+    static HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// Replace every system cursor with a blank one. Idempotent: a second
+    /// call while hidden is a no-op so a re-arm never leaks cursor handles.
+    /// Partial failures are logged and the remaining ids still processed —
+    /// a half-hidden scheme is strictly better than a parked arrow.
+    #[cfg(windows)]
+    pub fn hide() {
+        use std::sync::atomic::Ordering;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CopyIcon, CreateCursor, DestroyCursor, SetSystemCursor,
+        };
+        if HIDDEN.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (and_plane, xor_plane) = blank_cursor_planes();
+        // SAFETY: both planes are exactly (32*32/8) bytes as CreateCursor
+        // requires for a 32x32 monochrome cursor; a null HINSTANCE is
+        // permitted for cursors created from raw planes.
+        let blank = unsafe {
+            CreateCursor(
+                std::ptr::null_mut(),
+                0,
+                0,
+                BLANK_CURSOR_SIZE,
+                BLANK_CURSOR_SIZE,
+                and_plane.as_ptr().cast(),
+                xor_plane.as_ptr().cast(),
+            )
+        };
+        if blank.is_null() {
+            HIDDEN.store(false, Ordering::SeqCst);
+            tracing::warn!("system_cursor: CreateCursor failed; Windows cursor stays visible");
+            return;
+        }
+        let mut replaced = 0usize;
+        for id in SYSTEM_CURSOR_IDS {
+            // SetSystemCursor destroys the handle it is given, so every id
+            // needs its own copy of the blank cursor.
+            // SAFETY: `blank` is a valid cursor handle owned by this fn.
+            let copy = unsafe { CopyIcon(blank) };
+            if copy.is_null() {
+                tracing::warn!(id, "system_cursor: CopyIcon failed");
+                continue;
+            }
+            // SAFETY: `copy` is a valid cursor handle; ownership transfers
+            // to the system on success (and is destroyed on failure too).
+            if unsafe { SetSystemCursor(copy, id) } == 0 {
+                tracing::warn!(id, "system_cursor: SetSystemCursor failed");
+            } else {
+                replaced += 1;
+            }
+        }
+        // SAFETY: `blank` was never handed to the system; we still own it.
+        unsafe { DestroyCursor(blank) };
+        tracing::info!(
+            replaced,
+            total = SYSTEM_CURSOR_IDS.len(),
+            "system_cursor: hidden"
+        );
+        eprintln!(
+            "[cursor] hidden: replaced {replaced}/{} system cursors",
+            SYSTEM_CURSOR_IDS.len()
+        );
+    }
+
+    /// Reload the user's cursor scheme from the registry (undoes `hide`).
+    /// `force` restores even when this process never hid the cursor —
+    /// used once at hook start so a previous crashed daemon stint can
+    /// never leave the machine cursorless. Note: from a SYSTEM-session
+    /// daemon the "user scheme" is SYSTEM's, i.e. the Windows default.
+    #[cfg(windows)]
+    pub fn restore(force: bool) {
+        use std::sync::atomic::Ordering;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_SETCURSORS};
+        if !HIDDEN.swap(false, Ordering::SeqCst) && !force {
+            return;
+        }
+        // SAFETY: SPI_SETCURSORS takes no parameter block; null + 0 is the
+        // documented call shape.
+        let ok = unsafe { SystemParametersInfoW(SPI_SETCURSORS, 0, std::ptr::null_mut(), 0) };
+        if ok == 0 {
+            tracing::warn!("system_cursor: SystemParametersInfoW(SPI_SETCURSORS) failed");
+        } else {
+            tracing::info!(force, "system_cursor: restored");
+            eprintln!("[cursor] restored (force={force})");
+        }
+    }
+}
+
 /// Deskflow bogus-motion filter (MSWindowsComputer::onMouseMove
 /// `bogusZoneSize`): on the Windows hook the delta baseline is anchored at
 /// screen center by the roaming recenter, so a delta spanning roughly the
@@ -1425,6 +1560,17 @@ impl HookControl {
         use windows_sys::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
         const WM_HOOK_KB_ON: u32 = 0x8000 + 1; // WM_APP + 1
         const WM_HOOK_KB_OFF: u32 = 0x8000 + 2; // WM_APP + 2
+                                                // v0.2.32: the seat leaving this machine hides the parked Windows
+                                                // cursor; the seat returning restores the scheme (mirror of the
+                                                // macOS `set_mouse_cursor_associated(!on)` in the other impl).
+                                                // Done here on the runtime thread, not on the hook pump: the
+                                                // SetSystemCursor loop is ~14 USER calls and must never sit in
+                                                // the LL hook callback's latency budget.
+        if on {
+            system_cursor::hide();
+        } else {
+            system_cursor::restore(false);
+        }
         unsafe {
             if PostThreadMessageW(
                 self.thread_id,
@@ -1526,6 +1672,11 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
     const WM_HOOK_KB_ON: u32 = 0x8000 + 1; // WM_APP + 1
     const WM_HOOK_KB_OFF: u32 = 0x8000 + 2; // WM_APP + 2
 
+    // v0.2.32: a daemon that died mid-roam left the system cursors blank;
+    // a fresh hook start is the one moment we know no seat is remote, so
+    // always reload the scheme here.
+    system_cursor::restore(true);
+
     // Previous physical mouse position + warp gate live in hook_move_state
     // (module level) so the warp-echo/baseline coupling is unit-testable;
     // LL hooks deliver every event on one thread, so thread-local state
@@ -1616,7 +1767,19 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
                         GetCursorPos(&mut cur);
                         let dx = mi.pt.x - cur.x;
                         let dy = mi.pt.y - cur.y;
-                        if dx != 0 || dy != 0 {
+                        // v0.2.32: the relay diff is anchored at the recenter
+                        // point like the non-relay path, so a proposal that
+                        // spans the center-to-edge distance is a leaked warp
+                        // echo, not the hand (Deskflow bogusZoneSize). The
+                        // non-relay branch already filtered it; the relay
+                        // branch fed it to the engine as a violent flick.
+                        let bogus = hook_delta_is_bogus(
+                            dx,
+                            dy,
+                            SCREEN_W.load(Ordering::Relaxed),
+                            SCREEN_H.load(Ordering::Relaxed),
+                        );
+                        if (dx != 0 || dy != 0) && !bogus {
                             push(RawInput::Move {
                                 x: mi.pt.x,
                                 y: mi.pt.y,
@@ -2832,6 +2995,47 @@ pub fn start_input_hooks(_tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookC
 #[cfg(test)]
 mod input_tests {
     use super::*;
+
+    /// v0.2.32: Windows cursor hiding (Deskflow MSWindowsScreen idiom —
+    /// `SetSystemCursor(CopyIcon(blank), OCR_*)` for every system cursor id,
+    /// restored by `SystemParametersInfo(SPI_SETCURSORS)`). The id table and
+    /// the blank cursor planes are pure data, so they are pinned here on
+    /// every host: every OEM cursor the shell can show must be covered, the
+    /// table must hold no duplicates, and the blank planes must describe a
+    /// fully transparent 32x32 monochrome cursor (AND mask all ones, XOR
+    /// plane all zeros).
+    #[test]
+    fn system_cursor_ids_cover_every_oem_cursor_and_blank_planes_are_transparent() {
+        use super::system_cursor::{blank_cursor_planes, BLANK_CURSOR_SIZE, SYSTEM_CURSOR_IDS};
+
+        let ids = SYSTEM_CURSOR_IDS;
+        assert_eq!(ids.len(), 14, "all fourteen OCR_* ids must be covered");
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "duplicate ids would double-copy");
+        for id in ids {
+            assert!((32512..=32651).contains(&id), "{id} is not an OCR_* id");
+        }
+        for must in [
+            32512u32, 32513, 32514, 32515, 32516, 32642, 32649, 32650, 32651,
+        ] {
+            assert!(ids.contains(&must), "OCR id {must} missing");
+        }
+
+        assert_eq!(BLANK_CURSOR_SIZE, 32);
+        let (and_plane, xor_plane) = blank_cursor_planes();
+        assert_eq!(and_plane.len(), 32 * 32 / 8);
+        assert_eq!(xor_plane.len(), 32 * 32 / 8);
+        assert!(
+            and_plane.iter().all(|b| *b == 0xFF),
+            "AND mask must be opaque"
+        );
+        assert!(
+            xor_plane.iter().all(|b| *b == 0x00),
+            "XOR plane must be empty"
+        );
+    }
 
     /// v0.2.31: an injected move while a button is held must be posted as
     /// the matching *Dragged event, else AppKit never sees a drag (mac

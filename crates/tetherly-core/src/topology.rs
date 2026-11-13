@@ -131,15 +131,23 @@ pub struct EdgeCrossingConfig {
     pub slow_dwell_ms: u32,
     #[serde(default = "default_fast_push_delta_px")]
     pub fast_push_delta_px: u32,
-    /// Entry return grace (ms, v0.2.31): after this node's cursor crosses
-    /// INTO the peer, the sustained-push return to the local screen is
-    /// suppressed for this long. The entry placement parks the cursor ON
-    /// the peer's shared edge, so the hand's residual momentum right after
-    /// the crossing otherwise satisfies the 12 px / 600 ms return push and
+    /// Entry return grace (ms, v0.2.31/v0.2.32): after this node's cursor
+    /// crosses INTO the peer, the sustained push required to return to the
+    /// local screen starts at 4x the base threshold and decays linearly to
+    /// the base over this long. The entry placement parks the cursor ON the
+    /// peer's shared edge, so the hand's residual momentum right after the
+    /// crossing otherwise satisfies the 12 px / 600 ms return push and
     /// bounces the seat back within seconds (production 2026-11-13). 0
-    /// disables the grace.
+    /// disables the ramp (legacy instant return).
     #[serde(default = "default_entry_return_grace_ms")]
     pub entry_return_grace_ms: u32,
+    /// Remote cursor speed in percent (v0.2.32). Remote-seat deltas are
+    /// normalized against the PEER screen size carried by the tunnel
+    /// accept, so 100 moves the peer cursor 1 px per local px; values
+    /// above/below speed it up/slow it down. Clamped to
+    /// `TopologyValidator::MIN/MAX_REMOTE_SPEED_PERCENT`.
+    #[serde(default = "default_remote_speed_percent")]
+    pub remote_speed_percent: u32,
 }
 
 fn default_resistance() -> u32 {
@@ -167,7 +175,11 @@ fn default_fast_push_delta_px() -> u32 {
 }
 
 fn default_entry_return_grace_ms() -> u32 {
-    1000
+    3000
+}
+
+fn default_remote_speed_percent() -> u32 {
+    100
 }
 
 impl Default for EdgeCrossingConfig {
@@ -180,7 +192,8 @@ impl Default for EdgeCrossingConfig {
             redundancy_band_px: 24,
             slow_dwell_ms: 120,
             fast_push_delta_px: 6,
-            entry_return_grace_ms: 1000,
+            entry_return_grace_ms: 3000,
+            remote_speed_percent: 100,
         }
     }
 }
@@ -195,6 +208,8 @@ impl EdgeCrossingConfig {
         self.fast_push_delta_px = TopologyValidator::clamp_fast_push_delta(self.fast_push_delta_px);
         self.entry_return_grace_ms =
             TopologyValidator::clamp_entry_return_grace(self.entry_return_grace_ms);
+        self.remote_speed_percent =
+            TopologyValidator::clamp_remote_speed_percent(self.remote_speed_percent);
     }
 }
 
@@ -274,6 +289,9 @@ impl TopologyValidator {
     pub const MAX_SLOW_DWELL_MS: u32 = 2000;
     pub const MAX_FAST_PUSH_DELTA_PX: u32 = 100;
     pub const MAX_ENTRY_RETURN_GRACE_MS: u32 = 5000;
+    pub const MIN_REMOTE_SPEED_PERCENT: u32 =
+        *crate::InputServer::REMOTE_SPEED_PERCENT_RANGE.start();
+    pub const MAX_REMOTE_SPEED_PERCENT: u32 = *crate::InputServer::REMOTE_SPEED_PERCENT_RANGE.end();
 
     pub fn clamp_dimension(val: u32, is_width: bool) -> u32 {
         if is_width {
@@ -327,6 +345,13 @@ impl TopologyValidator {
 
     pub fn clamp_entry_return_grace(val: u32) -> u32 {
         val.min(Self::MAX_ENTRY_RETURN_GRACE_MS)
+    }
+
+    pub fn clamp_remote_speed_percent(val: u32) -> u32 {
+        val.clamp(
+            Self::MIN_REMOTE_SPEED_PERCENT,
+            Self::MAX_REMOTE_SPEED_PERCENT,
+        )
     }
 
     pub fn sanitize_peer_id(peer_id: &str) -> Result<String, CoreError> {
@@ -678,5 +703,48 @@ mod tests {
         assert_eq!(inner_req.ty, TYPE_TOPOLOGY_SYNC_REQ);
         let decoded_req = TopologySyncReqFrame::from_payload(&inner_req.payload).unwrap();
         assert_eq!(decoded_req.request_id, "req-999");
+    }
+
+    /// v0.2.32: `remote_speed_percent` defaults to 100 (1:1 against the
+    /// peer screen) both in `Default` and for persisted layouts written
+    /// before the field existed; sanitize clamps it into the engine's
+    /// accepted range so a bad value can never freeze the remote cursor.
+    #[test]
+    fn remote_speed_percent_defaults_and_clamps() {
+        let cfg = EdgeCrossingConfig::default();
+        assert_eq!(cfg.remote_speed_percent, 100);
+
+        let legacy: EdgeCrossingConfig = serde_json::from_str(r#"{"resistance_px":15}"#).unwrap();
+        assert_eq!(legacy.remote_speed_percent, 100);
+
+        let mut low = EdgeCrossingConfig {
+            remote_speed_percent: 0,
+            ..Default::default()
+        };
+        low.sanitize();
+        assert_eq!(
+            low.remote_speed_percent,
+            TopologyValidator::MIN_REMOTE_SPEED_PERCENT
+        );
+        let mut high = EdgeCrossingConfig {
+            remote_speed_percent: 10_000,
+            ..Default::default()
+        };
+        high.sanitize();
+        assert_eq!(
+            high.remote_speed_percent,
+            TopologyValidator::MAX_REMOTE_SPEED_PERCENT
+        );
+        assert_eq!(TopologyValidator::clamp_remote_speed_percent(150), 150);
+    }
+
+    /// v0.2.32: the entry return grace now drives a decaying threshold
+    /// instead of a hard cut, so the default is long enough (3 s) to cover
+    /// the hand settling after a crossing without ever locking the seat.
+    #[test]
+    fn entry_return_grace_defaults_to_three_seconds() {
+        assert_eq!(EdgeCrossingConfig::default().entry_return_grace_ms, 3000);
+        let legacy: EdgeCrossingConfig = serde_json::from_str(r#"{"resistance_px":15}"#).unwrap();
+        assert_eq!(legacy.entry_return_grace_ms, 3000);
     }
 }

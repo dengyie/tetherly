@@ -138,9 +138,9 @@ async fn pair() -> (Node, Node, DirGuard, DirGuard) {
 /// turns a dy=0 positional event at the boundary into a dwell-wait instead
 /// of an instant cross — tests that assert the instant cross must opt out
 /// explicitly (this also exercises the new config field's plumbing).
-/// Also zeroes the v0.2.31 entry return grace (default 1000 ms), which
-/// would otherwise hold the seat Remote through the instant push-back
-/// these legacy assertions perform.
+/// Also zeroes the entry return grace (default 3000 ms since v0.2.32),
+/// whose ramp would otherwise hold the seat Remote through the instant
+/// push-back these legacy assertions perform.
 async fn disable_tb_redundancy_band(node: &tetherly_node::Node) {
     node.topology_update_config(
         None,
@@ -154,6 +154,7 @@ async fn disable_tb_redundancy_band(node: &tetherly_node::Node) {
         None,
         None,
         Some(0),
+        None,
     )
     .await
     .unwrap();

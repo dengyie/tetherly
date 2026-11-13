@@ -1031,3 +1031,16 @@
 - Results: commit `c41af3d` + tag v0.2.31，release run 43327674466 五作业全绿；`scripts/deploy.sh --target all --tag v0.2.31` EXIT=0（Mac pid 97956→51476 accessibility_trusted=true；home-win 298224→310648 SYSTEM/SessionId=2；受保护进程 100% 不动）；双端 `/api/input` 新字段全 0 待漫游。新埋点首批取证：attach 双拨号（gen=N 被 gen=N+1 顶掉 → 第一条 pump `outbound slot dropped`），记为 `m3_12` 候选实证（§103.8）。原计划：待 commit + tag v0.2.31 → release CI → `scripts/deploy.sh --target all --tag v0.2.31` → 双端 health 0.2.31 与 `/api/input` 新字段 → 用户真机点击对账（`tx_buttons`/`rx_buttons`/`dropped`、`push_button`/`apply_button`）。
 - Next: 部署后真机验收 §103.8 四项；若 Windows 侧 `tx_buttons` 不增则查 LL hook Button 分发；`m3_12` windows 红用 `pump_exit` 取证。
 - Blockers: None.
+
+## 2026-11-13（第三轮）
+- Task: 用户 v0.2.31 真机 3 分钟测试反馈三症状（Windows 屏中央留光标；Mac 里不灵敏/延迟/丢数据；底边第一次进入有点卡），用户授权"全面负责开发"，落地 v0.2.32。
+- Actions:
+  1. 诊断：Windows relay 模式从未隐藏系统光标；core Remote 位移按本机尺寸归一化（1920×1080 → 1470×956 各向异性 0.77/0.89 + 1000 单位量化）；1.0 s 硬宽限到期即回归；relay 分支缺 bogus 过滤；§103.8 attach 双拨号根因是 `input_out` 清空晚于 `send_to`。
+  2. TDD 落地 A（`platform.rs::system_cursor` + `HookControl::set_keyboard` 接线 + `start_input_hooks` force restore）、B（core `set_remote_screen`/`set_remote_speed_percent` + accept/release 接线 + `EdgeCrossingConfig.remote_speed_percent` + `topology_update_config` 第 12 参 + API）、C（`required_return_push_px` 斜坡 + 默认宽限 3000）、D（relay bogus 过滤 + attach drop 提前）。
+  3. 版本 bump 0.2.32 + `cargo update --workspace --offline`。
+  4. 验证：fmt；clippy -D warnings 0 错误；core 321、node 214；loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65 一次全绿。Windows 交叉编译本机失败于 openh264-sys2 build script（缺 Windows C 头），Win32 签名对照 windows-sys 0.59.0 源码核对，编译门禁交 ci.yml windows 作业。
+  5. 文档：DEVELOPMENT.md 顶部基线 → v0.2.32 + §104；`.codex-memory` 四文件同步。
+- Results: 待 commit + push → ci.yml windows 绿 → tag v0.2.32 → release.yml → `scripts/deploy.sh --target all --tag v0.2.32` → 双端 health 0.2.32 → 真机验收 §104.7 四项。
+- Next: 部署后看 Windows 日志 `[cursor] hidden/restored`、Windows trace `remote_screen peer=1470x956`、每次 attach 单条 `channel_open`。
+- Blockers: None.
+
