@@ -2,14 +2,14 @@
 
 ## 当前接手基线（截至 2026-11-13）
 
-> **v0.2.33（31e42ae，2026-11-13）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+> **v0.2.33（31e42ae，2026-11-13 双端已部署）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
 
 ## v0.2.33 真机反馈修复（2026-11-13，DEVELOPMENT.md §105）
 - [x] **A · Windows 先隐藏后 park warp**：`enter_remote_seat_capture` / `leave_remote_seat_capture` + `CURSOR_HIDE_AROUND_WARPS = cfg!(windows)` + `HookControl::hide_cursor`；回归先 warp 回本地再恢复光标。日志根因：warp 13:05:10.998 → hidden 13:05:11.004。测试 `remote_seat_capture_orders_hide_and_restore_around_warps`。
 - [x] **B · 本地持有光标的 Target 反向快路径**：`reverse_local_owner`（预臂 accept 无 entry / `note_controller_left` 置位；accept/Enter 清零）；快推 ≥`fast_push_delta_px` 立即接管（trace `reverse_fast push`），钉边/慢推走短驻留，冷却 1 s；控制器在屏闸门不变。日志根因：13:05:07.05 `distance gate not armed` → 13:05:10.70 才越边（3.6 s）。测试 `local_owner_target_fast_push_reverses_immediately`、`local_owner_target_pinned_push_reverses_after_short_dwell`、`controller_on_screen_disables_fast_reverse_until_leave`；phase3 m3_11 距离门段落按新语义删去。
 - [x] **C · review (d)**：每次 attach 一条 `channel_open` 正确；`pump_exit: controller pump outbound slot dropped` 是回归时上一会话通道的正常拆除；§104.7 (d) 已更正。
 - [x] 本机验证：fmt、clippy -D warnings 0 错误；core 321、node 218；loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65 全绿。
-- [ ] ci.yml `31e42ae` 三平台绿 → `git tag v0.2.33` → release.yml → `scripts/deploy.sh --target all --tag v0.2.33`。
+- [x] ci.yml 43446075823 `31e42ae` 全绿 → tag v0.2.33 → release 43448044509 绿 → deploy EXIT=0：Mac 0.2.33 pid 10880 accessibility_trusted；Windows 0.2.33 pid 274908 SYSTEM sid=2、`[cursor] restored (force=true)`；受保护三进程不动。
 - [ ] 真机验收 v0.2.33（§105.7）：(a) 进入/回归 Windows 中央无光标闪烁；(c) Windows 本地光标推底边一次即进入 Mac，Windows trace 有 `reverse_fast`；(d) 每次 attach 一条 `channel_open`，回归时一条 `pump_exit ... slot dropped` 属正常。
 - [ ] 观察项：Mac watcher 自动重连抢在 Windows 再预臂前 attach（13:05:42）——快路径已使其无感，若仍出现反复抢角色再改 watcher。
 

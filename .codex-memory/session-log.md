@@ -1052,5 +1052,6 @@
   3. 版本 bump 0.2.33 + `cargo update --workspace --offline`；提交 `31e42ae`。
   4. 文档：DEVELOPMENT.md 基线 → v0.2.33、§104.7 (d) 更正、新增 §105；`.codex-memory` 四文件同步。
 - Results: 本机 fmt / clippy -D warnings 0 错误；core 321、node 218、集成全绿。
-- Next: ci.yml 绿 → tag v0.2.33 → release → deploy；用户真机验收 §105.7。
+- Deploy: ci 43446075823 绿 → tag v0.2.33 → release 43448044509 绿 → deploy EXIT=0；Mac pid 10880 / Windows pid 274908 SYSTEM sid=2；受保护进程不动。
+- Next: 用户真机验收 §105.7。
 - Blockers: None.
