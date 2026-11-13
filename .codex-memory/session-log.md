@@ -1083,3 +1083,10 @@
 - Results: fmt / clippy 0 错误；cargo test --workspace 全绿（node 226）；ci 43488480812（3a2ac2f）三平台 + deny + android 全绿。
 - Deploy: tag v0.2.37 → release 43490201522 绿 → deploy EXIT=0；Mac pid 57798；Windows pid 308400 SYSTEM；受保护进程不动。
 - Next: 用户按 §109.7 真机验收。
+
+## 2026-11-14 - v0.2.38（§110）
+- Context: 用户：v0.2.37 后“老问题”仍在，Mac trace 显示 4 轮进入后 0.3–0.6 s 弹回。
+- Work: Windows 日志 19:27 定位整段位移计入回程推力 + 48 px 入口门槛；只算越边部分、入口门槛 10×、ReturnDiag 日志；3 条测试 RED→GREEN。
+- Results: fmt / clippy 0 错误；cargo test --workspace 全绿（core 324）。
+- Deploy: ci 43496484032 绿 → tag v0.2.38 → release 43498423490 绿 → deploy EXIT=0；Mac pid 16286；Windows pid 288460 SYSTEM；受保护进程不动。
+- Next: 用户按 §110.7 真机验收。

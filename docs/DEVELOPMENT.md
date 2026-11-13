@@ -2,10 +2,11 @@
 
 ## 当前接手基线（维护于 2026-11-14）
 
-- **发布基线：v0.2.37（tag → `3a2ac2f`，2026-11-14 双端已部署，见 §109），最高 ADR-138。** `Cargo.toml` 与已发布 tag 为版本依据；下文 v1.x / v2.x 是历史设计文档版本，不能作为当前二进制版本。本块下方 2026-11-10 起的逐版本条目保留为历史演进记录，其中"未发布/未提交"措辞均为当时状态，v0.2.8–v0.2.30 已全部经 CI tag 发布并经 `scripts/deploy.sh --target all --tag vX.Y.Z` 部署。
+- **发布基线：v0.2.38（tag → `a643612`，2026-11-14 双端已部署，见 §110），最高 ADR-138。** `Cargo.toml` 与已发布 tag 为版本依据；下文 v1.x / v2.x 是历史设计文档版本，不能作为当前二进制版本。本块下方 2026-11-10 起的逐版本条目保留为历史演进记录，其中"未发布/未提交"措辞均为当时状态，v0.2.8–v0.2.30 已全部经 CI tag 发布并经 `scripts/deploy.sh --target all --tag vX.Y.Z` 部署。
 - **🟢 Windows→Mac 鼠标方向已解决（v0.2.29，2026-11-13 真机验收）：** 2026-11-13 早间移交时的"Windows 物理鼠标不能驱动 Mac 光标"根因是 §101 的 7 秒弹回（entry placement 落在反向触发区 + pinned heartbeat 自动完成驻留）；`7b71531` zone-entered gate 修复后双端 `/api/health` version=v0.2.29，Mac 日志 `apply: enter` → 稳定 Remote 会话 → 用户正常推回，无弹回。生产机验收由用户实测确认（"Windows 鼠标已经可以接入 mac 了"）。
 - **v0.2.30（§102）：** (A) core Remote 座位冗余 Move 帧抑制（归一化远端坐标不变就不发帧，消灭 `lone edge-clamp move` 四连与零位移抖动帧）；(C) 输入引擎决策环 `GET /api/input/trace` + 双 CLI `tetherly input trace`（64 条内存环，覆盖 crossing / seat / attach_kick / park_warp / release / rescue / reconcile / apply_enter / push_*），SYSTEM 守护进程排障不再依赖 RUST_LOG 与 ssh 翻日志；(B) 回归后 attach-kick 冷却**明确不做**（理由见 §102）。
 - **v0.2.31（§103）：** 针对用户真机两症状——(1) Windows 鼠标首次进入 Mac 要很久（22:28 日志 8 s `dwell gated` + 进入后 0.9–3.3 s 弹回）：反向触发区闸门改锚定在控制器**已应用的 Enter**（预臂 accept 无 entry 坐标时闸门保持开启，Enter 关闸、Leave 重开），core 新增进入回归宽限 `entry_return_grace`（node 由 `EdgeCrossingConfig.entry_return_grace_ms` 配置，默认 1000 ms，`/api/topology/config` 可调，0 为旧即时回归）；(2) Windows 鼠标在 Mac 里左键点不动：macOS 注入 `move_abs` 在按键按住期间改发 `*MouseDragged`（选字/拖窗/拖放此前对 AppKit 不可见），并补 Button 链路埋点 `push_button` / `apply_button` / `apply_reject` 与 `/api/input` 新字段 `applied / dropped / rx_buttons / rx_wheel / rx_keys / tx_buttons`，外加 `channel_open` / `pump_exit` / `zone_gate` 决策环条目（§102.7 `m3_12` 取证前置）。Mac 再预臂冷却（选项 iii）按 §102.4 继续不做。
+- **v0.2.38（§110）：** 针对 v0.2.37 后仍出现的“老问题”：Windows 鼠标进 Mac 后 0.3–0.6 s 被弹回、连弹 3–6 次。回程推力原来按整段事件位移累计（包括回到边缘的那段路程），而进入瞬间的门槛只有 48 px，入 Mac 不深时，手抬起回位的一笔就能越过门槛。修复：只累计越过共享边的部分；进入瞬间门槛提到 10 倍（120 px），在 3 s 宽限内线性回落；回程日志附带证据 `engine return to local`。
 - **v0.2.37（§109）：** 针对"Mac 控制 Windows 时被 Windows 接管，之后 Windows 鼠标回 Mac 卡很久"：降级后 Windows 光标进 Mac 时仍是护罩留下的空白 NSCursor，不可见，用户在菜单栏来回弹 8 轮。修复：释放会话、控制器 Enter、光标重新关联时均强制箭头光标并解除残留捕获。
 - **v0.2.36（§108）：** 针对"Mac 鼠标停在 Windows 上时，Windows 鼠标推底边进不了 Mac"：Mac 控制 Windows 期间（17:52:17–17:56:03）Windows 端零条 auto-reverse 日志。真实扫入先在钳位行之前一行进入边带（dy>0 开启驻留，未记钉边锚点），下一帧才落到钳位行（走 contiguous 分支，同样不记锚点），随后 Windows LL hook 静默，心跳无锚可续，驻留饿死。修复：活跃驻留中首次落到钳位行即补记锚点，交给钉边心跳完成。
 - **v0.2.35（§107）：** 针对 v0.2.34 真机"第一次 Windows 鼠标进入 Mac 仍卡很久"：日志 16:55:28.158 `local-owner fast push` → 16:55:31.067 `requesting polite takeover` 之间纯同步代码耗时 2909 ms（常态 <8 ms），同窗口其他同步步骤全线 4–50× 变慢——进程级饥饿而非决策逻辑。home-win 上 tetherly 被计划任务启动链继承为 **BelowNormal**（与 SRBMiner 同级）且工作集被裁到 6.5 MB。修复：守护进程启动自提 `ABOVE_NORMAL_PRIORITY_CLASS`、退出 EcoQoS 节流、`SetProcessWorkingSetSizeEx` 固定 64 MB 常驻下限（日志 `daemon responsiveness`）。
@@ -8430,3 +8431,17 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
    - CI 附带修复：`tests/phase3.rs::m3_9_reverse_control_takeover_flips_roles_cleanly` 第 3 步在角色翻转后立刻断言新 controller 的 channel 已打开；但 channel 要等对端 accept 响应才打开，macOS 慢 runner 上会竞态失败（ci 43486556104）。已改为与第 1 步相同的 3 s 轮询。
 6. **发布与部署（2026-11-14）**：commit `ad2ac01`（修复）+ `3a2ac2f`（m3_9 轮询）；ci 43488480812 三平台 + deny + android 全绿；tag v0.2.37 → release 43490201522 全绿；`deploy.sh --target all --tag v0.2.37` EXIT=0。Mac 0.2.37 pid 57798；Windows 0.2.37 pid 308400（267304 热替换），SYSTEM、AboveNormal、MinWS 64 MB；受保护进程 PID 不变（komari 263512 / SRBMiner 311184 / mihomo 268016）。
 7. **真机验收口径**：Mac 鼠标先进 Windows 控制一会儿 → 拿 Windows 鼠标接管 → 推底边进 Mac：Mac 上立即出现可见箭头光标，不再在菜单栏来回弹；Mac trace 依次出现 `cursor_restore grant released: input stopped` 与 `cursor_reveal controller entered`。
+
+## 110. Windows 鼠标进 Mac 后 0.3–0.6 s 连续弹回（老问题）(v0.2.38)
+
+1. **用户反馈（v0.2.37 真机）**：“还有问题，老问题”，并附上 Mac `/api/input/trace`：0.6 s 内反复出现 `apply_enter` → `controller left roaming`，共 4 轮。
+2. **日志证据（Windows 2026-11-13 19:27:11–14 UTC）**：连续 4 次 `engine crossing fired hook=(729..799,1072..1075) edge=Bottom` → `rem_y=0` 进入 → park warp 到 (960,540)；0.34–0.63 s 后在 `hook=(960,531..538)` 处回程（上推 2–9 px）。用户每次弹回后立刻又往下推，说明回程并非本意。全量日志统计：接管后进入有 34/57 次在 1 s 内弹回，普通进入有 18/34 次，常见 3–6 连弹；所以这是进入后过早回程的通用问题，不只发生在接管场景。
+3. **根因**：`local_move_delta` 的回程累加器只要事件结束时停在共享边（`next_rem_y<=0`），就把**整段事件位移**都算作推边力度，包括从内部回到边缘的那段路程。用户往下一划，越边时往往已到笔画末尾，只进入 Mac 几十 px；接着手抬起回位那一笔向上 50–90 px，加上 v0.2.32 的进入斜坡起点只有 4×12=48 px，于是正常回位被当成刻意甩回。
+4. **修复（`crates/tetherly-core/src/input.rs`）**：
+   - 推边力度只算超出共享边的部分：`push_beyond_edge = push - (起始深度换算回本地 px)`。
+   - `ENTRY_RETURN_PUSH_MULTIPLIER` 从 4 改为 10：进入瞬间门槛 120 px，在 `entry_return_grace`（默认 3 s）内线性回落到 12 px。
+   - 新增 `ReturnDiag {elapsed_ms, peak_depth, push, required_push}` 及 `last_return_diag()`。节点在回程时记日志 `engine return to local`，`crossing` trace 追加 `return elapsed_ms=.. peak_depth=.. push=a/b`，下次若再弹回，可以直接判断是手动还是别的来源。
+5. **测试**：新增 `shallow_entry_reset_stroke_does_not_bounce_the_seat_back`、`deliberate_flick_back_right_after_entry_still_returns`、`return_records_entry_elapsed_peak_depth_and_push`，先 RED 后 GREEN。以下用例按新语义调整了推力，确保越过边缘的推力足够：`return_push_threshold_decays_linearly_over_the_entry_grace`（10×）、`cross_screen_position_mapping_is_proportional_both_directions`（50→60）、phase3 `m3_5`（50→180）。fmt / clippy `-D warnings` 0 错误；workspace 全量测试全绿（core 324）。
+6. **发布与部署（2026-11-14）**：commit `a643612`；ci 43496484032 三平台 + deny + android 全绿；tag v0.2.38 → release 43498423490 全绿；`deploy.sh --target all --tag v0.2.38` EXIT=0。Mac 0.2.38 pid 16286；Windows 0.2.38 pid 288460（热替换 308400），SYSTEM；受保护进程 PID 不变（komari 263512 / SRBMiner 311184 / mihomo 268016）。
+7. **真机验收口径**：从 Windows 底边推进 Mac（包括 Mac 正控制 Windows 后被接管的场景）后，正常回位、小幅上下移动都不应再弹回 Windows；刻意快速往上甩仍能立即回 Windows，进入 3 s 后轻推上边也能回去。若仍有弹回，查 Windows 日志 `engine return to local` 的 `elapsed_ms / peak_depth / push`。
+
