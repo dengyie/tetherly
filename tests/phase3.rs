@@ -998,22 +998,16 @@ async fn m3_11_auto_reverse_gates_block_accidental_flips() {
         "two isolated bumps with a 300ms gap must not take over"
     );
 
-    // Gate: distance arming. After an idle gap (2s) the accumulator is
-    // reset — a freshly plugged-in mouse that only reaches the edge with a
-    // few px of jitter can never start the takeover, no matter how long it
-    // pushes.
-    tokio::time::sleep(Duration::from_millis(2200)).await;
-    for _ in 0..10 {
-        client.drive_input_delta(50, 49, 0, 3, 100, 50).unwrap();
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    assert_eq!(
-        client.active_tunnel_role(),
-        Some(tetherly_core::InputTunnelRole::Target),
-        "a mouse that never traversed the arming range must not take over"
-    );
-
+    // v0.2.33: this client is a PRE-ARM Target (attach without entry
+    // placement) — no controller cursor is parked on its screen, the local
+    // user owns it. The distance gate and the 600ms un-armed dwell only
+    // fence the parked-entry case (controller on screen; unit-tested in
+    // runtime::input: test_entry_parked_edge_micro_jitter_cannot_arm_reverse_dwell
+    // and controller_on_screen_disables_fast_reverse_until_leave). Here a
+    // dense slow push held past the short dwell is the deliberate gesture
+    // and hands over, exactly like a controller-side crossing (production
+    // 2026-11-13 13:05:07: the old 600ms gate cost 3.6 s on first entry).
+    // The isolated-bump fences above still hold for the local owner.
     // The sustained push still works once the mouse has proven real use: a
     // warmup traversal crosses the arming range, then a dense event stream
     // (30ms apart, well under TOUCH_GAP_MS) held past delay_ms fires the

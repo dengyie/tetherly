@@ -983,6 +983,14 @@ struct Shared {
     /// the user's push had landed). Reset per session by
     /// `reset_reverse_arming_state` on accept.
     reverse_zone_dirty: std::sync::atomic::AtomicBool,
+    /// v0.2.33: this Target session's screen is still owned by the LOCAL
+    /// user — the session came from a pre-arm accept (no entry placement)
+    /// or the controller's Leave already handed the cursor back. A push
+    /// into the shared edge is then the same gesture as a controller-side
+    /// crossing and uses the controller's speed gate (fast push now, slow
+    /// push after the short dwell) instead of the parked-entry misfire
+    /// fences. Cleared by `reset_reverse_arming_state` (accept, Enter).
+    reverse_local_owner: std::sync::atomic::AtomicBool,
     /// Target-side input apply counters (v0.2.31, mirrored from the pump's
     /// `InputClient` after every frame so `GET /api/input` can show them
     /// without reaching into the pump task): frames applied, frames

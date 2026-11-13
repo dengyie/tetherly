@@ -634,6 +634,7 @@ impl Node {
             reverse_last_tick: Mutex::new(None),
             reverse_pinned_touch: Mutex::new(None),
             reverse_zone_dirty: std::sync::atomic::AtomicBool::new(false),
+            reverse_local_owner: std::sync::atomic::AtomicBool::new(false),
             input_rx_applied: std::sync::atomic::AtomicU64::new(0),
             input_rx_dropped: std::sync::atomic::AtomicU64::new(0),
             input_rx_buttons: std::sync::atomic::AtomicU64::new(0),

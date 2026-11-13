@@ -1559,6 +1559,14 @@ impl HookControl {
         MOUSE_RELAY.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// v0.2.33: hide the system cursors ahead of the center park warp so
+    /// the arrow never paints at screen center (production 13:05:10.998
+    /// warp vs 13:05:11.004 hidden — a visible flash on every entry). The
+    /// later `set_keyboard(true)` hide is then an idempotent no-op.
+    pub fn hide_cursor(&self) {
+        system_cursor::hide();
+    }
+
     pub fn set_keyboard(&self, on: bool) -> Result<(), CoreError> {
         use windows_sys::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
         const WM_HOOK_KB_ON: u32 = 0x8000 + 1; // WM_APP + 1
@@ -1605,6 +1613,10 @@ impl HookControl {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// macOS hides through `set_keyboard` (dissociate + CGDisplayHideCursor
+    /// path); the pre-warp hide step is Windows-only.
+    pub fn hide_cursor(&self) {}
+
     pub fn set_keyboard(&self, on: bool) -> Result<(), CoreError> {
         let prev = self
             .keyboard_armed
@@ -1648,6 +1660,8 @@ impl HookControl {
     pub fn is_armed(&self) -> bool {
         false
     }
+
+    pub fn hide_cursor(&self) {}
 
     pub fn set_keyboard(&self, _on: bool) -> Result<(), CoreError> {
         Ok(())

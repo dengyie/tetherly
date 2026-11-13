@@ -489,6 +489,13 @@ impl Node {
                 "zone_gate",
                 format!("open: pre-arm accept without entry placement peer={peer_str}"),
             );
+            // v0.2.33: same fact, stronger consequence — the local user
+            // holds the cursor, so an edge push takes the controller-parity
+            // fast path (production 13:05:07: 3.6 s first entry).
+            self.shared
+                .reverse_local_owner
+                .store(true, Ordering::SeqCst);
+            self.trace_input("reverse_owner", "local: pre-arm accept");
         }
 
         // Apply the controller's proportional entry placement: without this
@@ -2099,6 +2106,49 @@ impl Node {
         }
     }
 
+    /// v0.2.33: Windows hides the system cursors BEFORE the center park
+    /// warp and restores them only AFTER the return warp, so the arrow is
+    /// never painted at screen center. macOS keeps its proven order (warp,
+    /// then dissociate+hide; re-associate, then warp home).
+    const CURSOR_HIDE_AROUND_WARPS: bool = cfg!(windows);
+
+    /// Seat moved to Remote: park the physical cursor and arm capture.
+    /// `hide_first` hides the local cursor before the park warp.
+    fn enter_remote_seat_capture(&self, park_x: i32, park_y: i32, hide_first: bool) {
+        if hide_first {
+            self.trace_input("cursor_hide", "before park warp");
+            if let Ok(guard) = self.shared.input_hook_control.lock() {
+                if let Some(ref control) = *guard {
+                    control.hide_cursor();
+                }
+            }
+        }
+        tracing::info!(park_x, park_y, "park warp before remote roaming");
+        self.trace_input("park_warp", format!("({park_x},{park_y})"));
+        crate::platform::warp_mouse_position(park_x, park_y);
+        if !hide_first {
+            self.trace_input("cursor_hide", "with capture arm");
+        }
+        self.arm_input_capture();
+    }
+
+    /// Seat returned to Local: disarm capture and put the cursor back at
+    /// the engine's local position. `restore_last` warps home before the
+    /// cursor is shown again.
+    fn leave_remote_seat_capture(&self, x: i32, y: i32, restore_last: bool) {
+        if restore_last {
+            self.trace_input("return_warp", format!("({x},{y})"));
+            crate::platform::warp_mouse_position(x, y);
+            self.trace_input("cursor_restore", "after return warp");
+            self.disarm_input_capture();
+        } else {
+            self.trace_input("cursor_restore", "before return warp");
+            self.disarm_input_capture();
+            self.trace_input("return_warp", format!("({x},{y})"));
+            crate::platform::warp_mouse_position(x, y);
+        }
+    }
+
     /// Check if low-level keyboard hook is currently armed and actively swallowing keystrokes.
     pub fn is_keyboard_armed(&self) -> bool {
         if let Ok(guard) = self.shared.input_hook_control.lock() {
@@ -2323,8 +2373,7 @@ impl Node {
         if release_grant {
             self.release_input_tunnel_local("stranded remote seat rescued");
         }
-        self.disarm_input_capture();
-        crate::platform::warp_mouse_position(cx, cy);
+        self.leave_remote_seat_capture(cx, cy, Self::CURSOR_HIDE_AROUND_WARPS);
         self.emit(UiEvent::input_seat_changed("local", false, None));
         self.trace_input(
             "rescue",
@@ -2496,6 +2545,9 @@ impl Node {
         self.shared
             .reverse_zone_dirty
             .store(false, Ordering::SeqCst);
+        self.shared
+            .reverse_local_owner
+            .store(false, Ordering::SeqCst);
         *self.shared.reverse_last_move.lock().expect("reverse_move") = None;
         *self.shared.reverse_last_pos.lock().expect("reverse_pos") = None;
         *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
@@ -2526,6 +2578,10 @@ impl Node {
     pub(crate) fn note_controller_left(&self) {
         self.shared.reverse_zone_dirty.store(true, Ordering::SeqCst);
         self.trace_input("zone_gate", "open: controller left");
+        self.shared
+            .reverse_local_owner
+            .store(true, Ordering::SeqCst);
+        self.trace_input("reverse_owner", "local: controller left");
     }
 
     /// Refresh physical activity timestamp without accumulating movement distance.
@@ -2859,12 +2915,14 @@ impl Node {
                 //    pull-off); parking at the shared edge instead is what
                 //    stranded the delta chain at saturation (v0.2.8 limit
                 //    cycle).
-                // 3) Warp BEFORE arming input capture / dissociating.
-                let (park_x, park_y) = (width / 2, height / 2);
-                tracing::info!(park_x, park_y, "park warp before remote roaming");
-                self.trace_input("park_warp", format!("({park_x},{park_y})"));
-                crate::platform::warp_mouse_position(park_x, park_y);
-                self.arm_input_capture();
+                // 3) Warp BEFORE arming input capture / dissociating — but
+                //    on Windows hide the system cursors FIRST (v0.2.33), or
+                //    the arrow paints at center for the ~6ms the hide takes.
+                self.enter_remote_seat_capture(
+                    width / 2,
+                    height / 2,
+                    Self::CURSOR_HIDE_AROUND_WARPS,
+                );
             } else if !self.is_keyboard_armed() {
                 self.arm_input_capture();
             }
@@ -2937,8 +2995,11 @@ impl Node {
                 if own_stint && self.input_channel_open_sync() {
                     self.release_input_tunnel_local("roaming returned to local seat");
                 }
-                self.disarm_input_capture();
-                crate::platform::warp_mouse_position(local_pos.0, local_pos.1);
+                self.leave_remote_seat_capture(
+                    local_pos.0,
+                    local_pos.1,
+                    Self::CURSOR_HIDE_AROUND_WARPS,
+                );
             } else {
                 // The drive path crossed INTO remote roaming: this node
                 // started a controller stint with its own edge crossing.
@@ -3150,6 +3211,35 @@ impl Node {
     /// real hand holds the push far longer; plug-in jitter / desk bumps are
     /// isolated spikes that reset the dwell long before 600ms.
     const REVERSE_DWELL_UNARMED_MS: u64 = 600;
+    /// Cooldown between automatic flips while the controller's cursor may
+    /// be parked on this screen (storm fence).
+    const REVERSE_COOLDOWN_MS: u128 = 3000;
+    /// v0.2.33: cooldown when the local user owns the cursor — only an
+    /// anti-spam fence for the in-flight attach, so a quick back-and-forth
+    /// is not swallowed for 3 s.
+    const REVERSE_COOLDOWN_LOCAL_OWNER_MS: u128 = 1000;
+
+    /// Cooldown that applies to the current Target session.
+    fn reverse_cooldown_ms(&self) -> u128 {
+        if self.shared.reverse_local_owner.load(Ordering::SeqCst) {
+            Self::REVERSE_COOLDOWN_LOCAL_OWNER_MS
+        } else {
+            Self::REVERSE_COOLDOWN_MS
+        }
+    }
+
+    /// Short dwell (the topology `delay_ms`, floored at
+    /// `REVERSE_DWELL_ARMED_MS`).
+    fn reverse_short_dwell_ms(&self) -> u64 {
+        Self::REVERSE_DWELL_ARMED_MS.max(
+            self.shared
+                .topology_layout
+                .lock()
+                .expect("topology_layout")
+                .config
+                .delay_ms as u64,
+        )
+    }
 
     /// Deskflow "switch at the shared edge" for the controlled side.
     ///
@@ -3189,11 +3279,12 @@ impl Node {
             let server = self.shared.input_engine.lock().expect("engine");
             server.edge()
         };
+        let local_owner = self.shared.reverse_local_owner.load(Ordering::SeqCst);
         let now = std::time::Instant::now();
         {
             let last_flip = self.shared.last_auto_reverse.lock().expect("last_flip");
             if let Some(t) = *last_flip {
-                if now.duration_since(t).as_millis() < 3000 {
+                if now.duration_since(t).as_millis() < self.reverse_cooldown_ms() {
                     return;
                 }
             }
@@ -3234,6 +3325,42 @@ impl Node {
             tetherly_core::ScreenEdge::Left => target_x <= 0,
         };
 
+        // v0.2.33 local-owner fast path (controller parity): no controller
+        // cursor is parked on this screen, so none of the parked-entry
+        // fences below has anything to protect. A fast into-edge push
+        // (>= the topology `fast_push_delta_px`, the same threshold the
+        // controller-side band gate uses) hands over at once; slower or
+        // pinned pushes fall through to the short dwell below.
+        if local_owner && crossed {
+            let into = match edge {
+                tetherly_core::ScreenEdge::Right => dx,
+                tetherly_core::ScreenEdge::Left => -dx,
+                tetherly_core::ScreenEdge::Bottom => dy,
+                tetherly_core::ScreenEdge::Top => -dy,
+            };
+            let fast_push = self
+                .shared
+                .topology_layout
+                .lock()
+                .expect("topology_layout")
+                .config
+                .fast_push_delta_px
+                .max(1) as i32;
+            if into >= fast_push {
+                *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
+                *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
+                *self
+                    .shared
+                    .reverse_pinned_touch
+                    .lock()
+                    .expect("reverse_pinned") = None;
+                tracing::info!(into, fast_push, %edge, "auto-reverse: local-owner fast push");
+                self.trace_input("reverse_fast", format!("push into={into} edge={edge}"));
+                self.fire_reverse_takeover(edge, x, y, width, height);
+                return;
+            }
+        }
+
         // v0.2.27 zone gate: the entry placement parks the incoming cursor
         // ON the shared edge — inside the reverse-trigger zone — so from the
         // parked position a single micro jitter toward the edge would arm
@@ -3270,7 +3397,7 @@ impl Node {
         // "push from where it sits" gesture accumulates ~0px and was
         // structurally dead — it instead needs the long contiguous dwell
         // below. The blocked log stays, once per second, for attribution.
-        if !distance_armed {
+        if !distance_armed && !local_owner {
             static LAST_BLOCK_LOG: std::sync::Mutex<Option<std::time::Instant>> =
                 std::sync::Mutex::new(None);
             let mut last = LAST_BLOCK_LOG.lock().expect("blocklog");
@@ -3335,26 +3462,22 @@ impl Node {
             tetherly_core::ScreenEdge::Top => y <= 2,
             tetherly_core::ScreenEdge::Left => x <= 2,
         };
+        // A local-owner push may open from the clamp row too (v0.2.33): the
+        // cursor typically already rests on the edge, so the OS reports
+        // zero deltas while the hand pushes.
+        let pinned_open = pinned_at_clamp && (!distance_armed || local_owner);
         let pushing_in = match edge {
             tetherly_core::ScreenEdge::Right => {
-                dx > 0
-                    || (dx == 0 && dwell_active)
-                    || (dx == 0 && pinned_at_clamp && !distance_armed)
+                dx > 0 || (dx == 0 && dwell_active) || (dx == 0 && pinned_open)
             }
             tetherly_core::ScreenEdge::Bottom => {
-                dy > 0
-                    || (dy == 0 && dwell_active)
-                    || (dy == 0 && pinned_at_clamp && !distance_armed)
+                dy > 0 || (dy == 0 && dwell_active) || (dy == 0 && pinned_open)
             }
             tetherly_core::ScreenEdge::Top => {
-                dy < 0
-                    || (dy == 0 && dwell_active)
-                    || (dy == 0 && pinned_at_clamp && !distance_armed)
+                dy < 0 || (dy == 0 && dwell_active) || (dy == 0 && pinned_open)
             }
             tetherly_core::ScreenEdge::Left => {
-                dx < 0
-                    || (dx == 0 && dwell_active)
-                    || (dx == 0 && pinned_at_clamp && !distance_armed)
+                dx < 0 || (dx == 0 && dwell_active) || (dx == 0 && pinned_open)
             }
         };
         let fired = if !crossed || !pushing_in {
@@ -3370,15 +3493,8 @@ impl Node {
                 .expect("reverse_pinned") = None;
             false
         } else {
-            let delay_ms = if distance_armed {
-                Self::REVERSE_DWELL_ARMED_MS.max(
-                    self.shared
-                        .topology_layout
-                        .lock()
-                        .expect("topology_layout")
-                        .config
-                        .delay_ms as u64,
-                )
+            let delay_ms = if distance_armed || local_owner {
+                self.reverse_short_dwell_ms()
             } else {
                 Self::REVERSE_DWELL_UNARMED_MS
             };
@@ -3386,6 +3502,9 @@ impl Node {
         };
         if !fired {
             return;
+        }
+        if local_owner {
+            self.trace_input("reverse_fast", format!("short dwell edge={edge}"));
         }
         self.fire_reverse_takeover(edge, x, y, width, height);
     }
@@ -3521,24 +3640,19 @@ impl Node {
                 }
                 // Cooldown gate mirrors the physical path.
                 {
+                    let cooldown = node.reverse_cooldown_ms();
                     let last_flip = node.shared.last_auto_reverse.lock().expect("last_flip");
                     if let Some(t) = *last_flip {
-                        if now.duration_since(t).as_millis() < 3000 {
+                        if now.duration_since(t).as_millis() < cooldown {
                             continue;
                         }
                     }
                 }
                 let distance_armed = node.shared.reverse_move_accum_px.load(Ordering::SeqCst)
                     >= Node::REVERSE_ARM_MIN_PX;
-                let delay_ms = if distance_armed {
-                    Node::REVERSE_DWELL_ARMED_MS.max(
-                        node.shared
-                            .topology_layout
-                            .lock()
-                            .expect("topology_layout")
-                            .config
-                            .delay_ms as u64,
-                    )
+                let local_owner = node.shared.reverse_local_owner.load(Ordering::SeqCst);
+                let delay_ms = if distance_armed || local_owner {
+                    node.reverse_short_dwell_ms()
                 } else {
                     Node::REVERSE_DWELL_UNARMED_MS
                 };
@@ -6610,6 +6724,208 @@ mod tests {
             serde_json::from_str(r#"{"ok":true,"channel_open":false,"seat":"local"}"#).unwrap();
         assert_eq!(legacy.applied, 0);
         assert_eq!(legacy.tx_buttons, 0);
+    }
+
+    /// Shared setup for the v0.2.33 local-owner reverse tests: a node with a
+    /// live peer below its bottom edge and an accepted PRE-ARM Target
+    /// session (no entry placement — the controller has not crossed, the
+    /// cursor on this screen is the local user's).
+    async fn local_owner_target_fixture(
+        name: &str,
+    ) -> (Node, std::path::PathBuf, std::path::PathBuf) {
+        let (node, dir) = crate::runtime::clipboard_policy_tests::temp_test_node(name);
+        let (other, dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node(&format!("{name}-peer"));
+        let peer_id = other.identity().device_id().clone();
+        node.shared.live.lock().unwrap().insert(
+            peer_id.clone(),
+            crate::runtime::trust::LivePeer {
+                device_id: peer_id.clone(),
+                name: "peer".into(),
+                platform: "test".into(),
+                addr: "127.0.0.1:1".parse().unwrap(),
+                handshake_hash: [0u8; 32],
+                file_port: None,
+                input_port: Some(45719),
+                screen_port: None,
+                caps: Vec::new(),
+                path: tetherly_core::PathKind::Lan,
+                rtt_ms: None,
+                last_seen_ms: 0,
+            },
+        );
+        node.shared.topology_layout.lock().unwrap().display = DisplayRect::new(1920, 1080, 1.0);
+        node.set_input_policy(crate::store::InputTunnelPolicy {
+            edge: Some("bottom".into()),
+            ..crate::store::InputTunnelPolicy::default()
+        })
+        .expect("policy set");
+        node.shared
+            .topology_layout
+            .lock()
+            .unwrap()
+            .neighbors
+            .insert(
+                DisplayEdge::Bottom,
+                EdgeNeighbor {
+                    peer_id: peer_id.to_string(),
+                    peer_edge: DisplayEdge::Top,
+                    offset: 0,
+                },
+            );
+        node.receive_input_tunnel_request(
+            &peer_id,
+            InputTunnelRequestFrame {
+                session_id: "tun_prearm_local".into(),
+                client_device_id: peer_id.to_string(),
+                requested_edge: None,
+                entry_x: None,
+                entry_y: None,
+                timestamp_ms: 1,
+            },
+        )
+        .await;
+        assert_eq!(
+            node.active_tunnel_role(),
+            Some(InputTunnelRole::Target),
+            "fixture: pre-arm accept must make this node the Target"
+        );
+        (node, dir, dir_other)
+    }
+
+    /// v0.2.33 (production 2026-11-13 13:05:07 → 13:05:10.70, 3.6 s first
+    /// entry): the peer had just returned home and re-pre-armed, so this
+    /// node was Target while its own user held the cursor. A deliberate
+    /// push into the shared edge took the 600 ms UN-armed dwell, which
+    /// every 1px pull-back reset. With no controller on this screen, the
+    /// push is the same gesture as a controller-side crossing: a fast
+    /// into-edge delta must hand over at once.
+    #[tokio::test]
+    async fn local_owner_target_fast_push_reverses_immediately() {
+        let (node, _d1, _d2) = local_owner_target_fixture("rev-local-fast").await;
+        let _ = node
+            .drive_input_delta(960, 1079, 0, 12, 1920, 1080)
+            .expect("reverse path must not error");
+        assert!(
+            node.shared.last_auto_reverse.lock().unwrap().is_some(),
+            "a fast into-edge push while the local user owns the cursor must reverse at once"
+        );
+        assert!(
+            node.input_trace_snapshot()
+                .iter()
+                .any(|e| e.kind == "reverse_fast"),
+            "the fast-path decision must be traced"
+        );
+    }
+
+    /// Slow / pinned variant: the cursor already rests on the clamp row, so
+    /// the OS reports zero deltas while the hand pushes. The short
+    /// controller-parity dwell must complete well before the 600 ms
+    /// un-armed dwell would.
+    #[tokio::test]
+    async fn local_owner_target_pinned_push_reverses_after_short_dwell() {
+        let (node, _d1, _d2) = local_owner_target_fixture("rev-local-pinned").await;
+        let started = std::time::Instant::now();
+        for _ in 0..40 {
+            let _ = node
+                .drive_input_delta(960, 1079, 0, 0, 1920, 1080)
+                .expect("reverse path must not error");
+            if node.shared.last_auto_reverse.lock().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(12));
+        }
+        let fired_after = started.elapsed();
+        assert!(
+            node.shared.last_auto_reverse.lock().unwrap().is_some(),
+            "a held pinned push while the local user owns the cursor must reverse"
+        );
+        assert!(
+            fired_after < std::time::Duration::from_millis(400),
+            "the local-owner dwell must be the short controller-parity one, took {fired_after:?}"
+        );
+    }
+
+    /// Fence: once the controller's Enter lands (its cursor is parked on
+    /// this screen) the misfire protections are back — a single fast push
+    /// must NOT bounce the session. The Leave hands the cursor back to the
+    /// local user and re-enables the fast path.
+    #[tokio::test]
+    async fn controller_on_screen_disables_fast_reverse_until_leave() {
+        let (node, _d1, _d2) = local_owner_target_fixture("rev-local-fence").await;
+        node.note_controller_entered();
+        // Prove interior presence so only the dwell (not the zone gate)
+        // stands between the push and a takeover.
+        let _ = node
+            .drive_input_delta(960, 400, 0, -679, 1920, 1080)
+            .expect("reverse path must not error");
+        node.shared.reverse_move_accum_px.store(0, Ordering::SeqCst);
+        *node.shared.reverse_last_pos.lock().unwrap() = None;
+        let _ = node
+            .drive_input_delta(960, 1079, 0, 12, 1920, 1080)
+            .expect("reverse path must not error");
+        assert!(
+            node.shared.last_auto_reverse.lock().unwrap().is_none(),
+            "with the controller on screen a single push must not reverse"
+        );
+
+        node.note_controller_left();
+        let _ = node
+            .drive_input_delta(960, 1079, 0, 12, 1920, 1080)
+            .expect("reverse path must not error");
+        assert!(
+            node.shared.last_auto_reverse.lock().unwrap().is_some(),
+            "after the controller's Leave the local user's push must reverse at once"
+        );
+    }
+
+    /// v0.2.33 (a): on Windows the center park warp ran ~6 ms BEFORE the
+    /// 14-call SetSystemCursor hide, so the arrow flashed at screen center
+    /// on every entry (production 13:05:10.998 warp, 13:05:11.004 hidden).
+    /// With `hide_first` the hide step precedes the warp; on return with
+    /// `restore_last` the cursor is moved home before it is shown again.
+    #[tokio::test]
+    async fn remote_seat_capture_orders_hide_and_restore_around_warps() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("cursor-order");
+        node.enter_remote_seat_capture(960, 540, true);
+        node.leave_remote_seat_capture(900, 1079, true);
+        let kinds: Vec<String> = node
+            .input_trace_snapshot()
+            .iter()
+            .map(|e| e.kind.clone())
+            .filter(|k| {
+                matches!(
+                    k.as_str(),
+                    "cursor_hide" | "park_warp" | "return_warp" | "cursor_restore"
+                )
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["cursor_hide", "park_warp", "return_warp", "cursor_restore"]
+        );
+
+        // macOS keeps its proven order: warp, then arm (dissociate + hide);
+        // disarm (re-associate) then warp home.
+        let (node, _dir) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("cursor-order-mac");
+        node.enter_remote_seat_capture(960, 540, false);
+        node.leave_remote_seat_capture(900, 1079, false);
+        let kinds: Vec<String> = node
+            .input_trace_snapshot()
+            .iter()
+            .map(|e| e.kind.clone())
+            .filter(|k| {
+                matches!(
+                    k.as_str(),
+                    "cursor_hide" | "park_warp" | "return_warp" | "cursor_restore"
+                )
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["park_warp", "cursor_hide", "cursor_restore", "return_warp"]
+        );
     }
 }
 
