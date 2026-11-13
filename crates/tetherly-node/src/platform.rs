@@ -967,12 +967,12 @@ pub fn warp_mouse_position(x: i32, y: i32) {
     }
 }
 
+/// Deskflow OSXScreen::leave & OSXScreen::enter alignment: set
+/// "SetsCursorInBackground" on the CGS connection so WindowServer honors
+/// cursor operations even when Tetherly is a background accessory process.
 #[cfg(target_os = "macos")]
-pub fn set_mouse_cursor_associated(associated: bool) {
+fn enable_background_cursor_ops() {
     unsafe {
-        // Deskflow OSXScreen::leave & OSXScreen::enter alignment:
-        // Set "SetsCursorInBackground" on the CGS connection so WindowServer honors cursor operations
-        // even when Tetherly is a background tray / accessory process without window focus.
         if let Ok(key_cstr) = std::ffi::CString::new("SetsCursorInBackground") {
             let key = CFStringCreateWithCString(
                 std::ptr::null(),
@@ -985,7 +985,15 @@ pub fn set_mouse_cursor_associated(associated: bool) {
                 CFRelease(key);
             }
         }
+    }
+}
 
+#[cfg(target_os = "macos")]
+pub fn set_mouse_cursor_associated(associated: bool) {
+    // An idle hide must not stack under the seat-capture hide counter.
+    reveal_idle_hidden_cursor();
+    enable_background_cursor_ops();
+    unsafe {
         let mut displays = [0u32; 16];
         let mut count = 0u32;
         let _ = CGGetOnlineDisplayList(16, displays.as_mut_ptr(), &mut count);
@@ -1048,6 +1056,64 @@ pub fn set_mouse_cursor_associated(associated: bool) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn set_mouse_cursor_associated(_associated: bool) {}
+
+/// v0.2.34: set while the cursor is hidden by `hide_cursor_until_local_motion`
+/// (Target idle after the controller left); the tap reveals it on the next
+/// physical mouse event. Separate from `CURSOR_HIDDEN` (seat capture) so the
+/// two CGDisplayHideCursor counters stay balanced.
+#[cfg(target_os = "macos")]
+static IDLE_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+fn online_displays() -> Vec<u32> {
+    let mut displays = [0u32; 16];
+    let mut count = 0u32;
+    unsafe {
+        let _ = CGGetOnlineDisplayList(16, displays.as_mut_ptr(), &mut count);
+    }
+    if count == 0 {
+        vec![objc2_core_graphics::CGMainDisplayID()]
+    } else {
+        displays[..count as usize].to_vec()
+    }
+}
+
+/// Hide the macOS cursor until the next physical mouse event (revealed by
+/// the event tap) or the next controller Enter. No-op while the seat
+/// capture already holds it hidden.
+#[cfg(target_os = "macos")]
+pub fn hide_cursor_until_local_motion() {
+    use std::sync::atomic::Ordering;
+    if CURSOR_HIDDEN.load(Ordering::SeqCst) || IDLE_HIDDEN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    enable_background_cursor_ops();
+    for disp in online_displays() {
+        unsafe {
+            let _ = CGDisplayHideCursor(disp);
+        }
+    }
+}
+
+/// Undo `hide_cursor_until_local_motion`; idempotent.
+#[cfg(target_os = "macos")]
+pub fn reveal_idle_hidden_cursor() {
+    use std::sync::atomic::Ordering;
+    if !IDLE_HIDDEN.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    for disp in online_displays() {
+        unsafe {
+            let _ = CGDisplayShowCursor(disp);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn hide_cursor_until_local_motion() {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reveal_idle_hidden_cursor() {}
 
 #[cfg(windows)]
 pub fn warp_mouse_position(x: i32, y: i32) {
@@ -2508,6 +2574,22 @@ pub fn start_input_hooks(tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookCo
             CGEvent::integer_value_field(Some(cg_event), CGEventField::EventSourceUserData);
         if user_data == TETHERLY_INJECTED_MAGIC {
             return event.as_ptr();
+        }
+
+        // v0.2.34: any physical pointer event reveals the idle hide applied
+        // when the controller left this screen.
+        if matches!(
+            event_type,
+            CGEventType::MouseMoved
+                | CGEventType::LeftMouseDragged
+                | CGEventType::RightMouseDragged
+                | CGEventType::OtherMouseDragged
+                | CGEventType::LeftMouseDown
+                | CGEventType::RightMouseDown
+                | CGEventType::OtherMouseDown
+                | CGEventType::ScrollWheel
+        ) {
+            reveal_idle_hidden_cursor();
         }
 
         match event_type {

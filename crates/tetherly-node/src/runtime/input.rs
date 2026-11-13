@@ -2566,6 +2566,9 @@ impl Node {
     /// semantics, anchored at the Enter instead of the accept since
     /// v0.2.31 — a pre-arm accept has no parked cursor yet).
     pub(crate) fn note_controller_entered(&self) {
+        // v0.2.34: the controller's injected events bypass the local tap,
+        // so the idle hide from the last Leave is revealed here.
+        crate::platform::reveal_idle_hidden_cursor();
         self.reset_reverse_arming_state();
         self.trace_input("zone_gate", "close: controller entered");
     }
@@ -2582,6 +2585,51 @@ impl Node {
             .reverse_local_owner
             .store(true, Ordering::SeqCst);
         self.trace_input("reverse_owner", "local: controller left");
+    }
+
+    /// v0.2.34: a Target parks its cursor at screen center when the
+    /// controller leaves, instead of leaving it on the shared edge. Mac only:
+    /// the Mac had no hidden-cursor handoff, so it left a visible leftover
+    /// pointer, and that pinned clamp-band spot let one stray zero-delta
+    /// touch complete the local-owner short dwell and steal the controller
+    /// role (production 2026-11-13 16:01:51.14). Windows stays off: its
+    /// cursor is the user's primary pointer.
+    const TARGET_PARK_ON_LEAVE: bool = cfg!(target_os = "macos");
+
+    /// Warp the cursor to the center of `screen`, drop every pinned-edge
+    /// reverse anchor, and (when the local hook is live to reveal it on the
+    /// next physical motion) hide the cursor until the local user moves.
+    /// Returns the park point, or `None` when disabled.
+    pub(crate) fn park_target_cursor_after_leave(
+        &self,
+        enabled: bool,
+        screen: (i32, i32),
+    ) -> Option<(i32, i32)> {
+        if !enabled || screen.0 <= 0 || screen.1 <= 0 {
+            return None;
+        }
+        let (cx, cy) = (screen.0 / 2, screen.1 / 2);
+        *self
+            .shared
+            .reverse_pinned_touch
+            .lock()
+            .expect("reverse_pinned") = None;
+        *self.shared.reverse_last_pos.lock().expect("reverse_pos") = None;
+        *self.shared.reverse_arm_since.lock().expect("reverse_arm") = None;
+        *self.shared.reverse_last_tick.lock().expect("reverse_tick") = None;
+        self.trace_input("target_park", format!("({cx},{cy}) controller left"));
+        crate::platform::warp_mouse_position(cx, cy);
+        let hook_live = self
+            .shared
+            .input_hook_control
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or(false);
+        if hook_live {
+            self.trace_input("cursor_idle_hide", "until local motion");
+            crate::platform::hide_cursor_until_local_motion();
+        }
+        Some((cx, cy))
     }
 
     /// Refresh physical activity timestamp without accumulating movement distance.
@@ -3667,6 +3715,10 @@ impl Node {
                     info!(
                         "auto-reverse: pinned heartbeat completed the dwell; requesting takeover"
                     );
+                    node.trace_input(
+                        "reverse_heartbeat",
+                        format!("pinned dwell done at ({ax},{ay}) local_owner={local_owner}"),
+                    );
                     node.fire_reverse_takeover(edge, ax, ay, 0, 0);
                 }
             }
@@ -4415,6 +4467,10 @@ impl Node {
                                             // (production 2026-11-11).
                                             node.release_input_tunnel_local("controller left roaming");
                                             node.note_controller_left();
+                                            node.park_target_cursor_after_leave(
+                                                Node::TARGET_PARK_ON_LEAVE,
+                                                crate::platform::screen_size(),
+                                            );
                                         }
                                         if let Some(leave) = leave_opt {
                                             if let Ok(f) = leave.to_frame() {
@@ -6926,6 +6982,70 @@ mod tests {
             kinds,
             vec!["park_warp", "cursor_hide", "cursor_restore", "return_warp"]
         );
+    }
+
+    /// v0.2.34 (production 2026-11-13 16:01:49.6 → 16:01:51.14): the
+    /// controller left this Target through the shared edge and its cursor
+    /// stayed parked ON that edge — a visible leftover pointer, and a
+    /// pinned clamp-band position from which one stray zero-delta touch
+    /// let the local-owner short dwell steal the controller role (the
+    /// peer was then a Target and its next crossing needed a slow reverse).
+    /// The Leave must park the cursor off the edge and clear the pinned
+    /// anchor; a deliberate push to the edge must still hand over at once.
+    #[tokio::test]
+    async fn controller_leave_parks_target_cursor_off_the_shared_edge() {
+        let (node, _d1, _d2) = local_owner_target_fixture("rev-leave-park").await;
+        node.note_controller_entered();
+        // The controller's last moves pinned the cursor on the shared edge.
+        let _ = node
+            .drive_input_delta(960, 1079, 0, 0, 1920, 1080)
+            .expect("reverse path must not error");
+        node.note_controller_left();
+        let parked = node.park_target_cursor_after_leave(true, (1920, 1080));
+        assert_eq!(parked, Some((960, 540)), "leave parks at screen center");
+        assert!(
+            node.shared.reverse_pinned_touch.lock().unwrap().is_none(),
+            "the leave park must drop any pinned-edge anchor"
+        );
+        assert!(
+            node.input_trace_snapshot()
+                .iter()
+                .any(|e| e.kind == "target_park"),
+            "the leave park must be traced"
+        );
+        for _ in 0..25 {
+            let _ = node
+                .drive_input_delta(960, 540, 0, 0, 1920, 1080)
+                .expect("reverse path must not error");
+            std::thread::sleep(std::time::Duration::from_millis(12));
+        }
+        assert!(
+            node.shared.last_auto_reverse.lock().unwrap().is_none(),
+            "stray zero-delta events at the parked point must never reverse"
+        );
+        let _ = node
+            .drive_input_delta(960, 1079, 0, 12, 1920, 1080)
+            .expect("reverse path must not error");
+        assert!(
+            node.shared.last_auto_reverse.lock().unwrap().is_some(),
+            "a deliberate push to the edge after the park must still reverse at once"
+        );
+    }
+
+    /// Platforms without the leave park (flag off) keep the cursor where
+    /// the controller left it and emit no park trace.
+    #[tokio::test]
+    async fn controller_leave_park_disabled_is_a_no_op() {
+        let (node, _d1, _d2) = local_owner_target_fixture("rev-leave-nopark").await;
+        node.note_controller_left();
+        assert_eq!(
+            node.park_target_cursor_after_leave(false, (1920, 1080)),
+            None
+        );
+        assert!(!node
+            .input_trace_snapshot()
+            .iter()
+            .any(|e| e.kind == "target_park"));
     }
 }
 
