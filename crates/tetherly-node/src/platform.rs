@@ -1104,11 +1104,63 @@ pub fn reveal_idle_hidden_cursor() {
     if !IDLE_HIDDEN.swap(false, Ordering::SeqCst) {
         return;
     }
+    // Deskflow OSXScreen::showCursor sets the background property before
+    // every show, not only before the hide.
+    enable_background_cursor_ops();
     for disp in online_displays() {
         unsafe {
             let _ = CGDisplayShowCursor(disp);
         }
     }
+}
+
+/// Call `show` until `is_visible` holds, at most `max_attempts` times;
+/// returns how many shows were issued. Never shows a cursor that is
+/// already visible, so a hide counter can never be driven below the
+/// visible threshold (a later capture hide still hides with one call).
+pub(crate) fn show_until_visible(
+    mut is_visible: impl FnMut() -> bool,
+    mut show: impl FnMut(),
+    max_attempts: u32,
+) -> u32 {
+    let mut shows = 0;
+    while shows < max_attempts && !is_visible() {
+        show();
+        shows += 1;
+    }
+    shows
+}
+
+/// v0.2.40: a controller Enter means a pointer must be on screen. After the
+/// idle reveal, verify the system actually shows the cursor and issue extra
+/// CGDisplayShowCursor calls while it does not (production 2026-11-13
+/// 21:21:34: `visible=false->false` after the reveal on every re-entry).
+/// Skipped while the seat capture legitimately holds it hidden. Returns
+/// the number of extra shows.
+#[cfg(target_os = "macos")]
+pub fn ensure_cursor_visible() -> u32 {
+    use std::sync::atomic::Ordering;
+    if CURSOR_HIDDEN.load(Ordering::SeqCst) || IDLE_HIDDEN.load(Ordering::SeqCst) {
+        return 0;
+    }
+    enable_background_cursor_ops();
+    let displays = online_displays();
+    show_until_visible(
+        || unsafe { CGCursorIsVisible() != 0 },
+        || {
+            for &disp in &displays {
+                unsafe {
+                    let _ = CGDisplayShowCursor(disp);
+                }
+            }
+        },
+        3,
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn ensure_cursor_visible() -> u32 {
+    0
 }
 
 /// v0.2.39 diagnostics: `(visible, capture_hidden, idle_hidden)` — the
@@ -3226,6 +3278,32 @@ pub fn start_input_hooks(_tx: std::sync::mpsc::Sender<RawInput>) -> Result<HookC
 #[cfg(test)]
 mod input_tests {
     use super::*;
+
+    /// v0.2.40: the controller-Enter reveal must prove the cursor is
+    /// visible, not trust one CGDisplayShowCursor (production 2026-11-13
+    /// 21:21:34: `cursor_reveal visible=false->false idle_hidden=true` on
+    /// every re-entry — the Windows-driven cursor entered the Mac
+    /// invisible, the user saw no pointer anywhere and swung back).
+    #[test]
+    fn show_until_visible_is_a_noop_when_already_visible() {
+        let mut shows = 0;
+        let extra = show_until_visible(|| true, || shows += 1, 3);
+        assert_eq!((extra, shows), (0, 0));
+    }
+
+    #[test]
+    fn show_until_visible_repeats_show_until_the_cursor_appears() {
+        let shows = std::cell::Cell::new(0u32);
+        let extra = show_until_visible(|| shows.get() >= 2, || shows.set(shows.get() + 1), 3);
+        assert_eq!((extra, shows.get()), (2, 2));
+    }
+
+    #[test]
+    fn show_until_visible_is_bounded_when_the_cursor_never_appears() {
+        let mut shows = 0;
+        let extra = show_until_visible(|| false, || shows += 1, 3);
+        assert_eq!((extra, shows), (3, 3));
+    }
 
     /// v0.2.32: Windows cursor hiding (Deskflow MSWindowsScreen idiom —
     /// `SetSystemCursor(CopyIcon(blank), OCR_*)` for every system cursor id,

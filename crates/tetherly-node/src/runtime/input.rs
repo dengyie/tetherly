@@ -2584,11 +2584,14 @@ impl Node {
         // Mac menu bar invisible; production 2026-11-13 18:34:53).
         self.disarm_input_capture();
         crate::platform::restore_arrow_cursor();
+        // v0.2.40: prove the pointer is on screen (one show after the idle
+        // hide left it invisible on every re-entry in production).
+        let extra_shows = crate::platform::ensure_cursor_visible();
         let (vis_after, _, _) = crate::platform::cursor_visibility_state();
         self.trace_input(
             "cursor_reveal",
             format!(
-                "controller entered visible={vis}->{vis_after} capture_hidden={cap} idle_hidden={idle}"
+                "controller entered visible={vis}->{vis_after} capture_hidden={cap} idle_hidden={idle} extra_shows={extra_shows}"
             ),
         );
         self.reset_reverse_arming_state();
