@@ -1044,3 +1044,13 @@
 - Next: 用户真机 3 分钟实测 §104.7 (a)–(d)；手感不对调 `POST /api/topology/config {"remote_speed_percent":N}`；m3_2 若再超时查 `open_input` 重试循环的无超时 await。
 - Blockers: None.
 
+## 2026-11-13（第四轮）
+- Task: 用户 v0.2.32 真机反馈：(a) Windows 中央光标闪一下后消失；(b) Mac 跟手好多了；(c) 底边第一次进入仍很卡"你看下日志"；(d) channel_open / pump_exit 口径"你 review 下"。
+- Actions:
+  1. 读 Windows `tetherly_system.log` + trace：(a) `park warp` 13:05:10.998178 早于 `system_cursor: hidden` 13:05:11.004023；回归 disarm 恢复光标早于 warp 回家。(c) 13:04:57.95 controller left → 13:05:07.05 `distance gate not armed; requiring long dwell accum_px=2` → 13:05:10.70 pinned heartbeat 才完成；13:05:42 Mac watcher 自动重连抢 attach 致第二次同型卡顿。(d) 每次 attach 一条 `channel_open`，`slot dropped` 为回归时正常拆除。
+  2. TDD 落地 `reverse_local_owner` 快路径 + `enter/leave_remote_seat_capture` 平台顺序 + `HookControl::hide_cursor`；4 个新单测；phase3 m3_11 距离门段落按新语义删去。
+  3. 版本 bump 0.2.33 + `cargo update --workspace --offline`；提交 `31e42ae`。
+  4. 文档：DEVELOPMENT.md 基线 → v0.2.33、§104.7 (d) 更正、新增 §105；`.codex-memory` 四文件同步。
+- Results: 本机 fmt / clippy -D warnings 0 错误；core 321、node 218、集成全绿。
+- Next: ci.yml 绿 → tag v0.2.33 → release → deploy；用户真机验收 §105.7。
+- Blockers: None.

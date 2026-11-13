@@ -2,7 +2,16 @@
 
 ## 当前接手基线（截至 2026-11-13）
 
-> **v0.2.32（afe2279，2026-11-13 双端已部署）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+> **v0.2.33（31e42ae，2026-11-13）；最高 ADR-138。** 旧“下一迭代 v1.61 / ADR-054”已过时，不再作为执行计划。代码存在、测试代码存在、CI 通过与物理真机验收须分开记录。下方 2026-11-10 条目中的"未提交/未发布"为当时状态，v0.2.8–v0.2.30 均已 CI 发布并部署。
+
+## v0.2.33 真机反馈修复（2026-11-13，DEVELOPMENT.md §105）
+- [x] **A · Windows 先隐藏后 park warp**：`enter_remote_seat_capture` / `leave_remote_seat_capture` + `CURSOR_HIDE_AROUND_WARPS = cfg!(windows)` + `HookControl::hide_cursor`；回归先 warp 回本地再恢复光标。日志根因：warp 13:05:10.998 → hidden 13:05:11.004。测试 `remote_seat_capture_orders_hide_and_restore_around_warps`。
+- [x] **B · 本地持有光标的 Target 反向快路径**：`reverse_local_owner`（预臂 accept 无 entry / `note_controller_left` 置位；accept/Enter 清零）；快推 ≥`fast_push_delta_px` 立即接管（trace `reverse_fast push`），钉边/慢推走短驻留，冷却 1 s；控制器在屏闸门不变。日志根因：13:05:07.05 `distance gate not armed` → 13:05:10.70 才越边（3.6 s）。测试 `local_owner_target_fast_push_reverses_immediately`、`local_owner_target_pinned_push_reverses_after_short_dwell`、`controller_on_screen_disables_fast_reverse_until_leave`；phase3 m3_11 距离门段落按新语义删去。
+- [x] **C · review (d)**：每次 attach 一条 `channel_open` 正确；`pump_exit: controller pump outbound slot dropped` 是回归时上一会话通道的正常拆除；§104.7 (d) 已更正。
+- [x] 本机验证：fmt、clippy -D warnings 0 错误；core 321、node 218；loopback 11 / phase1 68 / phase2 8 / phase3 13 / phase5 65 全绿。
+- [ ] ci.yml `31e42ae` 三平台绿 → `git tag v0.2.33` → release.yml → `scripts/deploy.sh --target all --tag v0.2.33`。
+- [ ] 真机验收 v0.2.33（§105.7）：(a) 进入/回归 Windows 中央无光标闪烁；(c) Windows 本地光标推底边一次即进入 Mac，Windows trace 有 `reverse_fast`；(d) 每次 attach 一条 `channel_open`，回归时一条 `pump_exit ... slot dropped` 属正常。
+- [ ] 观察项：Mac watcher 自动重连抢在 Windows 再预臂前 attach（13:05:42）——快路径已使其无感，若仍出现反复抢角色再改 watcher。
 
 ## v0.2.32 真机三症状修复（2026-11-13，DEVELOPMENT.md §104）
 - [x] **A · Windows 系统光标隐藏**：`platform.rs::system_cursor`（14 个 OCR_* + 空白光标 `SetSystemCursor(CopyIcon(blank))`，`SPI_SETCURSORS` 恢复；`HookControl::set_keyboard` on→hide / off→restore；`start_input_hooks` 开头 force restore）。测试 `system_cursor_ids_cover_every_oem_cursor_and_blank_planes_are_transparent`。修"Windows 屏中央留一个光标"。
@@ -14,7 +23,7 @@
 - [x] ci.yml `afe2279` 三平台全绿（windows check 首次绿：§103.8 的 m3_12 windows 连红在 attach 双拨号修复后消失，佐证根因）；ubuntu 首跑 `m3_2_peer_gone_returns_cursor` 超 5 s 一次（"cursor did not return home"，历史首见，rerun 绿；本机 3 次时间线：grace 到期 rescue ≈2.55 s，macOS 本机另有真实 hook 产生的 crossing 更早回归）→ 记为偶发，下一轮若复现再查 `open_input` 重试循环无超时 await。
 - [x] `git tag v0.2.32`（指向 afe2279）→ release.yml run 43426215702。
 - [x] release.yml 43426215702 绿 → `scripts/deploy.sh --target all --tag v0.2.32` exit 0：Mac health 0.2.32 / accessibility_trusted；Windows health 0.2.32、pid 311228、SYSTEM、SessionId=2、`[cursor] restored (force=true)`；受保护三进程不动；双端 rtt 61–64 ms；两端 `remote_speed_percent=100`、`entry_return_grace_ms=3000`。
-- [ ] 真机验收 v0.2.32（§104.7）：(a) 漫游时 Windows 无光标、回归后恢复（`[cursor] hidden: replaced 14/14` / `[cursor] restored`）；(b) Windows trace `remote_screen peer=1470x956`，Mac 里 1:1 跟手；(c) 底边首次进入不卡、3 s 内只有刻意甩回才回归；(d) 每次 attach 只一条 `channel_open`，无 `outbound slot dropped`。
+- [x] 真机验收 v0.2.32（§104.7，用户 2026-11-13 反馈 → §105）：(b) 跟手不丢段 ✓；(a) 中央光标闪一下 ✗ → v0.2.33 A；(c) 底边首次仍卡 ✗ → v0.2.33 B；(d) 口径错误已更正（slot dropped 为正常拆除）。原条目：(a) 漫游时 Windows 无光标、回归后恢复（`[cursor] hidden: replaced 14/14` / `[cursor] restored`）；(b) Windows trace `remote_screen peer=1470x956`，Mac 里 1:1 跟手；(c) 底边首次进入不卡、3 s 内只有刻意甩回才回归；(d) 每次 attach 只一条 `channel_open`，无 `outbound slot dropped`。
 - [ ] 若用户仍觉得慢/快：`POST /api/topology/config {"remote_speed_percent":N}`（25–400）；自定义光标主题用户回归后变默认主题属已知偏差。
 
 ## v0.2.31 真机症状修复（2026-11-13，DEVELOPMENT.md §103）

@@ -1,7 +1,9 @@
 # Project State
 
 ## Release Baseline (2026-11-13)
-- **v0.2.32** 已部署双端（tag → `afe2279`，2026-11-13；Mac pid 86032 / Windows pid 311228 SYSTEM sid=2；上一基线 v0.2.31 / `c41af3d`）。SSOT：`docs/DEVELOPMENT.md` 顶部"当前接手基线"+ §101–§104。
+- **v0.2.33**（tag → `31e42ae`，2026-11-13；上一基线 v0.2.32 / `afe2279`）。SSOT：`docs/DEVELOPMENT.md` 顶部"当前接手基线"+ §101–§105。
+- v0.2.33（§105）：Windows 进入漫游先 `hide_cursor` 再中心 park warp、回归先 warp 再恢复光标（修中央闪烁）；Target 本地持有光标（`reverse_local_owner`）时反向推边与控制器同口径——快推立即接管、钉边短驻留、冷却 1 s（修底边首次进入 3.6 s 卡顿）；§104.7 (d) 口径更正（`pump_exit ... slot dropped` 为回归正常拆除）。本机 core 321 / node 218 / 集成全绿。
+- v0.2.32 已部署双端（tag → `afe2279`，2026-11-13；Mac pid 86032 / Windows pid 311228 SYSTEM sid=2；上一基线 v0.2.31 / `c41af3d`）。SSOT：`docs/DEVELOPMENT.md` 顶部"当前接手基线"+ §101–§104。
 - 🟢 Windows→Mac 鼠标方向已解决（v0.2.29 `7b71531` zone-entered gate，用户真机确认）。
 - v0.2.30：core Remote 座位冗余 Move 帧抑制（A）；输入引擎 64 条决策环 `GET /api/input/trace` + `tetherly input trace`（C）；attach-kick 冷却明确不做（B）。
 - v0.2.31（§103）：反向闸门锚定控制器 Enter（预臂 accept 不关闸）修首次进入 8 s；core `entry_return_grace` + `EdgeCrossingConfig.entry_return_grace_ms`（默认 1000）修进入后弹回；macOS `move_abs` 按住期间发 `*MouseDragged` 修左键不能选字/拖窗；`/api/input` 新增 applied/dropped/rx_buttons/rx_wheel/rx_keys/tx_buttons，trace 新 kind push_button/apply_button/apply_reject/channel_open/pump_exit/zone_gate。

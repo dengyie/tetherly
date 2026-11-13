@@ -483,3 +483,9 @@
 - Rollback trigger: Windows 回归后光标不恢复→`restore(force)` 已在 hook 启动兜底，手工 `tetherly` 重启守护进程即恢复；用户觉得 Mac 里过快/过慢→`remote_speed_percent` 调整；想回 Windows 推不回→`entry_return_grace_ms` 调小；attach 后通道打不开→检查 drop 提前后 resp 路径 `!input_channel_open()` 兜底是否仍拨号。
 - Related files: `crates/tetherly-core/src/{input.rs,topology.rs}`, `crates/tetherly-node/src/{platform.rs,store.rs}`, `crates/tetherly-node/src/runtime/{input.rs,topology.rs}`, `crates/tetherly-node/src/uihttp/{api_topology.rs,dto.rs}`, `tests/phase3.rs`, `Cargo.toml`, `Cargo.lock`, `docs/DEVELOPMENT.md` §104
 - Deploy record: 2026-11-13 tag v0.2.32 → afe2279；release 43426215702；双端部署成功（Mac pid 86032，Windows pid 311228 SYSTEM sid=2）。附带决定：v0.2.31 macOS-only 注入辅助函数以 `cfg_attr(not(macos), allow(dead_code))` 保留而非 cfg 删除，保证其单测跨平台执行。
+
+## 2026-11-13 - v0.2.33：Windows hide-before-warp + 本地持有光标反向快路径（DEVELOPMENT.md §105）
+- Context: v0.2.32 真机反馈：Windows 中央光标闪一下；底边第一次进入仍很卡（日志 3.6 s：`distance gate not armed` 600 ms 驻留被回弹反复重置）；§104.7 (d) 口径存疑。
+- Decision: (1) 光标顺序按平台：Windows 先隐藏后 warp、先 warp 后恢复；macOS 保持原顺序（解关联/重关联语义已验证）。(2) 新增 `reverse_local_owner` 状态，区分"控制器光标停放在本屏"与"本地用户持有光标"；后者没有停放光标可保护，反向接管与控制器同口径（`fast_push_delta_px` 快推、`delay_ms` 短驻留、1 s 冷却），前者 §101/§103 闸门全部保留。不复用 `zone_gate` 语义，新增 trace kind `reverse_owner` / `reverse_fast`。(3) `pump_exit ... outbound slot dropped` 判定为正常拆除，不作故障指标。
+- Rejected: 缩短全局 600 ms 未武装驻留（会削弱控制器在屏的防误触）；改 Mac watcher 延迟 attach（竞态落回的正是本地持有光标的 Target，快路径已覆盖）。
+- Consequence: phase3 m3_11 的距离门段落（预臂 Target）按新语义删去，控制器在屏防误触由 node 单测 `controller_on_screen_disables_fast_reverse_until_leave` 覆盖。
