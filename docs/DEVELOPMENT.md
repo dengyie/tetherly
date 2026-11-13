@@ -8482,3 +8482,13 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
    - 两个测试都先 RED（类型不存在）再 GREEN。`DeskflowCursorOwners` 用 `#[cfg(any(target_os = "macos", test))]` 门控，不写 `const fn new`（Linux/Windows 的 test clippy 会报 dead_code）。fmt / clippy `-D warnings` 0 错误，workspace 全量测试全绿。
 5. **判读（下次）**：Mac trace `cursor_reveal ... visible=false->true` 说明 Deskflow 式 show（单次加 re-associate）生效。如果仍是 `->false`，同时 `capture_hidden=false idle_hidden=false`（本进程已不持有隐藏），说明隐藏来自进程外（系统“打字时隐藏”、其它 app 的 `NSCursor hide`）。下一步才考虑 Deskflow secondary enter 的 `IOPMAssertionDeclareUserActivity` 或改为把光标 park 到角落。
 6. **真机验收脚本 `scripts/verify_crossing.py`**（只读：只发 GET 请求，Windows 侧通过 ssh 调 curl.exe）：先打印两端版本和 pid，再给 N 秒（`--seconds`，默认 30）做手势，然后拉两端 `/api/input/trace` 判定。判定规则：Mac 每次 `cursor_reveal` 都必须以 `->true` 结束；Windows 每个 controller stint 按时长和划动方向标成 `OK / STAYED / BOUNCE / BOUNCE(wiggle)`，至少要有一次停留超过 `--bounce-ms`（默认 1500）。退出码 0 PASS / 1 FAIL / 2 无数据或采集失败。也可以用 `--mac-trace/--win-trace` 离线复判已保存的 trace：用 v0.2.39 复现数据回放，得到 3 次 `BOUNCE(wiggle)`、3 次 `visible=False->False`，结果 FAIL，与人工结论一致。
+7. **部署事故：v0.2.39 Windows 守护进程自发挂死（2026-11-13 22:44:48Z）**：
+   - **现象**：日志最后两行同一毫秒出现 `input client: session recv ended; closing e=...(os error 10053)` 和 `input channel auto-reconnected successfully`。之后不再写日志，45716 仍在 Listen，但 HTTP 不应答（`/api/health` 超时）。
+   - **影响**：deploy 3 分钟后到达，`/api/daemon/restart` 打到已挂死的进程上，一直卡住。deploy.sh 当前在 restart 之前不做 health 检查。
+   - **处置**：
+     1. 用 `comsvcs.dll MiniDump` 取 dump，存在 `E:\code\tetherly\data\dumps\tetherly-v0.2.39-hang-308452.dmp`；
+     2. 只 Stop pid 308452；
+     3. 把 CI 产物 `data/updates/tetherly-v0.2.40.exe` 覆盖到 `target/release/tetherly.exe`（校验 hash 一致）；
+     4. 执行 `Start-ScheduledTask TetherlySystemLauncher`。
+     结果：v0.2.40 pid 310880 以 SYSTEM 身份运行，受保护进程未动。
+   - **待查**：10053 关闭路径和 auto-reconnect 并发时疑似锁顺序死锁（12 个线程 Wait/Unknown，9 个 Wait/Executive）。deploy.sh 应改为 restart 前先探 health，失败时走“dump → stop → 覆盖 → launcher”的兜底流程。
