@@ -1046,6 +1046,8 @@ pub fn set_mouse_cursor_associated(associated: bool) {
                 }
                 cursor_shield::unhide_appkit_cursor();
             }
+            // v0.2.37: undo the shield's blank NSCursor as well.
+            cursor_shield::set_arrow_cursor_now();
 
             // 3. Re-associate mouse and reset suppression
             let _ = CGAssociateMouseAndMouseCursorPosition(true);
@@ -1114,6 +1116,12 @@ pub fn hide_cursor_until_local_motion() {}
 
 #[cfg(not(target_os = "macos"))]
 pub fn reveal_idle_hidden_cursor() {}
+
+/// v0.2.37: force the system arrow image (macOS: undo a blank NSCursor left
+/// by a cursor shield). No-op elsewhere.
+pub fn restore_arrow_cursor() {
+    cursor_shield::set_arrow_cursor_now();
+}
 
 #[cfg(windows)]
 pub fn warp_mouse_position(x: i32, y: i32) {

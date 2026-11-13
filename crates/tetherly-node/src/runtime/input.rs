@@ -1706,7 +1706,14 @@ impl Node {
             .lock()
             .expect("engine")
             .set_remote_screen(None);
+        if session.role == InputTunnelRole::Controller {
+            // v0.2.37: a grant release (takeover demotion, operator stop)
+            // ends a stint the edge return never saw; restore the cursor
+            // the same way the return does.
+            self.trace_input("cursor_restore", format!("grant released: {reason}"));
+        }
         self.disarm_input_capture();
+        crate::platform::restore_arrow_cursor();
         self.reset_reverse_arming_state();
         let alias = DeviceId::parse(&session.peer_id)
             .ok()
@@ -2569,6 +2576,14 @@ impl Node {
         // v0.2.34: the controller's injected events bypass the local tap,
         // so the idle hide from the last Leave is revealed here.
         crate::platform::reveal_idle_hidden_cursor();
+        // v0.2.37: a controller driving this screen means this node is not
+        // roaming anywhere — drop any capture a takeover demotion left armed
+        // and force the arrow image (a cursor shield's blank NSCursor
+        // survived the demotion, so the Windows-driven cursor entered the
+        // Mac menu bar invisible; production 2026-11-13 18:34:53).
+        self.trace_input("cursor_reveal", "controller entered");
+        self.disarm_input_capture();
+        crate::platform::restore_arrow_cursor();
         self.reset_reverse_arming_state();
         self.trace_input("zone_gate", "close: controller entered");
     }
@@ -6920,6 +6935,56 @@ mod tests {
             "the local-owner dwell must be the short controller-parity one, took {fired_after:?}"
         );
     }
+
+    #[tokio::test]
+    async fn controller_enter_restores_a_visible_cursor() {
+        let (node, _d1, _d2) = local_owner_target_fixture("enter-reveal").await;
+        node.note_controller_entered();
+        assert!(
+            node.input_trace_snapshot()
+                .iter()
+                .any(|e| e.kind == "cursor_reveal"),
+            "a controller entering this screen must force a visible arrow cursor"
+        );
+    }
+
+    /// Regression (production 2026-11-13 18:34:53, v0.2.36): the Mac was
+    /// roaming Windows (cursor blanked + hidden) when the Windows takeover
+    /// demoted it. The demotion released the grant without the cursor
+    /// restore the edge return performs, so the Windows-driven cursor
+    /// entered the Mac menu bar invisible and the user bounced back 8x.
+    #[tokio::test]
+    async fn demoted_roaming_controller_restores_the_cursor() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("demote-restore");
+        {
+            let mut engine = node.shared.input_engine.lock().unwrap();
+            engine.set_edge(tetherly_core::ScreenEdge::Top);
+            let crossed = engine.local_move_delta(700, 0, 0, -40);
+            assert_eq!(crossed, Some(tetherly_core::ScreenEdge::Top));
+            engine.drain();
+        }
+        *node.shared.active_input_tunnel.lock().unwrap() = Some(ActiveInputTunnelSession {
+            session_id: "tun_demote".to_string(),
+            peer_id: "tdev_peer".to_string(),
+            role: InputTunnelRole::Controller,
+            requested_edge: None,
+            entry_x: None,
+            entry_y: None,
+            capture_width: None,
+            capture_height: None,
+            started_at_ms: 0,
+            last_activity_ms: 0,
+            pre_arm_epoch: next_pre_arm_epoch(),
+        });
+        let _ = node.input_stop().await;
+        assert!(
+            node.input_trace_snapshot()
+                .iter()
+                .any(|e| e.kind == "cursor_restore"),
+            "releasing a controller grant must restore the local cursor"
+        );
+    }
+
     /// v0.2.36 (production 2026-11-13 17:52:17 → 17:56:03): while the
     /// Mac's cursor sat on this Windows Target, the user moved the
     /// Windows mouse down into the shared edge and nothing happened for

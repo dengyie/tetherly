@@ -56,6 +56,21 @@ mod macos_impl {
         }
     }
 
+    /// v0.2.37: put the system arrow back. `show_cursor_shields` installs a
+    /// blank NSCursor and nothing reset it on restore: the image only came
+    /// back once a physical move crossed some app's cursor rect, so a
+    /// cursor driven by an injected (remote controller) stream into the
+    /// menu bar stayed invisible (production 2026-11-13 18:34:53).
+    pub fn set_arrow_cursor_now() {
+        if MainThreadMarker::new().is_some() {
+            NSCursor::arrowCursor().set();
+        } else {
+            DispatchQueue::main().exec_async(|| {
+                NSCursor::arrowCursor().set();
+            });
+        }
+    }
+
     /// Safely invokes NSCursor::hide() on macOS's main thread.
     pub fn hide_appkit_cursor() {
         if MainThreadMarker::new().is_some() {
@@ -183,6 +198,9 @@ pub use macos_impl::*;
 
 #[cfg(not(target_os = "macos"))]
 pub fn set_blank_cursor_now() {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_arrow_cursor_now() {}
 
 #[cfg(not(target_os = "macos"))]
 pub fn hide_appkit_cursor() {}
