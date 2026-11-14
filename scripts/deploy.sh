@@ -166,6 +166,23 @@ deploy_windows() {
         fi
     done
 
+    # Pre-deploy memory cleanup (v0.2.42): the host is over-committed and a
+    # paged-out daemon stalls the first crossing after idle (DEVELOPMENT.md
+    # §114). Kills only hung sshd command sessions and trims working sets; it
+    # never touches protected processes and exits 2 if any of them is gone.
+    echo "==> Cleaning Windows memory before deploy (stale ssh sessions + working-set trim)..."
+    scp -q "$SCRIPT_DIR/win_memory_cleanup.ps1" "${REMOTE_HOST}:E:/code/tetherly/data/win_memory_cleanup.ps1"
+    set +e
+    ssh "${REMOTE_HOST}" "powershell -NoProfile -ExecutionPolicy Bypass -File E:\\code\\tetherly\\data\\win_memory_cleanup.ps1"
+    CLEAN_RC=$?
+    set -e
+    if [ "$CLEAN_RC" -eq 2 ]; then
+        echo "FATAL: protected process missing after memory cleanup; aborting." >&2
+        exit 2
+    elif [ "$CLEAN_RC" -ne 0 ]; then
+        echo "WARN: memory cleanup exited ${CLEAN_RC}; continuing deploy." >&2
+    fi
+
     WIN_BIN="$TMP_DIR/tetherly-windows-x86_64.exe"
     WIN_CLI="$TMP_DIR/tetherly-cli-windows-x86_64.exe"
 

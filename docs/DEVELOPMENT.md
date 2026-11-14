@@ -8536,3 +8536,13 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - Windows CI 实测：`raise_daemon_responsiveness_locks_the_image`（测试二进制自身的映像锁定字节数 > 0）。
 
 **验收（下次）**：Windows 启动日志 `image_locked_bytes` 接近 exe 映像大小；空闲 20 min 以上后，Get-Process WS 仍不低于约 25 MB；空闲后第一次 enter 的 push→apply 延迟回到毫秒级。
+
+**部署前内存清理（v0.2.42 追加）**：新增 `scripts/win_memory_cleanup.ps1`，`deploy.sh` 在 Windows 受保护进程预检通过后、staging 之前调用它（先 scp 到 `E:\code\tetherly\data\`）。脚本只做两件事：
+1. 结束卡死的 sshd 远程命令会话。判定条件：形如 `"c:\windows\system32\cmd.exe" /c ...` 的 cmd.exe，父进程是 sshd 或已退出，存活超过 `-MinAgeHours`（默认 6 h）；连同它的子孙进程一起结束。
+2. 对普通进程执行 `EmptyWorkingSet`。这一步不会结束任何进程，页面只是被移到 standby/modified 链表，下次访问时缺页读回。
+
+以下进程永不触碰：SRBMiner-MULTI / verge-mihomo / komari-agent 及其子孙、tetherly、系统关键进程、脚本自身的祖先链。入站 sshd 会话本身也不杀（端口转发会话本来就没有子进程）。退出码 2 表示受保护进程缺失，deploy.sh 随即 FATAL 中止；其它非零退出码只打印 WARN、继续部署。支持 `-DryRun`。
+
+首次执行（2026-11-14）：结束 3 个卡死的部署/探测会话，分别来自 10-19、11-10、11-11，共 9 个进程；另手动结束一个从 11-13 卡住的 pytest（pid 281544，ZCode agent 遗留）。trim 了 69 个进程，可用内存 1.1 GB → 3.5 GB；提交量 31.2 → 31.0 GB，几乎不变。受保护进程 3/3 存活。
+
+提交量的大头是 ZCode（约 6 GB）、SRBMiner（约 4 GB，受保护）、chrome 9222 CDP 签到实例（约 2.9 GB）和内核池（Paged 2.7 GB / NonPaged 1.7 GB）。另外 netprofm 的 svchost 私有内存 1.17 GB，疑似泄漏；重启该服务会影响网络，脚本不处理，留给用户决定。

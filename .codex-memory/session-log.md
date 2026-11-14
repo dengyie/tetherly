@@ -1128,3 +1128,5 @@
 - 只读采集主机状态：提交 31 GB / 物理 16 GB，C: idle 7.7%，exe 在 E: HDD，WS 7.8 MB，flags=0x9 → 硬下限无效。
 - 修复：`lock_daemon_image`（VirtualQuery 遍历映像 + 纯函数 `image_lock_ranges` / `image_lock_fits_floor` + VirtualLock）。启动日志新增 `image_locked_bytes`。
 - 测试：3 个跨平台单测加 1 个 Windows 实测。
+- 部署前内存清理：新增 `scripts/win_memory_cleanup.ps1` 并接入 deploy.sh（预检之后、staging 之前）。只清理卡死的 sshd 会话加 EmptyWorkingSet，受保护进程永不触碰，exit 2 中止部署。首次执行可用内存 1.1 GB → 3.5 GB，结束 9 个僵尸会话进程和 1 个卡死的 pytest。
+- Windows CI clippy 修复：`then_some`，函数指针先转 `as *const ()`（0115933）。
