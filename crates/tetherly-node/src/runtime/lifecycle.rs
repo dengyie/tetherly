@@ -558,6 +558,7 @@ impl Node {
             clip_auto_synced_in_count: AtomicU64::new(0),
             clip_sensitive_blocked_count: AtomicU64::new(0),
             last_auto_sync_hash: Mutex::new(None),
+            last_clip_token: Mutex::new(None),
             handoff_policy: Mutex::new(initial_handoff_policy),
             handoff_inbox: Mutex::new(initial_handoff_inbox),
             handoff_seq: AtomicU64::new(0),

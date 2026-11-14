@@ -156,6 +156,13 @@ pub trait Opener: Send + Sync {
 pub trait Clip: Send + Sync {
     fn set_text(&self, text: &str) -> Result<(), CoreError>;
     fn get_text(&self) -> Result<Option<String>, CoreError>;
+    /// Cheap "has the clipboard changed?" counter (macOS
+    /// `NSPasteboard.changeCount`, Windows `GetClipboardSequenceNumber`).
+    /// Pollers skip the full read + hash while it stays put. `None` means
+    /// the backend cannot tell, and callers must read every time.
+    fn change_token(&self) -> Option<u64> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

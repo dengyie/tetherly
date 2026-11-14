@@ -28,6 +28,33 @@ impl Clip for SystemClip {
             Err(e) => Err(clipboard_err(e)),
         }
     }
+
+    fn change_token(&self) -> Option<u64> {
+        system_clip_change_token()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn system_clip_change_token() -> Option<u64> {
+    // changeCount is a plain integer property, safe to read off the main
+    // thread (arboard reads the same general pasteboard from tokio workers).
+    let pb = objc2_app_kit::NSPasteboard::generalPasteboard();
+    Some(pb.changeCount() as u64)
+}
+
+#[cfg(windows)]
+fn system_clip_change_token() -> Option<u64> {
+    // 0 means the window station has no clipboard access (e.g. the SYSTEM
+    // daemon outside the interactive session) — fall back to reading.
+    match unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() } {
+        0 => None,
+        n => Some(u64::from(n)),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn system_clip_change_token() -> Option<u64> {
+    None
 }
 
 /// Map an OS clipboard failure to a labeled error: on hosts with no display
@@ -41,6 +68,7 @@ fn clipboard_err(e: arboard::Error) -> CoreError {
 #[derive(Clone, Default)]
 pub struct MemoryClip {
     inner: Arc<Mutex<Option<String>>>,
+    generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl MemoryClip {
@@ -52,11 +80,17 @@ impl MemoryClip {
 impl Clip for MemoryClip {
     fn set_text(&self, text: &str) -> Result<(), CoreError> {
         *self.inner.lock().expect("clip") = Some(text.to_string());
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
     fn get_text(&self) -> Result<Option<String>, CoreError> {
         Ok(self.inner.lock().expect("clip").clone())
+    }
+
+    fn change_token(&self) -> Option<u64> {
+        Some(self.generation.load(std::sync::atomic::Ordering::SeqCst))
     }
 }
 

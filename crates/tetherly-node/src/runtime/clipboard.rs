@@ -328,9 +328,27 @@ impl Node {
             return Ok(0);
         }
 
-        let text = match self.shared.clip.get_text()? {
-            Some(t) if !t.is_empty() => t,
-            _ => return Ok(0),
+        // Skip the full read + SHA-256 while the OS change counter has not
+        // moved: every 800 ms on both ends otherwise, for an unchanged
+        // clipboard. The token is taken before the read so a change racing
+        // the read is picked up next round.
+        let token = self.shared.clip.change_token();
+        {
+            let mut last = self.shared.last_clip_token.lock().expect("last_clip_token");
+            if !clip_read_needed(*last, token) {
+                return Ok(0);
+            }
+            *last = token;
+        }
+
+        let text = match self.shared.clip.get_text() {
+            Ok(Some(t)) if !t.is_empty() => t,
+            Ok(_) => return Ok(0),
+            Err(e) => {
+                // Unread generation: retry it next round.
+                *self.shared.last_clip_token.lock().expect("last_clip_token") = None;
+                return Err(e);
+            }
         };
 
         let hash = tetherly_core::hex_sha256(text.as_bytes());
@@ -751,4 +769,10 @@ impl Node {
             reason: clip_err.map(|e| e.to_string()),
         })
     }
+}
+
+/// Whether the auto-sync poller must read the clipboard: always without a
+/// change token, otherwise only once the token moved since the last read.
+pub(crate) fn clip_read_needed(last: Option<u64>, current: Option<u64>) -> bool {
+    current.is_none() || last != current
 }

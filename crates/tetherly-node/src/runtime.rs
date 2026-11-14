@@ -861,6 +861,8 @@ struct Shared {
     clip_auto_synced_in_count: AtomicU64,
     clip_sensitive_blocked_count: AtomicU64,
     last_auto_sync_hash: Mutex<Option<String>>,
+    /// Clip::change_token at the last auto-sync read (None = read next).
+    last_clip_token: Mutex<Option<u64>>,
     handoff_policy: Mutex<HandoffPolicy>,
     handoff_inbox: Mutex<HandoffInboxTable>,
     handoff_seq: AtomicU64,
@@ -1907,6 +1909,53 @@ pub(crate) mod clipboard_policy_tests {
         let report3 = node.clipboard_policy_report();
         assert_eq!(report3.sensitive_blocked_count, 1); // unchaged
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clip_read_needed_only_when_change_token_moves() {
+        use super::clipboard::clip_read_needed;
+        assert!(
+            clip_read_needed(None, None),
+            "no token support: always read"
+        );
+        assert!(clip_read_needed(None, Some(1)), "first poll reads");
+        assert!(
+            !clip_read_needed(Some(7), Some(7)),
+            "unchanged: skip read+hash"
+        );
+        assert!(clip_read_needed(Some(7), Some(8)), "changed: read");
+        assert!(clip_read_needed(Some(7), None), "token lost: read");
+    }
+
+    #[test]
+    fn memory_clip_change_token_advances_on_set_text() {
+        let clip = crate::platform::MemoryClip::new();
+        let t0 = clip.change_token();
+        assert!(t0.is_some());
+        assert_eq!(clip.change_token(), t0, "reads do not move the token");
+        clip.set_text("x").unwrap();
+        assert_ne!(clip.change_token(), t0);
+    }
+
+    #[tokio::test]
+    async fn test_poll_clipboard_auto_sync_still_sees_changes_after_skip() {
+        let (node, dir) = temp_test_node("token");
+        let mut policy = node.clipboard_policy();
+        policy.mode = ClipSyncMode::BidirectionalAuto;
+        policy.max_payload_bytes = 100;
+        node.set_clipboard_policy(policy).unwrap();
+        node.shared.clip.set_text(&"A".repeat(150)).unwrap();
+        node.poll_clipboard_auto_sync().await.unwrap();
+        node.poll_clipboard_auto_sync().await.unwrap();
+        assert_eq!(node.clipboard_policy_report().sensitive_blocked_count, 1);
+        node.shared.clip.set_text(&"B".repeat(150)).unwrap();
+        node.poll_clipboard_auto_sync().await.unwrap();
+        assert_eq!(
+            node.clipboard_policy_report().sensitive_blocked_count,
+            2,
+            "a new clipboard generation must be read again"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
