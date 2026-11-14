@@ -1182,3 +1182,11 @@
 ## 2026-11-15 v0.2.53 P1 收尾
 - P1-a inbox 可执行文件降级：`inbox_open_demotes_executables_to_the_folder`。P1-b LAN 提升身份与黑名单校验：`lan_promotion_rejects_identity_mismatch_and_blocked_peer`。P1-c 写入取消安全（outbox）：`send_cancelled_mid_write_keeps_the_stream_and_rekey_intact`。三项都是先看到 RED 再修到 GREEN。
 - CI 43633483432 与 release 43634582339 均为绿；两端 0.2.53，path lan；Mac 降级实测 demoted:true；受保护进程 3/3。DEVELOPMENT §123。
+
+## 2026-11-15 v0.2.54 深度 review + P2 清零
+- R1 inbox 白名单（`inbox_open_launches_only_passive_types`）、R2 来源标记（`received_file_gets_the_quarantine_attribute`）、R3 Windows 以控制台用户身份打开（CreateProcessAsUserW）。
+- 侧通道黑名单（`input_and_screen_channels_refuse_blocked_or_unexpected_peers`）；`dial_lan_promotion` 握手前先查黑名单。
+- P2 十项，其中新测试 `input_batch_is_atomic_under_queue_pressure`、`stalled_request_is_answered_408_and_closed`、`dial_peer_by_id_survives_a_slow_path`、`screen_codec_follows_the_viewer_not_the_last_caps_update` 都是先看到 RED 再修到 GREEN。
+- phase1 偶发 Timeout：负载 50+ 时出现；stash 基线与改动后各跑 3 次均 68/68，判定为环境抖动。
+- CI 43641398837 的 android 红：cfg 属性被新插入的函数占用。修复后 CI 43642452118 绿；release 43643501170 绿。
+- 部署结果：两端 0.2.54，path lan；Windows pid 293340 SYSTEM；受保护进程 3/3；无新增 WARN。DEVELOPMENT §124。

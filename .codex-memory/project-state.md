@@ -1,6 +1,12 @@
 # Project State
 
 ## Release Baseline (2026-11-14)
+- **v0.2.54**（§124，2026-11-15 双端已部署）：深度 review 三项加 §120 P2 十项，§120 路线图全部清零。
+  - R1：inbox open 改为被动类型白名单。
+  - R2：收到的文件先在 .part 上打来源标记（MOTW / quarantine），再进入 inbox。
+  - R3：daemon 以 SYSTEM 运行时，Windows 打开动作改以控制台用户身份执行（CreateProcessAsUserW）。
+  - input/screen 侧通道检查黑名单和目标设备；LAN 提升在握手前先查黑名单。
+  - P2：输入批次原子化、inbox 同名不覆盖、HTTP 读超时 408、日志轮转回退、percent-decode 修正、blocked.json 损坏时不放行、mDNS 精确匹配、dial_peer 去掉外层 2 s 超时、open_screen 连接超时、H.264 按当前观看者决定。
 - **v0.2.53**（§123，2026-11-15 双端已部署）：P1 收尾。inbox open 遇到可执行文件（看扩展名或魔数）时降级为打开文件夹，并写 WARN 与审计；LAN 提升必须校验 peer_id 与黑名单；会话写入改走 outbox，send 被取消也不会留下半帧或跳过 nonce，rekey 的 m1/m2 在任何 await 之前提交。§120 路线图中的 P0、P1 全部完成。
 - **v0.2.52**（§122，2026-11-15 双端已部署）：P0-1 本地 API token。每次启动生成 `<data_dir>/api.token`（Unix 0600，Windows DACL 只给 SYSTEM/BA/OW）；特权 POST/PUT/DELETE 路由无 token 返回 401；CLI 自动读 token，`tetherly dashboard` 生成带 token 的地址，托盘也打开带 token 的地址；deploy/package 脚本带请求头。home-win release 目录和 bat 去掉 Authenticated Users M，备份在 `E:\code\acl-backup\`。
 - **v0.2.42**（§114）：启动时用 `VirtualLock` 锁住整个 daemon 映像。home-win 内存超订，64 MB 硬 WS 下限（flags=0x9）仍被压到 7.8 MB，空闲后第一次 enter 要从 E: HDD 缺页读回冷代码，延迟约 7.5 s。

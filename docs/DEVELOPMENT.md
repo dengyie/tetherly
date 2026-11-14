@@ -8963,3 +8963,58 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 - 两端 health 均为 0.2.53，live_peers=1，path=lan；受保护进程 3/3 完好（pid 未变）。Windows 新 pid 为 298100，启动后无新增 WARN。
 - Mac inbox 降级实测：在 inbox 放无害的 `zz-demote-probe.sh` 后 POST open，响应为 `demoted:true`，同时打出 WARN `inbox open demoted`。探测文件已删除。Windows 没有做打开探测：SYSTEM 会话会弹窗，这里只做只读检查。
 - §120 路线图中的 P0、P1 至此全部完成。
+
+## 124. 深度 review 三项 + §120 P2 全部清零 (v0.2.54)
+
+**Review 发现（R1–R3）**
+
+- **R1 inbox 打开改为白名单**：§123 的黑名单（`LAUNCHABLE_EXTENSIONS`）挡不全，`.html`、`.svg`、`.url`、`.jar`、`.docm` 等都能间接执行代码。
+  - 改成 `PASSIVE_EXTENSIONS` 白名单：图片、音视频、pdf、txt、md、csv、office 非宏格式、压缩包。
+  - 白名单之外的文件一律降级为在文件管理器中定位（`inbox_file_needs_demotion`）。
+  - 测试：`inbox_open_launches_only_passive_types`。
+- **R2 收到的文件带来源标记**：
+  - Windows 上写 MOTW（`Zone.Identifier` ZoneId=3），macOS 上写 `com.apple.quarantine`，用 `libc::setxattr` 直接调用，不起子进程。
+  - 标记打在 `.part` 上，之后才 rename 进 inbox，所以 inbox 里永远不会出现没有标记的文件。
+  - 测试：`received_file_gets_the_quarantine_attribute`。
+- **R3 Windows 打开动作改以控制台用户身份执行**：
+  - daemon 以 LocalSystem 运行时，`SystemOpener` 依次调用 `WTSGetActiveConsoleSessionId` → `WTSQueryUserToken` → `CreateEnvironmentBlock` → `CreateProcessAsUserW`，桌面为 `winsta0\default`，执行 `rundll32 url.dll,FileProtocolHandler`。
+  - 不再以 SYSTEM 身份打开任何东西。
+  - 命令行由 `opener_command_line` 拼接，拒绝含 `"` 或控制字符的 url。
+  - 测试：命令行拼接的单测。CreateProcessAsUserW 本身由 CI windows-latest 编译覆盖；生产上不做打开探测，因为 SYSTEM 会话会弹窗。
+- **侧通道黑名单**：
+  - input（45719）和 screen（45720）是独立 socket，原先不查黑名单，也不校验连上的是不是目标设备。新增 `admit_channel`，两项都检查。
+  - `block_peer` 时同时切断对该 peer 的 input/screen。
+  - `dial_lan_promotion` 在握手前先查黑名单，被拉黑的 peer 不再浪费一次 Argon2 握手。
+  - 测试：`input_and_screen_channels_refuse_blocked_or_unexpected_peers`。
+
+**§120 P2 十项**
+
+1. 输入批次原子化：`send_input_events` 先用 `try_reserve_many` 一次预留整批。队列满时先丢 Move 事件，只为按键和按钮预留；仍然满就整批拒绝。不再出现只发出半批、导致按键卡住的情况。测试：`input_batch_is_atomic_under_queue_pressure`。
+2. 同名文件不再静默覆盖：`unique_inbox_path` 生成 `name (1).ext` 这样的名字。
+3. uihttp 读请求加超时：头和体共用一个 10 s deadline，超时返回 408 并断开连接。测试：`stalled_request_is_answered_408_and_closed`。
+4. logsink 轮转：rename 失败时退回 truncate；仍然失败就在超过 2× 上限后丢弃新记录，日志文件不再无限增长。
+5. `percent_decode` 遇到非法转义时原样保留字节，不再吞掉。
+6. `blocked.json` 损坏时不再全部放行：
+   - 先把原文件保存为 `.corrupt`；
+   - 再从原文件中挖回所有 `tdev_` id，这些设备保持拉黑；
+   - 打 ERROR。
+7. mDNS 移除改为精确匹配实例名（`instance_matches`）。原来的子串匹配会让 "macbook" 的下线把 "mac" 也一起移除。
+8. `dial_peer` 去掉外层 2 s 超时：`dial` 本身已经受连接超时和握手超时约束，外层超时会把慢的中继路径和 Argon2 配对误判为失败。测试：`dial_peer_by_id_survives_a_slow_path`（中继延迟 2.5 s，RED→GREEN）。
+9. `open_screen` 改用 `connect_with_timeout`。
+10. H.264 能力按当前观看者决定：`refresh_screen_codec` 根据 `screen_peer` 的 caps 设置编码，不再由最后一次 caps 更新决定。测试：`screen_codec_follows_the_viewer_not_the_last_caps_update`。
+
+**过程中的坑**
+
+- 第一次 CI 的 android 失败：新增的 `instance_matches` 插在 `#[cfg(feature = "lan")]` 与 `browse` 之间，cfg 属性被新函数占用，`browse` 在无 lan 的构建（android）里失去门控。修复：`instance_matches` 是纯函数，不再门控，cfg 还给 `browse`。本地验证命令：`cargo clippy -p tetherly-net --no-default-features --all-targets`。
+- 机器负载在 50 以上时，phase1 偶发握手 Timeout。stash 基线跑 3 次、改动后跑 3 次，全部 68/68，不是本次改动引入的问题。
+
+**上线验证（2026-11-15）**
+
+- CI：43641398837 的 android 红（见上面的坑）；修复后 43642452118 五个 job 全绿。release 43643501170 全绿。
+- `deploy.sh --target all --tag v0.2.54` 完成。部署前清理了 Windows 内存：可用内存从 3198 MB 升到 3770 MB，裁剪了 34 个进程。
+- 两端 health 均为 0.2.54，live_peers=1，地址都是 192.168.1.x，即走 LAN。
+- Windows 新 pid 为 293340，身份 SYSTEM，SessionId=2。
+- 受保护进程 3/3：komari-agent 263512、SRBMiner-MULTI 309980、verge-mihomo 268016，pid 未变。
+- 两端启动后都没有新增 WARN。
+- R2、R3 以及 logsink truncate 回退这三项的 Windows 路径，只由 CI windows-latest 编译与测试覆盖。生产上没有做 inbox 打开探测（SYSTEM 会话会弹窗）。
+- §120 路线图中的 P0、P1、P2 至此全部清零。
