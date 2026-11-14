@@ -1139,3 +1139,4 @@
   3. 退避计数在 peer 在线时不复位，会话断开也不唤醒循环。
 - 修复：`inbound_route_update` / `reconnect_candidates`（回退 `ip:CONTROL_PORT`，坏路由自愈）/ `connect_with_timeout(3s)` / `ReconnectBackoff` + `reconnect_wake` Notify。共 8 个单测。
 - 附带发现：旧 daemon 同毫秒做了两次 LAN 升级，产生重复会话（未修）。
+- v0.2.43 已部署并验证：Windows 热重启 02:44:04，Mac 在 1 s 内经 overlay 重连，随后升级到 LAN；input channel 自动重连成功。Windows routes.json 已自愈为 `10.144.144.100:45717`（原为临时端口 56857）。部署内清理：可用内存 3.6 GB → 4.3 GB，裁剪 43 个进程；受保护进程 3/3 完好；image_locked_bytes=26316800。
