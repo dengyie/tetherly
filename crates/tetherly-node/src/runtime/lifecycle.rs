@@ -718,9 +718,15 @@ impl Node {
     /// UI before `run()` — integration tests driving `/api/pin` — call this
     /// directly; `run()` calls it when a concrete port is configured.
     pub async fn spawn_ui(&self) -> std::io::Result<u16> {
-        let bound =
-            crate::uihttp::bind_and_spawn(self.clone_handle(), self.shared.cfg.ui_port).await?;
+        let (bound, token) =
+            crate::uihttp::bind_and_spawn_with_token(self.clone_handle(), self.shared.cfg.ui_port)
+                .await?;
         self.shared.bound_ui.store(bound, Ordering::SeqCst);
+        // In-process loopback clients (tray drag/drop, popover, dashboard
+        // launcher) authenticate with the token this listener just minted.
+        let token = token.map(|t| t.to_string());
+        tetherly_loopback::set_port_api_token(bound, token.clone());
+        tetherly_loopback::set_api_token(token);
         Ok(bound)
     }
 
@@ -1960,6 +1966,11 @@ impl Node {
 
     pub fn control_port(&self) -> u16 {
         self.shared.bound_control.load(Ordering::SeqCst)
+    }
+
+    /// The node's data directory (identity, stores, `api.token`).
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.shared.cfg.data_dir
     }
 
     /// Loopback UI API port. Reads the port actually bound by `run()`; falls

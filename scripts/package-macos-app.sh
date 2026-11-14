@@ -121,7 +121,12 @@ if [ "$RESTART" = true ]; then
     # code-signing validation. A daemon that refuses to exit is a hard
     # failure — proceeding would truncate a live image and brick the install.
     echo "==> Stopping previous daemon before replacing its binary..."
-    curl -s -X POST http://127.0.0.1:45716/api/daemon/shutdown >/dev/null 2>&1 || true
+    # v0.2.52 (P0-1): shutdown needs the daemon's per-start API token
+    # (0600 file in the user's data dir). Older daemons ignore the header.
+    API_TOKEN_FILE="${TETHERLY_DATA_DIR:-$HOME/.local/share/tetherly}/api.token"
+    API_TOKEN=""
+    [ -r "$API_TOKEN_FILE" ] && API_TOKEN=$(tr -d '[:space:]' < "$API_TOKEN_FILE")
+    curl -s -X POST -H "X-Tetherly-Token: ${API_TOKEN}" http://127.0.0.1:45716/api/daemon/shutdown >/dev/null 2>&1 || true
     daemon_stopped=""
     for _ in $(seq 1 20); do
         if ! pgrep -f "Tetherly.app/Contents/MacOS/Tetherly" >/dev/null 2>&1; then

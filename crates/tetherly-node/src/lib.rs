@@ -4,6 +4,7 @@
 // Win32 insert in platform.rs is the only unsafe. Core/net stay safe.
 
 pub mod ancs;
+pub mod apitoken;
 pub mod cred;
 pub mod events;
 pub mod lan;
@@ -86,6 +87,7 @@ pub use store::{
     VIRTUAL_DISPLAY_POLICY_FILE,
 };
 pub use uihttp::{
-    loopback_delete, loopback_events_connect, loopback_get, loopback_post,
-    loopback_post_with_deadlines, loopback_put, DaemonRestartReport, SseStream, UiResponse,
+    api_token, api_token_for, loopback_delete, loopback_events_connect, loopback_get,
+    loopback_post, loopback_post_with_deadlines, loopback_put, loopback_request, set_api_token,
+    set_port_api_token, DaemonRestartReport, SseStream, UiResponse,
 };

@@ -6,6 +6,7 @@ use crate::runtime::{Node, OutboxStatus};
 use crate::store::{ActionAccessMode, LocalActionDefinition};
 use serde::Serialize;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tetherly_core::{
     ActionValidator, AudioChannelLayout, CameraCodec, DisplayEdge, MediaCommand, MicCodec,
     PlaybackState, PowerSource,
@@ -21,7 +22,9 @@ use tracing::{info, warn};
 #[cfg(test)]
 use tetherly_loopback::parse_http_response;
 pub use tetherly_loopback::{
-    loopback_delete, loopback_get, loopback_post, loopback_post_with_deadlines, loopback_put,
+    api_token, api_token_for, loopback_delete, loopback_get, loopback_post,
+    loopback_post_with_deadlines, loopback_put, loopback_request, set_api_token,
+    set_port_api_token,
 };
 
 const INDEX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/index.html"));
@@ -72,6 +75,29 @@ use util::*;
 /// synchronously means a taken port is a hard error the caller can report,
 /// rather than a `warn!` that leaves the UI silently absent.
 pub async fn bind_and_spawn(node: Node, port: u16) -> std::io::Result<u16> {
+    bind_and_spawn_with_token(node, port).await.map(|(p, _)| p)
+}
+
+/// [`bind_and_spawn`], also returning the API token minted for this listener
+/// (see [`crate::apitoken`]). The token is rotated on every bind and written
+/// to `<data_dir>/api.token`; when that write fails the listener still serves
+/// but every privileged route answers 401 (fail closed) and the failure is a
+/// WARN, so the dashboard and everyday CLI keep working.
+pub async fn bind_and_spawn_with_token(
+    node: Node,
+    port: u16,
+) -> std::io::Result<(u16, Option<Arc<str>>)> {
+    let token: Option<Arc<str>> = match crate::apitoken::issue(node.data_dir()) {
+        Ok(t) => Some(Arc::from(t)),
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = %crate::apitoken::token_path(node.data_dir()).display(),
+                "api token file not written; privileged ui routes will refuse every caller"
+            );
+            None
+        }
+    };
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let mut attempts = 0;
     let listener = loop {
@@ -85,13 +111,18 @@ pub async fn bind_and_spawn(node: Node, port: u16) -> std::io::Result<u16> {
         }
     };
     let bound = listener.local_addr()?.port();
-    info!(port = bound, "ui listening (loopback only)");
+    info!(
+        port = bound,
+        token = token.is_some(),
+        "ui listening (loopback only)"
+    );
+    let gate: Arc<str> = token.clone().unwrap_or_else(|| Arc::from(""));
     tokio::spawn(async move {
-        if let Err(e) = accept_loop(listener, node, bound).await {
+        if let Err(e) = accept_loop(listener, node, bound, gate).await {
             warn!(%e, "ui http");
         }
     });
-    Ok(bound)
+    Ok((bound, token))
 }
 
 /// Extract the host name (without port) from a `Host` header value.
@@ -128,7 +159,12 @@ fn origin_allowed(origin: &str, ui_port: u16) -> bool {
     matches!(name, "127.0.0.1" | "localhost" | "[::1]") && port == Some(ui_port)
 }
 
-async fn accept_loop(listener: TcpListener, node: Node, ui_port: u16) -> std::io::Result<()> {
+async fn accept_loop(
+    listener: TcpListener,
+    node: Node,
+    ui_port: u16,
+    token: Arc<str>,
+) -> std::io::Result<()> {
     let mut stop = node.shutdown_signal();
     loop {
         tokio::select! {
@@ -143,8 +179,9 @@ async fn accept_loop(listener: TcpListener, node: Node, ui_port: u16) -> std::io
                     continue;
                 }
                 let node = node.clone_handle();
+                let token = token.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle(stream, node, ui_port).await {
+                    if let Err(e) = handle(stream, node, ui_port, &token).await {
                         warn!(%e, "ui request");
                     }
                 });
@@ -154,7 +191,12 @@ async fn accept_loop(listener: TcpListener, node: Node, ui_port: u16) -> std::io
     Ok(())
 }
 
-async fn handle(mut stream: TcpStream, node: Node, ui_port: u16) -> std::io::Result<()> {
+async fn handle(
+    mut stream: TcpStream,
+    node: Node,
+    ui_port: u16,
+    token: &str,
+) -> std::io::Result<()> {
     let mut buf = vec![0u8; 4096];
     let mut n = 0usize;
     loop {
@@ -189,6 +231,7 @@ async fn handle(mut stream: TcpStream, node: Node, ui_port: u16) -> std::io::Res
     let mut host_ok = false;
     let mut origin: Option<String> = None;
     let mut sec_fetch_site: Option<String> = None;
+    let mut presented: Option<String> = None;
     for line in lines {
         let Some((k, v)) = line.split_once(':') else {
             continue;
@@ -205,6 +248,12 @@ async fn handle(mut stream: TcpStream, node: Node, ui_port: u16) -> std::io::Res
             }
             "origin" => origin = Some(value.to_string()),
             "sec-fetch-site" => sec_fetch_site = Some(value.to_ascii_lowercase()),
+            crate::apitoken::TOKEN_HEADER => presented = Some(value.to_string()),
+            "authorization" => {
+                if let Some(t) = value.strip_prefix("Bearer ") {
+                    presented.get_or_insert_with(|| t.trim().to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -237,6 +286,23 @@ async fn handle(mut stream: TcpStream, node: Node, ui_port: u16) -> std::io::Res
             return Ok(());
         }
     }
+    if crate::apitoken::requires_token(method, path)
+        && !crate::apitoken::token_matches(token, presented.as_deref().unwrap_or(""))
+    {
+        warn!(
+            method,
+            path = path.split_once('?').map_or(path, |(p, _)| p),
+            presented = presented.is_some(),
+            "privileged ui route refused: missing or wrong api token"
+        );
+        // Swallow a small trailing body first: closing with unread bytes in
+        // the receive buffer makes the kernel RST, and the client then loses
+        // the 401 it was about to read.
+        drain_request_body(&mut stream, content_len.saturating_sub(n - head_end)).await;
+        let body = br#"{"ok":false,"error":"api token required: open the dashboard from the tray or `tetherly dashboard`, or run the CLI with access to the data dir's api.token (Windows: elevated)"}"#;
+        write_http(&mut stream, 401, "application/json", body).await?;
+        return Ok(());
+    }
     if method == "GET"
         && (path == "/api/events"
             || path == "/api/events/stream"
@@ -262,6 +328,26 @@ async fn handle(mut stream: TcpStream, node: Node, ui_port: u16) -> std::io::Res
     body.truncate(content_len);
     let resp = route(method, path, &body, &node).await;
     write_http_response(&mut stream, &resp).await
+}
+
+/// Best-effort read-and-discard of up to 64 KiB of request body (2 s cap)
+/// before an early refusal, so the close is a clean FIN rather than a reset.
+async fn drain_request_body(stream: &mut TcpStream, remaining: usize) {
+    let mut left = remaining.min(64 * 1024);
+    if left == 0 {
+        return;
+    }
+    let mut scratch = [0u8; 4096];
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while left > 0 {
+            let want = left.min(scratch.len());
+            match stream.read(&mut scratch[..want]).await {
+                Ok(0) | Err(_) => break,
+                Ok(k) => left -= k,
+            }
+        }
+    })
+    .await;
 }
 
 /// Structured HTTP response for the loopback UI server.
@@ -1866,10 +1952,117 @@ mod tests {
         assert_eq!(rep["cap_bytes"], crate::logsink::LOG_FILE_CAP);
         let (code, _) = loopback_get(port, "/api/log/tail?lines=5").await.unwrap();
         assert_eq!(code, 503);
-        let (code, _) = loopback_post(port, "/api/log/level", br#"{"filter":"debug"}"#)
+        let (code, _) = authed(
+            port,
+            &_dir,
+            "POST",
+            "/api/log/level",
+            Some(br#"{"filter":"debug"}"#),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 503);
+    }
+
+    /// Raw loopback request with an optional extra header line, so the
+    /// token gate is exercised exactly as an arbitrary local client would.
+    async fn raw_request(
+        port: u16,
+        method: &str,
+        path: &str,
+        extra_header: Option<&str>,
+        body: &[u8],
+    ) -> (u16, Vec<u8>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .unwrap();
+        let extra = extra_header.map(|h| format!("{h}\r\n")).unwrap_or_default();
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        s.write_all(head.as_bytes()).await.unwrap();
+        s.write_all(body).await.unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.unwrap();
+        tetherly_loopback::parse_http_response(&out)
+    }
+
+    /// Gated-route call with the token the test node's listener minted.
+    async fn authed(
+        port: u16,
+        dir: &std::path::Path,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+    ) -> std::io::Result<(u16, Vec<u8>)> {
+        let token = crate::apitoken::read(dir).expect("listener minted a token");
+        loopback_request(port, method, path, body, Some(&token)).await
+    }
+
+    /// A refused request whose body trails the headers must still get a clean
+    /// 401, not a TCP reset from closing with unread bytes in the buffer.
+    #[tokio::test]
+    async fn refused_request_with_late_body_gets_clean_401() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (node, _dir) = temp_test_node("api_token_late_body");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        for _ in 0..3 {
+            let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let body = br#"{"filter":"debug"}"#;
+            let head = format!(
+                "POST /api/log/level HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            s.write_all(head.as_bytes()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let _ = s.write_all(body).await;
+            let mut out = Vec::new();
+            s.read_to_end(&mut out)
+                .await
+                .expect("401 must arrive without a connection reset");
+            assert_eq!(tetherly_loopback::parse_http_response(&out).0, 401);
+        }
+    }
+
+    /// P0-1: privileged routes answer 401 without the per-start token, accept
+    /// it via `X-Tetherly-Token` or `Authorization: Bearer`, and everyday
+    /// routes stay open.
+    #[tokio::test]
+    async fn privileged_routes_require_the_api_token() {
+        let (node, dir) = temp_test_node("api_token");
+        let port = bind_and_spawn(node.clone_handle(), 0).await.unwrap();
+        let token = crate::apitoken::read(&dir).expect("listener issues a token file");
+
+        let (code, body) = raw_request(port, "POST", "/api/log/level", None, b"{}").await;
+        assert_eq!(code, 401, "{}", String::from_utf8_lossy(&body));
+        let rep: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rep["ok"], false);
+
+        let wrong = format!("X-Tetherly-Token: {}", "0".repeat(64));
+        let (code, _) = raw_request(port, "POST", "/api/log/level", Some(&wrong), b"{}").await;
+        assert_eq!(code, 401);
+
+        let (code, _) = raw_request(port, "POST", "/api/daemon/restart", None, b"{}").await;
+        assert_eq!(code, 401);
+        let (code, _) = raw_request(port, "DELETE", "/api/action/local?id=x", None, b"").await;
+        assert_eq!(code, 401);
+
+        let good = format!("X-Tetherly-Token: {token}");
+        let (code, _) = raw_request(port, "POST", "/api/log/level", Some(&good), b"{}").await;
+        assert_eq!(code, 503, "authorized request reaches the handler");
+        let bearer = format!("Authorization: Bearer {token}");
+        let (code, _) = raw_request(port, "POST", "/api/log/level", Some(&bearer), b"{}").await;
         assert_eq!(code, 503);
+
+        let (code, _) = raw_request(port, "GET", "/api/health", None, b"").await;
+        assert_eq!(code, 200);
+        let (code, _) = raw_request(port, "GET", "/api/action/local", None, b"").await;
+        assert_eq!(code, 200);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -2141,10 +2334,12 @@ mod tests {
             "allowed_groups": ["trusted_ops"],
             "allowed_tags": ["admin"]
         });
-        let (code, body) = loopback_post(
+        let (code, body) = authed(
             port,
+            &dir,
+            "POST",
             "/api/action/policy",
-            &serde_json::to_vec(&update_req).unwrap(),
+            Some(&serde_json::to_vec(&update_req).unwrap()),
         )
         .await
         .unwrap();
@@ -2175,10 +2370,12 @@ mod tests {
             "timeout_secs": 10,
             "enabled": true
         });
-        let (code, body) = loopback_post(
+        let (code, body) = authed(
             port,
+            &dir,
+            "POST",
             "/api/action/local",
-            &serde_json::to_vec(&add_req).unwrap(),
+            Some(&serde_json::to_vec(&add_req).unwrap()),
         )
         .await
         .unwrap();
@@ -2195,7 +2392,7 @@ mod tests {
         assert_eq!(rep["actions"][0]["id"], "test_echo");
 
         // 6. DELETE /api/action/local
-        let (code, body) = loopback_delete(port, "/api/action/local?id=test_echo")
+        let (code, body) = authed(port, &dir, "DELETE", "/api/action/local?id=test_echo", None)
             .await
             .unwrap();
         assert_eq!(code, 200);
@@ -6719,10 +6916,12 @@ mod tests {
         let bad_intent = serde_json::json!({
             "paths": []
         });
-        let (code, _) = loopback_post(
+        let (code, _) = authed(
             port,
+            &dir,
+            "POST",
             "/api/file/drag/intent",
-            &serde_json::to_vec(&bad_intent).unwrap(),
+            Some(&serde_json::to_vec(&bad_intent).unwrap()),
         )
         .await
         .unwrap();
@@ -6834,10 +7033,12 @@ mod tests {
             "norm_x": 0.5,
             "norm_y": 0.5,
         });
-        let (code, body) = loopback_post(
+        let (code, body) = authed(
             port,
+            &dir_host,
+            "POST",
             "/api/file/drag/intent",
-            &serde_json::to_vec(&intent).unwrap(),
+            Some(&serde_json::to_vec(&intent).unwrap()),
         )
         .await
         .unwrap();

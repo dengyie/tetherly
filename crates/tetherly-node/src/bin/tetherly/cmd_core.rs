@@ -918,6 +918,38 @@ pub(crate) async fn config(
     Ok(())
 }
 
+/// `tetherly dashboard` -- print or open the tokenized dashboard URL. The
+/// token was loaded at CLI startup (env `TETHERLY_API_TOKEN` or the data
+/// dir's `api.token`); without it the plain URL still serves every
+/// read-only view.
+pub(crate) fn dashboard(ui_port: u16, open: bool) -> Result<()> {
+    let token = tetherly_node::api_token();
+    if token.is_none() {
+        eprintln!(
+            "warning: api token not readable (Windows: run elevated); \
+             privileged dashboard actions will answer 401"
+        );
+    }
+    let url = tetherly_node::apitoken::dashboard_url(ui_port, token.as_deref());
+    if !open {
+        println!("{url}");
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open").arg(&url).status();
+    #[cfg(windows)]
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .status();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let status = std::process::Command::new("xdg-open").arg(&url).status();
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => anyhow::bail!("browser launcher exited with {s}"),
+        Err(e) => anyhow::bail!("could not launch browser: {e}"),
+    }
+}
+
 /// `tetherly stop` -- Stop arm of the top-level dispatch.
 pub(crate) async fn stop(ui_port: u16) -> Result<()> {
     let (code, resp) = tetherly_node::loopback_post(ui_port, "/api/daemon/shutdown", b"")

@@ -216,7 +216,11 @@ deploy_windows() {
     ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path 'C:\Users\mango\AppData\Local\tetherly\updates' | Out-Null; Copy-Item 'E:\code\tetherly\data\updates\\${REMOTE_STAGING_NAME}' 'C:\Users\mango\AppData\Local\tetherly\updates\\${REMOTE_STAGING_NAME}' -Force\""
 
     echo "==> Initiating NTFS in-use atomic hot-restart via /api/daemon/restart..."
-    RESTART_RESP=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"Invoke-RestMethod -Uri http://127.0.0.1:45716/api/daemon/restart -Method Post -Body (ConvertTo-Json @{replacement_path='C:\Users\mango\AppData\Local\tetherly\updates\\${REMOTE_STAGING_NAME}'}) -ContentType 'application/json' | ConvertTo-Json -Compress\"")
+    # v0.2.52 (P0-1): /api/daemon/restart requires the daemon's per-start API
+    # token. The file is SYSTEM/Administrators-only; the ssh session is an
+    # elevated Administrator, so it can read it. Daemons before v0.2.52 ignore
+    # the header, so this stays compatible across the upgrade.
+    RESTART_RESP=$(ssh "${REMOTE_HOST}" "powershell -NoProfile -Command \"\$h=@{}; \$tf='C:\Users\mango\AppData\Local\tetherly\api.token'; if (Test-Path \$tf) { \$h['X-Tetherly-Token']=(Get-Content -Raw \$tf).Trim() }; Invoke-RestMethod -Uri http://127.0.0.1:45716/api/daemon/restart -Method Post -Headers \$h -Body (ConvertTo-Json @{replacement_path='C:\Users\mango\AppData\Local\tetherly\updates\\${REMOTE_STAGING_NAME}'}) -ContentType 'application/json' | ConvertTo-Json -Compress\"")
     echo "Restart response: $RESTART_RESP"
 
     echo "==> Waiting 3s for daemon handoff..."

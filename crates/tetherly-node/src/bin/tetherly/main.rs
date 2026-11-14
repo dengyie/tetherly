@@ -114,6 +114,16 @@ fn main() -> Result<()> {
     // One tracing pipeline: rotating tetherly.log, live-reloadable filter
     // (`POST /api/log/level`), panic hook. See `tetherly_node::logging`.
     tetherly_node::logging::init(&data_dir, stdout_tty);
+    // P0-1: client commands authenticate privileged loopback routes with the
+    // running daemon's per-start token. `run` mints its own in spawn_ui.
+    if !matches!(&cli.cmd, Cmd::Run { .. }) {
+        let token = std::env::var("TETHERLY_API_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .or_else(|| tetherly_node::apitoken::read(&data_dir));
+        tetherly_node::set_api_token(token);
+    }
     if matches!(&cli.cmd, Cmd::Run { .. }) {
         tracing::info!(
             version = env!("CARGO_PKG_VERSION"),

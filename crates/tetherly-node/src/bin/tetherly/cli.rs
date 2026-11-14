@@ -843,6 +843,19 @@ pub(crate) enum Cmd {
         #[arg(long, default_value_t = 45716)]
         ui_port: u16,
     },
+    /// Print (or open) the dashboard URL carrying the local API token.
+    ///
+    /// Privileged dashboard actions (config, local actions, file send,
+    /// restart) need the token from `<data_dir>/api.token`; on Windows that
+    /// file is readable by SYSTEM/Administrators only, so run this elevated.
+    Dashboard {
+        /// UI API port of the running node (loopback only).
+        #[arg(long, default_value_t = 45716)]
+        ui_port: u16,
+        /// Open the URL in the default browser instead of printing it.
+        #[arg(long)]
+        open: bool,
+    },
     /// Gracefully stop the running node daemon.
     Stop {
         /// UI API port of the running node (loopback only).

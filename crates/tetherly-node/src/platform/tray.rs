@@ -199,7 +199,7 @@ mod macos_tray {
             #[unsafe(method(openDashboard:))]
             fn open_dashboard(&self, _sender: &NSMenuItem) {
                 let port = self.ivars().ui_port;
-                let url = format!("http://127.0.0.1:{port}");
+                let url = crate::apitoken::dashboard_url(port, tetherly_loopback::api_token().as_deref());
                 let _ = std::process::Command::new("open").arg(url).spawn();
             }
 
@@ -453,7 +453,10 @@ mod windows_tray {
                     popover::toggle_popover();
                 } else if event == WM_LBUTTONDBLCLK {
                     let port = GLOBAL_UI_PORT.load(Ordering::Relaxed);
-                    let url = format!("http://127.0.0.1:{port}");
+                    let url = crate::apitoken::dashboard_url(
+                        port,
+                        tetherly_loopback::api_token().as_deref(),
+                    );
                     let _ = std::process::Command::new("cmd")
                         .args(["/C", "start", &url])
                         .spawn();
@@ -489,7 +492,10 @@ mod windows_tray {
                     popover::toggle_popover();
                 } else if id == IDM_DASHBOARD {
                     let port = GLOBAL_UI_PORT.load(Ordering::Relaxed);
-                    let url = format!("http://127.0.0.1:{port}");
+                    let url = crate::apitoken::dashboard_url(
+                        port,
+                        tetherly_loopback::api_token().as_deref(),
+                    );
                     let _ = std::process::Command::new("cmd")
                         .args(["/C", "start", &url])
                         .spawn();

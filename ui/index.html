@@ -2731,6 +2731,42 @@
   </div>
 </main>
 <script>
+// P0-1 (v0.2.52): privileged routes need the per-start API token. The tray /
+// `tetherly dashboard` open this page as `/#token=<hex>`; keep it in
+// sessionStorage (this tab only), scrub it from the address bar, and attach
+// it to every same-origin request. The served HTML never contains it.
+(function installApiToken() {
+  let token = null;
+  try {
+    const m = /(?:^#|&)token=([0-9a-fA-F]{64})(?:&|$)/.exec(location.hash);
+    if (m) {
+      token = m[1];
+      sessionStorage.setItem("tetherly.apiToken", token);
+      history.replaceState(null, "", location.pathname + location.search);
+    } else {
+      token = sessionStorage.getItem("tetherly.apiToken");
+    }
+  } catch (_) {}
+  const nativeFetch = window.fetch.bind(window);
+  let warned = false;
+  window.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : (input && input.url) || "";
+    const sameOrigin = url.startsWith("/") || url.startsWith(location.origin);
+    if (token && sameOrigin) {
+      init = Object.assign({}, init);
+      const h = new Headers(init.headers || (typeof input !== "string" && input.headers) || {});
+      h.set("X-Tetherly-Token", token);
+      init.headers = h;
+    }
+    const r = await nativeFetch(input, init);
+    if (r.status === 401 && !warned) {
+      warned = true;
+      console.warn("tetherly: privileged action refused (401) — reopen the dashboard from the tray or `tetherly dashboard --open`");
+      try { alert("此操作需要本机 API 令牌：请从托盘菜单或 `tetherly dashboard --open`（Windows 需管理员）重新打开控制台。"); } catch (_) {}
+    }
+    return r;
+  };
+})();
 const $ = (id) => document.getElementById(id);
 async function api(path, body) {
   const opt = body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {};

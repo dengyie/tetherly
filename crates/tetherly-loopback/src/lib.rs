@@ -104,22 +104,87 @@ async fn exchange(
     }
 }
 
-fn body_head(method: &str, path: &str, body: &[u8]) -> String {
+/// Process-wide API token attached to every request (`X-Tetherly-Token`).
+///
+/// The daemon sets it for its in-process clients right after minting it; the
+/// CLI sets it at startup from `<data_dir>/api.token` when readable. Only the
+/// node's privileged routes check it; everything else ignores the header.
+static API_TOKEN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Set (or clear) the token sent with every subsequent loopback request.
+pub fn set_api_token(token: Option<String>) {
+    *API_TOKEN.write().unwrap_or_else(|e| e.into_inner()) = token;
+}
+
+/// The token currently attached to loopback requests, if any.
+pub fn api_token() -> Option<String> {
+    API_TOKEN.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+static PORT_API_TOKENS: std::sync::RwLock<Vec<(u16, String)>> = std::sync::RwLock::new(Vec::new());
+
+/// Register (or clear) the token for one specific daemon port. Takes priority over the
+/// process-wide default, so one process can drive several daemons (tests, multi-node tools).
+pub fn set_port_api_token(port: u16, token: Option<String>) {
+    let mut map = PORT_API_TOKENS.write().unwrap_or_else(|e| e.into_inner());
+    map.retain(|(p, _)| *p != port);
+    if let Some(t) = token {
+        map.push((port, t));
+    }
+}
+
+/// Token to present to the daemon listening on `port`: per-port entry, else the default.
+pub fn api_token_for(port: u16) -> Option<String> {
+    let map = PORT_API_TOKENS.read().unwrap_or_else(|e| e.into_inner());
+    map.iter()
+        .find(|(p, _)| *p == port)
+        .map(|(_, t)| t.clone())
+        .or_else(api_token)
+}
+
+fn auth_line(token: Option<&str>) -> String {
+    token
+        .map(|t| format!("X-Tetherly-Token: {t}\r\n"))
+        .unwrap_or_default()
+}
+
+fn body_head(method: &str, path: &str, body: &[u8], token: Option<&str>) -> String {
     format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        auth_line(token),
         body.len()
     )
 }
 
-fn headless_head(method: &str, path: &str) -> String {
-    format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+fn headless_head(method: &str, path: &str, token: Option<&str>) -> String {
+    format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{}Connection: close\r\n\r\n",
+        auth_line(token)
+    )
+}
+
+/// One request with an explicit token (`None` sends none), ignoring the
+/// process-wide token. For callers juggling several nodes (tests) or a
+/// token read from a non-default data dir.
+pub async fn loopback_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    token: Option<&str>,
+) -> io::Result<(u16, Vec<u8>)> {
+    let head = match body {
+        Some(b) => body_head(method, path, b, token),
+        None => headless_head(method, path, token),
+    };
+    exchange(port, head, body, CONNECT_TIMEOUT, REQUEST_TIMEOUT).await
 }
 
 /// `GET` a path and return `(status, body)`.
 pub async fn loopback_get(port: u16, path: &str) -> io::Result<(u16, Vec<u8>)> {
     exchange(
         port,
-        headless_head("GET", path),
+        headless_head("GET", path, api_token_for(port).as_deref()),
         None,
         CONNECT_TIMEOUT,
         REQUEST_TIMEOUT,
@@ -131,7 +196,7 @@ pub async fn loopback_get(port: u16, path: &str) -> io::Result<(u16, Vec<u8>)> {
 pub async fn loopback_delete(port: u16, path: &str) -> io::Result<(u16, Vec<u8>)> {
     exchange(
         port,
-        headless_head("DELETE", path),
+        headless_head("DELETE", path, api_token_for(port).as_deref()),
         None,
         CONNECT_TIMEOUT,
         REQUEST_TIMEOUT,
@@ -146,7 +211,7 @@ pub async fn loopback_delete(port: u16, path: &str) -> io::Result<(u16, Vec<u8>)
 pub async fn loopback_post(port: u16, path: &str, body: &[u8]) -> io::Result<(u16, Vec<u8>)> {
     exchange(
         port,
-        body_head("POST", path, body),
+        body_head("POST", path, body, api_token_for(port).as_deref()),
         Some(body),
         CONNECT_TIMEOUT,
         REQUEST_TIMEOUT,
@@ -170,7 +235,7 @@ pub async fn loopback_post_with_deadlines(
 ) -> io::Result<(u16, Vec<u8>)> {
     exchange(
         port,
-        body_head("POST", path, body),
+        body_head("POST", path, body, api_token_for(port).as_deref()),
         Some(body),
         connect_timeout,
         request_timeout,
@@ -182,7 +247,7 @@ pub async fn loopback_post_with_deadlines(
 pub async fn loopback_put(port: u16, path: &str, body: &[u8]) -> io::Result<(u16, Vec<u8>)> {
     exchange(
         port,
-        body_head("PUT", path, body),
+        body_head("PUT", path, body, api_token_for(port).as_deref()),
         Some(body),
         CONNECT_TIMEOUT,
         REQUEST_TIMEOUT,
@@ -316,7 +381,7 @@ mod tests {
 
         let err = exchange(
             port,
-            headless_head("GET", "/api/health"),
+            headless_head("GET", "/api/health", None),
             None,
             Duration::from_secs(1),
             Duration::from_millis(100),
@@ -417,5 +482,35 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[test]
+    fn request_heads_carry_the_api_token_only_when_known() {
+        assert!(!body_head("POST", "/a", b"{}", None).contains("X-Tetherly-Token"));
+        assert!(!headless_head("GET", "/a", None).contains("X-Tetherly-Token"));
+        let h = body_head("POST", "/a", b"{}", Some("t0k"));
+        assert!(h.contains("\r\nX-Tetherly-Token: t0k\r\n"), "{h}");
+        assert!(h.ends_with("\r\n\r\n"));
+        let h = headless_head("DELETE", "/a", Some("t0k"));
+        assert!(h.contains("\r\nX-Tetherly-Token: t0k\r\n"), "{h}");
+    }
+
+    #[test]
+    fn process_token_is_settable_and_clearable() {
+        set_api_token(Some("abc".into()));
+        assert_eq!(api_token().as_deref(), Some("abc"));
+        set_api_token(None);
+        assert_eq!(api_token(), None);
+    }
+
+    #[test]
+    fn port_registered_token_wins_over_the_default() {
+        set_port_api_token(40001, Some("node-a".into()));
+        set_port_api_token(40002, Some("node-b".into()));
+        assert_eq!(api_token_for(40001).as_deref(), Some("node-a"));
+        assert_eq!(api_token_for(40002).as_deref(), Some("node-b"));
+        set_port_api_token(40001, None);
+        assert_ne!(api_token_for(40001).as_deref(), Some("node-a"));
+        set_port_api_token(40002, None);
     }
 }
