@@ -547,6 +547,7 @@ impl Node {
             sys_probe: Mutex::new(Arc::new(crate::platform::PlatformSysProbe)),
             heartbeat_config: Mutex::new(HeartbeatConfig::default()),
             link_trackers: Mutex::new(HashMap::new()),
+            reconnect_wake: tokio::sync::Notify::new(),
             audit_engine: Mutex::new(AuditEngine::new(500)),
             message_engine: Mutex::new(MessageEngine::new(200)),
             outbox_engine: Mutex::new(OutboxEngine::new(200)),
@@ -1183,6 +1184,7 @@ impl Node {
                 if still_mine {
                     node.shared.sessions.lock().await.remove(&peer_id);
                     node.shared.live.lock().expect("live").remove(&peer_id);
+                    node.shared.reconnect_wake.notify_one();
                     node.shared
                         .ping_waiters
                         .lock()

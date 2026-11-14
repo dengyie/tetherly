@@ -848,6 +848,9 @@ struct Shared {
     sys_probe: Mutex<Arc<dyn crate::platform::SysProbe>>,
     heartbeat_config: Mutex<HeartbeatConfig>,
     link_trackers: Mutex<HashMap<DeviceId, PeerLinkTracker>>,
+    /// Raised when a live session ends so the reconnect loop redials now
+    /// instead of finishing a backoff sleep left over from earlier failures.
+    reconnect_wake: tokio::sync::Notify,
     audit_engine: Mutex<AuditEngine>,
     message_engine: Mutex<MessageEngine>,
     outbox_engine: Mutex<OutboxEngine>,
@@ -1261,6 +1264,93 @@ fn route_addr(table: &RouteTable, device_id: &str) -> Option<SocketAddr> {
         .and_then(|r| r.addr.parse().ok())
 }
 
+/// Route to persist after accepting an inbound session from `remote`, or
+/// `None` to keep the table as is. The remote port of an inbound socket is the
+/// peer's ephemeral source port, which nothing listens on, so a non-loopback
+/// peer is recorded at the well-known control port instead (the same
+/// convention the LAN promotion probe uses). A route learned by dialing is
+/// authoritative and is only replaced when it points at a non-control port on
+/// the same host — i.e. a stale ephemeral route written by older builds.
+/// Loopback peers (tests, local tools) are left verbatim: rewriting them to
+/// the control port would aim them at the real local daemon.
+fn inbound_route_update(existing: Option<SocketAddr>, remote: SocketAddr) -> Option<SocketAddr> {
+    if remote.ip().is_loopback() {
+        return existing.is_none().then_some(remote);
+    }
+    let canonical = SocketAddr::new(remote.ip(), CONTROL_PORT);
+    match existing {
+        None => Some(canonical),
+        Some(e) if e.ip() == remote.ip() && e.port() != CONTROL_PORT => Some(canonical),
+        Some(_) => None,
+    }
+}
+
+/// Addresses the reconnect loop tries for a peer, in order: the stored route,
+/// then — for a non-loopback route on a non-control port — the same host at
+/// the control port, so a stale ephemeral route heals itself on the next dial.
+fn reconnect_candidates(table: &RouteTable, device_id: &str) -> Vec<SocketAddr> {
+    let Some(route) = route_addr(table, device_id) else {
+        return Vec::new();
+    };
+    let mut out = vec![route];
+    if !route.ip().is_loopback() && route.port() != CONTROL_PORT {
+        out.push(SocketAddr::new(route.ip(), CONTROL_PORT));
+    }
+    out
+}
+
+/// Backoff state of the reconnect loop. The failure count only means
+/// something while a peer is actually down: once nothing needs dialing (the
+/// peer came back inbound or via LAN promotion) or a session was just lost,
+/// the next attempt must start fast instead of inheriting a 60s sleep.
+#[derive(Debug, Default)]
+struct ReconnectBackoff {
+    attempt: u32,
+}
+
+impl ReconnectBackoff {
+    /// Record one loop round: `dialed` peers were tried, `any_ok` if one connected.
+    fn on_round(&mut self, dialed: usize, any_ok: bool) {
+        if dialed == 0 || any_ok {
+            self.attempt = 0;
+        } else {
+            self.attempt = self.attempt.saturating_add(1);
+        }
+    }
+
+    /// A session just closed: redial immediately with a fresh schedule.
+    fn on_wake(&mut self) {
+        self.attempt = 0;
+    }
+
+    fn delay(&self) -> Duration {
+        tetherly_core::session::backoff_delay(self.attempt)
+    }
+}
+
+/// Upper bound on a reconnect TCP connect. A SYN to a dead port across the
+/// EasyTier overlay is silently dropped, and the OS default (75s on macOS)
+/// stalled reconnect for minutes after a peer restart.
+const RECONNECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+async fn connect_with_timeout(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
+    bounded_connect(addr, timeout, TcpStream::connect(addr)).await
+}
+
+async fn bounded_connect<T>(
+    addr: SocketAddr,
+    timeout: Duration,
+    connect: impl std::future::Future<Output = std::io::Result<T>>,
+) -> std::io::Result<T> {
+    match tokio::time::timeout(timeout, connect).await {
+        Ok(res) => res,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("connect to {addr} timed out after {timeout:?}"),
+        )),
+    }
+}
+
 fn parse_file_port(caps: &[String]) -> Option<u16> {
     parse_port_cap(caps, "fileport=")
 }
@@ -1294,6 +1384,132 @@ use tetherly_core::PlaybackState;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    fn table(device_id: &str, addr: &str) -> RouteTable {
+        RouteTable {
+            routes: vec![crate::store::Route {
+                device_id: device_id.to_string(),
+                addr: addr.to_string(),
+            }],
+        }
+    }
+
+    fn sa(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    // An inbound socket's remote port is the peer's ephemeral source port —
+    // nothing ever listens there. Recording it verbatim (the v0.2.42 bug)
+    // left Windows with `192.168.1.7:56857` and no way to redial the Mac.
+    #[test]
+    fn inbound_route_never_records_the_ephemeral_source_port() {
+        assert_eq!(
+            inbound_route_update(None, sa("192.168.1.7:56857")),
+            Some(sa("192.168.1.7:45717"))
+        );
+    }
+
+    #[test]
+    fn inbound_route_keeps_a_route_learned_by_dialing() {
+        // Mac's overlay route came from a successful outbound dial; a LAN
+        // inbound session must not clobber it.
+        assert_eq!(
+            inbound_route_update(Some(sa("10.144.144.10:45717")), sa("192.168.1.6:54829")),
+            None
+        );
+        assert_eq!(
+            inbound_route_update(Some(sa("192.168.1.6:45717")), sa("192.168.1.6:54829")),
+            None
+        );
+    }
+
+    #[test]
+    fn inbound_route_repairs_a_stale_ephemeral_route_on_the_same_host() {
+        assert_eq!(
+            inbound_route_update(Some(sa("192.168.1.7:56857")), sa("192.168.1.7:60001")),
+            Some(sa("192.168.1.7:45717"))
+        );
+    }
+
+    #[test]
+    fn inbound_route_leaves_loopback_peers_alone() {
+        // Loopback peers are tests / local tools; rewriting them to the
+        // well-known port would aim them at the real local daemon.
+        assert_eq!(
+            inbound_route_update(None, sa("127.0.0.1:50000")),
+            Some(sa("127.0.0.1:50000"))
+        );
+        assert_eq!(
+            inbound_route_update(Some(sa("127.0.0.1:41000")), sa("127.0.0.1:50000")),
+            None
+        );
+    }
+
+    #[test]
+    fn reconnect_candidates_fall_back_to_the_control_port() {
+        let t = table("tdev_x", "192.168.1.7:56857");
+        assert_eq!(
+            reconnect_candidates(&t, "tdev_x"),
+            vec![sa("192.168.1.7:56857"), sa("192.168.1.7:45717")]
+        );
+        let t = table("tdev_x", "10.144.144.10:45717");
+        assert_eq!(
+            reconnect_candidates(&t, "tdev_x"),
+            vec![sa("10.144.144.10:45717")]
+        );
+        let t = table("tdev_x", "127.0.0.1:41000");
+        assert_eq!(
+            reconnect_candidates(&t, "tdev_x"),
+            vec![sa("127.0.0.1:41000")]
+        );
+        assert!(reconnect_candidates(&t, "tdev_other").is_empty());
+    }
+
+    #[test]
+    fn reconnect_backoff_resets_once_every_peer_is_live() {
+        let mut b = ReconnectBackoff::default();
+        for _ in 0..8 {
+            b.on_round(1, false);
+        }
+        assert_eq!(b.delay(), tetherly_core::session::BACKOFF_MAX);
+        // Peer came back through another path (inbound / LAN promotion):
+        // nothing left to dial, so the next loss must start from 1s, not 60s.
+        b.on_round(0, false);
+        assert_eq!(b.delay(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn reconnect_backoff_resets_on_success_and_wake() {
+        let mut b = ReconnectBackoff::default();
+        b.on_round(1, false);
+        b.on_round(1, false);
+        b.on_round(1, true);
+        assert_eq!(b.delay(), Duration::from_secs(1));
+        b.on_round(1, false);
+        b.on_round(1, false);
+        b.on_wake();
+        assert_eq!(b.delay(), Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn connect_with_timeout_gives_up_on_a_black_holed_address() {
+        // On macOS + EasyTier a SYN to a dead overlay port is dropped with no
+        // RST and connect() hangs ~75s; model that as a connect that never
+        // resolves (a real black hole is environment-dependent).
+        let started = std::time::Instant::now();
+        let res = bounded_connect(
+            sa("10.144.144.10:45717"),
+            Duration::from_millis(200),
+            std::future::pending::<std::io::Result<()>>(),
+        )
+        .await;
+        assert_eq!(res.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
 
     #[test]
     fn bounded_retention_prunes_oldest_terminal_transfers() {

@@ -8546,3 +8546,22 @@ PR 守门：loopback + clippy + deny。BLE 与 DeskFlow 不挡 PR。
 首次执行（2026-11-14）：结束 3 个卡死的部署/探测会话，分别来自 10-19、11-10、11-11，共 9 个进程；另手动结束一个从 11-13 卡住的 pytest（pid 281544，ZCode agent 遗留）。trim 了 69 个进程，可用内存 1.1 GB → 3.5 GB；提交量 31.2 → 31.0 GB，几乎不变。受保护进程 3/3 存活。
 
 提交量的大头是 ZCode（约 6 GB）、SRBMiner（约 4 GB，受保护）、chrome 9222 CDP 签到实例（约 2.9 GB）和内核池（Paged 2.7 GB / NonPaged 1.7 GB）。另外 netprofm 的 svchost 私有内存 1.17 GB，疑似泄漏；重启该服务会影响网络，脚本不处理，留给用户决定。
+
+## 115. 对端热重启后约 4 分钟才重连 (v0.2.43)
+
+**现象**：v0.2.42 部署时 Windows daemon 热重启（02:04:11），Mac 直到 02:08:00 才重新连上（3m49s）；v0.2.41 同样的操作只要 1.4 s。期间双方日志均无拨号记录，Mac 线程全部空闲（不是死锁）。
+
+**根因（三处叠加）**：
+1. **inbound 会话把对端的临时源端口写进 routes.json**。`accept_one` 用 `remember_route(peer, remote_addr)`，remote 端口是对端 connect 的 ephemeral 端口（如 `192.168.1.7:56857`），没有任何进程在那里监听。Windows 的路由一直是这种地址，所以 Windows 端重连循环永远拨不通，恢复全靠 Mac 单方面拨号。
+2. **拨号没有 connect 超时**。overlay（EasyTier）对无监听端口的 SYN 直接丢弃、不回 RST，macOS `connect()` 默认要挂 75 s（实测 `nc -w 90 10.144.144.10 45799` 正好 75.04 s）。Mac 重连循环恰好在新 daemon 开始监听前约 0.5 s 拨了 overlay，整整卡了 75 s。
+3. **退避计数不会复位**。`attempt` 只有本循环自己拨通时才清零；对端经 inbound 或 LAN 升级回来、所有 peer 都在线时它保持高位，下次掉线直接睡满 60 s（`BACKOFF_MAX`）；会话断开也不会唤醒循环。
+
+**修复**（`runtime.rs` 纯函数 + 单测）：
+- `inbound_route_update`：inbound 不再覆盖拨号学到的路由；非 loopback 对端记为 `ip:CONTROL_PORT`（与 LAN 升级探测同一约定）；同主机的非控制端口旧路由（旧版本写入的临时端口）自动修正为控制端口；loopback 保持原样（避免测试节点拨到本机真 daemon）。
+- `reconnect_candidates`：路由失败后再尝试 `ip:CONTROL_PORT`，已经写坏的 routes.json 无需手工修，下一次拨号自愈。
+- `dial()` 走 `connect_with_timeout(3 s)`。
+- `ReconnectBackoff`：一轮无需拨号或有拨通即清零；会话关闭 `reconnect_wake.notify_one()` 立即唤醒循环并清零。
+
+**排查方法**：Windows 日志用 `iconv -c -f GBK` 读（混合编码会让 iconv 中途退出）；两端 `routes.json` 对比即可发现临时端口问题。
+
+**附带发现（未修）**：旧 Windows daemon 在 02:04:03.352/.353 同时做了两次 LAN 升级，产生两条重复会话。

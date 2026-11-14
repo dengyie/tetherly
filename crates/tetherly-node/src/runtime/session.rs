@@ -50,11 +50,17 @@ impl Node {
             return Err(CoreError::PeerBlocked(sess.peer_id.to_string()).into());
         }
         self.persist_trust();
-        let _ = remember_route(
-            &self.shared.cfg.data_dir,
+        let existing = super::route_addr(
+            &crate::store::load_routes(&self.shared.cfg.data_dir),
             sess.peer_id.as_str(),
-            &addr.to_string(),
         );
+        if let Some(route) = super::inbound_route_update(existing, addr) {
+            let _ = remember_route(
+                &self.shared.cfg.data_dir,
+                sess.peer_id.as_str(),
+                &route.to_string(),
+            );
+        }
         self.attach(sess).await;
         Ok(())
     }

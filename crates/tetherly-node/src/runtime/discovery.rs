@@ -10,10 +10,8 @@ use crate::telemetry::TrafficReport;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tetherly_core::frame::{ping, CapsUpdate};
-use tetherly_core::session::backoff_delay;
 use tetherly_core::{CoreError, DeviceId, PathKind};
 use tetherly_net::session::dial_session;
-use tokio::net::TcpStream;
 use tokio::sync::{oneshot, watch};
 use tracing::{debug, info, warn};
 
@@ -1452,7 +1450,7 @@ impl Node {
     pub(super) fn spawn_reconnect(&self) {
         let node = self.clone_handle();
         tokio::spawn(async move {
-            let mut attempt = 0u32;
+            let mut backoff = super::ReconnectBackoff::default();
             let mut stop = node.shared.shutdown.subscribe();
             loop {
                 if *stop.borrow() {
@@ -1472,6 +1470,8 @@ impl Node {
                 let trusted = node.trusted();
                 let live = node.live_peers();
                 let routes = crate::store::load_routes(&node.shared.cfg.data_dir);
+                let mut dialed = 0usize;
+                let mut any_ok = false;
                 for peer in trusted {
                     if peer.revoked || node.is_blocked(peer.device_id.as_str()) {
                         continue;
@@ -1479,23 +1479,30 @@ impl Node {
                     if live.iter().any(|l| l.device_id == peer.device_id) {
                         continue;
                     }
-                    if let Some(addr) = route_addr(&routes, peer.device_id.as_str()) {
+                    let candidates = super::reconnect_candidates(&routes, peer.device_id.as_str());
+                    if candidates.is_empty() {
+                        continue;
+                    }
+                    dialed += 1;
+                    for addr in candidates {
                         match node.dial(addr).await {
-                            Ok(()) => attempt = 0,
-                            Err(e) => {
-                                debug!(%e, "reconnect");
-                                attempt = attempt.saturating_add(1);
+                            Ok(()) => {
+                                any_ok = true;
+                                break;
                             }
+                            Err(e) => debug!(%e, %addr, peer = %peer.device_id, "reconnect"),
                         }
                     }
                 }
+                backoff.on_round(dialed, any_ok);
                 tokio::select! {
                     _ = stop.changed() => {
                         if *stop.borrow() {
                             break;
                         }
                     }
-                    _ = tokio::time::sleep(backoff_delay(attempt)) => {}
+                    _ = node.shared.reconnect_wake.notified() => backoff.on_wake(),
+                    _ = tokio::time::sleep(backoff.delay()) => {}
                 }
             }
         });
@@ -1505,7 +1512,7 @@ impl Node {
         if self.already_live_on_ip(addr) {
             return Ok(());
         }
-        let stream = TcpStream::connect(addr).await?;
+        let stream = super::connect_with_timeout(addr, super::RECONNECT_CONNECT_TIMEOUT).await?;
         let cfg = self.session_config();
         let sess = match dial_session(stream, addr, &cfg).await {
             Ok(s) => s,
