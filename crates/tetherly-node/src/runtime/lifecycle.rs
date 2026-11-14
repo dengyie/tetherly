@@ -548,6 +548,7 @@ impl Node {
             heartbeat_config: Mutex::new(HeartbeatConfig::default()),
             link_trackers: Mutex::new(HashMap::new()),
             reconnect_wake: tokio::sync::Notify::new(),
+            lan_promotions: Default::default(),
             audit_engine: Mutex::new(AuditEngine::new(500)),
             message_engine: Mutex::new(MessageEngine::new(200)),
             outbox_engine: Mutex::new(OutboxEngine::new(200)),
@@ -1708,8 +1709,22 @@ impl Node {
                             .collect();
                         let node = self.clone_handle();
                         let peer_cloned = peer.clone();
+                        let Some(guard) = self.shared.lan_promotions.try_begin(peer) else {
+                            debug!(peer = %peer, "lan promotion already in flight");
+                            return Ok(());
+                        };
+                        let delay =
+                            super::lan_promotion_delay(self.shared.identity.device_id(), peer);
                         tokio::spawn(async move {
+                            let _guard = guard;
+                            if !delay.is_zero() {
+                                tokio::time::sleep(delay).await;
+                            }
                             for ip_str in ips {
+                                if !node.peer_on_overlay(&peer_cloned) {
+                                    debug!(peer = %peer_cloned, "peer already promoted; skip lan probe");
+                                    break;
+                                }
                                 if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
                                     let target_addr =
                                         SocketAddr::new(ip, tetherly_net::CONTROL_PORT);
@@ -1869,6 +1884,16 @@ impl Node {
             SessionEvent::Unknown(_) => {}
         }
         Ok(())
+    }
+
+    /// True while the live session to `peer` runs over the overlay path.
+    fn peer_on_overlay(&self, peer: &DeviceId) -> bool {
+        self.shared
+            .live
+            .lock()
+            .expect("live")
+            .get(peer)
+            .is_some_and(|p| p.path == PathKind::Overlay)
     }
 
     pub fn control_port(&self) -> u16 {

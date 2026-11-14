@@ -851,6 +851,8 @@ struct Shared {
     /// Raised when a live session ends so the reconnect loop redials now
     /// instead of finishing a backoff sleep left over from earlier failures.
     reconnect_wake: tokio::sync::Notify,
+    /// Peers with an overlay→LAN promotion probe in flight.
+    lan_promotions: InflightSet,
     audit_engine: Mutex<AuditEngine>,
     message_engine: Mutex<MessageEngine>,
     outbox_engine: Mutex<OutboxEngine>,
@@ -1333,6 +1335,49 @@ impl ReconnectBackoff {
 /// Upper bound on a reconnect TCP connect. A SYN to a dead port across the
 /// EasyTier overlay is silently dropped, and the OS default (75s on macOS)
 /// stalled reconnect for minutes after a peer restart.
+/// How long the higher-id end waits before its own overlay→LAN promotion.
+/// Both ends see each other's `lanips=` caps; dialling at the same instant
+/// left two LAN sessions per peer (2026-11-14 02:04:03.352/.353). The
+/// lower id promotes immediately; the higher id only acts if the peer is
+/// still on overlay after this pause (lower id could not reach it).
+const LAN_PROMOTION_BACKOFF: Duration = Duration::from_millis(1500);
+
+fn lan_promotion_delay(local: &DeviceId, peer: &DeviceId) -> Duration {
+    if local.as_str() < peer.as_str() {
+        Duration::ZERO
+    } else {
+        LAN_PROMOTION_BACKOFF
+    }
+}
+
+/// Per-peer single-flight set: a repeated `Caps` update must not start a
+/// second LAN probe while one is still running.
+#[derive(Debug, Default)]
+struct InflightSet(Arc<Mutex<std::collections::HashSet<DeviceId>>>);
+
+struct InflightGuard {
+    set: Arc<Mutex<std::collections::HashSet<DeviceId>>>,
+    peer: DeviceId,
+}
+
+impl InflightSet {
+    fn try_begin(&self, peer: &DeviceId) -> Option<InflightGuard> {
+        let mut set = self.0.lock().expect("inflight");
+        set.insert(peer.clone()).then(|| InflightGuard {
+            set: self.0.clone(),
+            peer: peer.clone(),
+        })
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.set.lock() {
+            set.remove(&self.peer);
+        }
+    }
+}
+
 const RECONNECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 async fn connect_with_timeout(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
@@ -1465,6 +1510,38 @@ pub(crate) mod tests {
             vec![sa("127.0.0.1:41000")]
         );
         assert!(reconnect_candidates(&t, "tdev_other").is_empty());
+    }
+
+    #[test]
+    fn lan_promotion_lower_id_goes_first_higher_id_backs_off() {
+        let a = DeviceId::from_id_pk(&[1u8; 32]);
+        let b = DeviceId::from_id_pk(&[2u8; 32]);
+        let (lo, hi) = if a.as_str() < b.as_str() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        assert_eq!(lan_promotion_delay(&lo, &hi), Duration::ZERO);
+        assert_eq!(lan_promotion_delay(&hi, &lo), LAN_PROMOTION_BACKOFF);
+        assert!(LAN_PROMOTION_BACKOFF > Duration::from_millis(500));
+    }
+
+    #[test]
+    fn lan_promotion_guard_admits_one_probe_per_peer() {
+        let set = InflightSet::default();
+        let p = DeviceId::from_id_pk(&[3u8; 32]);
+        let q = DeviceId::from_id_pk(&[4u8; 32]);
+        let g = set.try_begin(&p).expect("first probe admitted");
+        assert!(
+            set.try_begin(&p).is_none(),
+            "second concurrent probe refused"
+        );
+        let _gq = set.try_begin(&q).expect("other peers unaffected");
+        drop(g);
+        assert!(
+            set.try_begin(&p).is_some(),
+            "slot frees when the probe ends"
+        );
     }
 
     #[test]

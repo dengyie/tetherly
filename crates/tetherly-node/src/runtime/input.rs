@@ -2050,6 +2050,23 @@ impl Node {
         Ok(())
     }
 
+    /// `open_input` for callers that report channel state (the start API):
+    /// when another task's dial holds the single-dialer gate, `open_input`
+    /// returns Ok immediately, so wait (bounded) for that dial to finish
+    /// before the caller inspects `input_out`.
+    pub async fn open_input_settled(&self, peer: &DeviceId) -> Result<(), tetherly_net::NetError> {
+        self.open_input(peer).await?;
+        // Connect (3 s) + handshake bound the other dial; 5 s covers both
+        // without hanging the API on a wedged task.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while self.shared.input_dialing.load(Ordering::SeqCst)
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok(())
+    }
+
     /// True while an input control channel to a peer is attached.
     #[inline]
     pub fn input_channel_open_sync(&self) -> bool {
@@ -4812,7 +4829,7 @@ impl Node {
         let _ = self.ensure_input_capture();
 
         if !self.input_channel_open().await {
-            self.open_input(&target_id)
+            self.open_input_settled(&target_id)
                 .await
                 .map_err(|e| CoreError::Json(format!("input open: {e}")))?;
         }
@@ -4822,7 +4839,7 @@ impl Node {
             ok: true,
             action: "start".to_string(),
             seat: self.input_seat_str().to_string(),
-            channel_open: true,
+            channel_open: self.input_channel_open_sync(),
             peer: Some(target_id.to_string()),
             timestamp_ms: now,
         })
@@ -5521,6 +5538,35 @@ mod tests {
         }
         let frame = rx.try_recv().expect("probe frame queued");
         assert_eq!(frame.ty, TYPE_INPUT_CLIP_HINT);
+    }
+
+    // Regression (phase5 flake): `/api/input/start` raced a dial already in
+    // flight (LAN promotion / reconnect watcher). `open_input` lost the CAS,
+    // returned Ok at once, and the API reported `channel_open: true` while
+    // `input_out` was still empty. The settled variant must wait for the
+    // in-flight dial and only then return.
+    #[tokio::test]
+    async fn test_open_input_settled_waits_for_inflight_dial() {
+        let (node, _dir) = crate::runtime::clipboard_policy_tests::temp_test_node("settled");
+        let (other, _dir_other) =
+            crate::runtime::clipboard_policy_tests::temp_test_node("settled-peer");
+        let other_id = other.identity().device_id().clone();
+
+        node.shared.input_dialing.store(true, Ordering::SeqCst);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let shared = node.shared.clone();
+        let dialer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            *shared.input_out.lock().unwrap() = Some((7, tx));
+            shared.input_dialing.store(false, Ordering::SeqCst);
+        });
+
+        assert!(node.open_input_settled(&other_id).await.is_ok());
+        assert!(
+            node.input_channel_open_sync(),
+            "must not return before the in-flight dial attached the channel"
+        );
+        dialer.await.unwrap();
     }
 
     // Regression: the target never applied the controller's mapped entry,
